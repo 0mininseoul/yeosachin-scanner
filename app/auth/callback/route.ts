@@ -28,7 +28,6 @@ export async function GET(request: Request) {
                     return cookieStore.getAll();
                 },
                 setAll(cookiesToSet) {
-                    console.log('Auth callback setAll called:', cookiesToSet.map(c => c.name).join(', '));
                     cookiesToSet.forEach(({ name, value, options }) => {
                         cookieStore.set(name, value, options);
                     });
@@ -38,22 +37,18 @@ export async function GET(request: Request) {
     );
 
     // 코드 교환 실행
-    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
 
     if (error) {
         console.error('Auth callback error:', error);
         return NextResponse.redirect(`${baseUrl}/login?error=${encodeURIComponent(error.message)}`);
     }
 
-    console.log('Auth callback: Exchange successful, session:', !!data.session, 'user:', data.user?.email);
-
     // 세션 검증을 통해 쿠키 설정 강제 (setAll 트리거)
-    const { data: { user } } = await supabase.auth.getUser();
-    console.log('Auth callback: getUser result:', user?.email || 'no user');
+    await supabase.auth.getUser();
 
     const redirectUrl = new URL(next, baseUrl);
     redirectUrl.searchParams.set('verified', 'true');
 
-    console.log('Auth callback: Redirecting to:', redirectUrl.toString());
     return NextResponse.redirect(redirectUrl);
 }

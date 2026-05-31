@@ -27,11 +27,6 @@ ai-baram-detector/
 │       │   ├── step/         # 현행 단계별 파이프라인
 │       │   ├── status/[requestId]/
 │       │   └── result/[requestId]/
-│       └── payment/          # Polar 결제
-│           ├── checkout/
-│           ├── pending/
-│           ├── success/
-│           └── webhook/
 ├── lib/
 │   ├── supabase/
 │   ├── services/
@@ -57,10 +52,9 @@ ai-baram-detector/
 | 프론트엔드 | Next.js 16, Tailwind CSS 4 |
 | 배포 | Vercel (Free) |
 | 백엔드/DB | Supabase |
-| 스크래핑 | Apify |
-| AI 분석 | Gemini 3 Flash (gemini-3-flash-preview) |
+| 스크래핑 | Apify + RapidAPI |
+| AI 분석 | Vertex AI Gemini (`gemini-3-flash-preview`) |
 | 이메일 | Resend |
-| 결제 | Polar (USD) |
 | 애널리틱스 | Amplitude |
 
 ---
@@ -72,13 +66,17 @@ NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 APIFY_API_TOKEN=
-GEMINI_API_KEY=
+RAPIDAPI_KEY=
+RAPIDAPI_HOST=
+GOOGLE_CLOUD_PROJECT=
+GOOGLE_CLOUD_LOCATION=global
+GOOGLE_GENAI_USE_VERTEXAI=true
+VERTEX_AI_MODEL=gemini-3-flash-preview
+GOOGLE_APPLICATION_CREDENTIALS=
+GOOGLE_SERVICE_ACCOUNT_KEY_BASE64=
 RESEND_API_KEY=
 RESEND_FROM_EMAIL=
-POLAR_ACCESS_TOKEN=
-POLAR_ORGANIZATION_ID=
 NEXT_PUBLIC_AMPLITUDE_API_KEY=
-INSTAGRAM_COOKIE=  # 팔로잉 스크래퍼용
 ```
 
 ---
@@ -86,55 +84,33 @@ INSTAGRAM_COOKIE=  # 팔로잉 스크래퍼용
 ## 4. 유저 플로우
 
 ```
-[랜딩] → [로그인] → [애인 ID/성별 입력] → [결제] → [분석 중] → [결과]
+[랜딩] → [로그인] → [애인 ID/성별 입력] → [분석 중] → [결과]
 ```
 
-입력 완료 시 → 데이터 Supabase 저장 → 결제 화면 이동
+입력 완료 시 → 분석 요청 생성 → 진행 화면 이동
 
 ---
 
-## 5. 요금제
+## 5. 분석 제한
 
-| 요금제 | 가격 | 스크래핑 제한 |
-|--------|------|--------------|
-| 베이직 | $2.99 | 팔로워/팔로잉 각 **500명** |
-| 스탠다드 | $5.99 | 팔로워/팔로잉 각 **1000명** |
+- 기본 분석은 팔로워/팔로잉 각 **500명** 기준으로 처리합니다.
+- 무료 분석 횟수 제한은 `users.analysis_count`와 `is_unlimited`로 제어합니다.
 
 ---
 
-## 6. Apify 스크래퍼 설정
+## 6. 스크래퍼 설정
 
 | 용도 | Actor | 비고 |
 |------|-------|------|
 | 팔로워 수집 | `datadoping/instagram-followers-scraper` | |
-| 팔로잉 수집 | `louisdeconinck/instagram-following-scraper` | **쿠키 필요** |
+| 팔로잉 수집 | RapidAPI Instagram Scraper | 개인 Instagram 쿠키 미사용 |
 | 프로필/매일 트래킹 | `apify/instagram-profile-scraper` | |
-
-### 팔로잉 스크래퍼 Input 예시
-
-```json
-{
-  "usernames": ["target_username"],
-  "cookies": "YOUR_INSTAGRAM_COOKIE"
-}
-```
-
-> 환경 변수 `INSTAGRAM_COOKIE`에 쿠키값 저장 필요
 
 ---
 
 ## 7. DB 스키마
 
 ```sql
--- 분석 임시 저장 (결제 전)
-CREATE TABLE pending_analysis (
-  id UUID PRIMARY KEY,
-  user_id UUID REFERENCES users(id),
-  target_instagram_id VARCHAR(100) NOT NULL,
-  target_gender VARCHAR(10),
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
 -- 분석 결과 확장
 ALTER TABLE analysis_results 
 ADD COLUMN bio TEXT,
@@ -149,15 +125,15 @@ ADD COLUMN gender_status VARCHAR(20) CHECK (gender_status IN ('confirmed', 'susp
 
 ## 8. API 명세
 
-### 8.1 입력 저장 (결제 전)
+### 8.1 분석 요청 생성
 
-#### POST `/api/analysis/pending`
+#### POST `/api/analysis/start`
 ```json
 // Request
 { "targetInstagramId": "boyfriend_123", "targetGender": "male" }
 
 // Response (201)
-{ "pendingId": "uuid" }
+{ "requestId": "uuid" }
 ```
 
 ### 8.2 결과 조회
@@ -296,7 +272,7 @@ async function runStep(requestId, step) {
       // 공개 계정 프로필 배치 수집 (apify/instagram-profile-scraper, 최대 350개)
       break;
     case 'analyze':
-      // 종합 AI 분석 (성별 + 외모 + 노출도 + 친밀도) - 단일 Gemini 호출
+      // 종합 AI 분석 (성별 + 외모 + 노출도 + 친밀도) - 단일 Vertex AI Gemini 호출
       // ai_analysis_cache 활용 (이미 분석된 계정 스킵)
       break;
     case 'finalize':
@@ -318,7 +294,7 @@ async function runStep(requestId, step) {
 | **결과 공유** | share_token 기반 `/share/[token]` 공유 페이지 |
 | **AI 분석 캐싱** | `ai_analysis_cache` 테이블로 동일 계정 재분석 스킵 |
 | **토큰 사용 추적** | `gemini_token_usage` 테이블로 API 비용 모니터링 |
-| **종합 분석** | 성별/외모/노출도/친밀도를 단일 Gemini 호출로 처리 (`combined-analysis.ts`) |
+| **종합 분석** | 성별/외모/노출도/친밀도를 단일 Vertex AI Gemini 호출로 처리 (`combined-analysis.ts`) |
 | **단계별 파이프라인** | step 기반으로 재개 가능한 분석 구조 |
 
 ---
@@ -330,6 +306,6 @@ async function runStep(requestId, step) {
 | 1.0 | 2025-01-22 | 초안 |
 | 2.0 | 2026-01-29 | 전면 재설계 |
 | 2.1 | 2026-01-29 | 유저 플로우, 요금제(500/1000), 외모 표현 제거, 파이프라인 순서 |
-| 2.2 | 2026-01-29 | 고위험군 10명/10%로 변경, 팔로잉 스크래퍼 쿠키 필요 명시 |
+| 2.2 | 2026-01-29 | 고위험군 10명/10%로 변경, 팔로잉 스크래퍼 방식 정리 |
 | 2.3 | 2026-02-24 | 서비스명 변경, 프로젝트 구조 업데이트, step 파이프라인/캐싱/공유 기능 반영 |
 | 2.4 | 2026-02-25 | 고위험군 인원수 변경: ≤30명→1명, 31~70명→2명, 71명+→3명 |

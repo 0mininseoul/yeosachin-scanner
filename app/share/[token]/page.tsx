@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState, use } from 'react';
+import Image from 'next/image';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 
@@ -37,9 +39,12 @@ function ProfileImage({
     }
 
     return (
-        <img
+        <Image
             src={proxiedSrc}
             alt=""
+            width={48}
+            height={48}
+            unoptimized
             className={className}
             onError={() => setError(true)}
         />
@@ -150,18 +155,18 @@ export default function ShareResultPage({ params }: PageProps) {
         };
 
         if (navigator.share) {
-            try {
-                await navigator.share(shareData);
-                return;
-            } catch (err) {
-                // fallback
+                try {
+                    await navigator.share(shareData);
+                    return;
+                } catch {
+                    // fallback
+                }
             }
-        }
 
         try {
             await navigator.clipboard.writeText(url);
             alert('링크가 클립보드에 복사되었습니다!');
-        } catch (err) {
+        } catch {
             alert('공유하기에 실패했습니다.');
         }
     };
@@ -198,12 +203,12 @@ export default function ShareResultPage({ params }: PageProps) {
                     <span className="text-2xl">🔍</span>
                     <h1 className="font-bold">분석 결과</h1>
                 </div>
-                <a
+                <Link
                     href="/"
                     className="text-pink-400 hover:text-pink-300 text-sm font-medium"
                 >
                     나도 분석해보기 →
-                </a>
+                </Link>
             </div>
 
             {/* 성별 비율 리포트 */}
@@ -381,12 +386,12 @@ export default function ShareResultPage({ params }: PageProps) {
                         📤 결과 공유하기
                     </button>
 
-                    <a
+                    <Link
                         href="/"
                         className="w-full bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 block text-center"
                     >
                         🔍 나도 분석해보기
-                    </a>
+                    </Link>
                 </div>
 
                 {/* 면책 조항 */}

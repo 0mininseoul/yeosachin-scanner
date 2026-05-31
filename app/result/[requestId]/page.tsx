@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState, use } from 'react';
+import Image from 'next/image';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 
@@ -39,9 +41,12 @@ function ProfileImage({
     }
 
     return (
-        <img
+        <Image
             src={proxiedSrc}
             alt=""
+            width={48}
+            height={48}
+            unoptimized
             className={className}
             onError={() => setError(true)}
         />
@@ -139,6 +144,7 @@ export default function ResultPage({ params }: PageProps) {
                 setData(result);
                 trackEvent(EVENTS.VIEW_RESULT, { femaleCount: result.femaleAccounts?.length });
             } catch (err) {
+                console.error('Failed to fetch analysis result:', err);
                 setError('결과를 불러오는데 실패했습니다.');
             } finally {
                 setLoading(false);
@@ -178,7 +184,7 @@ export default function ResultPage({ params }: PageProps) {
                 try {
                     await navigator.share(shareData);
                     return;
-                } catch (err) {
+                } catch {
                     // fallback
                 }
             }
@@ -226,8 +232,8 @@ export default function ResultPage({ params }: PageProps) {
                     <h1 className="font-bold">분석 결과</h1>
                 </div>
                 <div className="flex gap-3 text-sm">
-                    <a href="/" className="text-gray-400 hover:text-white">홈</a>
-                    <a href="/mypage" className="text-gray-400 hover:text-white">마이페이지</a>
+                    <Link href="/" className="text-gray-400 hover:text-white">홈</Link>
+                    <Link href="/mypage" className="text-gray-400 hover:text-white">마이페이지</Link>
                     <button
                         onClick={async () => {
                             try {

@@ -15,6 +15,7 @@ export async function GET() {
             return NextResponse.json({ success: false, error: 'Failed to send email' }, { status: 500 });
         }
     } catch (error) {
+        console.error('Test email failed:', error);
         return NextResponse.json({ success: false, error: 'Internal Error' }, { status: 500 });
     }
 }

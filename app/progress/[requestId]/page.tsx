@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, use, useRef, useCallback } from 'react';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
 
@@ -17,6 +18,7 @@ export default function ProgressPage({ params }: PageProps) {
     const retryCountRef = useRef(0);
     const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const stepTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const runNextStepRef = useRef<() => void>(() => undefined);
 
     const MAX_RETRIES = 3;
 
@@ -56,7 +58,7 @@ export default function ProgressPage({ params }: PageProps) {
                     isRunningStep.current = false;
                     retryTimeoutRef.current = setTimeout(() => {
                         retryTimeoutRef.current = null;
-                        runNextStep();
+                        runNextStepRef.current();
                     }, delay);
                     return;
                 }
@@ -76,7 +78,7 @@ export default function ProgressPage({ params }: PageProps) {
                 isRunningStep.current = false;
                 stepTimeoutRef.current = setTimeout(() => {
                     stepTimeoutRef.current = null;
-                    runNextStep();
+                    runNextStepRef.current();
                 }, 500);
             }
         } catch (err) {
@@ -96,11 +98,15 @@ export default function ProgressPage({ params }: PageProps) {
                 console.warn(`Network error, retrying in ${delay}ms (${retryCountRef.current}/${MAX_RETRIES})`);
                 retryTimeoutRef.current = setTimeout(() => {
                     retryTimeoutRef.current = null;
-                    runNextStep();
+                    runNextStepRef.current();
                 }, delay);
             }
         }
     }, [requestId]);
+
+    useEffect(() => {
+        runNextStepRef.current = runNextStep;
+    }, [runNextStep]);
 
     // pending 또는 processing 상태이면 분석 단계 실행
     useEffect(() => {
@@ -232,7 +238,14 @@ export default function ProgressPage({ params }: PageProps) {
 
             {/* 로고 */}
             <div className="w-16 h-16 mb-6">
-                <img src="/logo.png" alt="AI 바람감지기" className="w-full h-full animate-pulse" />
+                <Image
+                    src="/logo.png"
+                    alt="AI 바람감지기"
+                    width={64}
+                    height={64}
+                    className="w-full h-full animate-pulse"
+                    priority
+                />
             </div>
 
             {/* 제목 */}

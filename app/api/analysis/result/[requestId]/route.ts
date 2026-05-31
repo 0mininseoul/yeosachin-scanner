@@ -84,7 +84,7 @@ export async function GET(
             },
         };
 
-        // 7. 여성 계정 목록 (결제 후 모두 공개)
+        // 7. 여성 계정 목록
         const femaleAccounts = results?.map((result) => ({
             instagramId: result.suspect_instagram_id,
             fullName: result.suspect_full_name,

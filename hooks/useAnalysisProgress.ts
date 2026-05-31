@@ -37,6 +37,7 @@ export function useAnalysisProgress(requestId: string) {
                 errorMessage: request.error_message,
             });
         } catch (err) {
+            console.error('Failed to fetch analysis progress:', err);
             setError('분석 요청을 찾을 수 없습니다.');
         } finally {
             setLoading(false);

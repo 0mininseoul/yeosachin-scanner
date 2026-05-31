@@ -57,7 +57,7 @@ export interface AnalysisResult {
     is_recent_surge: boolean;
     surge_percentage?: number;
 
-    // 결제 상태
+    // 결과 공개 상태
     is_unlocked: boolean;
 
     created_at: string;
@@ -94,17 +94,4 @@ export interface PrivateAccount {
     profile_image?: string;
     full_name?: string;
     created_at: string;
-}
-
-export interface Payment {
-    id: string;
-    user_id: string;
-    result_id?: string;
-    payment_key?: string;
-    order_id: string;
-    amount: number;
-    product_type: 'unlock_rank' | 'deep_scan';
-    status: 'pending' | 'completed' | 'failed' | 'cancelled';
-    created_at: string;
-    completed_at?: string;
 }

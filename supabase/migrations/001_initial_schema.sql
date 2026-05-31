@@ -62,7 +62,7 @@ CREATE TABLE analysis_results (
     is_recent_surge BOOLEAN DEFAULT FALSE,
     surge_percentage FLOAT,
     
-    -- 결제 상태
+    -- 결과 공개 상태
     is_unlocked BOOLEAN DEFAULT FALSE,
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -103,21 +103,6 @@ CREATE TABLE private_accounts (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 7. 결제 테이블
-CREATE TABLE payments (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    result_id UUID REFERENCES analysis_results(id) ON DELETE SET NULL,
-    payment_key VARCHAR(200),  -- Polar checkout ID
-    order_id VARCHAR(100) UNIQUE NOT NULL,
-    amount INTEGER NOT NULL,
-    currency VARCHAR(10) DEFAULT 'usd',
-    product_type VARCHAR(20) NOT NULL CHECK (product_type IN ('unlock_rank', 'deep_scan')),
-    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed', 'cancelled')),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    completed_at TIMESTAMP WITH TIME ZONE
-);
-
 -- 인덱스 생성
 CREATE INDEX idx_analysis_requests_user_id ON analysis_requests(user_id);
 CREATE INDEX idx_analysis_requests_status ON analysis_requests(status);
@@ -126,8 +111,6 @@ CREATE INDEX idx_analysis_results_rank ON analysis_results(rank);
 CREATE INDEX idx_comment_details_result_id ON comment_details(result_id);
 CREATE INDEX idx_interaction_logs_result_id ON interaction_logs(result_id);
 CREATE INDEX idx_private_accounts_request_id ON private_accounts(request_id);
-CREATE INDEX idx_payments_user_id ON payments(user_id);
-CREATE INDEX idx_payments_order_id ON payments(order_id);
 
 -- RLS (Row Level Security) 활성화
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
@@ -136,7 +119,6 @@ ALTER TABLE analysis_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE comment_details ENABLE ROW LEVEL SECURITY;
 ALTER TABLE interaction_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE private_accounts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 
 -- RLS 정책: 사용자는 자신의 데이터만 접근 가능
 CREATE POLICY "Users can view own data" ON users
@@ -185,12 +167,6 @@ CREATE POLICY "Users can view own private accounts" ON private_accounts
             AND analysis_requests.user_id = auth.uid()
         )
     );
-
-CREATE POLICY "Users can view own payments" ON payments
-    FOR SELECT USING (auth.uid() = user_id);
-
-CREATE POLICY "Users can insert own payments" ON payments
-    FOR INSERT WITH CHECK (auth.uid() = user_id);
 
 -- Realtime 활성화 (분석 진행 상황 실시간 업데이트)
 ALTER PUBLICATION supabase_realtime ADD TABLE analysis_requests;

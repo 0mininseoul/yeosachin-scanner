@@ -21,8 +21,6 @@ import type { AnalyzedAccount } from '@/lib/types/analysis';
 import {
     type AnalysisStep,
     type StepData,
-    STEP_PROGRESS,
-    getNextStep,
     BATCH_SIZE,
     PROFILE_BATCH_SIZE,
     calculateBatchProgress,

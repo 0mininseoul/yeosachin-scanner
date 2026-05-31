@@ -87,11 +87,6 @@ export const EVENTS = {
     CLICK_SHARE_KAKAO: 'click_share_kakao',
     CLICK_SHARE_INSTAGRAM: 'click_share_instagram',
 
-    // 결제
-    VIEW_PRICING: 'view_pricing',
-    CLICK_CHECKOUT: 'click_checkout',
-    CLICK_UNLOCK_RANK2: 'click_unlock_rank2',
     CLICK_DEEP_SCAN: 'click_deep_scan',
     VIEW_DEEP_SCAN_BETA_MODAL: 'view_deep_scan_beta_modal',
-    PAYMENT_COMPLETE: 'payment_complete',
 } as const;

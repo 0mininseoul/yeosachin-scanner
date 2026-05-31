@@ -1,6 +1,8 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
+import Image from 'next/image';
+import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { useAuth } from '@/hooks/useAuth';
@@ -25,7 +27,14 @@ export default function LandingPage() {
         <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="flex items-center justify-center w-8 h-8 bg-gray-900 rounded-full overflow-hidden border border-gray-800">
-              <img src="/logo.png" alt="AI 위장 여사친 판독기 로고" className="w-full h-full object-cover" />
+              <Image
+                src="/logo.png"
+                alt="AI 위장 여사친 판독기 로고"
+                width={32}
+                height={32}
+                className="w-full h-full object-cover"
+                priority
+              />
             </div>
             <span className="font-bold text-lg text-mint-500">
               AI 위장 여사친 판독기
@@ -76,7 +85,7 @@ export default function LandingPage() {
               </span>
             </h1>
             <p className="text-gray-400 text-lg">
-              "그냥 친구야"라는 말,<br />
+              &quot;그냥 친구야&quot;라는 말,<br />
               AI가 팩트로 검증해드립니다.
             </p>
           </motion.div>
@@ -181,7 +190,7 @@ export default function LandingPage() {
             <div>
               <h3 className="font-bold text-lg mb-1">3. 결과 리포트</h3>
               <p className="text-gray-400 text-sm">
-                위험도가 높은 '위장 여사친' 후보를<br />
+                위험도가 높은 &apos;위장 여사친&apos; 후보를<br />
                 순위별로 확인해보세요.
               </p>
             </div>
@@ -199,7 +208,7 @@ export default function LandingPage() {
               <span className="absolute top-4 right-4 text-gray-600 text-xs">어제</span>
               <div className="flex text-mint-500 mb-2">★★★★★</div>
               <p className="text-gray-300 text-sm leading-relaxed mb-3">
-                "그냥 아는 동생이라던 애가 있었는데, AI 분석 결과에서 고위험군 1위로 뜨더라고요. 혹시나 해서 봤더니...ㅎ 진짜 소름"
+                &quot;그냥 아는 동생이라던 애가 있었는데, AI 분석 결과에서 고위험군 1위로 뜨더라고요. 혹시나 해서 봤더니...ㅎ 진짜 소름&quot;
               </p>
               <p className="text-gray-500 text-xs">- 23세 대학생 김OO님</p>
             </div>
@@ -208,7 +217,7 @@ export default function LandingPage() {
               <span className="absolute top-4 right-4 text-gray-600 text-xs">2일 전</span>
               <div className="flex text-mint-500 mb-2">★★★★★</div>
               <p className="text-gray-300 text-sm leading-relaxed mb-3">
-                "비공개 계정까지 리스트로 쫙 뽑아줘서 좋았어요. 내가 모르는 여자가 이렇게 많은 줄 몰랐음."
+                &quot;비공개 계정까지 리스트로 쫙 뽑아줘서 좋았어요. 내가 모르는 여자가 이렇게 많은 줄 몰랐음.&quot;
               </p>
               <p className="text-gray-500 text-xs">- 26세 직장인 이OO님</p>
             </div>
@@ -243,8 +252,8 @@ export default function LandingPage() {
             재미 목적으로만 이용해주시기 바랍니다.
           </p>
           <div className="flex justify-center gap-4 mt-4 text-gray-500">
-            <a href="/terms" className="hover:text-gray-300">이용약관</a>
-            <a href="/privacy" className="hover:text-gray-300">개인정보처리방침</a>
+            <Link href="/terms" className="hover:text-gray-300">이용약관</Link>
+            <Link href="/privacy" className="hover:text-gray-300">개인정보처리방침</Link>
           </div>
         </footer>
       </main>

@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server';
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import AnalysisList from './analysis-list';
 
@@ -32,12 +33,12 @@ export default async function MyPage() {
             {/* 네비게이션 */}
             <nav className="border-b border-gray-800 bg-black/80 backdrop-blur-md sticky top-0 z-50">
                 <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
-                    <a href="/" className="flex items-center gap-2">
+                    <Link href="/" className="flex items-center gap-2">
                         <span className="text-2xl">🕵️‍♀️</span>
                         <span className="font-bold text-lg bg-gradient-to-r from-pink-400 to-purple-400 text-transparent bg-clip-text">
                             AI 판독기
                         </span>
-                    </a>
+                    </Link>
                     <div className="flex items-center gap-4">
                         <span className="text-xs text-gray-500">{user.email}</span>
                         <form action="/api/auth/signout" method="post">

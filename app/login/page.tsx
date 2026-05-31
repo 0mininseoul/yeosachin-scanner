@@ -1,6 +1,7 @@
 'use client';
 
 import { useAuth } from '@/hooks/useAuth';
+import Image from 'next/image';
 import { useSearchParams } from 'next/navigation';
 import { Suspense } from 'react';
 
@@ -31,7 +32,14 @@ function LoginContent() {
             {/* 로고 */}
             <div className="mb-8 text-center">
                 <div className="w-20 h-20 mx-auto mb-4">
-                    <img src="/logo.png" alt="AI 위장 여사친 판독기" className="w-full h-full" />
+                    <Image
+                        src="/logo.png"
+                        alt="AI 위장 여사친 판독기"
+                        width={80}
+                        height={80}
+                        className="w-full h-full"
+                        priority
+                    />
                 </div>
                 <h1 className="text-2xl font-bold text-white">AI 위장 여사친 판독기</h1>
                 <p className="text-gray-400 mt-2">로그인하고 분석을 시작하세요</p>

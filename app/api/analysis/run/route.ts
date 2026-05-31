@@ -255,7 +255,7 @@ export async function POST(request: Request) {
                     risk_grade: result.riskGrade,
                     gender_confidence: result.genderConfidence,
                     gender_status: result.genderStatus,
-                    is_unlocked: true, // 결제 후 모두 공개
+                    is_unlocked: true,
                 });
             }
 
@@ -287,7 +287,7 @@ export async function POST(request: Request) {
             let errorMessage = rawMessage;
             if (rawMessage.includes('SCRAPING_AUTH_ERROR')) {
                 errorMessage = '서비스 인증 오류가 발생했습니다. 잠시 후 다시 시도해주세요. 문제가 지속되면 관리자에게 문의해주세요.';
-                console.error('SCRAPING_AUTH_ERROR - Instagram cookie may be expired:', rawMessage);
+                console.error('SCRAPING_AUTH_ERROR:', rawMessage);
             } else if (rawMessage.includes('SCRAPING_ERROR')) {
                 errorMessage = '데이터 수집 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
                 console.error('SCRAPING_ERROR:', rawMessage);

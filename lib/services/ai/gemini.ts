@@ -1,7 +1,57 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
+import { GoogleGenAI, type Part } from '@google/genai';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const VERTEX_AI_MODEL = process.env.VERTEX_AI_MODEL || 'gemini-3-flash-preview';
+const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
+
+let genAI: GoogleGenAI | null = null;
+let credentialsPrepared = false;
+
+function prepareGoogleCredentials(): void {
+    if (credentialsPrepared) {
+        return;
+    }
+
+    credentialsPrepared = true;
+
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS || !process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64) {
+        return;
+    }
+
+    const credentialsJson = Buffer.from(
+        process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64,
+        'base64'
+    ).toString('utf8');
+
+    JSON.parse(credentialsJson);
+
+    const credentialsPath = join('/tmp', 'google-service-account.json');
+    writeFileSync(credentialsPath, credentialsJson, { mode: 0o600 });
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
+}
+
+function getGenAIClient(): GoogleGenAI {
+    if (genAI) {
+        return genAI;
+    }
+
+    prepareGoogleCredentials();
+
+    const project = process.env.GOOGLE_CLOUD_PROJECT;
+    if (!project) {
+        throw new Error('GOOGLE_CLOUD_PROJECT is required to use Gemini through Vertex AI');
+    }
+
+    genAI = new GoogleGenAI({
+        vertexai: true,
+        project,
+        location: GOOGLE_CLOUD_LOCATION,
+    });
+
+    return genAI;
+}
 
 // 재시도 설정
 const RETRY_CONFIG = {
@@ -75,7 +125,7 @@ export async function logTokenUsage(
             completion_tokens: tokenUsage.completionTokens,
             total_tokens: tokenUsage.totalTokens,
             analysis_type: analysisType,
-            model_name: 'gemini-3-flash-preview',
+            model_name: VERTEX_AI_MODEL,
             cached_hit: cachedHit,
         });
     } catch (error) {
@@ -116,10 +166,9 @@ export async function analyzeWithGemini<T>(
                 await sleep(delay);
             }
 
-            const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+            const client = getGenAIClient();
 
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const parts: any[] = [{ text: prompt }];
+            const parts: Part[] = [{ text: prompt }];
 
             // 이미지가 있으면 추가
             if (images && images.length > 0) {
@@ -133,9 +182,15 @@ export async function analyzeWithGemini<T>(
                 }
             }
 
-            const result = await model.generateContent(parts);
-            const response = await result.response;
-            const text = response.text();
+            const response = await client.models.generateContent({
+                model: VERTEX_AI_MODEL,
+                contents: [{ role: 'user', parts }],
+            });
+            const text = response.text;
+
+            if (!text) {
+                throw new Error('Gemini response did not include text');
+            }
 
             // 토큰 사용량 추출
             const usageMetadata = response.usageMetadata;
@@ -155,7 +210,7 @@ export async function analyzeWithGemini<T>(
             // JSON 파싱
             const jsonMatch = text.match(/\{[\s\S]*\}/);
             if (!jsonMatch) {
-                console.error('JSON Parse Failed. Raw text:', text);
+                console.error('JSON Parse Failed. Response length:', text.length);
                 throw new Error('Failed to parse AI response as JSON');
             }
 
@@ -207,7 +262,7 @@ export async function imageUrlToBase64(url: string): Promise<string> {
         throw new Error(`Direct fetch failed: ${response.status}`);
     } catch (directError) {
         // 2차 시도: weserv.nl 프록시 사용
-        console.log(`Direct fetch failed for ${url.substring(0, 50)}..., trying proxy`);
+        console.log(`Direct fetch failed for ${url.substring(0, 50)}..., trying proxy`, directError);
 
         try {
             const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;

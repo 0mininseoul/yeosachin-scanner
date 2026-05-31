@@ -1,13 +1,12 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
     let supabaseResponse = NextResponse.next({
         request,
     });
 
-    // Auth Callback, API, Static, Share 파일은 미들웨어 로직 건너뛰기
-    // 특히 /api/payment/webhook은 외부(Polar)에서 직접 요청이 오므로 반드시 제외해야 함
+    // Auth Callback, API, Static, Share 파일은 proxy 로직 건너뛰기
     // /share는 비로그인 상태에서도 접근 가능해야 함 (결과 공유 기능)
     if (request.nextUrl.pathname.startsWith('/auth') ||
         request.nextUrl.pathname.startsWith('/api') ||
@@ -47,9 +46,9 @@ export async function middleware(request: NextRequest) {
 
     // 디버깅: 로그인 직후 리다이렉트된 경우인데 유저가 없으면 로그 출력
     if (request.nextUrl.searchParams.get('verified') === 'true' && !user) {
-        console.error('Middleware: Login verified but NO USER FOUND.');
+        console.error('Proxy: Login verified but NO USER FOUND.');
         const cookies = request.cookies.getAll();
-        console.log('Middleware Cookies:', cookies.map(c => c.name).join(', '));
+        console.log('Proxy Cookies:', cookies.map(c => c.name).join(', '));
     }
 
     // 보호된 경로 체크
