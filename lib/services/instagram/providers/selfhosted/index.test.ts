@@ -30,8 +30,17 @@ describe('selfHostedProvider', () => {
         expect(results[0].username).toBe('sample_user');
     });
 
-    it('getFollowers는 2단계 미구현 에러를 throw한다', async () => {
-        const provider = makeSelfHostedProvider({ fetchUser: vi.fn() });
-        await expect(provider.getFollowers!('x', 10)).rejects.toThrow('2단계');
+    it('getFollowers/getFollowing은 주입된 fetcher로 위임한다', async () => {
+        const fetchFollowersFn = vi.fn().mockResolvedValue([{ username: 'f1' }]);
+        const fetchFollowingFn = vi.fn().mockResolvedValue([{ username: 'g1' }]);
+        const provider = makeSelfHostedProvider({ fetchUser: vi.fn(), fetchFollowersFn, fetchFollowingFn });
+
+        const followers = await provider.getFollowers!('x', 10);
+        const following = await provider.getFollowing!('x', 20);
+
+        expect(followers).toEqual([{ username: 'f1' }]);
+        expect(following).toEqual([{ username: 'g1' }]);
+        expect(fetchFollowersFn).toHaveBeenCalledWith('x', 10);
+        expect(fetchFollowingFn).toHaveBeenCalledWith('x', 20);
     });
 });
