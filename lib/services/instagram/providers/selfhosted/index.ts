@@ -1,4 +1,4 @@
-import type { InstagramProfile } from '@/lib/types/instagram';
+import type { InstagramProfile, InstagramFollower } from '@/lib/types/instagram';
 import type { ScraperProvider } from '../types';
 import { mapUserToProfile } from './mappers';
 import { pLimit, withRetry } from './rate-limit';
@@ -9,12 +9,16 @@ interface SelfHostedDeps {
     fetchUser?: (username: string) => Promise<Record<string, unknown> | null>;
     concurrency?: number;
     retries?: number;
+    fetchFollowersFn?: (username: string, limit: number) => Promise<InstagramFollower[]>;
+    fetchFollowingFn?: (username: string, limit: number) => Promise<InstagramFollower[]>;
 }
 
 export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvider {
     const fetchUser = deps.fetchUser ?? ((u: string) => fetchWebProfileUser(u));
     const concurrency = deps.concurrency ?? 3;
     const retries = deps.retries ?? 2;
+    const followersFn = deps.fetchFollowersFn ?? ((u: string, l: number) => fetchFollowers(u, l));
+    const followingFn = deps.fetchFollowingFn ?? ((u: string, l: number) => fetchFollowing(u, l));
 
     async function getProfile(username: string): Promise<InstagramProfile | null> {
         const user = await withRetry(() => fetchUser(username), { retries });
@@ -42,8 +46,8 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
         name: 'selfhosted',
         getProfile,
         getProfilesBatch,
-        getFollowers: (username: string, limit: number) => fetchFollowers(username, limit),
-        getFollowing: (username: string, limit: number) => fetchFollowing(username, limit),
+        getFollowers: (username: string, limit: number) => followersFn(username, limit),
+        getFollowing: (username: string, limit: number) => followingFn(username, limit),
     };
 }
 

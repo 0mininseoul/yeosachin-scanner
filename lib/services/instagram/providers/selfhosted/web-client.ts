@@ -1,7 +1,7 @@
 import { getTransportConfig, buildRequest, type TransportConfig } from './transport';
 
-const IG_APP_ID = '936619743392459';
-const USER_AGENT =
+export const IG_APP_ID = '936619743392459';
+export const USER_AGENT =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
 function profileUrl(username: string): string {
