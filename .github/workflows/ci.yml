@@ -23,6 +23,8 @@ jobs:
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon-key
       SUPABASE_SERVICE_ROLE_KEY: ci-service-role-key-with-at-least-32-characters
       IMAGE_PROXY_SIGNING_SECRET: ci-image-proxy-signing-secret-with-at-least-32-characters
+      RESEND_API_KEY: re_ci_build_placeholder
+      RESEND_FROM_EMAIL: noreply@example.com
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
