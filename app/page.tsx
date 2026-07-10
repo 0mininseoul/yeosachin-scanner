@@ -1,45 +1,78 @@
 'use client';
 
+import { useCallback, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion, useReducedMotion, type Variants } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { useAuth } from '@/hooks/useAuth';
+import { LoginModal } from '@/components/login-modal';
 import {
   TopBar,
+  BrandMark,
   Eyebrow,
   CaseCard,
   ThreatBar,
   RiskTag,
   Stamp,
-  Redaction,
   PrimaryButton,
 } from '@/components/case-ui';
 
 type Grade = 'high_risk' | 'caution' | 'normal';
 
-const DEMO_SUSPECTS: { rank: string; grade: Grade; w: string }[] = [
-  { rank: '01', grade: 'high_risk', w: '58%' },
-  { rank: '02', grade: 'caution', w: '44%' },
-  { rank: '03', grade: 'normal', w: '66%' },
+// NOTE: 데모용 목업. 원형 프로필은 실제 AI 생성 여성 이미지로 교체 예정(현재 플레이스홀더).
+const DEMO_SUSPECTS: { rank: string; grade: Grade; name: string }[] = [
+  { rank: '01', grade: 'high_risk', name: 'suzy_kim_02' },
+  { rank: '02', grade: 'caution', name: 'yuna.daily' },
+  { rank: '03', grade: 'normal', name: 'haram_log' },
 ];
+
+const AVATAR_TINTS = [
+  { from: '#4a3136', to: '#241a1c' },
+  { from: '#3a3048', to: '#1c1a24' },
+  { from: '#48402e', to: '#241f1a' },
+];
+
+function DemoAvatar({ i }: { i: number }) {
+  const t = AVATAR_TINTS[i % AVATAR_TINTS.length];
+  return (
+    <div
+      className="relative h-10 w-10 shrink-0 overflow-hidden rounded-full border border-line-2"
+      style={{ background: `linear-gradient(140deg, ${t.from}, ${t.to})` }}
+      aria-hidden="true"
+    >
+      <svg viewBox="0 0 40 40" className="absolute inset-0 h-full w-full text-fg/30">
+        <circle cx="20" cy="15.5" r="6.8" fill="currentColor" />
+        <path d="M6.5 40c0-7.7 6-12.5 13.5-12.5S33.5 32.3 33.5 40z" fill="currentColor" />
+      </svg>
+    </div>
+  );
+}
 
 const STEPS = [
   {
     n: '01',
-    title: '대상 지정',
-    body: '남자친구의 인스타그램 아이디만 입력하세요. 비밀번호는 절대 묻지 않습니다.',
+    title: '아이디 하나면 충분',
+    body: ['남자친구 인스타그램 아이디만 넣으세요.', '나머지 파고드는 건 전부 AI 몫입니다.'],
   },
   {
     n: '02',
-    title: 'AI 정밀 판독',
-    body: '맞팔 목록을 스캔해 성별을 식별하고, 계정 분위기·태그·상호작용을 교차 분석합니다.',
+    title: '직접 못 찾는 것까지 판독',
+    body: ['맞팔 수백 명의 성별을 식별해 이성만 추려내고,', '상호작용·친밀도·프로필 분위기까지 5개 축으로 교차 분석합니다.'],
   },
   {
     n: '03',
-    title: '판독 리포트',
-    body: "위협 등급이 높은 '위장 여사친' 후보를 순위별로 정리해 보여드립니다.",
+    title: '위협 등급 리포트',
+    body: ['위장 여사친 후보를 위험도 순으로 정렬하고,', '위장여사친의 댓글 원문과 숨은 비공개 계정까지 근거로 보여드립니다.'],
   },
+];
+
+// 신뢰 블록 — "직접은 불가능, AI만 가능"을 강조 (자극적 톤)
+const TRUST = [
+  { title: '맞팔 전수 스캔', body: '수백 명을 일일이 볼 순 없죠. AI가 한 명도 빠짐없이 훑습니다.' },
+  { title: '이성 계정만 선별', body: '성별을 식별해 위장 여사친 후보만 골라냅니다.' },
+  { title: '상호작용 추적', body: '좋아요·댓글·태그·멘션·친밀도까지 정밀 분석합니다.' },
+  { title: '상대방은 절대 모름', body: '조회 흔적도, 알림도 남지 않습니다.' },
 ];
 
 const REVIEWS = [
@@ -62,9 +95,66 @@ export default function LandingPage() {
   const { user } = useAuth();
   const reduce = useReducedMotion();
 
-  const handleStart = () => {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [igId, setIgId] = useState('');
+  const [starting, setStarting] = useState(false);
+  const [heroError, setHeroError] = useState<string | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
+
+  const closeLogin = useCallback(() => {
+    try {
+      sessionStorage.removeItem('pending_ig');
+    } catch {
+      /* ignore */
+    }
+    setLoginOpen(false);
+  }, []);
+
+  const handleStart = async () => {
+    const id = igId.replace(/@/g, '').trim();
+    if (!id) {
+      setHeroError('남자친구의 인스타그램 아이디를 입력해주세요.');
+      inputRef.current?.focus();
+      return;
+    }
     trackEvent(EVENTS.CLICK_CTA_START);
-    router.push(user ? '/analyze' : '/login');
+
+    if (!user) {
+      try {
+        sessionStorage.setItem('pending_ig', id);
+      } catch {
+        /* ignore */
+      }
+      setLoginOpen(true);
+      return;
+    }
+
+    setStarting(true);
+    setHeroError(null);
+    try {
+      const res = await fetch('/api/analysis/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetInstagramId: id, targetGender: 'male' }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setHeroError(data.error || '판독 시작에 실패했습니다.');
+        setStarting(false);
+        return;
+      }
+      trackEvent(EVENTS.ANALYSIS_START);
+      router.push(`/progress/${data.requestId}`);
+    } catch (err) {
+      console.error('Failed to start analysis:', err);
+      setHeroError('서버 오류가 발생했습니다.');
+      setStarting(false);
+    }
+  };
+
+  const focusInput = () => {
+    inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => inputRef.current?.focus(), 420);
   };
 
   const EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
@@ -98,7 +188,7 @@ export default function LandingPage() {
             </>
           ) : (
             <button
-              onClick={() => router.push('/login')}
+              onClick={() => setLoginOpen(true)}
               className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
             >
               로그인
@@ -126,9 +216,7 @@ export default function LandingPage() {
               <span className="text-blood">누가 제일 위험할까?</span>
             </h1>
             <p className="mt-4 text-[15px] leading-relaxed text-fg-dim">
-              &quot;그냥 친구야&quot;라는 말,
-              <br />
-              AI가 팩트 체크해드립니다.
+              &quot;그냥 친구야&quot;라는 말, AI가 팩트 체크해드립니다.
             </p>
           </motion.div>
 
@@ -156,15 +244,21 @@ export default function LandingPage() {
 
               {/* suspect rows */}
               <motion.ul variants={listV} initial="hidden" animate="show" className="divide-y divide-line/70">
-                {DEMO_SUSPECTS.map((s) => (
+                {DEMO_SUSPECTS.map((s, i) => (
                   <motion.li key={s.rank} variants={itemV} className="flex items-center gap-3 px-4 py-3.5">
-                    <span className="num shrink-0 whitespace-nowrap text-[13px] font-bold tracking-wider text-fg-mute">
-                      #{s.rank}
-                    </span>
+                    <DemoAvatar i={i} />
                     <div className="min-w-0 flex-1">
                       <div className="mb-2 flex items-center gap-2">
+                        <span className="num shrink-0 text-[12px] font-bold tracking-wider text-fg-mute">
+                          #{s.rank}
+                        </span>
                         <span className="text-[13px] font-bold text-fg-dim">@</span>
-                        <Redaction style={{ width: s.w }} />
+                        <span
+                          aria-hidden="true"
+                          className="min-w-0 flex-1 select-none truncate text-[13px] font-semibold text-fg/90 blur-[5px]"
+                        >
+                          {s.name}
+                        </span>
                         <RiskTag grade={s.grade} className="ml-auto" />
                       </div>
                       <ThreatBar grade={s.grade} />
@@ -180,14 +274,44 @@ export default function LandingPage() {
             </CaseCard>
           </motion.div>
 
-          <div className="mt-8">
-            <PrimaryButton onClick={handleStart} size="lg">
-              지금 바로 판독하기
-              <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
-                →
-              </span>
+          {/* input + CTA */}
+          <div className="mt-8 space-y-2.5">
+            <div className="relative">
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
+              <input
+                ref={inputRef}
+                type="text"
+                value={igId}
+                onChange={(e) => {
+                  setIgId(e.target.value);
+                  if (heroError) setHeroError(null);
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && !starting && handleStart()}
+                placeholder="남자친구 인스타그램 아이디"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                aria-label="남자친구 인스타그램 아이디"
+                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
+              />
+            </div>
+            {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
+            <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
+              {starting ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  판독 요청 중…
+                </>
+              ) : (
+                <>
+                  지금 바로 판독하기
+                  <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
+                    →
+                  </span>
+                </>
+              )}
             </PrimaryButton>
-            <p className="mt-3 text-center text-[12px] text-fg-mute">
+            <p className="text-center text-[12px] text-fg-mute">
               판독 결과는 상대방에게 절대 통보되지 않습니다.
             </p>
           </div>
@@ -198,7 +322,7 @@ export default function LandingPage() {
           <div className="anim-marquee flex w-max whitespace-nowrap">
             {[0, 1].map((k) => (
               <div key={k} className="flex items-center" aria-hidden={k === 1}>
-                {['비밀 보장 100%', '상대방 통보 없음', '공개 정보 기반 분석', '비밀번호 요구 없음'].map((t) => (
+                {['상대방 통보 없음', '비밀 보장 100%', '아이디 하나면 끝', '3분이면 결과 완료'].map((t) => (
                   <span key={t} className="flex items-center px-6 text-[12px] font-medium tracking-[0.08em] text-fg-dim">
                     <span className="mr-6 h-1 w-1 bg-blood" />
                     {t}
@@ -220,8 +344,35 @@ export default function LandingPage() {
                 <span className="num text-[26px] font-black leading-none text-blood/85">{s.n}</span>
                 <div className="pt-0.5">
                   <h3 className="text-[16px] font-bold text-fg">{s.title}</h3>
-                  <p className="mt-1.5 text-[13px] leading-relaxed text-fg-dim">{s.body}</p>
+                  <p className="mt-1.5 text-[13px] leading-relaxed text-fg-dim">
+                    {s.body.map((line, i) => (
+                      <span key={i} className="block">
+                        {line}
+                      </span>
+                    ))}
+                  </p>
                 </div>
+              </CaseCard>
+            ))}
+          </div>
+        </section>
+
+        {/* ---------- why AI (trust) ---------- */}
+        <section className="pb-16">
+          <Eyebrow>왜 AI 판독인가</Eyebrow>
+          <h2 className="mt-3 text-[24px] font-extrabold leading-snug tracking-tight text-fg">
+            직접 뒤지는 건 <span className="text-blood">불가능</span>합니다
+          </h2>
+          <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
+            밤새 프로필을 눌러봐도 못 찾는 걸, AI는 3분이면 끝냅니다.
+          </p>
+
+          <div className="mt-8 grid grid-cols-2 gap-3">
+            {TRUST.map((t, i) => (
+              <CaseCard key={i} className="p-4">
+                <BrandMark size={16} className="text-blood" />
+                <h3 className="mt-3 text-[14px] font-bold text-fg">{t.title}</h3>
+                <p className="mt-1.5 text-[12px] leading-relaxed text-fg-dim">{t.body}</p>
               </CaseCard>
             ))}
           </div>
@@ -248,18 +399,20 @@ export default function LandingPage() {
 
         {/* ---------- bottom CTA ---------- */}
         <section className="pb-16">
-          <CaseCard bracket="var(--color-blood)" className="px-6 py-9 text-center">
-            <Eyebrow className="justify-center">무료 판독</Eyebrow>
-            <h2 className="mt-4 text-[19px] font-extrabold leading-snug tracking-tight text-fg">
-              더 늦기 전에, 지금 확인하세요
+          <CaseCard bracket="var(--color-blood)" className="px-6 py-10 text-center">
+            <Eyebrow className="justify-center">AI 정밀 판독</Eyebrow>
+            <h2 className="mt-4 text-[26px] font-extrabold leading-tight tracking-tight text-fg">
+              남자친구가
+              <br />
+              알려주지 않는 진실
             </h2>
-            <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+            <p className="mt-3.5 text-[13px] leading-relaxed text-fg-dim">
               불안해하며 시간 낭비하지 마세요.
               <br />
               AI가 3분 만에 사실을 정리해 드립니다.
             </p>
             <div className="mt-7">
-              <PrimaryButton onClick={handleStart} size="lg">
+              <PrimaryButton onClick={focusInput} size="lg">
                 지금 바로 위장 여사친 찾아내기
               </PrimaryButton>
             </div>
@@ -284,6 +437,8 @@ export default function LandingPage() {
           </div>
         </footer>
       </main>
+
+      <LoginModal open={loginOpen} onClose={closeLogin} redirectTo="/analyze" />
     </div>
   );
 }

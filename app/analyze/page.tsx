@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
@@ -12,6 +12,19 @@ export default function AnalyzePage() {
     const [error, setError] = useState<string | null>(null);
     const router = useRouter();
     const { user } = useAuth();
+
+    // 랜딩 히어로에서 입력한 아이디를 로그인 후 이어받아 프리필
+    useEffect(() => {
+        try {
+            const pending = sessionStorage.getItem('pending_ig');
+            if (pending) {
+                setInstagramId(pending);
+                sessionStorage.removeItem('pending_ig');
+            }
+        } catch {
+            /* ignore */
+        }
+    }, []);
 
     const handleStartAnalysis = async () => {
         if (!instagramId.trim()) {
