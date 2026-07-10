@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, use, useRef, useCallback } from 'react';
-import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
+import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
@@ -175,19 +175,19 @@ export default function ProgressPage({ params }: PageProps) {
 
     if (loading) {
         return (
-            <div className="min-h-screen bg-black flex items-center justify-center">
-                <div className="w-8 h-8 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+            <div className="flex min-h-dvh items-center justify-center">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-blood border-t-transparent" />
             </div>
         );
     }
 
     if (error || !data) {
         return (
-            <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
-                <p className="text-red-400 mb-4">{error || '분석 요청을 찾을 수 없습니다.'}</p>
+            <div className="flex min-h-dvh flex-col items-center justify-center px-5">
+                <p className="mb-5 text-[14px] text-blood">{error || '판독 요청을 찾을 수 없습니다.'}</p>
                 <button
                     onClick={() => router.push('/analyze')}
-                    className="text-emerald-400 underline"
+                    className="border border-line-2 px-5 py-2.5 text-[13px] font-bold text-fg transition-colors hover:border-fg-dim hover:bg-panel"
                 >
                     다시 시도하기
                 </button>
@@ -197,20 +197,17 @@ export default function ProgressPage({ params }: PageProps) {
 
     if (data.status === 'failed') {
         return (
-            <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
-                <div className="text-center max-w-sm">
-                    <div className="text-4xl mb-4">❌</div>
-                    <h1 className="text-xl font-bold text-white mb-2">분석 실패</h1>
-                    <p className="text-gray-400 mb-6">
-                        {data.errorMessage || '분석 중 오류가 발생했습니다.'}
+            <div className="flex min-h-dvh flex-col items-center justify-center px-5">
+                <CaseCard bracket="var(--color-blood)" className="w-full max-w-[400px] p-8 text-center">
+                    <Eyebrow className="justify-center">판독 중단</Eyebrow>
+                    <h1 className="mt-4 text-[22px] font-extrabold tracking-tight text-fg">판독에 실패했습니다</h1>
+                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                        {data.errorMessage || '판독 중 오류가 발생했습니다.'}
                     </p>
-                    <button
-                        onClick={() => router.push('/analyze')}
-                        className="bg-emerald-400 text-black font-bold py-3 px-6 rounded-xl"
-                    >
-                        다시 시도하기
-                    </button>
-                </div>
+                    <div className="mt-7">
+                        <PrimaryButton onClick={() => router.push('/analyze')}>다시 시도하기</PrimaryButton>
+                    </div>
+                </CaseCard>
             </div>
         );
     }
@@ -225,99 +222,115 @@ export default function ProgressPage({ params }: PageProps) {
     ];
 
     return (
-        <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
-            {/* 로그아웃 버튼 */}
-            <div className="absolute top-4 right-4">
-                <button
-                    onClick={handleLogout}
-                    className="text-sm text-gray-400 hover:text-white transition-colors"
-                >
-                    로그아웃
-                </button>
-            </div>
+        <div className="min-h-dvh">
+            <TopBar
+                right={
+                    <button
+                        onClick={handleLogout}
+                        className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
+                    >
+                        로그아웃
+                    </button>
+                }
+            />
 
-            {/* 로고 */}
-            <div className="w-16 h-16 mb-6">
-                <Image
-                    src="/logo.png"
-                    alt="AI 바람감지기"
-                    width={64}
-                    height={64}
-                    className="w-full h-full animate-pulse"
-                    priority
-                />
-            </div>
+            <main className="mx-auto flex max-w-[460px] flex-col items-center px-5 pt-12">
+                <Eyebrow>판독 진행 중</Eyebrow>
 
-            {/* 제목 */}
-            <h1 className="text-xl font-bold text-white mb-2">분석 중...</h1>
-            <p className="text-gray-400 mb-8">{data.progressStep || '분석을 준비하고 있습니다.'}</p>
-
-            {/* 프로그레스 바 */}
-            <div className="w-full max-w-sm mb-8">
-                <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                {/* radar scope focal */}
+                <div className="relative mt-8 h-44 w-44">
                     <div
-                        className="h-full bg-emerald-400 transition-all duration-500 ease-out"
-                        style={{ width: `${data.progress}%` }}
+                        className="anim-radar absolute inset-0 rounded-full"
+                        style={{
+                            background:
+                                'conic-gradient(from 0deg, transparent 0deg, rgba(228,19,42,0.30) 46deg, transparent 64deg)',
+                        }}
                     />
+                    <div className="absolute inset-0 rounded-full border border-line" />
+                    <div className="absolute inset-[22px] rounded-full border border-line" />
+                    <div className="absolute inset-[44px] rounded-full border border-line/70" />
+                    <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-line" />
+                    <div className="absolute top-1/2 left-0 h-px w-full -translate-y-1/2 bg-line" />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                        <BrandMark size={40} className="anim-blink text-blood" />
+                    </div>
                 </div>
-                <div className="flex justify-between mt-2 text-sm text-gray-500">
-                    <span>{data.progress}%</span>
-                    <span>약 5분 소요</span>
-                </div>
-            </div>
 
-            {/* 단계 체크리스트 */}
-            <div className="w-full max-w-sm space-y-3">
-                {steps.map((step, index) => {
-                    const isComplete = data.progress >= step.threshold;
-                    const isCurrent =
-                        data.progress >= (steps[index - 1]?.threshold || 0) &&
-                        data.progress < step.threshold;
-
-                    return (
-                        <div
-                            key={step.label}
-                            className={`flex items-center gap-3 p-3 rounded-xl ${isComplete
-                                ? 'bg-emerald-400/10 border border-emerald-400/30'
-                                : isCurrent
-                                    ? 'bg-gray-800 border border-gray-700'
-                                    : 'bg-gray-900/50 border border-gray-800'
-                                }`}
-                        >
-                            <div
-                                className={`w-6 h-6 rounded-full flex items-center justify-center ${isComplete
-                                    ? 'bg-emerald-400 text-black'
-                                    : isCurrent
-                                        ? 'bg-gray-700 border-2 border-emerald-400'
-                                        : 'bg-gray-800 border border-gray-600'
-                                    }`}
-                            >
-                                {isComplete ? '✓' : isCurrent ? '⋯' : index + 1}
-                            </div>
-                            <span
-                                className={
-                                    isComplete
-                                        ? 'text-emerald-400 font-medium'
-                                        : isCurrent
-                                            ? 'text-white'
-                                            : 'text-gray-500'
-                                }
-                            >
-                                {step.label}
-                            </span>
-                        </div>
-                    );
-                })}
-            </div>
-
-            {/* 이탈 주의 안내 */}
-            <div className="mt-8 p-4 bg-red-900/20 rounded-xl border border-red-500/30 max-w-sm">
-                <p className="text-sm text-red-300 text-center">
-                    ⚠️ 분석이 완료될 때까지 이 페이지를 닫지 마세요!
-                    <br />
-                    <span className="text-gray-400">페이지를 닫으면 분석이 중단됩니다.</span>
+                <h1 className="mt-8 text-[22px] font-extrabold tracking-tight text-fg">판독 중…</h1>
+                <p className="mt-2 text-center text-[13px] text-fg-dim">
+                    {data.progressStep || '판독을 준비하고 있습니다.'}
                 </p>
-            </div>
+
+                {/* progress bar */}
+                <div className="mt-7 w-full">
+                    <div className="h-1.5 w-full overflow-hidden bg-line">
+                        <div
+                            className="h-full bg-blood transition-[width] duration-500 ease-out"
+                            style={{ width: `${data.progress}%`, boxShadow: '0 0 12px var(--color-blood)' }}
+                        />
+                    </div>
+                    <div className="mt-2 flex justify-between text-[12px] text-fg-mute">
+                        <span className="num font-bold text-blood">{data.progress}%</span>
+                        <span>약 5분 소요</span>
+                    </div>
+                </div>
+
+                {/* step log */}
+                <div className="mt-7 w-full border border-line bg-ink-2">
+                    {steps.map((step, index) => {
+                        const isComplete = data.progress >= step.threshold;
+                        const isCurrent =
+                            data.progress >= (steps[index - 1]?.threshold || 0) &&
+                            data.progress < step.threshold;
+
+                        return (
+                            <div
+                                key={step.label}
+                                className="flex items-center gap-3 border-b border-line px-4 py-3 last:border-b-0"
+                            >
+                                <span
+                                    className={`num flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
+                                        isComplete
+                                            ? 'bg-blood text-white'
+                                            : isCurrent
+                                              ? 'border border-blood text-blood'
+                                              : 'border border-line-2 text-fg-mute'
+                                    }`}
+                                >
+                                    {isComplete ? '✓' : isCurrent ? '' : index + 1}
+                                    {isCurrent && <span className="anim-blink h-1.5 w-1.5 bg-blood" />}
+                                </span>
+                                <span
+                                    className={`text-[14px] ${
+                                        isComplete
+                                            ? 'font-medium text-fg'
+                                            : isCurrent
+                                              ? 'font-semibold text-fg'
+                                              : 'text-fg-mute'
+                                    }`}
+                                >
+                                    {step.label}
+                                </span>
+                                <span className="num ml-auto text-[11px] tracking-widest text-fg-mute">
+                                    {step.threshold}%
+                                </span>
+                            </div>
+                        );
+                    })}
+                </div>
+
+                {/* leave warning */}
+                <div className="mt-7 w-full border border-blood/35 bg-blood/[0.07] px-4 py-3.5">
+                    <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-blood">
+                        <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-blood" />
+                        <span>
+                            판독이 끝날 때까지 이 페이지를 닫지 마세요.
+                            <br />
+                            <span className="text-fg-dim">페이지를 닫으면 판독이 중단됩니다.</span>
+                        </span>
+                    </p>
+                </div>
+            </main>
         </div>
     );
 }

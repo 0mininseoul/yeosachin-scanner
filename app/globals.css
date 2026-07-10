@@ -1,30 +1,163 @@
 @import "tailwindcss";
 
+/* ============================================================
+   AI 위장 여사친 판독기 — "CASE FILE" design system
+   Dark forensic dossier · single crimson accent · Paperlogy
+   ============================================================ */
+
+@theme {
+  /* base — warm interrogation ink, not pure black */
+  --color-ink: #0c0a0b;
+  --color-ink-2: #121010;
+  --color-panel: #17120f;
+  --color-panel-2: #1e1815;
+  --color-line: #2a2220;
+  --color-line-2: #3b302c;
+
+  /* accent — crimson (single) */
+  --color-blood: #e4132a;
+  --color-blood-2: #ff3444;
+  --color-blood-dim: #7d1420;
+
+  /* classification scale */
+  --color-amber: #e0a32e;
+  --color-jade: #46a08a;
+
+  /* text */
+  --color-fg: #f3efea;
+  --color-fg-dim: #8c827b;
+  --color-fg-mute: #5f564f;
+  --color-paper: #ece6db;
+
+  --font-sans: var(--font-paperlogy), ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+  --glow-rgb: 228 19 42; /* accent glow (crimson) */
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-  --color-mint-500: #00E5BC;
-  --color-mint-400: #33FFD6;
-  --color-mint-600: #00CCA7;
-  --color-point-red: #FF453A;
+* {
+  -webkit-tap-highlight-color: transparent;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  background: var(--color-ink);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: transparent;
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  word-break: keep-all;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ambient surveillance texture: top blood glow + faint scanlines + grid */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(130% 70% at 50% -15%, rgb(var(--glow-rgb) / 0.1), transparent 62%),
+    repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.014) 3px 4px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px) 0 0 / 34px 34px,
+    linear-gradient(0deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px) 0 0 / 34px 34px;
+}
+
+::selection {
+  background: rgb(var(--glow-rgb) / 0.32);
+  color: #fff;
+}
+
+/* ---- typographic utilities ---- */
+.eyebrow {
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--color-fg-dim);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: 0.01em;
+}
+
+.tracked {
+  letter-spacing: 0.22em;
+}
+
+/* thin custom scrollbar for inner lists */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-2) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--color-line-2);
+  border-radius: 999px;
+}
+
+/* focus ring — visible, on-brand */
+:where(a, button, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-blood);
+  outline-offset: 2px;
+}
+
+/* ---- keyframes ---- */
+@keyframes scan-sweep {
+  0% { transform: translateY(-120%); opacity: 0; }
+  8% { opacity: 1; }
+  92% { opacity: 1; }
+  100% { transform: translateY(520%); opacity: 0; }
+}
+
+@keyframes stamp-in {
+  0% { opacity: 0; transform: translateY(6px) scale(1.04); }
+  55% { opacity: 1; }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes blink {
+  0%, 48% { opacity: 1; }
+  49%, 100% { opacity: 0.18; }
+}
+
+@keyframes bar-fill {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes radar-sweep {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.anim-scan { animation: scan-sweep 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+.anim-stamp { animation: stamp-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-blink { animation: blink 1.1s steps(1) infinite; }
+.anim-radar { animation: radar-sweep 3.2s linear infinite; }
+.anim-marquee { animation: marquee 22s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

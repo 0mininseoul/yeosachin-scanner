@@ -1,259 +1,288 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import Image from 'next/image';
 import Link from 'next/link';
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion, type Variants } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { useAuth } from '@/hooks/useAuth';
+import {
+  TopBar,
+  Eyebrow,
+  CaseCard,
+  ThreatBar,
+  RiskTag,
+  Stamp,
+  Redaction,
+  PrimaryButton,
+} from '@/components/case-ui';
+
+type Grade = 'high_risk' | 'caution' | 'normal';
+
+const DEMO_SUSPECTS: { rank: string; grade: Grade; w: string }[] = [
+  { rank: '01', grade: 'high_risk', w: '58%' },
+  { rank: '02', grade: 'caution', w: '44%' },
+  { rank: '03', grade: 'normal', w: '66%' },
+];
+
+const STEPS = [
+  {
+    n: '01',
+    title: '대상 지정',
+    body: '남자친구의 인스타그램 아이디만 입력하세요. 비밀번호는 절대 묻지 않습니다.',
+  },
+  {
+    n: '02',
+    title: 'AI 정밀 판독',
+    body: '맞팔 목록을 스캔해 성별을 식별하고, 계정 분위기·태그·상호작용을 교차 분석합니다.',
+  },
+  {
+    n: '03',
+    title: '판독 리포트',
+    body: "위협 등급이 높은 '위장 여사친' 후보를 순위별로 정리해 보여드립니다.",
+  },
+];
+
+const REVIEWS = [
+  {
+    grade: 'high_risk' as Grade,
+    body: '그냥 아는 동생이라던 계정이 고위험 1위로 떴어요. 혹시나 해서 봤더니… 진짜 소름.',
+    who: '23세 · 대학생',
+    when: '어제',
+  },
+  {
+    grade: 'caution' as Grade,
+    body: '비공개 계정까지 리스트로 쫙 뽑아줘서 좋았어요. 내가 모르던 계정이 이렇게 많을 줄이야.',
+    who: '26세 · 직장인',
+    when: '2일 전',
+  },
+];
 
 export default function LandingPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const reduce = useReducedMotion();
 
   const handleStart = () => {
     trackEvent(EVENTS.CLICK_CTA_START);
-    if (user) {
-      router.push('/analyze');
-    } else {
-      router.push('/login');
-    }
+    router.push(user ? '/analyze' : '/login');
+  };
+
+  const EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
+  const listV: Variants = {
+    hidden: {},
+    show: { transition: { staggerChildren: reduce ? 0 : 0.12, delayChildren: reduce ? 0 : 0.55 } },
+  };
+  const itemV: Variants = {
+    hidden: reduce ? { opacity: 1 } : { opacity: 0, y: 8 },
+    show: reduce ? { opacity: 1 } : { opacity: 1, y: 0, transition: { duration: 0.4, ease: EASE } },
   };
 
   return (
-    <div className="min-h-screen bg-black text-white selection:bg-mint-500/30">
-      {/* 네비게이션 */}
-      <nav className="fixed top-0 w-full z-50 bg-black/80 backdrop-blur-md border-b border-gray-800">
-        <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="flex items-center justify-center w-8 h-8 bg-gray-900 rounded-full overflow-hidden border border-gray-800">
-              <Image
-                src="/logo.png"
-                alt="AI 위장 여사친 판독기 로고"
-                width={32}
-                height={32}
-                className="w-full h-full object-cover"
-                priority
-              />
-            </div>
-            <span className="font-bold text-lg text-mint-500">
-              AI 위장 여사친 판독기
-            </span>
-          </div>
-          {user ? (
-            <div className="flex gap-4 items-center">
+    <div className="min-h-dvh">
+      <TopBar
+        right={
+          user ? (
+            <>
               <button
                 onClick={() => router.push('/mypage')}
-                className="text-sm font-medium text-gray-300 hover:text-white"
+                className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
               >
-                마이페이지
+                기록실
               </button>
               <button
                 onClick={() => router.push('/analyze')}
-                className="bg-mint-500 hover:bg-mint-400 text-black text-sm font-bold py-2 px-4 rounded-full transition-colors"
+                className="border border-blood bg-blood px-3.5 py-1.5 text-[13px] font-bold text-white transition-colors hover:bg-blood-2"
               >
-                분석하기
+                판독 시작
               </button>
-            </div>
+            </>
           ) : (
             <button
               onClick={() => router.push('/login')}
-              className="text-sm font-medium text-gray-300 hover:text-white"
+              className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
             >
               로그인
             </button>
-          )}
-        </div>
-      </nav>
+          )
+        }
+      />
 
-      <main className="max-w-md mx-auto pt-20 pb-10 px-4 flex flex-col items-center">
-        {/* 히어로 섹션 */}
-        <section className="text-center mb-16 px-2 w-full">
+      <main className="mx-auto max-w-[460px] px-5">
+        {/* ---------- HERO ---------- */}
+        <section className="pb-14 pt-12">
           <motion.div
-            initial={{ opacity: 0, y: 20 }}
+            initial={reduce ? false : { opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
-            className="mb-6"
+            transition={{ duration: 0.55, ease: EASE }}
           >
-            <span className="inline-block py-1 px-3 rounded-full bg-mint-500/10 text-mint-400 text-xs font-bold mb-4 border border-mint-500/20">
-              🔒 비밀 보장 100%
-            </span>
-            <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4">
-              내 남친이 맞팔 중인 여자들,<br />
-              <span className="text-mint-500">
-                누가 제일 위험할까?
-              </span>
+            <div className="mb-5 flex items-center justify-between">
+              <Eyebrow>CASE FILE · 판독 의뢰</Eyebrow>
+              <span className="num text-[11px] tracking-[0.2em] text-fg-mute">NO. 0421-KR</span>
+            </div>
+
+            <h1 className="text-[34px] font-bold leading-[1.14] tracking-[-0.02em] text-fg">
+              내 남친이 맞팔 중인 여자들,
+              <br />
+              <span className="text-blood">누가 제일 위험할까?</span>
             </h1>
-            <p className="text-gray-400 text-lg">
-              &quot;그냥 친구야&quot;라는 말,<br />
-              AI가 팩트로 검증해드립니다.
+            <p className="mt-4 text-[15px] leading-relaxed text-fg-dim">
+              &quot;그냥 친구야&quot;라는 말,
+              <br />
+              AI가 팩트 체크해드립니다.
             </p>
           </motion.div>
 
+          {/* signature: live dossier readout */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
+            initial={reduce ? false : { opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.3, duration: 0.5 }}
-            className="relative w-full aspect-[4/3] bg-gray-900 rounded-2xl overflow-hidden mb-8 border border-gray-800 shadow-2xl shadow-mint-500/10"
+            transition={{ delay: reduce ? 0 : 0.25, duration: 0.5, ease: EASE }}
+            className="mt-8"
           >
-            {/* 예시 결과 화면 (가상) */}
-            <div className="absolute inset-0 flex flex-col p-4">
-              <div className="flex items-center justify-between mb-4">
-                <div className="text-xs text-gray-400">분석 결과 리포트</div>
-                <div className="text-xs text-red-400 font-bold">🔴 고위험군 감지</div>
-              </div>
-              <div className="space-y-3">
-                <div className="bg-gray-800/80 rounded-xl p-3 flex items-center gap-3 backdrop-blur-sm border border-point-red/30">
-                  <div className="w-10 h-10 rounded-full bg-gray-700 overflow-hidden relative">
-                    <div className="absolute inset-0 bg-point-red/20 backdrop-blur-[2px]"></div>
-                  </div>
-                  <div className="flex-1">
-                    <div className="h-3 w-20 bg-gray-600 rounded mb-1.5"></div>
-                    <div className="h-2 w-12 bg-point-red/50 rounded"></div>
-                  </div>
-                  <div className="text-xl">🚨</div>
-                </div>
-                <div className="bg-gray-800/50 rounded-xl p-3 flex items-center gap-3 backdrop-blur-sm">
-                  <div className="w-10 h-10 rounded-full bg-gray-700"></div>
-                  <div className="flex-1">
-                    <div className="h-3 w-16 bg-gray-600 rounded mb-1.5"></div>
-                    <div className="h-2 w-10 bg-orange-500/50 rounded"></div>
-                  </div>
-                  <div className="text-xl">⚠️</div>
-                </div>
-                <div className="bg-gray-800/30 rounded-xl p-3 flex items-center gap-3 backdrop-blur-sm">
-                  <div className="w-10 h-10 rounded-full bg-gray-700"></div>
-                  <div className="flex-1">
-                    <div className="h-3 w-24 bg-gray-600 rounded mb-1.5"></div>
-                    <div className="h-2 w-8 bg-mint-500/50 rounded"></div>
-                  </div>
-                  <div className="text-xl">✅</div>
-                </div>
+            <CaseCard bracket="var(--color-blood)" className="overflow-hidden">
+              {/* scanning line */}
+              <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+                <div className="anim-scan h-16 w-full bg-gradient-to-b from-transparent via-blood/25 to-transparent" />
               </div>
 
-              {/* 오버레이 텍스트 */}
-              <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent flex items-end justify-center pb-4">
-                <p className="text-sm font-medium text-gray-300">
-                  AI가 인스타그램 계정을 분석합니다
-                </p>
+              {/* header */}
+              <div className="flex items-center justify-between border-b border-line px-4 py-3">
+                <span className="eyebrow">위협 등급 판독</span>
+                <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-[0.14em] text-blood">
+                  <span className="anim-blink h-1.5 w-1.5 bg-blood" />
+                  LIVE
+                </span>
               </div>
-            </div>
+
+              {/* suspect rows */}
+              <motion.ul variants={listV} initial="hidden" animate="show" className="divide-y divide-line/70">
+                {DEMO_SUSPECTS.map((s) => (
+                  <motion.li key={s.rank} variants={itemV} className="flex items-center gap-3 px-4 py-3.5">
+                    <span className="num shrink-0 whitespace-nowrap text-[13px] font-bold tracking-wider text-fg-mute">
+                      #{s.rank}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-2 flex items-center gap-2">
+                        <span className="text-[13px] font-bold text-fg-dim">@</span>
+                        <Redaction style={{ width: s.w }} />
+                        <RiskTag grade={s.grade} className="ml-auto" />
+                      </div>
+                      <ThreatBar grade={s.grade} />
+                    </div>
+                  </motion.li>
+                ))}
+              </motion.ul>
+
+              <div className="flex items-center justify-between border-t border-line px-4 py-3">
+                <span className="text-[12px] text-fg-mute">3명 판독 완료</span>
+                <Stamp className="-rotate-3">고위험 감지</Stamp>
+              </div>
+            </CaseCard>
           </motion.div>
 
-          <button
-            onClick={handleStart}
-            className="w-full bg-mint-500 text-black font-bold text-lg py-4 rounded-xl shadow-lg shadow-mint-500/20 hover:bg-mint-400 hover:scale-[1.02] transition-all active:scale-[0.98]"
-          >
-            지금 바로 분석하기 ✨
-          </button>
-          <p className="mt-3 text-xs text-gray-500">
-            * 분석 결과는 당사자에게 절대 알림이 가지 않습니다.
-          </p>
-        </section>
-
-        {/* 3단계 프로세스 */}
-        <section className="w-full mb-16 space-y-8">
-          <h2 className="text-xl font-bold text-center mb-8">
-            어떻게 분석하나요?
-          </h2>
-
-          <div className="flex items-start gap-4">
-            <div className="w-12 h-12 rounded-full bg-gray-900 flex items-center justify-center text-2xl flex-shrink-0 border border-gray-800">
-              📝
-            </div>
-            <div>
-              <h3 className="font-bold text-lg mb-1">1. 정보 입력</h3>
-              <p className="text-gray-400 text-sm">
-                남자친구의 인스타그램 아이디만 입력하세요.<br />
-                (비밀번호는 절대 요구하지 않아요!)
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-4">
-            <div className="w-12 h-12 rounded-full bg-gray-900 flex items-center justify-center text-2xl flex-shrink-0 border border-gray-800">
-              🤖
-            </div>
-            <div>
-              <h3 className="font-bold text-lg mb-1">2. AI 정밀 분석</h3>
-              <p className="text-gray-400 text-sm">
-                팔로워 목록을 스캔하여 성별을 식별하고,<br />
-                계정의 분위기, 태그, 남자친구와의 상호작용 등을 복합적으로 분석합니다.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-4">
-            <div className="w-12 h-12 rounded-full bg-gray-900 flex items-center justify-center text-2xl flex-shrink-0 border border-gray-800">
-              📊
-            </div>
-            <div>
-              <h3 className="font-bold text-lg mb-1">3. 결과 리포트</h3>
-              <p className="text-gray-400 text-sm">
-                위험도가 높은 &apos;위장 여사친&apos; 후보를<br />
-                순위별로 확인해보세요.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        {/* 리뷰 섹션 */}
-        <section className="w-full mb-16">
-          <h2 className="text-xl font-bold text-center mb-8">
-            이미 많은 분들이 확인했어요
-          </h2>
-
-          <div className="space-y-4">
-            <div className="bg-gray-900 p-5 rounded-2xl border border-gray-800 relative">
-              <span className="absolute top-4 right-4 text-gray-600 text-xs">어제</span>
-              <div className="flex text-mint-500 mb-2">★★★★★</div>
-              <p className="text-gray-300 text-sm leading-relaxed mb-3">
-                &quot;그냥 아는 동생이라던 애가 있었는데, AI 분석 결과에서 고위험군 1위로 뜨더라고요. 혹시나 해서 봤더니...ㅎ 진짜 소름&quot;
-              </p>
-              <p className="text-gray-500 text-xs">- 23세 대학생 김OO님</p>
-            </div>
-
-            <div className="bg-gray-900 p-5 rounded-2xl border border-gray-800 relative">
-              <span className="absolute top-4 right-4 text-gray-600 text-xs">2일 전</span>
-              <div className="flex text-mint-500 mb-2">★★★★★</div>
-              <p className="text-gray-300 text-sm leading-relaxed mb-3">
-                &quot;비공개 계정까지 리스트로 쫙 뽑아줘서 좋았어요. 내가 모르는 여자가 이렇게 많은 줄 몰랐음.&quot;
-              </p>
-              <p className="text-gray-500 text-xs">- 26세 직장인 이OO님</p>
-            </div>
-          </div>
-        </section>
-
-        {/* 하단 CTA */}
-        <section className="w-full text-center mb-10">
-          <div className="bg-gradient-to-br from-gray-900 to-gray-800 p-8 rounded-3xl border border-gray-700">
-            <h2 className="text-xl font-bold mb-4">
-              더 늦기 전에 확인해보세요
-            </h2>
-            <p className="text-gray-400 text-sm mb-6">
-              불안해하며 시간 낭비하지 마세요.<br />
-              AI가 3분 만에 진실을 알려드립니다.
+          <div className="mt-8">
+            <PrimaryButton onClick={handleStart} size="lg">
+              지금 바로 판독하기
+              <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
+                →
+              </span>
+            </PrimaryButton>
+            <p className="mt-3 text-center text-[12px] text-fg-mute">
+              판독 결과는 상대방에게 절대 통보되지 않습니다.
             </p>
-            <button
-              onClick={handleStart}
-              className="bg-white text-black font-bold py-3.5 px-8 rounded-xl hover:bg-gray-100 transition-colors"
-            >
-              무료로 시작하기 👉
-            </button>
           </div>
         </section>
 
-        {/* 푸터 */}
-        <footer className="text-center text-gray-600 text-xs space-y-2 py-8 border-t border-gray-900 w-full">
-          <p>AI 위장 여사친 판독기</p>
-          <p>
-            본 서비스는 AI 기술을 활용하여 공개된 정보를 분석합니다.<br />
-            분석 결과는 100% 정확성을 보장하지 않으며,<br />
-            재미 목적으로만 이용해주시기 바랍니다.
+        {/* ---------- assurance strip ---------- */}
+        <div className="-mx-5 overflow-hidden border-y border-line bg-ink-2 py-2.5">
+          <div className="anim-marquee flex w-max whitespace-nowrap">
+            {[0, 1].map((k) => (
+              <div key={k} className="flex items-center" aria-hidden={k === 1}>
+                {['비밀 보장 100%', '상대방 통보 없음', '공개 정보 기반 분석', '비밀번호 요구 없음'].map((t) => (
+                  <span key={t} className="flex items-center px-6 text-[12px] font-medium tracking-[0.08em] text-fg-dim">
+                    <span className="mr-6 h-1 w-1 bg-blood" />
+                    {t}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ---------- process ---------- */}
+        <section className="py-16">
+          <Eyebrow>판독 절차</Eyebrow>
+          <h2 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">3단계로 끝나는 판독</h2>
+
+          <div className="mt-8 space-y-3">
+            {STEPS.map((s) => (
+              <CaseCard key={s.n} className="flex items-start gap-4 p-4">
+                <span className="num text-[26px] font-black leading-none text-blood/85">{s.n}</span>
+                <div className="pt-0.5">
+                  <h3 className="text-[16px] font-bold text-fg">{s.title}</h3>
+                  <p className="mt-1.5 text-[13px] leading-relaxed text-fg-dim">{s.body}</p>
+                </div>
+              </CaseCard>
+            ))}
+          </div>
+        </section>
+
+        {/* ---------- reviews ---------- */}
+        <section className="pb-16">
+          <Eyebrow>열람 후기</Eyebrow>
+          <h2 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">이미 많은 분들이 확인했어요</h2>
+
+          <div className="mt-8 space-y-3">
+            {REVIEWS.map((r, i) => (
+              <CaseCard key={i} className="p-5">
+                <div className="mb-3 flex items-center justify-between">
+                  <RiskTag grade={r.grade} />
+                  <span className="num text-[11px] tracking-[0.14em] text-fg-mute">{r.when}</span>
+                </div>
+                <p className="text-[14px] leading-relaxed text-fg">&ldquo;{r.body}&rdquo;</p>
+                <p className="mt-3 border-t border-line pt-3 text-[12px] text-fg-dim">{r.who}</p>
+              </CaseCard>
+            ))}
+          </div>
+        </section>
+
+        {/* ---------- bottom CTA ---------- */}
+        <section className="pb-16">
+          <CaseCard bracket="var(--color-blood)" className="p-8 text-center">
+            <Eyebrow className="justify-center">무료 판독</Eyebrow>
+            <h2 className="mt-4 text-[22px] font-extrabold leading-snug tracking-tight text-fg">
+              더 늦기 전에,
+              <br />
+              지금 확인하세요
+            </h2>
+            <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+              불안해하며 시간 낭비하지 마세요.
+              <br />
+              AI가 3분 만에 사실을 정리해 드립니다.
+            </p>
+            <div className="mt-7">
+              <PrimaryButton onClick={handleStart} size="lg">
+                지금 바로 위장 여사친 찾아내기
+              </PrimaryButton>
+            </div>
+          </CaseCard>
+        </section>
+
+        {/* ---------- footer ---------- */}
+        <footer className="border-t border-line py-9">
+          <div className="mb-4">
+            <span className="eyebrow">AI 위장 여사친 판독기</span>
+          </div>
+          <p className="text-[12px] leading-relaxed text-fg-mute">
+            본 서비스는 AI 기술로 공개된 정보를 분석합니다. 판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
           </p>
-          <div className="flex justify-center gap-4 mt-4 text-gray-500">
-            <Link href="/terms" className="hover:text-gray-300">이용약관</Link>
-            <Link href="/privacy" className="hover:text-gray-300">개인정보처리방침</Link>
+          <div className="mt-5 flex gap-5 text-[12px] text-fg-dim">
+            <Link href="/terms" className="transition-colors hover:text-fg">
+              이용약관
+            </Link>
+            <Link href="/privacy" className="transition-colors hover:text-fg">
+              개인정보처리방침
+            </Link>
           </div>
         </footer>
       </main>

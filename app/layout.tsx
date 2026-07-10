@@ -1,19 +1,24 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+const paperlogy = localFont({
+  variable: "--font-paperlogy",
+  display: "swap",
+  preload: true,
+  src: [
+    { path: "./fonts/paperlogy/Paperlogy-3Light.woff2", weight: "300", style: "normal" },
+    { path: "./fonts/paperlogy/Paperlogy-4Regular.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/paperlogy/Paperlogy-5Medium.woff2", weight: "500", style: "normal" },
+    { path: "./fonts/paperlogy/Paperlogy-6SemiBold.woff2", weight: "600", style: "normal" },
+    { path: "./fonts/paperlogy/Paperlogy-7Bold.woff2", weight: "700", style: "normal" },
+    { path: "./fonts/paperlogy/Paperlogy-8ExtraBold.woff2", weight: "800", style: "normal" },
+    { path: "./fonts/paperlogy/Paperlogy-9Black.woff2", weight: "900", style: "normal" },
+  ],
 });
 
 export const viewport: Viewport = {
-  themeColor: "#EC4899",
+  themeColor: "#0c0a0b",
   width: "device-width",
   initialScale: 1,
 };
@@ -60,13 +65,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="ko">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
-      </body>
+    <html lang="ko" className={paperlogy.variable}>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
-

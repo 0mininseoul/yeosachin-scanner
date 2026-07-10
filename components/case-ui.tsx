@@ -1,0 +1,210 @@
+import Link from "next/link";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
+
+/* ============================================================
+   CASE FILE — shared dossier primitives
+   ============================================================ */
+
+type Grade = "high_risk" | "caution" | "normal";
+
+/* --- brand reticle mark --- */
+export function BrandMark({ size = 22, className = "" }: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={className}
+    >
+      <circle cx="12" cy="12" r="9.25" stroke="currentColor" strokeWidth="1.4" opacity="0.55" />
+      <circle cx="12" cy="12" r="4.4" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M12 1.5v4.2M12 18.3v4.2M1.5 12h4.2M18.3 12h4.2" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="12" cy="12" r="1.7" fill="var(--color-blood)" />
+    </svg>
+  );
+}
+
+/* --- brand wordmark lockup --- */
+export function Wordmark({ className = "" }: { className?: string }) {
+  return (
+    <span className={`flex items-center gap-2.5 ${className}`}>
+      <BrandMark className="text-blood" />
+      <span className="text-[15px] font-extrabold leading-none tracking-tight text-fg">
+        위장 여사친 <span className="text-blood">판독기</span>
+      </span>
+    </span>
+  );
+}
+
+/* --- sticky top bar shell --- */
+export function TopBar({ right, home = true }: { right?: ReactNode; home?: boolean }) {
+  return (
+    <header className="sticky top-0 z-50 border-b border-line bg-ink/85 backdrop-blur-md">
+      <div className="mx-auto flex h-14 max-w-[460px] items-center justify-between px-5">
+        {home ? (
+          <Link href="/" className="shrink-0">
+            <Wordmark />
+          </Link>
+        ) : (
+          <Wordmark />
+        )}
+        {right ? <div className="flex items-center gap-4">{right}</div> : null}
+      </div>
+    </header>
+  );
+}
+
+/* --- eyebrow / section label with leading blood tick --- */
+export function Eyebrow({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-2 ${className}`}>
+      <span className="h-[7px] w-[7px] shrink-0 bg-blood" />
+      <span className="eyebrow">{children}</span>
+    </span>
+  );
+}
+
+/* --- registration corner brackets --- */
+function Corners({ color }: { color: string }) {
+  const c = `pointer-events-none absolute h-2.5 w-2.5`;
+  return (
+    <>
+      <span className={`${c} left-[-1px] top-[-1px] border-l border-t`} style={{ borderColor: color }} />
+      <span className={`${c} right-[-1px] top-[-1px] border-r border-t`} style={{ borderColor: color }} />
+      <span className={`${c} bottom-[-1px] left-[-1px] border-b border-l`} style={{ borderColor: color }} />
+      <span className={`${c} bottom-[-1px] right-[-1px] border-b border-r`} style={{ borderColor: color }} />
+    </>
+  );
+}
+
+/* --- bordered dossier card with corner brackets --- */
+export function CaseCard({
+  children,
+  className = "",
+  bracket = "var(--color-line-2)",
+}: {
+  children: ReactNode;
+  className?: string;
+  bracket?: string;
+}) {
+  return (
+    <div className={`relative border border-line bg-ink-2 ${className}`}>
+      <Corners color={bracket} />
+      {children}
+    </div>
+  );
+}
+
+/* --- classification tag --- */
+const GRADE_MAP: Record<Grade, { label: string; text: string; border: string; bg: string; dot: string }> = {
+  high_risk: { label: "고위험", text: "text-blood", border: "border-blood/45", bg: "bg-blood/10", dot: "bg-blood" },
+  caution: { label: "주의", text: "text-amber", border: "border-amber/45", bg: "bg-amber/10", dot: "bg-amber" },
+  normal: { label: "정상", text: "text-jade", border: "border-jade/45", bg: "bg-jade/10", dot: "bg-jade" },
+};
+
+export function RiskTag({ grade, className = "" }: { grade: Grade; className?: string }) {
+  const g = GRADE_MAP[grade];
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 border ${g.border} ${g.bg} px-2 py-[3px] text-[10px] font-bold tracking-[0.14em] ${g.text} ${className}`}
+    >
+      <span className={`h-1.5 w-1.5 ${g.dot}`} />
+      {g.label}
+    </span>
+  );
+}
+
+/* --- segmented threat meter (qualitative, by grade) --- */
+export function ThreatBar({
+  grade,
+  segments = 14,
+  className = "",
+}: {
+  grade: Grade;
+  segments?: number;
+  className?: string;
+}) {
+  const fillMap: Record<Grade, number> = { high_risk: 12, caution: 8, normal: 4 };
+  const colorMap: Record<Grade, string> = {
+    high_risk: "var(--color-blood)",
+    caution: "var(--color-amber)",
+    normal: "var(--color-jade)",
+  };
+  const filled = fillMap[grade];
+  const color = colorMap[grade];
+  return (
+    <div className={`flex items-center gap-[3px] ${className}`} aria-hidden="true">
+      {Array.from({ length: segments }).map((_, i) => (
+        <span
+          key={i}
+          className="h-2.5 flex-1"
+          style={{
+            background: i < filled ? color : "var(--color-line)",
+            boxShadow: i < filled ? `0 0 6px ${color}55` : "none",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* --- rotated stamp --- */
+export function Stamp({
+  children,
+  tone = "blood",
+  className = "",
+}: {
+  children: ReactNode;
+  tone?: "blood" | "fg";
+  className?: string;
+}) {
+  const c = tone === "blood" ? "border-blood text-blood" : "border-fg-dim text-fg-dim";
+  return (
+    <span
+      className={`inline-block border-2 ${c} px-2 py-1 text-[11px] font-extrabold tracking-[0.18em] ${className}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+/* --- redaction bar --- */
+export function Redaction({ className = "", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <span
+      className={`inline-block h-[0.92em] w-24 max-w-full translate-y-[0.12em] bg-fg/85 ${className}`}
+      style={style}
+      aria-hidden="true"
+    />
+  );
+}
+
+/* --- primary crimson action --- */
+const primaryBase =
+  "group relative inline-flex w-full items-center justify-center gap-2 border border-blood bg-blood font-extrabold tracking-tight text-white transition-[transform,background,box-shadow] duration-150 hover:bg-blood-2 hover:shadow-[0_0_28px_-6px_var(--color-blood)] active:scale-[0.99] disabled:cursor-not-allowed disabled:border-line disabled:bg-panel disabled:text-fg-mute disabled:shadow-none";
+
+const primarySizes = {
+  md: "px-5 py-4 text-[15px]",
+  lg: "px-6 py-[18px] text-[18px]",
+} as const;
+
+export const primaryCls = `${primaryBase} ${primarySizes.md}`;
+
+export function PrimaryButton({
+  children,
+  className = "",
+  size = "md",
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & { size?: "md" | "lg" }) {
+  return (
+    <button className={`${primaryBase} ${primarySizes[size]} ${className}`} {...props}>
+      {children}
+    </button>
+  );
+}
+
+/* --- ghost / bordered action --- */
+export const ghostCls =
+  "inline-flex w-full items-center justify-center gap-2 border border-line-2 bg-transparent px-5 py-3.5 text-sm font-bold tracking-tight text-fg transition-colors duration-150 hover:border-fg-dim hover:bg-panel";

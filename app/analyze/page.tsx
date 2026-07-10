@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import { TopBar, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 
 export default function AnalyzePage() {
     const [instagramId, setInstagramId] = useState('');
@@ -65,74 +66,80 @@ export default function AnalyzePage() {
     };
 
     return (
-        <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
-            {/* 로그아웃 버튼 */}
-            {user && (
-                <div className="absolute top-4 right-4">
-                    <button
-                        onClick={handleLogout}
-                        className="text-sm text-gray-400 hover:text-white transition-colors"
-                    >
-                        로그아웃
-                    </button>
-                </div>
-            )}
+        <div className="min-h-dvh">
+            <TopBar
+                right={
+                    user ? (
+                        <button
+                            onClick={handleLogout}
+                            className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
+                        >
+                            로그아웃
+                        </button>
+                    ) : undefined
+                }
+            />
 
-            {/* 헤더 */}
-            <div className="mb-8 text-center">
-                <div className="text-4xl mb-4">🔍</div>
-                <h1 className="text-xl font-bold text-white">
-                    AI 위장 여사친 판독기
+            <main className="mx-auto max-w-[460px] px-5 pt-12">
+                <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
+                <h1 className="mt-3 text-[26px] font-extrabold leading-snug tracking-tight text-fg">
+                    누구를 판독할까요?
                 </h1>
-            </div>
+                <p className="mt-2 text-[14px] text-fg-dim">
+                    남자친구의 인스타그램 아이디를 입력하면 판독을 시작합니다.
+                </p>
 
-            <div className="w-full max-w-sm space-y-6">
-                {/* 인스타그램 ID 입력 */}
-                <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                        남자친구 인스타그램 아이디
+                <CaseCard className="mt-8 p-5">
+                    <label htmlFor="ig" className="eyebrow mb-3 block">
+                        대상 인스타그램 아이디
                     </label>
                     <div className="relative">
-                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">@</span>
+                        <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
                         <input
+                            id="ig"
                             type="text"
                             value={instagramId}
                             onChange={(e) => setInstagramId(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && !loading && handleStartAnalysis()}
                             placeholder="username"
-                            className="w-full bg-gray-900 border border-gray-700 rounded-xl py-3.5 pl-9 pr-4 text-white placeholder-gray-500 focus:outline-none focus:border-pink-400 focus:ring-1 focus:ring-pink-400 transition-all"
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                            spellCheck={false}
+                            className="w-full border border-line bg-ink py-3.5 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
                         />
                     </div>
-                </div>
 
-                {/* 공개 계정 안내 */}
-                <div className="flex items-start gap-2 p-3 bg-gray-900/50 rounded-xl border border-gray-800">
-                    <span className="text-amber-400">⚠️</span>
-                    <p className="text-xs text-gray-400">
-                        공개 계정만 분석 가능합니다. 비공개 계정은 분석할 수 없어요.
-                    </p>
-                </div>
-
-                {/* 에러 메시지 */}
-                {error && (
-                    <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-xl text-red-300 text-sm">
-                        {error}
+                    <div className="mt-4 flex items-start gap-2.5 border border-amber/30 bg-amber/[0.06] px-3 py-2.5">
+                        <span className="mt-0.5 h-1.5 w-1.5 shrink-0 bg-amber" />
+                        <p className="text-[12px] leading-relaxed text-fg-dim">
+                            <span className="font-semibold text-amber">공개 계정</span>만 판독 가능합니다. 비공개 계정은 판독할 수 없어요.
+                        </p>
                     </div>
-                )}
 
-                {/* 분석 시작 버튼 */}
-                <button
-                    onClick={handleStartAnalysis}
-                    disabled={!instagramId.trim() || loading}
-                    className="w-full bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-400 hover:to-purple-400 disabled:from-gray-700 disabled:to-gray-700 disabled:text-gray-500 text-white font-bold py-4 px-4 rounded-xl transition-all"
-                >
-                    {loading ? '분석 요청 중...' : '분석 시작하기'}
-                </button>
-            </div>
+                    {error && (
+                        <div className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood">
+                            {error}
+                        </div>
+                    )}
 
-            {/* 면책 조항 */}
-            <p className="mt-8 text-xs text-gray-500 text-center max-w-sm">
-                AI 분석 결과는 100% 정확하지 않으며, 참고용으로만 이용해주세요.
-            </p>
+                    <div className="mt-5">
+                        <PrimaryButton onClick={handleStartAnalysis} disabled={!instagramId.trim() || loading}>
+                            {loading ? (
+                                <>
+                                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                                    판독 요청 중…
+                                </>
+                            ) : (
+                                '판독 시작하기'
+                            )}
+                        </PrimaryButton>
+                    </div>
+                </CaseCard>
+
+                <p className="mt-6 text-center text-[12px] leading-relaxed text-fg-mute">
+                    AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 이용해 주세요.
+                </p>
+            </main>
         </div>
     );
 }

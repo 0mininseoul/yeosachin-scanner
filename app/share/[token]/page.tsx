@@ -5,26 +5,52 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import {
+    TopBar,
+    Eyebrow,
+    CaseCard,
+    ThreatBar,
+    RiskTag,
+    PrimaryButton,
+    ghostCls,
+    primaryCls,
+} from '@/components/case-ui';
 
 interface PageProps {
     params: Promise<{ token: string }>;
 }
 
-// Instagram CDN URL을 프록시 URL로 변환
 const getProxyImageUrl = (url: string | undefined): string | undefined => {
     if (!url) return undefined;
     if (url.startsWith('/api/image-proxy')) return url;
     return `/api/image-proxy?url=${encodeURIComponent(url)}`;
 };
 
-// 프로필 이미지 컴포넌트 (로드 실패 시 fallback)
+function FallbackGlyph({ variant }: { variant: 'person' | 'private' }) {
+    return (
+        <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5 text-fg-mute" aria-hidden="true">
+            {variant === 'private' ? (
+                <>
+                    <rect x="5" y="10.5" width="14" height="9" rx="1" stroke="currentColor" strokeWidth="1.5" />
+                    <path d="M8 10.5V8a4 4 0 018 0v2.5" stroke="currentColor" strokeWidth="1.5" />
+                </>
+            ) : (
+                <>
+                    <circle cx="12" cy="8.5" r="3.5" stroke="currentColor" strokeWidth="1.5" />
+                    <path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6" stroke="currentColor" strokeWidth="1.5" />
+                </>
+            )}
+        </svg>
+    );
+}
+
 function ProfileImage({
     src,
-    fallbackIcon,
-    className = "w-full h-full object-cover"
+    variant = 'person',
+    className = 'h-full w-full object-cover',
 }: {
     src?: string;
-    fallbackIcon: string;
+    variant?: 'person' | 'private';
     className?: string;
 }) {
     const [error, setError] = useState(false);
@@ -32,22 +58,14 @@ function ProfileImage({
 
     if (!proxiedSrc || error) {
         return (
-            <div className="w-full h-full flex items-center justify-center text-xl">
-                {fallbackIcon}
+            <div className="flex h-full w-full items-center justify-center">
+                <FallbackGlyph variant={variant} />
             </div>
         );
     }
 
     return (
-        <Image
-            src={proxiedSrc}
-            alt=""
-            width={48}
-            height={48}
-            unoptimized
-            className={className}
-            onError={() => setError(true)}
-        />
+        <Image src={proxiedSrc} alt="" width={48} height={48} unoptimized className={className} onError={() => setError(true)} />
     );
 }
 
@@ -71,6 +89,7 @@ interface PrivateAccount {
     fullName?: string;
     profileImage?: string;
     instagramUrl: string;
+    bio?: string;
 }
 
 interface ResultData {
@@ -86,30 +105,24 @@ interface ResultData {
     privateAccounts: PrivateAccount[];
 }
 
-const getRiskGradeStyle = (grade: string) => {
-    switch (grade) {
-        case 'high_risk':
-            return {
-                bg: 'bg-red-500/20',
-                text: 'text-red-400',
-                border: 'border-red-500/30',
-                label: '고위험군',
-            };
-        case 'caution':
-            return {
-                bg: 'bg-orange-500/20',
-                text: 'text-orange-400',
-                border: 'border-orange-500/30',
-                label: '주의',
-            };
-        default:
-            return {
-                bg: 'bg-green-500/20',
-                text: 'text-green-400',
-                border: 'border-green-500/30',
-                label: '보통',
-            };
-    }
+const InstaLink = ({ url }: { url: string }) => (
+    <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-fg-mute transition-colors hover:text-blood"
+        aria-label="인스타그램에서 보기"
+    >
+        <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
+        </svg>
+    </a>
+);
+
+const BRACKET_BY_GRADE: Record<string, string> = {
+    high_risk: 'var(--color-blood)',
+    caution: 'var(--color-amber)',
+    normal: 'var(--color-line-2)',
 };
 
 export default function ShareResultPage({ params }: PageProps) {
@@ -155,13 +168,13 @@ export default function ShareResultPage({ params }: PageProps) {
         };
 
         if (navigator.share) {
-                try {
-                    await navigator.share(shareData);
-                    return;
-                } catch {
-                    // fallback
-                }
+            try {
+                await navigator.share(shareData);
+                return;
+            } catch {
+                // fallback
             }
+        }
 
         try {
             await navigator.clipboard.writeText(url);
@@ -173,232 +186,186 @@ export default function ShareResultPage({ params }: PageProps) {
 
     if (loading) {
         return (
-            <div className="min-h-screen bg-black flex items-center justify-center">
-                <div className="w-8 h-8 border-2 border-pink-400 border-t-transparent rounded-full animate-spin" />
+            <div className="flex min-h-dvh items-center justify-center">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-blood border-t-transparent" />
             </div>
         );
     }
 
     if (error || !data) {
         return (
-            <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
-                <p className="text-red-400 mb-4">{error}</p>
-                <button
-                    onClick={() => router.push('/')}
-                    className="bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold py-3 px-6 rounded-xl"
-                >
+            <div className="flex min-h-dvh flex-col items-center justify-center px-5">
+                <p className="mb-5 text-[14px] text-blood">{error}</p>
+                <Link href="/" className={`${primaryCls} max-w-[220px]`}>
                     서비스 이용하기
-                </button>
+                </Link>
             </div>
         );
     }
 
     const { summary, femaleAccounts, privateAccounts } = data;
+    const gr = summary.genderRatio;
+    const highCount = femaleAccounts.filter((a) => a.riskGrade === 'high_risk').length;
 
     return (
-        <div className="min-h-screen bg-black text-white pb-20">
-            {/* 헤더 - 공유 페이지용 (로그인 버튼 없음) */}
-            <div className="p-4 border-b border-gray-800 flex justify-between items-center">
-                <div className="flex items-center gap-3">
-                    <span className="text-2xl">🔍</span>
-                    <h1 className="font-bold">분석 결과</h1>
-                </div>
-                <Link
-                    href="/"
-                    className="text-pink-400 hover:text-pink-300 text-sm font-medium"
-                >
-                    나도 분석해보기 →
-                </Link>
-            </div>
+        <div className="min-h-dvh pb-16">
+            <TopBar
+                right={
+                    <Link href="/" className="text-[13px] font-bold text-blood transition-colors hover:text-blood-2">
+                        나도 판독해보기 →
+                    </Link>
+                }
+            />
 
-            {/* 성별 비율 리포트 */}
-            <div className="p-4">
-                <div className="bg-gradient-to-r from-pink-900/30 to-purple-900/30 rounded-2xl p-4 mb-4 border border-pink-500/20">
-                    <p className="text-gray-400 text-sm mb-3">
-                        @{summary.targetInstagramId} 맞팔 계정 성별 분석
+            <main className="mx-auto max-w-[480px] px-5 pt-8">
+                <div className="flex items-center justify-between">
+                    <Eyebrow>판독 리포트 · 공유본</Eyebrow>
+                    <span className="num text-[11px] tracking-[0.18em] text-fg-mute">@{summary.targetInstagramId}</span>
+                </div>
+                <h1 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">판독 결과</h1>
+                {highCount > 0 && (
+                    <p className="mt-2 text-[13px] text-fg-dim">
+                        위협 등급 <span className="font-bold text-blood">고위험 {highCount}건</span>이 감지됐습니다.
                     </p>
-                    <div className="flex items-center justify-center gap-4 text-sm">
-                        <div className="text-center">
-                            <span className="text-2xl">👨</span>
-                            <div className="font-bold">{summary.genderRatio.male.count}명</div>
-                            <div className="text-gray-500 text-xs">{summary.genderRatio.male.percentage}%</div>
-                        </div>
-                        <div className="text-gray-600">│</div>
-                        <div className="text-center">
-                            <span className="text-2xl">👩</span>
-                            <div className="font-bold text-pink-400">{summary.genderRatio.female.count}명</div>
-                            <div className="text-gray-500 text-xs">{summary.genderRatio.female.percentage}%</div>
-                        </div>
-                        <div className="text-gray-600">│</div>
-                        <div className="text-center">
-                            <span className="text-2xl">❓</span>
-                            <div className="font-bold">{summary.genderRatio.unknown.count}명</div>
-                            <div className="text-gray-500 text-xs">{summary.genderRatio.unknown.percentage}%</div>
-                        </div>
+                )}
+
+                {/* gender breakdown */}
+                <CaseCard className="mt-6 p-5">
+                    <div className="mb-4 flex items-center justify-between">
+                        <span className="eyebrow">맞팔 계정 성별 분석</span>
+                        <span className="num text-[12px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
                     </div>
-                </div>
-
-                {/* 2컬럼 레이아웃 */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* 여성 계정 리스트 */}
-                    <div className="bg-gray-900 rounded-2xl p-4">
-                        <h3 className="font-bold mb-4 flex items-center gap-2">
-                            👩 남자친구가 맞팔 중인 여자들
-                            <span className="text-pink-400">{femaleAccounts.length}명</span>
-                        </h3>
-
-                        {femaleAccounts.length === 0 ? (
-                            <p className="text-gray-500 text-center py-8">
-                                분석된 여성 계정이 없습니다.
-                            </p>
-                        ) : (
-                            <div className="space-y-3 max-h-[400px] overflow-y-auto">
-                                {femaleAccounts.map((account) => {
-                                    const style = getRiskGradeStyle(account.riskGrade);
-                                    return (
-                                        <div
-                                            key={account.instagramId}
-                                            className={`${style.bg} border ${style.border} rounded-xl p-3`}
-                                        >
-                                            <div className="flex items-start gap-3">
-                                                {/* 프로필 이미지 */}
-                                                <div className="w-12 h-12 bg-gray-800 rounded-full flex-shrink-0 overflow-hidden">
-                                                    <ProfileImage
-                                                        src={account.profileImage}
-                                                        fallbackIcon="👤"
-                                                    />
-                                                </div>
-
-                                                {/* 정보 */}
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex items-center gap-2 mb-1">
-                                                        <a
-                                                            href={account.instagramUrl}
-                                                            target="_blank"
-                                                            rel="noopener noreferrer"
-                                                            className="font-bold text-white hover:text-pink-400 truncate"
-                                                        >
-                                                            @{account.instagramId}
-                                                        </a>
-                                                        <span className={`text-xs ${style.text} whitespace-nowrap`}>
-                                                            {style.label}
-                                                        </span>
-                                                    </div>
-                                                    {(account.fullName || account.bio) && (
-                                                        <p className="text-gray-400 text-sm truncate">
-                                                            {account.fullName && <span>{account.fullName}</span>}
-                                                            {account.fullName && account.bio && ' · '}
-                                                            {account.bio}
-                                                        </p>
-                                                    )}
-                                                </div>
-
-                                                {/* 인스타 링크 */}
-                                                <a
-                                                    href={account.instagramUrl}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-gray-500 hover:text-pink-400"
-                                                >
-                                                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                                                        <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
-                                                    </svg>
-                                                </a>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
+                    <div className="flex h-3 w-full overflow-hidden bg-line">
+                        <div className="h-full bg-fg-dim" style={{ width: `${gr.male.percentage}%` }} />
+                        <div className="h-full bg-blood" style={{ width: `${gr.female.percentage}%` }} />
+                        <div className="h-full bg-line-2" style={{ width: `${gr.unknown.percentage}%` }} />
+                    </div>
+                    <div className="mt-4 grid grid-cols-3 gap-3">
+                        {[
+                            { label: '남성', c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
+                            { label: '여성', c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
+                            { label: '미상', c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
+                        ].map((row) => (
+                            <div key={row.label} className="border-l border-line pl-3">
+                                <div className="flex items-center gap-1.5">
+                                    <span className={`h-2 w-2 ${row.dot}`} />
+                                    <span className="text-[12px] text-fg-dim">{row.label}</span>
+                                </div>
+                                <div className={`num mt-1 text-[18px] font-extrabold ${row.txt}`}>{row.c.count}</div>
+                                <div className="num text-[11px] text-fg-mute">{row.c.percentage}%</div>
                             </div>
-                        )}
+                        ))}
                     </div>
+                </CaseCard>
 
-                    {/* 비공개 계정 리스트 */}
-                    <div className="bg-gray-900 rounded-2xl p-4">
-                        <h3 className="font-bold mb-4 flex items-center gap-2">
-                            🔒 남자친구가 맞팔 중인 비공개 계정
-                            <span className="text-amber-400">{privateAccounts.length}개</span>
-                        </h3>
-
-                        {privateAccounts.length === 0 ? (
-                            <p className="text-gray-500 text-center py-8">
-                                비공개 계정이 없습니다.
-                            </p>
-                        ) : (
-                            <div className="space-y-3 max-h-[400px] overflow-y-auto">
-                                {privateAccounts.map((account) => (
-                                    <div
-                                        key={account.instagramId}
-                                        className="bg-gray-800/50 border border-gray-700 rounded-xl p-3"
-                                    >
-                                        <div className="flex items-center gap-3">
-                                            {/* 프로필 이미지 */}
-                                            <div className="w-10 h-10 bg-gray-700 rounded-full flex-shrink-0 overflow-hidden">
-                                                <ProfileImage
-                                                    src={account.profileImage}
-                                                    fallbackIcon="🔒"
-                                                />
-                                            </div>
-
-                                            {/* ID */}
-                                            <div className="flex-1 min-w-0">
+                {/* suspects */}
+                <section className="mt-9">
+                    <div className="flex items-baseline justify-between">
+                        <Eyebrow>위협 등급 순위</Eyebrow>
+                        <span className="num text-[12px] text-fg-dim">{femaleAccounts.length}명</span>
+                    </div>
+                    {femaleAccounts.length === 0 ? (
+                        <CaseCard className="mt-5 px-4 py-10 text-center">
+                            <p className="text-[13px] text-fg-mute">판독된 여성 계정이 없습니다.</p>
+                        </CaseCard>
+                    ) : (
+                        <div className="mt-5 space-y-2.5">
+                            {femaleAccounts.map((account, i) => (
+                                <CaseCard key={account.instagramId} bracket={BRACKET_BY_GRADE[account.riskGrade]} className="p-4">
+                                    <div className="flex items-start gap-3">
+                                        <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line bg-panel">
+                                            <ProfileImage src={account.profileImage} variant="person" />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className="num shrink-0 text-[12px] font-bold tracking-widest text-fg-mute">
+                                                    #{String(i + 1).padStart(2, '0')}
+                                                </span>
                                                 <a
                                                     href={account.instagramUrl}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
-                                                    className="font-medium text-gray-300 hover:text-white truncate block"
+                                                    className="truncate text-[14px] font-bold text-fg transition-colors hover:text-blood"
                                                 >
                                                     @{account.instagramId}
                                                 </a>
-                                                {account.fullName && (
-                                                    <p className="text-gray-500 text-xs truncate">{account.fullName}</p>
-                                                )}
+                                                <RiskTag grade={account.riskGrade} className="ml-auto" />
                                             </div>
-
-                                            {/* 인스타 링크 */}
-                                            <a
-                                                href={account.instagramUrl}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="text-gray-500 hover:text-white"
-                                            >
-                                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                                                    <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
-                                                </svg>
-                                            </a>
+                                            {(account.fullName || account.bio) && (
+                                                <p className="mt-1 truncate text-[12px] text-fg-dim">
+                                                    {account.fullName && <span>{account.fullName}</span>}
+                                                    {account.fullName && account.bio && ' · '}
+                                                    {account.bio}
+                                                </p>
+                                            )}
                                         </div>
                                     </div>
-                                ))}
-                            </div>
-                        )}
+                                    <div className="mt-3 flex items-center gap-3">
+                                        <ThreatBar grade={account.riskGrade} className="flex-1" />
+                                        <InstaLink url={account.instagramUrl} />
+                                    </div>
+                                </CaseCard>
+                            ))}
+                        </div>
+                    )}
+                </section>
 
-                        <p className="text-xs text-gray-500 mt-4">
-                            * 비공개 계정은 분석이 불가합니다. 직접 확인이 필요해요.
-                        </p>
+                {/* private */}
+                <section className="mt-9">
+                    <div className="flex items-baseline justify-between">
+                        <Eyebrow>숨은 위험인물들 / 비공개 계정</Eyebrow>
+                        <span className="num text-[12px] text-fg-dim">{privateAccounts.length}개</span>
                     </div>
-                </div>
+                    {privateAccounts.length === 0 ? (
+                        <CaseCard className="mt-5 px-4 py-10 text-center">
+                            <p className="text-[13px] text-fg-mute">비공개 계정이 없습니다.</p>
+                        </CaseCard>
+                    ) : (
+                        <div className="mt-5 space-y-2.5">
+                            {privateAccounts.map((account) => (
+                                <div key={account.instagramId} className="flex items-start gap-3 border border-line bg-ink-2/60 p-3.5">
+                                    <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line bg-panel">
+                                        <ProfileImage src={account.profileImage} variant="private" />
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                        <a
+                                            href={account.instagramUrl}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="block truncate text-[14px] font-bold text-fg transition-colors hover:text-blood"
+                                        >
+                                            @{account.instagramId}
+                                        </a>
+                                        {(account.fullName || account.bio) && (
+                                            <p className="mt-0.5 truncate text-[12px] text-fg-dim">
+                                                {account.fullName && <span>{account.fullName}</span>}
+                                                {account.fullName && account.bio && ' · '}
+                                                {account.bio}
+                                            </p>
+                                        )}
+                                    </div>
+                                    <InstaLink url={account.instagramUrl} />
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    <p className="mt-3 text-[11px] text-fg-mute">비공개 계정은 게시물 분석이 어려워요. 프로필을 직접 확인해 보세요.</p>
+                </section>
 
-                {/* 공유하기 + 나도 분석해보기 CTA */}
-                <div className="space-y-3 mt-6">
-                    <button
-                        onClick={handleShare}
-                        className="w-full bg-gray-800 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 border border-gray-700"
-                    >
-                        📤 결과 공유하기
+                {/* actions */}
+                <div className="mt-9 space-y-2.5">
+                    <button onClick={handleShare} className={ghostCls}>
+                        리포트 공유하기
                     </button>
-
-                    <Link
-                        href="/"
-                        className="w-full bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 block text-center"
-                    >
-                        🔍 나도 분석해보기
+                    <Link href="/" className={primaryCls}>
+                        나도 판독해보기
                     </Link>
                 </div>
 
-                {/* 면책 조항 */}
-                <p className="text-center text-xs text-gray-600 mt-4">
-                    AI 분석 결과는 100% 정확하지 않으며, 참고용으로만 사용해주세요.
+                <p className="mt-5 text-center text-[11px] text-fg-mute">
+                    AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 사용해 주세요.
                 </p>
-            </div>
+            </main>
         </div>
     );
 }
