@@ -248,12 +248,10 @@ export default function LandingPage() {
 
         {/* ---------- bottom CTA ---------- */}
         <section className="pb-16">
-          <CaseCard bracket="var(--color-blood)" className="p-8 text-center">
+          <CaseCard bracket="var(--color-blood)" className="px-6 py-9 text-center">
             <Eyebrow className="justify-center">무료 판독</Eyebrow>
-            <h2 className="mt-4 text-[22px] font-extrabold leading-snug tracking-tight text-fg">
-              더 늦기 전에,
-              <br />
-              지금 확인하세요
+            <h2 className="mt-4 text-[19px] font-extrabold leading-snug tracking-tight text-fg">
+              더 늦기 전에, 지금 확인하세요
             </h2>
             <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
               불안해하며 시간 낭비하지 마세요.
