@@ -1,8 +1,6 @@
 # AI 위장 여사친 판독기
 
-## 서비스 기획서 & MVP 개발 계획
-
-**Version 2.2 | 2026년 2월**
+## 서비스 기획 및 운영 기준
 
 ---
 
@@ -13,9 +11,9 @@
 3. [화면별 상세 기획](#3-화면별-상세-기획)
 4. [핵심 알고리즘](#4-핵심-알고리즘)
 5. [기술 아키텍처](#5-기술-아키텍처)
-6. [수익 모델](#8-수익-모델)
-7. [마이페이지 기능](#9-마이페이지-기능)
-8. [맞팔 업데이트 알리미 서비스](#10-맞팔-업데이트-알리미-서비스)
+6. [수익 모델](#6-수익-모델)
+7. [마이페이지 기능](#7-마이페이지-기능)
+8. [맞팔 업데이트 알리미 서비스](#8-맞팔-업데이트-알리미-서비스)
 
 ---
 
@@ -78,12 +76,15 @@
 
 입력 완료 후 → 분석 요청 생성 → 진행 화면으로 이동
 
+현재 API는 대상 성별을 받지만 결과 후보 필터는 여성 계정으로 고정되어 있습니다. 유료 출시 전 남성 대상 전용으로 입력을 제한하거나 성별별 후보 필터를 구현해야 합니다.
+
 ### 3.4 분석 중 화면
 
-- 실시간 진행률 바 (Supabase Realtime)
+- 진행률 바 (내부 분석 자료를 제외한 상태 열만 5초 간격으로 조회)
 - 단계별 체크마크: 팔로워 수집 → 맞팔 확인 → **계정 분석**
-- 예상 소요시간 표시 (약 3~5분)
-- **이탈 허용:** "페이지를 닫아도 분석은 계속됩니다. 완료되면 이메일로 알려드릴게요!"
+- 단계별 진행률과 실측 기반 예상 소요시간 표시
+- **운영 실행:** Cloud Tasks가 OIDC 인증으로 단계 호출과 재시도를 소유하므로 페이지 이탈이나 화면 잠금 후에도 분석이 계속됨
+- **로컬 폴백:** Cloud Tasks 설정이 없는 개발 환경에서만 인증된 진행 페이지가 단계 호출을 이어감
 
 > ⚠️ "외모 분석" 표현 절대 노출 금지 → "계정 분석"으로 표시
 
@@ -140,19 +141,29 @@
 3. 맞팔 추출 → 공개/비공개 분류
 
 [step: profiles]
-4. 공개 계정 프로필 배치 수집 (최대 350개)
-   └─ apify/instagram-profile-scraper (latestPosts 포함)
+4. 공개 계정 프로필 배치 준비 (최대 350개)
+   └─ 현재 캐시 버전의 12시간 profile snapshot 우선 사용
+   └─ cache miss만 로그인 없는 직접 수집, 실패 시 Apify 1회 폴백
 
 [step: analyze]
 5. AI 종합 분석 (단일 Vertex AI Gemini 호출)
-   └─ 성별 판단 + Photogenic Quality + 노출 정도 + 친밀도
-   └─ ai_analysis_cache 활용 (기분석 계정 스킵)
+   └─ 성별 판단 + Photogenic Quality + 노출 정도 + 기혼/해외 여부
+   └─ 모델/프롬프트/스키마/이미지 정책이 일치하는 30일 결과 캐시 활용
+
+[step: interactions]
+6. 대상 최근 최대 4개 게시물의 liker 150명, 최대 6개 게시물의 댓글 15개 수집
+   └─ 중간점수 상위 관측 여성 최대 10명만 최근 1개 게시물의 liker 100명씩 후속 확인
+   └─ 일치한 양의 상호작용만 저장하고 수집 coverage를 별도 기록
+
+[step: deep_analysis]
+7. 고위험 1~3명만 프로필·bio·피드·캡션·방향별 좋아요·댓글 내용을 병렬 분석
+   └─ 좋아요/댓글 건수와 세부 점수는 공개하지 않고 시니컬한 2문장 총평만 표시
 
 [step: finalize]
-6. 위험순위 점수 계산
+8. 특징 점수 + 최근 맞팔 보정 + 상호작용 점수 계산
 
 [step: completed]
-7. 결과 저장 + 이메일 발송 (Resend)
+9. 결과 저장 + 이메일 발송 (Resend)
 ```
 
 ### 4.2 성별 판단 (Vertex AI Gemini)
@@ -175,8 +186,11 @@
 | Photogenic Quality Grade 1 | 20점 |
 | 피부 노출 많음 | 40점 |
 | 태그됨 | 30점 |
+| 여성 → 대상 좋아요 | 최대 35점 |
+| 여성 → 대상 댓글 | 최대 45점 (게시물당 최대 2개 기여) |
+| 대상 → 여성 좋아요 | 최대 20점 |
 
-**최종점수 = Photogenic점수 + 노출점수 + 태그점수** (최대 170점)
+**최종점수 = 특징점수 + 최근 맞팔 보정 + 상호작용점수** (최대 290점)입니다. 기혼 또는 해외 계정은 외모 기반 특징점수만 제외하고, 최근 맞팔 보정과 실제로 관측된 상호작용점수는 유지합니다. 수집 상한 밖의 미관측 계정은 상호작용이 없다고 단정하지 않으며 coverage와 원시 건수는 내부 점수 계산에만 사용하고 결과에는 노출하지 않습니다. 구현 기준은 [`lib/constants/scoring.ts`](../lib/constants/scoring.ts)와 [`lib/services/analysis/interaction-score.ts`](../lib/services/analysis/interaction-score.ts)입니다.
 
 ### 4.4 위험순위 분류
 
@@ -198,20 +212,33 @@
 | 영역 | 기술 |
 |------|------|
 | 프론트엔드 | Next.js 16, React 19, Tailwind CSS 4 |
-| 배포 | Vercel (Free) |
+| 개발 호스팅 | Vercel Hobby (개발·비상업 검증 전용) |
+| 운영 호스팅 | Cloud Run 후보 (운영 canary 후 유료 배포 결정) |
 | 백엔드/DB | Supabase |
-| 스크래핑 | Apify + RapidAPI |
-| AI 분석 | Vertex AI Gemini (`gemini-3-flash-preview`) |
+| Instagram 수집 | 로그인 없는 직접 공개 프로필 + Apify 관계 목록 |
+| AI 분석 | Vertex AI Gemini (`gemini-3-flash-preview`, 비용 최적화 모드 선택 가능) |
 | 이메일 | Resend |
 | 애널리틱스 | Amplitude |
 
-### 5.2 Apify 스크래퍼
+### 5.2 Instagram 수집 라우팅
 
-| 용도 | Actor | 비고 |
-|------|-------|------|
-| 팔로워 수집 | `datadoping/instagram-followers-scraper` | |
-| 팔로잉 수집 | RapidAPI Instagram Scraper | 개인 Instagram 쿠키 미사용 |
-| 프로필/매일 트래킹 | `apify/instagram-profile-scraper` | |
+| 기능 | 기본 | 자동 폴백 |
+|------|------|-----------|
+| 단일/배치 공개 프로필 | 로그인 없는 직접 수집 (`selfhosted`) | `apify/instagram-profile-scraper` 1회 |
+| 팔로워/팔로잉 목록 | `scraping_solutions/instagram-scraper-followers-following-no-cookies` | 없음 |
+| 게시물 댓글 | `apify/instagram-comment-scraper` | 없음 |
+| 게시물 liker | `datadoping/instagram-likes-scraper` | 없음 |
+
+수집 과정은 Instagram 로그인 쿠키, 사용자 세션, 계정 풀을 요구하지 않습니다. 공개 프로필 작업만 직접 수집 실패 시 Apify를 한 번 호출합니다. 관계 목록은 선언 수와 플랜 상한으로 계산한 예상치의 99% 미만이면 자동 폴백 없이 실패합니다. FlashAPI, CoderX, Stable RapidAPI 어댑터는 관리자 수동 선택 전용입니다. FlashAPI는 팔로워 320/474명과 팔로잉 425/642명만 고유 수집한 라이브 canary 결과로 인해 운영 기본 경로에서 제외했습니다.
+
+`POST /api/analysis/start`의 `scraperOptions`는 `Authorization: Bearer <ADMIN_API_KEY>`를 통과한 운영자만 설정할 수 있습니다. 기능별 선택과 폴백 여부는 `analysis_requests.step_data.scraperOptions`에 저장되어 해당 작업 전체에 동일하게 적용됩니다. 세부 허용 조합과 운영 제한은 [`lib/services/instagram/README.md`](../lib/services/instagram/README.md)를 기준으로 합니다.
+
+### 5.3 캐시와 운영 DB
+
+- 현재 캐시 버전의 AI 결과는 `ai_analysis_cache`에서 30일 재사용합니다.
+- AI 결과와 함께 저장한 profile snapshot은 기본 12시간 동안 프로필 프로바이더 호출을 생략합니다. TTL은 `AI_PROFILE_SNAPSHOT_TTL_HOURS`로 6~24시간 범위에서 설정합니다.
+- 캐시 버전은 모델, 프롬프트, 응답 스키마, 이미지 정책을 포함하므로 분석 계약이 바뀌면 기존 결과와 snapshot을 재사용하지 않습니다.
+- 운영 분석 전에 Supabase 마이그레이션 `007`~`010`과 모든 `20260710*` 마이그레이션을 순서대로 적용합니다. 후속 마이그레이션은 관계 완전성 telemetry, 최종 사용자 mutation 차단, 30자 Instagram ID 계약, 상호작용 job/evidence/score 저장소를 제공합니다.
 
 ---
 
@@ -219,7 +246,9 @@
 
 ### 6.1 분석 제한
 
-- 기본 분석은 팔로워/팔로잉 각 500명 기준으로 처리합니다.
+- Basic은 팔로워/팔로잉 각 500명, Standard는 각 1,000명까지 수집합니다.
+- 공개 맞팔 프로필과 AI 분석 대상은 최대 350개입니다.
+- 공개 맞팔이 350개를 넘으면 팔로잉 프로바이더 반환 순서의 앞 350개를 분석하므로 결과는 전체 공개 맞팔이 아닌 표본입니다.
 - 결제 연동은 별도 공급자 확정 후 재설계합니다.
 
 ### 6.2 맞팔 업데이트 알리미
@@ -249,23 +278,10 @@
 ### 프로세스
 
 1. **가입**: 초기 팔로워/팔로잉 스크래핑 및 저장
-2. **매일 트래킹**: `apify/instagram-profile-scraper`로 follower_count, following_count 조회
+2. **매일 트래킹**: 현재 프로필 라우터로 follower_count, following_count 조회
 3. **변경 감지**: 수치 변경 시 전체 팔로워/팔로잉 재스크래핑
 4. **분석**: 새 맞팔 계정에 대해 성별/계정 분석
 5. **리포트 발송**: 이메일
 6. **과금**: 결제 공급자 확정 후 별도 설계
 
 ---
-
-## 변경 이력
-
-| 버전 | 날짜 | 변경 내용 |
-|------|------|-----------| 
-| 1.0 | 2025-01-22 | 초안 작성 |
-| 2.0 | 2026-01-29 | 전면 재설계 |
-| 2.1 | 2026-01-29 | 유저 플로우 수정, 요금제 제한 변경(500/1000), 외모 표현 제거, 파이프라인 순서 변경, 결과 표시 항목 정리 |
-| 2.2 | 2026-02-24 | 기술 스택 업데이트(Gemini 3 Flash, 실제 모델명), 파이프라인을 step 기반으로 업데이트, 종합 AI 분석(캐싱) 반영 |
-
----
-
-*— End of Document —*

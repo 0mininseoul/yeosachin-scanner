@@ -3,7 +3,7 @@ import { fetchWebProfileUser } from './web-client';
 import { mapUserToProfile } from './mappers';
 
 // 실제 인스타 호출. 기본 skip.
-// 실행: RUN_SMOKE=1 IG_TRANSPORT=direct npx vitest run **/web-client.smoke.test.ts
+// 실행: RUN_SMOKE=1 npx vitest run **/web-client.smoke.test.ts
 const run = process.env.RUN_SMOKE === '1';
 
 describe.skipIf(!run)('web-client 스모크 (실네트워크)', () => {

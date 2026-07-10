@@ -1,6 +1,7 @@
 import { analyzeWithGemini } from './gemini';
 import { INTIMACY_ANALYSIS_PROMPT } from '@/lib/constants/prompts';
 import type { IntimacyAnalysisResponse } from '@/lib/types/analysis';
+import { intimacyAnalysisResponseSchema } from './analysis-response-schemas';
 
 interface CommentForAnalysis {
     authorId: string;
@@ -35,6 +36,7 @@ export async function analyzeCommentIntimacy(
 
     // AI 분석 수행 (토큰 추적 포함)
     const result = await analyzeWithGemini<IntimacyAnalysisResponse>(prompt, undefined, {
+        schema: intimacyAnalysisResponseSchema,
         analysisType: 'intimacy',
         requestId,
     });
@@ -63,8 +65,8 @@ export async function analyzeCommentIntimacyBatch(
                         requestId,
                     });
                     return { key: `${i + index}`, result };
-                } catch (error) {
-                    console.error(`Intimacy analysis failed:`, error);
+                } catch {
+                    console.error('Intimacy batch analysis failed for one input');
                     return {
                         key: `${i + index}`,
                         result: {

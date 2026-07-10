@@ -4,6 +4,12 @@ import { useEffect, use, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
+import {
+    ANALYSIS_PROGRESS_STEPS,
+    ANALYSIS_STEP_RECOVERY_DELAY_MS,
+    decideAnalysisStepFailure,
+    shouldClientDriveAnalysis,
+} from '@/lib/services/analysis/progress-retry';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
@@ -11,7 +17,7 @@ interface PageProps {
 
 export default function ProgressPage({ params }: PageProps) {
     const { requestId } = use(params);
-    const { data, loading, error } = useAnalysisProgress(requestId);
+    const { data, loading, error, refetch } = useAnalysisProgress(requestId);
     const router = useRouter();
     const isRunningStep = useRef(false);
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -20,11 +26,18 @@ export default function ProgressPage({ params }: PageProps) {
     const stepTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const runNextStepRef = useRef<() => void>(() => undefined);
 
-    const MAX_RETRIES = 3;
+    const scheduleNextStep = useCallback((delayMs: number, retry = false) => {
+        const targetRef = retry ? retryTimeoutRef : stepTimeoutRef;
+        if (targetRef.current) clearTimeout(targetRef.current);
+        targetRef.current = setTimeout(() => {
+            targetRef.current = null;
+            runNextStepRef.current();
+        }, delayMs);
+    }, []);
 
     // 단계별 분석 실행 함수
     const runNextStep = useCallback(async () => {
-        if (isRunningStep.current) return;
+        if (data?.backgroundProcessing === true || isRunningStep.current) return;
         isRunningStep.current = true;
 
         try {
@@ -43,28 +56,44 @@ export default function ProgressPage({ params }: PageProps) {
                 let result: { step?: string; error?: string } = {};
                 try { result = await response.json(); } catch { /* non-JSON 응답 (504 등) */ }
 
-                // 서버가 파이프라인 실패를 기록한 경우 (500 + step 존재) → 재시도 불필요
-                if (response.status === 500 && result.step) {
-                    console.error('Pipeline failed at step:', result.step, result.error);
+                const decision = decideAnalysisStepFailure(
+                    response.status,
+                    Boolean(result.step),
+                    retryCountRef.current
+                );
+
+                if (decision.kind === 'lease_wait') {
+                    retryCountRef.current = decision.nextRetryCount;
                     isRunningStep.current = false;
+                    scheduleNextStep(decision.delayMs, true);
                     return;
                 }
 
-                // 504/네트워크 에러 등 일시적 에러 → 재시도
-                if (retryCountRef.current < MAX_RETRIES) {
-                    const delay = Math.pow(2, retryCountRef.current + 1) * 1000; // 2s, 4s, 8s
-                    retryCountRef.current += 1;
-                    console.warn(`Step failed (${response.status}), retrying in ${delay}ms (${retryCountRef.current}/${MAX_RETRIES})`);
+                if (decision.kind === 'terminal') {
                     isRunningStep.current = false;
-                    retryTimeoutRef.current = setTimeout(() => {
-                        retryTimeoutRef.current = null;
-                        runNextStepRef.current();
-                    }, delay);
+                    await refetch();
                     return;
                 }
 
-                console.error('Step failed after max retries:', result.error);
+                if (decision.kind === 'persisted_failure') {
+                    console.error('Pipeline failed at a persisted step');
+                    isRunningStep.current = false;
+                    await refetch();
+                    return;
+                }
+
+                if (decision.kind === 'transient_retry') {
+                    retryCountRef.current = decision.nextRetryCount;
+                    isRunningStep.current = false;
+                    scheduleNextStep(decision.delayMs, true);
+                    return;
+                }
+
+                console.error('Step failed after max retries');
                 isRunningStep.current = false;
+                await refetch();
+                retryCountRef.current = 0;
+                scheduleNextStep(ANALYSIS_STEP_RECOVERY_DELAY_MS, true);
                 return;
             }
 
@@ -72,14 +101,13 @@ export default function ProgressPage({ params }: PageProps) {
 
             // 성공 시 retryCount 리셋
             retryCountRef.current = 0;
+            isRunningStep.current = false;
 
             // 완료되지 않았으면 다음 단계 실행
             if (!result.done) {
-                isRunningStep.current = false;
-                stepTimeoutRef.current = setTimeout(() => {
-                    stepTimeoutRef.current = null;
-                    runNextStepRef.current();
-                }, 500);
+                scheduleNextStep(500);
+            } else {
+                await refetch();
             }
         } catch (err) {
             if (err instanceof Error && err.name === 'AbortError') {
@@ -91,18 +119,17 @@ export default function ProgressPage({ params }: PageProps) {
             console.error('Failed to run step:', err);
             isRunningStep.current = false;
 
-            // 네트워크 에러 재시도
-            if (retryCountRef.current < MAX_RETRIES) {
-                const delay = Math.pow(2, retryCountRef.current + 1) * 1000;
-                retryCountRef.current += 1;
-                console.warn(`Network error, retrying in ${delay}ms (${retryCountRef.current}/${MAX_RETRIES})`);
-                retryTimeoutRef.current = setTimeout(() => {
-                    retryTimeoutRef.current = null;
-                    runNextStepRef.current();
-                }, delay);
+            const decision = decideAnalysisStepFailure(0, false, retryCountRef.current);
+            if (decision.kind === 'transient_retry') {
+                retryCountRef.current = decision.nextRetryCount;
+                scheduleNextStep(decision.delayMs, true);
+            } else {
+                await refetch();
+                retryCountRef.current = 0;
+                scheduleNextStep(ANALYSIS_STEP_RECOVERY_DELAY_MS, true);
             }
         }
-    }, [requestId]);
+    }, [data?.backgroundProcessing, refetch, requestId, scheduleNextStep]);
 
     useEffect(() => {
         runNextStepRef.current = runNextStep;
@@ -111,12 +138,33 @@ export default function ProgressPage({ params }: PageProps) {
     // pending 또는 processing 상태이면 분석 단계 실행
     useEffect(() => {
         if (
-            (data?.status === 'pending' || data?.status === 'processing') &&
-            !isRunningStep.current
+            data?.backgroundProcessing === true ||
+            data?.status === 'completed' ||
+            data?.status === 'failed'
         ) {
+            if (retryTimeoutRef.current) {
+                clearTimeout(retryTimeoutRef.current);
+                retryTimeoutRef.current = null;
+            }
+            if (stepTimeoutRef.current) {
+                clearTimeout(stepTimeoutRef.current);
+                stepTimeoutRef.current = null;
+            }
+            return;
+        }
+        if (shouldClientDriveAnalysis(data?.status, data?.backgroundProcessing) &&
+            !isRunningStep.current) {
+            if (retryTimeoutRef.current) {
+                clearTimeout(retryTimeoutRef.current);
+                retryTimeoutRef.current = null;
+            }
+            if (stepTimeoutRef.current) {
+                clearTimeout(stepTimeoutRef.current);
+                stepTimeoutRef.current = null;
+            }
             runNextStep();
         }
-    }, [data?.status, runNextStep]);
+    }, [data?.backgroundProcessing, data?.progress, data?.status, runNextStep]);
 
     // 탭 복귀 시 파이프라인 재개
     useEffect(() => {
@@ -127,10 +175,8 @@ export default function ProgressPage({ params }: PageProps) {
             if (retryTimeoutRef.current || stepTimeoutRef.current) return;
 
             // 분석 진행 중이고 step이 안 돌고 있으면 재개
-            if (
-                (data?.status === 'pending' || data?.status === 'processing') &&
-                !isRunningStep.current
-            ) {
+            if (shouldClientDriveAnalysis(data?.status, data?.backgroundProcessing) &&
+                !isRunningStep.current) {
                 retryCountRef.current = 0; // 탭 복귀는 fresh start
                 runNextStep();
             }
@@ -138,7 +184,7 @@ export default function ProgressPage({ params }: PageProps) {
 
         document.addEventListener('visibilitychange', handleVisibility);
         return () => document.removeEventListener('visibilitychange', handleVisibility);
-    }, [data?.status, runNextStep]);
+    }, [data?.backgroundProcessing, data?.status, runNextStep]);
 
     // 컴포넌트 언마운트 시 정리
     useEffect(() => {
@@ -212,15 +258,6 @@ export default function ProgressPage({ params }: PageProps) {
         );
     }
 
-    // 진행 단계
-    const steps = [
-        { label: '팔로워 수집', threshold: 15 },
-        { label: '맞팔 확인', threshold: 30 },
-        { label: '성별 판단', threshold: 50 },
-        { label: '상호작용 분석', threshold: 75 },
-        { label: '점수 계산', threshold: 95 },
-    ];
-
     return (
         <div className="min-h-dvh">
             <TopBar
@@ -255,7 +292,6 @@ export default function ProgressPage({ params }: PageProps) {
                         <BrandMark size={40} className="anim-blink text-blood" />
                     </div>
                 </div>
-
                 <h1 className="mt-8 text-[22px] font-extrabold tracking-tight text-fg">판독 중…</h1>
                 <p className="mt-2 text-center text-[13px] text-fg-dim">
                     {data.progressStep || '판독을 준비하고 있습니다.'}
@@ -271,16 +307,16 @@ export default function ProgressPage({ params }: PageProps) {
                     </div>
                     <div className="mt-2 flex justify-between text-[12px] text-fg-mute">
                         <span className="num font-bold text-blood">{data.progress}%</span>
-                        <span>약 5분 소요</span>
+                        <span>단계별 처리 중</span>
                     </div>
                 </div>
 
                 {/* step log */}
                 <div className="mt-7 w-full border border-line bg-ink-2">
-                    {steps.map((step, index) => {
+                    {ANALYSIS_PROGRESS_STEPS.map((step, index) => {
                         const isComplete = data.progress >= step.threshold;
                         const isCurrent =
-                            data.progress >= (steps[index - 1]?.threshold || 0) &&
+                            data.progress >= (ANALYSIS_PROGRESS_STEPS[index - 1]?.threshold || 0) &&
                             data.progress < step.threshold;
 
                         return (
@@ -319,17 +355,30 @@ export default function ProgressPage({ params }: PageProps) {
                     })}
                 </div>
 
-                {/* leave warning */}
-                <div className="mt-7 w-full border border-blood/35 bg-blood/[0.07] px-4 py-3.5">
-                    <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-blood">
-                        <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-blood" />
-                        <span>
-                            판독이 끝날 때까지 이 페이지를 닫지 마세요.
-                            <br />
-                            <span className="text-fg-dim">페이지를 닫으면 판독이 중단됩니다.</span>
-                        </span>
-                    </p>
-                </div>
+                {/* background continuity or legacy browser fallback */}
+                {data.backgroundProcessing ? (
+                    <div className="mt-7 w-full border border-line-2 bg-panel px-4 py-3.5">
+                        <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-fg">
+                            <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-fg-dim" />
+                            <span>
+                                다른 앱으로 이동하거나 화면을 잠가도 판독은 계속됩니다.
+                                <br />
+                                <span className="text-fg-dim">언제든 돌아와 진행 상태를 확인할 수 있습니다.</span>
+                            </span>
+                        </p>
+                    </div>
+                ) : (
+                    <div className="mt-7 w-full border border-blood/35 bg-blood/[0.07] px-4 py-3.5">
+                        <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-blood">
+                            <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-blood" />
+                            <span>
+                                판독이 끝날 때까지 이 페이지를 닫지 마세요.
+                                <br />
+                                <span className="text-fg-dim">페이지를 닫으면 판독이 중단됩니다.</span>
+                            </span>
+                        </p>
+                    </div>
+                )}
             </main>
         </div>
     );

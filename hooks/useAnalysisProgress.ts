@@ -1,8 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
-import { createClient } from '@/lib/supabase/client';
-import type { RealtimeChannel } from '@supabase/supabase-js';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 interface AnalysisProgress {
     id: string;
@@ -10,86 +8,64 @@ interface AnalysisProgress {
     progress: number;
     progressStep: string | null;
     errorMessage: string | null;
+    backgroundProcessing: boolean;
 }
 
 export function useAnalysisProgress(requestId: string) {
     const [data, setData] = useState<AnalysisProgress | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const supabase = createClient();
+    const hasDataRef = useRef(false);
 
     // 초기 데이터 로드
     const fetchData = useCallback(async () => {
         try {
-            const { data: request, error } = await supabase
-                .from('analysis_requests')
-                .select('id, status, progress, progress_step, error_message')
-                .eq('id', requestId)
-                .single();
-
-            if (error) throw error;
+            const response = await fetch(`/api/analysis/status/${encodeURIComponent(requestId)}`, {
+                cache: 'no-store',
+            });
+            if (!response.ok) {
+                throw new Error(`Analysis status request failed (${response.status}).`);
+            }
+            const request = await response.json() as {
+                requestId: string;
+                status: AnalysisProgress['status'];
+                progress: number;
+                progressStep: string | null;
+                errorMessage: string | null;
+                backgroundProcessing: boolean;
+            };
 
             setData({
-                id: request.id,
+                id: request.requestId,
                 status: request.status,
                 progress: request.progress,
-                progressStep: request.progress_step,
-                errorMessage: request.error_message,
+                progressStep: request.progressStep,
+                errorMessage: request.errorMessage,
+                backgroundProcessing: request.backgroundProcessing === true,
             });
+            hasDataRef.current = true;
+            setError(null);
         } catch (err) {
             console.error('Failed to fetch analysis progress:', err);
-            setError('분석 요청을 찾을 수 없습니다.');
+            if (!hasDataRef.current) {
+                setError('분석 요청을 찾을 수 없습니다.');
+            }
         } finally {
             setLoading(false);
         }
-    }, [requestId, supabase]);
+    }, [requestId]);
 
     useEffect(() => {
-        fetchData();
+        void fetchData();
+    }, [fetchData]);
 
-        // Realtime 구독
-        let channel: RealtimeChannel;
-
-        const setupRealtime = async () => {
-            channel = supabase
-                .channel(`analysis-${requestId}`)
-                .on(
-                    'postgres_changes',
-                    {
-                        event: 'UPDATE',
-                        schema: 'public',
-                        table: 'analysis_requests',
-                        filter: `id=eq.${requestId}`,
-                    },
-                    (payload) => {
-                        const updated = payload.new as {
-                            id: string;
-                            status: 'pending' | 'processing' | 'completed' | 'failed';
-                            progress: number;
-                            progress_step: string | null;
-                            error_message: string | null;
-                        };
-
-                        setData({
-                            id: updated.id,
-                            status: updated.status,
-                            progress: updated.progress,
-                            progressStep: updated.progress_step,
-                            errorMessage: updated.error_message,
-                        });
-                    }
-                )
-                .subscribe();
-        };
-
-        setupRealtime();
-
-        return () => {
-            if (channel) {
-                supabase.removeChannel(channel);
-            }
-        };
-    }, [requestId, fetchData, supabase]);
+    // Poll only the explicitly granted progress columns. The paid pipeline remains owned by
+    // Cloud Tasks (or the progress page fallback), so polling never starts a paid step itself.
+    useEffect(() => {
+        if (data?.status === 'completed' || data?.status === 'failed') return;
+        const interval = setInterval(fetchData, 5_000);
+        return () => clearInterval(interval);
+    }, [data?.status, fetchData]);
 
     return { data, loading, error, refetch: fetchData };
 }

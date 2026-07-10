@@ -1,4 +1,13 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    inferRecentMutualFemaleRanks,
+    orderedMutualUsernamesFromStepData,
+} from '@/lib/services/analysis/recent-mutuals';
+import {
+    targetProfileImageFromStepData,
+    toResultInteractionSummary,
+} from '@/lib/services/analysis/result-interactions';
+import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
 
 export async function GET(
@@ -43,7 +52,15 @@ export async function GET(
         // 3. 분석 결과 조회 (여성 계정들)
         const { data: results, error: resultsError } = await supabaseAdmin
             .from('analysis_results')
-            .select('*')
+            .select(`
+                rank,
+                suspect_instagram_id,
+                suspect_profile_image,
+                suspect_full_name,
+                bio,
+                risk_grade,
+                risk_analysis
+            `)
             .eq('request_id', requestId)
             .order('rank', { ascending: true });
 
@@ -56,10 +73,17 @@ export async function GET(
         }
 
         // 4. 비공개 계정 조회
-        const { data: privateAccounts } = await supabaseAdmin
+        const { data: privateAccounts, error: privateAccountsError } = await supabaseAdmin
             .from('private_accounts')
-            .select('instagram_id, profile_image, full_name')
-            .eq('request_id', requestId);
+            .select('instagram_id, profile_image, full_name, name_female_score, name_confidence')
+            .eq('request_id', requestId)
+            .order('name_female_score', { ascending: false, nullsFirst: false })
+            .order('name_confidence', { ascending: false, nullsFirst: false })
+            .order('instagram_id', { ascending: true });
+        if (privateAccountsError) {
+            console.error('Shared private account results fetch failed', { requestId });
+            return NextResponse.json({ error: '결과 조회에 실패했습니다.' }, { status: 500 });
+        }
 
         // 5. 성별 비율 계산
         const genderStats = analysisRequest.gender_stats || { male: 0, female: 0, unknown: 0 };
@@ -79,21 +103,30 @@ export async function GET(
             },
         };
 
-        // 6. 여성 계정 목록
-        const femaleAccounts = results?.map((result) => ({
-            instagramId: result.suspect_instagram_id,
-            fullName: result.suspect_full_name,
-            profileImage: result.suspect_profile_image,
-            instagramUrl: `https://instagram.com/${result.suspect_instagram_id}`,
-            riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
-            bio: result.bio || '',
-        })) || [];
+        // 6. 여성 계정 목록. 수집 응답 순서는 실제 팔로우 시각이 아닌 최근 맞팔 추정치로만 사용한다.
+        const recentMutualRanks = inferRecentMutualFemaleRanks(
+            orderedMutualUsernamesFromStepData(analysisRequest.step_data),
+            (results || []).map((result) => result.suspect_instagram_id)
+        );
+        const femaleAccounts = results?.map((result) => {
+            const instagramId = result.suspect_instagram_id;
+            return {
+                instagramId,
+                fullName: result.suspect_full_name,
+                profileImage: createImageProxyPath(result.suspect_profile_image),
+                instagramUrl: `https://instagram.com/${instagramId}`,
+                riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
+                bio: result.bio || '',
+                recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
+                ...toResultInteractionSummary(result),
+            };
+        }) || [];
 
         // 7. 비공개 계정 목록
         const privateAccountsList = privateAccounts?.map((account) => ({
             instagramId: account.instagram_id,
             fullName: account.full_name,
-            profileImage: account.profile_image,
+            profileImage: createImageProxyPath(account.profile_image),
             instagramUrl: `https://instagram.com/${account.instagram_id}`,
         })) || [];
 
@@ -104,6 +137,9 @@ export async function GET(
             isShared: true, // 공유 링크로 접근했음을 표시
             summary: {
                 targetInstagramId: analysisRequest.target_instagram_id,
+                targetProfileImage: createImageProxyPath(
+                    targetProfileImageFromStepData(analysisRequest.step_data)
+                ),
                 mutualFollows: analysisRequest.mutual_follows || 0,
                 genderRatio,
             },

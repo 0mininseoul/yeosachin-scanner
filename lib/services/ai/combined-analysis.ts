@@ -1,26 +1,51 @@
-import { analyzeWithGemini, imageUrlToBase64, logTokenUsage } from './gemini';
+import { analyzeWithGemini, logTokenUsage } from './gemini';
+import { prepareAnalysisImages } from './image-preprocessing';
+import { getVertexAIAnalysisConcurrency } from './pipeline-config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { COMBINED_ANALYSIS_PROMPT } from '@/lib/constants/prompts';
 import { GENDER_CONFIDENCE_THRESHOLD } from '@/lib/constants/scoring';
 import type { CombinedAnalysisResponse } from '@/lib/types/analysis';
 import type { InstagramProfile, InstagramPost } from '@/lib/types/instagram';
+import { combinedAnalysisResponseSchema } from './analysis-response-schemas';
+import {
+    buildCombinedAnalysisCacheVersion,
+    COMBINED_ANALYSIS_CACHE_TTL_DAYS,
+    createCombinedAnalysisCacheEntry,
+    getCombinedProfileSnapshotTtlHours,
+    MAX_COMBINED_CACHE_BATCH_SIZE,
+    parseCombinedAnalysisCacheEntry,
+    parseCombinedProfileSnapshot,
+    tryCreateCombinedProfileSnapshot,
+    type CombinedProfileSnapshotAccount,
+} from './combined-cache';
 
 interface CombinedAnalysisInput {
     profile: InstagramProfile;
     recentPosts: InstagramPost[];
+    refreshCacheSnapshot?: boolean;
     requestId?: string; // 토큰 추적용
+}
+
+interface CachedAnalysisHit {
+    result: CombinedAnalysisResponse;
+    updatedAt: string | null;
 }
 
 /**
  * 캐시에서 분석 결과 조회 (updated_at 기준 30일 이내만 유효)
  */
-async function getCachedAnalysis(username: string): Promise<CombinedAnalysisResponse | null> {
+async function getCachedAnalysis(
+    username: string,
+    cacheVersion: string
+): Promise<CachedAnalysisHit | null> {
     try {
-        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const thirtyDaysAgo = new Date(
+            Date.now() - COMBINED_ANALYSIS_CACHE_TTL_DAYS * 24 * 60 * 60 * 1_000
+        ).toISOString();
 
         const { data, error } = await supabaseAdmin
             .from('ai_analysis_cache')
-            .select('analysis_result')
+            .select('analysis_result, updated_at')
             .eq('instagram_username', username)
             .gte('updated_at', thirtyDaysAgo)
             .single();
@@ -29,11 +54,45 @@ async function getCachedAnalysis(username: string): Promise<CombinedAnalysisResp
             return null;
         }
 
-        console.log(`Cache HIT for ${username}`);
-        return data.analysis_result as CombinedAnalysisResponse;
+        const cached = parseCombinedAnalysisCacheEntry(data.analysis_result, cacheVersion);
+        if (!cached) return null;
+        return {
+            result: cached,
+            updatedAt: typeof data.updated_at === 'string' ? data.updated_at : null,
+        };
     } catch {
         return null;
     }
+}
+
+function createProfileSnapshotFromInput(
+    input: Pick<CombinedAnalysisInput, 'profile' | 'recentPosts'>,
+    capturedAt: string
+) {
+    return tryCreateCombinedProfileSnapshot({
+        profile: {
+            username: input.profile.username,
+            ...(input.profile.profilePicUrl
+                ? { profilePicUrl: input.profile.profilePicUrl }
+                : {}),
+            ...(input.profile.fullName ? { fullName: input.profile.fullName } : {}),
+            ...(input.profile.bio ? { bio: input.profile.bio } : {}),
+            isPrivate: input.profile.isPrivate,
+        },
+        recentPosts: input.recentPosts.map((post) => ({
+            id: post.id,
+            shortCode: post.shortCode,
+            ...(post.caption ? { caption: post.caption } : {}),
+            hashtags: post.hashtags ?? [],
+            ...(post.imageUrl ? { imageUrl: post.imageUrl } : {}),
+            type: post.type,
+            likesCount: Math.max(0, post.likesCount),
+            commentsCount: Math.max(0, post.commentsCount),
+            timestamp: post.timestamp,
+            taggedUsers: post.taggedUsers ?? [],
+            mentionedUsers: post.mentionedUsers ?? [],
+        })),
+    }, capturedAt);
 }
 
 /**
@@ -42,25 +101,130 @@ async function getCachedAnalysis(username: string): Promise<CombinedAnalysisResp
 async function setCachedAnalysis(
     username: string,
     result: CombinedAnalysisResponse,
-    profilePicUrl?: string
+    cacheVersion: string,
+    input: Pick<CombinedAnalysisInput, 'profile' | 'recentPosts'>
 ): Promise<void> {
     try {
-        await supabaseAdmin
+        const updatedAt = new Date().toISOString();
+        const profileSnapshot = createProfileSnapshotFromInput(input, updatedAt);
+
+        const { error } = await supabaseAdmin
             .from('ai_analysis_cache')
             .upsert({
                 instagram_username: username,
-                analysis_result: result,
-                profile_pic_url: profilePicUrl,
-                updated_at: new Date().toISOString(),
+                analysis_result: createCombinedAnalysisCacheEntry(
+                    cacheVersion,
+                    result,
+                    profileSnapshot ?? undefined
+                ),
+                profile_pic_url: input.profile.profilePicUrl,
+                updated_at: updatedAt,
             }, {
                 onConflict: 'instagram_username',
             });
+        if (error) throw error;
 
-        console.log(`Cache SET for ${username}`);
-    } catch (error) {
+    } catch {
         // 캐시 저장 실패는 분석 실패로 이어지지 않도록
-        console.warn(`Failed to cache analysis for ${username}:`, error);
+        console.warn('Failed to cache a combined analysis result');
     }
+}
+
+async function refreshCachedProfileSnapshot(
+    username: string,
+    cacheVersion: string,
+    hit: CachedAnalysisHit,
+    input: Pick<CombinedAnalysisInput, 'profile' | 'recentPosts'>
+): Promise<void> {
+    if (!hit.updatedAt) return;
+
+    try {
+        const capturedAt = new Date().toISOString();
+        const profileSnapshot = createProfileSnapshotFromInput(input, capturedAt);
+        if (!profileSnapshot) return;
+        const { error } = await supabaseAdmin
+            .from('ai_analysis_cache')
+            .update({
+                analysis_result: createCombinedAnalysisCacheEntry(
+                    cacheVersion,
+                    hit.result,
+                    profileSnapshot
+                ),
+            })
+            .eq('instagram_username', username)
+            .eq('updated_at', hit.updatedAt);
+        if (error) throw error;
+    } catch {
+        // Refresh acceleration is optional and must never fail the analysis itself.
+        console.warn('Failed to refresh a combined analysis profile snapshot');
+    }
+}
+
+/**
+ * Read at most one profiles-stage batch from the current analysis cache.
+ * Every returned snapshot has current-version AI output and a separately bounded freshness window.
+ */
+export async function getCachedCombinedProfileSnapshots(
+    usernames: string[],
+    options: {
+        cacheVersion?: string;
+        nowMs?: number;
+        ttlHours?: number;
+        loadRows?: (usernames: string[], updatedAfter: string) => Promise<unknown>;
+    } = {}
+): Promise<Map<string, CombinedProfileSnapshotAccount>> {
+    if (usernames.length > MAX_COMBINED_CACHE_BATCH_SIZE) {
+        throw new Error(`Combined cache snapshot batches are limited to ${MAX_COMBINED_CACHE_BATCH_SIZE}`);
+    }
+
+    const normalizedUsernames = [...new Set(
+        usernames.map(username => username.trim().toLowerCase())
+    )].filter(username => /^[a-z0-9._]{1,30}$/.test(username));
+    const snapshots = new Map<string, CombinedProfileSnapshotAccount>();
+    if (normalizedUsernames.length === 0) return snapshots;
+
+    const cacheVersion = options.cacheVersion ?? buildCombinedAnalysisCacheVersion();
+    const ttlHours = options.ttlHours ?? getCombinedProfileSnapshotTtlHours();
+    const nowMs = options.nowMs ?? Date.now();
+    const updatedAfter = new Date(
+        nowMs - COMBINED_ANALYSIS_CACHE_TTL_DAYS * 24 * 60 * 60 * 1_000
+    ).toISOString();
+
+    try {
+        const rows = options.loadRows
+            ? await options.loadRows(normalizedUsernames, updatedAfter)
+            : await (async () => {
+                const { data, error } = await supabaseAdmin
+                    .from('ai_analysis_cache')
+                    .select('instagram_username, analysis_result')
+                    .in('instagram_username', normalizedUsernames)
+                    .gte('updated_at', updatedAfter);
+                if (error) throw error;
+                return data;
+            })();
+
+        if (!Array.isArray(rows)) return snapshots;
+
+        const requested = new Set(normalizedUsernames);
+        for (const row of rows) {
+            if (!row || typeof row !== 'object') continue;
+            const cacheRow = row as Record<string, unknown>;
+            if (typeof cacheRow.instagram_username !== 'string') continue;
+            const key = cacheRow.instagram_username.trim().toLowerCase();
+            if (!requested.has(key) || snapshots.has(key)) continue;
+
+            const snapshot = parseCombinedProfileSnapshot(cacheRow.analysis_result, cacheVersion, {
+                nowMs,
+                ttlHours,
+            });
+            if (!snapshot || snapshot.profile.username.toLowerCase() !== key) continue;
+            snapshots.set(key, snapshot);
+        }
+    } catch {
+        // Cache acceleration is optional; failures fall back to the configured profile provider.
+    }
+
+    return snapshots;
 }
 
 /**
@@ -71,11 +235,20 @@ async function setCachedAnalysis(
 export async function analyzeCombined(
     input: CombinedAnalysisInput
 ): Promise<CombinedAnalysisResponse> {
-    const { profile, recentPosts, requestId } = input;
+    const { profile, recentPosts, refreshCacheSnapshot = false, requestId } = input;
+    const cacheVersion = buildCombinedAnalysisCacheVersion();
 
     // 1. 캐시 확인
-    const cachedResult = await getCachedAnalysis(profile.username);
-    if (cachedResult) {
+    const cachedHit = await getCachedAnalysis(profile.username, cacheVersion);
+    if (cachedHit) {
+        if (refreshCacheSnapshot) {
+            await refreshCachedProfileSnapshot(
+                profile.username,
+                cacheVersion,
+                cachedHit,
+                { profile, recentPosts }
+            );
+        }
         // 캐시 히트 로깅 (토큰 0으로 기록)
         await logTokenUsage(
             { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
@@ -83,34 +256,17 @@ export async function analyzeCombined(
             requestId,
             true // cached_hit = true
         );
-        return cachedResult;
+        return cachedHit.result;
     }
 
-    console.log(`Cache MISS for ${profile.username}, calling Gemini API`);
-
-    // 2. 이미지 수집 (프로필 + 최근 피드 최대 10장)
-    const imageUrls: string[] = [];
-
-    if (profile.profilePicUrl) {
-        imageUrls.push(profile.profilePicUrl);
-    }
-
-    for (const post of recentPosts.slice(0, 9)) {
-        if (post.imageUrl) {
-            imageUrls.push(post.imageUrl);
-        }
-    }
-
-    // 이미지를 base64로 변환 (한 번만 수행)
-    const images: string[] = [];
-    for (const url of imageUrls) {
-        try {
-            const base64 = await imageUrlToBase64(url);
-            images.push(base64);
-        } catch (error) {
-            console.warn(`Failed to convert image: ${url}`, error);
-        }
-    }
+    // 2. 활성 품질/비용 정책 범위에서 이미지를 병렬 다운로드하고 JPEG로 정규화
+    const preparedImages = await prepareAnalysisImages(
+        profile.profilePicUrl,
+        recentPosts.flatMap(post => post.imageUrl ? [post.imageUrl] : [])
+    );
+    const images = preparedImages.map(image => image.base64);
+    const hasProfileImage = preparedImages.some(image => image.role === 'profile');
+    const feedImageCount = preparedImages.filter(image => image.role === 'post').length;
 
     // 2-2. 포스트 캡션/해시태그 수집 (기혼 여부 판단에 활용)
     const postsTextInfo = recentPosts
@@ -132,15 +288,16 @@ export async function analyzeCombined(
 
     // 3. 프롬프트 구성
     const prompt = COMBINED_ANALYSIS_PROMPT
-        .replace('{profileImageDescription}', profile.profilePicUrl ? '첨부된 이미지 참조' : '없음')
+        .replace('{profileImageDescription}', hasProfileImage ? '첨부된 이미지 참조' : '없음')
         .replace('{username}', profile.username)
         .replace('{fullName}', profile.fullName || '없음')
         .replace('{bio}', profile.bio || '없음')
-        .replace('{feedImagesDescription}', images.length > 1 ? '첨부된 이미지들 참조' : '없음')
+        .replace('{feedImagesDescription}', feedImageCount > 0 ? '첨부된 이미지들 참조' : '없음')
         .replace('{postsTextInfo}', postsTextInfo || '없음');
 
     // 4. AI 분석 수행 (한 번의 호출로 모든 분석 + 재시도 로직 + 토큰 추적)
     const result = await analyzeWithGemini<CombinedAnalysisResponse>(prompt, images, {
+        schema: combinedAnalysisResponseSchema,
         analysisType: 'combined',
         requestId,
     });
@@ -158,7 +315,7 @@ export async function analyzeCombined(
     }
 
     // 6. 결과 캐싱 (30일 후 자동 만료)
-    await setCachedAnalysis(profile.username, finalResult, profile.profilePicUrl);
+    await setCachedAnalysis(profile.username, finalResult, cacheVersion, { profile, recentPosts });
 
     return finalResult;
 }
@@ -168,7 +325,7 @@ export async function analyzeCombined(
  */
 export async function analyzeCombinedBatch(
     accounts: { profile: InstagramProfile; recentPosts: InstagramPost[] }[],
-    batchSize: number = 5,
+    batchSize: number = getVertexAIAnalysisConcurrency(),
     requestId?: string
 ): Promise<Map<string, CombinedAnalysisResponse>> {
     const results = new Map<string, CombinedAnalysisResponse>();
@@ -184,8 +341,8 @@ export async function analyzeCombinedBatch(
                         requestId,
                     });
                     return { username: account.profile.username, result };
-                } catch (error) {
-                    console.error(`Combined analysis failed for ${account.profile.username}:`, error);
+                } catch {
+                    console.error('Combined batch analysis failed for one account');
                     return {
                         username: account.profile.username,
                         result: {

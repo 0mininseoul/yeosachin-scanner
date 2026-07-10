@@ -24,6 +24,10 @@ export interface AnalysisRequest {
     opposite_gender_count?: number;
     confidence_score?: number;
     error_message?: string;
+    idempotency_key?: string;
+    background_processing: boolean;
+    processing_lease_token?: string;
+    processing_lease_expires_at?: string;
     created_at: string;
     completed_at?: string;
 }
@@ -36,6 +40,14 @@ export interface AnalysisResult {
     suspect_profile_image?: string;
     suspect_full_name?: string;
     risk_score: number;
+    interaction_score: number;
+    interaction_coverage: number;
+    interaction_coverage_status: 'high' | 'medium' | 'low';
+    female_to_target_likes_count: number;
+    female_to_target_comments_count: number;
+    target_to_female_likes_count: number;
+    recency_bonus: number;
+    risk_analysis: string[];
 
     // 상호작용 카운트
     likes_count: number;
@@ -93,5 +105,31 @@ export interface PrivateAccount {
     instagram_id: string;
     profile_image?: string;
     full_name?: string;
+    name_female_score?: number;
+    name_is_name?: boolean;
+    name_confidence?: number;
+    created_at: string;
+}
+
+export interface ScraperProviderUsage {
+    id: string;
+    request_id?: string;
+    provider: 'apify' | 'coderx' | 'flashapi' | 'rapidapi' | 'selfhosted';
+    capability: 'profile' | 'profilesBatch' | 'followers' | 'following';
+    request_count: number;
+    result_count: number;
+    raw_result_count: number;
+    unique_result_count: number;
+    unique_ratio: number;
+    fallback: boolean;
+    latency_ms: number;
+    status: 'success' | 'error';
+    expected_result_count?: number;
+    minimum_complete_count?: number;
+    coverage_ratio?: number;
+    failure_category?: 'configuration' | 'schema' | 'incomplete' | 'budget' | 'timeout' | 'provider';
+    estimated_cost_usd: number;
+    rate_limit_limit?: number;
+    rate_limit_remaining?: number;
     created_at: string;
 }

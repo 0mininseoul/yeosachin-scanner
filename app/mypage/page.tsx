@@ -20,7 +20,7 @@ export default async function MyPage() {
     // 2. 분석 기록 조회
     const { data: analyses, error: analysisError } = await supabase
         .from('analysis_requests')
-        .select('*')
+        .select('id, target_instagram_id, status, created_at, plan_type')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 

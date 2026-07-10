@@ -9,6 +9,8 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    // Nested Git worktrees run their own lint from their own repository root.
+    ".worktrees/**",
     "out/**",
     "build/**",
     "next-env.d.ts",

@@ -1,4 +1,6 @@
 import type { InstagramProfile, InstagramPost } from '@/lib/types/instagram';
+import { isInstagramUsername } from '../../username';
+import { normalizeInstagramTimestamp } from '../../timestamp';
 
 export function extractHashtags(caption?: string): string[] {
     if (!caption) return [];
@@ -17,6 +19,17 @@ function num(value: unknown): number {
 function count(node: Record<string, unknown>, key: string): number {
     const edge = node[key] as { count?: unknown } | undefined;
     return num(edge?.count);
+}
+
+function requiredCount(node: Record<string, unknown>, key: string): number {
+    const edge = node[key];
+    const value = edge && typeof edge === 'object'
+        ? (edge as Record<string, unknown>).count
+        : undefined;
+    if (!Number.isInteger(value) || (value as number) < 0) {
+        throw new Error(`SCRAPING_SCHEMA_ERROR: ${key}.count가 0 이상의 정수가 아닙니다.`);
+    }
+    return value as number;
 }
 
 function mapPost(node: Record<string, unknown>): InstagramPost {
@@ -55,13 +68,19 @@ function mapPost(node: Record<string, unknown>): InstagramPost {
         type,
         likesCount: likes,
         commentsCount: count(node, 'edge_media_to_comment'),
-        timestamp: node.taken_at_timestamp ? String(node.taken_at_timestamp) : '',
+        timestamp: normalizeInstagramTimestamp(node.taken_at_timestamp),
         taggedUsers,
         mentionedUsers: extractMentions(caption),
     };
 }
 
 export function mapUserToProfile(user: Record<string, unknown>): InstagramProfile {
+    if (
+        typeof user.username !== 'string' ||
+        !isInstagramUsername(user.username)
+    ) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted profile username이 올바르지 않습니다.');
+    }
     const mediaEdges = (user.edge_owner_to_timeline_media as { edges?: Array<{ node?: Record<string, unknown> }> })?.edges;
     const latestPosts: InstagramPost[] = Array.isArray(mediaEdges)
         ? mediaEdges
@@ -76,8 +95,8 @@ export function mapUserToProfile(user: Record<string, unknown>): InstagramProfil
         bio: user.biography as string | undefined,
         externalUrl: user.external_url as string | undefined,
         profilePicUrl: (user.profile_pic_url_hd || user.profile_pic_url) as string | undefined,
-        followersCount: count(user, 'edge_followed_by'),
-        followingCount: count(user, 'edge_follow'),
+        followersCount: requiredCount(user, 'edge_followed_by'),
+        followingCount: requiredCount(user, 'edge_follow'),
         postsCount: count(user, 'edge_owner_to_timeline_media'),
         isPrivate: (user.is_private as boolean) ?? false,
         isVerified: (user.is_verified as boolean) ?? false,

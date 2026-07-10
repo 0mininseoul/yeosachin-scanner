@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
 import {
     getInstagramProfile,
@@ -20,10 +21,64 @@ import {
 } from '@/lib/constants/scoring';
 import { sendAnalysisCompleteEmail } from '@/lib/services/email';
 import type { AnalyzedAccount } from '@/lib/types/analysis';
+import { createSupabaseScraperTelemetryHook } from '@/lib/services/instagram/supabase-telemetry';
+import { parseScraperProviderSelection } from '@/lib/services/instagram/config';
+import { expectedRelationshipCount } from '@/lib/services/instagram/completeness';
+import type {
+    Capability,
+    ScrapeRequestOptions,
+    ScraperProviderSelection,
+    ScraperTelemetryHook,
+} from '@/lib/services/instagram/providers/types';
+import {
+    acquireAnalysisRequestLease,
+    isAnalysisRequestOwner,
+    releaseAnalysisRequestLease,
+} from '@/lib/services/analysis/request-lease';
+import { getLegacyRunAccess } from '@/lib/services/analysis/legacy-run-access';
+import {
+    capPublicProfiles,
+    getRelationshipScrapeLimit,
+} from '@/lib/services/analysis/plan-limits';
 
-// 분석 실행 API (내부용 - 직접 호출하지 않음)
+const LEGACY_RUN_LEASE_SECONDS = 3_600;
+
+function providerOptions(
+    selection: ScraperProviderSelection,
+    capability: Capability,
+    requestId: string,
+    onTelemetry: ScraperTelemetryHook,
+    expectedResultCount?: number
+): ScrapeRequestOptions {
+    return {
+        provider: selection[capability],
+        fallback: selection.fallback,
+        requestId,
+        onTelemetry,
+        expectedResultCount,
+    };
+}
+
+// Migration-only legacy path. Disabled by default and admin-gated when explicitly enabled.
 export async function POST(request: Request) {
+    const legacyAccess = getLegacyRunAccess(request.headers.get('authorization'));
+    if (legacyAccess === 'disabled') {
+        return NextResponse.json(
+            { error: 'Legacy analysis run is disabled. Use the step pipeline.' },
+            { status: 410 }
+        );
+    }
+    if (legacyAccess === 'forbidden') {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     try {
+        const supabase = await createClient();
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError || !user) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
         const { requestId } = await request.json();
 
         if (!requestId) {
@@ -40,6 +95,9 @@ export async function POST(request: Request) {
         if (fetchError || !analysisRequest) {
             return NextResponse.json({ error: 'Request not found' }, { status: 404 });
         }
+        if (!isAnalysisRequestOwner(user.id, analysisRequest.user_id)) {
+            return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+        }
 
         if (analysisRequest.status !== 'pending') {
             return NextResponse.json({ error: 'Already processing or completed' }, { status: 400 });
@@ -54,13 +112,34 @@ export async function POST(request: Request) {
         };
 
         const targetId = analysisRequest.target_instagram_id;
-        const planType = analysisRequest.plan_type || 'basic'; // basic or standard
-        const scrapeLimit = planType === 'standard' ? 1000 : 500;
+        const scrapeLimit = getRelationshipScrapeLimit(analysisRequest.plan_type);
+        const scraperOptions = parseScraperProviderSelection(
+            analysisRequest.step_data?.scraperOptions
+        );
+        const scraperTelemetry = createSupabaseScraperTelemetryHook();
+        const lease = await acquireAnalysisRequestLease(
+            supabaseAdmin,
+            {
+                requestId,
+                userId: user.id,
+                expectedStep: analysisRequest.current_step || 'pending',
+                leaseSeconds: LEGACY_RUN_LEASE_SECONDS,
+            }
+        );
+        if (!lease) {
+            return NextResponse.json(
+                { error: 'Analysis request is already processing.' },
+                { status: 409 }
+            );
+        }
 
         try {
             // Step 1: 프로필 수집 (5%)
             await updateProgress(5, '대상 계정 정보 수집 중...');
-            const profile = await getInstagramProfile(targetId);
+            const profile = await getInstagramProfile(
+                targetId,
+                providerOptions(scraperOptions, 'profile', requestId, scraperTelemetry)
+            );
 
             if (!profile) {
                 throw new Error('계정을 찾을 수 없습니다.');
@@ -73,8 +152,28 @@ export async function POST(request: Request) {
             // Step 2: 팔로워/팔로잉 수집 (15%)
             await updateProgress(15, '팔로워/팔로잉 목록 수집 중...');
             const [followers, following] = await Promise.all([
-                getFollowers(targetId, scrapeLimit),
-                getFollowing(targetId, scrapeLimit),
+                getFollowers(
+                    targetId,
+                    scrapeLimit,
+                    providerOptions(
+                        scraperOptions,
+                        'followers',
+                        requestId,
+                        scraperTelemetry,
+                        expectedRelationshipCount(profile.followersCount, scrapeLimit)
+                    )
+                ),
+                getFollowing(
+                    targetId,
+                    scrapeLimit,
+                    providerOptions(
+                        scraperOptions,
+                        'following',
+                        requestId,
+                        scraperTelemetry,
+                        expectedRelationshipCount(profile.followingCount, scrapeLimit)
+                    )
+                ),
             ]);
 
             // Step 3: 맞팔 추출 (25%)
@@ -108,8 +207,12 @@ export async function POST(request: Request) {
             // Step 5: 공개 계정 프로필 스크래핑 (45%) - 최대 350개
             // 프로파일 수집 시 latestPosts도 함께 반환됨 (instagram-profile-scraper)
             await updateProgress(45, '공개 계정 프로필 수집 중...');
-            const profilesToScrape = publicAccounts.slice(0, 350);
-            const profiles = await getProfilesBatch(profilesToScrape.map(a => a.username));
+            const profilesToScrape = capPublicProfiles(publicAccounts);
+            const profiles = await getProfilesBatch(
+                profilesToScrape.map(a => a.username),
+                undefined,
+                providerOptions(scraperOptions, 'profilesBatch', requestId, scraperTelemetry)
+            );
 
             // 프로필과 게시물 매핑 (latestPosts 사용 - 별도 API 호출 불필요)
             const accountsWithPosts = profiles.map((profile) => ({
@@ -287,10 +390,10 @@ export async function POST(request: Request) {
             let errorMessage = rawMessage;
             if (rawMessage.includes('SCRAPING_AUTH_ERROR')) {
                 errorMessage = '서비스 인증 오류가 발생했습니다. 잠시 후 다시 시도해주세요. 문제가 지속되면 관리자에게 문의해주세요.';
-                console.error('SCRAPING_AUTH_ERROR:', rawMessage);
+                console.error(`SCRAPING_AUTH_ERROR: ${rawMessage}`);
             } else if (rawMessage.includes('SCRAPING_ERROR')) {
                 errorMessage = '데이터 수집 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
-                console.error('SCRAPING_ERROR:', rawMessage);
+                console.error(`SCRAPING_ERROR: ${rawMessage}`);
             }
 
             await supabaseAdmin
@@ -302,11 +405,14 @@ export async function POST(request: Request) {
                 .eq('id', requestId);
 
             throw pipelineError;
+        } finally {
+            await releaseAnalysisRequestLease(supabaseAdmin, lease);
         }
     } catch (error) {
-        console.error('Analysis pipeline error:', error);
+        const message = error instanceof Error ? error.message : 'Pipeline failed';
+        console.error(`Analysis pipeline error: ${message}`);
         return NextResponse.json(
-            { error: error instanceof Error ? error.message : 'Pipeline failed' },
+            { error: message },
             { status: 500 }
         );
     }

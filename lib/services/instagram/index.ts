@@ -7,3 +7,10 @@ export {
     classifyByPrivacy,
     getProfilesBatch,
 } from './scraper';
+export type {
+    ProviderName,
+    ScrapeRequestOptions,
+    ScraperProviderSelection,
+    ScraperTelemetryEvent,
+    ScraperTelemetryHook,
+} from './providers/types';

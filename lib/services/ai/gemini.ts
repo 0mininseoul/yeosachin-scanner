@@ -1,43 +1,38 @@
-import { writeFileSync } from 'fs';
-import { join } from 'path';
-import { GoogleGenAI, type Part } from '@google/genai';
+import {
+    GoogleGenAI,
+    MediaResolution,
+    ThinkingLevel,
+    type Part,
+} from '@google/genai';
+import type { ZodType } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    estimateGeminiRequestCost,
+    isVertexAICostOptimized,
+    resolveVertexAIModel,
+} from './gemini-cost';
+import {
+    getAnalysisImagePolicy,
+    imageUrlToNormalizedBase64,
+} from './image-preprocessing';
+import { parseGeminiJsonResponse } from './gemini-response';
+import { prepareGoogleApplicationCredentials } from '@/lib/services/google/credentials';
+import {
+    AI_AMBIGUOUS_GENERATION_ERROR_PREFIX,
+    classifyGeminiGenerationError,
+} from './gemini-generation-policy';
 
-const VERTEX_AI_MODEL = process.env.VERTEX_AI_MODEL || 'gemini-3-flash-preview';
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 
 let genAI: GoogleGenAI | null = null;
-let credentialsPrepared = false;
-
-function prepareGoogleCredentials(): void {
-    if (credentialsPrepared) {
-        return;
-    }
-
-    credentialsPrepared = true;
-
-    if (process.env.GOOGLE_APPLICATION_CREDENTIALS || !process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64) {
-        return;
-    }
-
-    const credentialsJson = Buffer.from(
-        process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64,
-        'base64'
-    ).toString('utf8');
-
-    JSON.parse(credentialsJson);
-
-    const credentialsPath = join('/tmp', 'google-service-account.json');
-    writeFileSync(credentialsPath, credentialsJson, { mode: 0o600 });
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
-}
+let extendedTelemetrySupported: boolean | null = null;
 
 function getGenAIClient(): GoogleGenAI {
     if (genAI) {
         return genAI;
     }
 
-    prepareGoogleCredentials();
+    prepareGoogleApplicationCredentials();
 
     const project = process.env.GOOGLE_CLOUD_PROJECT;
     if (!project) {
@@ -65,12 +60,27 @@ export interface TokenUsage {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    thinkingTokens?: number;
 }
 
 // 분석 결과 + 토큰 사용량
 export interface AnalysisResult<T> {
     data: T;
     tokenUsage: TokenUsage;
+}
+
+export interface GeminiRequestTelemetry {
+    tokenUsage: TokenUsage;
+    modelName: string;
+    location: string;
+    latencyMs: number;
+    estimatedCostUsd: number | null;
+}
+
+interface TokenLogMetadata {
+    latencyMs?: number;
+    location?: string;
+    estimatedCostUsd?: number | null;
 }
 
 /**
@@ -88,25 +98,24 @@ function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * 재시도 가능한 에러인지 확인
- */
-function isRetryableError(error: unknown): boolean {
-    if (error instanceof Error) {
-        const message = error.message.toLowerCase();
-        // Rate limit, 서버 에러, 네트워크 에러는 재시도
-        return (
-            message.includes('rate limit') ||
-            message.includes('429') ||
-            message.includes('500') ||
-            message.includes('503') ||
-            message.includes('timeout') ||
-            message.includes('network') ||
-            message.includes('econnreset') ||
-            message.includes('fetch failed')
+class RetryableGeminiRateLimitError extends Error {
+    constructor() {
+        super('AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.');
+        this.name = 'RetryableGeminiRateLimitError';
+    }
+}
+
+function sanitizeGenerationError(error: unknown): Error {
+    const disposition = classifyGeminiGenerationError(error);
+    if (disposition === 'rate_limited') {
+        return new RetryableGeminiRateLimitError();
+    }
+    if (disposition === 'ambiguous') {
+        return new Error(
+            `${AI_AMBIGUOUS_GENERATION_ERROR_PREFIX} Gemini generation status is unknown; the request was not retried.`
         );
     }
-    return false;
+    return new Error('AI_GENERATION_REQUEST_ERROR: Gemini rejected the generation request.');
 }
 
 /**
@@ -116,18 +125,62 @@ export async function logTokenUsage(
     tokenUsage: TokenUsage,
     analysisType: string,
     requestId?: string,
-    cachedHit: boolean = false
+    cachedHit: boolean = false,
+    modelName: string = resolveVertexAIModel(),
+    metadata: TokenLogMetadata = {}
 ): Promise<void> {
+    const location = metadata.location ?? GOOGLE_CLOUD_LOCATION;
+    const estimatedCostUsd = metadata.estimatedCostUsd
+        ?? estimateGeminiRequestCost(tokenUsage, modelName, location)?.totalCostUsd
+        ?? null;
+    const baseRow = {
+        request_id: requestId || null,
+        prompt_tokens: tokenUsage.promptTokens,
+        completion_tokens: tokenUsage.completionTokens,
+        total_tokens: tokenUsage.totalTokens,
+        analysis_type: analysisType,
+        model_name: modelName,
+        cached_hit: cachedHit,
+    };
+
     try {
-        await supabaseAdmin.from('gemini_token_usage').insert({
-            request_id: requestId || null,
-            prompt_tokens: tokenUsage.promptTokens,
-            completion_tokens: tokenUsage.completionTokens,
-            total_tokens: tokenUsage.totalTokens,
-            analysis_type: analysisType,
-            model_name: VERTEX_AI_MODEL,
-            cached_hit: cachedHit,
-        });
+        if (extendedTelemetrySupported !== false) {
+            const { error } = await supabaseAdmin.from('gemini_token_usage').insert({
+                ...baseRow,
+                thinking_tokens: tokenUsage.thinkingTokens ?? 0,
+                latency_ms: metadata.latencyMs ?? null,
+                estimated_cost_usd: estimatedCostUsd,
+                model_location: location,
+            });
+
+            if (!error) {
+                extendedTelemetrySupported = true;
+                return;
+            }
+
+            const errorText = JSON.stringify(error).toLowerCase();
+            const isMissingExtendedColumn = [
+                'thinking_tokens',
+                'latency_ms',
+                'estimated_cost_usd',
+                'model_location',
+            ].some(column => errorText.includes(column))
+                && (errorText.includes('schema cache')
+                    || errorText.includes('column')
+                    || errorText.includes('does not exist'));
+
+            if (!isMissingExtendedColumn) {
+                throw error;
+            }
+
+            extendedTelemetrySupported = false;
+            console.warn('Extended Gemini telemetry columns are unavailable; using base token logging');
+        }
+
+        const { error } = await supabaseAdmin.from('gemini_token_usage').insert(baseRow);
+        if (error) {
+            throw error;
+        }
     } catch (error) {
         // 토큰 로깅 실패는 분석 실패로 이어지지 않도록
         console.warn('Failed to log token usage:', error);
@@ -143,18 +196,38 @@ export async function logTokenUsage(
  */
 export async function analyzeWithGemini<T>(
     prompt: string,
-    images?: string[],
-    options?: {
+    images: string[] | undefined,
+    options: {
+        schema: ZodType<T>;
         analysisType?: string;
         requestId?: string;
         skipTokenLog?: boolean;
+        maxOutputTokens?: number;
+        onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
     }
 ): Promise<T> {
-    const { analysisType = 'unknown', requestId, skipTokenLog = false } = options || {};
+    const {
+        analysisType = 'unknown',
+        requestId,
+        skipTokenLog = false,
+        maxOutputTokens,
+        onTelemetry,
+        schema,
+    } = options;
+    if (
+        maxOutputTokens !== undefined
+        && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 65_536)
+    ) {
+        throw new Error('Gemini maxOutputTokens must be an integer from 1 to 65536');
+    }
+    const costOptimized = isVertexAICostOptimized();
+    const modelName = resolveVertexAIModel(process.env.VERTEX_AI_MODEL, costOptimized);
+    const imagePolicy = getAnalysisImagePolicy(costOptimized);
+    const analysisStartedAt = performance.now();
 
     console.log('--- AnalyzeWithGemini Start ---');
     console.log('Analysis type:', analysisType);
-    console.log('Image count:', images?.length ?? 0);
+    console.log('Image count:', Math.min(images?.length ?? 0, imagePolicy.maxImages));
 
     let lastError: Error | null = null;
 
@@ -172,7 +245,7 @@ export async function analyzeWithGemini<T>(
 
             // 이미지가 있으면 추가
             if (images && images.length > 0) {
-                for (const image of images) {
+                for (const image of images.slice(0, imagePolicy.maxImages)) {
                     parts.push({
                         inlineData: {
                             mimeType: 'image/jpeg',
@@ -182,10 +255,31 @@ export async function analyzeWithGemini<T>(
                 }
             }
 
-            const response = await client.models.generateContent({
-                model: VERTEX_AI_MODEL,
-                contents: [{ role: 'user', parts }],
-            });
+            let response;
+            try {
+                response = await client.models.generateContent({
+                    model: modelName,
+                    contents: [{ role: 'user', parts }],
+                    ...(costOptimized || maxOutputTokens !== undefined
+                        ? {
+                            config: {
+                                maxOutputTokens: maxOutputTokens ?? 1_024,
+                                responseMimeType: 'application/json',
+                                ...(costOptimized
+                                    ? {
+                                        mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
+                                        ...(modelName.startsWith('gemini-3')
+                                            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
+                                            : {}),
+                                    }
+                                    : {}),
+                            },
+                        }
+                        : {}),
+                });
+            } catch (generationError) {
+                throw sanitizeGenerationError(generationError);
+            }
             const text = response.text;
 
             if (!text) {
@@ -198,23 +292,42 @@ export async function analyzeWithGemini<T>(
                 promptTokens: usageMetadata?.promptTokenCount ?? 0,
                 completionTokens: usageMetadata?.candidatesTokenCount ?? 0,
                 totalTokens: usageMetadata?.totalTokenCount ?? 0,
+                thinkingTokens: usageMetadata?.thoughtsTokenCount ?? 0,
+            };
+            const costEstimate = estimateGeminiRequestCost(
+                tokenUsage,
+                modelName,
+                GOOGLE_CLOUD_LOCATION
+            );
+            const telemetry: GeminiRequestTelemetry = {
+                tokenUsage,
+                modelName,
+                location: GOOGLE_CLOUD_LOCATION,
+                latencyMs: Math.max(0, Math.round(performance.now() - analysisStartedAt)),
+                estimatedCostUsd: costEstimate?.totalCostUsd ?? null,
             };
 
             console.log('Token usage:', tokenUsage);
+            console.log('Gemini request telemetry:', telemetry);
 
             // 토큰 사용량 DB 저장
             if (!skipTokenLog) {
-                await logTokenUsage(tokenUsage, analysisType, requestId, false);
+                await logTokenUsage(tokenUsage, analysisType, requestId, false, modelName, {
+                    latencyMs: telemetry.latencyMs,
+                    location: telemetry.location,
+                    estimatedCostUsd: telemetry.estimatedCostUsd,
+                });
             }
 
-            // JSON 파싱
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                console.error('JSON Parse Failed. Response length:', text.length);
-                throw new Error('Failed to parse AI response as JSON');
+            if (onTelemetry) {
+                try {
+                    await onTelemetry(telemetry);
+                } catch (telemetryError) {
+                    console.warn('Gemini telemetry hook failed:', telemetryError);
+                }
             }
 
-            const parsed = JSON.parse(jsonMatch[0]) as T;
+            const parsed = parseGeminiJsonResponse(text, schema);
             console.log('--- AnalyzeWithGemini End (Success) ---');
 
             return parsed;
@@ -223,7 +336,8 @@ export async function analyzeWithGemini<T>(
             console.error(`Gemini API Error (attempt ${attempt + 1}):`, lastError.message);
 
             // 재시도 불가능한 에러거나 마지막 시도면 throw
-            if (!isRetryableError(error) || attempt >= RETRY_CONFIG.maxRetries) {
+            if (!(error instanceof RetryableGeminiRateLimitError)
+                || attempt >= RETRY_CONFIG.maxRetries) {
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
                 throw lastError;
             }
@@ -240,49 +354,7 @@ export async function analyzeWithGemini<T>(
  * 실패 시 외부 프록시 서비스(weserv.nl)를 통해 재시도
  */
 export async function imageUrlToBase64(url: string): Promise<string> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15초 타임아웃
-
-    try {
-        // 1차 시도: 직접 fetch
-        const response = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                'Referer': 'https://www.instagram.com/',
-            },
-        });
-
-        if (response.ok) {
-            const buffer = await response.arrayBuffer();
-            return Buffer.from(buffer).toString('base64');
-        }
-
-        throw new Error(`Direct fetch failed: ${response.status}`);
-    } catch (directError) {
-        // 2차 시도: weserv.nl 프록시 사용
-        console.log(`Direct fetch failed for ${url.substring(0, 50)}..., trying proxy`, directError);
-
-        try {
-            const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
-            const proxyResponse = await fetch(proxyUrl, {
-                signal: controller.signal,
-            });
-
-            if (!proxyResponse.ok) {
-                throw new Error(`Proxy fetch failed: ${proxyResponse.status}`);
-            }
-
-            const buffer = await proxyResponse.arrayBuffer();
-            return Buffer.from(buffer).toString('base64');
-        } catch (proxyError) {
-            console.warn(`Failed to convert image via proxy: ${url.substring(0, 80)}...`, proxyError);
-            throw proxyError;
-        }
-    } finally {
-        clearTimeout(timeoutId);
-    }
+    return imageUrlToNormalizedBase64(url);
 }
 
 /**
@@ -291,9 +363,15 @@ export async function imageUrlToBase64(url: string): Promise<string> {
 export async function getDailyTokenUsage(days: number = 7): Promise<{
     date: string;
     analysisType: string;
+    modelName: string;
     apiCalls: number;
     cacheHits: number;
+    promptTokens: number;
+    completionTokens: number;
     totalTokens: number;
+    estimatedCostUsd: number | null;
+    latencySamples: number;
+    averageLatencyMs: number | null;
 }[]> {
     const { data, error } = await supabaseAdmin
         .from('gemini_token_usage')
@@ -310,29 +388,75 @@ export async function getDailyTokenUsage(days: number = 7): Promise<{
     const dailyStats = new Map<string, {
         date: string;
         analysisType: string;
+        modelName: string;
         apiCalls: number;
         cacheHits: number;
+        promptTokens: number;
+        completionTokens: number;
         totalTokens: number;
+        estimatedCostUsd: number | null;
+        latencySamples: number;
+        totalLatencyMs: number;
     }>();
 
     for (const row of data || []) {
         const date = new Date(row.created_at).toISOString().split('T')[0];
-        const key = `${date}-${row.analysis_type}`;
+        const modelName = row.model_name || 'unknown';
+        const key = `${date}-${row.analysis_type}-${modelName}`;
 
         const existing = dailyStats.get(key) || {
             date,
             analysisType: row.analysis_type,
+            modelName,
             apiCalls: 0,
             cacheHits: 0,
+            promptTokens: 0,
+            completionTokens: 0,
             totalTokens: 0,
+            estimatedCostUsd: 0,
+            latencySamples: 0,
+            totalLatencyMs: 0,
         };
 
-        existing.apiCalls += 1;
+        const tokenUsage: TokenUsage = {
+            promptTokens: row.prompt_tokens ?? 0,
+            completionTokens: row.completion_tokens ?? 0,
+            totalTokens: row.total_tokens ?? 0,
+            thinkingTokens: row.thinking_tokens ?? undefined,
+        };
+        const calculatedCost = estimateGeminiRequestCost(
+            tokenUsage,
+            modelName,
+            row.model_location || GOOGLE_CLOUD_LOCATION
+        );
+        const storedCost = Number(row.estimated_cost_usd);
+        const estimatedCostUsd = row.estimated_cost_usd !== null
+            && row.estimated_cost_usd !== undefined
+            && Number.isFinite(storedCost)
+            ? storedCost
+            : calculatedCost?.totalCostUsd ?? null;
+        const latencyMs = Number(row.latency_ms);
+
+        existing.apiCalls += row.cached_hit ? 0 : 1;
         existing.cacheHits += row.cached_hit ? 1 : 0;
-        existing.totalTokens += row.total_tokens;
+        existing.promptTokens += tokenUsage.promptTokens;
+        existing.completionTokens += tokenUsage.completionTokens;
+        existing.totalTokens += tokenUsage.totalTokens;
+        existing.estimatedCostUsd = existing.estimatedCostUsd === null || estimatedCostUsd === null
+            ? null
+            : Number((existing.estimatedCostUsd + estimatedCostUsd).toFixed(12));
+        if (row.latency_ms !== null && row.latency_ms !== undefined && Number.isFinite(latencyMs)) {
+            existing.latencySamples += 1;
+            existing.totalLatencyMs += latencyMs;
+        }
 
         dailyStats.set(key, existing);
     }
 
-    return Array.from(dailyStats.values());
+    return Array.from(dailyStats.values()).map(({ totalLatencyMs, ...stats }) => ({
+        ...stats,
+        averageLatencyMs: stats.latencySamples > 0
+            ? Math.round(totalLatencyMs / stats.latencySamples)
+            : null,
+    }));
 }

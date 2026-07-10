@@ -18,8 +18,10 @@ export const EXPOSURE_SCORES = {
 // 태그 점수
 export const TAG_SCORE = 30;
 
-// 최대 점수
-export const MAX_SCORE = 170; // Photogenic 100 + Exposure 40 + Tag 30
+// 특징 점수 상한
+export const BASE_FEATURE_SCORE_MAX = 170; // Photogenic 100 + Exposure 40 + Tag 30
+export const RECENT_MUTUAL_BONUS_MAX = 20;
+export const MAX_SCORE = BASE_FEATURE_SCORE_MAX + RECENT_MUTUAL_BONUS_MAX;
 
 /**
  * Photogenic Grade에 따른 점수 반환

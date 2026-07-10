@@ -22,6 +22,11 @@ describe('mapUserToProfile', () => {
         expect(profile.profilePicUrl).toBe('https://cdn.example.com/pic_hd.jpg');
     });
 
+    it('팔로워/팔로잉 count가 누락되거나 잘못되면 거부한다', () => {
+        expect(() => mapUserToProfile({ ...user, edge_followed_by: {} })).toThrow('SCHEMA');
+        expect(() => mapUserToProfile({ ...user, edge_follow: { count: -1 } })).toThrow('SCHEMA');
+    });
+
     it('게시물을 최대 10개, 타입/좋아요/이미지와 함께 매핑한다', () => {
         expect(profile.latestPosts).toHaveLength(2);
         const [p1, p2] = profile.latestPosts!;
@@ -29,6 +34,7 @@ describe('mapUserToProfile', () => {
         expect(p1.imageUrl).toBe('https://cdn.example.com/post1.jpg');
         expect(p1.likesCount).toBe(42);
         expect(p1.commentsCount).toBe(5);
+        expect(p1.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
         expect(p2.type).toBe('video');
         expect(p2.videoUrl).toBe('https://cdn.example.com/post2.mp4');
         expect(p2.likesCount).toBe(10);

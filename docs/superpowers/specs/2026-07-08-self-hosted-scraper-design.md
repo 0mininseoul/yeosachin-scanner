@@ -1,3 +1,5 @@
+> **SUPERSEDED / DO NOT IMPLEMENT.** This is a historical design record, not current approval. See the [Instagram provider scope ledger](../../instagram-provider-scope-ledger.md); prohibited paths described below remain out of scope.
+
 # 자체 인스타그램 크롤러 (전환 가능한 프로바이더) — 설계 문서
 
 - 작성일: 2026-07-08

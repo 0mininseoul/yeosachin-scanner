@@ -4,17 +4,24 @@ import { useEffect, useState, use } from 'react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
-import { TopBar, Eyebrow, CaseCard, ThreatBar, RiskTag, PrimaryButton } from '@/components/case-ui';
+import {
+    TopBar,
+    Eyebrow,
+    CaseCard,
+    ThreatBar,
+    RiskTag,
+    RecentMutualBadge,
+    DeepRiskAnalysis,
+    PrimaryButton,
+} from '@/components/case-ui';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
 }
 
-// Instagram CDN URL을 프록시 URL로 변환
 const getProxyImageUrl = (url: string | undefined): string | undefined => {
     if (!url) return undefined;
-    if (url.startsWith('/api/image-proxy')) return url;
-    return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+    return url.startsWith('/api/image-proxy?') ? url : undefined;
 };
 
 function FallbackGlyph({ variant }: { variant: 'person' | 'private' }) {
@@ -82,6 +89,8 @@ interface FemaleAccount {
     instagramUrl: string;
     riskGrade: 'high_risk' | 'caution' | 'normal';
     bio: string;
+    recentMutualRank?: 1 | 2 | 3 | 4 | 5;
+    riskAnalysis: string[];
 }
 
 interface PrivateAccount {
@@ -97,6 +106,7 @@ interface ResultData {
     status: string;
     summary: {
         targetInstagramId: string;
+        targetProfileImage?: string;
         mutualFollows: number;
         genderRatio: GenderRatio;
     };
@@ -268,11 +278,16 @@ export default function ResultPage({ params }: PageProps) {
 
             <main className="mx-auto max-w-[480px] px-5 pt-8">
                 {/* case header */}
-                <div className="flex items-center justify-between">
-                    <Eyebrow>판독 리포트</Eyebrow>
-                    <span className="num text-[11px] tracking-[0.18em] text-fg-mute">
-                        @{summary.targetInstagramId}
-                    </span>
+                <div className="flex items-center justify-between gap-3">
+                    <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
+                    <div className="flex min-w-0 max-w-[62%] items-center gap-2">
+                        <div className="relative h-9 w-9 shrink-0 overflow-hidden border border-line-2 bg-panel">
+                            <ProfileImage src={summary.targetProfileImage} variant="person" />
+                        </div>
+                        <span className="num block truncate text-[10px] text-fg-mute">
+                            @{summary.targetInstagramId}
+                        </span>
+                    </div>
                 </div>
                 <h1 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">판독 결과</h1>
                 {highCount > 0 && (
@@ -373,8 +388,16 @@ export default function ResultPage({ params }: PageProps) {
                                                     {account.bio}
                                                 </p>
                                             )}
+                                            {account.recentMutualRank && (
+                                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                                    <RecentMutualBadge rank={account.recentMutualRank} />
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
+                                    {account.riskGrade === 'high_risk' && account.riskAnalysis.length > 0 && (
+                                        <DeepRiskAnalysis lines={account.riskAnalysis} className="mt-3" />
+                                    )}
                                     <div className="mt-3 flex items-center gap-3">
                                         <ThreatBar grade={account.riskGrade} className="flex-1" />
                                         <InstaLink url={account.instagramUrl} />
@@ -425,7 +448,7 @@ export default function ResultPage({ params }: PageProps) {
                         </div>
                     )}
                     <p className="mt-3 text-[11px] text-fg-mute">
-                        비공개 계정은 게시물 분석이 어려워요. 프로필을 직접 확인해 보세요.
+                        비공개 계정은 이름 텍스트의 여성형 가능성 순이며, 이 추정은 틀릴 수 있어요.
                     </p>
                 </section>
                 )}

@@ -127,9 +127,6 @@ CREATE POLICY "Users can view own data" ON users
 CREATE POLICY "Users can view own analysis requests" ON analysis_requests
     FOR SELECT USING (auth.uid() = user_id);
 
-CREATE POLICY "Users can insert own analysis requests" ON analysis_requests
-    FOR INSERT WITH CHECK (auth.uid() = user_id);
-
 CREATE POLICY "Users can view own analysis results" ON analysis_results
     FOR SELECT USING (
         EXISTS (

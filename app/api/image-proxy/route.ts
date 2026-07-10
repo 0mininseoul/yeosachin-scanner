@@ -1,4 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import {
+    downloadSecureImage,
+    INSTAGRAM_MEDIA_HOST_SUFFIXES,
+    TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
+} from '@/lib/services/media/secure-image-fetch';
+import { verifyImageProxyToken } from '@/lib/services/media/image-proxy-token';
+
+const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
+const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
+const IMAGE_PROXY_DIRECT_TIMEOUT_MS = 4_000;
+const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8';
 
 const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150" viewBox="0 0 150 150">
   <rect width="150" height="150" fill="#1f2937"/>
@@ -10,9 +21,53 @@ function getPlaceholderResponse() {
     return new NextResponse(PLACEHOLDER_SVG, {
         headers: {
             'Content-Type': 'image/svg+xml',
-            'Cache-Control': 'public, max-age=3600',
-            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'private, max-age=300',
+            'Content-Length': String(Buffer.byteLength(PLACEHOLDER_SVG)),
+            'Content-Security-Policy': "default-src 'none'; sandbox",
+            'Cross-Origin-Resource-Policy': 'same-origin',
+            'X-Content-Type-Options': 'nosniff',
         },
+    });
+}
+
+function imageCacheHeaders(expiresAt: string): Record<string, string> {
+    const remainingSeconds = Math.max(
+        0,
+        Number(expiresAt) - Math.ceil(Date.now() / 1_000)
+    );
+    if (remainingSeconds === 0) {
+        return {
+            'Cache-Control': 'private, no-store',
+            'CDN-Cache-Control': 'private, no-store',
+            'Vercel-CDN-Cache-Control': 'private, no-store',
+        };
+    }
+
+    const browserCache = `public, max-age=${remainingSeconds}, must-revalidate`;
+    const cdnCache = `public, s-maxage=${remainingSeconds}, must-revalidate`;
+    return {
+        'Cache-Control': browserCache,
+        'CDN-Cache-Control': cdnCache,
+        'Vercel-CDN-Cache-Control': cdnCache,
+    };
+}
+
+function imageResponse(bytes: Buffer, contentType: string, expiresAt: string) {
+    return new NextResponse(new Uint8Array(bytes), {
+        headers: {
+            'Content-Type': contentType,
+            'Content-Length': String(bytes.byteLength),
+            ...imageCacheHeaders(expiresAt),
+            'Cross-Origin-Resource-Policy': 'same-origin',
+            'X-Content-Type-Options': 'nosniff',
+        },
+    });
+}
+
+function errorResponse(error: string, status: number) {
+    return NextResponse.json({ error }, {
+        status,
+        headers: { 'Cache-Control': 'private, no-store' },
     });
 }
 
@@ -23,98 +78,71 @@ function getPlaceholderResponse() {
  * 모든 시도 실패 시 placeholder 이미지 반환
  */
 export async function GET(request: NextRequest) {
-    const url = request.nextUrl.searchParams.get('url');
+    const searchParams = request.nextUrl.searchParams;
+    const allowedParameters = ['url', 'expires', 'signature'] as const;
+    const parameterNames = Array.from(searchParams.keys());
+    if (
+        parameterNames.length !== allowedParameters.length
+        || allowedParameters.some((name) => searchParams.getAll(name).length !== 1)
+        || parameterNames.some((name) => !allowedParameters.includes(
+            name as typeof allowedParameters[number]
+        ))
+    ) {
+        return errorResponse('Invalid image proxy token', 400);
+    }
 
-    if (!url) {
-        return NextResponse.json({ error: 'URL parameter required' }, { status: 400 });
+    const url = searchParams.get('url');
+    const expires = searchParams.get('expires');
+    const signature = searchParams.get('signature');
+    if (!url || !expires || !signature) {
+        return errorResponse('Invalid image proxy token', 400);
+    }
+    const canonicalQuery = new URLSearchParams({ url, expires, signature }).toString();
+    if (new URL(request.url).search.slice(1) !== canonicalQuery) {
+        return errorResponse('Invalid image proxy token', 400);
+    }
+
+    const authorizedUrl = verifyImageProxyToken(url, expires, signature);
+    if (!authorizedUrl) {
+        return errorResponse('Image proxy token rejected', 403);
+    }
+
+    const startedAt = Date.now();
+    const remainingTimeoutMs = () => Math.max(
+        1,
+        IMAGE_PROXY_TOTAL_TIMEOUT_MS - (Date.now() - startedAt)
+    );
+
+    try {
+        const direct = await downloadSecureImage(authorizedUrl, {
+            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            maxBytes: IMAGE_PROXY_MAX_BYTES,
+            timeoutMs: Math.min(IMAGE_PROXY_DIRECT_TIMEOUT_MS, remainingTimeoutMs()),
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                Accept: IMAGE_ACCEPT,
+                Referer: 'https://www.instagram.com/',
+            },
+        });
+        return imageResponse(direct.bytes, direct.contentType, expires);
+    } catch {
+        // A trusted image proxy is a compatibility fallback for CDN-region failures.
+    }
+
+    if (Date.now() - startedAt >= IMAGE_PROXY_TOTAL_TIMEOUT_MS) {
+        return getPlaceholderResponse();
     }
 
     try {
-        // URL 유효성 검사 (Instagram CDN URL만 허용)
-        const parsedUrl = new URL(url);
-        const allowedHosts = [
-            'instagram.com',
-            'cdninstagram.com',
-            'fbcdn.net',
-            'instagram.fna.fbcdn.net',
-        ];
-
-        const isAllowed = allowedHosts.some(
-            (host) => parsedUrl.hostname.includes(host)
-        );
-
-        if (!isAllowed) {
-            return NextResponse.json({ error: 'URL not allowed' }, { status: 403 });
-        }
-
-        let buffer: ArrayBuffer;
-        let contentType = 'image/jpeg';
-
-        // 1차 시도: 직접 fetch
-        try {
-            const controller1 = new AbortController();
-            const timeoutId1 = setTimeout(() => controller1.abort(), 8000);
-
-            const response = await fetch(url, {
-                signal: controller1.signal,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                    'Referer': 'https://www.instagram.com/',
-                },
-            });
-
-            clearTimeout(timeoutId1);
-
-            if (response.ok) {
-                contentType = response.headers.get('content-type') || 'image/jpeg';
-                buffer = await response.arrayBuffer();
-
-                return new NextResponse(buffer, {
-                    headers: {
-                        'Content-Type': contentType,
-                        'Cache-Control': 'public, max-age=86400',
-                        'Access-Control-Allow-Origin': '*',
-                    },
-                });
-            }
-        } catch {
-            // 1차 시도 실패, 2차 시도로 진행
-        }
-
-        // 2차 시도: weserv.nl 프록시 사용
-        try {
-            const controller2 = new AbortController();
-            const timeoutId2 = setTimeout(() => controller2.abort(), 8000);
-
-            const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
-            const proxyResponse = await fetch(proxyUrl, {
-                signal: controller2.signal,
-            });
-
-            clearTimeout(timeoutId2);
-
-            if (proxyResponse.ok) {
-                contentType = proxyResponse.headers.get('content-type') || 'image/jpeg';
-                buffer = await proxyResponse.arrayBuffer();
-
-                return new NextResponse(buffer, {
-                    headers: {
-                        'Content-Type': contentType,
-                        'Cache-Control': 'public, max-age=86400',
-                        'Access-Control-Allow-Origin': '*',
-                    },
-                });
-            }
-        } catch {
-            // 2차 시도도 실패
-        }
-
-        // 모든 시도 실패: placeholder 반환
-        console.warn('Image proxy: all attempts failed, returning placeholder for:', url);
-        return getPlaceholderResponse();
-    } catch (error) {
-        console.error('Image proxy error:', error);
+        const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(authorizedUrl)}&default=1`;
+        const proxied = await downloadSecureImage(proxyUrl, {
+            allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
+            maxBytes: IMAGE_PROXY_MAX_BYTES,
+            timeoutMs: remainingTimeoutMs(),
+            headers: { Accept: IMAGE_ACCEPT },
+        });
+        return imageResponse(proxied.bytes, proxied.contentType, expires);
+    } catch {
         return getPlaceholderResponse();
     }
 }

@@ -1,8 +1,10 @@
-import { analyzeWithGemini, imageUrlToBase64 } from './gemini';
+import { analyzeWithGemini } from './gemini';
+import { prepareAnalysisImages } from './image-preprocessing';
 import { GENDER_ANALYSIS_PROMPT } from '@/lib/constants/prompts';
 import { GENDER_CONFIDENCE_THRESHOLD } from '@/lib/constants/scoring';
 import type { GenderAnalysisResponse } from '@/lib/types/analysis';
 import type { InstagramProfile, InstagramPost } from '@/lib/types/instagram';
+import { genderAnalysisResponseSchema } from './analysis-response-schemas';
 
 interface GenderAnalysisInput {
     profile: InstagramProfile;
@@ -17,40 +19,27 @@ export async function analyzeGender(
 ): Promise<GenderAnalysisResponse> {
     const { profile, recentPosts } = input;
 
-    // 이미지 수집 (프로필 + 최근 피드 최대 10장)
-    const imageUrls: string[] = [];
-
-    if (profile.profilePicUrl) {
-        imageUrls.push(profile.profilePicUrl);
-    }
-
-    for (const post of recentPosts.slice(0, 9)) {
-        if (post.imageUrl) {
-            imageUrls.push(post.imageUrl);
-        }
-    }
-
-    // 이미지를 base64로 변환
-    const images: string[] = [];
-    for (const url of imageUrls) {
-        try {
-            const base64 = await imageUrlToBase64(url);
-            images.push(base64);
-        } catch (error) {
-            console.warn(`Failed to convert image: ${url}`, error);
-        }
-    }
+    const preparedImages = await prepareAnalysisImages(
+        profile.profilePicUrl,
+        recentPosts.flatMap(post => post.imageUrl ? [post.imageUrl] : [])
+    );
+    const images = preparedImages.map(image => image.base64);
+    const hasProfileImage = preparedImages.some(image => image.role === 'profile');
+    const feedImageCount = preparedImages.filter(image => image.role === 'post').length;
 
     // 프롬프트 구성
     const prompt = GENDER_ANALYSIS_PROMPT
-        .replace('{profileImageDescription}', profile.profilePicUrl ? '첨부된 이미지 참조' : '없음')
+        .replace('{profileImageDescription}', hasProfileImage ? '첨부된 이미지 참조' : '없음')
         .replace('{username}', profile.username)
         .replace('{fullName}', profile.fullName || '없음')
         .replace('{bio}', profile.bio || '없음')
-        .replace('{feedImagesDescription}', images.length > 1 ? '첨부된 이미지들 참조' : '없음');
+        .replace('{feedImagesDescription}', feedImageCount > 0 ? '첨부된 이미지들 참조' : '없음');
 
     // AI 분석 수행
-    const result = await analyzeWithGemini<GenderAnalysisResponse>(prompt, images);
+    const result = await analyzeWithGemini<GenderAnalysisResponse>(prompt, images, {
+        schema: genderAnalysisResponseSchema,
+        analysisType: 'gender',
+    });
 
     // confidence가 임계값 미만이면 unknown 처리
     if (result.confidence < GENDER_CONFIDENCE_THRESHOLD) {
@@ -81,8 +70,8 @@ export async function analyzeGenderBatch(
                 try {
                     const result = await analyzeGender(account);
                     return { username: account.profile.username, result };
-                } catch (error) {
-                    console.error(`Gender analysis failed for ${account.profile.username}:`, error);
+                } catch {
+                    console.error('Gender batch analysis failed for one account');
                     return {
                         username: account.profile.username,
                         result: {

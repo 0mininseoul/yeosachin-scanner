@@ -7,20 +7,23 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "canary:instagram": "tsx --env-file=.env.local scripts/canary-instagram-provider.ts"
   },
   "dependencies": {
     "@amplitude/analytics-browser": "^2.33.5",
+    "@google-cloud/tasks": "6.2.3",
     "@google/genai": "^2.7.0",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.91.0",
     "apify-client": "^2.21.0",
     "framer-motion": "^12.29.2",
+    "google-auth-library": "10.9.0",
     "next": "16.2.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "resend": "^6.8.0",
-    "undici": "^8.7.0",
+    "sharp": "^0.34.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -30,9 +33,9 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
-    "sharp": "^0.34.5",
     "supabase": "^2.72.8",
     "tailwindcss": "^4",
+    "tsx": "^4.23.0",
     "typescript": "^5",
     "vitest": "^3.2.7"
   },

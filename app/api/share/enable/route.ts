@@ -27,10 +27,11 @@ export async function POST(request: Request) {
         }
 
         // 2. 분석 요청 조회 및 소유자 확인
-        const { data: analysisRequest, error: requestError } = await supabase
+        const { data: analysisRequest, error: requestError } = await supabaseAdmin
             .from('analysis_requests')
             .select('id, user_id, status, share_token, share_enabled')
             .eq('id', requestId)
+            .eq('user_id', user.id)
             .single();
 
         if (requestError || !analysisRequest) {

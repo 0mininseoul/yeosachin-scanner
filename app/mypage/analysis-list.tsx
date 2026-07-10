@@ -2,8 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
 import { PrimaryButton } from '@/components/case-ui';
+import { isAnalysisDeletable } from '@/lib/services/analysis/deletion';
 
 interface AnalysisRequest {
     id: string;
@@ -21,7 +21,6 @@ export default function AnalysisList({ initialAnalyses }: Props) {
     const [analyses, setAnalyses] = useState<AnalysisRequest[]>(initialAnalyses);
     const [loadingId, setLoadingId] = useState<string | null>(null);
     const router = useRouter();
-    const supabase = createClient();
 
     const handleDelete = async (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
@@ -33,11 +32,10 @@ export default function AnalysisList({ initialAnalyses }: Props) {
         setLoadingId(id);
 
         try {
-            const { error } = await supabase.from('analysis_requests').delete().eq('id', id);
-
-            if (error) {
+            const response = await fetch(`/api/analysis/result/${id}`, { method: 'DELETE' });
+            if (!response.ok) {
                 alert('삭제에 실패했습니다.');
-                console.error(error);
+                console.error('Analysis deletion request failed', { status: response.status });
             } else {
                 setAnalyses((prev) => prev.filter((item) => item.id !== id));
             }
@@ -103,6 +101,11 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                                 <span className="h-1.5 w-1.5 bg-jade" />
                                 판독완료
                             </span>
+                        ) : item.status === 'failed' ? (
+                            <span className="flex shrink-0 items-center gap-1.5 border border-blood/45 bg-blood/10 px-2 py-1 text-[11px] font-bold text-blood">
+                                <span className="h-1.5 w-1.5 bg-blood" />
+                                판독실패
+                            </span>
                         ) : (
                             <span className="flex shrink-0 items-center gap-1.5 border border-amber/45 bg-amber/10 px-2 py-1 text-[11px] font-bold text-amber">
                                 <span className="anim-blink h-1.5 w-1.5 bg-amber" />
@@ -111,20 +114,22 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                         )}
                     </div>
 
-                    <button
-                        onClick={(e) => handleDelete(e, item.id)}
-                        disabled={loadingId === item.id}
-                        className="absolute bottom-3 right-3 p-2 text-fg-mute opacity-100 transition-colors hover:text-blood sm:opacity-0 sm:group-hover:opacity-100"
-                        title="기록 삭제"
-                    >
-                        {loadingId === item.id ? (
-                            <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-fg-mute border-t-transparent" />
-                        ) : (
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                        )}
-                    </button>
+                    {isAnalysisDeletable(item.status) && (
+                        <button
+                            onClick={(e) => handleDelete(e, item.id)}
+                            disabled={loadingId === item.id}
+                            className="absolute bottom-3 right-3 p-2 text-fg-mute opacity-100 transition-colors hover:text-blood sm:opacity-0 sm:group-hover:opacity-100"
+                            title="기록 삭제"
+                        >
+                            {loadingId === item.id ? (
+                                <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-fg-mute border-t-transparent" />
+                            ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                            )}
+                        </button>
+                    )}
                 </div>
             ))}
         </div>

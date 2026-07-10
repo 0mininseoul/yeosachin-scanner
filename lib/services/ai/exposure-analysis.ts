@@ -1,6 +1,8 @@
-import { analyzeWithGemini, imageUrlToBase64 } from './gemini';
+import { analyzeWithGemini } from './gemini';
+import { prepareAnalysisImages } from './image-preprocessing';
 import { EXPOSURE_ANALYSIS_PROMPT } from '@/lib/constants/prompts';
 import type { ExposureAnalysisResponse } from '@/lib/types/analysis';
+import { exposureAnalysisResponseSchema } from './analysis-response-schemas';
 
 /**
  * 인스타그램 계정 주인의 노출 정도(Skin Visibility)를 AI로 분석
@@ -9,17 +11,8 @@ export async function analyzeExposure(
     profilePicUrl: string | undefined,
     postImageUrls: string[]
 ): Promise<ExposureAnalysisResponse> {
-    // 이미지 수집 (프로필 + 피드 최대 10장)
-    const imageUrls: string[] = [];
-
-    if (profilePicUrl) {
-        imageUrls.push(profilePicUrl);
-    }
-
-    imageUrls.push(...postImageUrls.slice(0, 9));
-
     // 이미지가 없으면 분석 불가
-    if (imageUrls.length === 0) {
+    if (!profilePicUrl && postImageUrls.length === 0) {
         return {
             ownerIdentified: false,
             skinVisibility: 'low',
@@ -28,16 +21,8 @@ export async function analyzeExposure(
         };
     }
 
-    // 이미지를 base64로 변환
-    const images: string[] = [];
-    for (const url of imageUrls) {
-        try {
-            const base64 = await imageUrlToBase64(url);
-            images.push(base64);
-        } catch (error) {
-            console.warn(`Failed to convert image: ${url}`, error);
-        }
-    }
+    const preparedImages = await prepareAnalysisImages(profilePicUrl, postImageUrls);
+    const images = preparedImages.map(image => image.base64);
 
     if (images.length === 0) {
         return {
@@ -51,15 +36,18 @@ export async function analyzeExposure(
     // 프롬프트 구성
     const prompt = EXPOSURE_ANALYSIS_PROMPT.replace(
         '{imageDescriptions}',
-        `총 ${images.length}개의 이미지가 첨부되어 있습니다. 첫 번째는 프로필 사진입니다.`
+        `총 ${images.length}개의 이미지가 첨부되어 있습니다.${preparedImages[0]?.role === 'profile' ? ' 첫 번째는 프로필 사진입니다.' : ''}`
     );
 
     // AI 분석 수행
     try {
-        const result = await analyzeWithGemini<ExposureAnalysisResponse>(prompt, images);
+        const result = await analyzeWithGemini<ExposureAnalysisResponse>(prompt, images, {
+            schema: exposureAnalysisResponseSchema,
+            analysisType: 'exposure',
+        });
         return result;
-    } catch (error) {
-        console.error('Exposure analysis failed:', error);
+    } catch {
+        console.error('Exposure analysis failed');
         return {
             ownerIdentified: false,
             skinVisibility: 'low',
@@ -89,8 +77,8 @@ export async function analyzeExposureBatch(
                         account.postImageUrls
                     );
                     return { username: account.username, result };
-                } catch (error) {
-                    console.error(`Exposure analysis failed for ${account.username}:`, error);
+                } catch {
+                    console.error('Exposure batch analysis failed for one account');
                     return {
                         username: account.username,
                         result: {

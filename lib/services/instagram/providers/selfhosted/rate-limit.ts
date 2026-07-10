@@ -21,6 +21,31 @@ export function pLimit(concurrency: number) {
     };
 }
 
+export interface RequestStartGate {
+    schedule<T>(task: () => Promise<T>, minIntervalMs: number): Promise<T>;
+}
+
+/** Process-shared callers can serialize request starts without holding the gate for response time. */
+export function createRequestStartGate(
+    now: () => number = Date.now,
+    wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+): RequestStartGate {
+    let tail: Promise<void> = Promise.resolve();
+    let nextStartAt = 0;
+
+    return {
+        schedule<T>(task: () => Promise<T>, minIntervalMs: number): Promise<T> {
+            const gate = tail.then(async () => {
+                const delayMs = Math.max(0, nextStartAt - now());
+                if (delayMs > 0) await wait(delayMs);
+                nextStartAt = now() + minIntervalMs;
+            });
+            tail = gate.then(() => undefined, () => undefined);
+            return gate.then(task);
+        },
+    };
+}
+
 export interface RetryOptions {
     retries?: number;
     baseDelayMs?: number;

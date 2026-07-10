@@ -1,10 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { TopBar, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
+import {
+    getAnalysisStartIdempotency,
+    type AnalysisStartIdempotency,
+} from '@/lib/services/analysis/client-idempotency';
 
 export default function AnalyzePage() {
     const [instagramId, setInstagramId] = useState('');
@@ -12,15 +16,22 @@ export default function AnalyzePage() {
     const [error, setError] = useState<string | null>(null);
     const router = useRouter();
     const { user } = useAuth();
+    const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
 
     // 랜딩 히어로에서 입력한 아이디를 로그인 후 이어받아 프리필
     useEffect(() => {
         try {
             const pending = sessionStorage.getItem('pending_ig');
-            if (pending) {
+            if (!pending) {
+                return;
+            }
+
+            const timer = window.setTimeout(() => {
                 setInstagramId(pending);
                 sessionStorage.removeItem('pending_ig');
-            }
+            }, 0);
+
+            return () => window.clearTimeout(timer);
         } catch {
             /* ignore */
         }
@@ -41,11 +52,20 @@ export default function AnalyzePage() {
         setError(null);
 
         try {
+            const targetInstagramId = instagramId.replace('@', '').trim();
+            idempotencyRef.current = getAnalysisStartIdempotency(
+                idempotencyRef.current,
+                targetInstagramId,
+                'male'
+            );
             const response = await fetch('/api/analysis/start', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Idempotency-Key': idempotencyRef.current.key,
+                },
                 body: JSON.stringify({
-                    targetInstagramId: instagramId.replace('@', '').trim(),
+                    targetInstagramId,
                     targetGender: 'male',
                 }),
             });

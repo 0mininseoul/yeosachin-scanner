@@ -116,6 +116,52 @@ export function RiskTag({ grade, className = "" }: { grade: Grade; className?: s
   );
 }
 
+export function RecentMutualBadge({
+  rank,
+  className = "",
+}: {
+  rank: 1 | 2 | 3 | 4 | 5;
+  className?: string;
+}) {
+  const label = `가장 최근 맞팔한 여자 ${rank}번째`;
+  return (
+    <span
+      className={`inline-flex max-w-full items-center gap-1.5 border border-amber/45 bg-amber/10 px-2 py-1 text-[10px] font-bold text-amber ${className}`}
+      title={label}
+      aria-label={label}
+    >
+      <span className="h-1.5 w-1.5 shrink-0 bg-amber" aria-hidden="true" />
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+export function DeepRiskAnalysis({
+  lines,
+  className = "",
+}: {
+  lines: string[];
+  className?: string;
+}) {
+  if (lines.length === 0) return null;
+
+  return (
+    <div className={`border-t border-line pt-3 ${className}`}>
+      <span className="eyebrow text-blood">고위험 계정 총평</span>
+      <ol className="mt-2 space-y-2">
+        {lines.slice(0, 2).map((line, index) => (
+          <li key={line} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2">
+            <span className="num pt-0.5 text-[10px] font-bold text-blood" aria-hidden="true">
+              {String(index + 1).padStart(2, "0")}
+            </span>
+            <p className="text-[12px] leading-[1.65] text-fg-dim">{line}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 /* --- segmented threat meter (qualitative, by grade) --- */
 export function ThreatBar({
   grade,

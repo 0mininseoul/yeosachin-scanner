@@ -85,6 +85,14 @@ export interface AnalyzedAccount {
 
     // 점수
     totalScore: number;
+    interactionScore?: number;
+    interactionCoverage?: number;
+    interactionCoverageStatus?: 'high' | 'medium' | 'low';
+    femaleToTargetLikesCount?: number;
+    femaleToTargetCommentsCount?: number;
+    targetToFemaleLikesCount?: number;
+    recencyBonus?: number;
+    riskAnalysis?: [string, string] | string[];
 
     // 위험순위
     riskGrade?: 'high_risk' | 'caution' | 'normal';
@@ -94,6 +102,7 @@ export interface AnalyzedAccount {
 // 분석 요약 (프론트엔드용)
 export interface AnalysisSummary {
     targetInstagramId: string;
+    targetProfileImage?: string;
     mutualFollows: number;
     genderRatio: {
         male: { count: number; percentage: number };
@@ -110,6 +119,8 @@ export interface FemaleAccountResult {
     instagramUrl: string;
     riskGrade: 'high_risk' | 'caution' | 'normal';
     bio?: string;
+    recentMutualRank?: 1 | 2 | 3 | 4 | 5;
+    riskAnalysis: string[];
 }
 
 // 결과 페이지용 비공개 계정 데이터
@@ -134,9 +145,11 @@ export interface AnalysisProgress {
     requestId: string;
     status: 'pending' | 'processing' | 'completed' | 'failed';
     progress: number;
-    progressStep: string;
+    progressStep: string | null;
+    backgroundProcessing: boolean;
     createdAt: string;
-    estimatedCompletionTime?: string;
+    completedAt: string | null;
+    estimatedCompletionTime: string | null;
 }
 
 // 기존 호환성 유지 (deprecated)
