@@ -8,6 +8,7 @@ import {
     type PlanId,
     type PlanEligibilityCatalog,
 } from '@/lib/domain/analysis/plan-catalog';
+import { ANALYSIS_V2_BOOTSTRAP_JOB_KEY } from './v2-coordinator';
 
 const ENTITLEMENT_JTI_DOMAIN = 'analysis-test-entitlement-jti-v1';
 
@@ -77,6 +78,9 @@ const preflightRowSchema = z.object({
 const rpcResultSchema = z.array(z.object({
     request_id: uuidSchema,
     created: z.boolean(),
+    initial_job_key: z.literal(ANALYSIS_V2_BOOTSTRAP_JOB_KEY),
+    request_status: z.enum(['pending', 'processing', 'completed', 'failed']),
+    background_processing: z.boolean(),
 }).strict()).length(1);
 const consumptionInputSchema = z.object({
     preflightId: uuidSchema,
@@ -152,7 +156,15 @@ export interface ConsumeAnalysisV2TestEntitlementInput {
 export interface ConsumedAnalysisV2TestEntitlement {
     requestId: string;
     created: boolean;
+    initialJobKey: typeof ANALYSIS_V2_BOOTSTRAP_JOB_KEY;
+    requestStatus: 'pending' | 'processing' | 'completed' | 'failed';
+    backgroundProcessing: boolean;
 }
+
+export type AnalysisV2InitialJobDispatcher = (
+    requestId: string,
+    jobKey: typeof ANALYSIS_V2_BOOTSTRAP_JOB_KEY
+) => Promise<unknown>;
 
 export class AnalysisV2EntitlementConsumptionError extends Error {
     readonly code: AnalysisV2EntitlementErrorCode;
@@ -351,5 +363,8 @@ export async function consumeAnalysisV2TestEntitlement(
     return {
         requestId: parsed.data[0].request_id,
         created: parsed.data[0].created,
+        initialJobKey: parsed.data[0].initial_job_key,
+        requestStatus: parsed.data[0].request_status,
+        backgroundProcessing: parsed.data[0].background_processing,
     };
 }

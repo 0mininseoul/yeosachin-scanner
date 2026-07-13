@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-13
 
-**Status:** Phase A contracts and Phase B guarded preflight implemented and validated; Phase C job foundation is next
+**Status:** Phase A-C contracts, guarded preflight, and durable job foundation implemented and validated; Phase D is in progress
 
 **Branch reviewed:** `agent/launch-correctness-performance`
 
@@ -338,6 +338,10 @@ test-project integration gate in Phase I.
 4. Ensure preflight creates zero Gemini, relationship, interaction, or paid-provider usage.
 
 ### Phase C: V2 job foundation
+
+Implementation status: complete on the backend branch. The additive migration remains unapplied
+until Phase I. The execution capability stays `preflight_only` until the Phase D-G handlers and
+the independent recovery scheduler are connected and verified.
 
 1. Add per-job leases and deterministic task names.
 2. Extend Cloud Tasks payload to `{requestId, jobKey}` and add a V2 worker dispatcher.

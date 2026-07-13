@@ -14,17 +14,23 @@ import {
     consumeAnalysisV2TestEntitlement,
     hashAnalysisTestEntitlementJti,
     validatePreflightForTestEntitlement,
+    type AnalysisV2InitialJobDispatcher,
     type AnalysisV2EntitlementErrorCode,
     type AnalysisV2PreflightRow,
 } from '@/lib/services/analysis/test-entitlement-consumption';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
 import { isAnalysisV2StartAvailable } from '@/lib/services/analysis/v2-execution-gate';
+import {
+    dispatchAnalysisV2Job,
+    getAnalysisV2TasksConfig,
+} from '@/lib/services/analysis/v2-tasks';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const requestBodySchema = z.object({
     planId: planIdSchema,
 }).strict();
+type EntitlementRouteContext = { params: Promise<{ preflightId: string }> };
 
 const PREFLIGHT_COLUMNS = [
     'id',
@@ -63,9 +69,17 @@ function entitlementError(code: AnalysisV2EntitlementErrorCode) {
     );
 }
 
+async function dispatchInitialJob(
+    dispatcher: AnalysisV2InitialJobDispatcher,
+    requestId: string,
+    jobKey: Parameters<AnalysisV2InitialJobDispatcher>[1]
+) {
+    await dispatcher(requestId, jobKey);
+}
+
 export async function POST(
     request: Request,
-    { params }: { params: Promise<{ preflightId: string }> }
+    { params }: EntitlementRouteContext
 ) {
     try {
         const supabase = await createClient();
@@ -99,16 +113,6 @@ export async function POST(
                 { status: 503 }
             );
         }
-        if (!isAnalysisV2StartAvailable()) {
-            return NextResponse.json(
-                {
-                    error: 'V2 백그라운드 분석 실행기가 아직 활성화되지 않았습니다.',
-                    code: 'V2_PIPELINE_UNAVAILABLE',
-                },
-                { status: 503 }
-            );
-        }
-
         const parsedPreflightId = uuidSchema.safeParse((await params).preflightId);
         if (!parsedPreflightId.success) {
             return NextResponse.json(
@@ -143,6 +147,36 @@ export async function POST(
             );
         }
 
+        const entitlement = verifyAnalysisTestEntitlement(entitlementToken, {
+            preflightId,
+            userId: user.id,
+            planId: body.data.planId,
+        });
+        if (!entitlement) {
+            return NextResponse.json(
+                { error: '유효한 분석 테스트 이용권이 필요합니다.', code: 'INVALID_ENTITLEMENT' },
+                { status: 403 }
+            );
+        }
+        if (!isAnalysisV2StartAvailable()) {
+            return NextResponse.json(
+                {
+                    error: 'V2 백그라운드 분석 실행기가 아직 활성화되지 않았습니다.',
+                    code: 'V2_PIPELINE_UNAVAILABLE',
+                },
+                { status: 503 }
+            );
+        }
+        try {
+            if (!getAnalysisV2TasksConfig()) throw new Error('queue disabled');
+        } catch {
+            console.error('Analysis V2 task queue configuration is unavailable.');
+            return NextResponse.json(
+                { error: '분석 작업 큐를 사용할 수 없습니다.', code: 'QUEUE_UNAVAILABLE' },
+                { status: 503 }
+            );
+        }
+
         const preflightQuery = await supabaseAdmin
             .from('analysis_preflights')
             .select(PREFLIGHT_COLUMNS)
@@ -162,18 +196,6 @@ export async function POST(
         }
 
         validatePreflightForTestEntitlement(row, body.data.planId);
-        const entitlement = verifyAnalysisTestEntitlement(entitlementToken, {
-            preflightId,
-            userId: user.id,
-            planId: body.data.planId,
-        });
-        if (!entitlement) {
-            return NextResponse.json(
-                { error: '유효한 분석 테스트 이용권이 필요합니다.', code: 'INVALID_ENTITLEMENT' },
-                { status: 403 }
-            );
-        }
-
         const consumed = await consumeAnalysisV2TestEntitlement(supabaseAdmin, {
             preflightId,
             userId: user.id,
@@ -181,11 +203,38 @@ export async function POST(
             entitlementJtiHash: hashAnalysisTestEntitlementJti(entitlement.nonce),
         });
 
+        const terminal = consumed.requestStatus === 'completed'
+            || consumed.requestStatus === 'failed';
+        if (!terminal) {
+            try {
+                await dispatchInitialJob(
+                    dispatchAnalysisV2Job,
+                    consumed.requestId,
+                    consumed.initialJobKey
+                );
+            } catch {
+                // The transaction already persisted a recoverable outbox job. A replay
+                // uses the same request and job key instead of consuming another token.
+                console.error('Analysis V2 initial job dispatch failed.');
+                return NextResponse.json(
+                    { error: '분석 작업 큐를 사용할 수 없습니다.', code: 'QUEUE_UNAVAILABLE' },
+                    { status: 503 }
+                );
+            }
+        }
+
+        const responseStatus = consumed.requestStatus === 'pending'
+            ? 'queued'
+            : consumed.requestStatus;
+        const backgroundProcessing = consumed.requestStatus === 'pending'
+            ? true
+            : consumed.backgroundProcessing;
+
         return NextResponse.json({
             schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
             requestId: consumed.requestId,
-            status: 'queued',
-            backgroundProcessing: false,
+            status: responseStatus,
+            backgroundProcessing,
         }, { status: consumed.created ? 201 : 200 });
     } catch (error) {
         if (error instanceof AnalysisV2EntitlementConsumptionError) {

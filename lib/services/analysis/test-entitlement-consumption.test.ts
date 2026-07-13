@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
+import { ANALYSIS_V2_BOOTSTRAP_JOB_KEY } from './v2-coordinator';
 import {
     AnalysisV2EntitlementConsumptionError,
     consumeAnalysisV2TestEntitlement,
@@ -214,6 +215,9 @@ describe('test entitlement consumption RPC', () => {
         const { client, rpc } = clientWith([{
             request_id: REQUEST_ID,
             created: true,
+            initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+            request_status: 'pending',
+            background_processing: false,
         }]);
 
         await expect(consumeAnalysisV2TestEntitlement(client, {
@@ -221,7 +225,13 @@ describe('test entitlement consumption RPC', () => {
             userId: USER_ID,
             selectedPlanId: 'standard',
             entitlementJtiHash,
-        })).resolves.toEqual({ requestId: REQUEST_ID, created: true });
+        })).resolves.toEqual({
+            requestId: REQUEST_ID,
+            created: true,
+            initialJobKey: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+            requestStatus: 'pending',
+            backgroundProcessing: false,
+        });
         expect(entitlementJtiHash).toMatch(/^[a-f0-9]{64}$/);
         expect(entitlementJtiHash).not.toContain(nonce);
         expect(rpc).toHaveBeenCalledWith('consume_analysis_v2_test_entitlement', {
@@ -235,20 +245,82 @@ describe('test entitlement consumption RPC', () => {
 
     it('strictly accepts one created or replayed request row', async () => {
         const hash = hashAnalysisTestEntitlementJti('abcdefghijklmnop');
-        const replay = clientWith([{ request_id: REQUEST_ID, created: false }]);
+        const replay = clientWith([{
+            request_id: REQUEST_ID,
+            created: false,
+            initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+            request_status: 'processing',
+            background_processing: true,
+        }]);
         await expect(consumeAnalysisV2TestEntitlement(replay.client, {
             preflightId: PREFLIGHT_ID,
             userId: USER_ID,
             selectedPlanId: 'standard',
             entitlementJtiHash: hash,
-        })).resolves.toEqual({ requestId: REQUEST_ID, created: false });
+        })).resolves.toEqual({
+            requestId: REQUEST_ID,
+            created: false,
+            initialJobKey: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+            requestStatus: 'processing',
+            backgroundProcessing: true,
+        });
 
         for (const data of [
             [],
-            [{ request_id: REQUEST_ID, created: true }, { request_id: REQUEST_ID, created: false }],
-            [{ request_id: 'not-a-uuid', created: true }],
-            [{ request_id: REQUEST_ID, created: 'yes' }],
-            [{ request_id: REQUEST_ID, created: true, leaked: 'value' }],
+            [{ request_id: REQUEST_ID, created: true }],
+            [
+                {
+                    request_id: REQUEST_ID,
+                    created: true,
+                    initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+                    request_status: 'pending',
+                    background_processing: false,
+                },
+                {
+                    request_id: REQUEST_ID,
+                    created: false,
+                    initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+                    request_status: 'processing',
+                    background_processing: true,
+                },
+            ],
+            [{
+                request_id: 'not-a-uuid',
+                created: true,
+                initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+            }],
+            [{
+                request_id: REQUEST_ID,
+                created: 'yes',
+                initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+            }],
+            [{
+                request_id: REQUEST_ID,
+                created: true,
+                initial_job_key: 'profile:target',
+            }],
+            [{
+                request_id: REQUEST_ID,
+                created: true,
+                initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+                request_status: 'pending',
+                background_processing: false,
+                leaked: 'value',
+            }],
+            [{
+                request_id: REQUEST_ID,
+                created: false,
+                initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+                request_status: 'queued',
+                background_processing: true,
+            }],
+            [{
+                request_id: REQUEST_ID,
+                created: false,
+                initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+                request_status: 'completed',
+                background_processing: 'no',
+            }],
         ]) {
             const malformed = clientWith(data);
             await expect(consumeAnalysisV2TestEntitlement(malformed.client, {
