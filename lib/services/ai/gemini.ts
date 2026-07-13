@@ -280,12 +280,6 @@ export async function analyzeWithGemini<T>(
             } catch (generationError) {
                 throw sanitizeGenerationError(generationError);
             }
-            const text = response.text;
-
-            if (!text) {
-                throw new Error('Gemini response did not include text');
-            }
-
             // 토큰 사용량 추출
             const usageMetadata = response.usageMetadata;
             const tokenUsage: TokenUsage = {
@@ -325,6 +319,12 @@ export async function analyzeWithGemini<T>(
                 } catch (telemetryError) {
                     console.warn('Gemini telemetry hook failed:', telemetryError);
                 }
+            }
+
+            const text = response.text;
+
+            if (!text) {
+                throw new Error('Gemini response did not include text');
             }
 
             const parsed = parseGeminiJsonResponse(text, schema);

@@ -175,7 +175,7 @@ ai-baram-detector/
 | `analysis_step_events` | PII 없는 단계별 시작/완료/재시도/실패와 지연시간 |
 | `analysis_provider_usage_expectations` | 유료 Actor 시작 전 고정한 작업과 최대 과금액 |
 | `analysis_gemini_usage_expectations` | Gemini 실행 전 고정한 예상 비용 로그 수 |
-| `analysis_operational_cost_summary` | 요청별 Apify 실제액, 보수 상한, Gemini 추정액 통합 view |
+| `analysis_operational_cost_summary` | 요청별 Apify 30초 후 확정 실제액, 보수 상한, Gemini 추정액 통합 view |
 | `analysis_results` | 위험도 순위 결과 (share_token 포함) |
 | `comment_details` | 친밀한 댓글 상세 정보 (현재 수집/분석 파이프라인 미연결) |
 | `private_accounts` | 비공개 계정과 username/full_name 기반 여성형 이름 확률 정렬값 |
@@ -191,6 +191,8 @@ ai-baram-detector/
 ### Instagram 수집 라우팅
 
 - 공개 프로필과 프로필 배치는 로그인 없는 직접 수집이 기본이며, 실패 시 Apify를 한 번만 호출합니다.
+- Apify terminal 직후 비용과 dataset count는 임시값일 수 있어 결과 처리는 지연하지 않고 30초 뒤 같은 run을 재조회합니다. 비용은 인증된 `usageTotalUsd`만 확정하며, 유료 run을 다시 시작하지 않습니다.
+- 체크포인트가 있는 유료 프로필 batch는 스키마가 유효한 결과에서 확인 불가 계정 최대 1개만 제외합니다. 여러 계정 누락, 요청 외 username과 중복은 항상 실패 처리하며, 체크포인트 없는 일반 호출은 95% 완전성 기준을 유지합니다.
 - 팔로워와 팔로잉은 Apify Scraping Solutions가 기본입니다. 대상 프로필의 선언 수와 플랜 상한으로 계산한 예상치의 99% 미만이면 자동 폴백 없이 실패합니다.
 - Instagram 로그인 쿠키, 세션 계정, 계정 풀은 사용하지 않습니다.
 - 댓글은 Apify 공식 Actor, liker는 DataDoping no-cookie Actor를 사용합니다. 관리자는 요청별 `comments`/`likers`를 `apify` 또는 `disabled`로 선택할 수 있습니다.
@@ -201,7 +203,7 @@ ai-baram-detector/
 
 ### 운영 관측성
 
-Vercel runtime log만으로 비용과 단계 이력을 판단하지 않습니다. 파이프라인은 `analysis_step_events`에 PII 없는 이벤트를 남기고, `analysis_operational_cost_summary`가 Apify 원장과 Gemini 추정 비용을 `requestId`별로 집계합니다. 운영자 조회는 `GET /api/admin/analysis-observability?requestId=<uuid>`이며 `ADMIN_API_KEY` Bearer 인증이 필요합니다. 원가 정의와 중복 집계 방지 규칙은 [운영 비용 및 가격 모델](docs/operations-cost-model.md)에 정리되어 있습니다.
+Vercel runtime log만으로 비용과 단계 이력을 판단하지 않습니다. 파이프라인은 `analysis_step_events`에 PII 없는 이벤트를 남기고, `analysis_operational_cost_summary`가 Apify 원장과 Gemini 추정 비용을 `requestId`별로 집계합니다. Apify 실제액은 terminal 30초 뒤 인증 재조회가 끝나기 전까지 미확정으로 표시됩니다. 완료·실패 후 Cloud Task가 요청별 정산을 재시도하고, 종료 작업은 삭제된 요청을 포함한 전역 미정산 원장도 제한적으로 복구합니다. Cloud Tasks가 비활성화된 브라우저 fallback은 응답 후 `after()`에서 요청별 정산을 재시도하며, 운영자 비용 조회도 해당 요청을 보조 정산합니다. 운영자 조회는 `GET /api/admin/analysis-observability?requestId=<uuid>`이며 `ADMIN_API_KEY` Bearer 인증이 필요합니다. 원가 정의와 중복 집계 방지 규칙은 [운영 비용 및 가격 모델](docs/operations-cost-model.md)에 정리되어 있습니다.
 
 ## 스크립트
 

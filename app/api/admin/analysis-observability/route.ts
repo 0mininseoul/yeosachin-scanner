@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { hasValidAdminAuthorization } from '@/lib/services/instagram/admin-selection';
 import { isValidAnalysisRequestId } from '@/lib/services/analysis/observability';
+import { reconcileSettledAnalysisProviderCosts } from '@/lib/services/analysis/provider-cost-reconciliation';
 
 const MAX_EVENT_ROWS = 500;
 
@@ -17,6 +18,17 @@ export async function GET(request: Request) {
     }
 
     try {
+        const reconciliation = await reconcileSettledAnalysisProviderCosts(
+            supabaseAdmin,
+            requestId
+        );
+        if (reconciliation.failed > 0 || reconciliation.hasMore) {
+            console.warn('[analysis.observability] provider costs remain pending', {
+                eligible: reconciliation.eligible,
+                failed: reconciliation.failed,
+                hasMore: reconciliation.hasMore,
+            });
+        }
         const [summaryResult, eventsResult] = await Promise.all([
             supabaseAdmin
                 .from('analysis_operational_cost_summary')

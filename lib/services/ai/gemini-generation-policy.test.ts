@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     classifyGeminiGenerationError,
     isAmbiguousGeminiGenerationError,
+    isRecoverableGeminiResponseError,
 } from './gemini-generation-policy';
 
 describe('classifyGeminiGenerationError', () => {
@@ -29,5 +30,15 @@ describe('classifyGeminiGenerationError', () => {
         expect(isAmbiguousGeminiGenerationError(
             new Error('AI_AMBIGUOUS_GENERATION_ERROR: sanitized')
         )).toBe(true);
+    });
+
+    it('recovers only from a concrete unusable response without regenerating it', () => {
+        expect(isRecoverableGeminiResponseError(
+            new Error('Gemini response did not match the required analysis schema')
+        )).toBe(true);
+        expect(isRecoverableGeminiResponseError(
+            new Error('Gemini response did not include text')
+        )).toBe(true);
+        expect(isRecoverableGeminiResponseError(new Error('fetch failed'))).toBe(false);
     });
 });

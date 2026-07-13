@@ -2,10 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     from: vi.fn(),
+    reconcileProviderCosts: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { from: mocks.from },
+}));
+vi.mock('@/lib/services/analysis/provider-cost-reconciliation', () => ({
+    reconcileSettledAnalysisProviderCosts: mocks.reconcileProviderCosts,
 }));
 
 import { GET } from '@/app/api/admin/analysis-observability/route';
@@ -53,6 +57,12 @@ function installQueryMocks() {
 describe('analysis observability admin route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.reconcileProviderCosts.mockResolvedValue({
+            eligible: 0,
+            finalized: 0,
+            failed: 0,
+            hasMore: false,
+        });
         process.env.ADMIN_API_KEY = 'admin-secret';
     });
 
@@ -85,6 +95,9 @@ describe('analysis observability admin route', () => {
                 gcpInfrastructureIncluded: false,
             },
         });
+        expect(mocks.reconcileProviderCosts).toHaveBeenCalledWith(
+            expect.anything(),
+            requestId
+        );
     });
 });
-

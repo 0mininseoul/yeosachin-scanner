@@ -323,6 +323,34 @@ describe('abortRunningAnalysisProviderRuns', () => {
         );
     });
 
+    it('reconciles an already terminal run with its settled usage total', async () => {
+        const client = abortClient([runningRow]);
+        const get = vi.fn().mockResolvedValue({
+            status: 'SUCCEEDED',
+            usageTotalUsd: 0.04,
+        });
+        const abort = vi.fn();
+
+        await expect(abortRunningAnalysisProviderRuns(client, {
+            requestId: 'request-id',
+            userId: 'user-id',
+            expectedStep: 'collect',
+        }, {
+            clientForSlot: () => ({
+                run: () => ({ get, abort, waitForFinish: vi.fn() }),
+            }),
+        })).resolves.toBe(1);
+
+        expect(abort).not.toHaveBeenCalled();
+        expect(client.rpc).toHaveBeenCalledWith(
+            'record_analysis_provider_cost_terminal',
+            expect.objectContaining({
+                p_status: 'succeeded',
+                p_usage_total_usd: 0.04,
+            })
+        );
+    });
+
     it('does not invoke Apify when no running row exists', async () => {
         const clientForSlot = vi.fn();
         await expect(abortRunningAnalysisProviderRuns(abortClient([]), {

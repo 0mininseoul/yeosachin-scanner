@@ -151,6 +151,27 @@ function validateProfileBatchCompleteness(
     return result;
 }
 
+function validateProfileBatchAttempt(
+    result: InstagramProfile[],
+    usernames: string[],
+    provider: ScraperProvider,
+    options?: ScrapeRequestOptions
+): InstagramProfile[] {
+    // A completed paid Actor can legitimately omit accounts that became unavailable.
+    // Only durable operations may preserve that schema-valid subset; ordinary calls
+    // retain the completeness requirement so provider regressions still fail closed.
+    if (options?.providerRun && provider.paid === true) {
+        validateProfileBatchSubset(result, usernames);
+        if (usernames.length - result.length > 1) {
+            throw new Error(
+                'SCRAPING_INCOMPLETE_ERROR: durable profiles batch omitted multiple accounts.'
+            );
+        }
+        return result;
+    }
+    return validateProfileBatchCompleteness(result, usernames);
+}
+
 function missingProfileUsernames(
     result: InstagramProfile[],
     usernames: string[]
@@ -422,7 +443,12 @@ export async function getProfilesBatch(
                 'profilesBatch',
                 fallback,
                 (p, context) => p.getProfilesBatch?.(usernames, usernames.length, context)
-                    .then(result => validateProfileBatchCompleteness(result, usernames)),
+                    .then(result => validateProfileBatchAttempt(
+                        result,
+                        usernames,
+                        p,
+                        options
+                    )),
                 true,
                 options
             );
@@ -446,11 +472,18 @@ export async function getProfilesBatch(
                 fallbackUsernames,
                 fallbackUsernames.length,
                 context
-            ).then(result => validateProfileBatchCompleteness(result, fallbackUsernames)),
+            ).then(result => validateProfileBatchAttempt(
+                result,
+                fallbackUsernames,
+                p,
+                options
+            )),
             true,
             options
         );
-        if (options?.providerRun) return supplement;
+        if (options?.providerRun && fallback.paid === true) {
+            return validateProfileBatchSubset(supplement, fallbackUsernames);
+        }
         return validateProfileBatchCompleteness(
             [...primaryResult, ...supplement],
             usernames
@@ -461,7 +494,7 @@ export async function getProfilesBatch(
         'profilesBatch',
         selected,
         (p, context) => p.getProfilesBatch?.(usernames, batchSize, context)
-            .then(result => validateProfileBatchCompleteness(result, usernames)),
+            .then(result => validateProfileBatchAttempt(result, usernames, p, options)),
         options?.fallback ?? c.fallback,
         options
     );

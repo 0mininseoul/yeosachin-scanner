@@ -282,9 +282,9 @@ export async function startOrResumeApifyActor(
             await context?.onCostRunFinished?.({
                 ...costRun,
                 status: terminalStatus,
-                usageTotalUsd: typeof run.usageTotalUsd === 'number'
-                    ? run.usageTotalUsd
-                    : null,
+                // Apify documents the first terminal cost as preliminary. A later
+                // authenticated reconciliation finalizes usage without delaying users.
+                usageTotalUsd: null,
             });
         } catch {
             throw new Error(

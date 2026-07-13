@@ -11,6 +11,13 @@ export function isAmbiguousGeminiGenerationError(error: unknown): boolean {
         && error.message.startsWith(AI_AMBIGUOUS_GENERATION_ERROR_PREFIX);
 }
 
+export function isRecoverableGeminiResponseError(error: unknown): boolean {
+    return error instanceof Error && [
+        'Gemini response did not match the required analysis schema',
+        'Gemini response did not include text',
+    ].includes(error.message);
+}
+
 const AMBIGUOUS_TRANSPORT_PATTERNS = [
     /\b(?:econnreset|etimedout|eai_again|enotfound)\b/i,
     /\b(?:network|socket)\b/i,

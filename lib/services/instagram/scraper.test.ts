@@ -422,6 +422,102 @@ describe('폴백', () => {
         );
         expect(result.map(item => item.username)).toEqual(['first', 'second']);
     });
+
+    it('durable 프로필 fallback은 완전성 기준을 통과한 부분 결과를 재결제 없이 반환한다', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const makeProfile = (username: string): InstagramProfile => ({
+            username,
+            followersCount: 0,
+            followingCount: 0,
+            postsCount: 0,
+            isPrivate: false,
+            isVerified: false,
+        });
+        __setProvidersForTest({
+            SCRAPER_PROFILES_BATCH: 'selfhosted',
+            SCRAPER_FALLBACK: 'true',
+        }, {
+            selfhosted: providerWith({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatch: vi.fn().mockResolvedValue([]),
+            }),
+            apify: providerWith({
+                name: 'apify',
+                paid: true,
+                getProfilesBatch: vi.fn(async () => usernames.slice(0, 29).map(makeProfile)),
+            }),
+        });
+
+        await expect(getProfilesBatch(usernames, 30, { providerRun: {} }))
+            .resolves.toHaveLength(29);
+    });
+
+    it('durable paid fallback은 작은 tail에서 unavailable 계정을 누락해도 반환한다', async () => {
+        __setProvidersForTest({
+            SCRAPER_PROFILES_BATCH: 'selfhosted',
+            SCRAPER_FALLBACK: 'true',
+        }, {
+            selfhosted: providerWith({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatch: vi.fn().mockRejectedValue(new Error('primary failed')),
+            }),
+            apify: providerWith({
+                name: 'apify',
+                paid: true,
+                getProfilesBatch: vi.fn().mockResolvedValue([]),
+            }),
+        });
+
+        await expect(getProfilesBatch(['unavailable'], 1, { providerRun: {} }))
+            .resolves.toEqual([]);
+    });
+
+    it('durable paid fallback도 batch에서 여러 계정 누락은 거부한다', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        __setProvidersForTest({
+            SCRAPER_PROFILES_BATCH: 'selfhosted',
+            SCRAPER_FALLBACK: 'true',
+        }, {
+            selfhosted: providerWith({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatch: vi.fn().mockRejectedValue(new Error('primary failed')),
+            }),
+            apify: providerWith({
+                name: 'apify',
+                paid: true,
+                getProfilesBatch: vi.fn().mockResolvedValue([]),
+            }),
+        });
+
+        await expect(getProfilesBatch(usernames, 30, { providerRun: {} }))
+            .rejects.toThrow('INCOMPLETE');
+    });
+
+    it('explicit durable paid provider도 schema-valid subset만 허용한다', async () => {
+        const profilesBatch = vi.fn().mockResolvedValue([]);
+        __setProvidersForTest({
+            SCRAPER_PROFILES_BATCH: 'apify',
+            SCRAPER_FALLBACK: 'false',
+        }, {
+            apify: providerWith({ name: 'apify', paid: true, getProfilesBatch: profilesBatch }),
+        });
+
+        await expect(getProfilesBatch(['unavailable'], 1, {
+            provider: 'apify',
+            fallback: false,
+            providerRun: {},
+        })).resolves.toEqual([]);
+
+        profilesBatch.mockResolvedValue([{ username: 'not-requested' }]);
+        await expect(getProfilesBatch(['unavailable'], 1, {
+            provider: 'apify',
+            fallback: false,
+            providerRun: {},
+        })).rejects.toThrow('SCHEMA');
+    });
 });
 
 describe('순수 헬퍼', () => {

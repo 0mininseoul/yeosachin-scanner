@@ -20,6 +20,7 @@ const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
 export const APIFY_RELATIONSHIP_ACTOR_ID =
     'scraping_solutions/instagram-scraper-followers-following-no-cookies';
 const DEFAULT_APIFY_RELATIONSHIP_BUILD = '0.0.71';
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 interface ApifyProviderDeps {
     client?: ApifyClientLike;
@@ -257,6 +258,14 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         credentialSlot: selectApifyCredentialSlot(env),
         actorConcurrency: integerSetting(env, 'APIFY_ACTOR_CONCURRENCY', 2, 1, 10),
         timeoutSecs: integerSetting(env, 'APIFY_PROFILE_TIMEOUT_SECS', 300, 30, 3_600),
+        datasetReadRetries: integerSetting(env, 'APIFY_DATASET_READ_RETRIES', 5, 0, 8),
+        datasetRetryBaseDelayMs: integerSetting(
+            env,
+            'APIFY_DATASET_RETRY_BASE_DELAY_MS',
+            500,
+            0,
+            30_000
+        ),
         estimatedCostPerResultUsd: numberSetting(
             env,
             'APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD',
@@ -284,6 +293,47 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             );
         }
         return Number(estimate.toFixed(12));
+    }
+
+    async function waitForSettledProfileDataset(
+        apify: ApifyClientLike,
+        datasetId: string,
+        maximumItems: number,
+        settings: ReturnType<typeof profileSettings>
+    ) {
+        let lastPage;
+        for (let attempt = 0; attempt <= settings.datasetReadRetries; attempt++) {
+            try {
+                lastPage = await apify.dataset(datasetId).listItems({
+                    limit: maximumItems + 1,
+                });
+            } catch {
+                lastPage = undefined;
+            }
+            if (
+                lastPage
+                && Array.isArray(lastPage.items)
+                && Number.isInteger(lastPage.total)
+                && lastPage.total >= 0
+                && lastPage.total <= maximumItems
+                && lastPage.items.length === lastPage.total
+            ) {
+                // A just-finished Dataset can briefly report a valid-looking 0/0.
+                // Exhaust bounded rereads before accepting a genuinely empty result.
+                if (lastPage.total > 0 || attempt === settings.datasetReadRetries) {
+                    return lastPage;
+                }
+            }
+            if (attempt < settings.datasetReadRetries) {
+                await sleep(settings.datasetRetryBaseDelayMs * 2 ** attempt);
+            }
+        }
+        if (lastPage && !Array.isArray(lastPage.items)) {
+            throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset items가 배열이 아닙니다.');
+        }
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset did not settle after completion.'
+        );
     }
 
     async function getProfile(
@@ -333,15 +383,12 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile run에 defaultDatasetId가 없습니다.');
         }
 
-        let page;
-        try {
-            page = await apify.dataset(run.defaultDatasetId).listItems({ limit: 2 });
-        } catch {
-            throw new Error('SCRAPING_ERROR: Apify profile dataset transport request failed.');
-        }
-        if (!Array.isArray(page.items)) {
-            throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset items가 배열이 아닙니다.');
-        }
+        const page = await waitForSettledProfileDataset(
+            apify,
+            run.defaultDatasetId,
+            1,
+            settings
+        );
         context?.recordUsage({
             estimated_cost_usd: page.items.length * settings.estimatedCostPerResultUsd,
         });
@@ -374,6 +421,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 'SCRAPING_CONFIG_ERROR: a durable Apify profile operation must fit in one batch.'
             );
         }
+        const isDurableOperation = Boolean(context?.resumeRunId || context?.onRunStarted);
         const settings = profileSettings();
         const apify = client(context?.credentialSlot);
         const requested = new Set(usernames.map((username) => username.toLowerCase()));
@@ -420,23 +468,15 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             if (!run.defaultDatasetId) {
                 throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile run에 defaultDatasetId가 없습니다.');
             }
-            let page;
-            try {
-                page = await apify.dataset(run.defaultDatasetId).listItems({
-                    limit: batch.length + 1,
-                });
-            } catch {
-                throw new Error('SCRAPING_ERROR: Apify profile dataset transport request failed.');
-            }
-            if (!Array.isArray(page.items)) {
-                throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset items가 배열이 아닙니다.');
-            }
+            const page = await waitForSettledProfileDataset(
+                apify,
+                run.defaultDatasetId,
+                batch.length,
+                settings
+            );
             context?.recordUsage({
                 estimated_cost_usd: page.items.length * settings.estimatedCostPerResultUsd,
             });
-            if (page.total > batch.length || page.items.length !== page.total) {
-                throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset 크기가 batch와 일치하지 않습니다.');
-            }
             for (const item of page.items) {
                 const profile = mapProfile(item as Record<string, unknown>, true);
                 const key = profile.username?.toLowerCase();
@@ -452,7 +492,8 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const results = [...resultMap.values()];
         context?.recordUsage({ result_count: results.length });
         const coverage = requested.size > 0 ? results.length / requested.size : 1;
-        if (coverage < 0.95) {
+        const unavailableCount = requested.size - results.length;
+        if (coverage < 0.95 && (!isDurableOperation || unavailableCount > 1)) {
             throw new Error(
                 `SCRAPING_INCOMPLETE_ERROR: Apify profile batch 커버리지가 ${(coverage * 100).toFixed(1)}%입니다.`
             );
