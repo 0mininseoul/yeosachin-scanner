@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     enqueueTask: vi.fn(),
     from: vi.fn(),
+    recordStepEvent: vi.fn(),
     releaseLease: vi.fn(),
     rpc: vi.fn(),
     verifyTask: vi.fn(),
@@ -44,6 +45,15 @@ vi.mock('@/lib/services/analysis/provider-run', async (importOriginal) => {
     return {
         ...actual,
         abortRunningAnalysisProviderRuns: mocks.abortRuns,
+    };
+});
+vi.mock('@/lib/services/analysis/observability', async (importOriginal) => {
+    const actual = await importOriginal<
+        typeof import('@/lib/services/analysis/observability')
+    >();
+    return {
+        ...actual,
+        recordAnalysisStepEvent: mocks.recordStepEvent,
     };
 });
 
@@ -103,6 +113,7 @@ describe('analysis step route orchestration', () => {
         mocks.acquireLease.mockResolvedValue({ requestId, token: 'lease-token' });
         mocks.abortRuns.mockResolvedValue(0);
         mocks.releaseLease.mockResolvedValue(undefined);
+        mocks.recordStepEvent.mockResolvedValue(true);
         mocks.rpc.mockResolvedValue({ data: 1, error: null });
         mocks.enqueueTask.mockResolvedValue('exists');
         mocks.createServerClient.mockResolvedValue({
@@ -137,6 +148,14 @@ describe('analysis step route orchestration', () => {
         expect(admin.update).not.toHaveBeenCalledWith(expect.objectContaining({
             current_step: 'collect',
         }));
+        expect(mocks.recordStepEvent).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ step: 'profiles', eventType: 'started' })
+        );
+        expect(mocks.recordStepEvent).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ step: 'profiles', eventType: 'completed' })
+        );
     });
 
     it('returns 503 without terminalizing a verified task transient failure', async () => {
@@ -175,6 +194,10 @@ describe('analysis step route orchestration', () => {
         );
         expect(mocks.releaseLease).toHaveBeenCalledOnce();
         expect(mocks.enqueueTask).not.toHaveBeenCalled();
+        expect(mocks.recordStepEvent).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ step: 'pending', eventType: 'retrying' })
+        );
     });
 
     it('does not execute a paid step after the verified delivery safety ceiling', async () => {
@@ -211,6 +234,14 @@ describe('analysis step route orchestration', () => {
         );
         expect(admin.update).not.toHaveBeenCalled();
         expect(mocks.enqueueTask).not.toHaveBeenCalled();
+        expect(mocks.recordStepEvent).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+                step: 'interactions',
+                eventType: 'aborted',
+                failureCategory: 'retry_exhausted',
+            })
+        );
     });
 
     it('enqueues a continuation only after a verified task commits a successful step', async () => {

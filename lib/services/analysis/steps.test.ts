@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     compactCompletedStepData,
+    getPendingAnalysisSubBatches,
     resolveProfileProviderBatchUsernames,
     type StepData,
 } from './steps';
@@ -102,5 +103,27 @@ describe('durable profile provider batch input', () => {
             ['alice'],
             []
         )).toThrow('frozen profile batch input');
+    });
+});
+
+describe('durable Gemini sub-batch operation indexes', () => {
+    it('keeps indexes anchored to the original batch after a partial checkpoint', () => {
+        const completed = new Set(['a', 'b', 'c']);
+        expect(getPendingAnalysisSubBatches(
+            ['a', 'b', 'c', 'd', 'e', 'f'],
+            2,
+            item => completed.has(item)
+        )).toEqual([
+            { operationIndex: 1, items: ['d'] },
+            { operationIndex: 2, items: ['e', 'f'] },
+        ]);
+    });
+
+    it('does not re-emit a fully completed fixed slice', () => {
+        expect(getPendingAnalysisSubBatches(
+            ['a', 'b', 'c', 'd'],
+            2,
+            item => item === 'a' || item === 'b'
+        )).toEqual([{ operationIndex: 1, items: ['c', 'd'] }]);
     });
 });
