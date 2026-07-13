@@ -13,10 +13,14 @@ vi.mock('./pipeline-config', () => ({
     getVertexAIAnalysisConcurrency: mocks.getVertexAIAnalysisConcurrency,
 }));
 
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
 import {
     analyzePrivateAccountNames,
     createPrivateNameBatchResponseSchema,
     PRIVATE_NAME_BATCH_SIZE,
+    type PrivateNameAnalysisChunkIdentity,
+    type PrivateNameAnalysisAuditSink,
     type PrivateNameAccountInput,
 } from './private-name-analysis';
 
@@ -49,6 +53,25 @@ function successfulResponse(prompt: string, schema: { parse(value: unknown): unk
         isName: true,
         confidence: 0.8,
     })));
+}
+
+function auditSink(
+    identity: PrivateNameAnalysisChunkIdentity,
+    overrides: Partial<PrivateNameAnalysisAuditSink> = {}
+): PrivateNameAnalysisAuditSink {
+    return {
+        requestId,
+        operationKey: identity.operationKey,
+        resultIdentity: identity.resultIdentity,
+        prepare: vi.fn().mockResolvedValue({
+            result: null,
+            source: null,
+            startingAttempt: 1,
+        }),
+        onBeforeAttempt: vi.fn(),
+        onAttemptTelemetry: vi.fn(),
+        ...overrides,
+    };
 }
 
 describe('private name batch response schema', () => {
@@ -101,7 +124,91 @@ describe('analyzePrivateAccountNames', () => {
                 requestId,
                 maxOutputTokens: 8_192,
             });
+            expect(call[2].stage).toBeUndefined();
         }
+    });
+
+    it('uses the staged policy only with both durable V2 audit callbacks', async () => {
+        let sink: PrivateNameAnalysisAuditSink | undefined;
+        const audit = {
+            forChunk: vi.fn((identity: PrivateNameAnalysisChunkIdentity) => {
+                sink = auditSink(identity);
+                return sink;
+            }),
+        };
+
+        await analyzePrivateAccountNames(accounts(1), requestId, audit);
+
+        expect(audit.forChunk).toHaveBeenCalledWith(expect.objectContaining({
+            chunkIndex: 0,
+            operationKey: expect.stringMatching(/^private-account-name:[a-f0-9]{64}$/),
+            inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }));
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledWith(
+            expect.any(String),
+            undefined,
+            expect.objectContaining({
+                requestId,
+                stage: 'privateAccountName',
+                onBeforeAttempt: sink?.onBeforeAttempt,
+                onAttemptTelemetry: sink?.onAttemptTelemetry,
+            })
+        );
+        await expect(analyzePrivateAccountNames(accounts(1), undefined, audit))
+            .rejects.toThrow('requires a request id');
+    });
+
+    it('assigns a distinct durable operation to every concurrently processed chunk', async () => {
+        const identities: PrivateNameAnalysisChunkIdentity[] = [];
+        const audit = {
+            forChunk: vi.fn((identity: PrivateNameAnalysisChunkIdentity) => {
+                identities.push(identity);
+                return auditSink(identity);
+            }),
+        };
+
+        await analyzePrivateAccountNames(accounts(205), requestId, audit);
+
+        expect(identities.map(identity => identity.chunkIndex).sort()).toEqual([0, 1, 2]);
+        expect(new Set(identities.map(identity => identity.operationKey)).size).toBe(3);
+    });
+
+    it('rejects reusing a chunk sink for different prompt content before Gemini', async () => {
+        let firstSink: PrivateNameAnalysisAuditSink | undefined;
+        const audit = {
+            forChunk: vi.fn((identity: PrivateNameAnalysisChunkIdentity) => {
+                firstSink ??= auditSink(identity);
+                return firstSink;
+            }),
+        };
+        await analyzePrivateAccountNames(accounts(1), requestId, audit);
+        mocks.analyzeWithGemini.mockClear();
+
+        await expect(analyzePrivateAccountNames(accounts(1, 1), requestId, audit))
+            .rejects.toThrow('invalid per-chunk sink');
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it('uses a prepared private-name checkpoint without calling Gemini', async () => {
+        const input = accounts(1);
+        const cached = [{
+            id: input[0].id,
+            femaleScore: 0.9,
+            isName: true,
+            confidence: 0.8,
+        }];
+        const audit = {
+            forChunk: vi.fn((identity: PrivateNameAnalysisChunkIdentity) => auditSink(identity, {
+                prepare: vi.fn().mockResolvedValue({
+                    result: cached,
+                    source: 'request',
+                    startingAttempt: 1,
+                }),
+            })),
+        };
+
+        await expect(analyzePrivateAccountNames(input, requestId, audit)).resolves.toEqual(cached);
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
     it('bounds concurrent chunk calls with the existing analysis concurrency', async () => {

@@ -5,6 +5,8 @@ export type GeminiGenerationErrorDisposition =
 
 export const AI_AMBIGUOUS_GENERATION_ERROR_PREFIX =
     'AI_AMBIGUOUS_GENERATION_ERROR:';
+export const AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX =
+    'AI_GENERATION_RESPONSE_REJECTED_ERROR:';
 
 export function isAmbiguousGeminiGenerationError(error: unknown): boolean {
     return error instanceof Error
@@ -12,10 +14,8 @@ export function isAmbiguousGeminiGenerationError(error: unknown): boolean {
 }
 
 export function isRecoverableGeminiResponseError(error: unknown): boolean {
-    return error instanceof Error && [
-        'Gemini response did not match the required analysis schema',
-        'Gemini response did not include text',
-    ].includes(error.message);
+    return error instanceof Error
+        && error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX);
 }
 
 const AMBIGUOUS_TRANSPORT_PATTERNS = [
@@ -29,13 +29,6 @@ const AMBIGUOUS_TRANSPORT_PATTERNS = [
     /\babort(?:ed|error)?\b/i,
     /\bhttp\s*5\d\d\b/i,
     /\b5\d\d\b/i,
-];
-
-const RATE_LIMIT_PATTERNS = [
-    /\b429\b/,
-    /\brate[ -]?limit(?:ed|ing)?\b/i,
-    /\btoo many requests\b/i,
-    /\bresource[_ -]?exhausted\b/i,
 ];
 
 function numericStatus(value: unknown): number | null {
@@ -92,10 +85,6 @@ export function classifyGeminiGenerationError(
     if (messages.some(message => AMBIGUOUS_TRANSPORT_PATTERNS.some(pattern => pattern.test(message)))) {
         return 'ambiguous';
     }
-    if (messages.some(message => RATE_LIMIT_PATTERNS.some(pattern => pattern.test(message)))) {
-        return 'rate_limited';
-    }
-
     // A concrete non-timeout 4xx response establishes that generation was rejected.
     if (status !== null && status >= 400 && status < 500) return 'rejected';
 

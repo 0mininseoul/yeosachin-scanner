@@ -1,7 +1,21 @@
 import { z } from 'zod';
 import { INSTAGRAM_USERNAME_PATTERN } from '@/lib/services/instagram/username';
-import { analyzeWithGemini } from './gemini';
+import {
+    analyzeWithGemini,
+    type GeminiAttemptStartTelemetry,
+    type GeminiAttemptTelemetry,
+} from './gemini';
+import { AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX } from './gemini-generation-policy';
 import { getVertexAIAnalysisConcurrency } from './pipeline-config';
+import { getAiStagePolicy } from './stage-policy';
+import {
+    analysisV2AiResultIdentitiesEqual,
+    createAnalysisV2AiMediaSnapshotHashFromParts,
+    createAnalysisV2AiResultIdentity,
+    createAnalysisV2AiResultInputHash,
+    type AnalysisV2AiPreparedResult,
+    type AnalysisV2AiResultIdentity,
+} from '@/lib/services/analysis/v2-ai-result-store';
 
 export const PRIVATE_NAME_BATCH_SIZE = 100;
 const MAX_PRIVATE_NAME_ACCOUNTS = 10_000;
@@ -81,6 +95,29 @@ export function createPrivateNameBatchResponseSchema(expectedIds: readonly strin
 export type PrivateNameAccountInput = z.input<typeof privateNameAccountSchema>;
 export type PrivateNameAnalysisResult = z.output<typeof privateNameResultSchema>;
 
+export interface PrivateNameAnalysisAuditSink {
+    requestId: string;
+    operationKey: string;
+    resultIdentity: AnalysisV2AiResultIdentity;
+    prepare(): Promise<AnalysisV2AiPreparedResult<unknown>>;
+    onBeforeAttempt(telemetry: GeminiAttemptStartTelemetry): void | Promise<void>;
+    onAttemptTelemetry(
+        telemetry: GeminiAttemptTelemetry,
+        parsedResult?: unknown
+    ): void | Promise<void>;
+}
+
+export interface PrivateNameAnalysisChunkIdentity {
+    chunkIndex: number;
+    operationKey: string;
+    inputHash: string;
+    resultIdentity: AnalysisV2AiResultIdentity;
+}
+
+export interface PrivateNameAnalysisAudit {
+    forChunk(identity: PrivateNameAnalysisChunkIdentity): PrivateNameAnalysisAuditSink;
+}
+
 function neutralResult(id: string): PrivateNameAnalysisResult {
     return {
         id,
@@ -122,28 +159,106 @@ ${JSON.stringify(promptAccounts)}
 
 async function analyzePrivateNameChunk(
     accounts: z.output<typeof privateNameAccountSchema>[],
-    requestId?: string
+    requestId?: string,
+    auditFactory?: PrivateNameAnalysisAudit,
+    chunkIndex = 0
 ): Promise<PrivateNameAnalysisResult[]> {
     const expectedIds = accounts.map(account => account.id);
     const schema = createPrivateNameBatchResponseSchema(expectedIds);
+    const prompt = buildPrivateNamePrompt(accounts);
+    const audit = chunkAuditSink(auditFactory, prompt, requestId, chunkIndex);
 
     try {
-        const results = await analyzeWithGemini<PrivateNameAnalysisResult[]>(
-            buildPrivateNamePrompt(accounts),
-            undefined,
-            {
-                schema,
-                analysisType: 'private_name_batch',
-                requestId,
-                maxOutputTokens: 8_192,
-            }
-        );
+        const prepared = audit ? await audit.prepare() : null;
+        const results = prepared?.result !== null && prepared?.result !== undefined
+            ? schema.parse(prepared.result)
+            : await analyzeWithGemini<PrivateNameAnalysisResult[]>(
+                prompt,
+                undefined,
+                {
+                    schema,
+                    analysisType: 'private_name_batch',
+                    requestId,
+                    ...(audit
+                        ? {
+                            stage: 'privateAccountName' as const,
+                            startingAttempt: prepared?.startingAttempt ?? 1,
+                            onBeforeAttempt: audit.onBeforeAttempt,
+                            onAttemptTelemetry: audit.onAttemptTelemetry,
+                        }
+                        : {
+                            // Preserve the legacy batch allowance when no durable V2 policy applies.
+                            maxOutputTokens: 8_192,
+                        }),
+                }
+            );
         // Preserve the strict boundary when analyzeWithGemini is replaced in tests or adapters.
         return schema.parse(results);
-    } catch {
+    } catch (error) {
+        if (
+            audit
+            && !(
+                error instanceof Error
+                && error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX)
+            )
+        ) {
+            throw error;
+        }
         console.warn('Private-name batch analysis failed; using neutral results for one chunk');
         return expectedIds.map(neutralResult);
     }
+}
+
+function privateNameChunkIdentity(
+    prompt: string,
+    chunkIndex: number
+): PrivateNameAnalysisChunkIdentity {
+    const policy = getAiStagePolicy('privateAccountName');
+    const inputHash = createAnalysisV2AiResultInputHash(prompt);
+    const resultIdentity = createAnalysisV2AiResultIdentity({
+        stage: 'privateAccountName',
+        modelName: policy.model,
+        thinkingLevel: policy.thinkingLevel,
+        mediaResolution: policy.mediaResolution,
+        promptVersion: policy.promptVersion,
+        schemaVersion: policy.schemaVersion,
+        maxOutputTokens: policy.maxOutputTokens,
+        inputHash,
+        mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts([]),
+        cacheScope: 'request',
+    });
+    return Object.freeze({
+        chunkIndex,
+        operationKey: resultIdentity.operationKey,
+        inputHash,
+        resultIdentity,
+    });
+}
+
+function chunkAuditSink(
+    audit: PrivateNameAnalysisAudit | undefined,
+    prompt: string,
+    requestId: string | undefined,
+    chunkIndex: number
+): PrivateNameAnalysisAuditSink | undefined {
+    if (!audit) return undefined;
+    if (typeof audit.forChunk !== 'function') {
+        throw new Error('Private-name V2 audit requires a per-chunk sink factory.');
+    }
+    const identity = privateNameChunkIdentity(prompt, chunkIndex);
+    const sink = audit.forChunk(identity);
+    if (
+        !sink
+        || sink.requestId !== requestId
+        || sink.operationKey !== identity.operationKey
+        || !analysisV2AiResultIdentitiesEqual(sink.resultIdentity, identity.resultIdentity)
+        || typeof sink.prepare !== 'function'
+        || typeof sink.onBeforeAttempt !== 'function'
+        || typeof sink.onAttemptTelemetry !== 'function'
+    ) {
+        throw new Error('Private-name V2 audit returned an invalid per-chunk sink.');
+    }
+    return sink;
 }
 
 /**
@@ -152,11 +267,15 @@ async function analyzePrivateNameChunk(
  */
 export async function analyzePrivateAccountNames(
     rawAccounts: PrivateNameAccountInput[],
-    requestId?: string
+    requestId?: string,
+    audit?: PrivateNameAnalysisAudit
 ): Promise<PrivateNameAnalysisResult[]> {
     const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
     if (requestId !== undefined) {
         z.string().uuid().parse(requestId);
+    }
+    if (audit && !requestId) {
+        throw new Error('Private-name V2 audit requires a request id.');
     }
     if (accounts.length === 0) return [];
 
@@ -173,7 +292,13 @@ export async function analyzePrivateAccountNames(
     for (let index = 0; index < chunks.length; index += concurrency) {
         await Promise.all(
             chunks.slice(index, index + concurrency).map(async (chunk, offset) => {
-                results[index + offset] = await analyzePrivateNameChunk(chunk, requestId);
+                const chunkIndex = index + offset;
+                results[chunkIndex] = await analyzePrivateNameChunk(
+                    chunk,
+                    requestId,
+                    audit,
+                    chunkIndex
+                );
             })
         );
     }

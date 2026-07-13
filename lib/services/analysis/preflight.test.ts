@@ -135,7 +135,7 @@ describe('preflight persistence adapter', () => {
             p_policy_versions_snapshot: {
                 pipeline: 'v2',
                 risk: 'risk-policy-v2.1',
-                aiStage: 'ai-stage-policy-v2.1',
+                aiStage: 'ai-stage-policy-v2.2',
             },
         });
     });

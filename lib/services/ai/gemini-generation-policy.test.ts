@@ -10,7 +10,9 @@ describe('classifyGeminiGenerationError', () => {
         expect(classifyGeminiGenerationError({ status: 429, message: 'RESOURCE_EXHAUSTED' }))
             .toBe('rate_limited');
         expect(classifyGeminiGenerationError(new Error('rate limit exceeded')))
-            .toBe('rate_limited');
+            .toBe('ambiguous');
+        expect(classifyGeminiGenerationError(new Error('RESOURCE_EXHAUSTED')))
+            .toBe('ambiguous');
     });
 
     it('treats server and transport failures as ambiguous', () => {
@@ -34,11 +36,11 @@ describe('classifyGeminiGenerationError', () => {
 
     it('recovers only from a concrete unusable response without regenerating it', () => {
         expect(isRecoverableGeminiResponseError(
-            new Error('Gemini response did not match the required analysis schema')
+            new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: strict schema failed')
         )).toBe(true);
         expect(isRecoverableGeminiResponseError(
             new Error('Gemini response did not include text')
-        )).toBe(true);
+        )).toBe(false);
         expect(isRecoverableGeminiResponseError(new Error('fetch failed'))).toBe(false);
     });
 });

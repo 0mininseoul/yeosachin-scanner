@@ -1,0 +1,716 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+    analyzeWithGemini: vi.fn(),
+}));
+
+vi.mock('./gemini', () => ({
+    analyzeWithGemini: mocks.analyzeWithGemini,
+}));
+
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+import { parseSafePublicRiskNarrative } from '@/lib/services/analysis/narrative-privacy';
+import {
+    createFeatureAnalysisResultIdentity,
+    createGenderTriageResultIdentity,
+    createHighRiskNarrativeResultIdentity,
+    createPartnerSafetyResultIdentity,
+    featureAnalysis,
+    featureAnalysisModelResponseSchema,
+    genderTriage,
+    highRiskNarrative,
+    highRiskNarrativeModelResponseSchema,
+    normalizedAiMediaSelectionSchema,
+    partnerSafetyAnalysis,
+    partnerSafetyModelResponseSchema,
+    type FeatureAnalysisInput,
+    type FeatureAnalysisResult,
+    type GenderTriageResult,
+    type HighRiskNarrativeInput,
+    type NormalizedAiMediaSelection,
+    type StagedAiAuditContext,
+} from './v2-staged-analysis';
+
+const requestId = '11111111-1111-4111-8111-111111111111';
+
+function encoded(value: string): string {
+    return Buffer.from(value).toString('base64');
+}
+
+function media(): NormalizedAiMediaSelection[] {
+    return [
+        {
+            selectionId: 'profile:candidate',
+            kind: 'profile',
+            normalizedJpegBase64: encoded('profile'),
+        },
+        ...Array.from({ length: 10 }, (_, index) => ({
+            selectionId: `post:${index + 1}:thumbnail`,
+            kind: 'feed' as const,
+            normalizedJpegBase64: encoded(`post-${index + 1}`),
+            postId: `post-${index + 1}`,
+        })),
+    ];
+}
+
+function audit(
+    stage: 'genderTriage' | 'featureAnalysis' | 'partnerSafety' | 'highRiskNarrative'
+    = 'genderTriage',
+    rawInput?: unknown
+): StagedAiAuditContext {
+    const resultIdentity = stage === 'genderTriage'
+        ? createGenderTriageResultIdentity(
+            (rawInput ?? { media: media() }) as Parameters<
+                typeof createGenderTriageResultIdentity
+            >[0]
+        )
+        : stage === 'featureAnalysis'
+            ? createFeatureAnalysisResultIdentity(
+                (rawInput ?? featureInput()) as Parameters<
+                    typeof createFeatureAnalysisResultIdentity
+                >[0]
+            )
+            : stage === 'partnerSafety'
+                ? createPartnerSafetyResultIdentity(
+                    (rawInput ?? {
+                        feature: verifiedFeatureResult(),
+                        contactSheet: contactSheet(),
+                    }) as Parameters<typeof createPartnerSafetyResultIdentity>[0]
+                )
+                : createHighRiskNarrativeResultIdentity(
+                    (rawInput ?? narrativeInput()) as Parameters<
+                        typeof createHighRiskNarrativeResultIdentity
+                    >[0]
+                );
+    if (!resultIdentity) throw new Error('Test audit requires a generated stage identity.');
+    return {
+        requestId,
+        operationKey: resultIdentity.operationKey,
+        resultIdentity,
+        prepare: vi.fn().mockResolvedValue({
+            result: null,
+            source: null,
+            startingAttempt: 1,
+        }),
+        onBeforeAttempt: vi.fn(),
+        onAttemptTelemetry: vi.fn(),
+    };
+}
+
+function routedTriage(
+    assessment: GenderTriageResult['assessment'] = {
+        inferredGender: 'unknown',
+        confidence: 'low',
+        ownerConsistency: 'multiple_or_unclear',
+        evidenceSelectionIds: ['profile:candidate'],
+    }
+): GenderTriageResult {
+    return {
+        assessment,
+        routingDecision: 'route_to_feature_analysis',
+        routingReason: 'conserve_female_recall',
+        analyzedSelectionIds: media().slice(0, 5).map(item => item.selectionId),
+    };
+}
+
+function featureResponse(overrides: Record<string, unknown> = {}) {
+    return {
+        gender: 'female',
+        genderConfidence: 'high',
+        ownerConsistency: 'same_person',
+        appearanceGrade: 4,
+        exposureScore: 2,
+        businessClassification: 'personal',
+        businessConfidence: 'high',
+        marriageEvidence: 'none',
+        partnerEvidence: 'none',
+        partnerExclusionContext: 'none',
+        evidenceSelectionIds: {
+            gender: ['profile:candidate'],
+            appearance: ['post:1:thumbnail'],
+            exposure: ['post:1:thumbnail'],
+            business: ['profile:candidate'],
+            marriagePartner: [],
+        },
+        oneLineOverview: '여행과 일상을 선명한 사진으로 정돈해 보여 주는 계정입니다.',
+        ...overrides,
+    };
+}
+
+function featureInput(triage = routedTriage()): FeatureAnalysisInput {
+    return {
+        triage,
+        bio: '여행과 일상 기록',
+        media: media(),
+        captions: media().slice(1).map((item, index) => ({
+            evidenceRefId: `caption:${index + 1}`,
+            selectionId: item.selectionId,
+            text: `여행 기록 ${index + 1}`,
+        })),
+    };
+}
+
+function verifiedFeatureResult(
+    overrides: Record<string, unknown> = {}
+): FeatureAnalysisResult {
+    return {
+        features: featureResponse(overrides) as FeatureAnalysisResult['features'],
+        finalGenderDecision: 'verified_female',
+        analyzedSelectionIds: media().map(item => item.selectionId),
+    };
+}
+
+function contactSheet() {
+    return {
+        selectionId: `contact-sheet:${'a'.repeat(64)}`,
+        normalizedJpegBase64: encoded('contact-sheet'),
+        sourceSelectionIds: ['post:carousel:media:1', 'post:carousel:media:2'],
+        width: 388,
+        height: 192,
+    };
+}
+
+function observed(ref: string) {
+    return { status: 'observed' as const, evidenceRefIds: [ref] };
+}
+
+function narrativeInput(): HighRiskNarrativeInput {
+    return {
+        forbiddenIdentifiers: {
+            targetUsername: 'target.user',
+            candidateUsername: 'candidate.user',
+        },
+        bio: 'candidate.user 여행 계정 https://example.com user@example.com 010-1234-5678',
+        media: media(),
+        captions: [{
+            evidenceRefId: 'caption:1',
+            selectionId: 'post:1:thumbnail',
+            text: '@target.user 와 함께한 여행',
+        }],
+        interactions: {
+            candidateToTargetLike: observed('like:candidate-to-target'),
+            targetToCandidateLike: observed('like:target-to-candidate'),
+            candidateToTargetComment: observed('comment:1'),
+            comments: [{
+                evidenceRefId: 'comment:1',
+                targetPostEvidenceRefId: 'target-post:1',
+                text: '@target.user 반가워 또 보자 010-2222-3333',
+            }],
+            coverage: {
+                status: 'partial',
+                evidenceRefId: 'coverage:target-interactions',
+            },
+        },
+    };
+}
+
+describe('V2 staged AI services', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('accepts only bounded normalized JPEG artifacts with stable IDs', () => {
+        expect(normalizedAiMediaSelectionSchema.parse(media()[0])).toEqual(media()[0]);
+        expect(() => normalizedAiMediaSelectionSchema.parse({
+            ...media()[0],
+            normalizedJpegBase64: 'not base64',
+        })).toThrow('standard base64');
+    });
+
+    it('triages with one profile and four feed images and excludes only a high-confidence same-owner male', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate', 'post:1:thumbnail'],
+        }));
+        const hooks = audit();
+
+        const result = await genderTriage({ media: media() }, hooks);
+
+        expect(result.routingDecision).toBe('exclude_high_confidence_male');
+        expect(result.analyzedSelectionIds).toEqual([
+            'profile:candidate',
+            'post:1:thumbnail',
+            'post:2:thumbnail',
+            'post:3:thumbnail',
+            'post:4:thumbnail',
+        ]);
+        const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(images).toHaveLength(5);
+        expect(prompt).toContain('multiple_or_unclear');
+        expect(prompt).not.toContain('post:5:thumbnail');
+        expect(options).toMatchObject({
+            stage: 'genderTriage',
+            requestId,
+            onBeforeAttempt: hooks.onBeforeAttempt,
+            onAttemptTelemetry: hooks.onAttemptTelemetry,
+        });
+    });
+
+    it('routes uncertain male and all female or unknown triage results to preserve female recall', async () => {
+        for (const assessment of [
+            {
+                inferredGender: 'male',
+                confidence: 'medium',
+                ownerConsistency: 'same_person',
+                evidenceSelectionIds: ['profile:candidate'],
+            },
+            {
+                inferredGender: 'female',
+                confidence: 'high',
+                ownerConsistency: 'same_person',
+                evidenceSelectionIds: ['profile:candidate'],
+            },
+            {
+                inferredGender: 'unknown',
+                confidence: 'low',
+                ownerConsistency: 'not_visible',
+                evidenceSelectionIds: [],
+            },
+        ]) {
+            mocks.analyzeWithGemini.mockImplementationOnce(async (
+                _prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } }
+            ) => options.schema.parse(assessment));
+            const result = await genderTriage({ media: media() }, audit());
+            expect(result.routingDecision).toBe('route_to_feature_analysis');
+            expect(result.routingReason).toBe('conserve_female_recall');
+        }
+    });
+
+    it('rejects an audit adapter bound to different media before calling Gemini', async () => {
+        const inputA = { media: media() };
+        const inputB = {
+            media: media().map((item, index) => index === 0
+                ? { ...item, normalizedJpegBase64: encoded('different-profile') }
+                : item),
+        };
+
+        await expect(genderTriage(inputB, audit('genderTriage', inputA)))
+            .rejects.toThrow('operationKey');
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it('returns a prepared request checkpoint without calling Gemini', async () => {
+        const input = { media: media() };
+        const hooks = audit('genderTriage', input);
+        const cachedAssessment = {
+            inferredGender: 'female' as const,
+            confidence: 'high' as const,
+            ownerConsistency: 'same_person' as const,
+            evidenceSelectionIds: ['profile:candidate'],
+        };
+        hooks.prepare = vi.fn().mockResolvedValue({
+            result: cachedAssessment,
+            source: 'request',
+            startingAttempt: 1,
+        });
+
+        const result = await genderTriage(input, hooks);
+
+        expect(result.assessment).toEqual(cachedAssessment);
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it('rejects hallucinated triage evidence and requires both durable attempt hooks', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['post:not-supplied'],
+        }));
+
+        await expect(genderTriage({ media: media() }, audit())).rejects.toThrow(
+            'not supplied to this stage'
+        );
+        await expect(genderTriage({ media: media() }, {
+            ...audit(),
+            onBeforeAttempt: undefined,
+        } as unknown as StagedAiAuditContext)).rejects.toThrow('onBeforeAttempt');
+        await expect(genderTriage({ media: media() }, {
+            ...audit(),
+            operationKey: 'candidate.user',
+        })).rejects.toThrow('operationKey');
+    });
+
+    it('runs feature analysis with medium-stage policy inputs and verifies an unconflicted woman', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse()));
+        const hooks = audit('featureAnalysis');
+
+        const result = await featureAnalysis(featureInput(), hooks);
+
+        expect(result.finalGenderDecision).toBe('verified_female');
+        expect(result.features.appearanceGrade).toBe(4);
+        expect(result.features.exposureScore).toBe(2);
+        const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(images).toHaveLength(11);
+        expect(prompt).toContain('여행과 일상 기록');
+        expect(prompt).toContain('caption:10');
+        expect(options).toMatchObject({
+            stage: 'featureAnalysis',
+            requestId,
+            onBeforeAttempt: hooks.onBeforeAttempt,
+            onAttemptTelemetry: hooks.onAttemptTelemetry,
+        });
+    });
+
+    it('lets high-confidence feature evidence override an uncertain triage guess', async () => {
+        const triage = routedTriage({
+            inferredGender: 'male',
+            confidence: 'medium',
+            ownerConsistency: 'multiple_or_unclear',
+            evidenceSelectionIds: ['profile:candidate'],
+        });
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse()));
+
+        const input = featureInput(triage);
+        const result = await featureAnalysis(input, audit('featureAnalysis', input));
+
+        expect(result.finalGenderDecision).toBe('verified_female');
+    });
+
+    it('keeps genuinely conflicting high-confidence same-owner stages unresolved', async () => {
+        const triage = routedTriage({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate'],
+        });
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({ gender: 'male' })));
+
+        const input = featureInput(triage);
+        expect((await featureAnalysis(
+            input,
+            audit('featureAnalysis', input)
+        )).finalGenderDecision)
+            .toBe('unresolved_stage_conflict');
+    });
+
+    it('keeps low-confidence feature gender unresolved and rejects unsupported evidence IDs', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({ genderConfidence: 'medium' })));
+        expect((await featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis')
+        )).finalGenderDecision).toBe('unresolved');
+
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                appearance: ['post:not-supplied'],
+            },
+        })));
+        await expect(featureAnalysis(featureInput(), audit('featureAnalysis'))).rejects.toThrow(
+            'not supplied to this stage'
+        );
+    });
+
+    it('rejects contradictory partner signals and internal metrics in one-line overviews', () => {
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            partnerEvidence: 'strong',
+            partnerExclusionContext: 'older_relative',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:1:thumbnail'],
+            },
+        }))).toThrow('excluded context');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            oneLineOverview: '고위험 점수 상위 계정입니다.',
+        }))).toThrow('internals');
+    });
+
+    it('requires supplied visual evidence before score or attenuation signals can be consumed', async () => {
+        for (const response of [
+            featureResponse({
+                evidenceSelectionIds: { ...featureResponse().evidenceSelectionIds, appearance: [] },
+            }),
+            featureResponse({
+                evidenceSelectionIds: { ...featureResponse().evidenceSelectionIds, exposure: [] },
+            }),
+            featureResponse({
+                businessClassification: 'business',
+                evidenceSelectionIds: { ...featureResponse().evidenceSelectionIds, business: [] },
+            }),
+            featureResponse({
+                partnerEvidence: 'strong',
+                evidenceSelectionIds: {
+                    ...featureResponse().evidenceSelectionIds,
+                    marriagePartner: [],
+                },
+            }),
+        ]) {
+            mocks.analyzeWithGemini.mockImplementationOnce(async (
+                _prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } }
+            ) => options.schema.parse(response));
+            await expect(featureAnalysis(
+                featureInput(),
+                audit('featureAnalysis')
+            )).rejects.toThrow('evidence');
+        }
+    });
+
+    it('skips partner-safety generation when no contact sheet exists and preserves feature evidence', async () => {
+        const result = await partnerSafetyAnalysis({
+            feature: verifiedFeatureResult({
+                partnerEvidence: 'strong',
+                evidenceSelectionIds: {
+                    ...featureResponse().evidenceSelectionIds,
+                    marriagePartner: ['post:1:thumbnail'],
+                },
+            }),
+            contactSheet: null,
+        });
+
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+        expect(result).toMatchObject({
+            source: 'feature_only',
+            hasStrongPartnerEvidence: true,
+            strongEvidenceBasis: 'feature',
+            analyzedContactSheetSelectionId: null,
+        });
+    });
+
+    it('uses one contact sheet and records a non-excluded two-person photo as pending weak evidence', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            companionPattern: 'single_two_person',
+            partnerEvidence: 'weak',
+            exclusionContext: 'none',
+            confidence: 'medium',
+            evidenceSourceSelectionIds: ['post:carousel:media:1'],
+        }));
+        const hooks = audit('partnerSafety');
+
+        const result = await partnerSafetyAnalysis({
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+        }, hooks);
+
+        expect(result).toMatchObject({
+            source: 'gemini',
+            hasWeakNonExcludedMalePairEvidence: true,
+            hasStrongPartnerEvidence: false,
+            weakAdjustmentStatus: 'pending_labeled_calibration',
+            analyzedContactSheetSelectionId: contactSheet().selectionId,
+        });
+        const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(images).toEqual([contactSheet().normalizedJpegBase64]);
+        expect(prompt).toContain('post:carousel:media:1');
+        expect(options).toMatchObject({
+            stage: 'partnerSafety',
+            requestId,
+            onBeforeAttempt: hooks.onBeforeAttempt,
+            onAttemptTelemetry: hooks.onAttemptTelemetry,
+        });
+    });
+
+    it('requires repeated or explicit high-confidence evidence for a strong partner cap', async () => {
+        expect(() => partnerSafetyModelResponseSchema.parse({
+            companionPattern: 'single_two_person',
+            partnerEvidence: 'strong',
+            exclusionContext: 'none',
+            confidence: 'high',
+            evidenceSourceSelectionIds: ['post:carousel:media:1'],
+        })).toThrow('repeated or explicit');
+
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            companionPattern: 'repeated_same_person',
+            partnerEvidence: 'strong',
+            exclusionContext: 'none',
+            confidence: 'high',
+            evidenceSourceSelectionIds: [
+                'post:carousel:media:1',
+                'post:carousel:media:2',
+            ],
+        }));
+
+        const result = await partnerSafetyAnalysis({
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+        }, audit('partnerSafety'));
+        expect(result).toMatchObject({
+            hasStrongPartnerEvidence: true,
+            strongEvidenceBasis: 'contact_sheet',
+            weakAdjustmentStatus: 'not_applicable',
+        });
+    });
+
+    it('falls back to feature-only partner evidence for invalid contact-sheet refs without regenerating', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            companionPattern: 'single_two_person',
+            partnerEvidence: 'weak',
+            exclusionContext: 'none',
+            confidence: 'medium',
+            evidenceSourceSelectionIds: ['post:not-supplied'],
+        }));
+
+        const result = await partnerSafetyAnalysis({
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+        }, audit('partnerSafety'));
+
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        expect(result).toMatchObject({
+            source: 'safe_fallback',
+            hasStrongPartnerEvidence: false,
+            analyzedContactSheetSelectionId: null,
+        });
+    });
+
+    it('reuses normalized media for the high-risk call and passes sanitized real comments with refs', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            lines: [{
+                text: '여행과 일상을 선명하게 연출하는 솜씨가 공교롭게도 꽤 능숙한 계정입니다.',
+                evidenceRefs: ['profile:bio', 'post:1:thumbnail'],
+            }, {
+                text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글의 보자 표현은 제법 친절하지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+        const hooks = audit('highRiskNarrative');
+
+        const result = await highRiskNarrative(narrativeInput(), hooks);
+
+        expect(result.source).toBe('gemini');
+        expect(parseSafePublicRiskNarrative(result.lines)).toEqual(result.lines);
+        const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(images).toEqual(media().map(item => item.normalizedJpegBase64));
+        expect(prompt).toContain('반가워 또 보자');
+        expect(prompt).toContain('comment:1');
+        expect(prompt).toContain('[계정명 제거]');
+        expect(prompt).toContain('[링크 제거]');
+        expect(prompt).toContain('[이메일 제거]');
+        expect(prompt).toContain('[연락처 제거]');
+        expect(prompt).not.toContain('candidate.user');
+        expect(prompt).not.toContain('target.user');
+        expect(options).toMatchObject({
+            stage: 'highRiskNarrative',
+            requestId,
+            onBeforeAttempt: hooks.onBeforeAttempt,
+            onAttemptTelemetry: hooks.onAttemptTelemetry,
+        });
+    });
+
+    it('uses one deterministic safe fallback without a second generation for invalid output', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            lines: [{
+                text: 'candidate.user는 고위험 점수 상위 계정입니다.',
+                evidenceRefs: ['invented:evidence'],
+            }, {
+                text: '대상 계정이 후보 피드에 남긴 댓글로 두 사람은 교제 중입니다.',
+                evidenceRefs: ['coverage:target-interactions'],
+            }],
+        }));
+
+        const result = await highRiskNarrative(narrativeInput(), audit('highRiskNarrative'));
+
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
+        expect(result.source).toBe('safe_fallback');
+        expect(parseSafePublicRiskNarrative(result.lines)).toEqual(result.lines);
+        expect(result.lines.join(' ')).not.toContain('candidate.user');
+        expect(result.evidenceRefs[1]).toContain('like:candidate-to-target');
+        expect(result.evidenceRefs[1]).toContain('like:target-to-candidate');
+        expect(result.evidenceRefs[1]).toContain('comment:1');
+        expect(result.evidenceRefs[1]).toContain('coverage:target-interactions');
+    });
+
+    it('propagates audit and ambiguous generation failures instead of hiding them as copy fallback', async () => {
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: intent was not durably stored.'
+        ));
+        await expect(highRiskNarrative(
+            narrativeInput(),
+            audit('highRiskNarrative')
+        )).rejects.toThrow(
+            'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR'
+        );
+
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.'
+        ));
+        await expect(highRiskNarrative(
+            narrativeInput(),
+            audit('highRiskNarrative')
+        )).rejects.toThrow(
+            'AI_AMBIGUOUS_GENERATION_ERROR'
+        );
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back for a terminal strict-response rejection without generating again', async () => {
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+        ));
+
+        const result = await highRiskNarrative(narrativeInput(), audit('highRiskNarrative'));
+
+        expect(result.source).toBe('safe_fallback');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps response schemas exact and rejects a third narrative line', () => {
+        expect(() => highRiskNarrativeModelResponseSchema.parse({
+            lines: [
+                { text: '첫 문장입니다.', evidenceRefs: ['profile:bio'] },
+                { text: '둘째 문장입니다.', evidenceRefs: ['coverage:target-interactions'] },
+                { text: '셋째 문장입니다.', evidenceRefs: ['profile:bio'] },
+            ],
+        })).toThrow();
+    });
+});

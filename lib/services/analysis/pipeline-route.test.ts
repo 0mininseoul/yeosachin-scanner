@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     acquireLease: vi.fn(),
+    analyzeCombined: vi.fn(),
     after: vi.fn(),
     afterCallbacks: [] as Array<() => void | Promise<void>>,
     abortRuns: vi.fn(),
@@ -62,6 +63,15 @@ vi.mock('@/lib/services/analysis/observability', async (importOriginal) => {
 vi.mock('@/lib/services/analysis/provider-cost-reconciliation', () => ({
     reconcileSettledAnalysisProviderCosts: mocks.reconcileProviderCosts,
 }));
+vi.mock('@/lib/services/ai/combined-analysis', async (importOriginal) => {
+    const actual = await importOriginal<
+        typeof import('@/lib/services/ai/combined-analysis')
+    >();
+    return {
+        ...actual,
+        analyzeCombined: mocks.analyzeCombined,
+    };
+});
 vi.mock('next/server', async (importOriginal) => {
     const actual = await importOriginal<typeof import('next/server')>();
     return { ...actual, after: mocks.after };
@@ -73,7 +83,7 @@ import {
 } from '@/app/api/analysis/step/route';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
-const userId = 'user-123';
+const userId = '223e4567-e89b-42d3-a456-426614174000';
 
 interface FluentAdminMock {
     builder: Record<string, ReturnType<typeof vi.fn>>;
@@ -330,6 +340,86 @@ describe('analysis step route orchestration', () => {
 
         expect(response.status).toBe(200);
         expect(mocks.enqueueTask).toHaveBeenCalledOnce();
+    });
+
+    it('checkpoints a charged strict Gemini rejection as unknown without regenerating it', async () => {
+        const admin = installFluentAdminMock();
+        mocks.verifyTask.mockResolvedValue(false);
+        mocks.rpc.mockResolvedValue({ data: true, error: null });
+        mocks.analyzeCombined.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: finishReason MAX_TOKENS'
+        ));
+
+        const account = {
+            profile: {
+                username: 'candidate',
+                isPrivate: false,
+            },
+            recentPosts: [],
+        };
+        const initialState = analysisRow({
+            current_step: 'analyze',
+            progress: 50,
+            step_data: {
+                accountsWithPosts: [account],
+                analyzeBatchIndex: 0,
+                combinedResults: {},
+            },
+        });
+        const checkpointedState = analysisRow({
+            current_step: 'analyze',
+            progress: 82,
+            step_data: {
+                accountsWithPosts: [account],
+                analyzeBatchIndex: 1,
+                combinedResults: {
+                    candidate: {
+                        gender: 'unknown',
+                        genderConfidence: 0,
+                    },
+                },
+            },
+        });
+        admin.single
+            .mockResolvedValueOnce({ data: initialState, error: null })
+            .mockResolvedValueOnce({ data: initialState, error: null })
+            .mockResolvedValueOnce({ data: checkpointedState, error: null })
+            .mockResolvedValueOnce({ data: checkpointedState, error: null });
+        admin.maybeSingle.mockResolvedValue({
+            data: { id: requestId },
+            error: null,
+        });
+
+        const firstResponse = await POST(postRequest());
+        const firstBody = await firstResponse.json();
+        expect(firstResponse.status).toBe(200);
+        expect(firstBody).toMatchObject({
+            success: true,
+            step: 'analyze',
+            done: false,
+        });
+        expect(admin.update).toHaveBeenCalledWith(expect.objectContaining({
+            current_step: 'analyze',
+            step_data: expect.objectContaining({
+                analyzeBatchIndex: 1,
+                combinedResults: {
+                    candidate: {
+                        gender: 'unknown',
+                        genderConfidence: 0,
+                    },
+                },
+            }),
+        }));
+
+        const resumedResponse = await POST(postRequest());
+        expect(resumedResponse.status).toBe(200);
+        await expect(resumedResponse.json()).resolves.toMatchObject({
+            success: true,
+            step: 'interactions',
+            done: false,
+        });
+        expect(mocks.analyzeCombined).toHaveBeenCalledTimes(1);
+        expect(mocks.abortRuns).not.toHaveBeenCalled();
     });
 
     it('acknowledges a duplicate verified task that cannot acquire the lease', async () => {

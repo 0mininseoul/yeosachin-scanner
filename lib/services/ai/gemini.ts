@@ -2,9 +2,10 @@ import {
     GoogleGenAI,
     MediaResolution,
     ThinkingLevel,
+    type GenerateContentConfig,
     type Part,
 } from '@google/genai';
-import type { ZodType } from 'zod';
+import { toJSONSchema, type ZodType } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     estimateGeminiRequestCost,
@@ -19,13 +20,93 @@ import { parseGeminiJsonResponse } from './gemini-response';
 import { prepareGoogleApplicationCredentials } from '@/lib/services/google/credentials';
 import {
     AI_AMBIGUOUS_GENERATION_ERROR_PREFIX,
+    AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
     classifyGeminiGenerationError,
 } from './gemini-generation-policy';
+import {
+    AI_SHARED_CONCURRENCY_LIMIT,
+    getAiStagePolicy,
+    isAiStageName,
+    type AiMediaResolution,
+    type AiStageName,
+    type AiThinkingLevel,
+} from './stage-policy';
 
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 
 let genAI: GoogleGenAI | null = null;
 let extendedTelemetrySupported: boolean | null = null;
+
+class AsyncSemaphore {
+    private active = 0;
+    private readonly queue: Array<() => void> = [];
+
+    constructor(private readonly limit: number) {}
+
+    async run<T>(task: () => Promise<T>): Promise<T> {
+        await this.acquire();
+        try {
+            return await task();
+        } finally {
+            this.release();
+        }
+    }
+
+    private acquire(): Promise<void> {
+        if (this.active < this.limit) {
+            this.active++;
+            return Promise.resolve();
+        }
+
+        return new Promise<void>(resolve => this.queue.push(resolve));
+    }
+
+    private release(): void {
+        const next = this.queue.shift();
+        if (next) {
+            next();
+            return;
+        }
+
+        this.active--;
+    }
+}
+
+interface GeminiGenerationLimiterState {
+    shared: AsyncSemaphore;
+    stages: Map<AiStageName, AsyncSemaphore>;
+}
+
+const processScope = globalThis as typeof globalThis & {
+    __AI_BARAM_GEMINI_GENERATION_LIMITER_V1__?: GeminiGenerationLimiterState;
+};
+const generationLimiterState = processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ ?? {
+    shared: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT),
+    stages: new Map<AiStageName, AsyncSemaphore>(),
+};
+processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ = generationLimiterState;
+
+function getStageGenerationSemaphore(stage: AiStageName): AsyncSemaphore {
+    const existing = generationLimiterState.stages.get(stage);
+    if (existing) return existing;
+
+    const semaphore = new AsyncSemaphore(getAiStagePolicy(stage).concurrency);
+    generationLimiterState.stages.set(stage, semaphore);
+    return semaphore;
+}
+
+async function runWithGenerationSlot<T>(
+    stage: AiStageName | null,
+    task: () => Promise<T>
+): Promise<T> {
+    if (!stage) {
+        return generationLimiterState.shared.run(task);
+    }
+
+    // Acquire the narrower stage slot first so queued stage work cannot occupy
+    // otherwise-available shared capacity.
+    return getStageGenerationSemaphore(stage).run(() => generationLimiterState.shared.run(task));
+}
 
 function getGenAIClient(): GoogleGenAI {
     if (genAI) {
@@ -69,12 +150,72 @@ export interface AnalysisResult<T> {
     tokenUsage: TokenUsage;
 }
 
+export type GeminiUsageMetadataStatus = 'complete' | 'missing' | 'malformed';
+export type GeminiAttemptDisposition =
+    | 'success'
+    | 'rate_limited'
+    | 'ambiguous'
+    | 'rejected';
+
 export interface GeminiRequestTelemetry {
-    tokenUsage: TokenUsage;
+    tokenUsage: TokenUsage | null;
+    usageComplete: boolean;
+    usageMetadataStatus: GeminiUsageMetadataStatus;
     modelName: string;
     location: string;
+    stage: AiStageName | null;
+    thinkingLevel: AiThinkingLevel | null;
+    mediaCount: number;
+    mediaResolution: AiMediaResolution | null;
+    promptVersion: string | null;
+    schemaVersion: number | null;
+    maxOutputTokens: number | null;
     latencyMs: number;
     estimatedCostUsd: number | null;
+}
+
+export interface GeminiAttemptTelemetry extends GeminiRequestTelemetry {
+    attempt: number;
+    retryCount: number;
+    disposition: GeminiAttemptDisposition;
+    finishReason: string | null;
+}
+
+export interface GeminiAttemptStartTelemetry {
+    requestId: string;
+    modelName: string;
+    location: string;
+    stage: AiStageName;
+    thinkingLevel: AiThinkingLevel | null;
+    mediaCount: number;
+    mediaResolution: AiMediaResolution | null;
+    promptVersion: string;
+    schemaVersion: number;
+    maxOutputTokens: number;
+    attempt: number;
+    retryCount: number;
+}
+
+export interface AnalyzeWithGeminiOptions<T> {
+    schema: ZodType<T>;
+    analysisType?: string;
+    requestId?: string;
+    skipTokenLog?: boolean;
+    stage?: AiStageName;
+    model?: string;
+    thinkingLevel?: AiThinkingLevel;
+    mediaResolution?: AiMediaResolution;
+    maxOutputTokens?: number;
+    /** Resume only after a durably terminalized explicit 429. Attempts are globally bounded at 4. */
+    startingAttempt?: number;
+    onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
+    /** Reserve a durable, PII-free generation intent before the SDK request starts. */
+    onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
+    /** The V2 caller must persist this PII-free event when it is used as the stage audit sink. */
+    onAttemptTelemetry?: (
+        telemetry: GeminiAttemptTelemetry,
+        parsedResult?: T
+    ) => void | Promise<void>;
 }
 
 interface TokenLogMetadata {
@@ -117,6 +258,257 @@ function sanitizeGenerationError(error: unknown): Error {
     }
     return new Error('AI_GENERATION_REQUEST_ERROR: Gemini rejected the generation request.');
 }
+
+const SUPPORTED_RESPONSE_SCHEMA_KEYS = new Set([
+    '$id',
+    '$defs',
+    '$ref',
+    '$anchor',
+    'type',
+    'format',
+    'title',
+    'description',
+    'enum',
+    'items',
+    'prefixItems',
+    'minItems',
+    'maxItems',
+    'minimum',
+    'maximum',
+    'anyOf',
+    'oneOf',
+    'properties',
+    'additionalProperties',
+    'required',
+    'propertyOrdering',
+]);
+
+function sanitizeResponseJsonSchema(value: unknown): unknown {
+    if (Array.isArray(value)) {
+        return value.map(sanitizeResponseJsonSchema);
+    }
+    if (!value || typeof value !== 'object') {
+        return value;
+    }
+
+    const source = value as Record<string, unknown>;
+    const sanitized: Record<string, unknown> = {};
+
+    for (const [key, child] of Object.entries(source)) {
+        if (key === 'const') {
+            if (!('enum' in source)) sanitized.enum = [child];
+            continue;
+        }
+        if (!SUPPORTED_RESPONSE_SCHEMA_KEYS.has(key)) continue;
+
+        if ((key === 'properties' || key === '$defs') && child && typeof child === 'object') {
+            sanitized[key] = Object.fromEntries(
+                Object.entries(child as Record<string, unknown>)
+                    .map(([name, schema]) => [name, sanitizeResponseJsonSchema(schema)])
+            );
+            continue;
+        }
+
+        sanitized[key] = sanitizeResponseJsonSchema(child);
+    }
+
+    return sanitized;
+}
+
+/** Convert a strict runtime Zod schema to the JSON Schema subset accepted by Vertex AI. */
+export function zodToGeminiResponseJsonSchema<T>(schema: ZodType<T>): Record<string, unknown> {
+    const generated = toJSONSchema(schema, {
+        target: 'draft-2020-12',
+        // The model response is the wire input that Zod parses and transforms.
+        io: 'input',
+        cycles: 'throw',
+        reused: 'inline',
+        unrepresentable: 'throw',
+    });
+    const sanitized = sanitizeResponseJsonSchema(generated);
+    if (!sanitized || typeof sanitized !== 'object' || Array.isArray(sanitized)) {
+        throw new Error('Gemini response schema must map to a JSON Schema object');
+    }
+    return sanitized as Record<string, unknown>;
+}
+
+const THINKING_LEVEL_CONFIG: Record<AiThinkingLevel, ThinkingLevel> = {
+    MINIMAL: ThinkingLevel.MINIMAL,
+    LOW: ThinkingLevel.LOW,
+    MEDIUM: ThinkingLevel.MEDIUM,
+    HIGH: ThinkingLevel.HIGH,
+};
+
+const MEDIA_RESOLUTION_CONFIG: Record<AiMediaResolution, MediaResolution> = {
+    LOW: MediaResolution.MEDIA_RESOLUTION_LOW,
+    MEDIUM: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+    HIGH: MediaResolution.MEDIA_RESOLUTION_HIGH,
+};
+
+function validateExplicitModel(model: string | undefined): string | undefined {
+    if (model === undefined) return undefined;
+    const normalized = model.trim();
+    if (!normalized || normalized.length > 256 || /\s/.test(normalized)) {
+        throw new Error('Gemini model must be a non-empty model identifier');
+    }
+    return normalized;
+}
+
+function validateThinkingLevel(level: AiThinkingLevel | undefined): void {
+    if (
+        level !== undefined
+        && !Object.prototype.hasOwnProperty.call(THINKING_LEVEL_CONFIG, level)
+    ) {
+        throw new Error('Gemini thinkingLevel must be MINIMAL, LOW, MEDIUM, or HIGH');
+    }
+}
+
+function validateMediaResolution(resolution: AiMediaResolution | undefined): void {
+    if (
+        resolution !== undefined
+        && !Object.prototype.hasOwnProperty.call(MEDIA_RESOLUTION_CONFIG, resolution)
+    ) {
+        throw new Error('Gemini mediaResolution must be LOW, MEDIUM, or HIGH');
+    }
+}
+
+interface StrictUsageMetadata {
+    tokenUsage: TokenUsage | null;
+    status: GeminiUsageMetadataStatus;
+}
+
+function readNonNegativeInteger(value: unknown): number | null {
+    return typeof value === 'number'
+        && Number.isSafeInteger(value)
+        && value >= 0
+        ? value
+        : null;
+}
+
+function extractStrictUsageMetadata(value: unknown): StrictUsageMetadata {
+    if (value === undefined || value === null) {
+        return { tokenUsage: null, status: 'missing' };
+    }
+    if (typeof value !== 'object' || Array.isArray(value)) {
+        return { tokenUsage: null, status: 'malformed' };
+    }
+
+    const metadata = value as Record<string, unknown>;
+    const promptTokens = readNonNegativeInteger(metadata.promptTokenCount);
+    const completionTokens = readNonNegativeInteger(metadata.candidatesTokenCount);
+    const totalTokens = readNonNegativeInteger(metadata.totalTokenCount);
+    const reportedThinkingTokens = metadata.thoughtsTokenCount === undefined
+        ? null
+        : readNonNegativeInteger(metadata.thoughtsTokenCount);
+
+    if (
+        promptTokens === null
+        || completionTokens === null
+        || totalTokens === null
+        || (metadata.thoughtsTokenCount !== undefined && reportedThinkingTokens === null)
+    ) {
+        return { tokenUsage: null, status: 'malformed' };
+    }
+    const inferredThinkingTokens = totalTokens - promptTokens - completionTokens;
+    if (
+        inferredThinkingTokens < 0
+        || (
+            reportedThinkingTokens !== null
+            && reportedThinkingTokens !== inferredThinkingTokens
+        )
+    ) {
+        return { tokenUsage: null, status: 'malformed' };
+    }
+
+    return {
+        tokenUsage: {
+            promptTokens,
+            completionTokens,
+            totalTokens,
+            thinkingTokens: reportedThinkingTokens ?? inferredThinkingTokens,
+        },
+        status: 'complete',
+    };
+}
+
+interface GeminiResponseCandidateShape {
+    finishReason?: unknown;
+    content?: { parts?: unknown };
+}
+
+interface GeminiResponseShape {
+    candidates?: unknown;
+}
+
+function readSingleCandidateFinishReason(response: GeminiResponseShape): string | null {
+    if (!Array.isArray(response.candidates) || response.candidates.length !== 1) return null;
+    const value = response.candidates[0];
+    if (!value || typeof value !== 'object') return null;
+    const candidate = value as GeminiResponseCandidateShape;
+    return typeof candidate.finishReason === 'string' ? candidate.finishReason : null;
+}
+
+function extractSuccessfulCandidateText(response: GeminiResponseShape): string {
+    if (!Array.isArray(response.candidates) || response.candidates.length !== 1) {
+        throw new Error('Gemini response did not include exactly one candidate');
+    }
+
+    const value = response.candidates[0];
+    if (!value || typeof value !== 'object') {
+        throw new Error('Gemini response did not include exactly one usable candidate');
+    }
+    const candidate = value as GeminiResponseCandidateShape;
+    if (candidate.finishReason !== 'STOP') {
+        throw new Error('Gemini response did not finish successfully');
+    }
+
+    const parts = candidate.content?.parts;
+    if (!Array.isArray(parts)) {
+        throw new Error('Gemini response did not include text');
+    }
+    const text = parts
+        .filter(part => part && typeof part === 'object')
+        .filter(part => (part as { thought?: unknown }).thought !== true)
+        .map(part => (part as { text?: unknown }).text)
+        .filter((part): part is string => typeof part === 'string')
+        .join('')
+        .trim();
+
+    if (!text) {
+        throw new Error('Gemini response did not include text');
+    }
+    return text;
+}
+
+async function emitAttemptTelemetry<T>(
+    telemetry: GeminiAttemptTelemetry,
+    hook: AnalyzeWithGeminiOptions<T>['onAttemptTelemetry'],
+    parsedResult?: T
+): Promise<void> {
+    console.log('Gemini SDK attempt telemetry:', telemetry);
+    if (!hook) return;
+
+    try {
+        if (telemetry.disposition === 'success') {
+            await hook(telemetry, parsedResult);
+        } else {
+            await hook(telemetry);
+        }
+    } catch (error) {
+        // A fenced result means the attempt telemetry committed, but the stale worker was
+        // intentionally prevented from mutating request/cache state. Preserve that outcome so
+        // callers do not misclassify it as an ambiguous persistence failure.
+        if (error instanceof Error && error.name === 'AnalysisV2AiResultFenceError') {
+            throw error;
+        }
+        throw new Error(
+            'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt result was not durably stored.'
+        );
+    }
+}
+
+const REQUEST_UUID_PATTERN =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * 토큰 사용량을 DB에 저장
@@ -197,55 +589,111 @@ export async function logTokenUsage(
 export async function analyzeWithGemini<T>(
     prompt: string,
     images: string[] | undefined,
-    options: {
-        schema: ZodType<T>;
-        analysisType?: string;
-        requestId?: string;
-        skipTokenLog?: boolean;
-        maxOutputTokens?: number;
-        onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
-    }
+    options: AnalyzeWithGeminiOptions<T>
 ): Promise<T> {
     const {
         analysisType = 'unknown',
         requestId,
         skipTokenLog = false,
+        stage,
+        model,
+        thinkingLevel,
+        mediaResolution,
         maxOutputTokens,
+        startingAttempt = 1,
         onTelemetry,
+        onBeforeAttempt,
+        onAttemptTelemetry,
         schema,
     } = options;
+    if (stage !== undefined && !isAiStageName(stage)) {
+        throw new Error('Gemini stage is not recognized');
+    }
     if (
         maxOutputTokens !== undefined
         && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 65_536)
     ) {
         throw new Error('Gemini maxOutputTokens must be an integer from 1 to 65536');
     }
+    if (!Number.isSafeInteger(startingAttempt) || startingAttempt < 1 || startingAttempt > 4) {
+        throw new Error('Gemini startingAttempt must be an integer from 1 to 4');
+    }
+    if (!stage && startingAttempt !== 1) {
+        throw new Error('Gemini attempt resumption is available only for durable stage calls');
+    }
+    const explicitModel = validateExplicitModel(model);
+    validateThinkingLevel(thinkingLevel);
+    validateMediaResolution(mediaResolution);
+    if (stage && skipTokenLog) {
+        throw new Error('Gemini stage calls cannot skip durable token logging');
+    }
+    if (
+        stage
+        && (
+            !requestId
+            || !REQUEST_UUID_PATTERN.test(requestId)
+            || typeof onBeforeAttempt !== 'function'
+            || typeof onAttemptTelemetry !== 'function'
+        )
+    ) {
+        throw new Error(
+            'Gemini stage calls require a valid request UUID and durable attempt callbacks'
+        );
+    }
+
     const costOptimized = isVertexAICostOptimized();
-    const modelName = resolveVertexAIModel(process.env.VERTEX_AI_MODEL, costOptimized);
+    const stagePolicy = stage ? getAiStagePolicy(stage) : null;
+    const modelName = explicitModel
+        ?? stagePolicy?.model
+        ?? resolveVertexAIModel(process.env.VERTEX_AI_MODEL, costOptimized);
+    const resolvedThinkingLevel = thinkingLevel
+        ?? stagePolicy?.thinkingLevel
+        ?? (costOptimized && modelName.startsWith('gemini-3')
+            ? 'MINIMAL'
+            : null);
+    const resolvedMediaResolution = mediaResolution
+        ?? stagePolicy?.mediaResolution
+        ?? (costOptimized ? 'LOW' : null);
+    const resolvedMaxOutputTokens = maxOutputTokens
+        ?? stagePolicy?.maxOutputTokens
+        ?? (costOptimized ? 1_024 : undefined);
     const imagePolicy = getAnalysisImagePolicy(costOptimized);
+    const maxImages = stagePolicy
+        ? stagePolicy.profileImageLimit + stagePolicy.feedImageLimit
+        : imagePolicy.maxImages;
+    const selectedImages = images?.slice(0, maxImages) ?? [];
+    const responseJsonSchema = zodToGeminiResponseJsonSchema(schema);
     const analysisStartedAt = performance.now();
 
-    console.log('--- AnalyzeWithGemini Start ---');
-    console.log('Analysis type:', analysisType);
-    console.log('Image count:', Math.min(images?.length ?? 0, imagePolicy.maxImages));
+    console.log('Gemini analysis started:', {
+        stage: stage ?? null,
+        mediaCount: selectedImages.length,
+    });
 
     let lastError: Error | null = null;
 
-    for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
+    for (
+        let attemptNumber = startingAttempt;
+        attemptNumber <= RETRY_CONFIG.maxRetries + 1;
+        attemptNumber++
+    ) {
         try {
-            if (attempt > 0) {
-                const delay = getRetryDelay(attempt - 1);
-                console.log(`Retry attempt ${attempt}/${RETRY_CONFIG.maxRetries} after ${delay}ms`);
+            if (attemptNumber > startingAttempt) {
+                const delay = getRetryDelay(attemptNumber - 2);
+                console.log(
+                    `Retry attempt ${attemptNumber - 1}/${RETRY_CONFIG.maxRetries} after ${delay}ms`
+                );
                 await sleep(delay);
             }
 
             const client = getGenAIClient();
+            let attemptStartedAt = performance.now();
 
             const parts: Part[] = [{ text: prompt }];
 
             // 이미지가 있으면 추가
-            if (images && images.length > 0) {
-                for (const image of images.slice(0, imagePolicy.maxImages)) {
+            if (selectedImages.length > 0) {
+                for (const image of selectedImages) {
                     parts.push({
                         inlineData: {
                             mimeType: 'image/jpeg',
@@ -257,87 +705,181 @@ export async function analyzeWithGemini<T>(
 
             let response;
             try {
-                response = await client.models.generateContent({
-                    model: modelName,
-                    contents: [{ role: 'user', parts }],
-                    ...(costOptimized || maxOutputTokens !== undefined
+                const config: GenerateContentConfig = {
+                    responseMimeType: 'application/json',
+                    responseJsonSchema,
+                    ...(resolvedMaxOutputTokens !== undefined
+                        ? { maxOutputTokens: resolvedMaxOutputTokens }
+                        : {}),
+                    ...(resolvedMediaResolution
+                        ? { mediaResolution: MEDIA_RESOLUTION_CONFIG[resolvedMediaResolution] }
+                        : {}),
+                    ...(resolvedThinkingLevel
                         ? {
-                            config: {
-                                maxOutputTokens: maxOutputTokens ?? 1_024,
-                                responseMimeType: 'application/json',
-                                ...(costOptimized
-                                    ? {
-                                        mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
-                                        ...(modelName.startsWith('gemini-3')
-                                            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
-                                            : {}),
-                                    }
-                                    : {}),
+                            thinkingConfig: {
+                                thinkingLevel: THINKING_LEVEL_CONFIG[resolvedThinkingLevel],
                             },
                         }
                         : {}),
+                };
+                response = await runWithGenerationSlot(stage ?? null, async () => {
+                    attemptStartedAt = performance.now();
+                    if (stage && requestId && stagePolicy && onBeforeAttempt) {
+                        try {
+                            await onBeforeAttempt({
+                                requestId,
+                                modelName,
+                                location: GOOGLE_CLOUD_LOCATION,
+                                stage,
+                                thinkingLevel: resolvedThinkingLevel,
+                                mediaCount: selectedImages.length,
+                                mediaResolution: resolvedMediaResolution,
+                                promptVersion: stagePolicy.promptVersion,
+                                schemaVersion: stagePolicy.schemaVersion,
+                                maxOutputTokens: resolvedMaxOutputTokens
+                                    ?? stagePolicy.maxOutputTokens,
+                                attempt: attemptNumber,
+                                retryCount: attemptNumber - 1,
+                            });
+                        } catch {
+                            throw new Error(
+                                'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
+                            );
+                        }
+                    }
+
+                    return client.models.generateContent({
+                        model: modelName,
+                        contents: [{ role: 'user', parts }],
+                        config,
+                    });
                 });
             } catch (generationError) {
+                if (
+                    generationError instanceof Error
+                    && generationError.message.startsWith('AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR:')
+                ) {
+                    throw generationError;
+                }
+                const disposition = classifyGeminiGenerationError(generationError);
+                await emitAttemptTelemetry({
+                    tokenUsage: null,
+                    usageComplete: false,
+                    usageMetadataStatus: 'missing',
+                    modelName,
+                    location: GOOGLE_CLOUD_LOCATION,
+                    stage: stage ?? null,
+                    thinkingLevel: resolvedThinkingLevel,
+                    mediaCount: selectedImages.length,
+                    mediaResolution: resolvedMediaResolution,
+                    promptVersion: stagePolicy?.promptVersion ?? null,
+                    schemaVersion: stagePolicy?.schemaVersion ?? null,
+                    maxOutputTokens: resolvedMaxOutputTokens ?? null,
+                    latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
+                    estimatedCostUsd: null,
+                    attempt: attemptNumber,
+                    retryCount: attemptNumber - 1,
+                    disposition,
+                    finishReason: null,
+                }, onAttemptTelemetry);
                 throw sanitizeGenerationError(generationError);
             }
-            // 토큰 사용량 추출
-            const usageMetadata = response.usageMetadata;
-            const tokenUsage: TokenUsage = {
-                promptTokens: usageMetadata?.promptTokenCount ?? 0,
-                completionTokens: usageMetadata?.candidatesTokenCount ?? 0,
-                totalTokens: usageMetadata?.totalTokenCount ?? 0,
-                thinkingTokens: usageMetadata?.thoughtsTokenCount ?? 0,
-            };
-            const costEstimate = estimateGeminiRequestCost(
-                tokenUsage,
-                modelName,
-                GOOGLE_CLOUD_LOCATION
-            );
-            const telemetry: GeminiRequestTelemetry = {
-                tokenUsage,
+
+            const usage = extractStrictUsageMetadata(response.usageMetadata);
+            const costEstimate = usage.tokenUsage
+                ? estimateGeminiRequestCost(
+                    usage.tokenUsage,
+                    modelName,
+                    GOOGLE_CLOUD_LOCATION
+                )
+                : null;
+            const finishReason = readSingleCandidateFinishReason(response);
+            let parsed: T | undefined;
+            let completionError: Error | null = null;
+            try {
+                const text = extractSuccessfulCandidateText(response);
+                parsed = parseGeminiJsonResponse(text, schema);
+            } catch (error) {
+                completionError = error instanceof Error ? error : new Error('Gemini response rejected');
+            }
+
+            const attemptTelemetry: GeminiAttemptTelemetry = {
+                tokenUsage: usage.tokenUsage,
+                usageComplete: usage.status === 'complete',
+                usageMetadataStatus: usage.status,
                 modelName,
                 location: GOOGLE_CLOUD_LOCATION,
-                latencyMs: Math.max(0, Math.round(performance.now() - analysisStartedAt)),
+                stage: stage ?? null,
+                thinkingLevel: resolvedThinkingLevel,
+                mediaCount: selectedImages.length,
+                mediaResolution: resolvedMediaResolution,
+                promptVersion: stagePolicy?.promptVersion ?? null,
+                schemaVersion: stagePolicy?.schemaVersion ?? null,
+                maxOutputTokens: resolvedMaxOutputTokens ?? null,
+                latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
                 estimatedCostUsd: costEstimate?.totalCostUsd ?? null,
+                attempt: attemptNumber,
+                retryCount: attemptNumber - 1,
+                disposition: completionError ? 'rejected' : 'success',
+                finishReason,
             };
 
-            console.log('Token usage:', tokenUsage);
-            console.log('Gemini request telemetry:', telemetry);
+            // V2 persists the validated result and attempt outcome before any best-effort legacy log.
+            await emitAttemptTelemetry(
+                attemptTelemetry,
+                onAttemptTelemetry,
+                completionError ? undefined : parsed
+            );
 
-            // 토큰 사용량 DB 저장
-            if (!skipTokenLog) {
-                await logTokenUsage(tokenUsage, analysisType, requestId, false, modelName, {
-                    latencyMs: telemetry.latencyMs,
-                    location: telemetry.location,
-                    estimatedCostUsd: telemetry.estimatedCostUsd,
+            // The legacy table cannot represent unknown usage. Never persist a fabricated zero.
+            if (!skipTokenLog && usage.tokenUsage) {
+                await logTokenUsage(usage.tokenUsage, analysisType, requestId, false, modelName, {
+                    latencyMs: attemptTelemetry.latencyMs,
+                    location: attemptTelemetry.location,
+                    estimatedCostUsd: attemptTelemetry.estimatedCostUsd,
                 });
             }
 
+            if (completionError) {
+                throw new Error(
+                    `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} generated response failed strict validation.`
+                );
+            }
+
+            const telemetry: GeminiRequestTelemetry = {
+                tokenUsage: attemptTelemetry.tokenUsage,
+                usageComplete: attemptTelemetry.usageComplete,
+                usageMetadataStatus: attemptTelemetry.usageMetadataStatus,
+                modelName: attemptTelemetry.modelName,
+                location: attemptTelemetry.location,
+                stage: attemptTelemetry.stage,
+                thinkingLevel: attemptTelemetry.thinkingLevel,
+                mediaCount: attemptTelemetry.mediaCount,
+                mediaResolution: attemptTelemetry.mediaResolution,
+                promptVersion: attemptTelemetry.promptVersion,
+                schemaVersion: attemptTelemetry.schemaVersion,
+                maxOutputTokens: attemptTelemetry.maxOutputTokens,
+                latencyMs: Math.max(0, Math.round(performance.now() - analysisStartedAt)),
+                estimatedCostUsd: attemptTelemetry.estimatedCostUsd,
+            };
+            console.log('Gemini request telemetry:', telemetry);
             if (onTelemetry) {
                 try {
                     await onTelemetry(telemetry);
-                } catch (telemetryError) {
-                    console.warn('Gemini telemetry hook failed:', telemetryError);
+                } catch {
+                    console.warn('Gemini telemetry hook failed');
                 }
             }
-
-            const text = response.text;
-
-            if (!text) {
-                throw new Error('Gemini response did not include text');
-            }
-
-            const parsed = parseGeminiJsonResponse(text, schema);
             console.log('--- AnalyzeWithGemini End (Success) ---');
 
-            return parsed;
+            return parsed as T;
         } catch (error) {
             lastError = error instanceof Error ? error : new Error(String(error));
-            console.error(`Gemini API Error (attempt ${attempt + 1}):`, lastError.message);
+            console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
 
             // 재시도 불가능한 에러거나 마지막 시도면 throw
             if (!(error instanceof RetryableGeminiRateLimitError)
-                || attempt >= RETRY_CONFIG.maxRetries) {
+                || attemptNumber >= RETRY_CONFIG.maxRetries + 1) {
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
                 throw lastError;
             }
