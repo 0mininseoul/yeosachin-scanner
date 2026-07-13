@@ -1,0 +1,752 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { ProfileAttemptResult } from '@/lib/services/instagram/providers/types';
+import type {
+    ApifyPostComment,
+    ApifyPostLiker,
+} from '@/lib/services/instagram/providers/apify-interactions';
+import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
+import type { AnalysisV2DagState } from './v2-dag-planner';
+import type { AnalysisV2EvidenceStore } from './v2-evidence-store';
+import type { AnalysisV2TargetEvidenceCheckpointInput } from './v2-evidence-store';
+import type {
+    AnalysisV2ProfileAttemptResultInput,
+    AnalysisV2ProfileFetchCheckpointStore,
+    AnalysisV2ProfileFetchResume,
+} from './v2-profile-fetch-store';
+import type {
+    AnalysisV2ProviderRunReservationInput,
+    AnalysisV2ProviderRunStore,
+    StoredAnalysisV2ProviderRun,
+} from './v2-provider-run-store';
+import {
+    AnalysisV2CollectionContextFenceError,
+    type AnalysisV2CollectionRequestContext,
+    type AnalysisV2CollectionRequestContextStore,
+} from './v2-request-context';
+import type { AnalysisV2StageExecutorContext } from './v2-worker';
+import {
+    createAnalysisV2CollectionTopology,
+    createAnalysisV2ProfileFetchExecutor,
+    createAnalysisV2RelationshipsExecutor,
+    createAnalysisV2TargetEvidenceExecutor,
+} from './v2-collection-executors';
+
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+// gitleaks:allow -- deterministic UUID fixture
+const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
+// gitleaks:allow -- deterministic UUID fixture
+const claimToken = '51b42f42-204d-4dfb-86f8-9658d21c78f1';
+// gitleaks:allow -- deterministic UUID fixture
+const reservationToken = 'f920fd7c-5091-42e8-9623-78be7a57dc88';
+const inputHash = 'a'.repeat(64);
+const resultHash = 'b'.repeat(64);
+const capturedAt = '2026-07-13T07:30:00.000Z';
+
+function requestContext(
+    overrides: Partial<AnalysisV2CollectionRequestContext> = {}
+): AnalysisV2CollectionRequestContext {
+    return {
+        requestId,
+        targetUsername: 'target',
+        excludedUsername: 'girlfriend',
+        planId: 'basic',
+        followersDeclaredCount: 2,
+        followingDeclaredCount: 2,
+        detailedMutualLimit: 300,
+        ...overrides,
+    };
+}
+
+function contextStore(
+    value: AnalysisV2CollectionRequestContext
+): AnalysisV2CollectionRequestContextStore {
+    return { load: vi.fn(async () => value) };
+}
+
+function state(
+    overrides: Partial<AnalysisV2DagState> = {}
+): AnalysisV2DagState {
+    return {
+        schemaVersion: 2,
+        requestSnapshotHash: 'c'.repeat(64),
+        planId: 'basic',
+        planSnapshotHash: 'd'.repeat(64),
+        girlfriendExclusion: {
+            decisionHash: 'e'.repeat(64),
+            excludedCount: 1,
+        },
+        ...overrides,
+    };
+}
+
+function stageContext<S extends 'relationships' | 'target_evidence' | 'profile_fetch'>(
+    stage: S,
+    dagState: AnalysisV2DagState,
+    batch: number | null = null,
+    jobInputHash = inputHash
+): AnalysisV2StageExecutorContext<S> {
+    const jobKey = stage === 'relationships'
+        ? 'track:relationships:collect'
+        : stage === 'target_evidence'
+          ? 'track:target-evidence:collect'
+          : `track:profiles:batch:${batch}`;
+    const track = stage === 'target_evidence'
+        ? 'target_evidence'
+        : stage === 'profile_fetch'
+          ? 'profiles'
+          : 'relationships';
+    const kind = stage === 'profile_fetch' ? 'profile_fetch' : 'collection';
+    return {
+        stage,
+        claim: {
+            requestId,
+            jobKey,
+            track,
+            kind,
+            batch,
+            inputHash: jobInputHash,
+            generation: 1,
+            reservationToken,
+            claimToken,
+            attemptCount: 1,
+        },
+        job: {
+            requestId,
+            jobKey,
+            track,
+            kind,
+            batch,
+            inputHash: jobInputHash,
+            requiredJobKeys: stage === 'profile_fetch'
+                ? ['track:relationships:collect']
+                : [],
+        },
+        state: dagState,
+    } as AnalysisV2StageExecutorContext<S>;
+}
+
+function post(index: number, type: InstagramPost['type'] = 'image'): InstagramPost {
+    return {
+        id: `post-${index}`,
+        shortCode: `code_${index}`,
+        ...(type === 'image'
+            ? { imageUrl: `https://images.example/${index}.jpg` }
+            : { thumbnailUrl: `https://images.example/${index}.jpg` }),
+        type,
+        likesCount: 100 + index,
+        commentsCount: 20 + index,
+        timestamp: new Date(Date.UTC(2026, 6, 13, 7, index)).toISOString(),
+        taggedUsers: [],
+        mentionedUsers: [],
+    };
+}
+
+function profile(username: string, posts: InstagramPost[] = [post(0)]): InstagramProfile {
+    return {
+        username,
+        fullName: `${username} name`,
+        bio: `${username} bio`,
+        profilePicUrl: `https://images.example/${username}.jpg`,
+        followersCount: 20,
+        followingCount: 10,
+        postsCount: posts.length,
+        isPrivate: false,
+        isVerified: false,
+        latestPosts: posts,
+    };
+}
+
+function success(username: string, source: 'selfhosted' | 'apify' = 'selfhosted') {
+    return {
+        outcome: {
+            requestedUsername: username,
+            source,
+            status: 'success' as const,
+            failureCategory: null,
+            httpStatus: null,
+            requestCount: 1,
+            latencyMs: 10,
+            capturedAt,
+        },
+        profile: profile(username),
+    };
+}
+
+function failure(username: string, source: 'selfhosted' | 'apify' = 'selfhosted') {
+    return {
+        outcome: {
+            requestedUsername: username,
+            source,
+            status: 'failed' as const,
+            failureCategory: 'timeout' as const,
+            httpStatus: 504,
+            requestCount: 1,
+            latencyMs: 10,
+            capturedAt,
+        },
+    };
+}
+
+function unavailable(username: string) {
+    return {
+        outcome: {
+            requestedUsername: username,
+            source: 'apify' as const,
+            status: 'unavailable' as const,
+            failureCategory: 'not_found' as const,
+            httpStatus: 404,
+            requestCount: 1,
+            latencyMs: 10,
+            capturedAt,
+        },
+    };
+}
+
+function completedResume(
+    usernames: readonly string[],
+    profiles: AnalysisV2ProfileFetchResume['primaryResults'] =
+        usernames.map(username => success(username))
+): AnalysisV2ProfileFetchResume {
+    return {
+        requestId,
+        jobKey: 'track:profiles:batch:0',
+        requestedUsernames: [...usernames],
+        frozenUnresolvedUsernames: [],
+        primaryResults: profiles,
+        fallbackResults: [],
+        primaryCapturedAt: capturedAt,
+        fallbackCapturedAt: null,
+    };
+}
+
+function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
+    let current = initial;
+    const store: AnalysisV2ProfileFetchCheckpointStore = {
+        load: vi.fn(async () => current),
+        checkpointPrimary: vi.fn(async (input: {
+            requestId: string;
+            jobKey: string;
+            claimToken: string;
+            jobInputHash: string;
+            requestedUsernames: readonly string[];
+            results: readonly AnalysisV2ProfileAttemptResultInput[];
+        }) => {
+            const unresolved = input.results
+                .filter(result => result.outcome.status !== 'success')
+                .map(result => result.outcome.requestedUsername);
+            current = {
+                requestId: input.requestId,
+                jobKey: input.jobKey,
+                requestedUsernames: [...input.requestedUsernames],
+                frozenUnresolvedUsernames: unresolved,
+                primaryResults: input.results as AnalysisV2ProfileFetchResume['primaryResults'],
+                fallbackResults: [],
+                primaryCapturedAt: capturedAt,
+                fallbackCapturedAt: null,
+            };
+            return current;
+        }),
+        checkpointFallback: vi.fn(async (input: {
+            results: readonly AnalysisV2ProfileAttemptResultInput[];
+        }) => {
+            if (!current) throw new Error('missing primary');
+            current = {
+                ...current,
+                fallbackResults: input.results as AnalysisV2ProfileFetchResume['fallbackResults'],
+                fallbackCapturedAt: capturedAt,
+            };
+            return current;
+        }),
+        purgeTerminal: vi.fn(async () => 0),
+    };
+    return { store, current: () => current };
+}
+
+function storedRun(
+    input: AnalysisV2ProviderRunReservationInput,
+    status: StoredAnalysisV2ProviderRun['status'] = 'succeeded'
+): StoredAnalysisV2ProviderRun {
+    return {
+        requestId: input.requestId,
+        jobKey: input.jobKey,
+        operationKey: input.operationKey,
+        inputHash: input.inputHash,
+        logicalProvider: 'apify',
+        actorId: input.actorId,
+        credentialSlot: input.credentialSlot,
+        maxChargeUsd: input.maxChargeUsd,
+        reservationToken,
+        status,
+        runId: status === 'starting' ? null : `run${input.operationKey.slice(-8)}`,
+        actualUsageUsd: status === 'succeeded' ? 0.01 : null,
+        reservedAt: capturedAt,
+        runStartedAt: status === 'starting' ? null : capturedAt,
+        terminalizedAt: status === 'succeeded' ? capturedAt : null,
+        usageReconciledAt: status === 'succeeded' ? capturedAt : null,
+    };
+}
+
+function providerStore(callOrder: string[] = []) {
+    const runs = new Map<string, StoredAnalysisV2ProviderRun>();
+    const bindAdapterCheckpoint = vi.fn(async (input: AnalysisV2ProviderRunReservationInput) => {
+        callOrder.push(`bind:${input.operationKey.split(':', 1)[0]}`);
+        runs.set(input.operationKey, storedRun(input));
+        return {
+            stored: null,
+            checkpoint: {
+                onBeforeRunStart: vi.fn(),
+                onRunStarted: vi.fn(),
+            },
+        };
+    });
+    const load = vi.fn(async (input: { operationKey: string }) => runs.get(input.operationKey) ?? null);
+    return {
+        bindAdapterCheckpoint,
+        load,
+        value: {
+            bindAdapterCheckpoint,
+            load,
+        } as unknown as AnalysisV2ProviderRunStore,
+    };
+}
+
+describe('analysis V2 concrete collection executors', () => {
+    it('collects both exact preflight relationship sides concurrently and builds frozen topology', async () => {
+        const starts: string[] = [];
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const getter = (side: string) => vi.fn(async () => {
+            starts.push(side);
+            if (starts.length === 2) release?.();
+            await gate;
+            return side === 'followers'
+                ? [
+                    { username: 'alice', isPrivate: false, isVerified: false },
+                    { username: 'private_a', isPrivate: true, isVerified: false },
+                ]
+                : [
+                    { username: 'alice', isPrivate: false, isVerified: false },
+                    { username: 'private_a', isPrivate: true, isVerified: false },
+                ];
+        });
+        const getFollowersMock = getter('followers');
+        const getFollowingMock = getter('following');
+        const providers = providerStore();
+        const checkpointRelationshipSide = vi.fn(async (input) => ({
+            side: input.side,
+            revision: 1,
+            declaredCount: input.declaredCount,
+            collectedCount: input.rows.length,
+            coverageBps: 10_000,
+            inputHash: input.inputHash,
+            resultHash,
+        }));
+        const evidence = {
+            checkpointRelationshipSide,
+            freezeRelationships: vi.fn(async () => ({
+                revision: 1,
+                resultHash,
+                exclusionDecisionHash: 'f'.repeat(64),
+                followersResultHash: resultHash,
+                followingResultHash: resultHash,
+                mutualCount: 2,
+                publicCount: 1,
+                privateCount: 1,
+                detailedPublicCount: 1,
+                unscreenedPublicCount: 0,
+            })),
+            loadRelationshipStaging: vi.fn(async () => ({
+                excludedUsername: 'girlfriend',
+                detailedPublicUsernames: ['alice'],
+                privateMutualUsernames: ['private_a'],
+            })),
+        } as unknown as AnalysisV2EvidenceStore;
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: evidence,
+            providerRunStore: providers.value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            env: { APIFY_API_TOKEN_SLOT: 'primary' },
+        });
+
+        const result = await executor(stageContext('relationships', state()));
+
+        expect(starts).toEqual(['followers', 'following']);
+        expect(getFollowersMock).toHaveBeenCalledWith('target', 2, expect.objectContaining({
+            provider: 'apify',
+            fallback: false,
+            expectedResultCount: 2,
+        }));
+        expect(getFollowingMock).toHaveBeenCalledWith('target', 2, expect.objectContaining({
+            provider: 'apify',
+            fallback: false,
+            expectedResultCount: 2,
+        }));
+        expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
+        expect(result.checkpoint.manifest.profileBatches).toHaveLength(1);
+        expect(result.checkpoint.manifest.privateNameBatches).toHaveLength(1);
+        expect(JSON.stringify(getFollowersMock.mock.calls)).not.toContain('cookie');
+    });
+
+    it('fails before provider work on stale leases and declared-count/plan drift', async () => {
+        const getFollowersMock = vi.fn();
+        const staleStore: AnalysisV2CollectionRequestContextStore = {
+            load: vi.fn(async () => { throw new AnalysisV2CollectionContextFenceError(); }),
+        };
+        await expect(createAnalysisV2RelationshipsExecutor({
+            requestContextStore: staleStore,
+            getFollowers: getFollowersMock,
+        })(stageContext('relationships', state()))).rejects.toThrow(
+            'ANALYSIS_V2_COLLECTION_CONTEXT_FENCE_MISMATCH'
+        );
+        expect(getFollowersMock).not.toHaveBeenCalled();
+
+        await expect(createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({ followersDeclaredCount: 401 })),
+            getFollowers: getFollowersMock,
+        })(stageContext('relationships', state()))).rejects.toThrow(
+            'ANALYSIS_V2_COLLECTION_SCOPE_DRIFT'
+        );
+        expect(getFollowersMock).not.toHaveBeenCalled();
+    });
+
+    it('collects 4x150 likers and 6x15 comments from a durable target snapshot, including reels', async () => {
+        const posts = Array.from({ length: 8 }, (_, index) => post(
+            index,
+            index === 7 ? 'reel' : 'image'
+        ));
+        const target = profile('target', posts);
+        const profileStore = inMemoryProfileStore({
+            ...completedResume(['target'], [{ ...success('target'), profile: target }]),
+            jobKey: 'track:target-evidence:collect',
+        });
+        const providers = providerStore();
+        const getPostLikers = vi.fn(async (
+            urls: string[],
+            _limit: number,
+            _context?: unknown
+        ): Promise<ApifyPostLiker[]> => {
+            void _limit;
+            void _context;
+            return urls.map((url, index) => ({
+                postUrl: url,
+                id: `like-${index}`,
+                username: `woman_${index}`,
+                profilePicUrl: `https://images.example/woman-${index}.jpg`,
+                isPrivate: false,
+                isVerified: false,
+                totalLikes: 200,
+            }));
+        });
+        const getPostComments = vi.fn(async (
+            urls: string[],
+            _limit: number,
+            _context?: unknown
+        ): Promise<ApifyPostComment[]> => {
+            void _limit;
+            void _context;
+            return urls.map((url, index) => ({
+                postUrl: url,
+                id: `comment-${index}`,
+                text: `comment ${index}`,
+                ownerUsername: `commenter_${index}`,
+                timestamp: capturedAt,
+            }));
+        });
+        const checkpointTargetEvidence = vi.fn(async (
+            input: AnalysisV2TargetEvidenceCheckpointInput
+        ) => ({
+            revision: 1,
+            resultHash,
+            inputHash: input.inputHash,
+            interactorCount: input.rows.length,
+            likerCount: input.rows.filter(row => row.signal === 'target_post_like').length,
+            commentCount: input.rows.filter(row => row.signal === 'target_post_comment').length,
+        }));
+        const executor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            interactionAdapter: { getPostLikers, getPostComments },
+            evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
+            getProfilesBatchV2: vi.fn(),
+            env: { APIFY_API_TOKEN_SLOT: 'primary' },
+        });
+
+        await executor(stageContext('target_evidence', state()));
+
+        expect(getPostLikers).toHaveBeenCalledWith(
+            expect.arrayContaining(['https://www.instagram.com/reel/code_7/']),
+            150,
+            expect.any(Object)
+        );
+        expect(getPostLikers.mock.calls[0]![0]).toHaveLength(4);
+        expect(getPostComments.mock.calls[0]![0]).toHaveLength(6);
+        expect(getPostComments.mock.calls[0]![1]).toBe(15);
+        const saved = checkpointTargetEvidence.mock.calls[0]![0];
+        if (
+            saved.likerSource.status !== 'collected'
+            || saved.commentSource.status !== 'collected'
+        ) throw new Error('expected collected target evidence');
+        expect(saved.likerSource.coverage).toHaveLength(4);
+        expect(saved.commentSource.coverage).toHaveLength(6);
+        expect(saved.rows.some(row => row.content === 'comment 0')).toBe(true);
+    });
+
+    it('proves zero-post target interactions as not applicable without starting paid actors', async () => {
+        const empty = profile('target', []);
+        const profileStore = inMemoryProfileStore({
+            ...completedResume(['target'], [{ ...success('target'), profile: empty }]),
+            jobKey: 'track:target-evidence:collect',
+        });
+        const checkpointTargetEvidence = vi.fn(async (
+            input: AnalysisV2TargetEvidenceCheckpointInput
+        ) => ({
+            revision: 1,
+            resultHash,
+            inputHash: input.inputHash,
+            interactorCount: 0,
+            likerCount: 0,
+            commentCount: 0,
+        }));
+        const getPostLikers = vi.fn();
+        const getPostComments = vi.fn();
+        await createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providerStore().value,
+            interactionAdapter: { getPostLikers, getPostComments },
+            evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
+            getProfilesBatchV2: vi.fn(),
+        })(stageContext('target_evidence', state()));
+
+        expect(getPostLikers).not.toHaveBeenCalled();
+        expect(getPostComments).not.toHaveBeenCalled();
+        expect(checkpointTargetEvidence.mock.calls[0]![0]).toMatchObject({
+            likerSource: { status: 'not_applicable' },
+            commentSource: { status: 'not_applicable' },
+            rows: [],
+        });
+    });
+
+    it('persists all primary outcomes before binding and freezes exactly unresolved fallback input', async () => {
+        const usernames = ['alice', 'bob'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const callOrder: string[] = [];
+        const profileStore = inMemoryProfileStore(null);
+        vi.mocked(profileStore.store.checkpointPrimary).mockImplementation(async (input) => {
+            callOrder.push('primary-persisted');
+            const unresolved = input.results
+                .filter(result => result.outcome.status !== 'success')
+                .map(result => result.outcome.requestedUsername);
+            const next: AnalysisV2ProfileFetchResume = {
+                requestId,
+                jobKey: input.jobKey,
+                requestedUsernames: [...input.requestedUsernames],
+                frozenUnresolvedUsernames: unresolved,
+                primaryResults: input.results as AnalysisV2ProfileFetchResume['primaryResults'],
+                fallbackResults: [],
+                primaryCapturedAt: capturedAt,
+                fallbackCapturedAt: null,
+            };
+            const replacement = inMemoryProfileStore(next);
+            vi.mocked(profileStore.store.load).mockImplementation(replacement.store.load);
+            vi.mocked(profileStore.store.checkpointFallback).mockImplementation(
+                replacement.store.checkpointFallback
+            );
+            return next;
+        });
+        const providers = providerStore(callOrder);
+        const snapshots: ProfilesBatchSnapshot[] = [];
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            const primary = [success('alice'), failure('bob')] as ProfileAttemptResult[];
+            snapshots.push({ attempt: 'primary', requested: [...requested] });
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: requested,
+                results: primary,
+            });
+            expect(callOrder).toEqual([
+                'primary-persisted',
+                'bind:profile-fallback',
+            ]);
+            const fallback = [{ ...success('bob', 'apify'), profile: profile('bob') }];
+            snapshots.push({ attempt: 'fallback', requested: ['bob'] });
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: ['bob'],
+                results: fallback,
+            });
+            return {
+                results: [primary[0]!, fallback[0]!],
+                profiles: [profile('alice'), profile('bob')],
+                primaryResults: primary,
+                fallbackResults: fallback,
+                frozenUnresolvedUsernames: ['bob'],
+            };
+        });
+        const executor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            env: { APIFY_API_TOKEN_SLOT: 'primary' },
+        });
+        const dagState = state({ relationships: relationshipManifest(topology) });
+
+        await expect(executor(stageContext('profile_fetch', dagState, 0))).resolves.toMatchObject({
+            checkpoint: { manifest: { itemCount: 2, producerInputHash: inputHash } },
+        });
+        expect(snapshots).toEqual([
+            { attempt: 'primary', requested: ['alice', 'bob'] },
+            { attempt: 'fallback', requested: ['bob'] },
+        ]);
+        expect(profileStore.store.checkpointFallback).toHaveBeenCalledWith(expect.objectContaining({
+            results: [expect.objectContaining({ outcome: expect.objectContaining({
+                requestedUsername: 'bob',
+            }) })],
+        }));
+        expect(profileStore.store.checkpointPrimary).toHaveBeenCalledWith(
+            expect.objectContaining({
+                results: expect.arrayContaining([
+                    expect.objectContaining({
+                        outcome: expect.objectContaining({
+                            requestedUsername: 'bob',
+                            status: 'failed',
+                            failureCategory: 'timeout',
+                            httpStatus: 504,
+                        }),
+                    }),
+                ]),
+            })
+        );
+    });
+
+    it('rejects wrong batches, girlfriend leakage, partial terminal outcomes, and ambiguous starts', async () => {
+        const usernames = ['alice', 'bob'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const dagState = state({ relationships: relationshipManifest(topology) });
+        const complete = inMemoryProfileStore(completedResume(usernames));
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: complete.store,
+        })(stageContext('profile_fetch', dagState, 1))).rejects.toThrow(
+            'ANALYSIS_V2_PROFILE_BATCH_MISMATCH'
+        );
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(['alice', 'girlfriend']),
+            profileCheckpointStore: complete.store,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(
+                createAnalysisV2CollectionTopology('profiles', ['alice', 'girlfriend'])
+            ) }),
+            0
+        ))).rejects.toThrow('ANALYSIS_V2_GIRLFRIEND_EXCLUSION_LEAK');
+
+        const partial = inMemoryProfileStore({
+            ...completedResume(usernames, [success('alice'), failure('bob')]),
+            frozenUnresolvedUsernames: ['bob'],
+            fallbackResults: [
+                unavailable('bob') as AnalysisV2ProfileFetchResume['fallbackResults'][number],
+            ],
+            fallbackCapturedAt: capturedAt,
+        });
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: partial.store,
+        })(stageContext('profile_fetch', dagState, 0))).rejects.toThrow(
+            'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE'
+        );
+
+        const primaryOnly = inMemoryProfileStore(null);
+        const ambiguousFetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: requested,
+                results: [success('alice'), failure('bob')],
+            });
+            throw new Error('SCRAPING_AMBIGUOUS_START_ERROR: unknown Actor start');
+        });
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: primaryOnly.store,
+            providerRunStore: providerStore().value,
+            getProfilesBatchV2: ambiguousFetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+        })(stageContext('profile_fetch', dagState, 0))).rejects.toThrow(
+            'SCRAPING_AMBIGUOUS_START_ERROR'
+        );
+        expect(primaryOnly.store.checkpointPrimary).toHaveBeenCalledOnce();
+        expect(primaryOnly.store.checkpointFallback).not.toHaveBeenCalled();
+    });
+
+    it('derives a stable batch result hash from the durable canonical checkpoint', async () => {
+        const usernames = ['alice', 'bob'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const complete = inMemoryProfileStore(completedResume(usernames));
+        const executor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: complete.store,
+            getProfilesBatchV2: vi.fn(),
+        });
+        const dagState = state({ relationships: relationshipManifest(topology) });
+
+        const first = await executor(stageContext('profile_fetch', dagState, 0));
+        const second = await executor(stageContext('profile_fetch', dagState, 0));
+        expect(first.checkpoint.manifest.resultHash).toBe(second.checkpoint.manifest.resultHash);
+        expect(first.checkpoint.manifest.resultHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+});
+
+interface ProfilesBatchSnapshot {
+    attempt: 'primary' | 'fallback';
+    requested: string[];
+}
+
+function relationshipManifest(profileBatches: readonly {
+    batch: number;
+    itemCount: number;
+    inputHash: string;
+}[]) {
+    return {
+        revision: 1,
+        resultHash,
+        detectedMutualCount: profileBatches.reduce((sum, batch) => sum + batch.itemCount, 0),
+        publicCount: profileBatches.reduce((sum, batch) => sum + batch.itemCount, 0),
+        privateCount: 0,
+        detailedSelectedPublicCount: profileBatches.reduce(
+            (sum, batch) => sum + batch.itemCount,
+            0
+        ),
+        notScreenedPublicCount: 0,
+        profileBatches,
+        privateNameBatches: [],
+    };
+}
+
+function relationshipEvidence(usernames: readonly string[]): AnalysisV2EvidenceStore {
+    return {
+        loadRelationshipStaging: vi.fn(async () => ({
+            detailedPublicUsernames: [...usernames],
+        })),
+    } as unknown as AnalysisV2EvidenceStore;
+}

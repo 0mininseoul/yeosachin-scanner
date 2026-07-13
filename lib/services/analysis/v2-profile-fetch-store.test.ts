@@ -13,8 +13,12 @@ import {
 
 // gitleaks:allow -- UUID fixture
 const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
+// gitleaks:allow -- UUID fixture
+const claimToken = '51b42f42-204d-4dfb-86f8-9658d21c78f1';
 const jobKey = 'track:profiles:batch:0';
+const jobInputHash = 'a'.repeat(64);
 const capturedAt = '2026-07-13T07:30:00.000Z';
+const checkpointIdentity = { requestId, jobKey, claimToken, jobInputHash } as const;
 
 function post(index: number, overrides: Partial<InstagramPost> = {}): InstagramPost {
     return {
@@ -135,8 +139,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
 
         const result = await store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['Alice', 'BOB'],
             results: primaryResults(),
         });
@@ -146,6 +149,10 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const [rpcName, params] = fake.rpc.mock.calls[0]!;
         expect(rpcName).toBe(ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.primaryRpc);
         expect(params.p_requested_usernames).toEqual(['alice', 'bob']);
+        expect(params).toMatchObject({
+            p_claim_token: claimToken,
+            p_job_input_hash: jobInputHash,
+        });
         const persistedOutcomes = params.p_outcomes;
         expect(Array.isArray(persistedOutcomes)).toBe(true);
         if (!Array.isArray(persistedOutcomes)) throw new Error('outcome fixture mismatch');
@@ -209,8 +216,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
 
         await store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['alice'],
             results: [{
                 outcome: outcome({ username: 'alice', status: 'success' }),
@@ -234,8 +240,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
 
         await expect(store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['alice'],
             results: [{
                 outcome: outcome({ username: 'alice', status: 'success' }),
@@ -250,20 +255,17 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
 
         await expect(store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['alice', 'bob'],
             results: primaryResults().slice(0, 1),
         })).rejects.toThrow('missing terminal outcome');
         await expect(store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['alice', 'Alice'],
             results: primaryResults(),
         })).rejects.toThrow('duplicate requested username');
         await expect(store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['alice'],
             results: [{
                 outcome: outcome({ username: 'bob', status: 'success' }),
@@ -271,8 +273,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
             }],
         })).rejects.toThrow('unexpected outcome username');
         await expect(store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['alice'],
             results: [{
                 outcome: outcome({ username: 'alice', source: 'apify', status: 'success' }),
@@ -302,8 +303,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
 
         await expect(store.checkpointPrimary({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             requestedUsernames: ['alice'],
             results: [{ outcome: incomplete }],
         })).resolves.toMatchObject(snapshot);
@@ -332,8 +332,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
 
         const result = await store.checkpointFallback({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             results: [fallbackResult],
         });
 
@@ -355,8 +354,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
 
         await expect(store.checkpointFallback({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             results: [{
                 outcome: outcome({
                     username: 'alice',
@@ -367,8 +365,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
             }],
         })).rejects.toThrow('unexpected outcome username');
         await expect(store.checkpointFallback({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
             results: [{
                 outcome: outcome({
                     username: 'bob',
@@ -402,8 +399,7 @@ describe('analysis V2 profile fetch checkpoint store', () => {
 
         const malformed = clientWith({ data: { requestId }, error: null });
         await expect(createAnalysisV2ProfileFetchCheckpointStore(malformed.client).load({
-            requestId,
-            jobKey,
+            ...checkpointIdentity,
         })).rejects.toThrow('invalid checkpoint load response');
 
         const conflict = clientWith({
@@ -412,11 +408,30 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         });
         await expect(createAnalysisV2ProfileFetchCheckpointStore(conflict.client)
             .checkpointPrimary({
-                requestId,
-                jobKey,
+                ...checkpointIdentity,
                 requestedUsernames: ['alice', 'bob'],
                 results: primaryResults(),
             })).rejects.toThrow('ANALYSIS_V2_PROFILE_PRIMARY_CONFLICT');
+    });
+
+    it('does not hide a stale or different claim behind an idempotent replay', async () => {
+        const fenced = clientWith({
+            data: null,
+            error: {
+                code: 'P0001',
+                message: 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+            },
+        });
+        await expect(createAnalysisV2ProfileFetchCheckpointStore(fenced.client)
+            .checkpointPrimary({
+                ...checkpointIdentity,
+                requestedUsernames: ['alice', 'bob'],
+                results: primaryResults(),
+            })).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH');
+        expect(fenced.rpc.mock.calls[0]![1]).toMatchObject({
+            p_claim_token: claimToken,
+            p_job_input_hash: jobInputHash,
+        });
     });
 
     it('purges only through the terminal purge RPC and validates its result', async () => {

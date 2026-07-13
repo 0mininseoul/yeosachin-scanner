@@ -570,6 +570,8 @@ REVOKE ALL ON FUNCTION public.analysis_v2_profile_checkpoint_snapshot(UUID, TEXT
 CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_profile_primary(
     p_request_id UUID,
     p_job_key TEXT,
+    p_claim_token UUID,
+    p_job_input_hash TEXT,
     p_requested_usernames TEXT[],
     p_outcomes JSONB
 )
@@ -579,6 +581,7 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+    v_now TIMESTAMP WITH TIME ZONE;
     v_request public.analysis_requests%ROWTYPE;
     v_job public.analysis_pipeline_jobs%ROWTYPE;
     v_batch public.analysis_v2_profile_fetch_batches%ROWTYPE;
@@ -590,6 +593,9 @@ BEGIN
        OR p_job_key IS NULL
        OR pg_catalog.char_length(p_job_key) NOT BETWEEN 1 AND 160
        OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
+       OR p_claim_token IS NULL
+       OR p_job_input_hash IS NULL
+       OR p_job_input_hash !~ '^[a-f0-9]{64}$'
        OR NOT public.analysis_v2_valid_profile_username_list(
             p_requested_usernames,
             FALSE
@@ -633,6 +639,18 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
+    v_now := pg_catalog.clock_timestamp();
+    IF v_request.status NOT IN ('pending', 'processing')
+       OR v_job.status <> 'processing'
+       OR v_job.input_hash IS DISTINCT FROM p_job_input_hash
+       OR v_job.lease_token IS DISTINCT FROM p_claim_token
+       OR v_job.lease_expires_at IS NULL
+       OR v_job.lease_expires_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+
     v_payload_hash := pg_catalog.encode(
         extensions.digest(
             pg_catalog.jsonb_build_object(
@@ -650,6 +668,12 @@ BEGIN
     WHERE batch.request_id = p_request_id
       AND batch.job_key = p_job_key
     FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+    IF v_job.lease_expires_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
     IF FOUND THEN
         IF v_batch.requested_usernames IS DISTINCT FROM p_requested_usernames
            OR v_batch.primary_payload_hash <> v_payload_hash THEN
@@ -658,13 +682,6 @@ BEGIN
                 ERRCODE = 'P0001';
         END IF;
         RETURN public.analysis_v2_profile_checkpoint_snapshot(p_request_id, p_job_key);
-    END IF;
-
-    IF v_request.status NOT IN ('pending', 'processing')
-       OR v_job.status <> 'processing' THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY',
-            ERRCODE = 'P0001';
     END IF;
 
     SELECT COALESCE(
@@ -741,15 +758,17 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_profile_primary(
-    UUID, TEXT, TEXT[], JSONB
+    UUID, TEXT, UUID, TEXT, TEXT[], JSONB
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_profile_primary(
-    UUID, TEXT, TEXT[], JSONB
+    UUID, TEXT, UUID, TEXT, TEXT[], JSONB
 ) TO service_role;
 
 CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_profile_fallback(
     p_request_id UUID,
     p_job_key TEXT,
+    p_claim_token UUID,
+    p_job_input_hash TEXT,
     p_outcomes JSONB
 )
 RETURNS JSONB
@@ -768,6 +787,9 @@ BEGIN
        OR p_job_key IS NULL
        OR pg_catalog.char_length(p_job_key) NOT BETWEEN 1 AND 160
        OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
+       OR p_claim_token IS NULL
+       OR p_job_input_hash IS NULL
+       OR p_job_input_hash !~ '^[a-f0-9]{64}$'
        OR pg_catalog.jsonb_typeof(p_outcomes) <> 'array' THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_INVALID',
@@ -802,12 +824,30 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
+    v_completed_at := pg_catalog.clock_timestamp();
+    IF v_request.status NOT IN ('pending', 'processing')
+       OR v_job.status <> 'processing'
+       OR v_job.input_hash IS DISTINCT FROM p_job_input_hash
+       OR v_job.lease_token IS DISTINCT FROM p_claim_token
+       OR v_job.lease_expires_at IS NULL
+       OR v_job.lease_expires_at <= v_completed_at THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+
     SELECT batch.*
     INTO v_batch
     FROM public.analysis_v2_profile_fetch_batches AS batch
     WHERE batch.request_id = p_request_id
       AND batch.job_key = p_job_key
     FOR UPDATE;
+    v_completed_at := pg_catalog.clock_timestamp();
+    IF v_job.lease_expires_at <= v_completed_at THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
     IF NOT FOUND
        OR pg_catalog.cardinality(v_batch.frozen_unresolved_usernames) = 0
        OR NOT public.analysis_v2_valid_profile_outcomes(
@@ -831,13 +871,6 @@ BEGIN
                 ERRCODE = 'P0001';
         END IF;
         RETURN public.analysis_v2_profile_checkpoint_snapshot(p_request_id, p_job_key);
-    END IF;
-
-    IF v_request.status NOT IN ('pending', 'processing')
-       OR v_job.status <> 'processing' THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY',
-            ERRCODE = 'P0001';
     END IF;
 
     INSERT INTO public.analysis_v2_profile_fetch_outcomes (
@@ -892,35 +925,70 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_profile_fallback(
-    UUID, TEXT, JSONB
+    UUID, TEXT, UUID, TEXT, JSONB
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_profile_fallback(
-    UUID, TEXT, JSONB
+    UUID, TEXT, UUID, TEXT, JSONB
 ) TO service_role;
 
 CREATE OR REPLACE FUNCTION public.load_analysis_v2_profile_fetch_checkpoint(
     p_request_id UUID,
-    p_job_key TEXT
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_job_input_hash TEXT
 )
 RETURNS JSONB
 LANGUAGE plpgsql
-STABLE
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE;
+    v_request public.analysis_requests%ROWTYPE;
+    v_job public.analysis_pipeline_jobs%ROWTYPE;
 BEGIN
     IF p_request_id IS NULL
        OR p_job_key IS NULL
        OR pg_catalog.char_length(p_job_key) NOT BETWEEN 1 AND 160
        OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
-       OR NOT EXISTS (
-            SELECT 1
-            FROM public.analysis_requests AS analysis_request
-            WHERE analysis_request.id = p_request_id
-              AND analysis_request.pipeline_version = 'v2'
-       ) THEN
+       OR p_claim_token IS NULL
+       OR p_job_input_hash IS NULL
+       OR p_job_input_hash !~ '^[a-f0-9]{64}$' THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    PERFORM 1
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.consumed_request_id = p_request_id
+    FOR UPDATE;
+
+    SELECT analysis_request.*
+    INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id
+    FOR UPDATE;
+
+    SELECT job.*
+    INTO v_job
+    FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id
+      AND job.job_key = p_job_key
+    FOR UPDATE;
+
+    v_now := pg_catalog.clock_timestamp();
+    IF v_request.id IS NULL
+       OR v_request.pipeline_version IS DISTINCT FROM 'v2'
+       OR v_request.status NOT IN ('pending', 'processing')
+       OR v_job.request_id IS NULL
+       OR v_job.status <> 'processing'
+       OR v_job.input_hash IS DISTINCT FROM p_job_input_hash
+       OR v_job.lease_token IS DISTINCT FROM p_claim_token
+       OR v_job.lease_expires_at IS NULL
+       OR v_job.lease_expires_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
             ERRCODE = 'P0001';
     END IF;
 
@@ -928,9 +996,13 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.load_analysis_v2_profile_fetch_checkpoint(UUID, TEXT)
+REVOKE ALL ON FUNCTION public.load_analysis_v2_profile_fetch_checkpoint(
+    UUID, TEXT, UUID, TEXT
+)
     FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.load_analysis_v2_profile_fetch_checkpoint(UUID, TEXT)
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_profile_fetch_checkpoint(
+    UUID, TEXT, UUID, TEXT
+)
     TO service_role;
 
 CREATE OR REPLACE FUNCTION public.purge_analysis_v2_profile_fetch_checkpoints(
@@ -969,12 +1041,14 @@ GRANT EXECUTE ON FUNCTION public.purge_analysis_v2_profile_fetch_checkpoints(UUI
     TO service_role;
 
 COMMENT ON FUNCTION public.checkpoint_analysis_v2_profile_primary(
-    UUID, TEXT, TEXT[], JSONB
+    UUID, TEXT, UUID, TEXT, TEXT[], JSONB
 ) IS 'Atomically persists one complete primary outcome set and freezes its exact ordered unresolved usernames; exact replay is idempotent and conflicting replay fails closed.';
 COMMENT ON FUNCTION public.checkpoint_analysis_v2_profile_fallback(
-    UUID, TEXT, JSONB
+    UUID, TEXT, UUID, TEXT, JSONB
 ) IS 'Atomically persists exactly one Apify outcome for every username in the frozen unresolved set without storing provider run identity or credentials.';
-COMMENT ON FUNCTION public.load_analysis_v2_profile_fetch_checkpoint(UUID, TEXT) IS
+COMMENT ON FUNCTION public.load_analysis_v2_profile_fetch_checkpoint(
+    UUID, TEXT, UUID, TEXT
+) IS
     'Loads the strict bounded resume snapshot for one V2 profile job.';
 COMMENT ON FUNCTION public.purge_analysis_v2_profile_fetch_checkpoints(UUID) IS
     'Standalone terminal staging purge. The transactional Phase G finalizer must call this after its canonical preflight/request/job lock order or delete the same request rows inline.';

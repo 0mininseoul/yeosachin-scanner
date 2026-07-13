@@ -49,6 +49,10 @@ describe('analysis V2 profile checkpoint migration contract', () => {
             'FROM public.analysis_preflights AS preflight',
             'FROM public.analysis_requests AS analysis_request',
             'FROM public.analysis_pipeline_jobs AS job',
+            'v_now := pg_catalog.clock_timestamp()',
+            'v_job.input_hash IS DISTINCT FROM p_job_input_hash',
+            'v_job.lease_token IS DISTINCT FROM p_claim_token',
+            'v_job.lease_expires_at <= v_now',
             'FROM public.analysis_v2_profile_fetch_batches AS batch',
             "MESSAGE = 'ANALYSIS_V2_PROFILE_PRIMARY_CONFLICT'",
             "WHERE outcome.value->>'status' <> 'success'",
@@ -64,6 +68,10 @@ describe('analysis V2 profile checkpoint migration contract', () => {
         const fallback = functionDefinition('checkpoint_analysis_v2_profile_fallback');
         expect(fallback).not.toContain('p_requested_usernames');
         expectInOrder(fallback, [
+            'FROM public.analysis_pipeline_jobs AS job',
+            'v_completed_at := pg_catalog.clock_timestamp()',
+            'v_job.input_hash IS DISTINCT FROM p_job_input_hash',
+            'v_job.lease_token IS DISTINCT FROM p_claim_token',
             'FROM public.analysis_v2_profile_fetch_batches AS batch',
             'v_batch.frozen_unresolved_usernames',
             "'fallback'",
@@ -80,6 +88,27 @@ describe('analysis V2 profile checkpoint migration contract', () => {
         expect(validator).toContain(
             "outcome.value->>'username' <> p_expected_usernames[outcome.ordinal::INTEGER]"
         );
+    });
+
+    it('fences load and exact idempotent replay behind the current claim and input hash', () => {
+        for (const name of [
+            'checkpoint_analysis_v2_profile_primary',
+            'checkpoint_analysis_v2_profile_fallback',
+            'load_analysis_v2_profile_fetch_checkpoint',
+        ]) {
+            const definition = functionDefinition(name);
+            expect(definition).toContain('p_claim_token UUID');
+            expect(definition).toContain('p_job_input_hash TEXT');
+            expect(definition).toContain('v_job.input_hash IS DISTINCT FROM p_job_input_hash');
+            expect(definition).toContain('v_job.lease_token IS DISTINCT FROM p_claim_token');
+            expect(definition).toContain('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH');
+        }
+        const primary = functionDefinition('checkpoint_analysis_v2_profile_primary');
+        expect(primary.indexOf('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH'))
+            .toBeLessThan(primary.indexOf('IF FOUND THEN'));
+        const fallback = functionDefinition('checkpoint_analysis_v2_profile_fallback');
+        expect(fallback.indexOf('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH'))
+            .toBeLessThan(fallback.indexOf('v_batch.fallback_completed_at IS NOT NULL'));
     });
 
     it('stores bounded canonical media rather than arbitrary provider payloads', () => {

@@ -13,6 +13,7 @@ const MAX_CAROUSEL_MEDIA = 20;
 const MAX_URL_LENGTH = 8_192;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 const usernameSchema = z.string()
     .trim()
@@ -178,6 +179,8 @@ export interface AnalysisV2ProfileAttemptResultInput {
 export interface AnalysisV2ProfileFetchCheckpointIdentity {
     requestId: string;
     jobKey: string;
+    claimToken: string;
+    jobInputHash: string;
 }
 
 export interface AnalysisV2ProfileFetchCheckpointStore {
@@ -307,7 +310,12 @@ function databaseOutcomes(results: readonly AnalysisV2CheckpointResult[]): unkno
 }
 
 function validateIdentity(input: AnalysisV2ProfileFetchCheckpointIdentity): void {
-    if (!UUID_PATTERN.test(input.requestId) || !JOB_KEY_PATTERN.test(input.jobKey)) {
+    if (
+        !UUID_PATTERN.test(input.requestId)
+        || !JOB_KEY_PATTERN.test(input.jobKey)
+        || !UUID_PATTERN.test(input.claimToken)
+        || !SHA256_PATTERN.test(input.jobInputHash)
+    ) {
         throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: invalid checkpoint identity.');
     }
 }
@@ -376,6 +384,7 @@ function throwRpcError(error: RpcError, operation: string): never {
         'ANALYSIS_V2_PROFILE_FALLBACK_CONFLICT',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_INVALID',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY',
+        'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
     ].find(message => error.message === message);
     if (knownConflict) throw new Error(knownConflict);
     throw new Error(
@@ -405,6 +414,8 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
             {
                 p_request_id: input.requestId,
                 p_job_key: input.jobKey,
+                p_claim_token: input.claimToken,
+                p_job_input_hash: input.jobInputHash,
             }
         );
         if (error) throwRpcError(error, 'checkpoint load');
@@ -425,6 +436,8 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
                 {
                     p_request_id: input.requestId,
                     p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken,
+                    p_job_input_hash: input.jobInputHash,
                     p_requested_usernames: requestedUsernames,
                     p_outcomes: databaseOutcomes(results),
                 }
@@ -454,6 +467,8 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
                 {
                     p_request_id: input.requestId,
                     p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken,
+                    p_job_input_hash: input.jobInputHash,
                     p_outcomes: databaseOutcomes(results),
                 }
             );
