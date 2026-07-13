@@ -424,6 +424,39 @@ export const progressEventV1Schema = z.object({
 export type ProgressSnapshotV1 = z.infer<typeof progressSnapshotV1Schema>;
 export type ProgressEventV1 = z.infer<typeof progressEventV1Schema>;
 
+export const progressReadV1Schema = z.object({
+    schemaVersion: z.literal(ANALYSIS_V2_SCHEMA_VERSION),
+    snapshot: progressSnapshotV1Schema,
+    events: z.array(progressEventV1Schema).max(200),
+}).strict().superRefine((value, context) => {
+    if (value.events.some(event => event.requestId !== value.snapshot.requestId)) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Progress events must belong to the snapshot request.',
+            path: ['events'],
+        });
+    }
+    for (let index = 1; index < value.events.length; index += 1) {
+        if (value.events[index]!.seq !== value.events[index - 1]!.seq + 1) {
+            context.addIssue({
+                code: 'custom',
+                message: 'Progress event pages must be contiguous.',
+                path: ['events', index, 'seq'],
+            });
+        }
+    }
+    if (value.events.at(-1)?.seq !== undefined
+        && value.events.at(-1)!.seq > value.snapshot.lastEventSeq) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Progress events cannot be newer than the snapshot.',
+            path: ['events'],
+        });
+    }
+});
+
+export type ProgressReadV1 = z.infer<typeof progressReadV1Schema>;
+
 const relationshipCoverageSchema = z.object({
     declared: z.number().int().nonnegative(),
     collected: z.number().int().nonnegative(),
