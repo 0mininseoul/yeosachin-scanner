@@ -1,4 +1,4 @@
-export const ANALYSIS_V2_EXECUTION_CAPABILITY = 'preflight_only' as const;
+export const ANALYSIS_V2_EXECUTION_CAPABILITY = 'jobs' as const;
 
 function strictBoolean(value: string | undefined): boolean {
     const normalized = value?.trim().toLowerCase();
