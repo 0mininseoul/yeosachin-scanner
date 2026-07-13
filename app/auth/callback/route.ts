@@ -5,7 +5,9 @@ import { NextResponse } from 'next/server';
 export async function GET(request: Request) {
     const { searchParams, origin } = new URL(request.url);
     const code = searchParams.get('code');
-    const next = searchParams.get('next') ?? '/analyze';
+    // 오픈 리다이렉트 방지: 내부 절대경로('/...')만 허용, 프로토콜-상대('//')·절대 URL 차단
+    const rawNext = searchParams.get('next') ?? '/analyze';
+    const next = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/analyze';
 
     // 리다이렉트 URL 계산
     const forwardedHost = request.headers.get('x-forwarded-host');
