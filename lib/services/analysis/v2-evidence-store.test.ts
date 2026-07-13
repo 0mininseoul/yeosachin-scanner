@@ -11,6 +11,7 @@ import {
     canonicalizeAnalysisV2TargetEvidenceRows,
     canonicalizeAnalysisV2TargetEvidenceSource,
     createAnalysisV2EvidenceStore,
+    createAnalysisV2RelationshipNotApplicableInputHash,
     createAnalysisV2RelationshipResultHash,
     createAnalysisV2TargetEvidenceResultHash,
     deriveAnalysisV2MutualRows,
@@ -55,13 +56,16 @@ function sideResponse(
 ) {
     return {
         side,
+        sourceStatus: declaredCount === 0 ? 'not_applicable' : 'collected',
         revision: 1,
         declaredCount,
         collectedCount: rows.length,
         coverageBps: declaredCount === 0
             ? 10_000
             : Math.floor(rows.length * 10_000 / declaredCount),
-        inputHash,
+        inputHash: declaredCount === 0
+            ? createAnalysisV2RelationshipNotApplicableInputHash(side)
+            : inputHash,
         resultHash: createAnalysisV2RelationshipResultHash(side, rows),
     };
 }
@@ -245,10 +249,13 @@ describe('analysis V2 evidence store', () => {
             claimToken,
             jobInputHash,
             side: 'followers' as const,
-            inputHash,
-            provider: 'apify' as const,
-            providerRunId: 'ApifyRun1234',
-            providerOperationKey: validOperationKey('followers'),
+            source: {
+                status: 'collected' as const,
+                inputHash,
+                provider: 'apify' as const,
+                providerRunId: 'ApifyRun1234',
+                providerOperationKey: validOperationKey('followers'),
+            },
         };
 
         await expect(store.checkpointRelationshipSide({
@@ -282,10 +289,13 @@ describe('analysis V2 evidence store', () => {
             jobInputHash,
             side: 'following',
             declaredCount: 2,
-            inputHash,
-            provider: 'apify',
-            providerRunId: 'ApifyRun1234',
-            providerOperationKey: validOperationKey('following'),
+            source: {
+                status: 'collected',
+                inputHash,
+                provider: 'apify',
+                providerRunId: 'ApifyRun1234',
+                providerOperationKey: validOperationKey('following'),
+            },
             rows,
         })).resolves.toEqual(sideResponse('following', rows));
 
@@ -321,6 +331,91 @@ describe('analysis V2 evidence store', () => {
         );
     });
 
+    it('checkpoints a deterministic zero side without any provider identity', async () => {
+        const { rpc, client } = rpcClient();
+        const zeroInputHash = createAnalysisV2RelationshipNotApplicableInputHash('followers');
+        rpc.mockResolvedValueOnce({
+            data: sideResponse('followers', [], 0),
+            error: null,
+        });
+        const store = createAnalysisV2EvidenceStore(client);
+
+        await expect(store.checkpointRelationshipSide({
+            requestId,
+            jobKey: relationshipJobKey,
+            claimToken,
+            jobInputHash,
+            side: 'followers',
+            declaredCount: 0,
+            source: { status: 'not_applicable', inputHash: zeroInputHash },
+            rows: [],
+        })).resolves.toEqual(sideResponse('followers', [], 0));
+
+        expect(zeroInputHash).toMatch(/^[0-9a-f]{64}$/);
+        expect(zeroInputHash).not.toBe(
+            createAnalysisV2RelationshipNotApplicableInputHash('following')
+        );
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_EVIDENCE_DATABASE_NAMES.checkpointRelationshipNotApplicableRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: relationshipJobKey,
+                p_claim_token: claimToken,
+                p_job_input_hash: jobInputHash,
+                p_side: 'followers',
+            }
+        );
+        expect(JSON.stringify(rpc.mock.calls[0])).not.toMatch(
+            /provider|operation|run_id|p_rows/i
+        );
+    });
+
+    it('rejects forged or non-empty not-applicable relationship proofs before RPC', async () => {
+        const { rpc, client } = rpcClient();
+        const store = createAnalysisV2EvidenceStore(client);
+        const common = {
+            requestId,
+            jobKey: relationshipJobKey,
+            claimToken,
+            jobInputHash,
+            side: 'followers' as const,
+            declaredCount: 0,
+            rows: [] as AnalysisV2RelationshipRowInput[],
+        };
+
+        await expect(store.checkpointRelationshipSide({
+            ...common,
+            source: { status: 'not_applicable', inputHash },
+        })).rejects.toBeInstanceOf(AnalysisV2RelationshipIncompleteError);
+        await expect(store.checkpointRelationshipSide({
+            ...common,
+            source: {
+                status: 'not_applicable',
+                inputHash: createAnalysisV2RelationshipNotApplicableInputHash('followers'),
+            },
+            rows: relationshipRows(1),
+        })).rejects.toBeInstanceOf(AnalysisV2RelationshipIncompleteError);
+        await expect(store.checkpointRelationshipSide({
+            ...common,
+            source: {
+                status: 'not_applicable',
+                inputHash: createAnalysisV2RelationshipNotApplicableInputHash('followers'),
+                providerRunId: 'ForbiddenRun123',
+            } as never,
+        })).rejects.toThrow();
+        await expect(store.checkpointRelationshipSide({
+            ...common,
+            source: {
+                status: 'collected',
+                inputHash,
+                provider: 'apify',
+                providerRunId: 'ApifyRun1234',
+                providerOperationKey: validOperationKey('followers'),
+            },
+        })).rejects.toBeInstanceOf(AnalysisV2RelationshipIncompleteError);
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
     it('rejects the wrong fixed job or missing job input fence before persistence', async () => {
         const rows = relationshipRows(1);
         const { rpc, client } = rpcClient();
@@ -330,10 +425,13 @@ describe('analysis V2 evidence store', () => {
             claimToken,
             side: 'followers' as const,
             declaredCount: 1,
-            inputHash,
-            provider: 'apify' as const,
-            providerRunId: 'ApifyRun1234',
-            providerOperationKey: validOperationKey('followers'),
+            source: {
+                status: 'collected' as const,
+                inputHash,
+                provider: 'apify' as const,
+                providerRunId: 'ApifyRun1234',
+                providerOperationKey: validOperationKey('followers'),
+            },
             rows,
         };
 
@@ -366,10 +464,13 @@ describe('analysis V2 evidence store', () => {
             jobInputHash,
             side: 'followers',
             declaredCount: 2,
-            inputHash,
-            provider: 'apify',
-            providerRunId: 'ApifyRun1234',
-            providerOperationKey: validOperationKey('followers'),
+            source: {
+                status: 'collected',
+                inputHash,
+                provider: 'apify',
+                providerRunId: 'ApifyRun1234',
+                providerOperationKey: validOperationKey('followers'),
+            },
             rows,
         })).rejects.toThrow('relationship checkpoint drift');
     });
@@ -604,10 +705,13 @@ describe('analysis V2 evidence store', () => {
                 jobInputHash,
                 side: 'followers',
                 declaredCount: 1,
-                inputHash,
-                provider: 'apify',
-                providerRunId: 'ApifyRun1234',
-                providerOperationKey: validOperationKey('followers'),
+                source: {
+                    status: 'collected',
+                    inputHash,
+                    provider: 'apify',
+                    providerRunId: 'ApifyRun1234',
+                    providerOperationKey: validOperationKey('followers'),
+                },
                 rows,
             })).rejects.toBeInstanceOf(AnalysisV2EvidenceFenceError);
 
@@ -624,10 +728,13 @@ describe('analysis V2 evidence store', () => {
                 jobInputHash,
                 side: 'followers',
                 declaredCount: 1,
-                inputHash,
-                provider: 'apify',
-                providerRunId: 'ApifyRun1234',
-                providerOperationKey: validOperationKey('followers'),
+                source: {
+                    status: 'collected',
+                    inputHash,
+                    provider: 'apify',
+                    providerRunId: 'ApifyRun1234',
+                    providerOperationKey: validOperationKey('followers'),
+                },
                 rows,
             })).rejects.toBeInstanceOf(AnalysisV2EvidenceConflictError);
     });

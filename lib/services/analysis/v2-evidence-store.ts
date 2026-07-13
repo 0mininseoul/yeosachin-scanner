@@ -87,6 +87,7 @@ export interface AnalysisV2MutualStagingRow
 
 export interface AnalysisV2RelationshipSideManifest {
     side: AnalysisV2RelationshipSide;
+    sourceStatus: 'collected' | 'not_applicable';
     revision: number;
     declaredCount: number;
     collectedCount: number;
@@ -115,17 +116,17 @@ export interface AnalysisV2RelationshipStagingSnapshot {
     detailedMutualLimit: AnalysisV2DetailedMutualLimit;
     manifest: AnalysisV2RelationshipDagManifest;
     followers: AnalysisV2RelationshipSideManifest & {
-        provider: AnalysisV2RelationshipProvider;
-        providerRunId: string;
-        providerOperationKey: string;
-        providerCredentialSlot: 'primary' | 'secondary';
+        provider: 'apify' | null;
+        providerRunId: string | null;
+        providerOperationKey: string | null;
+        providerCredentialSlot: 'primary' | 'secondary' | null;
         rows: AnalysisV2CanonicalRelationshipRow[];
     };
     following: AnalysisV2RelationshipSideManifest & {
-        provider: AnalysisV2RelationshipProvider;
-        providerRunId: string;
-        providerOperationKey: string;
-        providerCredentialSlot: 'primary' | 'secondary';
+        provider: 'apify' | null;
+        providerRunId: string | null;
+        providerOperationKey: string | null;
+        providerCredentialSlot: 'primary' | 'secondary' | null;
         rows: AnalysisV2CanonicalRelationshipRow[];
     };
     mutualRows: AnalysisV2MutualStagingRow[];
@@ -211,14 +212,24 @@ export interface AnalysisV2EvidenceJobClaim {
     jobInputHash: string;
 }
 
+export type AnalysisV2RelationshipSideSourceInput =
+    | {
+        status: 'collected';
+        inputHash: string;
+        provider: 'apify';
+        providerRunId: string;
+        providerOperationKey: string;
+    }
+    | {
+        status: 'not_applicable';
+        inputHash: string;
+    };
+
 export interface AnalysisV2RelationshipSideCheckpointInput
     extends AnalysisV2EvidenceJobClaim {
     side: AnalysisV2RelationshipSide;
     declaredCount: number;
-    inputHash: string;
-    provider: AnalysisV2RelationshipProvider;
-    providerRunId: string;
-    providerOperationKey: string;
+    source: AnalysisV2RelationshipSideSourceInput;
     rows: readonly AnalysisV2RelationshipRowInput[];
 }
 
@@ -268,6 +279,8 @@ export const ANALYSIS_V2_EVIDENCE_DATABASE_NAMES = Object.freeze({
     targetManifestTable: 'analysis_v2_target_evidence_manifests',
     targetInteractorTable: 'analysis_target_interactors',
     checkpointRelationshipSideRpc: 'checkpoint_analysis_v2_relationship_side',
+    checkpointRelationshipNotApplicableRpc:
+        'checkpoint_analysis_v2_relationship_side_not_applicable',
     freezeRelationshipsRpc: 'freeze_analysis_v2_relationships',
     loadRelationshipStagingRpc: 'load_analysis_v2_relationship_staging',
     checkpointTargetEvidenceRpc: 'checkpoint_analysis_v2_target_evidence',
@@ -319,6 +332,7 @@ export class AnalysisV2RelationshipIncompleteError extends Error {
 
 const relationshipSideManifestSchema = z.object({
     side: z.enum(['followers', 'following']),
+    sourceStatus: z.enum(['collected', 'not_applicable']),
     revision: z.number().int().min(1).max(32_767),
     declaredCount: z.number().int().min(0).max(ANALYSIS_V2_RELATIONSHIP_SIDE_LIMIT),
     collectedCount: z.number().int().min(0).max(ANALYSIS_V2_RELATIONSHIP_SIDE_LIMIT),
@@ -364,12 +378,26 @@ const mutualRowSchema = canonicalRelationshipRowSchema.extend({
 }).strict();
 
 const relationshipStagingSideSchema = relationshipSideManifestSchema.extend({
-    provider: z.enum(['apify', 'coderx']),
-    providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN),
-    providerOperationKey: z.string().max(128),
-    providerCredentialSlot: z.enum(['primary', 'secondary']),
+    provider: z.literal('apify').nullable(),
+    providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN).nullable(),
+    providerOperationKey: z.string().max(128).nullable(),
+    providerCredentialSlot: z.enum(['primary', 'secondary']).nullable(),
     rows: z.array(canonicalRelationshipRowSchema).max(ANALYSIS_V2_RELATIONSHIP_SIDE_LIMIT),
 }).strict();
+
+const relationshipSideSourceInputSchema = z.discriminatedUnion('status', [
+    z.object({
+        status: z.literal('collected'),
+        inputHash: z.string().regex(SHA256_PATTERN),
+        provider: z.literal('apify'),
+        providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN),
+        providerOperationKey: z.string().max(128),
+    }).strict(),
+    z.object({
+        status: z.literal('not_applicable'),
+        inputHash: z.string().regex(SHA256_PATTERN),
+    }).strict(),
+]);
 
 const detailedLimitSchema = z.union([
     z.literal(300),
@@ -536,6 +564,13 @@ export function createAnalysisV2RelationshipResultHash(
     return sha256(
         `analysis-v2-relationship-result-v2\n${side}\n${relationshipRowHashMaterial(rows)}`
     );
+}
+
+export function createAnalysisV2RelationshipNotApplicableInputHash(
+    side: AnalysisV2RelationshipSide
+): string {
+    const parsedSide = z.enum(['followers', 'following']).parse(side);
+    return sha256(`analysis-v2-relationship-not-applicable-v1\n${parsedSide}\n0`);
 }
 
 export function deriveAnalysisV2MutualRows(input: {
@@ -983,10 +1018,34 @@ function assertRelationshipSnapshotIntegrity(
 ): void {
     for (const side of ['followers', 'following'] as const) {
         const staged = snapshot[side];
-        relationshipOperationKey(side, staged.providerOperationKey);
         const expectedCoverage = staged.declaredCount === 0
             ? 10_000
             : Math.floor(staged.rows.length * 10_000 / staged.declaredCount);
+        const isNotApplicable = staged.sourceStatus === 'not_applicable';
+        if (isNotApplicable) {
+            if (
+                staged.declaredCount !== 0
+                || staged.rows.length !== 0
+                || staged.inputHash !== createAnalysisV2RelationshipNotApplicableInputHash(side)
+                || staged.provider !== null
+                || staged.providerRunId !== null
+                || staged.providerOperationKey !== null
+                || staged.providerCredentialSlot !== null
+            ) {
+                persistenceDrift(`${side} relationship source`);
+            }
+        } else {
+            if (
+                staged.declaredCount === 0
+                || staged.provider !== 'apify'
+                || staged.providerRunId === null
+                || staged.providerOperationKey === null
+                || staged.providerCredentialSlot === null
+            ) {
+                persistenceDrift(`${side} relationship source`);
+            }
+            relationshipOperationKey(side, staged.providerOperationKey);
+        }
         if (
             staged.collectedCount !== staged.rows.length
             || staged.coverageBps !== expectedCoverage
@@ -1104,30 +1163,43 @@ export function createAnalysisV2EvidenceStore(
             );
             const rows = canonicalRelationshipRows(input.rows);
             const minimum = Math.ceil(declaredCount * 0.99);
-            if (
-                rows.length > declaredCount
+            const source = relationshipSideSourceInputSchema.parse(input.source);
+            const inputHash = requiredHash(source.inputHash, 'relationship input');
+            if (source.status === 'not_applicable') {
+                if (
+                    declaredCount !== 0
+                    || rows.length !== 0
+                    || inputHash !== createAnalysisV2RelationshipNotApplicableInputHash(side)
+                ) {
+                    throw new AnalysisV2RelationshipIncompleteError();
+                }
+            } else if (
+                declaredCount === 0
+                || rows.length > declaredCount
                 || rows.length < minimum
-                || (declaredCount === 0 && rows.length !== 0)
             ) {
                 throw new AnalysisV2RelationshipIncompleteError();
             }
-            const provider = z.enum(['apify', 'coderx'])
-                .parse(input.provider);
-            if (!PROVIDER_RUN_ID_PATTERN.test(input.providerRunId)) {
-                throw new Error(
-                    'ANALYSIS_V2_EVIDENCE_VALIDATION_ERROR: invalid provider run id.'
-                );
-            }
-            const inputHash = requiredHash(input.inputHash, 'relationship input');
             const resultHash = createAnalysisV2RelationshipResultHash(side, rows);
-            const providerOperationKey = relationshipOperationKey(
-                side,
-                input.providerOperationKey
-            );
+            const providerOperationKey = source.status === 'collected'
+                ? relationshipOperationKey(side, source.providerOperationKey)
+                : null;
 
-            const { data, error } = await client.rpc(
-                ANALYSIS_V2_EVIDENCE_DATABASE_NAMES.checkpointRelationshipSideRpc,
-                {
+            const { data, error } = source.status === 'not_applicable'
+                ? await client.rpc(
+                    ANALYSIS_V2_EVIDENCE_DATABASE_NAMES
+                        .checkpointRelationshipNotApplicableRpc,
+                    {
+                        p_request_id: input.requestId.toLowerCase(),
+                        p_job_key: input.jobKey,
+                        p_claim_token: input.claimToken.toLowerCase(),
+                        p_job_input_hash: input.jobInputHash,
+                        p_side: side,
+                    }
+                )
+                : await client.rpc(
+                    ANALYSIS_V2_EVIDENCE_DATABASE_NAMES.checkpointRelationshipSideRpc,
+                    {
                     p_request_id: input.requestId.toLowerCase(),
                     p_job_key: input.jobKey,
                     p_claim_token: input.claimToken.toLowerCase(),
@@ -1136,12 +1208,12 @@ export function createAnalysisV2EvidenceStore(
                     p_declared_count: declaredCount,
                     p_input_hash: inputHash,
                     p_result_hash: resultHash,
-                    p_provider: provider,
-                    p_provider_run_id: input.providerRunId,
+                    p_provider: source.provider,
+                    p_provider_run_id: source.providerRunId,
                     p_provider_operation_key: providerOperationKey,
                     p_rows: relationshipRowsForDatabase(rows),
-                }
-            );
+                    }
+                );
             if (error) throwRpcError(error, 'relationship side checkpoint');
             const result = parseResponse(
                 relationshipSideManifestSchema,
@@ -1150,6 +1222,7 @@ export function createAnalysisV2EvidenceStore(
             );
             if (
                 result.side !== side
+                || result.sourceStatus !== source.status
                 || result.declaredCount !== declaredCount
                 || result.collectedCount !== rows.length
                 || result.coverageBps !== (declaredCount === 0

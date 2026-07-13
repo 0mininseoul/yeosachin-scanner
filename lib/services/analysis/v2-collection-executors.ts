@@ -29,6 +29,7 @@ import {
 } from './v2-dag-planner';
 import {
     analysisV2EvidenceStore,
+    createAnalysisV2RelationshipNotApplicableInputHash,
     type AnalysisV2EvidenceStore,
     type AnalysisV2RelationshipRowInput,
     type AnalysisV2TargetEvidenceSourceInput,
@@ -334,7 +335,16 @@ export function createAnalysisV2RelationshipsExecutor(
                 ? request.followersDeclaredCount
                 : request.followingDeclaredCount;
             if (declaredCount === 0) {
-                throw new Error('ANALYSIS_V2_RELATIONSHIP_ZERO_COUNT_PROVIDER_PROOF_UNSUPPORTED');
+                return dependencies.evidenceStore.checkpointRelationshipSide({
+                    ...claim,
+                    side,
+                    declaredCount,
+                    source: {
+                        status: 'not_applicable',
+                        inputHash: createAnalysisV2RelationshipNotApplicableInputHash(side),
+                    },
+                    rows: [],
+                });
             }
             const canonicalInput = canonicalRelationshipIdentity({
                 side,
@@ -374,10 +384,13 @@ export function createAnalysisV2RelationshipsExecutor(
                 ...claim,
                 side,
                 declaredCount,
-                inputHash,
-                provider: 'apify',
-                providerRunId: run.runId,
-                providerOperationKey: operationKey,
+                source: {
+                    status: 'collected',
+                    inputHash,
+                    provider: 'apify',
+                    providerRunId: run.runId,
+                    providerOperationKey: operationKey,
+                },
                 rows: relationshipRows(rows),
             });
         };

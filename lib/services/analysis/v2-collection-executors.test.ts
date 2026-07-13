@@ -335,11 +335,12 @@ describe('analysis V2 concrete collection executors', () => {
         const providers = providerStore();
         const checkpointRelationshipSide = vi.fn(async (input) => ({
             side: input.side,
+            sourceStatus: input.source.status,
             revision: 1,
             declaredCount: input.declaredCount,
             collectedCount: input.rows.length,
             coverageBps: 10_000,
-            inputHash: input.inputHash,
+            inputHash: input.source.inputHash,
             resultHash,
         }));
         const evidence = {
@@ -388,6 +389,73 @@ describe('analysis V2 concrete collection executors', () => {
         expect(result.checkpoint.manifest.profileBatches).toHaveLength(1);
         expect(result.checkpoint.manifest.privateNameBatches).toHaveLength(1);
         expect(JSON.stringify(getFollowersMock.mock.calls)).not.toContain('cookie');
+    });
+
+    it('freezes exact zero relationship sides without reserving or starting Actors', async () => {
+        const providers = providerStore();
+        const getFollowersMock = vi.fn();
+        const getFollowingMock = vi.fn();
+        const checkpointRelationshipSide = vi.fn(async (input) => ({
+            side: input.side,
+            sourceStatus: input.source.status,
+            revision: 1,
+            declaredCount: input.declaredCount,
+            collectedCount: input.rows.length,
+            coverageBps: 10_000,
+            inputHash: input.source.inputHash,
+            resultHash,
+        }));
+        const evidence = {
+            checkpointRelationshipSide,
+            freezeRelationships: vi.fn(async () => ({
+                revision: 1,
+                resultHash,
+                exclusionDecisionHash: 'f'.repeat(64),
+                followersResultHash: resultHash,
+                followingResultHash: resultHash,
+                mutualCount: 0,
+                publicCount: 0,
+                privateCount: 0,
+                detailedPublicCount: 0,
+                unscreenedPublicCount: 0,
+            })),
+            loadRelationshipStaging: vi.fn(async () => ({
+                excludedUsername: 'girlfriend',
+                detailedPublicUsernames: [],
+                privateMutualUsernames: [],
+            })),
+        } as unknown as AnalysisV2EvidenceStore;
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                followersDeclaredCount: 0,
+                followingDeclaredCount: 0,
+            })),
+            evidenceStore: evidence,
+            providerRunStore: providers.value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+        });
+
+        const result = await executor(stageContext('relationships', state()));
+
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(providers.load).not.toHaveBeenCalled();
+        expect(getFollowersMock).not.toHaveBeenCalled();
+        expect(getFollowingMock).not.toHaveBeenCalled();
+        expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
+        const sources = checkpointRelationshipSide.mock.calls.map(([input]) => input.source);
+        expect(sources).toEqual([
+            expect.objectContaining({ status: 'not_applicable' }),
+            expect.objectContaining({ status: 'not_applicable' }),
+        ]);
+        expect(sources[0]?.inputHash).toMatch(/^[0-9a-f]{64}$/);
+        expect(sources[0]?.inputHash).not.toBe(sources[1]?.inputHash);
+        expect(JSON.stringify(sources)).not.toMatch(/provider|operation|runId/i);
+        expect(result.checkpoint.manifest).toMatchObject({
+            detectedMutualCount: 0,
+            profileBatches: [],
+            privateNameBatches: [],
+        });
     });
 
     it('fails before provider work on stale leases and declared-count/plan drift', async () => {
