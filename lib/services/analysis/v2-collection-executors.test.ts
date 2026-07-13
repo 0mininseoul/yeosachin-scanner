@@ -630,7 +630,7 @@ describe('analysis V2 concrete collection executors', () => {
         );
     });
 
-    it('rejects wrong batches, girlfriend leakage, partial terminal outcomes, and ambiguous starts', async () => {
+    it('rejects wrong batches, girlfriend leakage, ambiguous failures, and ambiguous starts', async () => {
         const usernames = ['alice', 'bob'];
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
         const dagState = state({ relationships: relationshipManifest(topology) });
@@ -656,7 +656,7 @@ describe('analysis V2 concrete collection executors', () => {
             0
         ))).rejects.toThrow('ANALYSIS_V2_GIRLFRIEND_EXCLUSION_LEAK');
 
-        const partial = inMemoryProfileStore({
+        const verifiedUnavailable = inMemoryProfileStore({
             ...completedResume(usernames, [success('alice'), failure('bob')]),
             frozenUnresolvedUsernames: ['bob'],
             fallbackResults: [
@@ -667,7 +667,23 @@ describe('analysis V2 concrete collection executors', () => {
         await expect(createAnalysisV2ProfileFetchExecutor({
             requestContextStore: contextStore(requestContext()),
             evidenceStore: relationshipEvidence(usernames),
-            profileCheckpointStore: partial.store,
+            profileCheckpointStore: verifiedUnavailable.store,
+        })(stageContext('profile_fetch', dagState, 0))).resolves.toMatchObject({
+            checkpoint: { manifest: { itemCount: 2 } },
+        });
+
+        const ambiguousTerminal = inMemoryProfileStore({
+            ...completedResume(usernames, [success('alice'), failure('bob')]),
+            frozenUnresolvedUsernames: ['bob'],
+            fallbackResults: [
+                failure('bob', 'apify') as AnalysisV2ProfileFetchResume['fallbackResults'][number],
+            ],
+            fallbackCapturedAt: capturedAt,
+        });
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: ambiguousTerminal.store,
         })(stageContext('profile_fetch', dagState, 0))).rejects.toThrow(
             'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE'
         );

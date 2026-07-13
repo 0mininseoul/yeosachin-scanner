@@ -36,6 +36,7 @@ import {
 import {
     analysisV2ProfileFetchCheckpointStore,
     type AnalysisV2CheckpointProfile,
+    type AnalysisV2CheckpointResult,
     type AnalysisV2ProfileAttemptResultInput,
     type AnalysisV2ProfileFetchCheckpointIdentity,
     type AnalysisV2ProfileFetchCheckpointStore,
@@ -524,6 +525,20 @@ function durableSuccessfulProfiles(
     resume: AnalysisV2ProfileFetchResume,
     requestedUsernames: readonly string[]
 ): AnalysisV2CheckpointProfile[] {
+    const final = durableTerminalProfileResults(resume, requestedUsernames);
+    if (final.some(result => result.outcome.status !== 'success' || !('profile' in result))) {
+        throw new Error('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+    }
+    return final.map(result => {
+        if (!('profile' in result)) throw new Error('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+        return result.profile;
+    });
+}
+
+function durableTerminalProfileResults(
+    resume: AnalysisV2ProfileFetchResume,
+    requestedUsernames: readonly string[]
+): AnalysisV2CheckpointResult[] {
     if (
         resume.requestedUsernames.length !== requestedUsernames.length
         || resume.requestedUsernames.some((username, index) => username !== requestedUsernames[index])
@@ -533,26 +548,23 @@ function durableSuccessfulProfiles(
     const final = finalCheckpointResults(resume);
     if (
         final.length !== requestedUsernames.length
-        || final.some(result => result.outcome.status !== 'success' || !('profile' in result))
+        || final.some(result => result.outcome.status === 'failed')
     ) {
         throw new Error('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
     }
-    return final.map(result => {
-        if (!('profile' in result)) throw new Error('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
-        return result.profile;
-    });
+    return final;
 }
 
 function profileBatchResultHash(
     requestedUsernames: readonly string[],
-    profiles: readonly AnalysisV2CheckpointProfile[]
+    results: readonly AnalysisV2CheckpointResult[]
 ): string {
     return sha256([
         'analysis-v2-profile-batch-result-v1',
         ...requestedUsernames.map((username, index) => [
             index + 1,
             lengthPrefixed(username),
-            lengthPrefixed(JSON.stringify(profiles[index])),
+            lengthPrefixed(JSON.stringify(results[index])),
         ].join('|')),
     ].join('\n'));
 }
@@ -785,7 +797,7 @@ export function createAnalysisV2ProfileFetchExecutor(
         }
 
         const resume = await durableProfiles({ dependencies, claim, usernames });
-        const profiles = durableSuccessfulProfiles(resume, usernames);
+        const results = durableTerminalProfileResults(resume, usernames);
         return Object.freeze({
             checkpoint: Object.freeze({
                 kind: 'profile_fetch_batch' as const,
@@ -794,7 +806,7 @@ export function createAnalysisV2ProfileFetchExecutor(
                     itemCount: usernames.length,
                     producerInputHash: context.job.inputHash,
                     revision: 1,
-                    resultHash: profileBatchResultHash(usernames, profiles),
+                    resultHash: profileBatchResultHash(usernames, results),
                 }),
             }),
         });
