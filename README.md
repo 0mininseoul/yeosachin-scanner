@@ -172,6 +172,10 @@ ai-baram-detector/
 |--------|------|
 | `users` | 사용자 정보, 분석 횟수 |
 | `analysis_requests` | 분석 요청 상태/진행률/단계 데이터 |
+| `analysis_step_events` | PII 없는 단계별 시작/완료/재시도/실패와 지연시간 |
+| `analysis_provider_usage_expectations` | 유료 Actor 시작 전 고정한 작업과 최대 과금액 |
+| `analysis_gemini_usage_expectations` | Gemini 실행 전 고정한 예상 비용 로그 수 |
+| `analysis_operational_cost_summary` | 요청별 Apify 실제액, 보수 상한, Gemini 추정액 통합 view |
 | `analysis_results` | 위험도 순위 결과 (share_token 포함) |
 | `comment_details` | 친밀한 댓글 상세 정보 (현재 수집/분석 파이프라인 미연결) |
 | `private_accounts` | 비공개 계정과 username/full_name 기반 여성형 이름 확률 정렬값 |
@@ -194,6 +198,10 @@ ai-baram-detector/
 - `POST /api/analysis/start`의 `scraperOptions`는 `ADMIN_API_KEY` Bearer 인증을 통과한 요청만 허용하며, 선택값은 해당 분석 요청에 저장됩니다.
 
 허용 조합, 기능별 폴백 규칙, 완전성 기준과 canary 절차의 기준 문서는 [Instagram 프로바이더 운영 가이드](lib/services/instagram/README.md)입니다.
+
+### 운영 관측성
+
+Vercel runtime log만으로 비용과 단계 이력을 판단하지 않습니다. 파이프라인은 `analysis_step_events`에 PII 없는 이벤트를 남기고, `analysis_operational_cost_summary`가 Apify 원장과 Gemini 추정 비용을 `requestId`별로 집계합니다. 운영자 조회는 `GET /api/admin/analysis-observability?requestId=<uuid>`이며 `ADMIN_API_KEY` Bearer 인증이 필요합니다. 원가 정의와 중복 집계 방지 규칙은 [운영 비용 및 가격 모델](docs/operations-cost-model.md)에 정리되어 있습니다.
 
 ## 스크립트
 

@@ -21,6 +21,7 @@ import {
 import {
     analyzePrivateAccountNames,
     createPrivateNameBatchResponseSchema,
+    PRIVATE_NAME_BATCH_SIZE,
     type PrivateNameAnalysisResult,
 } from '@/lib/services/ai/private-name-analysis';
 import {
@@ -66,6 +67,7 @@ import {
     PROFILE_BATCH_SIZE,
     calculateBatchProgress,
     compactCompletedStepData,
+    getPendingAnalysisSubBatches,
     resolveProfileProviderBatchUsernames,
 } from '@/lib/services/analysis/steps';
 import {
@@ -147,6 +149,11 @@ import {
     clearGeminiGeneration,
     rejectUnresolvedGeminiGeneration,
 } from '@/lib/services/analysis/gemini-generation-intent';
+import {
+    classifyAnalysisFailure,
+    recordAnalysisStepEvent,
+} from '@/lib/services/analysis/observability';
+import { recordGeminiUsageExpectation } from '@/lib/services/analysis/gemini-usage-expectation';
 
 const MAX_INTERACTION_EVIDENCE_ROWS = 2_500;
 
@@ -231,6 +238,9 @@ export async function POST(request: Request) {
 
         let stepSucceeded = false;
         let leasedStepData: StepData = {};
+        let deliveryAttempt: number | null = null;
+        let stepProgress = Number(analysisRequest.progress ?? 0);
+        const stepStartedAt = Date.now();
         try {
             // The lease CASes the broad step name. Batch cursors can advance while a
             // delayed worker waits for that lease, so execution state is read again
@@ -256,6 +266,7 @@ export async function POST(request: Request) {
             currentStep = (leasedAnalysisRequest.current_step || 'pending') as AnalysisStep;
             const stepData: StepData = leasedAnalysisRequest.step_data || {};
             leasedStepData = stepData;
+            stepProgress = Number(leasedAnalysisRequest.progress ?? stepProgress);
             const scraperOptions = parseScraperProviderSelection(stepData.scraperOptions);
             const targetId = leasedAnalysisRequest.target_instagram_id;
             const scrapeLimit = getRelationshipScrapeLimit(leasedAnalysisRequest.plan_type);
@@ -263,6 +274,7 @@ export async function POST(request: Request) {
                 request.headers,
                 isBackgroundTask
             );
+            deliveryAttempt = deliveryRetryCount === null ? null : deliveryRetryCount + 1;
             if (shouldAbortPipelineBeforeExecution(deliveryRetryCount)) {
                 await abortPaidProviderRunsBeforeFailure(
                     requestId,
@@ -281,6 +293,15 @@ export async function POST(request: Request) {
                         { status: 409 }
                     );
                 }
+                await recordAnalysisStepEvent(supabaseAdmin, {
+                    requestId,
+                    step: currentStep,
+                    eventType: 'aborted',
+                    deliveryAttempt,
+                    progress: stepProgress,
+                    latencyMs: Date.now() - stepStartedAt,
+                    failureCategory: 'retry_exhausted',
+                });
                 return NextResponse.json({
                     success: false,
                     step: 'failed',
@@ -288,6 +309,14 @@ export async function POST(request: Request) {
                     done: true,
                 });
             }
+
+            await recordAnalysisStepEvent(supabaseAdmin, {
+                requestId,
+                step: currentStep,
+                eventType: 'started',
+                deliveryAttempt,
+                progress: stepProgress,
+            });
 
             // 현재 단계에 따라 처리
             const stepResponse = await (async () => {
@@ -323,7 +352,11 @@ export async function POST(request: Request) {
                     );
 
                 case 'analyze':
-                    return await processAnalyze(requestId, stepData);
+                    return await processAnalyze(
+                        requestId,
+                        leasedAnalysisRequest.user_id,
+                        stepData
+                    );
 
                 case 'interactions':
                     return await processInteractions(
@@ -334,7 +367,12 @@ export async function POST(request: Request) {
                     );
 
                 case 'deep_analysis':
-                    return await processDeepAnalysis(requestId, targetId, stepData);
+                    return await processDeepAnalysis(
+                        requestId,
+                        leasedAnalysisRequest.user_id,
+                        targetId,
+                        stepData
+                    );
 
                 case 'finalize':
                     return await processFinalize(requestId, leasedAnalysisRequest, stepData);
@@ -358,6 +396,15 @@ export async function POST(request: Request) {
                 }
             })();
             stepSucceeded = stepResponse.ok;
+            await recordAnalysisStepEvent(supabaseAdmin, {
+                requestId,
+                step: currentStep,
+                eventType: stepResponse.ok ? 'completed' : 'failed',
+                deliveryAttempt,
+                progress: stepProgress,
+                latencyMs: Date.now() - stepStartedAt,
+                failureCategory: stepResponse.ok ? null : 'unknown',
+            });
             return stepResponse;
         } catch (pipelineError) {
             const errorMessage = pipelineError instanceof Error ? pipelineError.message : 'Unknown error';
@@ -378,12 +425,29 @@ export async function POST(request: Request) {
                     }
                 );
                 if (semanticRetryCount === null) {
+                    await recordAnalysisStepEvent(supabaseAdmin, {
+                        requestId,
+                        step: currentStep,
+                        eventType: 'skipped',
+                        deliveryAttempt,
+                        progress: stepProgress,
+                        latencyMs: Date.now() - stepStartedAt,
+                    });
                     return NextResponse.json(
                         { error: 'Analysis state advanced before retry was recorded.' },
                         { status: 409 }
                     );
                 }
                 if (semanticRetryCount <= MAX_CLOUD_TASK_PIPELINE_RETRIES) {
+                    await recordAnalysisStepEvent(supabaseAdmin, {
+                        requestId,
+                        step: currentStep,
+                        eventType: 'retrying',
+                        deliveryAttempt,
+                        progress: stepProgress,
+                        latencyMs: Date.now() - stepStartedAt,
+                        failureCategory: classifyAnalysisFailure(pipelineError),
+                    });
                     return NextResponse.json(
                         {
                             error: errorMessage,
@@ -413,6 +477,16 @@ export async function POST(request: Request) {
                     { status: 409 }
                 );
             }
+
+            await recordAnalysisStepEvent(supabaseAdmin, {
+                requestId,
+                step: currentStep,
+                eventType: 'failed',
+                deliveryAttempt,
+                progress: stepProgress,
+                latencyMs: Date.now() - stepStartedAt,
+                failureCategory: classifyAnalysisFailure(pipelineError),
+            });
 
             return NextResponse.json({ error: errorMessage, step: currentStep }, { status: 500 });
         } finally {
@@ -743,6 +817,16 @@ async function processCollect(
             25,
             '비공개 계정 이름 분류 중...'
         );
+        await recordGeminiUsageExpectation(supabaseAdmin, {
+            requestId,
+            userId,
+            expectedStep: 'collect',
+            operationKey: 'private-names',
+            generationKind: 'private_names',
+            expectedRecordCount: Math.ceil(
+                privateNameInputs.length / PRIVATE_NAME_BATCH_SIZE
+            ),
+        });
         try {
             privateNameResults = await analyzePrivateAccountNames(privateNameInputs, requestId);
         } catch {
@@ -1012,7 +1096,7 @@ async function processProfiles(
 }
 
 // Step 3: 통합 분석 (성별 + 여성인 경우 외모/노출) + 캐싱 + 토큰 추적
-async function processAnalyze(requestId: string, stepData: StepData) {
+async function processAnalyze(requestId: string, userId: string, stepData: StepData) {
     rejectUnresolvedGeminiGeneration(stepData);
     const accountsWithPosts = stepData.accountsWithPosts || [];
     const batchIndex = stepData.analyzeBatchIndex || 0;
@@ -1092,16 +1176,20 @@ async function processAnalyze(requestId: string, stepData: StepData) {
 
     // 품질 모드의 이미지 디코딩 부하를 고려해 기본 5, 환경 변수로 최대 10까지 조절
     const subBatchSize = getVertexAIAnalysisConcurrency();
-    const pendingBatch = batch.filter(account => (
-        !Object.prototype.hasOwnProperty.call(combinedResults, account.profile.username)
-    ));
-    for (let i = 0; i < pendingBatch.length; i += subBatchSize) {
-        const subBatch = pendingBatch.slice(i, i + subBatchSize);
+    const pendingSubBatches = getPendingAnalysisSubBatches(
+        batch,
+        subBatchSize,
+        account => Object.prototype.hasOwnProperty.call(
+            combinedResults,
+            account.profile.username
+        )
+    );
+    for (const { operationIndex, items: subBatch } of pendingSubBatches) {
         const generationStepData = beginGeminiGeneration(
             { ...stepData, combinedResults: { ...combinedResults } },
             {
                 kind: 'combined',
-                operationKey: `combined:${batchIndex}:${Math.floor(i / subBatchSize)}`,
+                operationKey: `combined:${batchIndex}:${operationIndex}`,
                 inputIds: subBatch.map(account => account.profile.username),
             }
         );
@@ -1112,6 +1200,14 @@ async function processAnalyze(requestId: string, stepData: StepData) {
             progress,
             `AI 분석 중... (${batchIndex + 1}/${totalBatches})`
         );
+        await recordGeminiUsageExpectation(supabaseAdmin, {
+            requestId,
+            userId,
+            expectedStep: 'analyze',
+            operationKey: `combined:${batchIndex}:${operationIndex}`,
+            generationKind: 'combined',
+            expectedRecordCount: subBatch.length,
+        });
         const outcomes = await Promise.allSettled(
             subBatch.map(account => analyzeCombined({
                 profile: account.profile as Parameters<typeof analyzeCombined>[0]['profile'],
@@ -2038,6 +2134,7 @@ async function getPersistedInteractionScores(
 // Step 5: 최상위 위험 계정의 프로필·피드·상호작용 근거를 병렬 심층 분석
 async function processDeepAnalysis(
     requestId: string,
+    userId: string,
     targetId: string,
     stepData: StepData
 ) {
@@ -2102,6 +2199,14 @@ async function processDeepAnalysis(
         94,
         `위험 계정 심층 분석 중... (${highRiskAccounts.length}명)`
     );
+    await recordGeminiUsageExpectation(supabaseAdmin, {
+        requestId,
+        userId,
+        expectedStep: 'deep_analysis',
+        operationKey: 'deep-risk:0',
+        generationKind: 'deep_risk',
+        expectedRecordCount: highRiskAccounts.length,
+    });
 
     const deepAnalysisResults = await Promise.allSettled(
         highRiskAccounts.map(async ({ account, username, score }) => {

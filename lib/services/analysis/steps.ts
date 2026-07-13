@@ -67,6 +67,30 @@ export function calculateBatchProgress(
     return Math.round(stepProgress.min + batchProgress);
 }
 
+export function getPendingAnalysisSubBatches<T>(
+    batch: readonly T[],
+    subBatchSize: number,
+    isCompleted: (item: T) => boolean
+): Array<{ operationIndex: number; items: T[] }> {
+    if (!Number.isSafeInteger(subBatchSize) || subBatchSize < 1) {
+        throw new Error('Invalid analysis sub-batch size.');
+    }
+
+    const pending: Array<{ operationIndex: number; items: T[] }> = [];
+    for (let start = 0; start < batch.length; start += subBatchSize) {
+        const items = batch
+            .slice(start, start + subBatchSize)
+            .filter(item => !isCompleted(item));
+        if (items.length > 0) {
+            pending.push({
+                operationIndex: Math.floor(start / subBatchSize),
+                items,
+            });
+        }
+    }
+    return pending;
+}
+
 // step_data 타입 정의
 export interface StepData {
     scraperOptions?: ScraperProviderSelection;
