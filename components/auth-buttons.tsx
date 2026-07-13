@@ -1,31 +1,39 @@
 'use client';
 
-import { useAuth } from '@/hooks/useAuth';
+import { useState } from 'react';
+import { createClient } from '@/lib/supabase/client';
 
 // Kakao / Google OAuth buttons, shared by the /login page and the login modal.
+// 로그인 버튼만 필요하므로 full useAuth(유저 조회/구독) 대신 supabase를 직접 호출한다.
 export function AuthButtons({ redirectTo = '/analyze' }: { redirectTo?: string }) {
-    const { signInWithKakao, signInWithGoogle, loading } = useAuth();
+    const [pending, setPending] = useState<'kakao' | 'google' | null>(null);
 
-    const kakao = async () => {
+    const signIn = async (provider: 'kakao' | 'google') => {
+        setPending(provider);
         try {
-            await signInWithKakao(redirectTo);
+            const supabase = createClient();
+            const { error } = await supabase.auth.signInWithOAuth({
+                provider,
+                options: {
+                    redirectTo: `${window.location.origin}/auth/callback?next=${redirectTo}`,
+                },
+            });
+            if (error) {
+                console.error(`${provider} login error:`, error);
+                setPending(null);
+            }
+            // 성공 시 브라우저가 OAuth 제공자로 리다이렉트됨
         } catch (e) {
-            console.error('Kakao login error:', e);
-        }
-    };
-    const google = async () => {
-        try {
-            await signInWithGoogle(redirectTo);
-        } catch (e) {
-            console.error('Google login error:', e);
+            console.error(`${provider} login error:`, e);
+            setPending(null);
         }
     };
 
     return (
         <div className="space-y-2.5">
             <button
-                onClick={kakao}
-                disabled={loading}
+                onClick={() => signIn('kakao')}
+                disabled={pending !== null}
                 className="flex w-full items-center justify-center gap-2.5 bg-[#FEE500] px-4 py-3.5 text-[14px] font-bold text-[#3C1E1E] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor">
@@ -35,8 +43,8 @@ export function AuthButtons({ redirectTo = '/analyze' }: { redirectTo?: string }
             </button>
 
             <button
-                onClick={google}
-                disabled={loading}
+                onClick={() => signIn('google')}
+                disabled={pending !== null}
                 className="flex w-full items-center justify-center gap-2.5 border border-line-2 bg-paper px-4 py-3.5 text-[14px] font-bold text-[#1f1c1a] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
                 <svg width="18" height="18" viewBox="0 0 24 24">
