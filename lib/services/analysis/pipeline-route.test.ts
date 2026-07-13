@@ -185,6 +185,24 @@ describe('analysis step route orchestration', () => {
         );
     });
 
+    it('never executes a persisted V2 request through the paid V1 state machine', async () => {
+        const admin = installFluentAdminMock();
+        mocks.verifyTask.mockResolvedValue(false);
+        admin.single.mockResolvedValueOnce({
+            data: analysisRow({ pipeline_version: 'v2' }),
+            error: null,
+        });
+
+        const response = await POST(postRequest());
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'V2_PIPELINE_REQUIRED',
+        });
+        expect(mocks.acquireLease).not.toHaveBeenCalled();
+        expect(mocks.enqueueTask).not.toHaveBeenCalled();
+    });
+
     it('returns 503 without terminalizing a verified task transient failure', async () => {
         const admin = installFluentAdminMock();
         mocks.verifyTask.mockResolvedValue(true);

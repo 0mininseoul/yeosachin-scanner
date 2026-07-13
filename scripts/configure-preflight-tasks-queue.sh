@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for name in \
+  PREFLIGHT_TASKS_PROJECT \
+  PREFLIGHT_TASKS_LOCATION \
+  PREFLIGHT_TASKS_QUEUE \
+  PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL \
+  PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
+  PREFLIGHT_TASKS_CLOUD_RUN_SERVICE \
+  PREFLIGHT_TASKS_CLOUD_RUN_REGION; do
+  [[ -n "${!name:-}" ]] || {
+    printf 'error: %s is required\n' "$name" >&2
+    exit 1
+  }
+done
+
+export ANALYSIS_TASKS_PROJECT="$PREFLIGHT_TASKS_PROJECT"
+export ANALYSIS_TASKS_LOCATION="$PREFLIGHT_TASKS_LOCATION"
+export ANALYSIS_TASKS_QUEUE="$PREFLIGHT_TASKS_QUEUE"
+export ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL="$PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL"
+export ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL="$PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL"
+export ANALYSIS_TASKS_CLOUD_RUN_SERVICE="$PREFLIGHT_TASKS_CLOUD_RUN_SERVICE"
+export ANALYSIS_TASKS_CLOUD_RUN_REGION="$PREFLIGHT_TASKS_CLOUD_RUN_REGION"
+# Transport/authentication failures happen before the database claim counter. Keep retrying for
+# the full preflight TTL; successful crawler claims have their own independent database ceiling.
+export ANALYSIS_TASKS_MAX_RETRY_DURATION="1800s"
+
+exec "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"

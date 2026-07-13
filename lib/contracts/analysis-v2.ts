@@ -1,17 +1,14 @@
 import { z } from 'zod';
 import {
-    ANALYSIS_PLAN_CATALOG,
     PLAN_ACCESS_MODES,
     PLAN_IDS,
     PLAN_LAUNCH_STATUSES,
-    PLAN_PRICING_VERSION,
     assessRelationshipCoverage,
     buildPlanSelectionCards,
     calculateDetailedScreeningScope,
     determinePlanEligibility,
     getAnalysisPlan,
-    isPlanLaunchStatusOverrideAllowed,
-    type PlanLaunchStatusOverrides,
+    type PlanEligibilityCatalog,
 } from '@/lib/domain/analysis/plan-catalog';
 import { CURRENT_ANALYSIS_PIPELINE_VERSION } from '@/lib/domain/analysis/pipeline-version';
 import { calculateTrackProgressBp } from '@/lib/domain/analysis/progress-policy';
@@ -209,17 +206,17 @@ const preflightReadyV1Schema = z.object({
         followers: value.target.followersCount,
         following: value.target.followingCount,
     };
-    const launchStatusOverrides = Object.fromEntries(
-        value.plans.map(plan => [
-            plan.planId,
-            isPlanLaunchStatusOverrideAllowed(plan.planId, plan.launchStatus)
-                ? plan.launchStatus
-                : ANALYSIS_PLAN_CATALOG[plan.planId].launchStatus,
-        ])
-    ) as PlanLaunchStatusOverrides;
+    if (value.plans.some((plan, index) => plan.planId !== PLAN_IDS[index])) {
+        return;
+    }
+    const snapshotCatalog = Object.fromEntries(value.plans.map(plan => [plan.planId, {
+        launchStatus: plan.launchStatus,
+        relationshipCapacity: plan.relationshipCapacity,
+        detailedMutualLimit: plan.detailedMutualLimit,
+    }])) as PlanEligibilityCatalog;
     const eligibility = determinePlanEligibility(counts, {
         accessMode: value.accessMode,
-        launchStatusOverrides,
+        catalog: snapshotCatalog,
     });
     if (eligibility.status === 'blocked') {
         context.addIssue({
@@ -248,28 +245,9 @@ const preflightReadyV1Schema = z.object({
 
     const expectedCards = buildPlanSelectionCards(counts, {
         accessMode: value.accessMode,
-        launchStatusOverrides,
+        catalog: snapshotCatalog,
     });
     value.plans.forEach((plan, index) => {
-        const catalogPlan = ANALYSIS_PLAN_CATALOG[plan.planId];
-        if (
-            plan.relationshipCapacity.followers !== catalogPlan.relationshipCapacity.followers
-            || plan.relationshipCapacity.following !== catalogPlan.relationshipCapacity.following
-            || plan.detailedMutualLimit !== catalogPlan.detailedMutualLimit
-        ) {
-            context.addIssue({
-                code: 'custom',
-                message: 'Plan quote scope does not match the server catalog.',
-                path: ['plans', index],
-            });
-        }
-        if (!isPlanLaunchStatusOverrideAllowed(plan.planId, plan.launchStatus)) {
-            context.addIssue({
-                code: 'custom',
-                message: 'Plan quote launch status cannot exceed the server catalog.',
-                path: ['plans', index, 'launchStatus'],
-            });
-        }
         const expectedCard = expectedCards[index];
         if (plan.selectionState !== expectedCard.selectionState) {
             context.addIssue({
@@ -287,7 +265,6 @@ const preflightReadyV1Schema = z.object({
         }
         if (
             plan.pricingVersion !== value.pricingVersion
-            || plan.pricingVersion !== catalogPlan.pricingVersion
         ) {
             context.addIssue({
                 code: 'custom',
@@ -295,25 +272,7 @@ const preflightReadyV1Schema = z.object({
                 path: ['plans', index, 'pricingVersion'],
             });
         }
-        if (
-            plan.price.status !== catalogPlan.price.status
-            || plan.price.currency !== catalogPlan.price.currency
-            || plan.price.amountKrw !== catalogPlan.price.amountKrw
-        ) {
-            context.addIssue({
-                code: 'custom',
-                message: 'Plan quote price does not match the server catalog.',
-                path: ['plans', index, 'price'],
-            });
-        }
     });
-    if (value.pricingVersion !== PLAN_PRICING_VERSION) {
-        context.addIssue({
-            code: 'custom',
-            message: 'Preflight pricing version does not match the server catalog.',
-            path: ['pricingVersion'],
-        });
-    }
 });
 const preflightBlockedV1Schema = z.object({
     schemaVersion: z.literal(ANALYSIS_V2_SCHEMA_VERSION),

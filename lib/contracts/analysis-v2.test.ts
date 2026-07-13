@@ -126,7 +126,7 @@ describe('analysis V2 public contracts', () => {
                 plans: result.plans.map(plan => plan.planId === 'standard'
                     ? { ...plan, launchStatus: 'production' }
                     : plan),
-            }).success).toBe(false);
+            }).success).toBe(true);
             expect(preflightStatusV1Schema.safeParse({
                 ...result,
                 plans: result.plans.map(plan => plan.planId === 'plus'

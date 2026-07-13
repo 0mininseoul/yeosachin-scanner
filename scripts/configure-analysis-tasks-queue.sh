@@ -5,7 +5,7 @@ readonly CLOUD_TASKS_API="cloudtasks.googleapis.com"
 readonly QUEUE_MAX_DISPATCHES_PER_SECOND="2"
 readonly QUEUE_MAX_CONCURRENT_DISPATCHES="2"
 readonly QUEUE_MAX_ATTEMPTS="8"
-readonly QUEUE_MAX_RETRY_DURATION="3600s"
+readonly QUEUE_MAX_RETRY_DURATION="${ANALYSIS_TASKS_MAX_RETRY_DURATION:-3600s}"
 readonly QUEUE_MIN_BACKOFF="40s"
 readonly QUEUE_MAX_BACKOFF="300s"
 readonly QUEUE_MAX_DOUBLINGS="4"
@@ -25,6 +25,10 @@ Required environment variables:
   ANALYSIS_TASKS_QUEUE
   ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL
   ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL
+
+Optional private Cloud Run target variables (set both or neither):
+  ANALYSIS_TASKS_CLOUD_RUN_SERVICE
+  ANALYSIS_TASKS_CLOUD_RUN_REGION
 
 Options:
   --dry-run  Print mutations without applying them. Read-only preflight checks run.
@@ -80,6 +84,11 @@ validate_location() {
 validate_queue() {
   [[ "$1" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] \
     || die "ANALYSIS_TASKS_QUEUE is invalid"
+}
+
+validate_cloud_run_service() {
+  [[ "$1" =~ ^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$ ]] \
+    || die "ANALYSIS_TASKS_CLOUD_RUN_SERVICE is invalid"
 }
 
 validate_service_account_email() {
@@ -190,6 +199,43 @@ ensure_service_account_binding() {
   fi
 }
 
+cloud_run_invoker_binding_exists() {
+  local member="$1"
+  local bindings
+  bindings="$(gcloud run services get-iam-policy \
+    "$ANALYSIS_TASKS_CLOUD_RUN_SERVICE" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--region=$ANALYSIS_TASKS_CLOUD_RUN_REGION" \
+    '--flatten=bindings[].members' \
+    "--filter=bindings.role=roles/run.invoker AND bindings.members=$member" \
+    '--format=csv[no-heading](bindings.role,bindings.members,bindings.condition.expression)')"
+  grep -Fqx "roles/run.invoker,${member}," <<<"$bindings"
+}
+
+ensure_cloud_run_invoker_binding() {
+  local member="$1"
+  if cloud_run_invoker_binding_exists "$member"; then
+    log "verified: task identity can invoke the private Cloud Run worker"
+    return 0
+  fi
+
+  [[ "$mode" != "check" ]] \
+    || die "missing IAM binding: task identity cannot invoke the private Cloud Run worker"
+  run_mutation gcloud run services add-iam-policy-binding \
+    "$ANALYSIS_TASKS_CLOUD_RUN_SERVICE" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--region=$ANALYSIS_TASKS_CLOUD_RUN_REGION" \
+    "--member=$member" \
+    '--role=roles/run.invoker' \
+    '--condition=None' \
+    '--quiet'
+
+  if [[ "$mode" == "apply" ]]; then
+    cloud_run_invoker_binding_exists "$member" \
+      || die "Cloud Run invoker binding was not observable after setup"
+  fi
+}
+
 api_is_enabled() {
   local enabled
   enabled="$(gcloud services list \
@@ -215,8 +261,8 @@ queue_limits_match() {
     "--project=$ANALYSIS_TASKS_PROJECT" \
     "--location=$ANALYSIS_TASKS_LOCATION" \
     '--format=csv[no-heading](rateLimits.maxDispatchesPerSecond,rateLimits.maxConcurrentDispatches,retryConfig.maxAttempts,retryConfig.maxRetryDuration,retryConfig.minBackoff,retryConfig.maxBackoff,retryConfig.maxDoublings)')"
-  [[ "$policy" == "2.0,2,8,3600s,40s,300s,4" \
-    || "$policy" == "2,2,8,3600s,40s,300s,4" ]]
+  [[ "$policy" == "2.0,2,8,$QUEUE_MAX_RETRY_DURATION,40s,300s,4" \
+    || "$policy" == "2,2,8,$QUEUE_MAX_RETRY_DURATION,40s,300s,4" ]]
 }
 
 verify_queue_running() {
@@ -269,6 +315,15 @@ validate_service_account_email \
 validate_service_account_email \
   "$ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL" \
   "ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL"
+
+if [[ -n "${ANALYSIS_TASKS_CLOUD_RUN_SERVICE:-}" \
+   || -n "${ANALYSIS_TASKS_CLOUD_RUN_REGION:-}" ]]; then
+  [[ -n "${ANALYSIS_TASKS_CLOUD_RUN_SERVICE:-}" \
+     && -n "${ANALYSIS_TASKS_CLOUD_RUN_REGION:-}" ]] \
+    || die "set both ANALYSIS_TASKS_CLOUD_RUN_SERVICE and ANALYSIS_TASKS_CLOUD_RUN_REGION"
+  validate_cloud_run_service "$ANALYSIS_TASKS_CLOUD_RUN_SERVICE"
+  validate_location "$ANALYSIS_TASKS_CLOUD_RUN_REGION"
+fi
 
 queue_args=(
   "$ANALYSIS_TASKS_QUEUE"
@@ -362,6 +417,7 @@ fi
 
 readonly enqueuer_member="serviceAccount:$ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL"
 readonly service_agent_member="serviceAccount:service-${project_number}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
+readonly task_invoker_member="serviceAccount:$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL"
 
 ensure_project_binding \
   'roles/cloudtasks.serviceAgent' \
@@ -385,7 +441,7 @@ if [[ "$task_account_available" == "false" ]]; then
     "$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" \
     "--project=$ANALYSIS_TASKS_PROJECT" \
     "--member=$service_agent_member" \
-    '--role=roles/iam.serviceAccountTokenCreator' \
+    '--role=roles/iam.serviceAccountUser' \
     '--condition=None' \
     '--quiet'
 else
@@ -394,9 +450,18 @@ else
     "$enqueuer_member" \
     'runtime principal has iam.serviceAccounts.actAs on the task invoker'
   ensure_service_account_binding \
-    'roles/iam.serviceAccountTokenCreator' \
+    'roles/iam.serviceAccountUser' \
     "$service_agent_member" \
-    'Cloud Tasks service agent can mint the task OIDC token'
+    'Cloud Tasks service agent can act as the task OIDC identity'
+fi
+
+if [[ -n "${ANALYSIS_TASKS_CLOUD_RUN_SERVICE:-}" ]]; then
+  gcloud run services describe "$ANALYSIS_TASKS_CLOUD_RUN_SERVICE" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--region=$ANALYSIS_TASKS_CLOUD_RUN_REGION" \
+    '--format=value(metadata.name)' >/dev/null \
+    || die "private Cloud Run worker service does not exist or is not visible"
+  ensure_cloud_run_invoker_binding "$task_invoker_member"
 fi
 
 if [[ "$mode" == "dry-run" && "$api_was_enabled" == "false" ]]; then

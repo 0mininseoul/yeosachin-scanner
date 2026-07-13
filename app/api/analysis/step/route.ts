@@ -213,6 +213,19 @@ export async function POST(request: Request) {
         if (!isBackgroundTask && !isAnalysisRequestOwner(userId ?? '', analysisRequest.user_id)) {
             return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
         }
+        if (
+            analysisRequest.pipeline_version !== null
+            && analysisRequest.pipeline_version !== undefined
+            && analysisRequest.pipeline_version !== 'v1'
+        ) {
+            return NextResponse.json(
+                {
+                    error: 'This request requires the V2 background dispatcher.',
+                    code: 'V2_PIPELINE_REQUIRED',
+                },
+                { status: 409 }
+            );
+        }
 
         // 이미 완료되었거나 실패한 경우
         if (analysisRequest.status === 'completed' || analysisRequest.status === 'failed') {

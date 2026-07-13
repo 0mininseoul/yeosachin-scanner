@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-13
 
-**Status:** Phase A contracts implemented and validated; Phase B preflight is next
+**Status:** Phase A contracts and Phase B guarded preflight implemented and validated; Phase C job foundation is next
 
 **Branch reviewed:** `agent/launch-correctness-performance`
 
@@ -329,6 +329,9 @@ All new staging tables deny anon/authenticated reads. Only sanitized progress an
 
 ### Phase B: Preflight and exclusion
 
+Implementation status: complete on the backend branch. The migration remains unapplied until the
+test-project integration gate in Phase I.
+
 1. Add migration, RLS, expiry, and idempotency for preflights.
 2. Add asynchronous preflight POST/GET, self-hosted Cloud Run job, and exclusion route.
 3. Add an internal signed test entitlement; keep payment out of scope.
@@ -397,7 +400,8 @@ Google's current model documentation confirms that `gemini-3.1-flash-lite` accep
 
 ### Phase I: Measurement and E2E
 
-1. Apply migrations to a test project and configure Cloud Tasks/Cloud Run through GCP CLI.
+1. Apply migrations to a test project and configure Cloud Tasks/Cloud Run plus the bounded
+   preflight-retention scheduler through GCP CLI.
 2. Run provider, RLS, migration, task-idempotency, and cleanup integration suites.
 3. Test `0_min._.00` first and record every stage latency, provider source, returned/declared counts, fallback username set, Gemini calls/tokens/thinking, cost, and total wall time.
 4. Repeat Basic/Standard/Plus synthetic or consented fixtures under concurrent load. A single successful canary is not a launch gate.
@@ -574,7 +578,7 @@ Required frontend fixtures before live integration:
 ### Readiness
 
 - Product contract: ready, with payment price values intentionally deferred.
-- Backend contracts: Phase A implemented and validated; live endpoints begin in Phase B.
+- Backend contracts: Phase A and the guarded Phase B endpoints are implemented and validated.
 - Frontend: ready to start only after the Phase A contract commit.
 - Production launch: blocked on V2 implementation, labeled AI evaluation, full E2E, load/cost gates, and payment integration.
 

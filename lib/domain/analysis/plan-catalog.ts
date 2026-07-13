@@ -12,9 +12,15 @@ export type PlanAccessMode = (typeof PLAN_ACCESS_MODES)[number];
 
 export type PlanLaunchStatusOverrides = Readonly<Partial<Record<PlanId, PlanLaunchStatus>>>;
 
+export type PlanEligibilityCatalog = Readonly<Record<PlanId, Readonly<Pick<
+    AnalysisPlan,
+    'launchStatus' | 'relationshipCapacity' | 'detailedMutualLimit'
+>>>>;
+
 export interface PlanEligibilityOptions {
     accessMode?: PlanAccessMode;
     launchStatusOverrides?: PlanLaunchStatusOverrides;
+    catalog?: PlanEligibilityCatalog;
 }
 
 export const PLAN_PRICING_VERSION = 'deferred' as const;
@@ -159,7 +165,10 @@ function validatedCounts(counts: RelationshipCounts): RelationshipCounts {
     return Object.freeze({ ...counts });
 }
 
-function supportsCounts(plan: AnalysisPlan, counts: RelationshipCounts): boolean {
+function supportsCounts(
+    plan: Pick<AnalysisPlan, 'relationshipCapacity'>,
+    counts: RelationshipCounts
+): boolean {
     return counts.followers <= plan.relationshipCapacity.followers
         && counts.following <= plan.relationshipCapacity.following;
 }
@@ -178,6 +187,7 @@ function resolvedOptions(options: PlanEligibilityOptions): Required<PlanEligibil
     return {
         accessMode: options.accessMode ?? 'production',
         launchStatusOverrides: options.launchStatusOverrides ?? {},
+        catalog: options.catalog ?? ANALYSIS_PLAN_CATALOG,
     };
 }
 
@@ -187,13 +197,14 @@ export function getAnalysisPlan(planId: PlanId): AnalysisPlan {
 
 export function getEffectivePlanLaunchStatus(
     planId: PlanId,
-    overrides: PlanLaunchStatusOverrides = {}
+    overrides: PlanLaunchStatusOverrides = {},
+    catalog: PlanEligibilityCatalog = ANALYSIS_PLAN_CATALOG
 ): PlanLaunchStatus {
     const override = overrides[planId];
     if (override === undefined) {
-        return getAnalysisPlan(planId).launchStatus;
+        return catalog[planId].launchStatus;
     }
-    if (!isPlanLaunchStatusOverrideAllowed(planId, override)) {
+    if (!isPlanLaunchStatusOverrideAllowed(planId, override, catalog)) {
         throw new RangeError(
             `${planId} launch status cannot be promoted beyond the server catalog.`
         );
@@ -203,9 +214,10 @@ export function getEffectivePlanLaunchStatus(
 
 export function isPlanLaunchStatusOverrideAllowed(
     planId: PlanId,
-    effectiveStatus: PlanLaunchStatus
+    effectiveStatus: PlanLaunchStatus,
+    catalog: PlanEligibilityCatalog = ANALYSIS_PLAN_CATALOG
 ): boolean {
-    const configuredStatus = getAnalysisPlan(planId).launchStatus;
+    const configuredStatus = catalog[planId].launchStatus;
     const restrictiveness: Record<PlanLaunchStatus, number> = {
         disabled: 0,
         test_only: 1,
@@ -219,12 +231,13 @@ export function determinePlanEligibility(
     options: PlanEligibilityOptions = {}
 ): PlanEligibility {
     const counts = validatedCounts(input);
+    const resolved = resolvedOptions(options);
     const capacityRequiredPlanIndex = PLAN_IDS.findIndex(planId => (
-        supportsCounts(ANALYSIS_PLAN_CATALOG[planId], counts)
+        supportsCounts(resolved.catalog[planId], counts)
     ));
 
     if (capacityRequiredPlanIndex === -1) {
-        const plus = ANALYSIS_PLAN_CATALOG.plus;
+        const plus = resolved.catalog.plus;
         return Object.freeze({
             status: 'blocked',
             reason: 'over_plus_capacity',
@@ -237,10 +250,13 @@ export function determinePlanEligibility(
     }
 
     const capacityRequiredPlanId = PLAN_IDS[capacityRequiredPlanIndex];
-    const resolved = resolvedOptions(options);
     const selectablePlanIds = PLAN_IDS.slice(capacityRequiredPlanIndex).filter(planId => (
         planSupportsAccessMode(
-            getEffectivePlanLaunchStatus(planId, resolved.launchStatusOverrides),
+            getEffectivePlanLaunchStatus(
+                planId,
+                resolved.launchStatusOverrides,
+                resolved.catalog
+            ),
             resolved.accessMode
         )
     ));
@@ -320,13 +336,14 @@ export function buildPlanSelectionCards(
     const resolved = resolvedOptions(options);
     const eligibility = determinePlanEligibility(counts, resolved);
     const capacityRequiredPlanIndex = PLAN_IDS.findIndex(planId => (
-        supportsCounts(ANALYSIS_PLAN_CATALOG[planId], counts)
+        supportsCounts(resolved.catalog[planId], counts)
     ));
 
     return Object.freeze(PLAN_IDS.map((planId, index): PlanSelectionCardState => {
         const launchStatus = getEffectivePlanLaunchStatus(
             planId,
-            resolved.launchStatusOverrides
+            resolved.launchStatusOverrides,
+            resolved.catalog
         );
         if (capacityRequiredPlanIndex === -1 || index < capacityRequiredPlanIndex) {
             return Object.freeze({
