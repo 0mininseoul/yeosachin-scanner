@@ -55,7 +55,13 @@ export type AnalysisV2StageId =
     | 'finalize';
 
 type CheckpointWithKind<K extends AnalysisV2DagManifestCheckpoint['kind']> = Extract<
-    AnalysisV2DagManifestCheckpoint,
+    AnalysisV2DagManifestCheckpoint extends infer Checkpoint
+        ? Checkpoint extends { kind: infer Kind }
+            ? K extends Kind
+                ? Omit<Checkpoint, 'kind'> & { kind: K }
+                : never
+            : never
+        : never,
     { kind: K }
 >;
 

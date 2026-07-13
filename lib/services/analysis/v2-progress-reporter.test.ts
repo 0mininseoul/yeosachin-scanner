@@ -4,6 +4,7 @@ import type { AnalysisV2DagState } from './v2-dag-planner';
 import type { ClaimedAnalysisV2Job } from './v2-job-store';
 import {
     AnalysisV2ProgressConflictError,
+    type AnalysisV2ProgressCheckpointInput,
     type AnalysisV2ProgressStore,
 } from './v2-progress-store';
 import { createAnalysisV2ProgressReporter } from './v2-progress-reporter';
@@ -121,7 +122,9 @@ describe('analysis V2 progress reporter', () => {
             state: relationshipState,
             stage: 'relationships',
         });
-        const payload = checkpoint.mock.calls[0]![0];
+        const payload = (checkpoint.mock.calls as unknown as [
+            [AnalysisV2ProgressCheckpointInput],
+        ])[0][0];
         expect(payload.event).toMatchObject({
             eventCode: 'RELATIONSHIP_PROGRESS',
             aggregateCount: 42,
