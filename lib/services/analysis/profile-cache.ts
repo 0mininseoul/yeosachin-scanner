@@ -88,7 +88,8 @@ function mapScrapedProfile(profile: InstagramProfile): ProfileStageAccount {
 export function mergeCachedAndScrapedProfiles(
     batch: ProfileBatchAccount[],
     cachedSnapshots: ReadonlyMap<string, CombinedProfileSnapshotAccount>,
-    scrapedProfiles: InstagramProfile[]
+    scrapedProfiles: InstagramProfile[],
+    options: { allowUnavailable?: boolean } = {}
 ): ProfileStageAccount[] {
     const requested = assertUniqueBatch(batch);
     const missing = new Set(
@@ -108,26 +109,26 @@ export function mergeCachedAndScrapedProfiles(
     }
 
     const absent = [...missing].filter(key => !scrapedByUsername.has(key));
-    if (absent.length > 0) {
+    if (absent.length > 0 && options.allowUnavailable !== true) {
         throw new Error(
             `SCRAPING_INCOMPLETE_ERROR: profiles batch omitted ${absent.length} requested account(s).`
         );
     }
 
-    return batch.map((account) => {
+    return batch.flatMap((account) => {
         const key = usernameKey(account.username);
         const cached = cachedSnapshots.get(key);
         if (cached) {
             if (usernameKey(cached.profile.username) !== key) {
                 throw new Error('CACHE_SCHEMA_ERROR: profile snapshot username mismatch.');
             }
-            return { ...cached, profileSource: 'cache' };
+            return [{ ...cached, profileSource: 'cache' as const }];
         }
 
         const scraped = scrapedByUsername.get(key);
         if (!scraped) {
-            throw new Error('SCRAPING_INCOMPLETE_ERROR: profile missing after merge.');
+            return [];
         }
-        return mapScrapedProfile(scraped);
+        return [mapScrapedProfile(scraped)];
     });
 }

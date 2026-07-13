@@ -133,7 +133,7 @@ describe('apifyProvider', () => {
         expect(onCostRunFinished).toHaveBeenCalledWith({
             ...costIdentity,
             status: 'succeeded',
-            usageTotalUsd: 0.40205,
+            usageTotalUsd: null,
         });
         expect(onCostRunStarted.mock.invocationCallOrder[0])
             .toBeLessThan(waitForFinish.mock.invocationCallOrder[0]);
@@ -180,7 +180,7 @@ describe('apifyProvider', () => {
         }));
         expect(onCostRunFinished).toHaveBeenCalledWith(expect.objectContaining({
             status: 'succeeded',
-            usageTotalUsd: 0.25,
+            usageTotalUsd: null,
         }));
         expect(client.run).toHaveBeenCalledWith('StoredRun12345678');
         expect(waitForFinish).toHaveBeenCalledWith({ waitSecs: 120 });
@@ -237,7 +237,7 @@ describe('apifyProvider', () => {
         expect(onCostRunFinished).toHaveBeenCalledWith(expect.objectContaining({
             credentialSlot: 'secondary',
             status: normalized,
-            usageTotalUsd: 0.07,
+            usageTotalUsd: null,
         }));
         expect(waitForFinish.mock.invocationCallOrder[0])
             .toBeLessThan(onCostRunFinished.mock.invocationCallOrder[0]);
@@ -422,7 +422,7 @@ describe('apifyProvider', () => {
         }));
         expect(onCostRunFinished).toHaveBeenCalledWith(expect.objectContaining({
             credentialSlot: 'secondary',
-            usageTotalUsd: 0.02,
+            usageTotalUsd: null,
         }));
     });
 
@@ -535,6 +535,91 @@ describe('apifyProvider', () => {
         const { client } = mockClient([profileItem('alice')]);
         const provider = makeApifyProvider({ client, env: {} });
         await expect(provider.getProfilesBatch!(['alice', 'bob'], 2)).rejects.toThrow('INCOMPLETE');
+    });
+
+    it('allows an unavailable account in a durable one-account profile tail', async () => {
+        const { client } = mockClient([]);
+        const provider = makeApifyProvider({
+            client,
+            env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
+        });
+
+        await expect(provider.getProfilesBatch!(['unavailable'], 1, {
+            onRunStarted: vi.fn(),
+            recordUsage: vi.fn(),
+        })).resolves.toEqual([]);
+    });
+
+    it('rejects a durable profile batch that omits multiple accounts', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const { client } = mockClient(usernames.slice(0, 28).map(profileItem));
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getProfilesBatch!(usernames, 30, {
+            onRunStarted: vi.fn(),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('INCOMPLETE');
+    });
+
+    it('still rejects malformed rows in a durable partial profile result', async () => {
+        const { client } = mockClient([{ username: 'alice' }]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getProfilesBatch!(['alice', 'unavailable'], 2, {
+            onRunStarted: vi.fn(),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCHEMA');
+    });
+
+    it('rereads a preliminary profile dataset without rerunning the paid actor', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const items = usernames.slice(0, 29).map(profileItem);
+        const { client, call } = mockClient(items);
+        const listItems = vi.fn()
+            .mockResolvedValueOnce({
+                items: items.slice(0, 17),
+                total: 29,
+                offset: 0,
+                count: 17,
+                limit: 31,
+            })
+            .mockResolvedValueOnce({
+                items,
+                total: 29,
+                offset: 0,
+                count: 29,
+                limit: 31,
+            });
+        vi.mocked(client.dataset).mockReturnValue(
+            { listItems } as unknown as ReturnType<typeof client.dataset>
+        );
+        const provider = makeApifyProvider({
+            client,
+            env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
+        });
+
+        await expect(provider.getProfilesBatch!(usernames, 30)).resolves.toHaveLength(29);
+        expect(call).toHaveBeenCalledTimes(1);
+        expect(listItems).toHaveBeenCalledTimes(2);
+    });
+
+    it('rereads a preliminary empty profile dataset before accepting it', async () => {
+        const item = profileItem('alice');
+        const { client, call } = mockClient([item]);
+        const listItems = vi.fn()
+            .mockResolvedValueOnce({ items: [], total: 0, offset: 0, count: 0, limit: 2 })
+            .mockResolvedValueOnce({ items: [item], total: 1, offset: 0, count: 1, limit: 2 });
+        vi.mocked(client.dataset).mockReturnValue(
+            { listItems } as unknown as ReturnType<typeof client.dataset>
+        );
+        const provider = makeApifyProvider({
+            client,
+            env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
+        });
+
+        await expect(provider.getProfile!('alice')).resolves.toMatchObject({ username: 'alice' });
+        expect(call).toHaveBeenCalledTimes(1);
+        expect(listItems).toHaveBeenCalledTimes(2);
     });
 
     it('does not swallow failed profile actor runs', async () => {

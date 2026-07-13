@@ -4,6 +4,7 @@ import { z } from 'zod';
 const mocks = vi.hoisted(() => ({
     generateContent: vi.fn(),
     prepareGoogleApplicationCredentials: vi.fn(),
+    tokenUsageInsert: vi.fn(),
 }));
 
 vi.mock('@google/genai', () => ({
@@ -20,7 +21,7 @@ vi.mock('@/lib/services/google/credentials', () => ({
 
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: {
-        from: vi.fn(() => ({ insert: vi.fn().mockResolvedValue({ error: null }) })),
+        from: vi.fn(() => ({ insert: mocks.tokenUsageInsert })),
     },
 }));
 
@@ -52,6 +53,7 @@ function analyze(onTelemetry?: ReturnType<typeof vi.fn>) {
 describe('analyzeWithGemini generation retry policy', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.tokenUsageInsert.mockResolvedValue({ error: null });
         vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'test-project');
         vi.stubEnv('VERTEX_AI_COST_OPTIMIZED', 'false');
     });
@@ -121,12 +123,50 @@ describe('analyzeWithGemini generation retry policy', () => {
         }));
     });
 
-    it('does not retry empty or schema-invalid responses', async () => {
+    it('logs usage and telemetry before rejecting an empty response without retrying', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
         vi.spyOn(console, 'log').mockImplementation(() => undefined);
-        mocks.generateContent.mockResolvedValueOnce({ text: '', usageMetadata: {} });
-        await expect(analyze()).rejects.toThrow('Gemini response did not include text');
+        const telemetry = vi.fn();
+        mocks.generateContent.mockResolvedValueOnce({
+            text: '',
+            usageMetadata: {
+                promptTokenCount: 12,
+                candidatesTokenCount: 0,
+                totalTokenCount: 12,
+                thoughtsTokenCount: 0,
+            },
+        });
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            analysisType: 'empty_response_test',
+            requestId: 'request-1',
+            onTelemetry: telemetry,
+        })).rejects.toThrow('Gemini response did not include text');
+
         expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+        expect(mocks.tokenUsageInsert).toHaveBeenCalledTimes(1);
+        expect(mocks.tokenUsageInsert).toHaveBeenCalledWith(expect.objectContaining({
+            request_id: 'request-1',
+            prompt_tokens: 12,
+            completion_tokens: 0,
+            total_tokens: 12,
+            analysis_type: 'empty_response_test',
+        }));
+        expect(telemetry).toHaveBeenCalledTimes(1);
+        expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+            tokenUsage: {
+                promptTokens: 12,
+                completionTokens: 0,
+                totalTokens: 12,
+                thinkingTokens: 0,
+            },
+        }));
+    });
+
+    it('does not retry schema-invalid responses', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
         mocks.generateContent.mockResolvedValueOnce({
             ...successfulResponse(),
@@ -135,6 +175,6 @@ describe('analyzeWithGemini generation retry policy', () => {
         await expect(analyze()).rejects.toThrow(
             'Gemini response did not match the required analysis schema'
         );
-        expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+        expect(mocks.generateContent).toHaveBeenCalledTimes(1);
     });
 });

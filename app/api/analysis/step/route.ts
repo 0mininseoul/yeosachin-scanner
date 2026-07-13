@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import {
     getInstagramProfile,
     getFollowers,
@@ -27,7 +27,10 @@ import {
 import {
     getVertexAIAnalysisConcurrency,
 } from '@/lib/services/ai/pipeline-config';
-import { isAmbiguousGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
+import {
+    isAmbiguousGeminiGenerationError,
+    isRecoverableGeminiResponseError,
+} from '@/lib/services/ai/gemini-generation-policy';
 import {
     getProfileCacheMissUsernames,
     mergeCachedAndScrapedProfiles,
@@ -154,8 +157,13 @@ import {
     recordAnalysisStepEvent,
 } from '@/lib/services/analysis/observability';
 import { recordGeminiUsageExpectation } from '@/lib/services/analysis/gemini-usage-expectation';
+import { reconcileSettledAnalysisProviderCosts } from '@/lib/services/analysis/provider-cost-reconciliation';
 
 const MAX_INTERACTION_EVIDENCE_ROWS = 2_500;
+const PROVIDER_COST_RECONCILIATION_DELAY_MS = 35_000;
+const PROVIDER_COST_RECONCILIATION_RETRIES = 3;
+
+export const maxDuration = 300;
 
 // 단계별 분석 처리 API
 export async function POST(request: Request) {
@@ -186,7 +194,20 @@ export async function POST(request: Request) {
             .eq('id', requestId)
             .single();
 
-        if (fetchError || !analysisRequest) {
+        if (fetchError && fetchError.code !== 'PGRST116') {
+            throw new Error('ANALYSIS_PERSISTENCE_ERROR: request state read failed.');
+        }
+        if (!analysisRequest) {
+            if (isBackgroundTask) {
+                const globalCosts = await reconcileSettledAnalysisProviderCosts(supabaseAdmin);
+                if (globalCosts.failed > 0 || globalCosts.hasMore) {
+                    return NextResponse.json(
+                        { error: 'Provider cost reconciliation is not settled yet.' },
+                        { status: 503 }
+                    );
+                }
+                return NextResponse.json({ success: true, done: true });
+            }
             return NextResponse.json({ error: 'Request not found' }, { status: 404 });
         }
         if (!isBackgroundTask && !isAnalysisRequestOwner(userId ?? '', analysisRequest.user_id)) {
@@ -195,6 +216,24 @@ export async function POST(request: Request) {
 
         // 이미 완료되었거나 실패한 경우
         if (analysisRequest.status === 'completed' || analysisRequest.status === 'failed') {
+            const requestCosts = await reconcileSettledAnalysisProviderCosts(
+                supabaseAdmin,
+                requestId
+            );
+            const globalCosts = await reconcileSettledAnalysisProviderCosts(supabaseAdmin);
+            if (globalCosts.failed > 0 || globalCosts.hasMore) {
+                console.warn('Global provider cost reconciliation remains pending', {
+                    eligible: globalCosts.eligible,
+                    failed: globalCosts.failed,
+                    hasMore: globalCosts.hasMore,
+                });
+            }
+            if (isBackgroundTask && (requestCosts.failed > 0 || requestCosts.hasMore || globalCosts.hasMore)) {
+                return NextResponse.json(
+                    { error: 'Provider cost reconciliation is not settled yet.' },
+                    { status: 503 }
+                );
+            }
             return NextResponse.json({
                 success: true,
                 step: analysisRequest.current_step,
@@ -237,6 +276,7 @@ export async function POST(request: Request) {
         }
 
         let stepSucceeded = false;
+        let stepTerminalized = false;
         let leasedStepData: StepData = {};
         let deliveryAttempt: number | null = null;
         let stepProgress = Number(analysisRequest.progress ?? 0);
@@ -302,6 +342,7 @@ export async function POST(request: Request) {
                     latencyMs: Date.now() - stepStartedAt,
                     failureCategory: 'retry_exhausted',
                 });
+                stepTerminalized = true;
                 return NextResponse.json({
                     success: false,
                     step: 'failed',
@@ -487,12 +528,18 @@ export async function POST(request: Request) {
                 latencyMs: Date.now() - stepStartedAt,
                 failureCategory: classifyAnalysisFailure(pipelineError),
             });
+            stepTerminalized = true;
 
             return NextResponse.json({ error: errorMessage, step: currentStep }, { status: 500 });
         } finally {
             await releaseAnalysisRequestLease(supabaseAdmin, lease);
-            if (isBackgroundTask && stepSucceeded) {
+            if (isBackgroundTask && (stepSucceeded || stepTerminalized)) {
                 await enqueueBackgroundContinuation(requestId);
+            } else if (
+                !isBackgroundTask
+                && (stepTerminalized || (stepSucceeded && currentStep === 'finalize'))
+            ) {
+                scheduleBrowserFallbackCostReconciliation(requestId);
             }
         }
     } catch (error) {
@@ -503,6 +550,25 @@ export async function POST(request: Request) {
             { status: 500 }
         );
     }
+}
+
+export function scheduleBrowserFallbackCostReconciliation(requestId: string): void {
+    after(async () => {
+        await new Promise<void>((resolve) => {
+            setTimeout(resolve, PROVIDER_COST_RECONCILIATION_DELAY_MS);
+        });
+        for (let attempt = 0; attempt < PROVIDER_COST_RECONCILIATION_RETRIES; attempt++) {
+            const result = await reconcileSettledAnalysisProviderCosts(
+                supabaseAdmin,
+                requestId
+            );
+            if (result.failed === 0 && !result.hasMore) return;
+            if (attempt + 1 < PROVIDER_COST_RECONCILIATION_RETRIES) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 30_000));
+            }
+        }
+        console.warn('Browser fallback provider cost reconciliation remains pending');
+    });
 }
 
 async function abortPaidProviderRunsBeforeFailure(
@@ -525,6 +591,11 @@ async function enqueueBackgroundContinuation(requestId: string): Promise<void> {
         throw new Error('ANALYSIS_TASKS_ENQUEUE_ERROR: continuation state read failed.');
     }
     if (!['pending', 'processing'].includes(data.status)) {
+        await enqueueAnalysisTask(requestId, {
+            currentStep: data.current_step || data.status,
+            progress: Number(data.progress ?? 100),
+            stepData: (data.step_data ?? {}) as StepData,
+        }, { delaySeconds: 35 });
         if (data.background_processing === true) {
             await setBackgroundProcessing(requestId, false);
         }
@@ -1055,7 +1126,8 @@ async function processProfiles(
     const batchAccountsWithPosts = mergeCachedAndScrapedProfiles(
         batch,
         cachedSnapshots,
-        profiles
+        profiles,
+        { allowUnavailable: true }
     );
 
     // 기존 결과에 추가
@@ -1225,11 +1297,17 @@ async function processAnalyze(requestId: string, userId: string, stepData: StepD
             const account = subBatch[resultIndex];
             if (!account || !outcome) continue;
             if (outcome.status === 'rejected') {
-                accountFailed = true;
                 console.error('Combined analysis failed for one account', { requestId });
                 if (isAmbiguousGeminiGenerationError(outcome.reason)) {
+                    accountFailed = true;
                     ambiguousGenerationError ??= outcome.reason;
+                } else if (isRecoverableGeminiResponseError(outcome.reason)) {
+                    combinedResults[account.profile.username] = {
+                        gender: 'unknown',
+                        genderConfidence: 0,
+                    };
                 } else {
+                    accountFailed = true;
                     accountFailure ??= outcome.reason;
                 }
                 continue;

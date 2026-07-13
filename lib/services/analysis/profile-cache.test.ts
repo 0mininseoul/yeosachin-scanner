@@ -106,6 +106,16 @@ describe('profiles-stage cache merge', () => {
         )).toThrow('SCRAPING_INCOMPLETE_ERROR');
     });
 
+    it('can omit a provider-confirmed unavailable account without losing valid profiles', () => {
+        const result = mergeCachedAndScrapedProfiles(
+            [{ username: 'alice' }, { username: 'bob' }],
+            new Map(),
+            [profile('alice')],
+            { allowUnavailable: true }
+        );
+        expect(result.map(account => account.profile.username)).toEqual(['alice']);
+    });
+
     it('rejects duplicate requests, duplicate results, and unexpected results', () => {
         expect(() => getProfileCacheMissUsernames(
             [{ username: 'alice' }, { username: 'ALICE' }],

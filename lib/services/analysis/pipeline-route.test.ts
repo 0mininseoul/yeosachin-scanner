@@ -1,12 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     acquireLease: vi.fn(),
+    after: vi.fn(),
+    afterCallbacks: [] as Array<() => void | Promise<void>>,
     abortRuns: vi.fn(),
     createServerClient: vi.fn(),
     enqueueTask: vi.fn(),
     from: vi.fn(),
     recordStepEvent: vi.fn(),
+    reconcileProviderCosts: vi.fn(),
     releaseLease: vi.fn(),
     rpc: vi.fn(),
     verifyTask: vi.fn(),
@@ -56,8 +59,18 @@ vi.mock('@/lib/services/analysis/observability', async (importOriginal) => {
         recordAnalysisStepEvent: mocks.recordStepEvent,
     };
 });
+vi.mock('@/lib/services/analysis/provider-cost-reconciliation', () => ({
+    reconcileSettledAnalysisProviderCosts: mocks.reconcileProviderCosts,
+}));
+vi.mock('next/server', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('next/server')>();
+    return { ...actual, after: mocks.after };
+});
 
-import { POST } from '@/app/api/analysis/step/route';
+import {
+    POST,
+    scheduleBrowserFallbackCostReconciliation,
+} from '@/app/api/analysis/step/route';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = 'user-123';
@@ -110,15 +123,29 @@ function postRequest(headers?: Record<string, string>) {
 describe('analysis step route orchestration', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.afterCallbacks.length = 0;
+        mocks.after.mockImplementation((callback: () => void | Promise<void>) => {
+            mocks.afterCallbacks.push(callback);
+        });
         mocks.acquireLease.mockResolvedValue({ requestId, token: 'lease-token' });
         mocks.abortRuns.mockResolvedValue(0);
         mocks.releaseLease.mockResolvedValue(undefined);
         mocks.recordStepEvent.mockResolvedValue(true);
+        mocks.reconcileProviderCosts.mockResolvedValue({
+            eligible: 0,
+            finalized: 0,
+            failed: 0,
+            hasMore: false,
+        });
         mocks.rpc.mockResolvedValue({ data: 1, error: null });
         mocks.enqueueTask.mockResolvedValue('exists');
         mocks.createServerClient.mockResolvedValue({
             auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: userId } } }) },
         });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
     });
 
     it('dispatches using the fresh row read after acquiring the lease', async () => {
@@ -210,6 +237,18 @@ describe('analysis step route orchestration', () => {
                 data: analysisRow({ current_step: 'interactions' }),
                 error: null,
             });
+        admin.maybeSingle
+            .mockResolvedValueOnce({
+                data: {
+                    status: 'failed',
+                    current_step: 'failed',
+                    progress: 100,
+                    step_data: {},
+                    background_processing: true,
+                },
+                error: null,
+            })
+            .mockResolvedValueOnce({ data: { id: requestId }, error: null });
 
         const response = await POST(postRequest({
             'X-CloudTasks-TaskRetryCount': '6',
@@ -232,8 +271,12 @@ describe('analysis step route orchestration', () => {
                 userId,
             })
         );
-        expect(admin.update).not.toHaveBeenCalled();
-        expect(mocks.enqueueTask).not.toHaveBeenCalled();
+        expect(admin.update).toHaveBeenCalledWith({ background_processing: false });
+        expect(mocks.enqueueTask).toHaveBeenCalledWith(
+            requestId,
+            expect.objectContaining({ currentStep: 'failed' }),
+            { delaySeconds: 35 }
+        );
         expect(mocks.recordStepEvent).toHaveBeenCalledWith(
             expect.anything(),
             expect.objectContaining({
@@ -286,5 +329,95 @@ describe('analysis step route orchestration', () => {
         });
         expect(mocks.enqueueTask).not.toHaveBeenCalled();
         expect(mocks.releaseLease).not.toHaveBeenCalled();
+    });
+
+    it('retries a terminal background task while its request costs remain unsettled', async () => {
+        const admin = installFluentAdminMock();
+        mocks.verifyTask.mockResolvedValue(true);
+        admin.single.mockResolvedValueOnce({
+            data: analysisRow({ status: 'completed', current_step: 'completed' }),
+            error: null,
+        });
+        mocks.reconcileProviderCosts
+            .mockResolvedValueOnce({ eligible: 1, finalized: 0, failed: 1, hasMore: false })
+            .mockResolvedValueOnce({ eligible: 1, finalized: 0, failed: 1, hasMore: false });
+
+        const response = await POST(postRequest());
+
+        expect(response.status).toBe(503);
+        expect(mocks.reconcileProviderCosts).toHaveBeenNthCalledWith(
+            1,
+            expect.anything(),
+            requestId
+        );
+        expect(mocks.reconcileProviderCosts).toHaveBeenNthCalledWith(
+            2,
+            expect.anything()
+        );
+        expect(mocks.acquireLease).not.toHaveBeenCalled();
+    });
+
+    it('runs a global reconciliation for a deleted request background task', async () => {
+        const admin = installFluentAdminMock();
+        mocks.verifyTask.mockResolvedValue(true);
+        admin.single.mockResolvedValueOnce({ data: null, error: { code: 'PGRST116' } });
+
+        const response = await POST(postRequest());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({ success: true, done: true });
+        expect(mocks.reconcileProviderCosts).toHaveBeenCalledOnce();
+        expect(mocks.reconcileProviderCosts).toHaveBeenCalledWith(expect.anything());
+        expect(mocks.acquireLease).not.toHaveBeenCalled();
+    });
+
+    it('retries a background task when the request read fails transiently', async () => {
+        const admin = installFluentAdminMock();
+        mocks.verifyTask.mockResolvedValue(true);
+        admin.single.mockResolvedValueOnce({ data: null, error: { code: '08006' } });
+
+        const response = await POST(postRequest());
+
+        expect(response.status).toBe(500);
+        expect(mocks.reconcileProviderCosts).not.toHaveBeenCalled();
+        expect(mocks.acquireLease).not.toHaveBeenCalled();
+    });
+
+    it('reconciles browser fallback costs after 35 seconds and stops on success', async () => {
+        vi.useFakeTimers();
+        mocks.reconcileProviderCosts
+            .mockResolvedValueOnce({ eligible: 1, finalized: 0, failed: 1, hasMore: false })
+            .mockResolvedValueOnce({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
+
+        scheduleBrowserFallbackCostReconciliation(requestId);
+
+        expect(mocks.after).toHaveBeenCalledOnce();
+        const pending = Promise.resolve(mocks.afterCallbacks[0]());
+        await vi.advanceTimersByTimeAsync(35_000);
+        expect(mocks.reconcileProviderCosts).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await pending;
+        expect(mocks.reconcileProviderCosts).toHaveBeenCalledTimes(2);
+        expect(mocks.reconcileProviderCosts).toHaveBeenLastCalledWith(
+            expect.anything(),
+            requestId
+        );
+    });
+
+    it('caps browser fallback cost reconciliation at three attempts', async () => {
+        vi.useFakeTimers();
+        mocks.reconcileProviderCosts.mockResolvedValue({
+            eligible: 1,
+            finalized: 0,
+            failed: 1,
+            hasMore: false,
+        });
+
+        scheduleBrowserFallbackCostReconciliation(requestId);
+
+        const pending = Promise.resolve(mocks.afterCallbacks[0]());
+        await vi.advanceTimersByTimeAsync(95_000);
+        await pending;
+        expect(mocks.reconcileProviderCosts).toHaveBeenCalledTimes(3);
     });
 });

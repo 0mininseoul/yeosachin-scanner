@@ -111,7 +111,7 @@ describe('Apify interaction adapter', () => {
         );
     });
 
-    it('forwards the selected interaction credential and actual usage to cost callbacks', async () => {
+    it('forwards the credential while deferring preliminary usage finalization', async () => {
         const post = 'https://www.instagram.com/p/PostA/';
         const { client } = mockClient([liker('alice', post)], { usageTotalUsd: 0.0014 });
         const adapter = makeApifyInteractionAdapter({
@@ -134,7 +134,7 @@ describe('Apify interaction adapter', () => {
         }));
         expect(onCostRunFinished).toHaveBeenCalledWith(expect.objectContaining({
             status: 'succeeded',
-            usageTotalUsd: 0.0014,
+            usageTotalUsd: null,
         }));
     });
 
