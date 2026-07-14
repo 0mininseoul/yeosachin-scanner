@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { TopBar, Eyebrow } from '@/components/case-ui';
+import { ownerAnalysisHistoryV1Schema } from '@/lib/services/analysis/owner-history';
 import AnalysisList from './analysis-list';
 
 export const metadata = {
@@ -17,16 +18,18 @@ export default async function MyPage() {
         redirect('/login');
     }
 
-    // 2. 분석 기록 조회
-    const { data: analyses, error: analysisError } = await supabase
-        .from('analysis_requests')
-        .select('id, target_instagram_id, status, created_at, plan_type')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+    // 2. V2 terminal PII scrub 이후에도 owner-safe projection으로 분석 기록 조회
+    const { data: historyPayload, error: analysisError } = await supabase
+        .rpc('load_analysis_owner_history_v1');
 
     if (analysisError) {
         console.error('Error fetching analysis history:', analysisError);
     }
+    const parsedHistory = ownerAnalysisHistoryV1Schema.safeParse(historyPayload);
+    if (!analysisError && !parsedHistory.success) {
+        console.error('Analysis owner history response failed validation');
+    }
+    const analyses = parsedHistory.success ? parsedHistory.data.items : [];
 
     return (
         <div className="min-h-dvh">
@@ -51,7 +54,7 @@ export default async function MyPage() {
                 <p className="mt-2 text-[13px] text-fg-dim">지난 판독 기록을 확인하고 관리하세요.</p>
 
                 <div className="mt-8">
-                    <AnalysisList initialAnalyses={analyses || []} />
+                    <AnalysisList initialAnalyses={analyses} />
                 </div>
             </main>
         </div>

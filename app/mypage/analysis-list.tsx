@@ -4,22 +4,18 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { PrimaryButton } from '@/components/case-ui';
 import { isAnalysisDeletable } from '@/lib/services/analysis/deletion';
+import {
+    ownerHistoryTargetLabel,
+    type OwnerAnalysisHistoryItemV1,
+} from '@/lib/services/analysis/owner-history';
 import { analysisPlanBadgePresentation } from '@/lib/services/analysis/owner-view-presentation';
 
-interface AnalysisRequest {
-    id: string;
-    target_instagram_id: string;
-    status: string;
-    created_at: string;
-    plan_type?: string;
-}
-
 interface Props {
-    initialAnalyses: AnalysisRequest[];
+    initialAnalyses: OwnerAnalysisHistoryItemV1[];
 }
 
 export default function AnalysisList({ initialAnalyses }: Props) {
-    const [analyses, setAnalyses] = useState<AnalysisRequest[]>(initialAnalyses);
+    const [analyses, setAnalyses] = useState<OwnerAnalysisHistoryItemV1[]>(initialAnalyses);
     const [loadingId, setLoadingId] = useState<string | null>(null);
     const router = useRouter();
 
@@ -72,7 +68,7 @@ export default function AnalysisList({ initialAnalyses }: Props) {
     return (
         <div className="space-y-2.5">
             {analyses.map((item) => {
-                const planBadge = analysisPlanBadgePresentation(item.plan_type);
+                const planBadge = analysisPlanBadgePresentation(item.planType);
                 return (
                     <div
                         key={item.id}
@@ -82,7 +78,9 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                         <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                                 <div className="flex items-center gap-2">
-                                    <h3 className="truncate text-[15px] font-bold text-fg">@{item.target_instagram_id}</h3>
+                                    <h3 className="truncate text-[15px] font-bold text-fg">
+                                        {ownerHistoryTargetLabel(item)}
+                                    </h3>
                                     <span
                                         className={`shrink-0 border px-1.5 py-0.5 text-[10px] font-bold tracking-[0.1em] ${planBadge.className}`}
                                     >
@@ -90,8 +88,12 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                                     </span>
                                 </div>
                                 <div className="num mt-1.5 text-[12px] text-fg-mute">
-                                    {new Date(item.created_at).toLocaleDateString()}{' '}
-                                    {new Date(item.created_at).toLocaleTimeString()}
+                                    {item.createdAt ? (
+                                        <>
+                                            {new Date(item.createdAt).toLocaleDateString()}{' '}
+                                            {new Date(item.createdAt).toLocaleTimeString()}
+                                        </>
+                                    ) : '날짜 미상'}
                                 </div>
                             </div>
 
