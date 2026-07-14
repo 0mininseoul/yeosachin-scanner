@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import type { CloudTasksClient } from '@google-cloud/tasks';
 import { OAuth2Client } from 'google-auth-library';
 import { z } from 'zod';
+import {
+    getCloudTasksCallerAuthConfig,
+    type CloudTasksCallerAuthConfig,
+} from '@/lib/services/google/vercel-wif';
 import { createCloudTasksClient } from './background-tasks';
 import {
     analysisV2JobStore,
@@ -27,6 +31,7 @@ export interface AnalysisV2TasksConfig {
     targetUrl: string;
     oidcAudience: string;
     serviceAccountEmail: string;
+    callerAuth: CloudTasksCallerAuthConfig;
 }
 
 export type AnalysisV2TaskPayload = AnalysisV2TaskDelivery;
@@ -78,8 +83,12 @@ type DispatchOptions = EnqueueOptions & {
 let sharedTasksClient: CloudTasksClient | undefined;
 let sharedTokenVerifier: OAuth2Client | undefined;
 
-async function getSharedTasksClient(): Promise<CloudTasksClient> {
-    sharedTasksClient ??= await createCloudTasksClient();
+async function getSharedTasksClient(
+    config: AnalysisV2TasksConfig
+): Promise<CloudTasksClient> {
+    sharedTasksClient ??= await createCloudTasksClient({
+        callerAuth: config.callerAuth,
+    });
     return sharedTasksClient;
 }
 
@@ -154,6 +163,15 @@ export function getAnalysisV2TasksConfig(
         );
     }
 
+    const callerAuth = getCloudTasksCallerAuthConfig({
+        env,
+        projectId: project,
+        modeKey: 'ANALYSIS_V2_TASKS_CALLER_AUTH_MODE',
+        enqueuerServiceAccountEmailKey:
+            'ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL',
+        errorPrefix: 'ANALYSIS_V2_TASKS_CONFIG_ERROR',
+    });
+
     return Object.freeze({
         project,
         location,
@@ -161,6 +179,7 @@ export function getAnalysisV2TasksConfig(
         targetUrl: target.toString(),
         oidcAudience: audience.origin,
         serviceAccountEmail,
+        callerAuth,
     });
 }
 
@@ -237,7 +256,7 @@ export async function enqueueAnalysisV2Task(
         throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: invalid task delay.');
     }
 
-    const client = options.client ?? await getSharedTasksClient();
+    const client = options.client ?? await getSharedTasksClient(config);
     const parent = client.queuePath(config.project, config.location, config.queue);
     const taskName = configuredTaskName(
         config,
@@ -284,7 +303,7 @@ export async function lookupAnalysisV2Task(
     const config = requireConfig(
         options.config === undefined ? getAnalysisV2TasksConfig() : options.config
     );
-    const client = options.client ?? await getSharedTasksClient();
+    const client = options.client ?? await getSharedTasksClient(config);
     const name = configuredTaskName(
         config,
         client,

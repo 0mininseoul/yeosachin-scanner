@@ -3,8 +3,16 @@ import type {
     InstagramProfile,
     InstagramPost,
 } from '@/lib/types/instagram';
+import { MAX_RECENT_POSTS } from '@/lib/domain/analysis/media-policy';
 import { isInstagramUsername } from '../../username';
 import { normalizeInstagramTimestamp } from '../../timestamp';
+
+export interface SelfHostedAdmissionProfileSummary {
+    username: string;
+    followersCount: number;
+    followingCount: number;
+    isPrivate: boolean;
+}
 
 export function extractHashtags(caption?: string): string[] {
     if (!caption) return [];
@@ -213,7 +221,7 @@ function mapPost(node: Record<string, unknown>): InstagramPost {
     };
 }
 
-export function mapUserToProfile(user: Record<string, unknown>): InstagramProfile {
+export function mapUserToProfileSummary(user: Record<string, unknown>): InstagramProfile {
     if (
         typeof user.username !== 'string' ||
         !isInstagramUsername(user.username)
@@ -225,6 +233,42 @@ export function mapUserToProfile(user: Record<string, unknown>): InstagramProfil
     if (typeof isPrivate !== 'boolean') {
         throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted profile is_private가 boolean이 아닙니다.');
     }
+    return {
+        username: user.username,
+        fullName: user.full_name as string | undefined,
+        bio: user.biography as string | undefined,
+        externalUrl: user.external_url as string | undefined,
+        profilePicUrl: (user.profile_pic_url_hd || user.profile_pic_url) as string | undefined,
+        followersCount: requiredCount(user, 'edge_followed_by'),
+        followingCount: requiredCount(user, 'edge_follow'),
+        postsCount,
+        isPrivate,
+        isVerified: (user.is_verified as boolean) ?? false,
+    };
+}
+
+export function mapUserToAdmissionProfileSummary(
+    user: Record<string, unknown>
+): SelfHostedAdmissionProfileSummary {
+    if (
+        typeof user.username !== 'string'
+        || !isInstagramUsername(user.username)
+    ) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted admission username이 올바르지 않습니다.');
+    }
+    if (typeof user.is_private !== 'boolean') {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted admission is_private가 boolean이 아닙니다.');
+    }
+    return {
+        username: user.username,
+        followersCount: requiredCount(user, 'edge_followed_by'),
+        followingCount: requiredCount(user, 'edge_follow'),
+        isPrivate: user.is_private,
+    };
+}
+
+export function mapUserToProfile(user: Record<string, unknown>): InstagramProfile {
+    const summary = mapUserToProfileSummary(user);
     const mediaEdges = (user.edge_owner_to_timeline_media as { edges?: Array<{ node?: Record<string, unknown> }> })?.edges;
     const latestPosts: InstagramPost[] = Array.isArray(mediaEdges)
         ? mediaEdges
@@ -238,13 +282,19 @@ export function mapUserToProfile(user: Record<string, unknown>): InstagramProfil
                   return mapPost(edge.node);
               })
         : [];
-    if (!isPrivate && postsCount > 0 && latestPosts.length === 0) {
+    if (!summary.isPrivate && summary.postsCount > 0 && latestPosts.length === 0) {
         throw new Error(
             'SCRAPING_INCOMPLETE_ERROR: selfhosted public profile has posts but no usable timeline media.'
         );
     }
+    const requiredRecentPosts = Math.min(summary.postsCount, MAX_RECENT_POSTS);
+    if (!summary.isPrivate && latestPosts.length < requiredRecentPosts) {
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: selfhosted public profile recent-post snapshot is incomplete.'
+        );
+    }
     if (
-        !isPrivate
+        !summary.isPrivate
         && latestPosts.some(post => post.type === 'carousel' && post.childrenComplete !== true)
     ) {
         throw new Error(
@@ -253,16 +303,7 @@ export function mapUserToProfile(user: Record<string, unknown>): InstagramProfil
     }
 
     return {
-        username: user.username as string,
-        fullName: user.full_name as string | undefined,
-        bio: user.biography as string | undefined,
-        externalUrl: user.external_url as string | undefined,
-        profilePicUrl: (user.profile_pic_url_hd || user.profile_pic_url) as string | undefined,
-        followersCount: requiredCount(user, 'edge_followed_by'),
-        followingCount: requiredCount(user, 'edge_follow'),
-        postsCount,
-        isPrivate,
-        isVerified: (user.is_verified as boolean) ?? false,
+        ...summary,
         latestPosts,
     };
 }

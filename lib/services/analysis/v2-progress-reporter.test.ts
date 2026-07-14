@@ -133,6 +133,34 @@ describe('analysis V2 progress reporter', () => {
         expect(JSON.stringify(payload)).not.toContain('instagram');
     });
 
+    it('masks the actual executor-start username before heartbeat persistence', async () => {
+        const heartbeatActiveProfile = vi.fn(async () => true);
+        const store = progressStore();
+        store.heartbeatActiveProfile = heartbeatActiveProfile;
+        const reporter = createAnalysisV2ProgressReporter({ store });
+
+        await reporter.heartbeat!({
+            claim: claim({
+                jobKey: 'track:profile-ai:batch:0',
+                track: 'profile_ai',
+                kind: 'ai',
+                batch: 0,
+            }),
+            stage: 'profile_ai',
+            username: 'Candidate.Name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+        });
+
+        expect(heartbeatActiveProfile).toHaveBeenCalledWith(expect.objectContaining({
+            maskedUsername: 'c************e',
+            imageUrl: null,
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+        }));
+        expect(JSON.stringify(heartbeatActiveProfile.mock.calls)).not.toContain('Candidate.Name');
+    });
+
     it('reloads current DAG state once when a parallel completion makes counters stale', async () => {
         const checkpoint = vi.fn()
             .mockRejectedValueOnce(new AnalysisV2ProgressConflictError())

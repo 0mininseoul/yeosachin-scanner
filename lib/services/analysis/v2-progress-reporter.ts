@@ -4,6 +4,7 @@ import type { AnalysisV2DagState } from './v2-dag-planner';
 import {
     AnalysisV2ProgressConflictError,
     analysisV2ProgressStore,
+    maskAnalysisV2ProgressUsername,
     type AnalysisV2ProgressCheckpointResult,
     type AnalysisV2ProgressStore,
     type AnalysisV2ProgressTracksInput,
@@ -29,6 +30,13 @@ export interface AnalysisV2ProgressReporter {
         state: AnalysisV2DagState;
     }): Promise<AnalysisV2ProgressCheckpointResult>;
     report(input: AnalysisV2ProgressReportInput): Promise<AnalysisV2ProgressCheckpointResult>;
+    heartbeat?(input: {
+        claim: ClaimedAnalysisV2Job;
+        stage: Extract<AnalysisV2StageId, 'profile_fetch' | 'profile_ai'>;
+        username: string;
+        startedAt: string;
+        totalCount: number;
+    }): Promise<boolean>;
 }
 
 function workMap(tracks: AnalysisV2ProgressTracksInput) {
@@ -123,6 +131,22 @@ export function createAnalysisV2ProgressReporter(input: {
     }
 
     return {
+        async heartbeat({ claim, username, startedAt, totalCount }) {
+            if (!store.heartbeatActiveProfile) {
+                throw new Error('ANALYSIS_V2_ACTIVE_PROFILE_HEARTBEAT_UNAVAILABLE');
+            }
+            return store.heartbeatActiveProfile({
+                requestId: claim.requestId,
+                jobKey: claim.jobKey,
+                claimToken: claim.claimToken,
+                jobInputHash: claim.inputHash,
+                startedAt,
+                totalCount,
+                maskedUsername: maskAnalysisV2ProgressUsername(username),
+                imageUrl: null,
+            });
+        },
+
         async initialize({ claim, state }) {
             return store.checkpoint(checkpointInput(claim, bootstrapProjection(state)));
         },

@@ -3,6 +3,9 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { hasValidAdminAuthorization } from '@/lib/services/instagram/admin-selection';
 import { isValidAnalysisRequestId } from '@/lib/services/analysis/observability';
 import { reconcileSettledAnalysisProviderCosts } from '@/lib/services/analysis/provider-cost-reconciliation';
+import {
+    loadAnalysisV2OperationalObservability,
+} from '@/lib/services/analysis/v2-operational-observability';
 
 const MAX_EVENT_ROWS = 500;
 
@@ -18,6 +21,23 @@ export async function GET(request: Request) {
     }
 
     try {
+        const v2 = await loadAnalysisV2OperationalObservability(
+            supabaseAdmin,
+            requestId
+        );
+        if (v2) {
+            return NextResponse.json({
+                success: true,
+                ...v2,
+                costPolicy: {
+                    billingSource: 'analysis_v2_provider_runs+analysis_v2_ai_attempts',
+                    providerCostBasis: 'actual_and_conservative',
+                    geminiCostBasis: 'estimated',
+                    gcpInfrastructureIncluded: false,
+                },
+            });
+        }
+
         const reconciliation = await reconcileSettledAnalysisProviderCosts(
             supabaseAdmin,
             requestId

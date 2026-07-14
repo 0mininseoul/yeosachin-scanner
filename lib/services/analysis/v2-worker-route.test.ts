@@ -23,7 +23,7 @@ vi.mock('@/lib/services/analysis/v2-tasks', async (importOriginal) => {
     };
 });
 vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
-    isAnalysisV2StartAvailable: mocks.available,
+    isAnalysisV2WorkerAvailable: mocks.available,
 }));
 vi.mock('@/lib/services/analysis/v2-worker', () => ({
     processAnalysisV2TaskDelivery: mocks.process,
@@ -78,7 +78,7 @@ describe('analysis V2 worker route', () => {
         expect(mocks.process).toHaveBeenCalledOnce();
     });
 
-    it('keeps the worker closed while the execution capability is unavailable', async () => {
+    it('uses only the worker drain gate, independently from new admission', async () => {
         mocks.available.mockReturnValue(false);
         const response = await POST(request());
         expect(response.status).toBe(503);

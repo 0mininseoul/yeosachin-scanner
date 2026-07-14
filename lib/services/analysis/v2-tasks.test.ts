@@ -28,6 +28,7 @@ const config: AnalysisV2TasksConfig = {
     targetUrl: 'https://worker.example.com/api/analysis/v2/worker',
     oidcAudience: 'https://worker.example.com',
     serviceAccountEmail: 'analysis-v2-task@example-project.iam.gserviceaccount.com',
+    callerAuth: { mode: 'adc', projectId: 'example-project' },
 };
 
 function configEnv(): Record<string, string> {
@@ -39,6 +40,7 @@ function configEnv(): Record<string, string> {
         ANALYSIS_V2_TASKS_TARGET_URL: config.targetUrl,
         ANALYSIS_V2_TASKS_OIDC_AUDIENCE: config.oidcAudience,
         ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: config.serviceAccountEmail,
+        ANALYSIS_V2_TASKS_CALLER_AUTH_MODE: 'adc',
     };
 }
 
@@ -100,6 +102,37 @@ describe('analysis V2 Cloud Tasks', () => {
             ...configEnv(),
             ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://worker.example.com/not-root',
         })).toThrow('OIDC audience');
+        expect(() => getAnalysisV2TasksConfig({
+            ...configEnv(),
+            ANALYSIS_V2_TASKS_CALLER_AUTH_MODE: '',
+        })).toThrow('ANALYSIS_V2_TASKS_CALLER_AUTH_MODE');
+        expect(() => getAnalysisV2TasksConfig({
+            ...configEnv(),
+            VERCEL: '1',
+        })).toThrow('Vercel must use vercel-wif');
+    });
+
+    it('resolves the dedicated Vercel WIF enqueuer without changing task OIDC identity', () => {
+        const providerResource =
+            'projects/123456789012/locations/global/workloadIdentityPools/'
+            + 'vercel-production/providers/ai-baram-detector';
+        const resolved = getAnalysisV2TasksConfig({
+            ...configEnv(),
+            ANALYSIS_V2_TASKS_CALLER_AUTH_MODE: 'vercel-wif',
+            ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL:
+                'analysis-v2-enqueuer@example-project.iam.gserviceaccount.com',
+            GCP_VERCEL_WIF_PROVIDER_RESOURCE: providerResource,
+            VERCEL: '1',
+            VERCEL_ENV: 'production',
+        });
+        expect(resolved?.serviceAccountEmail).toBe(config.serviceAccountEmail);
+        expect(resolved?.callerAuth).toMatchObject({
+            mode: 'vercel-wif',
+            stsAudience: `//iam.googleapis.com/${providerResource}`,
+            oidcTokenAudience: `https://iam.googleapis.com/${providerResource}`,
+            enqueuerServiceAccountEmail:
+                'analysis-v2-enqueuer@example-project.iam.gserviceaccount.com',
+        });
     });
 
     it('strictly parses only the PII-free task delivery contract', () => {

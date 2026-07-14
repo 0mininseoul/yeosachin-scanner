@@ -195,8 +195,16 @@ describe('analysis V2 reverse-like production collector', () => {
             jobInputHash: consumerInputHash,
             targetUsername: 'target.account',
             candidates: [
-                { candidateId: 'candidate:a', postUrl: 'https://instagram.com/p/POST_A/' },
-                { candidateId: 'candidate:b', postUrl: 'https://instagram.com/reel/POST_B/' },
+                {
+                    candidateId: 'candidate:a',
+                    postUrl: 'https://instagram.com/p/POST_A/',
+                    declaredLikesCount: 114,
+                },
+                {
+                    candidateId: 'candidate:b',
+                    postUrl: 'https://instagram.com/reel/POST_B/',
+                    declaredLikesCount: 0,
+                },
             ],
             limitPerPost: 100,
         });
@@ -216,11 +224,138 @@ describe('analysis V2 reverse-like production collector', () => {
         expect(result.results).toEqual([
             {
                 candidateId: 'candidate:a',
-                status: 'collected',
-                likerUsernames: ['target.account'],
+                status: 'observed',
             },
-            { candidateId: 'candidate:b', status: 'not_collected', likerUsernames: [] },
+            { candidateId: 'candidate:b', status: 'not_observed' },
         ]);
+    });
+
+    it('fails closed instead of turning an out-of-scope 109-of-114 sample into absence', async () => {
+        const providerRunStore = {
+            bindAdapterCheckpoint: vi.fn(async () => ({ stored: null, checkpoint: {} })),
+            load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
+        } as unknown as AnalysisV2ProviderRunStore;
+        const getPostLikers = vi.fn(async () => Array.from({ length: 109 }, (_, index) => ({
+            postUrl: 'https://www.instagram.com/p/POST_A/',
+            id: String(index + 1),
+            username: `sample.${index + 1}`,
+            profilePicUrl: 'https://cdninstagram.com/profile.jpg',
+            isPrivate: false,
+            isVerified: false,
+            totalLikes: 114,
+        })));
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore,
+            adapter: { getPostLikers, getPostComments: vi.fn() },
+            env: {},
+        });
+
+        await expect(collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 114,
+            }],
+            limitPerPost: 100,
+        })).rejects.toThrow('ANALYSIS_V2_REVERSE_LIKE_RESULT_LIMIT_EXCEEDED');
+    });
+
+    it('keeps a complete first-100 sample from a 114-like post as not_collected', async () => {
+        const providerRunStore = {
+            bindAdapterCheckpoint: vi.fn(async () => ({ stored: null, checkpoint: {} })),
+            load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
+        } as unknown as AnalysisV2ProviderRunStore;
+        const getPostLikers = vi.fn(async () => Array.from({ length: 100 }, (_, index) => ({
+            postUrl: 'https://www.instagram.com/p/POST_A/',
+            id: String(index + 1),
+            username: `sample.${index + 1}`,
+            profilePicUrl: 'https://cdninstagram.com/profile.jpg',
+            isPrivate: false,
+            isVerified: false,
+            totalLikes: 114,
+        })));
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore,
+            adapter: { getPostLikers, getPostComments: vi.fn() },
+            env: {},
+        });
+
+        const result = await collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 114,
+            }],
+            limitPerPost: 100,
+        });
+
+        expect(result.results[0]?.status).toBe('not_collected');
+    });
+
+    it('confirms absence only when the complete liker population is within the sample cap', async () => {
+        const bindAdapterCheckpoint = vi.fn(async () => ({ stored: null, checkpoint: {} }));
+        const providerRunStore = {
+            bindAdapterCheckpoint,
+            load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
+        } as unknown as AnalysisV2ProviderRunStore;
+        const getPostLikers = vi.fn(async () => [
+            {
+                postUrl: 'https://www.instagram.com/p/POST_A/', id: '1', username: 'one',
+                profilePicUrl: 'https://cdninstagram.com/one.jpg', isPrivate: false,
+                isVerified: false, totalLikes: 2,
+            },
+            {
+                postUrl: 'https://www.instagram.com/p/POST_A/', id: '2', username: 'two',
+                profilePicUrl: 'https://cdninstagram.com/two.jpg', isPrivate: false,
+                isVerified: false, totalLikes: 2,
+            },
+        ]);
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore,
+            adapter: { getPostLikers, getPostComments: vi.fn() },
+            env: {},
+        });
+        const base = {
+            requestId,
+            jobKey: 'track:reverse-likes:collect' as const,
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            limitPerPost: 100 as const,
+        };
+
+        const complete = await collector.collect({
+            ...base,
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 2,
+            }],
+        });
+        const firstOperationKey = complete.operationKey;
+        const sampled = await collector.collect({
+            ...base,
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 3,
+            }],
+        });
+
+        expect(complete.results[0]?.status).toBe('not_observed');
+        expect(sampled.results[0]?.status).toBe('not_collected');
+        expect(sampled.operationKey).not.toBe(firstOperationKey);
+        expect(bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
     });
 
     it('does not reserve or call a paid provider when no shortlist post is collectable', async () => {

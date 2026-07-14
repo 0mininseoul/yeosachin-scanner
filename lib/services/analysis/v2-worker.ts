@@ -47,6 +47,8 @@ import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
 import { analysisV2ResultStore } from './v2-result-store';
+import { prepareAnalysisV2ProviderRunsForTerminalFailure } from './v2-provider-lifecycle';
+import { analysisV2ProviderRunStore } from './v2-provider-run-store';
 import { getAnalysisV2ProductionExecutorRegistry } from './v2-production-executors';
 import { dispatchAnalysisV2Job } from './v2-tasks';
 
@@ -100,6 +102,8 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     claim: ClaimedAnalysisV2Job;
     job: AnalysisV2DagJob;
     state: AnalysisV2DagState;
+    /** Reports the exact profile whose work is starting; persistence masks the handle. */
+    reportActiveProfile?: (username: string) => Promise<void>;
 }
 
 export type AnalysisV2StageExecutor<S extends AnalysisV2StageId> = (
@@ -126,6 +130,9 @@ export type AnalysisV2TerminalFailureFinalizer = (
 ) => Promise<unknown>;
 
 export type AnalysisV2TerminalMediaCleanup = () => Promise<unknown>;
+export type AnalysisV2TerminalFailureIntentLoader = (
+    claim: ClaimedAnalysisV2Job
+) => Promise<string | null>;
 
 export type AnalysisV2WorkerOutcome =
     | Readonly<{ status: 'already_terminal' }>
@@ -172,18 +179,50 @@ const defaultProgressReporter = createAnalysisV2ProgressReporter({
 });
 const EMPTY_EXECUTOR_REGISTRY: AnalysisV2StageExecutorRegistry = Object.freeze({});
 
-const finalizeTerminalFailure: AnalysisV2TerminalFailureFinalizer = (claim, errorCode) => (
-    analysisV2ResultStore.fail({
+export async function finalizeAnalysisV2TerminalFailure(
+    claim: ClaimedAnalysisV2Job,
+    errorCode: string,
+    dependencies: {
+        prepareProviderRuns?: typeof prepareAnalysisV2ProviderRunsForTerminalFailure;
+        failRequest?: AnalysisV2TerminalFailureFinalizer;
+    } = {}
+): Promise<unknown> {
+    const failure = {
         requestId: claim.requestId,
         jobKey: claim.jobKey,
         claimToken: claim.claimToken,
         jobInputHash: claim.inputHash,
         errorCode,
-    })
-);
+    };
+    await (dependencies.prepareProviderRuns
+        ?? prepareAnalysisV2ProviderRunsForTerminalFailure)(failure);
+    return (dependencies.failRequest
+        ?? (input => analysisV2ResultStore.fail({
+            requestId: input.requestId,
+            jobKey: input.jobKey,
+            claimToken: input.claimToken,
+            jobInputHash: input.inputHash,
+            errorCode,
+        })))(claim, errorCode);
+}
+
+const finalizeTerminalFailure: AnalysisV2TerminalFailureFinalizer =
+    finalizeAnalysisV2TerminalFailure;
 
 const cleanupTerminalMedia: AnalysisV2TerminalMediaCleanup = async () => {
     await cleanupConfiguredAnalysisV2TerminalMedia();
+};
+
+const loadTerminalFailureIntent: AnalysisV2TerminalFailureIntentLoader = async claim => {
+    const intent = await analysisV2ProviderRunStore.loadCleanupIntent(claim.requestId);
+    if (!intent) return null;
+    if (
+        intent.jobKey !== claim.jobKey
+        || intent.jobInputHash !== claim.inputHash
+    ) {
+        throw new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED');
+    }
+    return intent.errorCode;
 };
 
 function executionError(code: string, disposition: AnalysisV2JobFailureDisposition): never {
@@ -455,10 +494,38 @@ export async function executeAnalysisV2DagJob(
         return successorsForAnalysisV2Job(current.plan, claim);
     }
 
+    const activeProfileStage = current.stage === 'profile_fetch'
+        || current.stage === 'profile_ai'
+        ? current.stage
+        : null;
+    const activeProfileBatchTotal = activeProfileStage
+        ? state.relationships?.profileBatches.find(batch => batch.batch === current.job.batch)
+            ?.itemCount ?? null
+        : null;
+    if (activeProfileStage && activeProfileBatchTotal === null) {
+        executionError('ANALYSIS_V2_PROFILE_PROGRESS_TOPOLOGY_MISSING', 'permanent');
+    }
+    let lastActiveProfileStartedAtMs = 0;
     const checkpoint = await executeRegisteredStage(current.stage, executors, {
         claim,
         job: current.job,
         state,
+        ...(progressReporter?.heartbeat && activeProfileStage ? {
+            reportActiveProfile: async (username: string) => {
+                const startedAtMs = Math.max(
+                    Date.now(),
+                    lastActiveProfileStartedAtMs + 1
+                );
+                lastActiveProfileStartedAtMs = startedAtMs;
+                await progressReporter.heartbeat!({
+                    claim,
+                    stage: activeProfileStage,
+                    username,
+                    startedAt: new Date(startedAtMs).toISOString(),
+                    totalCount: activeProfileBatchTotal!,
+                });
+            },
+        } : {}),
     });
     assertCheckpointMatchesJob(current.stage, current.job, checkpoint);
     if (checkpoint) await stateStore.checkpointManifest(claim, checkpoint);
@@ -507,6 +574,8 @@ const TRANSIENT_FAILURE_CODES = new Set([
     'ANALYSIS_V2_PROFILE_CONSUMER_RETRYABLE_OUTCOME',
     'ANALYSIS_V2_PROGRESS_CONFLICT',
     'ANALYSIS_V2_PROVIDER_RUN_ALREADY_RESERVED',
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_NOT_READY',
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
     'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_NOT_READY',
     'ANALYSIS_V2_RELATIONSHIP_EVIDENCE_NOT_READY',
     'ANALYSIS_V2_RELATIONSHIP_NOT_READY',
@@ -515,6 +584,8 @@ const TRANSIENT_FAILURE_CODES = new Set([
     'ANALYSIS_V2_STAGE_CHECKPOINT_NOT_VISIBLE',
     'ANALYSIS_V2_TARGET_EVIDENCE_NOT_READY',
     'ANALYSIS_V2_TARGET_PROFILE_NOT_READY',
+    'SCRAPING_DATASET_TRANSIENT_ERROR',
+    'SCRAPING_RUN_PENDING_ERROR',
 ]);
 
 const PERMANENT_FAILURE_CODES = new Set([
@@ -691,6 +762,7 @@ export async function processAnalysisV2TaskDelivery(
         dispatch?: AnalysisV2JobDispatcher;
         terminalFailureFinalizer?: AnalysisV2TerminalFailureFinalizer;
         terminalMediaCleanup?: AnalysisV2TerminalMediaCleanup;
+        terminalFailureIntentLoader?: AnalysisV2TerminalFailureIntentLoader;
     } = {}
 ): Promise<AnalysisV2WorkerOutcome> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -702,6 +774,25 @@ export async function processAnalysisV2TaskDelivery(
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
     const claim = await store.claim(delivery);
     if (!claim) return Object.freeze({ status: 'already_terminal' });
+
+    const pendingTerminalFailure = await (
+        dependencies.terminalFailureIntentLoader ?? loadTerminalFailureIntent
+    )(claim);
+    if (pendingTerminalFailure) {
+        await (dependencies.terminalFailureFinalizer ?? finalizeTerminalFailure)(
+            claim,
+            pendingTerminalFailure
+        );
+        try {
+            await (dependencies.terminalMediaCleanup ?? cleanupTerminalMedia)();
+        } catch {
+            // The recovery sweep retries exact-generation cleanup after terminalization.
+        }
+        return Object.freeze({
+            status: 'failed',
+            errorCode: pendingTerminalFailure,
+        });
+    }
 
     let successors: readonly AnalysisV2JobSuccessor[];
     try {

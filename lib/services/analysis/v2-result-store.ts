@@ -804,6 +804,12 @@ function throwRpcError(error: RpcError, operation: string): never {
     ) {
         throw new AnalysisV2ResultNotReadyError();
     }
+    if (
+        error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED'
+        || error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_NOT_READY'
+    ) {
+        throw new Error(error.message);
+    }
     throw new Error(
         `ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: ${operation} failed (${safeRpcCode(error)}).`
     );

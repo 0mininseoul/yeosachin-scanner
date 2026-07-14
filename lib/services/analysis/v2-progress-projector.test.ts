@@ -22,21 +22,28 @@ function state(overrides: Partial<AnalysisV2DagState> = {}): AnalysisV2DagState 
 }
 
 describe('analysis V2 progress projector', () => {
-    it('uses stable plan-capacity work totals so later topology cannot lower progress', () => {
-        expect(getAnalysisV2ProgressWorkTotals('basic')).toEqual({
-            relationshipAi: 24,
+    it('uses the frozen fan-out topology instead of a plan-capacity estimate', () => {
+        expect(getAnalysisV2ProgressWorkTotals(state())).toEqual({
+            relationshipAi: 4,
             interactions: 2,
-            finalization: 7,
+            finalization: 3,
         });
-        expect(getAnalysisV2ProgressWorkTotals('standard')).toEqual({
-            relationshipAi: 44,
+        expect(getAnalysisV2ProgressWorkTotals(state({
+            relationships: {
+                revision: 1,
+                resultHash: hash('relationships'),
+                detectedMutualCount: 31,
+                publicCount: 30,
+                privateCount: 1,
+                detailedSelectedPublicCount: 30,
+                notScreenedPublicCount: 0,
+                profileBatches: [{ batch: 0, itemCount: 30, inputHash: hash('profile') }],
+                privateNameBatches: [{ batch: 0, itemCount: 1, inputHash: hash('private') }],
+            },
+        }))).toEqual({
+            relationshipAi: 6,
             interactions: 2,
-            finalization: 11,
-        });
-        expect(getAnalysisV2ProgressWorkTotals('plus')).toEqual({
-            relationshipAi: 64,
-            interactions: 2,
-            finalization: 15,
+            finalization: 4,
         });
     });
 
@@ -131,12 +138,12 @@ describe('analysis V2 progress projector', () => {
         expect(projected.tracks.relationshipAi).toEqual({
             state: 'completed',
             stageCode: 'RELATIONSHIP_AI_COMPLETE',
-            done: 24,
-            total: 24,
+            done: 4,
+            total: 4,
         });
     });
 
-    it('keeps potential findings provisional and final score facts confirmed', () => {
+    it('keeps shortlist progress neutral and final score facts confirmed', () => {
         const screening = projectAnalysisV2Progress({
             activeStage: 'screening',
             state: state({
@@ -161,7 +168,11 @@ describe('analysis V2 progress projector', () => {
                 },
             }),
         });
-        expect(screening.event?.state).toBe('provisional');
+        expect(screening.event).toMatchObject({
+            state: 'confirmed',
+            eventCode: 'SHORTLIST_READY',
+            copyCode: 'SHORTLIST_READY',
+        });
         expect(screening.event?.aggregateCount).toBe(6);
         expect(final.event).toMatchObject({
             state: 'confirmed',

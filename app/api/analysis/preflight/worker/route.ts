@@ -1,14 +1,25 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { processPreflight } from '@/lib/services/analysis/preflight';
+import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     getPreflightTasksConfig,
     verifyPreflightTaskAuthorization,
 } from '@/lib/services/analysis/preflight-tasks';
 
-const workerRequestSchema = z.object({
-    preflightId: z.string().uuid(),
-}).strict();
+const workerRequestSchema = z.union([
+    z.object({
+        preflightId: z.string().uuid(),
+    }).strict(),
+    z.object({
+        preflightId: z.string().uuid(),
+        kind: z.literal('fresh_admission'),
+        generation: z.number().int().min(1).max(100),
+        dispatchGeneration: z.number().int().min(1).max(100),
+        dispatchToken: z.string().uuid(),
+    }).strict(),
+]);
 
 export async function POST(request: Request) {
     let config;
@@ -36,7 +47,14 @@ export async function POST(request: Request) {
     }
 
     try {
-        const outcome = await processPreflight(parsed.data.preflightId);
+        const outcome = 'kind' in parsed.data
+            ? await processAnalysisV2FreshAdmission(supabaseAdmin, {
+                preflightId: parsed.data.preflightId,
+                generation: parsed.data.generation,
+                dispatchGeneration: parsed.data.dispatchGeneration,
+                dispatchToken: parsed.data.dispatchToken,
+            })
+            : await processPreflight(parsed.data.preflightId);
         return NextResponse.json({ status: outcome });
     } catch {
         console.error('Preflight worker failed.');

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { GoogleAuth } from 'google-gax';
 import {
     analysisTaskStateFromRow,
     analysisTaskStateKey,
@@ -25,14 +26,72 @@ describe('analysis background tasks', () => {
         const order: string[] = [];
         const client = {} as never;
 
-        await expect(createCloudTasksClient(
-            () => { order.push('credentials'); },
-            async () => {
+        await expect(createCloudTasksClient({
+            prepareLegacyCredentials: () => { order.push('credentials'); },
+            createClient: async () => {
                 order.push('client');
                 return client;
-            }
-        )).resolves.toBe(client);
+            },
+        })).resolves.toBe(client);
         expect(order).toEqual(['credentials', 'client']);
+    });
+
+    it('uses attached ADC explicitly without preparing legacy V1 credentials', async () => {
+        const prepareLegacyCredentials = vi.fn();
+        const auth = new GoogleAuth({ projectId: config.project });
+        const createAdcGoogleAuth = vi.fn(() => auth);
+        const createClient = vi.fn(async () => ({} as never));
+
+        await createCloudTasksClient({
+            callerAuth: { mode: 'adc', projectId: config.project },
+            prepareLegacyCredentials,
+            createAdcGoogleAuth,
+            createClient,
+        });
+
+        expect(prepareLegacyCredentials).not.toHaveBeenCalled();
+        expect(createAdcGoogleAuth).toHaveBeenCalledWith(config.project);
+        expect(createClient).toHaveBeenCalledWith({
+            auth,
+            projectId: config.project,
+        });
+    });
+
+    it('injects the federated enqueuer only for an explicit WIF caller', async () => {
+        const prepareLegacyCredentials = vi.fn();
+        const auth = new GoogleAuth({ projectId: config.project });
+        const createWifGoogleAuth = vi.fn(() => auth);
+        const createClient = vi.fn(async () => ({} as never));
+        const providerResource =
+            'projects/123456789012/locations/global/workloadIdentityPools/'
+            + 'vercel-production/providers/ai-baram-detector';
+        const callerAuth = {
+            mode: 'vercel-wif' as const,
+            projectId: config.project,
+            providerResource,
+            stsAudience: `//iam.googleapis.com/${providerResource}`,
+            oidcTokenAudience: `https://iam.googleapis.com/${providerResource}`,
+            enqueuerServiceAccountEmail:
+                'analysis-v2-enqueuer@example-project.iam.gserviceaccount.com',
+            serviceAccountImpersonationUrl:
+                'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/'
+                + 'analysis-v2-enqueuer@example-project.iam.gserviceaccount.com:'
+                + 'generateAccessToken',
+        };
+
+        await createCloudTasksClient({
+            callerAuth,
+            prepareLegacyCredentials,
+            createWifGoogleAuth,
+            createClient,
+        });
+
+        expect(prepareLegacyCredentials).not.toHaveBeenCalled();
+        expect(createWifGoogleAuth).toHaveBeenCalledWith(callerAuth);
+        expect(createClient).toHaveBeenCalledWith({
+            auth,
+            projectId: config.project,
+        });
     });
 
     it('is disabled by default and fails closed on partial configuration', () => {

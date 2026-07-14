@@ -412,6 +412,7 @@ export const progressEventV1Schema = z.object({
         'TARGET_PROFILE_READY',
         'RELATIONSHIP_PROGRESS',
         'PROFILE_SCREENED',
+        'SHORTLIST_READY',
         'POTENTIAL_HIGH_RISK_FOUND',
         'FINDING_CORRECTED',
         'FINDING_CONFIRMED',

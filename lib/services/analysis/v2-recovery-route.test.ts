@@ -7,12 +7,12 @@ const mocks = vi.hoisted(() => ({
     recover: vi.fn(),
 }));
 
-vi.mock('@/lib/services/analysis/v2-tasks', () => ({
-    getAnalysisV2TasksConfig: mocks.config,
-    verifyAnalysisV2TaskAuthorization: mocks.verify,
+vi.mock('@/lib/services/analysis/v2-maintenance-auth', () => ({
+    getAnalysisV2MaintenanceAuthConfig: mocks.config,
+    verifyAnalysisV2MaintenanceAuthorization: mocks.verify,
 }));
 vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
-    isAnalysisV2StartAvailable: mocks.available,
+    isAnalysisV2RecoveryAvailable: mocks.available,
 }));
 vi.mock('@/lib/services/analysis/v2-recovery', () => ({
     recoverAnalysisV2Jobs: mocks.recover,
@@ -21,12 +21,8 @@ vi.mock('@/lib/services/analysis/v2-recovery', () => ({
 import { POST } from '@/app/api/analysis/v2/recover/route';
 
 const config = {
-    project: 'example-project',
-    location: 'asia-northeast3',
-    queue: 'analysis-v2',
-    targetUrl: 'https://worker.example.com/api/analysis/v2/worker',
     oidcAudience: 'https://worker.example.com',
-    serviceAccountEmail: 'analysis-task@example-project.iam.gserviceaccount.com',
+    serviceAccountEmail: 'analysis-maintenance@example-project.iam.gserviceaccount.com',
 };
 
 function request() {
@@ -58,7 +54,7 @@ describe('analysis V2 recovery route', () => {
         expect(mocks.recover).toHaveBeenCalledOnce();
     });
 
-    it('keeps recovery closed with the execution gate and retries partial failures', async () => {
+    it('uses only the recovery gate and retries partial failures', async () => {
         mocks.available.mockReturnValue(false);
         const closed = await POST(request());
         expect(closed.status).toBe(503);
@@ -74,5 +70,21 @@ describe('analysis V2 recovery route', () => {
         });
         const retry = await POST(request());
         expect(retry.status).toBe(500);
+    });
+
+    it('fails closed before recovery when maintenance auth is unavailable or invalid', async () => {
+        mocks.config.mockImplementationOnce(() => {
+            throw new Error('missing maintenance config');
+        });
+        const unavailable = await POST(request());
+        expect(unavailable.status).toBe(503);
+        await expect(unavailable.json()).resolves.toEqual({
+            code: 'MAINTENANCE_UNAVAILABLE',
+        });
+
+        mocks.verify.mockResolvedValueOnce(false);
+        const unauthorized = await POST(request());
+        expect(unauthorized.status).toBe(401);
+        expect(mocks.recover).not.toHaveBeenCalled();
     });
 });

@@ -2,19 +2,23 @@
 set -euo pipefail
 
 readonly CLOUD_TASKS_API="cloudtasks.googleapis.com"
-readonly QUEUE_MAX_DISPATCHES_PER_SECOND="2"
-readonly QUEUE_MAX_CONCURRENT_DISPATCHES="2"
+readonly QUEUE_MAX_DISPATCHES_PER_SECOND="${ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND:-2}"
+readonly QUEUE_MAX_CONCURRENT_DISPATCHES="${ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES:-2}"
 readonly QUEUE_MAX_ATTEMPTS="8"
 readonly QUEUE_MAX_RETRY_DURATION="${ANALYSIS_TASKS_MAX_RETRY_DURATION:-3600s}"
 readonly QUEUE_MIN_BACKOFF="40s"
 readonly QUEUE_MAX_BACKOFF="300s"
 readonly QUEUE_MAX_DOUBLINGS="4"
+readonly ENQUEUER_IAM_SCOPE="${ANALYSIS_TASKS_IAM_SCOPE:-project}"
+readonly EXACT_IAM="${ANALYSIS_TASKS_EXACT_IAM:-false}"
+readonly RUNTIME_QUEUE_ACCESS="${ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS:-none}"
 
 mode="apply"
+reconcile_iam="false"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/configure-analysis-tasks-queue.sh [--dry-run | --check]
+Usage: scripts/configure-analysis-tasks-queue.sh [--dry-run | --check] [--reconcile-iam]
 
 Safely provisions or verifies the Google Cloud Tasks queue and the IAM bindings
 used by the background analysis pipeline.
@@ -30,9 +34,23 @@ Optional private Cloud Run target variables (set both or neither):
   ANALYSIS_TASKS_CLOUD_RUN_SERVICE
   ANALYSIS_TASKS_CLOUD_RUN_REGION
 
+Optional bounded queue overrides:
+  ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND      Integer 1..100. Defaults to 2.
+  ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES     Integer 1..100. Defaults to 2.
+  ANALYSIS_TASKS_IAM_SCOPE                     project (default) or queue.
+  ANALYSIS_TASKS_EXACT_IAM                     true or false. Defaults to false.
+  ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL Required when exact IAM is true.
+  ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS          none or enqueue-view.
+
+Set ANALYSIS_TASKS_IAM_SCOPE=queue for a dedicated queue. In queue mode the
+configured enqueuer must not retain project-wide roles/cloudtasks.enqueuer.
+
 Options:
   --dry-run  Print mutations without applying them. Read-only preflight checks run.
   --check    Verify the complete configuration without changing it.
+  --reconcile-iam
+             Replace non-empty drifted task-SA or queue IAM. Without this
+             explicit opt-in, unexpected existing IAM fails closed.
   -h, --help Show this help.
 
 The enqueuer account must already exist. The task invoker account is created when
@@ -89,6 +107,38 @@ validate_queue() {
 validate_cloud_run_service() {
   [[ "$1" =~ ^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$ ]] \
     || die "ANALYSIS_TASKS_CLOUD_RUN_SERVICE is invalid"
+}
+
+validate_queue_capacity() {
+  [[ "$QUEUE_MAX_DISPATCHES_PER_SECOND" =~ ^[1-9][0-9]*$ ]] \
+    && ((10#$QUEUE_MAX_DISPATCHES_PER_SECOND <= 100)) \
+    || die "ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND must be an integer from 1 through 100"
+  [[ "$QUEUE_MAX_CONCURRENT_DISPATCHES" =~ ^[1-9][0-9]*$ ]] \
+    && ((10#$QUEUE_MAX_CONCURRENT_DISPATCHES <= 100)) \
+    || die "ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES must be an integer from 1 through 100"
+}
+
+validate_iam_scope() {
+  [[ "$ENQUEUER_IAM_SCOPE" == "project" || "$ENQUEUER_IAM_SCOPE" == "queue" ]] \
+    || die "ANALYSIS_TASKS_IAM_SCOPE must be project or queue"
+}
+
+validate_exact_iam_mode() {
+  [[ "$EXACT_IAM" == "true" || "$EXACT_IAM" == "false" ]] \
+    || die "ANALYSIS_TASKS_EXACT_IAM must be true or false"
+  [[ "$RUNTIME_QUEUE_ACCESS" == "none" || "$RUNTIME_QUEUE_ACCESS" == "enqueue-view" ]] \
+    || die "ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS must be none or enqueue-view"
+  if [[ "$EXACT_IAM" == "true" ]]; then
+    [[ "$ENQUEUER_IAM_SCOPE" == "queue" ]] \
+      || die "exact task IAM requires ANALYSIS_TASKS_IAM_SCOPE=queue"
+    required_env ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL
+    validate_service_account_email \
+      "$ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
+      "ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL"
+    [[ "$(service_account_project "$ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL")" \
+      == "$ANALYSIS_TASKS_PROJECT" ]] \
+      || die "runtime service account must belong to ANALYSIS_TASKS_PROJECT"
+  fi
 }
 
 validate_service_account_email() {
@@ -172,6 +222,61 @@ ensure_project_binding() {
   if [[ "$mode" == "apply" ]]; then
     project_binding_exists "$role" "$member" \
       || die "IAM binding was not observable after setup: $description"
+  fi
+}
+
+reject_project_binding() {
+  local role="$1"
+  local member="$2"
+  local description="$3"
+  local bindings
+  bindings="$(gcloud projects get-iam-policy "$ANALYSIS_TASKS_PROJECT" \
+    '--flatten=bindings[].members' \
+    "--filter=bindings.role=$role AND bindings.members=$member" \
+    '--format=csv[no-heading](bindings.role,bindings.members)')"
+  grep -Fq "${role},${member}" <<<"$bindings" || return 0
+  die "forbidden project-wide IAM binding: $description"
+}
+
+queue_binding_exists() {
+  local role="$1"
+  local member="$2"
+  local policy
+  policy="$(gcloud tasks queues get-iam-policy "$ANALYSIS_TASKS_QUEUE" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--location=$ANALYSIS_TASKS_LOCATION" \
+    --format=json)"
+  jq -e \
+    --arg role "$role" \
+    --arg member "$member" '
+      any(.bindings[]?;
+        .role == $role
+        and (.condition? == null)
+        and any(.members[]?; . == $member))' \
+    <<<"$policy" >/dev/null
+}
+
+ensure_queue_binding() {
+  local role="$1"
+  local member="$2"
+  local description="$3"
+  if queue_binding_exists "$role" "$member"; then
+    log "verified: $description"
+    return 0
+  fi
+
+  [[ "$mode" != "check" ]] || die "missing queue IAM binding: $description"
+  run_mutation gcloud tasks queues add-iam-policy-binding \
+    "$ANALYSIS_TASKS_QUEUE" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--location=$ANALYSIS_TASKS_LOCATION" \
+    "--member=$member" \
+    "--role=$role" \
+    --quiet
+
+  if [[ "$mode" == "apply" ]]; then
+    queue_binding_exists "$role" "$member" \
+      || die "queue IAM binding was not observable after setup: $description"
   fi
 }
 
@@ -261,8 +366,8 @@ queue_limits_match() {
     "--project=$ANALYSIS_TASKS_PROJECT" \
     "--location=$ANALYSIS_TASKS_LOCATION" \
     '--format=csv[no-heading](rateLimits.maxDispatchesPerSecond,rateLimits.maxConcurrentDispatches,retryConfig.maxAttempts,retryConfig.maxRetryDuration,retryConfig.minBackoff,retryConfig.maxBackoff,retryConfig.maxDoublings)')"
-  [[ "$policy" == "2.0,2,8,$QUEUE_MAX_RETRY_DURATION,40s,300s,4" \
-    || "$policy" == "2,2,8,$QUEUE_MAX_RETRY_DURATION,40s,300s,4" ]]
+  [[ "$policy" == "${QUEUE_MAX_DISPATCHES_PER_SECOND}.0,${QUEUE_MAX_CONCURRENT_DISPATCHES},8,$QUEUE_MAX_RETRY_DURATION,40s,300s,4" \
+    || "$policy" == "${QUEUE_MAX_DISPATCHES_PER_SECOND},${QUEUE_MAX_CONCURRENT_DISPATCHES},8,$QUEUE_MAX_RETRY_DURATION,40s,300s,4" ]]
 }
 
 verify_queue_running() {
@@ -275,6 +380,215 @@ verify_queue_running() {
     || die "queue state is $state; inspect it and resume it explicitly if appropriate"
 }
 
+ensure_queue_configuration() {
+  if [[ "$mode" == "dry-run" && "$api_was_enabled" == "false" ]]; then
+    run_mutation gcloud tasks queues create "${queue_args[@]}"
+  elif queue_exists; then
+    if queue_limits_match; then
+      log "verified: queue rate and retry policy"
+    else
+      [[ "$mode" != "check" ]] || die "queue rate or retry policy has drifted"
+      run_mutation gcloud tasks queues update "${queue_args[@]}"
+    fi
+    if [[ "$mode" != "dry-run" ]]; then
+      queue_limits_match || die "queue policy was not applied"
+      verify_queue_running
+    fi
+  else
+    [[ "$mode" != "check" ]] || die "analysis task queue does not exist"
+    run_mutation gcloud tasks queues create "${queue_args[@]}"
+    if [[ "$mode" == "apply" ]]; then
+      queue_limits_match || die "queue policy was not applied"
+      verify_queue_running
+    fi
+  fi
+}
+
+task_identity_policy() {
+  gcloud iam service-accounts get-iam-policy \
+    "$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    --format=json
+}
+
+queue_iam_policy() {
+  gcloud tasks queues get-iam-policy "$ANALYSIS_TASKS_QUEUE" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--location=$ANALYSIS_TASKS_LOCATION" \
+    --format=json
+}
+
+task_identity_policy_is_exact() {
+  local policy="$1"
+  jq -e \
+    --arg enqueuer "$enqueuer_member" \
+    --arg runtime "$runtime_member" \
+    --arg service_agent "$service_agent_member" '
+      ((.bindings // []) | length) == 1
+        and .bindings[0].role == "roles/iam.serviceAccountUser"
+        and (.bindings[0].condition? == null)
+        and ((.bindings[0].members | sort)
+          == ([$enqueuer, $runtime, $service_agent] | sort))
+    ' <<<"$policy" >/dev/null
+}
+
+queue_iam_policy_is_exact() {
+  local policy="$1"
+  if [[ "$RUNTIME_QUEUE_ACCESS" == "enqueue-view" ]]; then
+    jq -e \
+      --arg enqueuer "$enqueuer_member" \
+      --arg runtime "$runtime_member" '
+        ((.bindings // []) | length) == 2
+          and ([.bindings[].role] | sort) == [
+            "roles/cloudtasks.enqueuer",
+            "roles/cloudtasks.viewer"
+          ]
+          and ([.bindings[] | select(.role == "roles/cloudtasks.enqueuer")]
+            | length) == 1
+          and ([.bindings[] | select(.role == "roles/cloudtasks.enqueuer")][0]
+            | (.condition? == null)
+              and ((.members | sort) == ([$enqueuer, $runtime] | sort)))
+          and ([.bindings[] | select(.role == "roles/cloudtasks.viewer")]
+            | length) == 1
+          and ([.bindings[] | select(.role == "roles/cloudtasks.viewer")][0]
+            | (.condition? == null) and .members == [$runtime])
+      ' <<<"$policy" >/dev/null
+  else
+    jq -e --arg enqueuer "$enqueuer_member" '
+      ((.bindings // []) | length) == 1
+        and .bindings[0].role == "roles/cloudtasks.enqueuer"
+        and (.bindings[0].condition? == null)
+        and .bindings[0].members == [$enqueuer]
+    ' <<<"$policy" >/dev/null
+  fi
+}
+
+iam_policy_is_empty() {
+  jq -e '((.bindings // []) | length) == 0' <<<"$1" >/dev/null
+}
+
+iam_policy_files=()
+written_iam_policy_file=""
+write_exact_task_identity_policy() {
+  local current="$1"
+  local file
+  file="$(mktemp "${TMPDIR:-/tmp}/analysis-task-sa-iam.XXXXXX.json")"
+  iam_policy_files+=("$file")
+  jq \
+    --arg enqueuer "$enqueuer_member" \
+    --arg runtime "$runtime_member" \
+    --arg service_agent "$service_agent_member" '
+      .bindings = [{
+        "role": "roles/iam.serviceAccountUser",
+        "members": ([$enqueuer, $runtime, $service_agent] | sort)
+      }]
+    ' <<<"$current" >"$file"
+  written_iam_policy_file="$file"
+}
+
+write_exact_queue_policy() {
+  local current="$1"
+  local file
+  file="$(mktemp "${TMPDIR:-/tmp}/analysis-queue-iam.XXXXXX.json")"
+  iam_policy_files+=("$file")
+  if [[ "$RUNTIME_QUEUE_ACCESS" == "enqueue-view" ]]; then
+    jq --arg enqueuer "$enqueuer_member" --arg runtime "$runtime_member" '
+      .bindings = [
+        {
+          "role": "roles/cloudtasks.enqueuer",
+          "members": ([$enqueuer, $runtime] | sort)
+        },
+        {"role": "roles/cloudtasks.viewer", "members": [$runtime]}
+      ]
+    ' <<<"$current" >"$file"
+  else
+    jq --arg enqueuer "$enqueuer_member" '
+      .bindings = [{"role": "roles/cloudtasks.enqueuer", "members": [$enqueuer]}]
+    ' <<<"$current" >"$file"
+  fi
+  written_iam_policy_file="$file"
+}
+
+ensure_exact_task_identity_policy() {
+  local policy
+  local file
+  if [[ "$mode" == "dry-run" && "$task_account_available" == "false" ]]; then
+    log "[dry-run] task OIDC IAM will contain only V2 enqueuer, runtime, and Cloud Tasks service agent actAs"
+    return 0
+  fi
+  policy="$(task_identity_policy)"
+  if task_identity_policy_is_exact "$policy"; then
+    log "verified: task OIDC identity has exact actAs principals and no token-creator role"
+    return 0
+  fi
+  [[ "$mode" != "check" ]] || die "task OIDC identity IAM has drifted"
+  if ! iam_policy_is_empty "$policy" && [[ "$reconcile_iam" != "true" ]]; then
+    die "task OIDC identity IAM has unexpected bindings; inspect or use --reconcile-iam"
+  fi
+  write_exact_task_identity_policy "$policy"
+  file="$written_iam_policy_file"
+  run_mutation gcloud iam service-accounts set-iam-policy \
+    "$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" "$file" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    --quiet
+  if [[ "$mode" == "apply" ]]; then
+    policy="$(task_identity_policy)"
+    task_identity_policy_is_exact "$policy" \
+      || die "exact task OIDC identity IAM was not observable"
+  fi
+}
+
+ensure_exact_queue_policy() {
+  local policy
+  local file
+  if [[ "$mode" == "dry-run" ]] && ! queue_exists; then
+    log "[dry-run] queue IAM will contain only the declared V2 queue principals"
+    return 0
+  fi
+  policy="$(queue_iam_policy)"
+  if queue_iam_policy_is_exact "$policy"; then
+    log "verified: queue IAM has only the declared V2 principals and roles"
+    return 0
+  fi
+  [[ "$mode" != "check" ]] || die "queue IAM has drifted"
+  if ! iam_policy_is_empty "$policy" && [[ "$reconcile_iam" != "true" ]]; then
+    die "queue IAM has unexpected bindings; inspect or use --reconcile-iam"
+  fi
+  write_exact_queue_policy "$policy"
+  file="$written_iam_policy_file"
+  run_mutation gcloud tasks queues set-iam-policy \
+    "$ANALYSIS_TASKS_QUEUE" "$file" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--location=$ANALYSIS_TASKS_LOCATION" \
+    --quiet
+  if [[ "$mode" == "apply" ]]; then
+    policy="$(queue_iam_policy)"
+    queue_iam_policy_is_exact "$policy" \
+      || die "exact queue IAM was not observable"
+  fi
+}
+
+verify_task_identity_is_keyless_and_project_role_free() {
+  local keys
+  local roles
+  if [[ "$task_account_available" == "false" ]]; then
+    [[ "$mode" == "dry-run" ]] || die "task OIDC identity is unavailable"
+    return 0
+  fi
+  keys="$(gcloud iam service-accounts keys list \
+    "--iam-account=$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    --managed-by=user \
+    '--format=value(name)')"
+  [[ -z "$keys" ]] || die "task OIDC identity has a user-managed key"
+  roles="$(gcloud projects get-iam-policy "$ANALYSIS_TASKS_PROJECT" \
+    '--flatten=bindings[].members' \
+    "--filter=bindings.members=$task_invoker_member" \
+    '--format=value(bindings.role)')"
+  [[ -z "$roles" ]] || die "task OIDC identity must have no project-wide role"
+  log "verified: task OIDC identity is keyless and project-role-free"
+}
+
 while (($# > 0)); do
   case "$1" in
     --dry-run)
@@ -284,6 +598,9 @@ while (($# > 0)); do
     --check)
       [[ "$mode" == "apply" ]] || die "choose only one of --dry-run or --check"
       mode="check"
+      ;;
+    --reconcile-iam)
+      reconcile_iam="true"
       ;;
     -h|--help)
       usage
@@ -309,6 +626,9 @@ done
 validate_project "$ANALYSIS_TASKS_PROJECT"
 validate_location "$ANALYSIS_TASKS_LOCATION"
 validate_queue "$ANALYSIS_TASKS_QUEUE"
+validate_queue_capacity
+validate_iam_scope
+validate_exact_iam_mode
 validate_service_account_email \
   "$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" \
   "ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL"
@@ -347,6 +667,9 @@ task_account_project="$(service_account_project "$ANALYSIS_TASKS_SERVICE_ACCOUNT
   || die "task invoker and enqueuer service accounts must be distinct"
 
 command -v gcloud >/dev/null 2>&1 || die "gcloud CLI is required"
+if [[ "$ENQUEUER_IAM_SCOPE" == "queue" ]]; then
+  command -v jq >/dev/null 2>&1 || die "jq is required for queue-scoped IAM"
+fi
 active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -n 1)"
 [[ -n "$active_account" ]] || die "gcloud has no active authenticated account"
 
@@ -418,17 +741,25 @@ fi
 readonly enqueuer_member="serviceAccount:$ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL"
 readonly service_agent_member="serviceAccount:service-${project_number}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
 readonly task_invoker_member="serviceAccount:$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL"
+readonly runtime_member="serviceAccount:${ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL:-unused@invalid}"
+
+cleanup() {
+  local file
+  for file in "${iam_policy_files[@]:-}"; do
+    [[ -z "$file" ]] || rm -f "$file"
+  done
+}
+trap cleanup EXIT
 
 ensure_project_binding \
   'roles/cloudtasks.serviceAgent' \
   "$service_agent_member" \
   'Cloud Tasks service agent project role'
-ensure_project_binding \
-  'roles/cloudtasks.enqueuer' \
-  "$enqueuer_member" \
-  'runtime principal can enqueue Cloud Tasks'
 
-if [[ "$task_account_available" == "false" ]]; then
+if [[ "$EXACT_IAM" == "true" ]]; then
+  verify_task_identity_is_keyless_and_project_role_free
+  ensure_exact_task_identity_policy
+elif [[ "$task_account_available" == "false" ]]; then
   [[ "$mode" == "dry-run" ]] || die "task invoker service account is unavailable"
   run_mutation gcloud iam service-accounts add-iam-policy-binding \
     "$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" \
@@ -461,29 +792,41 @@ if [[ -n "${ANALYSIS_TASKS_CLOUD_RUN_SERVICE:-}" ]]; then
     "--region=$ANALYSIS_TASKS_CLOUD_RUN_REGION" \
     '--format=value(metadata.name)' >/dev/null \
     || die "private Cloud Run worker service does not exist or is not visible"
-  ensure_cloud_run_invoker_binding "$task_invoker_member"
+  if [[ "$EXACT_IAM" != "true" ]]; then
+    ensure_cloud_run_invoker_binding "$task_invoker_member"
+  fi
 fi
 
-if [[ "$mode" == "dry-run" && "$api_was_enabled" == "false" ]]; then
-  run_mutation gcloud tasks queues create "${queue_args[@]}"
-elif queue_exists; then
-  if queue_limits_match; then
-    log "verified: queue rate and retry policy"
-  else
-    [[ "$mode" != "check" ]] || die "queue rate or retry policy has drifted"
-    run_mutation gcloud tasks queues update "${queue_args[@]}"
-  fi
-  if [[ "$mode" != "dry-run" ]]; then
-    queue_limits_match || die "queue policy was not applied"
-    verify_queue_running
-  fi
+ensure_queue_configuration
+
+if [[ "$EXACT_IAM" == "true" ]]; then
+  reject_project_binding \
+    'roles/cloudtasks.enqueuer' \
+    "$enqueuer_member" \
+    'configured enqueuer can enqueue every queue in the project'
+  reject_project_binding \
+    'roles/cloudtasks.enqueuer' \
+    "$runtime_member" \
+    'runtime can enqueue every queue in the project'
+  reject_project_binding \
+    'roles/cloudtasks.viewer' \
+    "$runtime_member" \
+    'runtime can view every queue in the project'
+  ensure_exact_queue_policy
+elif [[ "$ENQUEUER_IAM_SCOPE" == "queue" ]]; then
+  reject_project_binding \
+    'roles/cloudtasks.enqueuer' \
+    "$enqueuer_member" \
+    'configured enqueuer can enqueue every queue in the project'
+  ensure_queue_binding \
+    'roles/cloudtasks.enqueuer' \
+    "$enqueuer_member" \
+    'runtime principal can enqueue only the configured Cloud Tasks queue'
 else
-  [[ "$mode" != "check" ]] || die "analysis task queue does not exist"
-  run_mutation gcloud tasks queues create "${queue_args[@]}"
-  if [[ "$mode" == "apply" ]]; then
-    queue_limits_match || die "queue policy was not applied"
-    verify_queue_running
-  fi
+  ensure_project_binding \
+    'roles/cloudtasks.enqueuer' \
+    "$enqueuer_member" \
+    'runtime principal can enqueue Cloud Tasks'
 fi
 
 if [[ "$mode" == "dry-run" ]]; then

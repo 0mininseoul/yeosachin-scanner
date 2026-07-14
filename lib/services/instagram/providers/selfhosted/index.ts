@@ -11,9 +11,14 @@ import {
     successfulProfileAttempt,
     unavailableProfileAttempt,
 } from '../profile-attempt';
-import { mapUserToProfile } from './mappers';
+import {
+    mapUserToAdmissionProfileSummary,
+    mapUserToProfile,
+    mapUserToProfileSummary,
+    type SelfHostedAdmissionProfileSummary,
+} from './mappers';
 import { pLimit, withRetry } from './rate-limit';
-import { fetchWebProfileUser } from './web-client';
+import { fetchWebProfileAdmissionUser, fetchWebProfileUser } from './web-client';
 import { isInstagramUsername } from '../../username';
 
 interface SelfHostedDeps {
@@ -25,6 +30,34 @@ interface SelfHostedDeps {
 
 function isConfigurationError(error: unknown): error is Error {
     return error instanceof Error && error.message.startsWith('SCRAPING_CONFIG_ERROR:');
+}
+
+function isProgressPersistenceError(error: unknown): error is Error {
+    return error instanceof Error && (
+        error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+        || error.message.startsWith('ANALYSIS_V2_PROGRESS_')
+    );
+}
+
+async function reportProfileStart(
+    context: ProviderCallContext | undefined,
+    username: string
+): Promise<void> {
+    try {
+        await context?.onProfileStart?.(username);
+    } catch (error) {
+        if (isProgressPersistenceError(error)) throw error;
+        throw new Error('ANALYSIS_PERSISTENCE_ERROR: active profile heartbeat failed.');
+    }
+}
+
+async function reportProfileResolved(context: ProviderCallContext | undefined): Promise<void> {
+    try {
+        await context?.onProfileResolved?.();
+    } catch (error) {
+        if (isProgressPersistenceError(error)) throw error;
+        throw new Error('ANALYSIS_PERSISTENCE_ERROR: profile work progress failed.');
+    }
 }
 
 export function getSelfHostedProfileConcurrency(
@@ -69,6 +102,22 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
         const result = user ? mapUserToProfile(user) : null;
         if (result && result.username.toLowerCase() !== username.toLowerCase()) {
             throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted profile username이 요청과 다릅니다.');
+        }
+        context?.recordUsage({ result_count: result ? 1 : 0 });
+        return result;
+    }
+
+    async function getProfileSummary(
+        username: string,
+        context?: ProviderCallContext
+    ): Promise<InstagramProfile | null> {
+        if (!isInstagramUsername(username)) {
+            throw new Error('SCRAPING_CONFIG_ERROR: selfhosted summary username is invalid.');
+        }
+        const user = await fetchUser(username, context);
+        const result = user ? mapUserToProfileSummary(user) : null;
+        if (result && result.username.toLowerCase() !== username.toLowerCase()) {
+            throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted summary username mismatch.');
         }
         context?.recordUsage({ result_count: result ? 1 : 0 });
         return result;
@@ -123,6 +172,7 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
         const results = await Promise.all(
             normalized.map(username => limit(async () => {
                 const startedAt = Date.now();
+                await reportProfileStart(context, username);
                 let requestCount = 0;
                 const itemContext: ProviderCallContext = {
                     ...context,
@@ -145,6 +195,7 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
                         });
                     }
                     const profile = mapUserToProfile(rawUser);
+                    await reportProfileResolved(itemContext);
                     return successfulProfileAttempt({
                         requestedUsername: username,
                         source: 'selfhosted',
@@ -153,7 +204,9 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
                         latencyMs,
                     });
                 } catch (error) {
-                    if (isConfigurationError(error)) throw error;
+                    if (isConfigurationError(error) || isProgressPersistenceError(error)) {
+                        throw error;
+                    }
                     return failedProfileAttempt({
                         requestedUsername: username,
                         source: 'selfhosted',
@@ -173,6 +226,7 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
     return {
         name: 'selfhosted',
         paid: false,
+        getProfileSummary,
         getProfile,
         getProfilesBatch,
         getProfilesBatchOutcomes,
@@ -180,3 +234,27 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
 }
 
 export const selfHostedProvider: ScraperProvider = makeSelfHostedProvider();
+
+export async function getSelfHostedProfileSummary(
+    username: string
+): Promise<InstagramProfile | null> {
+    if (!selfHostedProvider.getProfileSummary) {
+        throw new Error('SCRAPING_CONFIG_ERROR: selfhosted summary capability is unavailable.');
+    }
+    return selfHostedProvider.getProfileSummary(username);
+}
+
+
+export async function getSelfHostedAdmissionProfileSummary(
+    username: string
+): Promise<SelfHostedAdmissionProfileSummary | null> {
+    if (!isInstagramUsername(username)) {
+        throw new Error('SCRAPING_CONFIG_ERROR: selfhosted admission username is invalid.');
+    }
+    const user = await fetchWebProfileAdmissionUser(username);
+    const result = user ? mapUserToAdmissionProfileSummary(user) : null;
+    if (result && result.username.toLowerCase() !== username.toLowerCase()) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted admission username mismatch.');
+    }
+    return result;
+}

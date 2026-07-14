@@ -160,6 +160,37 @@ describe('V2 progress persistence adapter', () => {
         );
     });
 
+    it('persists only a masked profile-start heartbeat under the exact job fence', async () => {
+        const mock = client(true);
+        const store = createAnalysisV2ProgressStore(mock);
+
+        await expect(store.heartbeatActiveProfile!({
+            requestId,
+            jobKey: 'track:profile-ai:batch:3',
+            claimToken,
+            jobInputHash: inputHash,
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+            maskedUsername: 'c************e',
+            imageUrl: null,
+        })).resolves.toBe(true);
+
+        expect(mock.rpc).toHaveBeenCalledWith(
+            'checkpoint_analysis_v2_active_profile_heartbeat',
+            {
+                p_request_id: requestId,
+                p_job_key: 'track:profile-ai:batch:3',
+                p_claim_token: claimToken,
+                p_job_input_hash: inputHash,
+                p_started_at: '2026-07-14T02:00:00.000Z',
+                p_total_count: 30,
+                p_masked_username: 'c************e',
+                p_image_url: null,
+            }
+        );
+        expect(JSON.stringify(mock.rpc.mock.calls)).not.toContain('Candidate.Name');
+    });
+
     it('uses the same IEEE-754 weighted progress calculation as the database', async () => {
         const tracks = {
             relationshipAi: {

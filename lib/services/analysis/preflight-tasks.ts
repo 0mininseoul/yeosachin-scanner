@@ -1,5 +1,9 @@
 import type { CloudTasksClient } from '@google-cloud/tasks';
 import { OAuth2Client } from 'google-auth-library';
+import {
+    getCloudTasksCallerAuthConfig,
+    type CloudTasksCallerAuthConfig,
+} from '@/lib/services/google/vercel-wif';
 import { createCloudTasksClient } from './background-tasks';
 import {
     PREFLIGHT_TASK_DISPATCH_DEADLINE_SECONDS,
@@ -19,6 +23,7 @@ export interface PreflightTasksConfig {
     targetUrl: string;
     oidcAudience: string;
     serviceAccountEmail: string;
+    callerAuth: CloudTasksCallerAuthConfig;
 }
 
 export type PreflightDispatchPolicy =
@@ -107,6 +112,15 @@ export function getPreflightTasksConfig(
         );
     }
 
+    const callerAuth = getCloudTasksCallerAuthConfig({
+        env,
+        projectId: project,
+        modeKey: 'PREFLIGHT_TASKS_CALLER_AUTH_MODE',
+        enqueuerServiceAccountEmailKey:
+            'PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL',
+        errorPrefix: 'PREFLIGHT_TASKS_CONFIG_ERROR',
+    });
+
     return Object.freeze({
         project,
         location,
@@ -114,6 +128,7 @@ export function getPreflightTasksConfig(
         targetUrl: target.toString(),
         oidcAudience: audience.origin,
         serviceAccountEmail,
+        callerAuth,
     });
 }
 
@@ -135,8 +150,12 @@ export function resolvePreflightDispatchPolicy(
     return Object.freeze({ mode: 'local_after' });
 }
 
-async function getSharedTasksClient(): Promise<CloudTasksClientLike> {
-    sharedTasksClient ??= await createCloudTasksClient();
+async function getSharedTasksClient(
+    config: PreflightTasksConfig
+): Promise<CloudTasksClientLike> {
+    sharedTasksClient ??= await createCloudTasksClient({
+        callerAuth: config.callerAuth,
+    });
     return sharedTasksClient;
 }
 
@@ -150,6 +169,27 @@ export function preflightTaskId(preflightId: string, generation: number): string
     return `preflight-${preflightId.toLowerCase()}-g${generation}`;
 }
 
+export function freshAdmissionTaskId(
+    preflightId: string,
+    generation: number,
+    dispatchGeneration: number
+): string {
+    if (!UUID_PATTERN.test(preflightId)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid preflight id.');
+    }
+    if (!Number.isSafeInteger(generation) || generation < 1 || generation > 100) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid admission generation.');
+    }
+    if (
+        !Number.isSafeInteger(dispatchGeneration)
+        || dispatchGeneration < 1
+        || dispatchGeneration > 100
+    ) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid admission dispatch generation.');
+    }
+    return `preflight-admission-${preflightId.toLowerCase()}-g${generation}-d${dispatchGeneration}`;
+}
+
 function isAlreadyExists(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false;
     const value = error as { code?: unknown; message?: unknown };
@@ -159,7 +199,7 @@ function isAlreadyExists(error: unknown): boolean {
 }
 
 function taskRequest(
-    preflightId: string,
+    payload: Record<string, unknown>,
     taskName: string,
     parent: string,
     config: PreflightTasksConfig
@@ -173,7 +213,7 @@ function taskRequest(
                 httpMethod: 'POST',
                 url: config.targetUrl,
                 headers: { 'Content-Type': 'application/json' },
-                body: Buffer.from(JSON.stringify({ preflightId })).toString('base64'),
+                body: Buffer.from(JSON.stringify(payload)).toString('base64'),
                 oidcToken: {
                     serviceAccountEmail: config.serviceAccountEmail,
                     audience: config.oidcAudience,
@@ -196,17 +236,55 @@ export async function enqueuePreflightTask(
         throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
     }
 
-    const client = options.client ?? await getSharedTasksClient();
+    const client = options.client ?? await getSharedTasksClient(config);
     const taskId = preflightTaskId(preflightId, generation);
     const parent = client.queuePath(config.project, config.location, config.queue);
     const name = client.taskPath(config.project, config.location, config.queue, taskId);
 
     try {
-        await client.createTask(taskRequest(preflightId, name, parent, config));
+        await client.createTask(taskRequest({ preflightId }, name, parent, config));
         return 'enqueued';
     } catch (error) {
         if (isAlreadyExists(error)) return 'exists';
         throw new Error('PREFLIGHT_TASKS_ENQUEUE_ERROR: task creation failed.');
+    }
+}
+
+export async function enqueueFreshAdmissionTask(
+    preflightId: string,
+    generation: number,
+    dispatchGeneration: number,
+    dispatchToken: string,
+    options: {
+        config?: PreflightTasksConfig;
+        client?: CloudTasksClientLike;
+    } = {}
+): Promise<'enqueued' | 'exists'> {
+    const config = options.config ?? getPreflightTasksConfig();
+    if (!config) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
+    }
+    if (!UUID_PATTERN.test(dispatchToken)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid admission dispatch token.');
+    }
+
+    const client = options.client ?? await getSharedTasksClient(config);
+    const taskId = freshAdmissionTaskId(preflightId, generation, dispatchGeneration);
+    const parent = client.queuePath(config.project, config.location, config.queue);
+    const name = client.taskPath(config.project, config.location, config.queue, taskId);
+
+    try {
+        await client.createTask(taskRequest({
+            preflightId,
+            kind: 'fresh_admission',
+            generation,
+            dispatchGeneration,
+            dispatchToken: dispatchToken.toLowerCase(),
+        }, name, parent, config));
+        return 'enqueued';
+    } catch (error) {
+        if (isAlreadyExists(error)) return 'exists';
+        throw new Error('PREFLIGHT_TASKS_ENQUEUE_ERROR: admission task creation failed.');
     }
 }
 

@@ -99,6 +99,31 @@ export interface AnalysisV2ProviderRunUsageReconciliationInput {
     actualUsageUsd: number;
 }
 
+export interface AnalysisV2ProviderRunCleanupTerminalInput
+    extends Omit<AnalysisV2ProviderRunUsageReconciliationInput, 'actualUsageUsd'> {
+    actualUsageUsd: number | null;
+}
+
+export interface AnalysisV2ProviderRunCleanupIntentInput {
+    requestId: string;
+    jobKey: string;
+    claimToken: string;
+    jobInputHash: string;
+    errorCode: string;
+}
+
+export interface StoredAnalysisV2ProviderRunCleanupIntent {
+    requestId: string;
+    jobKey: string;
+    jobInputHash: string;
+    errorCode: string;
+}
+
+export interface AnalysisV2ActiveProviderRunBatch {
+    startingCount: number;
+    runs: readonly StoredAnalysisV2ProviderRun[];
+}
+
 export interface AnalysisV2ProviderRunAdapterBinding {
     /** The durable row before this binding; null means onBeforeRunStart will reserve it. */
     stored: StoredAnalysisV2ProviderRun | null;
@@ -122,6 +147,15 @@ export interface AnalysisV2ProviderRunStore {
         Promise<StoredAnalysisV2ProviderRun | null>;
     listUnreconciled(limit?: number): Promise<StoredAnalysisV2ProviderRun[]>;
     reconcileUsage(input: AnalysisV2ProviderRunUsageReconciliationInput):
+        Promise<StoredAnalysisV2ProviderRun>;
+    requestCleanup(input: AnalysisV2ProviderRunCleanupIntentInput): Promise<void>;
+    loadCleanupIntent(requestId: string):
+        Promise<StoredAnalysisV2ProviderRunCleanupIntent | null>;
+    listActiveForCleanup(input?: {
+        requestId?: string;
+        limit?: number;
+    }): Promise<AnalysisV2ActiveProviderRunBatch>;
+    settleForCleanup(input: AnalysisV2ProviderRunCleanupTerminalInput):
         Promise<StoredAnalysisV2ProviderRun>;
     bindAdapterCheckpoint(input: AnalysisV2ProviderRunReservationInput):
         Promise<AnalysisV2ProviderRunAdapterBinding>;
@@ -149,6 +183,10 @@ export const ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_v2_provider_run',
     listUnreconciledRpc: 'list_analysis_v2_unreconciled_provider_runs',
     reconcileUsageRpc: 'reconcile_analysis_v2_provider_run_usage',
+    requestCleanupRpc: 'request_analysis_v2_provider_run_cleanup',
+    loadCleanupIntentRpc: 'load_analysis_v2_provider_run_cleanup_intent',
+    listActiveCleanupRpc: 'list_analysis_v2_active_provider_runs_for_cleanup',
+    settleCleanupRpc: 'settle_analysis_v2_provider_run_for_cleanup',
 });
 
 export class AnalysisV2ProviderRunFenceError extends Error {
@@ -395,6 +433,53 @@ function parseUnreconciledRuns(data: unknown, limit: number): StoredAnalysisV2Pr
     });
 }
 
+function parseActiveCleanupBatch(
+    data: unknown,
+    limit: number
+): AnalysisV2ActiveProviderRunBatch {
+    const envelope = rpcObject(data, 'active cleanup list');
+    if (
+        !Number.isSafeInteger(envelope.startingCount)
+        || (envelope.startingCount as number) < 0
+        || (envelope.startingCount as number) > 10_000
+        || !Array.isArray(envelope.runs)
+        || envelope.runs.length > limit
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid active cleanup list.'
+        );
+    }
+    const runs = envelope.runs.map(value => parseStoredRun(value, 'active cleanup list'));
+    if (runs.some(run => run.status !== 'running' || run.runId === null)) {
+        throw new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid active cleanup run.'
+        );
+    }
+    return Object.freeze({
+        startingCount: envelope.startingCount as number,
+        runs: Object.freeze(runs),
+    });
+}
+
+function parseCleanupIntent(data: unknown): StoredAnalysisV2ProviderRunCleanupIntent {
+    const intent = rpcObject(data, 'cleanup intent');
+    const errorCode = requiredString(
+        intent.errorCode,
+        /^[A-Z][A-Z0-9_]{2,63}$/,
+        'cleanup error code'
+    );
+    return Object.freeze({
+        requestId: requiredUuid(intent.requestId, 'cleanup request id'),
+        jobKey: requiredString(intent.jobKey, JOB_KEY_PATTERN, 'cleanup job key'),
+        jobInputHash: requiredString(
+            intent.jobInputHash,
+            SHA256_PATTERN,
+            'cleanup input hash'
+        ),
+        errorCode,
+    });
+}
+
 function validateLookupIdentity(input: {
     requestId: string;
     jobKey: string;
@@ -413,6 +498,19 @@ function validateClaimedIdentity(input: AnalysisV2ProviderRunIdentity): void {
     validateLookupIdentity(input);
     if (!UUID_PATTERN.test(input.claimToken) || !SHA256_PATTERN.test(input.inputHash)) {
         throw new Error('ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid claim identity.');
+    }
+}
+
+function validateCleanupIntentIdentity(input: AnalysisV2ProviderRunCleanupIntentInput): void {
+    if (
+        !UUID_PATTERN.test(input.requestId)
+        || !JOB_KEY_PATTERN.test(input.jobKey)
+        || !UUID_PATTERN.test(input.claimToken)
+        || !SHA256_PATTERN.test(input.jobInputHash)
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid cleanup identity.'
+        );
     }
 }
 
@@ -475,6 +573,33 @@ function assertReconciliationIdentity(
     }
 }
 
+function assertCleanupTerminalIdentity(
+    stored: StoredAnalysisV2ProviderRun,
+    expected: AnalysisV2ProviderRunCleanupTerminalInput
+): void {
+    if (
+        stored.reservationToken !== expected.reservationToken.toLowerCase()
+        || stored.runId !== expected.runId
+        || stored.logicalProvider !== expected.logicalProvider
+        || stored.actorId !== expected.actorId
+        || stored.credentialSlot !== expected.credentialSlot
+        || stored.maxChargeUsd !== canonicalMoney(expected.maxChargeUsd, 'maximum charge')
+        || stored.status !== expected.status
+        || (
+            expected.actualUsageUsd !== null
+            && stored.actualUsageUsd !== canonicalMoney(
+                expected.actualUsageUsd,
+                'actual usage'
+            )
+        )
+        || stored.terminalizedAt === null
+    ) {
+        throw new AnalysisV2ProviderRunConflictError(
+            'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_CONFLICT'
+        );
+    }
+}
+
 function assertCostEventIdentity(
     event: ProviderCostRunStarted,
     expected: StoredAnalysisV2ProviderRun
@@ -510,11 +635,19 @@ function throwRpcError(error: RpcError, operation: string): never {
         || error.message === 'ANALYSIS_V2_PROVIDER_RUN_STATE_CONFLICT'
         || error.message === 'ANALYSIS_V2_PROVIDER_RUN_TERMINAL_CONFLICT'
         || error.message === 'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_CONFLICT'
+        || error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_CONFLICT'
+        || error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_INTENT_CONFLICT'
     ) {
         throw new AnalysisV2ProviderRunConflictError(error.message);
     }
     if (error.message === 'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_NOT_READY') {
         throw new AnalysisV2ProviderRunReconciliationNotReadyError();
+    }
+    if (
+        error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED'
+        || error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_NOT_READY'
+    ) {
+        throw new Error(error.message);
     }
     throw new Error(
         `ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: ${operation} failed (${safeRpcCode(error)}).`
@@ -715,6 +848,117 @@ export function createAnalysisV2ProviderRunStore(
             if (error) throwRpcError(error, 'usage reconciliation');
             const stored = parseStoredRun(data, 'usage reconciliation');
             assertReconciliationIdentity(stored, expected);
+            return stored;
+        },
+
+        async requestCleanup(input) {
+            validateCleanupIntentIdentity(input);
+            if (!/^[A-Z][A-Z0-9_]{2,63}$/.test(input.errorCode)) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid cleanup error code.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.requestCleanupRpc,
+                {
+                    p_request_id: input.requestId.toLowerCase(),
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken.toLowerCase(),
+                    p_job_input_hash: input.jobInputHash,
+                    p_error_code: input.errorCode,
+                }
+            );
+            if (error) throwRpcError(error, 'cleanup intent');
+            if (data !== true) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid cleanup intent response.'
+                );
+            }
+        },
+
+        async loadCleanupIntent(requestId) {
+            if (!UUID_PATTERN.test(requestId)) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid cleanup request id.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadCleanupIntentRpc,
+                { p_request_id: requestId.toLowerCase() }
+            );
+            if (error) throwRpcError(error, 'cleanup intent load');
+            return data === null ? null : parseCleanupIntent(data);
+        },
+
+        async listActiveForCleanup(input = {}) {
+            const limit = input.limit ?? 64;
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid cleanup list limit.'
+                );
+            }
+            if (input.requestId !== undefined && !UUID_PATTERN.test(input.requestId)) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid cleanup request id.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.listActiveCleanupRpc,
+                {
+                    p_request_id: input.requestId?.toLowerCase() ?? null,
+                    p_limit: limit,
+                }
+            );
+            if (error) throwRpcError(error, 'active cleanup list');
+            return parseActiveCleanupBatch(data, limit);
+        },
+
+        async settleForCleanup(input) {
+            const reservationToken = requiredUuid(
+                input.reservationToken,
+                'reservation token'
+            );
+            const runId = requiredString(input.runId, RUN_ID_PATTERN, 'run id');
+            const provider = canonicalProviderIdentity(input);
+            if (!['succeeded', 'failed', 'aborted', 'timed_out'].includes(input.status)) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid cleanup terminal status.'
+                );
+            }
+            const actualUsageUsd = input.actualUsageUsd === null
+                ? null
+                : canonicalMoney(input.actualUsageUsd, 'actual usage');
+            if (
+                actualUsageUsd !== null
+                && actualUsageUsd > provider.maxChargeUsd + 0.000000001
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: actual usage exceeds maximum charge.'
+                );
+            }
+            const expected: AnalysisV2ProviderRunCleanupTerminalInput = {
+                ...provider,
+                reservationToken,
+                runId,
+                status: input.status,
+                actualUsageUsd,
+            };
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.settleCleanupRpc,
+                {
+                    p_reservation_token: reservationToken,
+                    p_run_id: runId,
+                    p_logical_provider: provider.logicalProvider,
+                    p_actor_id: provider.actorId,
+                    p_credential_slot: provider.credentialSlot,
+                    p_max_charge_usd: provider.maxChargeUsd,
+                    p_status: input.status,
+                    p_actual_usage_usd: actualUsageUsd,
+                }
+            );
+            if (error) throwRpcError(error, 'provider cleanup settlement');
+            const stored = parseStoredRun(data, 'provider cleanup settlement');
+            assertCleanupTerminalIdentity(stored, expected);
             return stored;
         },
 

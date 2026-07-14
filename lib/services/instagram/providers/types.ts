@@ -82,6 +82,10 @@ export interface ScrapeRequestOptions {
     expectedResultCount?: number;
     requestId?: string;
     onTelemetry?: ScraperTelemetryHook;
+    /** Internal UX heartbeat emitted only when work for an exact profile starts. */
+    onProfileStart?(username: string): void | Promise<void>;
+    /** Internal PII-free progress signal emitted after a primary profile is resolved. */
+    onProfileResolved?(): void | Promise<void>;
     providerRun?: ProviderRunCheckpoint;
 }
 
@@ -138,6 +142,8 @@ export interface ProviderCallContext extends ProviderCostRunCallbacks {
         maxChargeUsd: number;
     }): void | Promise<void>;
     onRunStarted?(runId: string): void | Promise<void>;
+    onProfileStart?(username: string): void | Promise<void>;
+    onProfileResolved?(): void | Promise<void>;
     recordUsage(delta: ProviderUsageDelta): void;
 }
 
@@ -165,6 +171,14 @@ export type ProfileAttemptResult =
 export interface ScraperProvider {
     readonly name: ProviderName;
     readonly paid?: boolean;
+    /**
+     * Lightweight identity/count contract. It deliberately does not parse timeline media, so
+     * checkout admission cannot fail because a post or carousel snapshot is incomplete.
+     */
+    getProfileSummary?(
+        username: string,
+        context?: ProviderCallContext
+    ): Promise<InstagramProfile | null>;
     getProfile?(username: string, context?: ProviderCallContext): Promise<InstagramProfile | null>;
     getFollowers?(
         username: string,

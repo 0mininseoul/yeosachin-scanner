@@ -6,6 +6,14 @@ const migration = readFileSync(join(
     process.cwd(),
     'supabase/migrations/20260713183230_add_analysis_v2_progress_state.sql'
 ), 'utf8');
+const neutralShortlistMigration = readFileSync(join(
+    process.cwd(),
+    'supabase/migrations/20260714023000_add_analysis_v2_neutral_shortlist_progress.sql'
+), 'utf8');
+const activeProfileHeartbeatMigration = readFileSync(join(
+    process.cwd(),
+    'supabase/migrations/20260714024500_add_analysis_v2_active_profile_heartbeats.sql'
+), 'utf8');
 
 describe('V2 progress migration contract', () => {
     it('creates owner-readable sanitized state and append-only event tables', () => {
@@ -62,6 +70,59 @@ describe('V2 progress migration contract', () => {
         expect(migration).toContain("p_event->>'copyCode' ~");
         expect(migration).toContain('aggregate_count IS NULL OR aggregate_count BETWEEN 0 AND 10000');
         expect(migration).not.toMatch(/comment_text|caption_text|liker_username|raw_score/i);
+    });
+
+    it('adds a neutral confirmed shortlist event without reclassifying historical events', () => {
+        expect(neutralShortlistMigration).toContain("'SHORTLIST_READY'");
+        expect(neutralShortlistMigration).toContain(
+            "'SHORTLIST_READY', 'FINDING_CONFIRMED', 'ANALYSIS_COMPLETED'"
+        );
+        expect(neutralShortlistMigration).toContain("'POTENTIAL_HIGH_RISK_FOUND'");
+        expect(neutralShortlistMigration).toContain(
+            'DROP CONSTRAINT analysis_progress_events_code_check'
+        );
+    });
+
+    it('selects the latest-started sanitized profile only from a still-live job', () => {
+        expect(activeProfileHeartbeatMigration).toContain(
+            'CREATE TABLE public.analysis_v2_active_profile_heartbeats'
+        );
+        expect(activeProfileHeartbeatMigration).toContain(
+            "p_job_key !~ '^track:(profiles|profile-ai):batch:[0-9]+$'"
+        );
+        expect(activeProfileHeartbeatMigration).toContain(
+            'v_job.lease_token IS DISTINCT FROM p_claim_token'
+        );
+        expect(activeProfileHeartbeatMigration).toContain(
+            'job.lease_expires_at > pg_catalog.clock_timestamp()'
+        );
+        expect(activeProfileHeartbeatMigration).toContain(
+            'ORDER BY heartbeat.started_at DESC, heartbeat.updated_at DESC, heartbeat.job_key DESC'
+        );
+        expect(activeProfileHeartbeatMigration).toContain(
+            'EXCLUDED.claim_token\n                IS DISTINCT FROM'
+        );
+        expect(activeProfileHeartbeatMigration).toContain(
+            "'maskedUsername', heartbeat.masked_username"
+        );
+        expect(activeProfileHeartbeatMigration).not.toMatch(
+            /raw_username|instagram_username|profile_pic_url/i
+        );
+        expect(activeProfileHeartbeatMigration).not.toMatch(
+            /GRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)[^;]*(?:anon|authenticated)/i
+        );
+    });
+
+    it('keeps heartbeats label-only so percent can advance only from durable DAG state', () => {
+        expect(activeProfileHeartbeatMigration).not.toContain(
+            'checkpoint_analysis_v2_profile_work_progress'
+        );
+        expect(activeProfileHeartbeatMigration).not.toMatch(
+            /p_completed_count|v_candidate_progress|progress_bp\s*=/
+        );
+        expect(activeProfileHeartbeatMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat'
+        );
     });
 
     it('clears transient profile data at terminal states and configures Realtime publication', () => {

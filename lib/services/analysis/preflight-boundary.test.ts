@@ -1,14 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
 import type { ClaimedPreflight, PreflightStore } from './preflight';
-import type { ScraperProvider } from '@/lib/services/instagram/providers/types';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import { processPreflight } from './preflight';
-import {
-    __resetProvidersForTest,
-    __setProvidersForTest,
-} from '@/lib/services/instagram/scraper';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -60,57 +56,30 @@ function store(): PreflightStore {
 }
 
 describe('preflight free-provider boundary', () => {
-    afterEach(() => __resetProvidersForTest());
+    it('binds the worker directly to the count-only self-hosted capability', async () => {
+        const source = readFileSync(new URL('./preflight.ts', import.meta.url), 'utf8');
+        expect(source).toContain(
+            "import { getSelfHostedProfileSummary } from '@/lib/services/instagram/providers/selfhosted'"
+        );
+        expect(source).not.toContain("import { getInstagramProfile } from '@/lib/services/instagram'");
 
-    it('calls only the self-hosted profile capability with no fallback or telemetry sink', async () => {
-        const selfHostedGetProfile = vi.fn(async (_username, context) => {
-            expect(context?.requestId).toBeUndefined();
-            expect(context?.onCostRunStarted).toBeUndefined();
-            return {
-                username: 'target.name',
-                fullName: 'Target',
-                bio: 'bio',
-                profilePicUrl: 'https://cdn.example.com/avatar.jpg',
-                followersCount: 350,
-                followingCount: 300,
-                postsCount: 10,
-                isPrivate: false,
-                isVerified: false,
-            };
-        });
-        const forbiddenCapability = vi.fn(async () => {
-            throw new Error('Paid or relationship capability must not run during preflight.');
-        });
-        const paidProvider = (name: 'apify' | 'coderx' | 'flashapi' | 'rapidapi') => ({
-            name,
-            paid: true,
-            getProfile: forbiddenCapability,
-            getFollowers: forbiddenCapability,
-            getFollowing: forbiddenCapability,
-        } satisfies ScraperProvider);
-        __setProvidersForTest({
-            SCRAPER_PROFILE: 'apify',
-            SCRAPER_FALLBACK: 'true',
-        }, {
-            selfhosted: {
-                name: 'selfhosted',
-                paid: false,
-                getProfile: selfHostedGetProfile,
-                getFollowers: forbiddenCapability,
-                getFollowing: forbiddenCapability,
-            },
-            apify: paidProvider('apify'),
-            coderx: paidProvider('coderx'),
-            flashapi: paidProvider('flashapi'),
-            rapidapi: paidProvider('rapidapi'),
-        });
-
+        const getProfile = vi.fn(async () => ({
+            username: 'target.name',
+            fullName: 'Target',
+            bio: 'bio',
+            profilePicUrl: 'https://cdn.example.com/avatar.jpg',
+            followersCount: 350,
+            followingCount: 300,
+            postsCount: 87,
+            isPrivate: false,
+            isVerified: false,
+            // No latestPosts: preflight must not depend on timeline completeness.
+        }));
         const preflightStore = store();
-        await expect(processPreflight(preflightId, { store: preflightStore }))
-            .resolves.toBe('ready');
 
-        expect(selfHostedGetProfile).toHaveBeenCalledOnce();
-        expect(forbiddenCapability).not.toHaveBeenCalled();
+        await expect(processPreflight(preflightId, { store: preflightStore, getProfile }))
+            .resolves.toBe('ready');
+        expect(getProfile).toHaveBeenCalledWith('target.name');
         expect(preflightStore.finalizeReady).toHaveBeenCalledOnce();
     });
 });

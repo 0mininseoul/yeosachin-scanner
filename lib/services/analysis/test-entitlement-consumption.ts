@@ -87,6 +87,7 @@ const consumptionInputSchema = z.object({
     userId: uuidSchema,
     selectedPlanId: z.enum(PLAN_IDS),
     entitlementJtiHash: z.string().regex(/^[a-f0-9]{64}$/),
+    admissionToken: uuidSchema.nullable().optional().default(null),
 }).strict();
 
 export const ANALYSIS_V2_ENTITLEMENT_ERROR_CODES = [
@@ -151,6 +152,7 @@ export interface ConsumeAnalysisV2TestEntitlementInput {
     userId: string;
     selectedPlanId: PlanId;
     entitlementJtiHash: string;
+    admissionToken?: string | null;
 }
 
 export interface ConsumedAnalysisV2TestEntitlement {
@@ -196,7 +198,10 @@ function invalidPlan(): never {
 export function validatePreflightForTestEntitlement(
     rawRow: AnalysisV2PreflightRow,
     selectedPlanId: PlanId,
-    options: { nowMs?: number } = {}
+    options: {
+        nowMs?: number;
+        deferPlanSelectionToFreshAdmission?: boolean;
+    } = {}
 ): ValidatedTestEntitlementPreflight {
     if (rawRow.status !== 'ready' && rawRow.status !== 'consumed') {
         throw new AnalysisV2EntitlementConsumptionError(
@@ -286,6 +291,17 @@ export function validatePreflightForTestEntitlement(
         if (card.selectionState !== 'unavailable' && card.unavailableReason !== null) invalidPlan();
     }
 
+    if (options.deferPlanSelectionToFreshAdmission) {
+        // Counts may move in either direction after preflight. The fresh admission RPC
+        // recomputes the selected-plan semantics under the locked server snapshot.
+        return Object.freeze({
+            id: row.id,
+            userId: row.user_id,
+            selectedPlanId,
+            state: row.status,
+        });
+    }
+
     const counts = {
         followers: row.target_followers_count,
         following: row.target_following_count,
@@ -341,6 +357,7 @@ export async function consumeAnalysisV2TestEntitlement(
             p_user_id: validatedInput.userId,
             p_selected_plan_id: validatedInput.selectedPlanId,
             p_entitlement_jti_hash: validatedInput.entitlementJtiHash,
+            p_admission_token: validatedInput.admissionToken,
         }
     );
 

@@ -107,6 +107,31 @@ describe('test entitlement preflight validation', () => {
         ).selectedPlanId).toBe('plus');
     });
 
+    it('defers stale ready-plan selection to the authoritative fresh admission RPC', () => {
+        expect(validatePreflightForTestEntitlement(
+            preflightRow(),
+            'basic',
+            {
+                nowMs: NOW_MS,
+                deferPlanSelectionToFreshAdmission: true,
+            }
+        )).toEqual({
+            id: PREFLIGHT_ID,
+            userId: USER_ID,
+            selectedPlanId: 'basic',
+            state: 'ready',
+        });
+
+        expectBoundedError(
+            () => validatePreflightForTestEntitlement(
+                preflightRow(),
+                'basic',
+                { nowMs: NOW_MS }
+            ),
+            'ANALYSIS_V2_PLAN_NOT_ALLOWED'
+        );
+    });
+
     it('rejects a lower plan and inconsistent capacity, launch, access, or price snapshots', () => {
         for (const [row, planId] of [
             [preflightRow(), 'basic'],
@@ -239,6 +264,7 @@ describe('test entitlement consumption RPC', () => {
             p_user_id: USER_ID,
             p_selected_plan_id: 'standard',
             p_entitlement_jti_hash: entitlementJtiHash,
+            p_admission_token: null,
         });
         expect(JSON.stringify(rpc.mock.calls)).not.toContain(nonce);
     });

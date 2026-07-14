@@ -13,7 +13,11 @@ import {
 } from '@/lib/services/analysis/request-lease';
 import { NextResponse } from 'next/server';
 
-const STATUS_COLUMNS = 'id, user_id, status, current_step, progress, progress_step, error_message, background_processing, created_at, completed_at, idempotency_key';
+const STATUS_COLUMNS = 'id, user_id, pipeline_version, status, current_step, progress, progress_step, error_message, background_processing, created_at, completed_at, idempotency_key';
+
+function isV1Pipeline(value: unknown): boolean {
+    return value === null || value === 'v1';
+}
 
 export async function GET(
     request: Request,
@@ -50,7 +54,8 @@ export async function GET(
         let analysisRequest = initialStatus.data;
 
         if (
-            ['pending', 'processing'].includes(analysisRequest.status)
+            isV1Pipeline(analysisRequest.pipeline_version)
+            && ['pending', 'processing'].includes(analysisRequest.status)
             && isAnalysisRequestStale(analysisRequest.created_at)
         ) {
             await expireStaleAnalysisBeforeStart(undefined, {

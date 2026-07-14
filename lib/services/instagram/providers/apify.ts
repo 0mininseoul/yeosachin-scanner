@@ -4,6 +4,7 @@ import type {
     InstagramProfile,
     InstagramPost,
 } from '@/lib/types/instagram';
+import { MAX_RECENT_POSTS } from '@/lib/domain/analysis/media-policy';
 import type {
     ProfileAttemptResult,
     ProviderCallContext,
@@ -53,6 +54,26 @@ function hasDurableProfileRunCheckpoint(context?: ProviderCallContext): boolean 
 function isTypedScrapingError(error: unknown, ...prefixes: string[]): error is Error {
     return error instanceof Error
         && prefixes.some(prefix => error.message.startsWith(prefix));
+}
+
+function isProgressPersistenceError(error: unknown): error is Error {
+    return isTypedScrapingError(
+        error,
+        'ANALYSIS_PERSISTENCE_ERROR:',
+        'ANALYSIS_V2_PROGRESS_'
+    );
+}
+
+async function reportProfileStart(
+    context: ProviderCallContext | undefined,
+    username: string
+): Promise<void> {
+    try {
+        await context?.onProfileStart?.(username);
+    } catch (error) {
+        if (isProgressPersistenceError(error)) throw error;
+        throw new Error('ANALYSIS_PERSISTENCE_ERROR: active profile heartbeat failed.');
+    }
 }
 
 function profileRunPending(message: string): Error {
@@ -112,6 +133,18 @@ const profileSchema = z.object({
 const profileUsernameEnvelopeSchema = z.object({
     username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
 }).passthrough();
+
+const profileNotFoundEnvelopeSchema = z.object({
+    username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
+    statusCode: z.literal(404).optional(),
+    errorCode: z.enum(['NOT_FOUND', 'not_found']).optional(),
+    error: z.literal('not_found').optional(),
+}).passthrough().refine(value => (
+    value.statusCode === 404
+    || value.errorCode === 'NOT_FOUND'
+    || value.errorCode === 'not_found'
+    || value.error === 'not_found'
+), { message: 'explicit not-found evidence is required' });
 
 const latestPostSchema = z.object({
     id: z.union([z.string().min(1), z.number().int().nonnegative()]),
@@ -342,6 +375,16 @@ function mapProfile(profile: Record<string, unknown>, includePosts: boolean): In
     if (includePosts && !value.private && value.postsCount > 0 && latestPosts?.length === 0) {
         throw new Error(
             'SCRAPING_INCOMPLETE_ERROR: Apify public profile has posts but no usable latestPosts.'
+        );
+    }
+    const requiredRecentPosts = Math.min(value.postsCount, MAX_RECENT_POSTS);
+    if (
+        includePosts
+        && !value.private
+        && (latestPosts?.length ?? 0) < requiredRecentPosts
+    ) {
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: Apify public profile recent-post snapshot is incomplete.'
         );
     }
     return {
@@ -610,6 +653,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
     interface CollectedProfileBatch {
         profilesByUsername: Map<string, InstagramProfile>;
         failuresByUsername: Map<string, Error>;
+        notFoundUsernames: Set<string>;
         datasetContaminated: boolean;
     }
 
@@ -634,6 +678,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const requested = new Set(usernames.map((username) => username.toLowerCase()));
         const profilesByUsername = new Map<string, InstagramProfile>();
         const failuresByUsername = new Map<string, Error>();
+        const notFoundUsernames = new Set<string>();
         const seenDatasetUsernames = new Set<string>();
         let datasetContaminated = false;
         const durableRun = hasDurableProfileRunCheckpoint(context);
@@ -646,26 +691,33 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             try {
                 run = await runWithApifyActorSlot(
                     settings.actorConcurrency,
-                    () => startOrResumeApifyActor(
-                        apify,
-                        PROFILE_ACTOR_ID,
-                        { usernames: batch },
-                        {
-                            logicalProvider: 'apify',
-                            credentialSlot: settings.credentialSlot,
-                            timeoutSecs: settings.timeoutSecs,
-                            maxItems: batch.length,
-                            maxTotalChargeUsd: maximumChargeUsd,
-                        },
-                        context
-                    )
+                    async () => {
+                        // Apify executes the whole batch remotely, so expose one real
+                        // representative only after the Actor slot is actually acquired.
+                        if (batch[0]) await reportProfileStart(context, batch[0]);
+                        return startOrResumeApifyActor(
+                            apify,
+                            PROFILE_ACTOR_ID,
+                            { usernames: batch },
+                            {
+                                logicalProvider: 'apify',
+                                credentialSlot: settings.credentialSlot,
+                                timeoutSecs: settings.timeoutSecs,
+                                maxItems: batch.length,
+                                maxTotalChargeUsd: maximumChargeUsd,
+                            },
+                            context
+                        );
+                    }
                 );
             } catch (error) {
                 if (isTypedScrapingError(
                     error,
                     'SCRAPING_AMBIGUOUS_START_ERROR:',
                     'SCRAPING_RUN_CHECKPOINT_ERROR:',
+                    'SCRAPING_RUN_PENDING_ERROR:',
                     'ANALYSIS_PERSISTENCE_ERROR:',
+                    'ANALYSIS_V2_PROGRESS_',
                     'SCRAPING_CONFIG_ERROR:',
                     'SCRAPING_BUDGET_ERROR:',
                     'SCRAPING_SCHEMA_ERROR:'
@@ -723,6 +775,17 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 estimated_cost_usd: page.items.length * settings.estimatedCostPerResultUsd,
             });
             for (const item of page.items) {
+                const explicitNotFound = profileNotFoundEnvelopeSchema.safeParse(item);
+                if (explicitNotFound.success) {
+                    const key = explicitNotFound.data.username.toLowerCase();
+                    if (!requested.has(key) || seenDatasetUsernames.has(key)) {
+                        datasetContaminated = true;
+                        continue;
+                    }
+                    seenDatasetUsernames.add(key);
+                    notFoundUsernames.add(key);
+                    continue;
+                }
                 const envelope = profileUsernameEnvelopeSchema.safeParse(item);
                 if (!envelope.success) {
                     datasetContaminated = true;
@@ -758,7 +821,12 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 }
             }
         }
-        return { profilesByUsername, failuresByUsername, datasetContaminated };
+        return {
+            profilesByUsername,
+            failuresByUsername,
+            notFoundUsernames,
+            datasetContaminated,
+        };
     }
 
     async function getProfilesBatch(
@@ -775,12 +843,18 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const results = [...collected.profilesByUsername.values()];
         context?.recordUsage({ result_count: results.length });
         const requested = new Set(usernames.map(username => username.toLowerCase()));
-        const isDurableOperation = Boolean(context?.resumeRunId || context?.onRunStarted);
-        const coverage = requested.size > 0 ? results.length / requested.size : 1;
-        const unavailableCount = requested.size - results.length;
-        if (coverage < 0.95 && (!isDurableOperation || unavailableCount > 1)) {
+        const ambiguousOmissions = [...requested].filter(username => (
+            !collected.profilesByUsername.has(username)
+            && !collected.notFoundUsernames.has(username)
+        ));
+        if (ambiguousOmissions.length > 0) {
+            if (hasDurableProfileRunCheckpoint(context)) {
+                throw profileRunPending(
+                    'Apify profile dataset omitted accounts without explicit not-found evidence.'
+                );
+            }
             throw new Error(
-                `SCRAPING_INCOMPLETE_ERROR: Apify profile batch 커버리지가 ${(coverage * 100).toFixed(1)}%입니다.`
+                'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted accounts without explicit not-found evidence.'
             );
         }
         return results;
@@ -797,9 +871,14 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const missingUsernames = usernames.filter(requestedUsername => {
             const key = requestedUsername.trim().toLowerCase();
             return !collected.profilesByUsername.has(key)
-                && !collected.failuresByUsername.has(key);
+                && !collected.failuresByUsername.has(key)
+                && !collected.notFoundUsernames.has(key);
         });
-        const incompleteOmission = missingUsernames.length > 1;
+        if (missingUsernames.length > 0 && hasDurableProfileRunCheckpoint(context)) {
+            throw profileRunPending(
+                'Apify profile dataset omitted accounts without explicit not-found evidence.'
+            );
+        }
         const results = usernames.map((requestedUsername) => {
             const key = requestedUsername.trim().toLowerCase();
             const profile = collected.profilesByUsername.get(key);
@@ -824,12 +903,12 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                     latencyMs,
                 });
             }
-            if (incompleteOmission) {
+            if (missingUsernames.includes(requestedUsername)) {
                 return failedProfileAttempt({
                     requestedUsername,
                     source: 'apify',
                     error: new Error(
-                        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted multiple accounts.'
+                        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
                     ),
                     requestCount: 1,
                     latencyMs,

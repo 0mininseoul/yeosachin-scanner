@@ -634,10 +634,13 @@ describe('analysis V2 concrete collection executors', () => {
         });
         const providers = providerStore(callOrder);
         const snapshots: ProfilesBatchSnapshot[] = [];
+        const reportActiveProfile = vi.fn(async () => undefined);
         const fetcher = vi.fn(async (
             requested: readonly string[],
             options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
         ) => {
+            await options.onProfileStart?.('alice');
+            await options.onProfileStart?.('bob');
             const primary = [success('alice'), failure('bob')] as ProfileAttemptResult[];
             snapshots.push({ attempt: 'primary', requested: [...requested] });
             await options.persistAttemptOutcomes({
@@ -650,6 +653,7 @@ describe('analysis V2 concrete collection executors', () => {
                 'primary-persisted',
                 'bind:profile-fallback',
             ]);
+            await options.onProfileStart?.('bob');
             const fallback = [{ ...success('bob', 'apify'), profile: profile('bob') }];
             snapshots.push({ attempt: 'fallback', requested: ['bob'] });
             await options.persistAttemptOutcomes({
@@ -676,9 +680,13 @@ describe('analysis V2 concrete collection executors', () => {
         });
         const dagState = state({ relationships: relationshipManifest(topology) });
 
-        await expect(executor(stageContext('profile_fetch', dagState, 0))).resolves.toMatchObject({
+        await expect(executor({
+            ...stageContext('profile_fetch', dagState, 0),
+            reportActiveProfile,
+        })).resolves.toMatchObject({
             checkpoint: { manifest: { itemCount: 2, producerInputHash: inputHash } },
         });
+        expect(reportActiveProfile.mock.calls).toEqual([['alice'], ['bob'], ['bob']]);
         expect(snapshots).toEqual([
             { attempt: 'primary', requested: ['alice', 'bob'] },
             { attempt: 'fallback', requested: ['bob'] },
@@ -702,6 +710,67 @@ describe('analysis V2 concrete collection executors', () => {
                 ]),
             })
         );
+    });
+
+    it('reports only the unresolved fallback profile when resuming a durable primary attempt', async () => {
+        const usernames = ['alice', 'bob'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const primary = [success('alice'), failure('bob')] as ProfileAttemptResult[];
+        const profileStore = inMemoryProfileStore({
+            requestId,
+            jobKey: 'track:profiles:batch:0',
+            requestedUsernames: usernames,
+            frozenUnresolvedUsernames: ['bob'],
+            primaryResults: primary as AnalysisV2ProfileFetchResume['primaryResults'],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        });
+        const reportActiveProfile = vi.fn(async () => undefined);
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            expect(requested).toEqual(usernames);
+            expect(options.resume?.frozenUnresolvedUsernames).toEqual(['bob']);
+            await options.onProfileStart?.('bob');
+            const fallback = [{ ...success('bob', 'apify'), profile: profile('bob') }];
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: ['bob'],
+                results: fallback,
+            });
+            return {
+                results: [primary[0]!, fallback[0]!],
+                profiles: [profile('alice'), profile('bob')],
+                primaryResults: primary,
+                fallbackResults: fallback,
+                frozenUnresolvedUsernames: ['bob'],
+            };
+        });
+        const executor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providerStore().value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            env: { APIFY_API_TOKEN_SLOT: 'primary' },
+        });
+
+        await executor({
+            ...stageContext(
+                'profile_fetch',
+                state({ relationships: relationshipManifest(topology) }),
+                0
+            ),
+            reportActiveProfile,
+        });
+
+        expect(fetcher).toHaveBeenCalledOnce();
+        expect(reportActiveProfile.mock.calls).toEqual([['bob']]);
+        expect(profileStore.store.checkpointPrimary).not.toHaveBeenCalled();
+        expect(profileStore.store.checkpointFallback).toHaveBeenCalledOnce();
     });
 
     it('rejects wrong batches, girlfriend leakage, ambiguous failures, and ambiguous starts', async () => {
@@ -792,18 +861,28 @@ describe('analysis V2 concrete collection executors', () => {
         const usernames = ['alice', 'bob'];
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
         const complete = inMemoryProfileStore(completedResume(usernames));
+        const fetcher = vi.fn();
+        const reportActiveProfile = vi.fn(async () => undefined);
         const executor = createAnalysisV2ProfileFetchExecutor({
             requestContextStore: contextStore(requestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: complete.store,
-            getProfilesBatchV2: vi.fn(),
+            getProfilesBatchV2: fetcher,
         });
         const dagState = state({ relationships: relationshipManifest(topology) });
 
-        const first = await executor(stageContext('profile_fetch', dagState, 0));
-        const second = await executor(stageContext('profile_fetch', dagState, 0));
+        const first = await executor({
+            ...stageContext('profile_fetch', dagState, 0),
+            reportActiveProfile,
+        });
+        const second = await executor({
+            ...stageContext('profile_fetch', dagState, 0),
+            reportActiveProfile,
+        });
         expect(first.checkpoint.manifest.resultHash).toBe(second.checkpoint.manifest.resultHash);
         expect(first.checkpoint.manifest.resultHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(reportActiveProfile).not.toHaveBeenCalled();
     });
 });
 

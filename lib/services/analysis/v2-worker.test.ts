@@ -24,7 +24,8 @@ import {
     AnalysisV2JobExecutionError,
     classifyAnalysisV2JobFailure,
     executeAnalysisV2FoundationJob,
-    processAnalysisV2TaskDelivery,
+    finalizeAnalysisV2TerminalFailure,
+    processAnalysisV2TaskDelivery as processAnalysisV2TaskDeliveryImpl,
     type AnalysisV2StageExecutorRegistry,
 } from './v2-worker';
 
@@ -48,6 +49,14 @@ const bootstrapClaim: ClaimedAnalysisV2Job = {
     claimToken,
     attemptCount: 1,
 };
+
+const processAnalysisV2TaskDelivery: typeof processAnalysisV2TaskDeliveryImpl = (
+    taskDelivery,
+    dependencies = {}
+) => processAnalysisV2TaskDeliveryImpl(taskDelivery, {
+    terminalFailureIntentLoader: async () => null,
+    ...dependencies,
+});
 
 function digest(label: string): string {
     return createHash('sha256').update(label, 'utf8').digest('hex');
@@ -163,6 +172,78 @@ function progressReporter(): AnalysisV2ProgressReporter {
 }
 
 describe('analysis V2 durable DAG worker', () => {
+    it('confirms provider cleanup before invoking the request failure RPC', async () => {
+        const order: string[] = [];
+        const prepareProviderRuns = vi.fn(async input => {
+            order.push('provider');
+            expect(input).toEqual({
+                requestId,
+                jobKey: bootstrapClaim.jobKey,
+                claimToken,
+                jobInputHash: bootstrapClaim.inputHash,
+                errorCode: 'JOB_ATTEMPTS_EXHAUSTED',
+            });
+            return {
+                scanned: 1,
+                settled: 1,
+                failed: 0,
+                unconfirmedStarts: 0,
+                hasMore: false,
+            };
+        });
+        const failRequest = vi.fn(async () => {
+            order.push('request');
+        });
+
+        await finalizeAnalysisV2TerminalFailure(
+            bootstrapClaim,
+            'JOB_ATTEMPTS_EXHAUSTED',
+            { prepareProviderRuns, failRequest }
+        );
+        expect(order).toEqual(['provider', 'request']);
+    });
+
+    it('never invokes request failure when provider cleanup is unresolved', async () => {
+        const failRequest = vi.fn();
+        await expect(finalizeAnalysisV2TerminalFailure(
+            bootstrapClaim,
+            'JOB_ATTEMPTS_EXHAUSTED',
+            {
+                prepareProviderRuns: async () => {
+                    throw new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED');
+                },
+                failRequest,
+            }
+        )).rejects.toThrow('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED');
+        expect(failRequest).not.toHaveBeenCalled();
+    });
+
+    it('resumes the original persisted terminal failure without rerunning a job or changing its code', async () => {
+        const handler = vi.fn();
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const terminalFailureIntentLoader = vi.fn(async () => 'ORIGINAL_PROVIDER_FAILURE');
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: store({ ...bootstrapClaim, attemptCount: 7 }),
+            handler,
+            terminalFailureIntentLoader,
+            terminalFailureFinalizer,
+            terminalMediaCleanup: vi.fn(async () => undefined),
+        })).resolves.toEqual({
+            status: 'failed',
+            errorCode: 'ORIGINAL_PROVIDER_FAILURE',
+        });
+        expect(handler).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
+            expect.objectContaining({ claimToken }),
+            'ORIGINAL_PROVIDER_FAILURE'
+        );
+        expect(terminalFailureFinalizer).not.toHaveBeenCalledWith(
+            expect.anything(),
+            'JOB_ATTEMPTS_EXHAUSTED'
+        );
+    });
+
     it('initializes bootstrap under its live claim and fans out canonical root jobs', async () => {
         const dagStore = stateStore();
         const progress = progressReporter();
@@ -369,6 +450,116 @@ describe('analysis V2 durable DAG worker', () => {
         ]);
         expect(fanout.every(job => job.requiredJobKeys?.includes(relationshipClaim.jobKey)))
             .toBe(true);
+    });
+
+    it('wires an exact profile-start callback to the fenced progress heartbeat', async () => {
+        const initial: AnalysisV2DagState = {
+            ...baseState(),
+            relationships: relationshipManifest(),
+        };
+        const profileClaim = claimFor(initial, 'track:profiles:batch:0');
+        const profileManifest = {
+            batch: 0,
+            itemCount: 30,
+            producerInputHash: profileClaim.inputHash,
+            revision: 1,
+            resultHash: digest('profile-fetch-result'),
+        };
+        const completed: AnalysisV2DagState = {
+            ...initial,
+            profileFetchBatches: [profileManifest],
+        };
+        let current = initial;
+        const dagStore = stateStore(initial, {
+            load: vi.fn(async () => current),
+            checkpointManifest: vi.fn(async () => {
+                current = completed;
+                return current;
+            }),
+        });
+        const progress = progressReporter();
+        progress.heartbeat = vi.fn(async () => true);
+        const executor: NonNullable<AnalysisV2StageExecutorRegistry['profile_fetch']> =
+            vi.fn(async (context) => {
+                await context.reportActiveProfile?.('Candidate.One');
+                await context.reportActiveProfile?.('Candidate.Two');
+                return {
+                    checkpoint: {
+                        kind: 'profile_fetch_batch' as const,
+                        manifest: profileManifest,
+                    },
+                };
+            });
+
+        await executeAnalysisV2FoundationJob(profileClaim, {
+            stateStore: dagStore,
+            executors: { profile_fetch: executor },
+            progressReporter: progress,
+        });
+
+        expect(progress.heartbeat).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            claim: profileClaim,
+            stage: 'profile_fetch',
+            username: 'Candidate.One',
+            startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+            totalCount: 30,
+        }));
+        expect(progress.heartbeat).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            claim: profileClaim,
+            stage: 'profile_fetch',
+            username: 'Candidate.Two',
+            startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+            totalCount: 30,
+        }));
+        const calls = vi.mocked(progress.heartbeat!).mock.calls;
+        expect(Date.parse(calls[1]![0].startedAt)).toBeGreaterThan(
+            Date.parse(calls[0]![0].startedAt)
+        );
+        expect(progress.report).toHaveBeenCalledOnce();
+        expect(dagStore.checkpointManifest).toHaveBeenCalledBefore(
+            vi.mocked(progress.report)
+        );
+    });
+
+    it('does not advance canonical progress when durable manifest persistence fails', async () => {
+        const initial: AnalysisV2DagState = {
+            ...baseState(),
+            relationships: relationshipManifest(),
+        };
+        const profileClaim = claimFor(initial, 'track:profiles:batch:0');
+        const profileManifest = {
+            batch: 0,
+            itemCount: 30,
+            producerInputHash: profileClaim.inputHash,
+            revision: 1,
+            resultHash: digest('profile-fetch-result-persistence-failure'),
+        };
+        const dagStore = stateStore(initial, {
+            checkpointManifest: vi.fn(async () => {
+                throw new Error('MANIFEST_PERSISTENCE_FAILED');
+            }),
+        });
+        const progress = progressReporter();
+        progress.heartbeat = vi.fn(async () => true);
+        const executor: NonNullable<AnalysisV2StageExecutorRegistry['profile_fetch']> =
+            vi.fn(async context => {
+                await context.reportActiveProfile?.('Candidate.One');
+                return {
+                    checkpoint: {
+                        kind: 'profile_fetch_batch' as const,
+                        manifest: profileManifest,
+                    },
+                };
+            });
+
+        await expect(executeAnalysisV2FoundationJob(profileClaim, {
+            stateStore: dagStore,
+            executors: { profile_fetch: executor },
+            progressReporter: progress,
+        })).rejects.toThrow('MANIFEST_PERSISTENCE_FAILED');
+
+        expect(progress.heartbeat).toHaveBeenCalledOnce();
+        expect(progress.report).not.toHaveBeenCalled();
     });
 
     it('replays a persisted checkpoint without repeating provider work after completion failure', async () => {
@@ -612,6 +803,47 @@ describe('analysis V2 durable DAG worker', () => {
                 maxAttempts: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
             }
         );
+    });
+
+    it.each([
+        'SCRAPING_RUN_PENDING_ERROR: retry the persisted Actor run.',
+        'SCRAPING_DATASET_TRANSIENT_ERROR: retry the persisted Actor dataset.',
+    ])('classifies resumable paid-provider lifecycle errors as transient: %s', async message => {
+        const initial = baseState();
+        const relationshipClaim = claimFor(initial, ANALYSIS_V2_RELATIONSHIPS_JOB_KEY);
+        const jobStore = store(relationshipClaim);
+
+        await expect(processAnalysisV2TaskDelivery({
+            ...delivery,
+            jobKey: relationshipClaim.jobKey,
+        }, {
+            store: jobStore,
+            stateStore: stateStore(initial),
+            executors: {
+                relationships: async () => {
+                    throw new Error(message);
+                },
+            },
+        })).resolves.toMatchObject({
+            status: 'retry',
+            errorCode: message.split(':', 1)[0],
+        });
+        expect(jobStore.releaseClaim).toHaveBeenCalledOnce();
+    });
+
+    it('does not retry ambiguous starts or truly terminal Actor failures', () => {
+        expect(classifyAnalysisV2JobFailure(
+            new Error('SCRAPING_AMBIGUOUS_START_ERROR: start response was not confirmed.')
+        )).toMatchObject({ disposition: 'permanent', retryable: false });
+        expect(classifyAnalysisV2JobFailure(
+            new Error('SCRAPING_ERROR: Apify actor failed (status=FAILED).')
+        )).toMatchObject({ disposition: 'permanent', retryable: false });
+        expect(classifyAnalysisV2JobFailure(
+            new Error('SCRAPING_ERROR: Apify actor failed (status=ABORTED).')
+        )).toMatchObject({ disposition: 'permanent', retryable: false });
+        expect(classifyAnalysisV2JobFailure(
+            new Error('SCRAPING_ERROR: Apify actor failed (status=TIMED-OUT).')
+        )).toMatchObject({ disposition: 'permanent', retryable: false });
     });
 
     it('atomically terminalizes a retryable failure on the final attempt', async () => {

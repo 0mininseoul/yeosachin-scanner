@@ -18,9 +18,21 @@ import {
     type AnalysisV2EntitlementErrorCode,
     type AnalysisV2PreflightRow,
 } from '@/lib/services/analysis/test-entitlement-consumption';
+import {
+    AnalysisV2FreshAdmissionError,
+    markAnalysisV2FreshAdmissionDispatched,
+    releaseAnalysisV2FreshAdmissionDispatch,
+    reserveAnalysisV2FreshAdmission,
+    type AnalysisV2FreshPlanSnapshot,
+    type AnalysisV2FreshAdmissionErrorCode,
+} from '@/lib/services/analysis/fresh-plan-admission';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
-import { isAnalysisV2StartAvailable } from '@/lib/services/analysis/v2-execution-gate';
+import { isAnalysisV2AdmissionAvailable } from '@/lib/services/analysis/v2-execution-gate';
+import {
+    enqueueFreshAdmissionTask,
+    getPreflightTasksConfig,
+} from '@/lib/services/analysis/preflight-tasks';
 import {
     dispatchAnalysisV2Job,
     getAnalysisV2TasksConfig,
@@ -62,10 +74,38 @@ const ERROR_STATUS: Readonly<Record<AnalysisV2EntitlementErrorCode, number>> = {
     ANALYSIS_ALREADY_IN_PROGRESS: 409,
 };
 
+const FRESH_ADMISSION_ERROR_STATUS: Readonly<
+Record<AnalysisV2FreshAdmissionErrorCode, number>
+> = {
+    ANALYSIS_V2_PREFLIGHT_NOT_FOUND: 404,
+    ANALYSIS_V2_PREFLIGHT_NOT_READY: 409,
+    ANALYSIS_V2_PREFLIGHT_EXPIRED: 410,
+    ANALYSIS_V2_PLAN_NOT_ALLOWED: 409,
+    ANALYSIS_V2_TARGET_NOT_FOUND: 409,
+    ANALYSIS_V2_TARGET_PRIVATE: 409,
+    ANALYSIS_V2_TARGET_MISMATCH: 409,
+    ANALYSIS_V2_OVER_PLUS_CAPACITY: 409,
+    ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE: 503,
+};
+
 function entitlementError(code: AnalysisV2EntitlementErrorCode) {
     return NextResponse.json(
         { error: '분석 테스트 이용권을 사용할 수 없습니다.', code },
         { status: ERROR_STATUS[code] }
+    );
+}
+
+function freshAdmissionError(
+    code: AnalysisV2FreshAdmissionErrorCode,
+    latestPlan: AnalysisV2FreshPlanSnapshot | null = null
+) {
+    return NextResponse.json(
+        {
+            error: '최신 계정 정보로 분석 가능 여부를 확인할 수 없습니다.',
+            code,
+            ...(latestPlan ? { latestPlan } : {}),
+        },
+        { status: FRESH_ADMISSION_ERROR_STATUS[code] }
     );
 }
 
@@ -158,25 +198,7 @@ export async function POST(
                 { status: 403 }
             );
         }
-        if (!isAnalysisV2StartAvailable()) {
-            return NextResponse.json(
-                {
-                    error: 'V2 백그라운드 분석 실행기가 아직 활성화되지 않았습니다.',
-                    code: 'V2_PIPELINE_UNAVAILABLE',
-                },
-                { status: 503 }
-            );
-        }
-        try {
-            if (!getAnalysisV2TasksConfig()) throw new Error('queue disabled');
-        } catch {
-            console.error('Analysis V2 task queue configuration is unavailable.');
-            return NextResponse.json(
-                { error: '분석 작업 큐를 사용할 수 없습니다.', code: 'QUEUE_UNAVAILABLE' },
-                { status: 503 }
-            );
-        }
-
+        const entitlementJtiHash = hashAnalysisTestEntitlementJti(entitlement.nonce);
         const preflightQuery = await supabaseAdmin
             .from('analysis_preflights')
             .select(PREFLIGHT_COLUMNS)
@@ -195,12 +217,134 @@ export async function POST(
             return entitlementError('ANALYSIS_V2_PREFLIGHT_NOT_FOUND');
         }
 
-        validatePreflightForTestEntitlement(row, body.data.planId);
+        const validatedPreflight = validatePreflightForTestEntitlement(
+            row,
+            body.data.planId,
+            { deferPlanSelectionToFreshAdmission: true }
+        );
+
+        if (
+            validatedPreflight.state === 'ready'
+            && !isAnalysisV2AdmissionAvailable()
+        ) {
+            return NextResponse.json(
+                {
+                    error: '새 분석 접수가 일시적으로 중단되었습니다.',
+                    code: 'V2_PIPELINE_UNAVAILABLE',
+                },
+                { status: 503 }
+            );
+        }
+
+        let analysisTasksConfig;
+        let preflightTasksConfig;
+        try {
+            analysisTasksConfig = getAnalysisV2TasksConfig();
+            preflightTasksConfig = validatedPreflight.state === 'ready'
+                ? getPreflightTasksConfig()
+                : null;
+            if (!analysisTasksConfig || (
+                validatedPreflight.state === 'ready' && !preflightTasksConfig
+            )) {
+                throw new Error('queue disabled');
+            }
+        } catch {
+            console.error('Analysis V2 task queue configuration is unavailable.');
+            return NextResponse.json(
+                { error: '분석 작업 큐를 사용할 수 없습니다.', code: 'QUEUE_UNAVAILABLE' },
+                { status: 503 }
+            );
+        }
+
+        let admissionToken: string | null = null;
+        if (validatedPreflight.state === 'ready') {
+            const admission = await reserveAnalysisV2FreshAdmission(supabaseAdmin, {
+                preflightId,
+                userId: user.id,
+                selectedPlanId: body.data.planId,
+                entitlementJtiHash,
+            });
+            if (admission.state === 'pending') {
+                if (admission.shouldEnqueue) {
+                    const dispatch = {
+                        preflightId,
+                        userId: user.id,
+                        generation: admission.generation,
+                        dispatchGeneration: admission.dispatchGeneration,
+                        dispatchToken: admission.dispatchToken!,
+                    };
+                    try {
+                        await enqueueFreshAdmissionTask(
+                            preflightId,
+                            admission.generation,
+                            admission.dispatchGeneration,
+                            admission.dispatchToken!,
+                            { config: preflightTasksConfig! }
+                        );
+                    } catch {
+                        try {
+                            await releaseAnalysisV2FreshAdmissionDispatch(
+                                supabaseAdmin,
+                                dispatch
+                            );
+                        } catch {
+                            console.error(
+                                'Analysis V2 fresh admission dispatch release failed.'
+                            );
+                        }
+                        console.error('Analysis V2 fresh admission dispatch failed.');
+                        return NextResponse.json(
+                            {
+                                error: '최신 계정 확인 작업을 시작할 수 없습니다.',
+                                code: 'QUEUE_UNAVAILABLE',
+                            },
+                            { status: 503 }
+                        );
+                    }
+                    try {
+                        await markAnalysisV2FreshAdmissionDispatched(
+                            supabaseAdmin,
+                            dispatch
+                        );
+                    } catch {
+                        console.error('Analysis V2 fresh admission dispatch mark failed.');
+                        return NextResponse.json(
+                            {
+                                error: '최신 계정 확인 작업 상태를 확정할 수 없습니다.',
+                                code: 'QUEUE_UNAVAILABLE',
+                            },
+                            { status: 503 }
+                        );
+                    }
+                }
+                return NextResponse.json({
+                    schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                    preflightId,
+                    status: 'admission_pending',
+                    backgroundProcessing: true,
+                    retryAfterMs: 1_000,
+                }, {
+                    status: 202,
+                    headers: { 'Retry-After': '1' },
+                });
+            }
+            if (admission.state === 'blocked') {
+                return freshAdmissionError(admission.errorCode, admission.snapshot);
+            }
+            if (!admission.selectedPlanAllowed) {
+                return freshAdmissionError(
+                    'ANALYSIS_V2_PLAN_NOT_ALLOWED',
+                    admission.snapshot
+                );
+            }
+            admissionToken = admission.admissionToken;
+        }
         const consumed = await consumeAnalysisV2TestEntitlement(supabaseAdmin, {
             preflightId,
             userId: user.id,
             selectedPlanId: body.data.planId,
-            entitlementJtiHash: hashAnalysisTestEntitlementJti(entitlement.nonce),
+            entitlementJtiHash,
+            admissionToken,
         });
 
         const terminal = consumed.requestStatus === 'completed'
@@ -237,6 +381,9 @@ export async function POST(
             backgroundProcessing,
         }, { status: consumed.created ? 201 : 200 });
     } catch (error) {
+        if (error instanceof AnalysisV2FreshAdmissionError) {
+            return freshAdmissionError(error.code);
+        }
         if (error instanceof AnalysisV2EntitlementConsumptionError) {
             return entitlementError(error.code);
         }

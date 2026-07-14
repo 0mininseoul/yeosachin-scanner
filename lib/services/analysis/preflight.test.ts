@@ -371,10 +371,7 @@ describe('preflight worker domain', () => {
 
         await expect(processPreflight(preflightId, { store, getProfile }))
             .resolves.toBe('ready');
-        expect(getProfile).toHaveBeenCalledWith('target.name', {
-            provider: 'selfhosted',
-            fallback: false,
-        });
+        expect(getProfile).toHaveBeenCalledWith('target.name');
         expect(store.finalizeReady).toHaveBeenCalledWith(
             expect.objectContaining({ preflightId, claimToken }),
             expect.objectContaining({

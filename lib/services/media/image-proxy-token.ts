@@ -94,6 +94,7 @@ function openOpaquePayload(
     if (!OPAQUE_TOKEN_PATTERN.test(token)) return null;
     try {
         const sealed = Buffer.from(token, 'base64url');
+        if (sealed.toString('base64url') !== token) return null;
         if (sealed.length <= NONCE_BYTES + AUTH_TAG_BYTES) return null;
         const nonce = sealed.subarray(0, NONCE_BYTES);
         const tag = sealed.subarray(NONCE_BYTES, NONCE_BYTES + AUTH_TAG_BYTES);

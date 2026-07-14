@@ -158,8 +158,9 @@ export async function POST(request: Request) {
             loadActiveRequest: async () => {
                 const active = await supabaseAdmin
                     .from('analysis_requests')
-                    .select('id, status, current_step, created_at, idempotency_key')
+                    .select('id, status, current_step, created_at, idempotency_key, pipeline_version')
                     .eq('user_id', user.id)
+                    .or('pipeline_version.eq.v1,pipeline_version.is.null')
                     .in('status', ['pending', 'processing'])
                     .maybeSingle();
                 if (active.error) {

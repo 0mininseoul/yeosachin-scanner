@@ -21,7 +21,18 @@ import type { InstagramProfile } from '@/lib/types/instagram';
 const fixtureUser = (fixture as { data: { user: Record<string, unknown> } }).data.user;
 
 function rawUser(username: string): Record<string, unknown> {
-    return { ...fixtureUser, username };
+    const timeline = fixtureUser.edge_owner_to_timeline_media as {
+        count: number;
+        edges: unknown[];
+    };
+    return {
+        ...fixtureUser,
+        username,
+        edge_owner_to_timeline_media: {
+            ...timeline,
+            count: timeline.edges.length,
+        },
+    };
 }
 
 function profile(username: string): InstagramProfile {
@@ -99,7 +110,7 @@ describe('getProfilesBatchV2', () => {
             item.outcome.status,
         ])).toEqual([
             ['bob', 'success'],
-            ['carol', 'unavailable'],
+            ['carol', 'failed'],
             ['dave', 'success'],
         ]);
         expect(result.results.map(item => [
@@ -109,7 +120,7 @@ describe('getProfilesBatchV2', () => {
         ])).toEqual([
             ['alice', 'success', 'selfhosted'],
             ['bob', 'success', 'apify'],
-            ['carol', 'unavailable', 'apify'],
+            ['carol', 'failed', 'apify'],
             ['dave', 'success', 'apify'],
         ]);
     });
@@ -210,6 +221,52 @@ describe('getProfilesBatchV2', () => {
         await expect(getProfilesBatchV2(['alice'], {
             persistAttemptOutcomes: vi.fn().mockRejectedValue(new Error('database unavailable')),
         })).rejects.toThrow('PROFILE_FETCH_PERSISTENCE_ERROR: primary');
+        expect(fallback).not.toHaveBeenCalled();
+    });
+
+    it('propagates a start-heartbeat persistence failure before any paid fallback', async () => {
+        const fetchUser = vi.fn(async username => rawUser(username));
+        const fallback = vi.fn();
+        const persistAttemptOutcomes = vi.fn();
+        __setProvidersForTest({}, {
+            selfhosted: makeSelfHostedProvider({ fetchUser, concurrency: 1, retries: 0 }),
+            apify: provider({ name: 'apify', paid: true, getProfilesBatch: fallback }),
+        });
+
+        await expect(getProfilesBatchV2(['alice'], {
+            providerRun: durablePaidStart(),
+            onProfileStart: async () => {
+                throw new Error('database unavailable');
+            },
+            persistAttemptOutcomes,
+        })).rejects.toThrow(
+            'ANALYSIS_PERSISTENCE_ERROR: active profile heartbeat failed.'
+        );
+
+        expect(fetchUser).not.toHaveBeenCalled();
+        expect(persistAttemptOutcomes).not.toHaveBeenCalled();
+        expect(fallback).not.toHaveBeenCalled();
+    });
+
+    it('preserves an exact progress fence failure without persisting or starting fallback', async () => {
+        const fetchUser = vi.fn(async username => rawUser(username));
+        const fallback = vi.fn();
+        const persistAttemptOutcomes = vi.fn();
+        __setProvidersForTest({}, {
+            selfhosted: makeSelfHostedProvider({ fetchUser, concurrency: 1, retries: 0 }),
+            apify: provider({ name: 'apify', paid: true, getProfilesBatch: fallback }),
+        });
+
+        await expect(getProfilesBatchV2(['alice'], {
+            providerRun: durablePaidStart(),
+            onProfileStart: async () => {
+                throw new Error('ANALYSIS_V2_PROGRESS_FENCE_MISMATCH');
+            },
+            persistAttemptOutcomes,
+        })).rejects.toThrow('ANALYSIS_V2_PROGRESS_FENCE_MISMATCH');
+
+        expect(fetchUser).not.toHaveBeenCalled();
+        expect(persistAttemptOutcomes).not.toHaveBeenCalled();
         expect(fallback).not.toHaveBeenCalled();
     });
 

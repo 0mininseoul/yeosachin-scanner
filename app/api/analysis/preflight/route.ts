@@ -19,6 +19,7 @@ import {
     enqueuePreflightTask,
     resolvePreflightDispatchPolicy,
 } from '@/lib/services/analysis/preflight-tasks';
+import { isAnalysisV2AdmissionAvailable } from '@/lib/services/analysis/v2-execution-gate';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -40,6 +41,13 @@ export async function POST(request: Request) {
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
             return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+        }
+        if (!isAnalysisV2AdmissionAvailable()) {
+            return errorResponse(
+                503,
+                'V2_PIPELINE_UNAVAILABLE',
+                '새 분석 접수가 일시적으로 중단되었습니다.'
+            );
         }
 
         let body: unknown;

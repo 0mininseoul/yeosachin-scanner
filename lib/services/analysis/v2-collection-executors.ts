@@ -477,8 +477,9 @@ async function durableProfiles(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
     usernames: readonly string[];
+    onProfileStart?: (username: string) => Promise<void>;
 }): Promise<AnalysisV2ProfileFetchResume> {
-    const { dependencies, claim, usernames } = input;
+    const { dependencies, claim, usernames, onProfileStart } = input;
     const identity = profileIdentity(claim);
     let resume = await dependencies.profileCheckpointStore.load(identity);
     if (
@@ -505,6 +506,7 @@ async function durableProfiles(input: {
 
     await dependencies.getProfilesBatchV2(usernames, {
         requestId: claim.requestId,
+        onProfileStart,
         providerRun: mutableProviderRun,
         ...(resume ? {
             resume: {
@@ -809,7 +811,12 @@ export function createAnalysisV2ProfileFetchExecutor(
             throw new Error('ANALYSIS_V2_GIRLFRIEND_EXCLUSION_LEAK');
         }
 
-        const resume = await durableProfiles({ dependencies, claim, usernames });
+        const resume = await durableProfiles({
+            dependencies,
+            claim,
+            usernames,
+            onProfileStart: context.reportActiveProfile,
+        });
         const results = durableTerminalProfileResults(resume, usernames);
         return Object.freeze({
             checkpoint: Object.freeze({

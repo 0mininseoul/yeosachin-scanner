@@ -116,8 +116,7 @@ const profileOutcomeSchema = z.object({
         value.profile === null || value.triage || value.feature
         || value.genderOperationKey || value.genderResultHash
         || value.featureOperationKey || value.featureResultHash
-        || value.normalizedSelectionIds.length > 0 || value.mediaBundlePersisted
-        || value.mediaCoverage.normalizedCount !== 0
+        || value.mediaBundlePersisted
     )) {
         context.addIssue({ code: 'custom', message: 'Media-unavailable outcome is inconsistent.' });
     }

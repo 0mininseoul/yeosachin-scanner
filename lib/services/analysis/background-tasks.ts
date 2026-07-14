@@ -1,7 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { CloudTasksClient } from '@google-cloud/tasks';
+import { GoogleAuth, type ClientOptions } from 'google-gax';
 import { OAuth2Client } from 'google-auth-library';
 import { prepareGoogleApplicationCredentials } from '@/lib/services/google/credentials';
+import {
+    GOOGLE_CLOUD_PLATFORM_SCOPE,
+    createVercelWifGoogleAuth,
+    type CloudTasksCallerAuthConfig,
+} from '@/lib/services/google/vercel-wif';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROJECT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -53,6 +59,18 @@ interface IdTokenVerifierLike {
     verifyIdToken(options: { idToken: string; audience: string }): PromiseLike<IdTokenTicketLike>;
 }
 
+type CloudTasksClientConstructorOptions = Pick<ClientOptions, 'auth' | 'projectId'>;
+
+type CreateCloudTasksClientOptions = {
+    callerAuth?: CloudTasksCallerAuthConfig;
+    prepareLegacyCredentials?: () => unknown;
+    createClient?: (
+        options?: CloudTasksClientConstructorOptions
+    ) => Promise<CloudTasksClient>;
+    createAdcGoogleAuth?: (projectId: string) => GoogleAuth;
+    createWifGoogleAuth?: typeof createVercelWifGoogleAuth;
+};
+
 let sharedTasksClient: CloudTasksClient | undefined;
 let sharedTokenVerifier: OAuth2Client | undefined;
 
@@ -64,14 +82,35 @@ async function getSharedTasksClient(): Promise<CloudTasksClientLike> {
 }
 
 export async function createCloudTasksClient(
-    prepareCredentials: () => unknown = prepareGoogleApplicationCredentials,
-    createClient: () => Promise<CloudTasksClient> = async () => {
-        const { CloudTasksClient: TasksClient } = await import('@google-cloud/tasks');
-        return new TasksClient();
-    }
+    options: CreateCloudTasksClientOptions = {}
 ): Promise<CloudTasksClient> {
-    prepareCredentials();
-    return createClient();
+    const prepareLegacyCredentials = options.prepareLegacyCredentials
+        ?? prepareGoogleApplicationCredentials;
+    const createClient = options.createClient ?? (async (
+        clientOptions?: CloudTasksClientConstructorOptions
+    ) => {
+        const { CloudTasksClient: TasksClient } = await import('@google-cloud/tasks');
+        return new TasksClient(clientOptions);
+    });
+
+    if (!options.callerAuth) {
+        prepareLegacyCredentials();
+        return createClient();
+    }
+
+    const auth = options.callerAuth.mode === 'vercel-wif'
+        ? (options.createWifGoogleAuth ?? createVercelWifGoogleAuth)(
+            options.callerAuth
+        )
+        : (options.createAdcGoogleAuth ?? ((projectId: string) => new GoogleAuth({
+            projectId,
+            scopes: [GOOGLE_CLOUD_PLATFORM_SCOPE],
+        })))(options.callerAuth.projectId);
+
+    return createClient({
+        auth,
+        projectId: options.callerAuth.projectId,
+    });
 }
 
 function booleanSetting(value: string | undefined): boolean {

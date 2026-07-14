@@ -14,6 +14,12 @@ export type ApifyRelationshipKind = 'followers' | 'following';
 
 const APIFY_RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
 const MAX_INVOCATION_WAIT_SECS = 240;
+const RESUMABLE_APIFY_RUN_STATUSES = new Set([
+    'READY',
+    'RUNNING',
+    'TIMING-OUT',
+    'ABORTING',
+]);
 
 export interface ApifyActorRunOptions {
     logicalProvider: 'apify' | 'coderx';
@@ -210,6 +216,7 @@ export async function startOrResumeApifyActor(
     }
 
     let runId = resumeRunId;
+    let durablyCheckpointed = Boolean(resumeRunId);
     if (!runId) {
         if (context?.startReserved) {
             throw new Error(
@@ -250,6 +257,7 @@ export async function startOrResumeApifyActor(
         runId = startedRun.id;
         try {
             await context?.onRunStarted?.(runId);
+            durablyCheckpointed = typeof context?.onRunStarted === 'function';
         } catch {
             try {
                 await client.run(runId).abort();
@@ -283,6 +291,11 @@ export async function startOrResumeApifyActor(
             waitSecs: Math.min(options.timeoutSecs, MAX_INVOCATION_WAIT_SECS),
         });
     } catch {
+        if (durablyCheckpointed) {
+            throw new Error(
+                'SCRAPING_RUN_PENDING_ERROR: Apify run status is temporarily unavailable; retry the checkpointed run.'
+            );
+        }
         throw new Error('SCRAPING_ERROR: Apify run status request failed.');
     }
 
@@ -315,7 +328,26 @@ export async function startOrResumeApifyActor(
             );
         }
     }
+    if (!terminalStatus && RESUMABLE_APIFY_RUN_STATUSES.has(run.status) && durablyCheckpointed) {
+        throw new Error(
+            `SCRAPING_RUN_PENDING_ERROR: Apify run status=${run.status}; retry the checkpointed run.`
+        );
+    }
     return run;
+}
+
+function hasDurableRunCheckpoint(context?: ProviderCallContext): boolean {
+    return Boolean(context?.resumeRunId || context?.onRunStarted);
+}
+
+function resumableDatasetError(
+    context: ProviderCallContext | undefined,
+    detail: string
+): Error {
+    if (hasDurableRunCheckpoint(context)) {
+        return new Error(`SCRAPING_DATASET_TRANSIENT_ERROR: ${detail}`);
+    }
+    return new Error(`SCRAPING_ERROR: ${detail}`);
 }
 
 function actorRequestError(error: unknown): Error {
@@ -419,6 +451,7 @@ export async function runApifyRelationshipActor(
                 && (
                     error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+                    || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
                 )
             ) {
@@ -448,8 +481,9 @@ export async function runApifyRelationshipActor(
                     page = await dataset.listItems({ offset, limit: pageLimit });
                 } catch {
                     page = undefined;
-                    invariantError = new Error(
-                        'SCRAPING_ERROR: APIFY_DATASET_TRANSPORT_EXHAUSTED Apify dataset transport request failed.'
+                    invariantError = resumableDatasetError(
+                        context,
+                        'APIFY_DATASET_TRANSPORT_EXHAUSTED Apify dataset transport request failed.'
                     );
                 }
                 if (page && !Array.isArray(page.items)) {
@@ -502,9 +536,13 @@ export async function runApifyRelationshipActor(
                     page.items.length === 0 &&
                     attempt < definition.datasetReadRetries
                 ) {
-                    invariantError = new Error(
-                        'SCRAPING_INCOMPLETE_ERROR: APIFY_DATASET_EMPTY_UNSETTLED Apify dataset이 아직 비어 있습니다.'
-                    );
+                    invariantError = hasDurableRunCheckpoint(context)
+                        ? new Error(
+                            'SCRAPING_DATASET_TRANSIENT_ERROR: APIFY_DATASET_EMPTY_UNSETTLED Apify dataset이 아직 비어 있습니다.'
+                        )
+                        : new Error(
+                            'SCRAPING_INCOMPLETE_ERROR: APIFY_DATASET_EMPTY_UNSETTLED Apify dataset이 아직 비어 있습니다.'
+                        );
                 }
                 if (!invariantError) break;
                 if (attempt < definition.datasetReadRetries) {

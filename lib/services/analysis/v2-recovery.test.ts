@@ -55,6 +55,24 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
     };
 }
 
+function providerRecovery() {
+    return {
+        cleanupProviderRuns: vi.fn(async () => ({
+            scanned: 0,
+            settled: 0,
+            failed: 0,
+            unconfirmedStarts: 0,
+            hasMore: false,
+        })),
+        reconcileProviderUsage: vi.fn(async () => ({
+            eligible: 0,
+            reconciled: 0,
+            failed: 0,
+            hasMore: false,
+        })),
+    };
+}
+
 describe('analysis V2 dispatch recovery', () => {
     it('dispatches pending/reserved jobs and preserves task identities that still exist', async () => {
         const jobStore = store([
@@ -67,6 +85,7 @@ describe('analysis V2 dispatch recovery', () => {
         const cleanupTerminalMedia = vi.fn(async () => undefined);
 
         await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
             store: jobStore,
             dispatch,
             lookup,
@@ -77,6 +96,9 @@ describe('analysis V2 dispatch recovery', () => {
             taskPresent: 1,
             lostRace: 0,
             failed: 0,
+            providerRunsSettled: 0,
+            providerRunsBlocked: 0,
+            providerUsageReconciled: 0,
         });
         expect(dispatch).toHaveBeenCalledTimes(2);
         expect(jobStore.rearmDispatch).not.toHaveBeenCalled();
@@ -89,6 +111,7 @@ describe('analysis V2 dispatch recovery', () => {
         const dispatch = vi.fn(async () => 'enqueued');
 
         await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
             store: jobStore,
             dispatch,
             lookup: async () => 'not_found',
@@ -107,6 +130,7 @@ describe('analysis V2 dispatch recovery', () => {
     it('never rearms an ambiguous lookup failure and tolerates a concurrent recovery race', async () => {
         const ambiguousStore = store([job('coordinator:ambiguous', 'enqueued')]);
         const ambiguous = await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
             store: ambiguousStore,
             lookup: async () => { throw new Error('permission denied'); },
             dispatch: vi.fn(),
@@ -119,6 +143,7 @@ describe('analysis V2 dispatch recovery', () => {
             throw new AnalysisV2JobFenceError();
         });
         await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
             store: raceStore,
             lookup: async () => 'not_found',
             dispatch: vi.fn(),
@@ -127,6 +152,7 @@ describe('analysis V2 dispatch recovery', () => {
 
     it('reports a terminal media cleanup failure for the scheduler to retry', async () => {
         await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
             store: store([]),
             cleanupTerminalMedia: async () => {
                 throw new Error('temporary cleanup failure');
@@ -137,6 +163,43 @@ describe('analysis V2 dispatch recovery', () => {
             taskPresent: 0,
             lostRace: 0,
             failed: 1,
+            providerRunsSettled: 0,
+            providerRunsBlocked: 0,
+            providerUsageReconciled: 0,
         });
+    });
+
+    it('repeats provider abort and usage reconciliation and reports unresolved cleanup', async () => {
+        const cleanupProviderRuns = vi.fn(async () => ({
+            scanned: 3,
+            settled: 2,
+            failed: 1,
+            unconfirmedStarts: 1,
+            hasMore: false,
+        }));
+        const reconcileProviderUsage = vi.fn(async () => ({
+            eligible: 2,
+            reconciled: 1,
+            failed: 1,
+            hasMore: false,
+        }));
+
+        await expect(recoverAnalysisV2Jobs({
+            store: store([]),
+            cleanupProviderRuns,
+            reconcileProviderUsage,
+            cleanupTerminalMedia: vi.fn(async () => undefined),
+        })).resolves.toEqual({
+            scanned: 0,
+            dispatched: 0,
+            taskPresent: 0,
+            lostRace: 0,
+            failed: 2,
+            providerRunsSettled: 2,
+            providerRunsBlocked: 2,
+            providerUsageReconciled: 1,
+        });
+        expect(cleanupProviderRuns).toHaveBeenCalledOnce();
+        expect(reconcileProviderUsage).toHaveBeenCalledOnce();
     });
 });

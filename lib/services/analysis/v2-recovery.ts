@@ -12,6 +12,12 @@ import {
 import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
+import {
+    reconcileAnalysisV2ProviderUsage,
+    settleActiveAnalysisV2ProviderRuns,
+    type AnalysisV2ProviderCleanupSummary,
+    type AnalysisV2ProviderReconciliationSummary,
+} from './v2-provider-lifecycle';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -22,6 +28,9 @@ export interface AnalysisV2RecoverySummary {
     taskPresent: number;
     lostRace: number;
     failed: number;
+    providerRunsSettled: number;
+    providerRunsBlocked: number;
+    providerUsageReconciled: number;
 }
 
 type RecoveryLookup = (job: {
@@ -32,6 +41,8 @@ type RecoveryLookup = (job: {
 
 type RecoveryDispatch = (requestId: string, jobKey: string) => Promise<unknown>;
 type TerminalMediaCleanup = () => Promise<unknown>;
+type ProviderRunCleanup = () => Promise<AnalysisV2ProviderCleanupSummary>;
+type ProviderUsageReconciliation = () => Promise<AnalysisV2ProviderReconciliationSummary>;
 
 type RecoveryOutcome = keyof Omit<AnalysisV2RecoverySummary, 'scanned'>;
 
@@ -98,6 +109,8 @@ export async function recoverAnalysisV2Jobs(
         limit?: number;
         concurrency?: number;
         cleanupTerminalMedia?: TerminalMediaCleanup;
+        cleanupProviderRuns?: ProviderRunCleanup;
+        reconcileProviderUsage?: ProviderUsageReconciliation;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -119,6 +132,9 @@ export async function recoverAnalysisV2Jobs(
         taskPresent: 0,
         lostRace: 0,
         failed: 0,
+        providerRunsSettled: 0,
+        providerRunsBlocked: 0,
+        providerUsageReconciled: 0,
     };
     let cursor = 0;
     const worker = async () => {
@@ -137,6 +153,30 @@ export async function recoverAnalysisV2Jobs(
     );
     try {
         await (dependencies.cleanupTerminalMedia ?? cleanupTerminalMedia)();
+    } catch {
+        summary.failed += 1;
+    }
+    try {
+        const providerCleanup = await (
+            dependencies.cleanupProviderRuns
+            ?? (() => settleActiveAnalysisV2ProviderRuns())
+        )();
+        summary.providerRunsSettled = providerCleanup.settled;
+        summary.providerRunsBlocked = providerCleanup.unconfirmedStarts
+            + providerCleanup.failed
+            + (providerCleanup.hasMore ? 1 : 0);
+        if (summary.providerRunsBlocked > 0) summary.failed += 1;
+    } catch {
+        summary.failed += 1;
+        summary.providerRunsBlocked += 1;
+    }
+    try {
+        const reconciliation = await (
+            dependencies.reconcileProviderUsage
+            ?? (() => reconcileAnalysisV2ProviderUsage())
+        )();
+        summary.providerUsageReconciled = reconciliation.reconciled;
+        if (reconciliation.failed > 0 || reconciliation.hasMore) summary.failed += 1;
     } catch {
         summary.failed += 1;
     }

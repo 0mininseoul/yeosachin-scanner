@@ -126,6 +126,10 @@ const datasetPageSchema = z.object({
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+function hasDurableRunCheckpoint(context?: ProviderCallContext): boolean {
+    return Boolean(context?.resumeRunId || context?.onRunStarted);
+}
+
 function parsePostIdentity(value: string, allowNestedPath = false): PostIdentity {
     let url: URL;
     try {
@@ -326,9 +330,13 @@ async function readBoundedDataset(
                 page = undefined;
                 lastError = error instanceof Error && error.message.startsWith('SCRAPING_SCHEMA_ERROR:')
                     ? error
-                    : new Error(
-                        'SCRAPING_ERROR: APIFY_INTERACTION_DATASET_TRANSPORT_EXHAUSTED Dataset transport request failed.'
-                    );
+                    : hasDurableRunCheckpoint(context)
+                        ? new Error(
+                            'SCRAPING_DATASET_TRANSIENT_ERROR: APIFY_INTERACTION_DATASET_TRANSPORT_EXHAUSTED Dataset transport request failed.'
+                        )
+                        : new Error(
+                            'SCRAPING_ERROR: APIFY_INTERACTION_DATASET_TRANSPORT_EXHAUSTED Dataset transport request failed.'
+                        );
             }
 
             if (page) {
@@ -367,9 +375,13 @@ async function readBoundedDataset(
                     page.total === 0 &&
                     attempt < config.datasetReadRetries
                 ) {
-                    lastError = new Error(
-                        'SCRAPING_INCOMPLETE_ERROR: APIFY_INTERACTION_DATASET_EMPTY_UNSETTLED Dataset is not settled yet.'
-                    );
+                    lastError = hasDurableRunCheckpoint(context)
+                        ? new Error(
+                            'SCRAPING_DATASET_TRANSIENT_ERROR: APIFY_INTERACTION_DATASET_EMPTY_UNSETTLED Dataset is not settled yet.'
+                        )
+                        : new Error(
+                            'SCRAPING_INCOMPLETE_ERROR: APIFY_INTERACTION_DATASET_EMPTY_UNSETTLED Dataset is not settled yet.'
+                        );
                 } else {
                     lastError = undefined;
                     break;
@@ -437,6 +449,7 @@ async function runActor(
                 && (
                     error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+                    || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
                 )
             ) {

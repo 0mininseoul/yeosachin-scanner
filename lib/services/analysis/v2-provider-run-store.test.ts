@@ -452,4 +452,121 @@ describe('analysis V2 provider run store', () => {
             }
         );
     });
+
+    it('persists an exact terminal-cleanup intent before remote Actor actions', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({ data: true, error: null });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.requestCleanup({
+            requestId,
+            jobKey,
+            claimToken,
+            jobInputHash: inputHash,
+            errorCode: 'JOB_ATTEMPTS_EXHAUSTED',
+        })).resolves.toBeUndefined();
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.requestCleanupRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_claim_token: claimToken,
+                p_job_input_hash: inputHash,
+                p_error_code: 'JOB_ATTEMPTS_EXHAUSTED',
+            }
+        );
+    });
+
+    it('loads the original incomplete cleanup identity for retry convergence', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({
+            data: {
+                requestId,
+                jobKey,
+                jobInputHash: inputHash,
+                errorCode: 'ORIGINAL_PROVIDER_FAILURE',
+            },
+            error: null,
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.loadCleanupIntent(requestId)).resolves.toEqual({
+            requestId,
+            jobKey,
+            jobInputHash: inputHash,
+            errorCode: 'ORIGINAL_PROVIDER_FAILURE',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadCleanupIntentRpc,
+            { p_request_id: requestId }
+        );
+    });
+
+    it('preserves the typed cleanup freeze when a sibling tries to reserve paid work', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({
+            data: null,
+            error: {
+                code: 'P0001',
+                message: 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+            },
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.reserve(identity)).rejects.toThrow(
+            'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED'
+        );
+    });
+
+    it('lists confirmed cleanup runs separately from unconfirmed starts', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({
+            data: { startingCount: 2, runs: [storedRow('running')] },
+            error: null,
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.listActiveForCleanup({ requestId, limit: 12 }))
+            .resolves.toEqual({
+                startingCount: 2,
+                runs: [expect.objectContaining({ runId, status: 'running' })],
+            });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.listActiveCleanupRpc,
+            { p_request_id: requestId, p_limit: 12 }
+        );
+    });
+
+    it('seals a cleanup-confirmed terminal run without a live claim', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({
+            data: storedRow('aborted'),
+            error: null,
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.settleForCleanup({
+            reservationToken,
+            runId,
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+            status: 'aborted',
+            actualUsageUsd: null,
+        })).resolves.toMatchObject({ status: 'aborted', actualUsageUsd: null });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.settleCleanupRpc,
+            {
+                p_reservation_token: reservationToken,
+                p_run_id: runId,
+                p_logical_provider: 'apify',
+                p_actor_id: identity.actorId,
+                p_credential_slot: 'primary',
+                p_max_charge_usd: 0.40205,
+                p_status: 'aborted',
+                p_actual_usage_usd: null,
+            }
+        );
+    });
 });

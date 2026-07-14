@@ -162,6 +162,33 @@ describe('Apify interaction adapter', () => {
         }));
     });
 
+    it('retries pending and temporarily unreadable interaction runs without a second start', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const pending = mockClient([liker('alice', post)], { status: 'RUNNING' });
+        const adapter = makeApifyInteractionAdapter({ client: pending.client, env: BASE_ENV });
+        const checkpoint = {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify' as const,
+            actorId: APIFY_LIKERS_ACTOR_ID,
+            credentialSlot: 'primary' as const,
+            maxChargeUsd: 0.00155,
+            recordUsage: vi.fn(),
+        };
+
+        await expect(adapter.getPostLikers([post], 1, checkpoint))
+            .rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+        expect(pending.call).not.toHaveBeenCalled();
+
+        const unreadable = mockClient([liker('alice', post)]);
+        unreadable.listItems.mockRejectedValueOnce(new Error('dataset unavailable'));
+        await expect(makeApifyInteractionAdapter({
+            client: unreadable.client,
+            env: BASE_ENV,
+        }).getPostLikers([post], 1, checkpoint))
+            .rejects.toThrow('SCRAPING_DATASET_TRANSIENT_ERROR');
+        expect(unreadable.call).not.toHaveBeenCalled();
+    });
+
     it('supports the ten URL x one hundred candidate-liker product ceiling', async () => {
         const urls = Array.from(
             { length: 10 },

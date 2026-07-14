@@ -1,8 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import fixture from './__fixtures__/web-profile-info.json';
-import { mapUserToProfile, extractHashtags, extractMentions } from './mappers';
+import {
+    mapUserToAdmissionProfileSummary,
+    mapUserToProfile,
+    mapUserToProfileSummary,
+    extractHashtags,
+    extractMentions,
+} from './mappers';
 
 const user = (fixture as { data: { user: Record<string, unknown> } }).data.user;
+const fixturePosts = (
+    user.edge_owner_to_timeline_media as { edges: Array<{ node: Record<string, unknown> }> }
+).edges.map(edge => edge.node);
 
 function userWithPosts(posts: Array<Record<string, unknown>>): Record<string, unknown> {
     return {
@@ -15,14 +24,14 @@ function userWithPosts(posts: Array<Record<string, unknown>>): Record<string, un
 }
 
 describe('mapUserToProfile', () => {
-    const profile = mapUserToProfile(user);
+    const profile = mapUserToProfile(userWithPosts(fixturePosts));
 
     it('프로필 스칼라 필드를 매핑한다', () => {
         expect(profile.username).toBe('sample_user');
         expect(profile.fullName).toBe('샘플 유저');
         expect(profile.followersCount).toBe(1234);
         expect(profile.followingCount).toBe(321);
-        expect(profile.postsCount).toBe(87);
+        expect(profile.postsCount).toBe(2);
         expect(profile.isPrivate).toBe(false);
         expect(profile.isVerified).toBe(true);
         expect(profile.externalUrl).toBe('https://example.com');
@@ -33,8 +42,9 @@ describe('mapUserToProfile', () => {
     });
 
     it('팔로워/팔로잉 count가 누락되거나 잘못되면 거부한다', () => {
-        expect(() => mapUserToProfile({ ...user, edge_followed_by: {} })).toThrow('SCHEMA');
-        expect(() => mapUserToProfile({ ...user, edge_follow: { count: -1 } })).toThrow('SCHEMA');
+        const complete = userWithPosts(fixturePosts);
+        expect(() => mapUserToProfile({ ...complete, edge_followed_by: {} })).toThrow('SCHEMA');
+        expect(() => mapUserToProfile({ ...complete, edge_follow: { count: -1 } })).toThrow('SCHEMA');
     });
 
     it('게시물을 최대 10개, 타입/좋아요/이미지와 함께 매핑한다', () => {
@@ -49,6 +59,16 @@ describe('mapUserToProfile', () => {
         expect(p2.thumbnailUrl).toBe('https://cdn.example.com/post2.jpg');
         expect(p2.videoUrl).toBe('https://cdn.example.com/post2.mp4');
         expect(p2.likesCount).toBe(10);
+    });
+
+    it('공개 계정의 최신 8개 게시물 스냅샷이 덜 오면 불완전 결과로 거부한다', () => {
+        expect(() => mapUserToProfile({
+            ...user,
+            edge_owner_to_timeline_media: {
+                count: 87,
+                edges: fixturePosts.map(node => ({ node })),
+            },
+        })).toThrow('SCRAPING_INCOMPLETE_ERROR');
     });
 
     it('GraphSidecar 자식을 순서대로 매핑하고 선언 개수와 일치할 때만 완전성을 표시한다', () => {
@@ -204,6 +224,53 @@ describe('mapUserToProfile', () => {
         expect(p1.taggedUsers).toContain('tagged_c');
         expect(p1.mentionedUsers).toContain('friend_b');
         expect(p1.hashtags).toContain('선릉');
+    });
+});
+
+describe('mapUserToProfileSummary', () => {
+    it('validates identity, privacy, and counts without parsing incomplete timeline media', () => {
+        const incompleteTimeline = {
+            ...user,
+            edge_owner_to_timeline_media: { count: 87, edges: [] },
+        };
+
+        expect(mapUserToProfileSummary(incompleteTimeline)).toMatchObject({
+            username: 'sample_user',
+            followersCount: 1234,
+            followingCount: 321,
+            postsCount: 87,
+            isPrivate: false,
+        });
+        expect(mapUserToProfileSummary(incompleteTimeline).latestPosts).toBeUndefined();
+        expect(() => mapUserToProfile(incompleteTimeline))
+            .toThrow('SCRAPING_INCOMPLETE_ERROR');
+    });
+});
+
+describe('mapUserToAdmissionProfileSummary', () => {
+    it('validates only identity, privacy, and relationship counts', () => {
+        const admission = mapUserToAdmissionProfileSummary({
+            username: 'sample_user',
+            is_private: false,
+            edge_followed_by: { count: 410 },
+            edge_follow: { count: 390 },
+            edge_owner_to_timeline_media: { count: 'schema drift' },
+            is_verified: 'unknown',
+            profile_pic_url: 'not a url',
+        });
+
+        expect(admission).toEqual({
+            username: 'sample_user',
+            followersCount: 410,
+            followingCount: 390,
+            isPrivate: false,
+        });
+        expect(() => mapUserToAdmissionProfileSummary({
+            username: 'sample_user',
+            is_private: false,
+            edge_followed_by: {},
+            edge_follow: { count: 390 },
+        })).toThrow('SCHEMA');
     });
 });
 

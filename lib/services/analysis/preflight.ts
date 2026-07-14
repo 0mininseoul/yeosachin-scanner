@@ -32,7 +32,7 @@ import {
     analysisTestEntitlementsEnabled,
     assertAnalysisTestEntitlementConfiguration,
 } from './test-entitlement';
-import { getInstagramProfile } from '@/lib/services/instagram';
+import { getSelfHostedProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
 import { isInstagramUsername } from '@/lib/services/instagram/username';
 import {
     canonicalizeImageProxyUrl,
@@ -833,7 +833,7 @@ export async function processPreflight(
     preflightId: string,
     dependencies: {
         store?: PreflightStore;
-        getProfile?: typeof getInstagramProfile;
+        getProfile?: typeof getSelfHostedProfileSummary;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
@@ -842,9 +842,8 @@ export async function processPreflight(
     let terminalized = false;
     try {
         assertPreflightRuntimePolicy();
-        const profile = await (dependencies.getProfile ?? getInstagramProfile)(
-            claim.targetInstagramId,
-            { provider: 'selfhosted', fallback: false }
+        const profile = await (dependencies.getProfile ?? getSelfHostedProfileSummary)(
+            claim.targetInstagramId
         );
         if (!profile) {
             await store.finalizeBlocked(claim, 'TARGET_NOT_FOUND');

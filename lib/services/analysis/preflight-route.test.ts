@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     after: vi.fn(),
+    admissionAvailable: vi.fn(),
     createClient: vi.fn(),
     enqueue: vi.fn(),
     getUser: vi.fn(),
@@ -40,6 +41,9 @@ vi.mock('@/lib/services/analysis/preflight', async (importOriginal) => {
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     enqueuePreflightTask: mocks.enqueue,
     resolvePreflightDispatchPolicy: mocks.resolveDispatch,
+}));
+vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
+    isAnalysisV2AdmissionAvailable: mocks.admissionAvailable,
 }));
 
 import { POST as createPreflight } from '@/app/api/analysis/preflight/route';
@@ -86,6 +90,7 @@ describe('preflight owner routes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+        mocks.admissionAvailable.mockReturnValue(true);
         mocks.getUser.mockResolvedValue({
             data: {
                 user: {
@@ -139,6 +144,16 @@ describe('preflight owner routes', () => {
             extra: true,
         }))).status).toBe(400);
         expect((await createPreflight(postRequest(undefined, 'short'))).status).toBe(400);
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+    });
+
+    it('blocks new intake without stopping already authenticated workers', async () => {
+        mocks.admissionAvailable.mockReturnValue(false);
+        const response = await createPreflight(postRequest());
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'V2_PIPELINE_UNAVAILABLE',
+        });
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
     });
 

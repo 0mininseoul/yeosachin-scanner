@@ -17,7 +17,6 @@ import {
     isSuccessfulProfileAttempt,
     profileAttemptLatency,
     successfulProfileAttempt,
-    unavailableProfileAttempt,
     validateProfileAttemptResults,
 } from './providers/profile-attempt';
 import {
@@ -70,6 +69,8 @@ export interface ProfilesBatchV2Options {
     requestId?: string;
     onTelemetry?: ScrapeRequestOptions['onTelemetry'];
     providerRun?: ScrapeRequestOptions['providerRun'];
+    onProfileStart?: ScrapeRequestOptions['onProfileStart'];
+    onProfileResolved?: ScrapeRequestOptions['onProfileResolved'];
     resume?: ProfilesBatchV2Resume;
     persistAttemptOutcomes(snapshot: ProfilesBatchV2AttemptSnapshot): Promise<void>;
 }
@@ -268,6 +269,8 @@ async function runAttempt<T>(
         startReserved: options?.providerRun?.startReserved,
         onBeforeRunStart: options?.providerRun?.onBeforeRunStart,
         onRunStarted: options?.providerRun?.onRunStarted,
+        onProfileStart: options?.onProfileStart,
+        onProfileResolved: options?.onProfileResolved,
         onCostRunStarted: options?.providerRun?.onCostRunStarted,
         onCostRunFinished: options?.providerRun?.onCostRunFinished,
         recordUsage: (delta) => addUsage(usage, delta),
@@ -377,8 +380,7 @@ function profilesToAttemptResults(
     requestedUsernames: readonly string[],
     profiles: readonly InstagramProfile[],
     source: ProfileAttemptProvider,
-    startedAt: number,
-    omittedAsUnavailable: boolean
+    startedAt: number
 ): ProfileAttemptResult[] {
     const requested = new Set(requestedUsernames);
     const returned = new Map<string, InstagramProfile>();
@@ -406,23 +408,15 @@ function profilesToAttemptResults(
                 latencyMs,
             });
         }
-        return omittedAsUnavailable
-            ? unavailableProfileAttempt({
-                requestedUsername,
-                source,
-                reason: 'not_found',
-                requestCount: 1,
-                latencyMs,
-            })
-            : failedProfileAttempt({
-                requestedUsername,
-                source,
-                error: new Error(
-                    'SCRAPING_INCOMPLETE_ERROR: primary provider omitted a terminal result.'
-                ),
-                requestCount: 1,
-                latencyMs,
-            });
+        return failedProfileAttempt({
+            requestedUsername,
+            source,
+            error: new Error(
+                'SCRAPING_INCOMPLETE_ERROR: provider omitted a terminal result without explicit not-found evidence.'
+            ),
+            requestCount: 1,
+            latencyMs,
+        });
     });
 }
 
@@ -472,8 +466,7 @@ async function runProfileOutcomeAttempt(
                     requestedUsernames,
                     profiles,
                     source,
-                    startedAt,
-                    source === 'apify'
+                    startedAt
                 ));
             },
             fallback,
@@ -497,6 +490,7 @@ async function runProfileOutcomeAttempt(
             'SCRAPING_RUN_CHECKPOINT_ERROR:',
             'SCRAPING_RUN_PENDING_ERROR:',
             'ANALYSIS_PERSISTENCE_ERROR:',
+            'ANALYSIS_V2_PROGRESS_',
         ].some(prefix => error.message.startsWith(prefix))
             ? error
             : undefined;
@@ -804,8 +798,11 @@ export async function getProfilesBatchV2(
             {
                 requestId: options.requestId,
                 onTelemetry: options.onTelemetry,
+                onProfileStart: options.onProfileStart,
+                onProfileResolved: options.onProfileResolved,
             }
         );
+        if (primaryAttempt.paidRunBarrierError) throw primaryAttempt.paidRunBarrierError;
         primaryResults = primaryAttempt.results;
         await persistProfileAttempt(options, Object.freeze({
             attempt: 'primary',
@@ -846,6 +843,7 @@ export async function getProfilesBatchV2(
             {
                 requestId: options.requestId,
                 onTelemetry: options.onTelemetry,
+                onProfileStart: options.onProfileStart,
                 providerRun: options.providerRun,
             }
         );

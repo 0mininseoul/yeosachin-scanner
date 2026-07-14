@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
-import { isAnalysisV2StartAvailable } from '@/lib/services/analysis/v2-execution-gate';
+import { isAnalysisV2WorkerAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import {
     AnalysisV2JobDispatchNotReadyError,
     AnalysisV2JobFenceError,
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     )) {
         return NextResponse.json({ code: 'UNAUTHORIZED' }, { status: 401 });
     }
-    if (!isAnalysisV2StartAvailable()) {
+    if (!isAnalysisV2WorkerAvailable()) {
         return NextResponse.json({ code: 'V2_PIPELINE_UNAVAILABLE' }, { status: 503 });
     }
 

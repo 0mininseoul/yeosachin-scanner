@@ -3,6 +3,7 @@ import { createRequestStartGate } from './rate-limit';
 import {
     createWebProfileCircuitBreaker,
     getWebProfileConfig,
+    makeWebProfileAdmissionFetcher,
     makeWebProfileFetcher,
 } from './web-client';
 
@@ -127,6 +128,33 @@ describe('selfhosted web profile client', () => {
         await expect(fetchProfile('target')).rejects.toThrow('SCHEMA');
         await expect(fetchProfile('target')).rejects.toThrow('circuit is open');
         expect(fetchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps fresh admission independent from timeline, verification, and URL fields', async () => {
+        const minimalUser = {
+            username: 'target',
+            is_private: false,
+            edge_followed_by: { count: 401 },
+            edge_follow: { count: 399 },
+            edge_owner_to_timeline_media: { count: 'changed' },
+            is_verified: 'changed',
+            profile_pic_url: 'not a url',
+        };
+        const admissionFetcher = makeWebProfileAdmissionFetcher({
+            env: env(),
+            fetchFn: vi.fn<typeof fetch>(async () => response({ data: { user: minimalUser } })),
+        });
+        const fullFetcher = makeWebProfileFetcher({
+            env: env(),
+            fetchFn: vi.fn<typeof fetch>(async () => response({ data: { user: minimalUser } })),
+        });
+
+        await expect(admissionFetcher('target')).resolves.toMatchObject({
+            username: 'target',
+            edge_followed_by: { count: 401 },
+            edge_follow: { count: 399 },
+        });
+        await expect(fullFetcher('target')).rejects.toThrow('SCRAPING_SCHEMA_ERROR');
     });
 
     it('rejects invalid reliability settings before making a request', () => {

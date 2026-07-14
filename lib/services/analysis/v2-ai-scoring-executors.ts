@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+    MAX_RECENT_POSTS,
     selectAnalysisMedia,
     type SelectedAnalysisMedia,
 } from '@/lib/domain/analysis/media-policy';
@@ -306,12 +307,12 @@ export interface AnalysisV2RelationshipEvidenceReadModel {
 export interface AnalysisV2ReverseLikeCollectionInput {
     candidateId: string;
     postUrl: string;
+    declaredLikesCount: number;
 }
 
 export interface AnalysisV2ReverseLikeCollectionResult {
     candidateId: string;
-    status: 'collected' | 'not_collected';
-    likerUsernames: readonly string[];
+    status: 'observed' | 'not_observed' | 'not_collected';
 }
 
 export interface AnalysisV2ReverseLikeCollector {
@@ -421,23 +422,44 @@ async function runBounded<T, R>(
     }
     const results = new Array<R>(values.length);
     let next = 0;
+    let firstError: unknown;
+    let failed = false;
     async function worker() {
-        while (next < values.length) {
+        while (!failed && next < values.length) {
             const index = next++;
-            results[index] = await task(values[index], index);
+            try {
+                results[index] = await task(values[index], index);
+            } catch (error) {
+                if (!failed) {
+                    failed = true;
+                    firstError = error;
+                }
+            }
         }
     }
     await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+    if (failed) throw firstError;
     return results;
 }
 
 function mediaPolicy(profile: AnalysisV2CheckpointProfile) {
-    return selectAnalysisMedia({
+    const latestPosts = profile.latestPosts ?? [];
+    if (
+        !profile.isPrivate
+        && latestPosts.length < Math.min(profile.postsCount, MAX_RECENT_POSTS)
+    ) {
+        throw new Error('ANALYSIS_V2_PROFILE_MEDIA_STRUCTURAL_INCOMPLETE');
+    }
+    const policy = selectAnalysisMedia({
         profile: profile.profilePicUrl
             ? { id: profile.username, imageUrl: profile.profilePicUrl }
             : undefined,
-        posts: profile.latestPosts ?? [],
+        posts: latestPosts,
     });
+    if (policy.carouselCoverage.incompletePostIds.length > 0) {
+        throw new Error('ANALYSIS_V2_PROFILE_MEDIA_STRUCTURAL_INCOMPLETE');
+    }
+    return policy;
 }
 
 function captionEvidence(
@@ -495,11 +517,7 @@ async function normalizedSelections(
     }));
     const successful = prepared.filter(item => item.status === 'success');
     const failures = prepared.flatMap(item => item.status === 'failure' ? [item.failure] : []);
-    if (
-        selected.length > 0
-        && successful.length === 0
-        && failures.some(failure => failure.disposition === 'transient')
-    ) {
+    if (failures.some(failure => failure.disposition === 'transient')) {
         throw new AnalysisV2TransientMediaPreparationError();
     }
     const media: NormalizedAiMediaSelection[] = successful.map(({ item, bytes }) => ({
@@ -680,14 +698,20 @@ function relationshipRowsByBatch(
     return rows;
 }
 
-function postUrl(profile: AnalysisV2CheckpointProfile): string | null {
+function latestPostLikeScope(profile: AnalysisV2CheckpointProfile): Readonly<{
+    postUrl: string;
+    declaredLikesCount: number;
+}> | null {
     const post = profile.latestPosts?.slice().sort((left, right) => (
         Date.parse(right.timestamp) - Date.parse(left.timestamp)
         || left.id.localeCompare(right.id)
     ))[0];
     if (!post) return null;
     const kind = post.type === 'reel' ? 'reel' : 'p';
-    return `https://www.instagram.com/${kind}/${post.shortCode}/`;
+    return Object.freeze({
+        postUrl: `https://www.instagram.com/${kind}/${post.shortCode}/`,
+        declaredLikesCount: post.likesCount,
+    });
 }
 
 function evidenceRef(domain: string, value: unknown): string {
@@ -714,13 +738,9 @@ function validateReverseLikeCollection(
             throw new Error('ANALYSIS_V2_REVERSE_LIKE_RESULT_SCOPE_DRIFT');
         }
         seen.add(result.candidateId);
-        if (result.likerUsernames.length > REVERSE_LIKE_LIMIT) {
-            throw new Error('ANALYSIS_V2_REVERSE_LIKE_RESULT_LIMIT_DRIFT');
-        }
-        const usernames = result.likerUsernames.map(normalizeUsername);
-        if (new Set(usernames).size !== usernames.length) {
-            throw new Error('ANALYSIS_V2_REVERSE_LIKE_RESULT_DUPLICATE');
-        }
+    }
+    if (seen.size !== inputs.length) {
+        throw new Error('ANALYSIS_V2_REVERSE_LIKE_RESULT_SCOPE_DRIFT');
     }
 }
 
@@ -926,135 +946,166 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             }
             const aiFence = checkpointClaim(context);
             const outcomes = await runBounded(results, profileConcurrency, async item => {
-                const candidateId = analysisV2CandidateId(item.username);
-                if (item.status !== 'success' || !item.profile) {
-                    return {
-                        candidateId,
-                        instagramId: normalizeUsername(item.username),
-                        status: 'fetch_unavailable' as const,
-                        profile: null,
-                        triage: null,
-                        feature: null,
-                        normalizedSelectionIds: [],
-                        mediaCoverage: {
-                            selectedCount: 0,
-                            normalizedCount: 0,
-                            failures: [],
-                        },
-                        captions: [],
-                        genderOperationKey: null,
-                        genderResultHash: null,
-                        featureOperationKey: null,
-                        featureResultHash: null,
-                        mediaBundlePersisted: false,
-                    };
-                }
+                await context.reportActiveProfile?.(item.username);
+                const outcome = await (async () => {
+                    const candidateId = analysisV2CandidateId(item.username);
+                    if (item.status !== 'success' || !item.profile || item.profile.isPrivate) {
+                        return {
+                            candidateId,
+                            instagramId: normalizeUsername(item.username),
+                            status: 'fetch_unavailable' as const,
+                            profile: null,
+                            triage: null,
+                            feature: null,
+                            normalizedSelectionIds: [],
+                            mediaCoverage: {
+                                selectedCount: 0,
+                                normalizedCount: 0,
+                                failures: [],
+                            },
+                            captions: [],
+                            genderOperationKey: null,
+                            genderResultHash: null,
+                            featureOperationKey: null,
+                            featureResultHash: null,
+                            mediaBundlePersisted: false,
+                        };
+                    }
 
-                const policy = mediaPolicy(item.profile);
-                const triageNormalized = await normalizedSelections(
-                    policy.triage.media,
-                    dependencies.normalizeMedia
-                );
-                if (triageNormalized.media.length === 0) {
+                    const policy = mediaPolicy(item.profile);
+                    const triageNormalized = await normalizedSelections(
+                        policy.triage.media,
+                        dependencies.normalizeMedia
+                    );
+                    if (
+                        triageNormalized.media.length === 0
+                        || triageNormalized.coverage.failures.length > 0
+                    ) {
+                        return {
+                            candidateId,
+                            instagramId: normalizeUsername(item.username),
+                            status: 'media_unavailable' as const,
+                            profile: item.profile,
+                            triage: null,
+                            feature: null,
+                            normalizedSelectionIds: triageNormalized.media.map(
+                                row => row.selectionId
+                            ),
+                            mediaCoverage: triageNormalized.coverage,
+                            captions: [],
+                            genderOperationKey: null,
+                            genderResultHash: null,
+                            featureOperationKey: null,
+                            featureResultHash: null,
+                            mediaBundlePersisted: false,
+                        };
+                    }
+                    const gender = await dependencies.ai.gender({
+                        media: triageNormalized.media,
+                    }, aiFence);
+                    if (gender.result.routingDecision === 'exclude_high_confidence_male') {
+                        return {
+                            candidateId,
+                            instagramId: normalizeUsername(item.username),
+                            status: 'verified_non_female' as const,
+                            profile: item.profile,
+                            triage: gender.result,
+                            feature: null,
+                            normalizedSelectionIds: triageNormalized.media.map(
+                                row => row.selectionId
+                            ),
+                            mediaCoverage: triageNormalized.coverage,
+                            captions: [],
+                            genderOperationKey: gender.operationKey,
+                            genderResultHash: gender.resultHash,
+                            featureOperationKey: null,
+                            featureResultHash: null,
+                            mediaBundlePersisted: false,
+                        };
+                    }
+                    const triageAttempted = new Set(policy.triage.selectionIds);
+                    const featureRemainder = policy.feature.media.filter(media => (
+                        !triageAttempted.has(media.selectionId)
+                    ));
+                    const remainderNormalized = await normalizedSelections(
+                        featureRemainder,
+                        dependencies.normalizeMedia
+                    );
+                    const normalized = mergeNormalizedSelections(
+                        policy.feature.media,
+                        [triageNormalized, remainderNormalized]
+                    );
+                    if (normalized.coverage.failures.length > 0) {
+                        return {
+                            candidateId,
+                            instagramId: normalizeUsername(item.username),
+                            status: 'media_unavailable' as const,
+                            profile: item.profile,
+                            triage: null,
+                            feature: null,
+                            normalizedSelectionIds: normalized.media.map(
+                                row => row.selectionId
+                            ),
+                            mediaCoverage: normalized.coverage,
+                            captions: [],
+                            genderOperationKey: null,
+                            genderResultHash: null,
+                            featureOperationKey: null,
+                            featureResultHash: null,
+                            mediaBundlePersisted: false,
+                        };
+                    }
+                    const captions = captionEvidence(item.profile, normalized.media);
+                    const features = await dependencies.ai.features({
+                        triage: gender.result,
+                        bio: item.profile.bio ?? null,
+                        media: normalized.media,
+                        captions,
+                    }, aiFence);
+                    const status = features.result.finalGenderDecision === 'verified_female'
+                        ? 'verified_female' as const
+                        : features.result.finalGenderDecision === 'verified_non_female'
+                            ? 'verified_non_female' as const
+                            : features.result.finalGenderDecision === 'unresolved_stage_conflict'
+                                ? 'unresolved_stage_conflict' as const
+                                : 'unresolved' as const;
+                    let mediaBundlePersisted = false;
+                    if (status === 'verified_female') {
+                        const bundleMedia: AnalysisV2NormalizedMediaBundleItem[] =
+                            features.result.analyzedSelectionIds.map(selectionId => {
+                                const bytes = normalized.bytes.get(selectionId);
+                                if (!bytes) {
+                                    throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
+                                }
+                                return { selectionId, normalizedJpeg: bytes };
+                            });
+                        await dependencies.mediaStore.persistBundle({
+                            requestId: context.claim.requestId,
+                            jobKey: context.claim.jobKey,
+                            claimToken: context.claim.claimToken,
+                            bundleId: analysisV2CandidateBundleId(candidateId),
+                            media: bundleMedia,
+                        });
+                        mediaBundlePersisted = true;
+                    }
                     return {
                         candidateId,
                         instagramId: normalizeUsername(item.username),
-                        status: 'media_unavailable' as const,
-                        profile: item.profile,
-                        triage: null,
-                        feature: null,
-                        normalizedSelectionIds: [],
-                        mediaCoverage: triageNormalized.coverage,
-                        captions: [],
-                        genderOperationKey: null,
-                        genderResultHash: null,
-                        featureOperationKey: null,
-                        featureResultHash: null,
-                        mediaBundlePersisted: false,
-                    };
-                }
-                const gender = await dependencies.ai.gender({
-                    media: triageNormalized.media,
-                }, aiFence);
-                if (gender.result.routingDecision === 'exclude_high_confidence_male') {
-                    return {
-                        candidateId,
-                        instagramId: normalizeUsername(item.username),
-                        status: 'verified_non_female' as const,
+                        status,
                         profile: item.profile,
                         triage: gender.result,
-                        feature: null,
-                        normalizedSelectionIds: triageNormalized.media.map(
-                            row => row.selectionId
-                        ),
-                        mediaCoverage: triageNormalized.coverage,
-                        captions: [],
+                        feature: features.result,
+                        normalizedSelectionIds: normalized.media.map(row => row.selectionId),
+                        mediaCoverage: normalized.coverage,
+                        captions,
                         genderOperationKey: gender.operationKey,
                         genderResultHash: gender.resultHash,
-                        featureOperationKey: null,
-                        featureResultHash: null,
-                        mediaBundlePersisted: false,
+                        featureOperationKey: features.operationKey,
+                        featureResultHash: features.resultHash,
+                        mediaBundlePersisted,
                     };
-                }
-                const triageAttempted = new Set(policy.triage.selectionIds);
-                const featureRemainder = policy.feature.media.filter(media => (
-                    !triageAttempted.has(media.selectionId)
-                ));
-                const remainderNormalized = await normalizedSelections(
-                    featureRemainder,
-                    dependencies.normalizeMedia
-                );
-                const normalized = mergeNormalizedSelections(
-                    policy.feature.media,
-                    [triageNormalized, remainderNormalized]
-                );
-                const captions = captionEvidence(item.profile, normalized.media);
-                const features = await dependencies.ai.features({
-                    triage: gender.result,
-                    bio: item.profile.bio ?? null,
-                    media: normalized.media,
-                    captions,
-                }, aiFence);
-                const status = features.result.finalGenderDecision === 'verified_female'
-                    ? 'verified_female' as const
-                    : features.result.finalGenderDecision === 'verified_non_female'
-                        ? 'verified_non_female' as const
-                        : features.result.finalGenderDecision === 'unresolved_stage_conflict'
-                            ? 'unresolved_stage_conflict' as const
-                        : 'unresolved' as const;
-                let mediaBundlePersisted = false;
-                if (status === 'verified_female') {
-                    const bundleMedia: AnalysisV2NormalizedMediaBundleItem[] =
-                        features.result.analyzedSelectionIds.map(selectionId => {
-                            const bytes = normalized.bytes.get(selectionId);
-                            if (!bytes) throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
-                            return { selectionId, normalizedJpeg: bytes };
-                        });
-                    await dependencies.mediaStore.persistBundle({
-                        requestId: context.claim.requestId,
-                        jobKey: context.claim.jobKey,
-                        claimToken: context.claim.claimToken,
-                        bundleId: analysisV2CandidateBundleId(candidateId),
-                        media: bundleMedia,
-                    });
-                    mediaBundlePersisted = true;
-                }
-                return {
-                    candidateId,
-                    instagramId: normalizeUsername(item.username),
-                    status,
-                    profile: item.profile,
-                    triage: gender.result,
-                    feature: features.result,
-                    normalizedSelectionIds: normalized.media.map(row => row.selectionId),
-                    mediaCoverage: normalized.coverage,
-                    captions,
-                    genderOperationKey: gender.operationKey,
-                    genderResultHash: gender.resultHash,
-                    featureOperationKey: features.operationKey,
-                    featureResultHash: features.resultHash,
-                    mediaBundlePersisted,
-                };
+                })();
+                return outcome;
             });
             const publicCheckpoint = await dependencies.resultStore.checkpointFeatureBatch({
                 ...checkpointClaim(context),
@@ -1292,8 +1343,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 ));
             const collectionInputs = shortlist.flatMap(row => {
                 const profile = outcomeById.get(row.candidateId)?.profile;
-                const url = profile ? postUrl(profile) : null;
-                return url ? [{ candidateId: row.candidateId, postUrl: url }] : [];
+                const scope = profile ? latestPostLikeScope(profile) : null;
+                return scope ? [{ candidateId: row.candidateId, ...scope }] : [];
             });
             const collected = await dependencies.reverseLikes.collect({
                 ...checkpointClaim(context),
@@ -1305,14 +1356,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const resultById = new Map(collected.results.map(row => [row.candidateId, row]));
             const rows = shortlist.map(candidate => {
                 const result = resultById.get(candidate.candidateId);
-                const targetUsername = normalizeUsername(target.username);
-                const status: AnalysisV2ReverseLikeObservation = result?.status === 'collected'
-                    ? result.likerUsernames.some(username => (
-                        normalizeUsername(username) === targetUsername
-                    ))
-                        ? 'observed'
-                        : 'observed_not_found'
-                    : 'not_collected';
+                const status: AnalysisV2ReverseLikeObservation = result?.status === 'observed'
+                    ? 'observed'
+                    : result?.status === 'not_observed'
+                        ? 'observed_not_found'
+                        : 'not_collected';
                 return {
                     candidateId: candidate.candidateId,
                     shortlistRank: candidate.verificationShortlistRank!,
@@ -1386,7 +1434,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     contactCandidates,
                     dependencies.normalizeMedia
                 );
-                const contactSheet = normalized.media.length > 0
+                const contactSheetCoverageComplete = normalized.coverage.failures.length === 0;
+                const contactSheet = contactSheetCoverageComplete && normalized.media.length > 0
                     ? await createContactSheet(normalized.media.map(media => ({
                         selectionId: media.selectionId,
                         normalizedJpegBase64: media.normalizedJpegBase64,
@@ -1550,7 +1599,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     displayScore: candidate.risk.displayScore,
                     riskBand: candidate.risk.riskBand as RiskBand,
                     featuredRank: candidate.featuredRank,
-                    recentMutualRank: candidate.recentMutualBadgeRank,
+                    recentMutualRank: candidate.recentFemaleMutualRank,
                     verificationShortlistRank: candidate.verificationShortlistRank,
                     partnerSafetySource: partnerScoreSource(partnerRow),
                     partnerSafetyOperationKey: partnerRow?.operationKey ?? null,

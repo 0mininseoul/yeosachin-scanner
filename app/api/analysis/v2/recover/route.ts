@@ -1,27 +1,27 @@
 import { NextResponse } from 'next/server';
-import { isAnalysisV2StartAvailable } from '@/lib/services/analysis/v2-execution-gate';
+import { isAnalysisV2RecoveryAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import { recoverAnalysisV2Jobs } from '@/lib/services/analysis/v2-recovery';
 import {
-    getAnalysisV2TasksConfig,
-    verifyAnalysisV2TaskAuthorization,
-} from '@/lib/services/analysis/v2-tasks';
+    getAnalysisV2MaintenanceAuthConfig,
+    verifyAnalysisV2MaintenanceAuthorization,
+} from '@/lib/services/analysis/v2-maintenance-auth';
 
 export const maxDuration = 300;
 
 export async function POST(request: Request) {
     let config;
     try {
-        config = getAnalysisV2TasksConfig();
+        config = getAnalysisV2MaintenanceAuthConfig();
     } catch {
-        return NextResponse.json({ code: 'QUEUE_UNAVAILABLE' }, { status: 503 });
+        return NextResponse.json({ code: 'MAINTENANCE_UNAVAILABLE' }, { status: 503 });
     }
-    if (!config || !await verifyAnalysisV2TaskAuthorization(
+    if (!await verifyAnalysisV2MaintenanceAuthorization(
         request.headers.get('authorization'),
         { config }
     )) {
         return NextResponse.json({ code: 'UNAUTHORIZED' }, { status: 401 });
     }
-    if (!isAnalysisV2StartAvailable()) {
+    if (!isAnalysisV2RecoveryAvailable()) {
         return NextResponse.json({ code: 'V2_PIPELINE_UNAVAILABLE' }, { status: 503 });
     }
 

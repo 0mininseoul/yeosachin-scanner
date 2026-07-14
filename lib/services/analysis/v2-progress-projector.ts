@@ -1,4 +1,3 @@
-import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
 import type { ProgressTrackId } from '@/lib/domain/analysis/progress-policy';
 import type { AnalysisV2DagState } from './v2-dag-planner';
 import type {
@@ -7,9 +6,6 @@ import type {
     AnalysisV2ProgressTrackInput,
 } from './v2-progress-store';
 import type { AnalysisV2StageId } from './v2-worker';
-
-const PROFILE_BATCH_SIZE = 30;
-const PRIVATE_NAME_BATCH_SIZE = 100;
 
 const TRACK_BY_STAGE: Readonly<Record<AnalysisV2StageId, ProgressTrackId>> = Object.freeze({
     relationships: 'relationshipAi',
@@ -71,22 +67,14 @@ export interface AnalysisV2ProjectedProgress {
 }
 
 export function getAnalysisV2ProgressWorkTotals(
-    planId: AnalysisV2DagState['planId']
+    state: AnalysisV2DagState
 ): AnalysisV2ProgressWorkTotals {
-    const plan = getAnalysisPlan(planId);
-    const maximumProfileBatches = Math.ceil(
-        plan.detailedMutualLimit / PROFILE_BATCH_SIZE
-    );
-    const maximumPrivateNameBatches = Math.ceil(
-        Math.min(
-            plan.relationshipCapacity.followers,
-            plan.relationshipCapacity.following
-        ) / PRIVATE_NAME_BATCH_SIZE
-    );
+    const profileBatches = state.relationships?.profileBatches.length ?? 0;
+    const privateNameBatches = state.relationships?.privateNameBatches.length ?? 0;
     return Object.freeze({
-        relationshipAi: maximumProfileBatches * 2 + 4,
+        relationshipAi: profileBatches * 2 + 4,
         interactions: 2,
-        finalization: maximumPrivateNameBatches + 3,
+        finalization: privateNameBatches + 3,
     });
 }
 
@@ -159,9 +147,9 @@ function progressEvent(
             };
         case 'screening':
             return state.screening ? {
-                state: 'provisional',
-                eventCode: 'POTENTIAL_HIGH_RISK_FOUND',
-                copyCode: 'SHORTLIST_FOUND',
+                state: 'confirmed',
+                eventCode: 'SHORTLIST_READY',
+                copyCode: 'SHORTLIST_READY',
                 aggregateCount: state.screening.shortlistCount,
             } : null;
         case 'final_score':
@@ -182,7 +170,7 @@ export function projectAnalysisV2Progress(input: {
     activeStage: AnalysisV2StageId;
     includeStageEvent?: boolean;
 }): AnalysisV2ProjectedProgress {
-    const totals = getAnalysisV2ProgressWorkTotals(input.state.planId);
+    const totals = getAnalysisV2ProgressWorkTotals(input.state);
     const relationshipDone = (input.state.relationships ? 1 : 0)
         + (input.state.profileFetchBatches?.length ?? 0)
         + (input.state.profileAiBatches?.length ?? 0)

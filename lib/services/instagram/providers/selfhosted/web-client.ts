@@ -24,6 +24,8 @@ interface FetchOptions {
     onRequest?(): void;
 }
 
+type ProfileValidationMode = 'full' | 'admission';
+
 type FailureKind = 'auth' | 'circuit' | 'http' | 'rate_limit' | 'schema' | 'timeout' | 'transport';
 
 class WebProfileRequestError extends Error {
@@ -262,7 +264,38 @@ function validateRawUser(user: Record<string, unknown>, expectedUsername: string
     }
 }
 
-function parseUser(payload: unknown, expectedUsername: string): Record<string, unknown> | null {
+function validateAdmissionRawUser(
+    user: Record<string, unknown>,
+    expectedUsername: string
+): void {
+    if (
+        typeof user.username !== 'string'
+        || !isInstagramUsername(user.username)
+        || user.username.toLowerCase() !== expectedUsername.toLowerCase()
+    ) {
+        throw schemaError('SCRAPING_SCHEMA_ERROR: web_profile_info admission username mismatch.');
+    }
+    for (const key of ['edge_followed_by', 'edge_follow']) {
+        const edge = user[key];
+        const count = edge && typeof edge === 'object' && !Array.isArray(edge)
+            ? (edge as Record<string, unknown>).count
+            : undefined;
+        if (!Number.isSafeInteger(count) || (count as number) < 0) {
+            throw schemaError(
+                `SCRAPING_SCHEMA_ERROR: web_profile_info admission ${key}.count invalid.`
+            );
+        }
+    }
+    if (typeof user.is_private !== 'boolean') {
+        throw schemaError('SCRAPING_SCHEMA_ERROR: web_profile_info admission privacy invalid.');
+    }
+}
+
+function parseUser(
+    payload: unknown,
+    expectedUsername: string,
+    validationMode: ProfileValidationMode
+): Record<string, unknown> | null {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
         throw schemaError('SCRAPING_SCHEMA_ERROR: web_profile_info response is not an object.');
     }
@@ -279,11 +312,15 @@ function parseUser(payload: unknown, expectedUsername: string): Record<string, u
         throw schemaError('SCRAPING_SCHEMA_ERROR: web_profile_info user field is invalid.');
     }
     const user = data.user as Record<string, unknown>;
-    validateRawUser(user, expectedUsername);
+    if (validationMode === 'admission') validateAdmissionRawUser(user, expectedUsername);
+    else validateRawUser(user, expectedUsername);
     return user;
 }
 
-export function makeWebProfileFetcher(deps: WebProfileFetcherDeps = {}) {
+function makeWebProfileFetcherForMode(
+    validationMode: ProfileValidationMode,
+    deps: WebProfileFetcherDeps = {}
+) {
     const fetchFn = deps.fetchFn ?? fetch;
     const now = deps.now ?? Date.now;
     const wait = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -337,7 +374,7 @@ export function makeWebProfileFetcher(deps: WebProfileFetcherDeps = {}) {
                                 true
                             );
                         }
-                        return parseUser(payload, username);
+                        return parseUser(payload, username, validationMode);
                     } finally {
                         clearTimeout(timer);
                     }
@@ -370,9 +407,25 @@ export function makeWebProfileFetcher(deps: WebProfileFetcherDeps = {}) {
     };
 }
 
+export function makeWebProfileFetcher(deps: WebProfileFetcherDeps = {}) {
+    return makeWebProfileFetcherForMode('full', deps);
+}
+
+export function makeWebProfileAdmissionFetcher(deps: WebProfileFetcherDeps = {}) {
+    return makeWebProfileFetcherForMode('admission', deps);
+}
+
 const sharedStartGate = createRequestStartGate();
-const sharedCircuit = createWebProfileCircuitBreaker();
-const defaultFetcher = makeWebProfileFetcher({ gate: sharedStartGate, circuit: sharedCircuit });
+const sharedProfileCircuit = createWebProfileCircuitBreaker();
+const sharedAdmissionCircuit = createWebProfileCircuitBreaker();
+const defaultFetcher = makeWebProfileFetcher({
+    gate: sharedStartGate,
+    circuit: sharedProfileCircuit,
+});
+const defaultAdmissionFetcher = makeWebProfileAdmissionFetcher({
+    gate: sharedStartGate,
+    circuit: sharedAdmissionCircuit,
+});
 
 export async function fetchWebProfileUser(
     username: string,
@@ -380,4 +433,12 @@ export async function fetchWebProfileUser(
     options?: FetchOptions
 ): Promise<Record<string, unknown> | null> {
     return defaultFetcher(username, transport, options);
+}
+
+export async function fetchWebProfileAdmissionUser(
+    username: string,
+    transport?: TransportConfig,
+    options?: FetchOptions
+): Promise<Record<string, unknown> | null> {
+    return defaultAdmissionFetcher(username, transport, options);
 }

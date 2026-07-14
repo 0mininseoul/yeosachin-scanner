@@ -383,6 +383,8 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 candidateId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/)
                     .parse(candidate.candidateId),
                 postUrl: canonicalPostUrl(candidate.postUrl),
+                declaredLikesCount: z.number().int().min(0).max(2_000_000_000)
+                    .parse(candidate.declaredLikesCount),
             }));
             if (
                 new Set(candidates.map(row => row.candidateId)).size !== candidates.length
@@ -394,7 +396,11 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 'candidate-likers-v2',
                 targetUsername,
                 String(REVERSE_LIKE_LIMIT),
-                ...candidates.flatMap(row => [row.candidateId, row.postUrl]),
+                ...candidates.flatMap(row => [
+                    row.candidateId,
+                    row.postUrl,
+                    String(row.declaredLikesCount),
+                ]),
             ].map(lengthPrefixed).join('\n');
             const operationKey = createAnalysisV2ProviderOperationKey(
                 'candidate-likers',
@@ -427,6 +433,9 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 row.candidateId,
                 new Set<string>(),
             ]));
+            if (likers.length > candidates.length * REVERSE_LIKE_LIMIT) {
+                throw new Error('ANALYSIS_V2_REVERSE_LIKE_RESULT_LIMIT_EXCEEDED');
+            }
             for (const liker of likers) {
                 const url = canonicalPostUrl(liker.postUrl);
                 const candidate = candidateByUrl.get(url);
@@ -446,14 +455,16 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     const likerUsernames = Object.freeze([
                         ...usernamesByCandidate.get(candidate.candidateId)!,
                     ]);
+                    const targetObserved = likerUsernames.includes(targetUsername);
+                    const globalAbsenceConfirmed = candidate.declaredLikesCount <= REVERSE_LIKE_LIMIT
+                        && likerUsernames.length >= candidate.declaredLikesCount;
                     return Object.freeze({
                         candidateId: candidate.candidateId,
-                        // The actor returns liker rows without a per-post completion marker.
-                        // An empty set therefore proves neither successful collection nor absence.
-                        status: likerUsernames.length > 0
-                            ? 'collected' as const
-                            : 'not_collected' as const,
-                        likerUsernames,
+                        status: targetObserved
+                            ? 'observed' as const
+                            : globalAbsenceConfirmed
+                                ? 'not_observed' as const
+                                : 'not_collected' as const,
                     });
                 })),
             });

@@ -101,6 +101,7 @@ function context<S extends AnalysisV2StageId>(
         jobKey?: string;
         batch?: number | null;
         state?: AnalysisV2DagState;
+        reportActiveProfile?: (username: string) => Promise<void>;
     } = {}
 ): AnalysisV2StageExecutorContext<S> {
     const jobKey = options.jobKey ?? `test:${stage}`;
@@ -129,6 +130,9 @@ function context<S extends AnalysisV2StageId>(
             requiredJobKeys: [],
         },
         state: options.state ?? state(),
+        ...(options.reportActiveProfile
+            ? { reportActiveProfile: options.reportActiveProfile }
+            : {}),
     };
 }
 
@@ -590,6 +594,173 @@ describe('V2 AI and scoring executors', () => {
         ]);
     });
 
+    it('reports each real profile AI task start without exposing media URLs', async () => {
+        const memoryState = memory();
+        const reportActiveProfile = vi.fn(async () => undefined);
+        const account = profile('woman.parallel');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['woman.parallel'],
+                    results: [{
+                        username: 'woman.parallel', status: 'success' as const, profile: account,
+                    }],
+                })),
+            },
+        });
+        const base = state();
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                reportActiveProfile,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        detectedMutualCount: 1,
+                        publicCount: 1,
+                        detailedSelectedPublicCount: 1,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('profile-topology-heartbeat'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('profile-producer-heartbeat'),
+                        revision: 1,
+                        resultHash: digest('profile-result-heartbeat'),
+                    }],
+                }),
+            })
+        );
+
+        expect(reportActiveProfile).toHaveBeenCalledExactlyOnceWith('woman.parallel');
+        expect(JSON.stringify(reportActiveProfile.mock.calls)).not.toContain('cdninstagram');
+    });
+
+    it('drains in-flight Gemini work before surfacing the first bounded worker failure', async () => {
+        const memoryState = memory();
+        const first = profile('first.account', { postCount: 0 });
+        const sibling = profile('sibling.account', { postCount: 0 });
+        const neverStarted = profile('queued.account', { postCount: 0 });
+        let markSiblingStarted!: () => void;
+        let releaseSibling!: () => void;
+        const siblingStarted = new Promise<void>(resolve => { markSiblingStarted = resolve; });
+        const siblingRelease = new Promise<void>(resolve => { releaseSibling = resolve; });
+        const deps = dependencies(memoryState, {
+            profileAiConcurrency: 2,
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['first.account', 'sibling.account', 'queued.account'],
+                    results: [first, sibling, neverStarted].map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0]
+        ) => {
+            const ids = input.media.map(row => row.selectionId);
+            if (ids.some(id => id.includes('first.account'))) {
+                await siblingStarted;
+                throw new Error('FIRST_GEMINI_FAILURE');
+            }
+            markSiblingStarted();
+            await siblingRelease;
+            return {
+                result: triage(ids, 'male'),
+                operationKey: `gender-triage:${digest('drained-sibling')}`,
+                resultHash: digest('drained-sibling-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+            })
+        );
+        let settled = false;
+        void execution.then(
+            () => { settled = true; },
+            () => { settled = true; }
+        );
+
+        await siblingStarted;
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(settled).toBe(false);
+
+        releaseSibling();
+        await expect(execution).rejects.toThrow('FIRST_GEMINI_FAILURE');
+        expect(deps.ai.gender).toHaveBeenCalledTimes(2);
+        expect(JSON.stringify(vi.mocked(deps.ai.gender).mock.calls))
+            .not.toContain('queued.account');
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
+    it('excludes a relationship-public profile that drifted private before any media or AI work', async () => {
+        const memoryState = memory();
+        const drifted = {
+            ...profile('privacy.drift'),
+            isPrivate: true,
+        };
+        const normalizeMedia = vi.fn(async () => Buffer.from('should-not-run'));
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['privacy.drift'],
+                    results: [{
+                        username: 'privacy.drift', status: 'success' as const, profile: drifted,
+                    }],
+                })),
+            },
+            normalizeMedia,
+        });
+        const base = state();
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        detectedMutualCount: 1,
+                        publicCount: 1,
+                        detailedSelectedPublicCount: 1,
+                        profileBatches: [{
+                            batch: 0, itemCount: 1, inputHash: digest('privacy-drift-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1,
+                        producerInputHash: digest('privacy-drift-producer'),
+                        revision: 1, resultHash: digest('privacy-drift-result'),
+                    }],
+                }),
+            })
+        );
+
+        expect(memoryState.outcomes).toEqual([
+            expect.objectContaining({
+                instagramId: 'privacy.drift',
+                status: 'fetch_unavailable',
+                profile: null,
+            }),
+        ]);
+        expect(normalizeMedia).not.toHaveBeenCalled();
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(vi.mocked(deps.resultStore.checkpointFeatureBatch).mock.calls[0]![0].rows)
+            .toEqual([expect.objectContaining({ classification: 'unavailable' })]);
+    });
+
     it('retries a profile batch with an unresolved failed producer outcome', async () => {
         const memoryState = memory();
         const base = state();
@@ -628,6 +799,56 @@ describe('V2 AI and scoring executors', () => {
             }),
         }))).rejects.toThrow('ANALYSIS_V2_PROFILE_CONSUMER_RETRYABLE_OUTCOME');
         expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before gender inference when a public post snapshot is structural partial', async () => {
+        const memoryState = memory();
+        const full = profile('woman.partial', { postCount: 8 });
+        const account = { ...full, latestPosts: full.latestPosts!.slice(0, 2) };
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['woman.partial'],
+                    results: [{
+                        username: 'woman.partial', status: 'success' as const, profile: account,
+                    }],
+                })),
+            },
+        });
+        const base = state();
+        const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        detectedMutualCount: 1,
+                        publicCount: 1,
+                        detailedSelectedPublicCount: 1,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('profile-topology-structural-partial'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('profile-producer-structural-partial'),
+                        revision: 1,
+                        resultHash: digest('profile-result-structural-partial'),
+                    }],
+                }),
+            })
+        );
+
+        await expect(execution).rejects.toThrow(
+            'ANALYSIS_V2_PROFILE_MEDIA_STRUCTURAL_INCOMPLETE'
+        );
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(deps.ai.features).not.toHaveBeenCalled();
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
 
@@ -806,6 +1027,103 @@ describe('V2 AI and scoring executors', () => {
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
 
+    it('retries the exact job when even one required media item remains transient', async () => {
+        const memoryState = memory();
+        const account = profile('media.partial_timeout');
+        const normalizeMedia = vi.fn(async (media: { selectionId: string }) => {
+            if (media.selectionId.startsWith('profile:')) return Buffer.from(media.selectionId);
+            throw new AnalysisImagePreparationError('timeout', 'transient');
+        });
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['media.partial_timeout'],
+                    results: [{
+                        username: 'media.partial_timeout',
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+            normalizeMedia,
+        });
+        const base = state();
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await expect(registry.profile_ai!(context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            state: state({
+                relationships: {
+                    ...base.relationships!,
+                    profileBatches: [{
+                        batch: 0, itemCount: 1, inputHash: digest('topology-partial-timeout'),
+                    }],
+                },
+                profileFetchBatches: [{
+                    batch: 0, itemCount: 1,
+                    producerInputHash: digest('producer-partial-timeout'),
+                    revision: 1, resultHash: digest('result-partial-timeout'),
+                }],
+            }),
+        }))).rejects.toThrow('ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT');
+
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
+    it('records permanent partial media as unavailable without running gender or feature AI', async () => {
+        const memoryState = memory();
+        const account = profile('media.partial_permanent');
+        const normalizeMedia = vi.fn(async (media: { selectionId: string }) => {
+            if (media.selectionId.includes('post-1')) {
+                throw new AnalysisImagePreparationError('source_missing', 'permanent');
+            }
+            return Buffer.from(media.selectionId);
+        });
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['media.partial_permanent'],
+                    results: [{
+                        username: 'media.partial_permanent',
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+            normalizeMedia,
+        });
+        const base = state();
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.profile_ai!(context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            state: state({
+                relationships: {
+                    ...base.relationships!,
+                    profileBatches: [{
+                        batch: 0, itemCount: 1, inputHash: digest('topology-partial-permanent'),
+                    }],
+                },
+                profileFetchBatches: [{
+                    batch: 0, itemCount: 1,
+                    producerInputHash: digest('producer-partial-permanent'),
+                    revision: 1, resultHash: digest('result-partial-permanent'),
+                }],
+            }),
+        }));
+
+        expect(memoryState.outcomes[0]).toMatchObject({
+            status: 'media_unavailable',
+            mediaCoverage: { selectedCount: 3, normalizedCount: 2 },
+        });
+        expect(memoryState.outcomes[0].normalizedSelectionIds).toHaveLength(2);
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(deps.ai.features).not.toHaveBeenCalled();
+    });
+
     it('keeps a transient media success after its bounded retry', async () => {
         const memoryState = memory();
         const account = profile('media.recovers', { postCount: 0 });
@@ -857,6 +1175,73 @@ describe('V2 AI and scoring executors', () => {
             failures: [],
         });
         expect(deps.ai.gender).toHaveBeenCalledOnce();
+    });
+
+    it('never treats a partially prepared carousel contact sheet as partner absence', async () => {
+        const memoryState = memory();
+        const candidate = verifiedOutcome('woman.carousel');
+        candidate.profile = {
+            ...candidate.profile!,
+            postsCount: 1,
+            latestPosts: [{
+                id: 'carousel-post',
+                shortCode: 'carouselpost',
+                caption: 'carousel',
+                imageUrl: 'https://cdninstagram.com/carousel/cover.jpg',
+                type: 'carousel',
+                mediaItems: Array.from({ length: 4 }, (_, index) => ({
+                    id: `frame-${index + 1}`,
+                    type: 'image' as const,
+                    imageUrl: `https://cdninstagram.com/carousel/frame-${index + 1}.jpg`,
+                })),
+                declaredMediaCount: 4,
+                childrenComplete: true,
+                likesCount: 0,
+                commentsCount: 0,
+                timestamp: new Date(Date.UTC(2026, 6, 10)).toISOString(),
+                taggedUsers: [],
+                mentionedUsers: [],
+            }],
+        };
+        memoryState.outcomes = [candidate];
+        memoryState.screening = {
+            revision: 1,
+            resultHash: digest('screening-carousel'),
+            shortlistHash: digest('shortlist-carousel'),
+            candidates: calculateV2PreliminaryScores({
+                candidates: [{
+                    candidateId: candidate.candidateId,
+                    username: candidate.instagramId,
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    isBusinessAccount: false,
+                    hasWeakPartnerEvidence: false,
+                    hasStrongPartnerEvidence: false,
+                    uniqueTargetPostsLikedByCandidate: 0,
+                    boundedCandidateCommentsOnTarget: 0,
+                    hasTagOrCaptionMention: false,
+                }],
+                orderedMutualUsernames: [candidate.instagramId],
+                excludedUsername: null,
+            }),
+        };
+        const normalizeMedia = vi.fn(async () => {
+            throw new AnalysisImagePreparationError('source_missing', 'permanent');
+        });
+        const deps = dependencies(memoryState, { normalizeMedia });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.partner_safety!(context('partner_safety'));
+
+        expect(deps.createContactSheet).not.toHaveBeenCalled();
+        expect(deps.ai.partnerSafety).toHaveBeenCalledWith(
+            expect.objectContaining({ contactSheet: null }),
+            expect.any(Object)
+        );
+        expect(memoryState.partner?.rows[0]).toMatchObject({
+            result: { source: 'feature_only' },
+            mediaCoverage: { selectedCount: 1, normalizedCount: 0 },
+        });
     });
 
     it('defensively excludes the girlfriend and preserves the actual sanitized comment', async () => {
@@ -969,8 +1354,7 @@ describe('V2 AI and scoring executors', () => {
                     operationKey,
                     results: input.candidates.map(candidate => ({
                         candidateId: candidate.candidateId,
-                        status: 'collected' as const,
-                        likerUsernames: [],
+                        status: 'not_observed' as const,
                     })),
                 })),
             },
@@ -1039,6 +1423,11 @@ describe('V2 AI and scoring executors', () => {
             evidenceSelectionIds: [`profile:${weakCandidate.instagramId}`],
         });
         expect(publicScoreWeak).toMatchObject({ weakPartnerAdjustment: -5 });
+        const tenthRecent = preliminary.find(row => row.recentFemaleMutualRank === 10)!;
+        expect(tenthRecent.recentMutualBadgeRank).toBeNull();
+        expect(vi.mocked(deps.resultStore.checkpointScores).mock.calls[0]![0].rows.find(
+            row => row.candidateId === tenthRecent.candidateId
+        )?.recentMutualRank).toBe(10);
     });
 
     it('keeps missing reverse-like evidence as not_collected instead of inferring no relationship', async () => {

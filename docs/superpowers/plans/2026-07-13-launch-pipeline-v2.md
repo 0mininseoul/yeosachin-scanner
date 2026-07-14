@@ -278,6 +278,8 @@ type ProgressSnapshotV1 = {
 
 `GET /api/analysis/progress/:id?afterSeq=N` returns the current snapshot plus allowlisted events. Realtime is an accelerator; sequence-based polling repairs gaps after disconnect, sleep, or app switching.
 
+`activeProfile` is projected at read time from sanitized per-job start heartbeats. The profile-fetch provider emits a heartbeat immediately before a real self-hosted request (or one representative username when a remote fallback batch starts), and profile AI emits one immediately before each bounded candidate task. Each row contains only a masked username and `null` or a signed image-proxy path. Parallel work uses **latest-started among jobs whose exact lease is still live** semantics, ordered by `started_at`; a completed or expired job disappears automatically. This transient field can change without a DAG/event revision, so the client refreshes it on the five-second polling path and never treats it as evidence or a persisted finding.
+
 Allowed events expose confirmed/provisional aggregate facts only. They never expose `step_data`, captions, comments, liker usernames, evidence counts, or raw scores. A spicy claim uses a provisional code until the final score checkpoint and can be corrected by a later event.
 
 ### Result
@@ -307,6 +309,8 @@ Additive migration first; V1 active requests continue on legacy tables and route
    - bounded raw target-post liker/comment staging collected before gender is known; service-role only and purged at terminal state.
 6. `analysis_progress_state` and `analysis_progress_events`
    - owner-readable sanitized state/events with monotonic revision and sequence.
+7. `analysis_v2_active_profile_heartbeats`
+   - service-only masked profile-start heartbeats, one per live profile job; owner progress reads project only the latest-started live row.
 
 ### Existing-table extensions
 
@@ -397,8 +401,8 @@ Google's current model documentation confirms that `gemini-3.1-flash-lite` accep
 
 1. Publish monotonic work-unit progress from the DAG, not fixed sequential thresholds.
 2. Add masked active-profile display, parallel track status, percent, ETA range, and an event feed with provisional/correction states.
-3. Increment snapshot revision on every public semantic change, including terminal status, active profile, and event sequence, even when the numeric percentage is unchanged. Event sequences are contiguous at append time.
-4. Hydrate from snapshot first, subscribe to Realtime second, then fetch any event sequence gap. Fall back to five-second polling.
+3. Increment snapshot revision on every durable DAG/event semantic change, including terminal status and event sequence, even when the numeric percentage is unchanged. Event sequences are contiguous at append time. Active-profile heartbeats are transient companion state and use latest-started-live-job ordering rather than the DAG revision.
+4. Hydrate from snapshot first, subscribe to Realtime second, then fetch any event sequence gap. Fall back to five-second polling, which also refreshes transient active-profile state.
 5. Add plan/scope coverage to results, real 1.0-10.0 score bars, separate featured sections, one-line overview reveal, empty-high-risk state, pagination, and virtualized long lists.
 6. Preserve reduced-motion, mobile layout, image failure, reconnect, error, and browser-return states.
 

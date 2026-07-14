@@ -10,6 +10,7 @@ import {
     selectAnalysisV2ApifyCredentialSlot,
     selectApifyApiToken,
     selectApifyCredentialSlot,
+    runWithApifyActorSlot,
     startOrResumeApifyActor,
 } from './apify-relationship';
 import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
@@ -227,6 +228,83 @@ describe('apifyProvider', () => {
             expect(onCostRunFinished).not.toHaveBeenCalled();
         }
     );
+
+    it.each(['READY', 'RUNNING', 'TIMING-OUT', 'ABORTING'])(
+        'retries persisted Apify state %s against the exact run id',
+        async status => {
+            const { client, call } = mockClient([], status);
+            const onCostRunFinished = vi.fn();
+
+            await expect(startOrResumeApifyActor(
+                client,
+                APIFY_RELATIONSHIP_ACTOR_ID,
+                {},
+                {
+                    logicalProvider: 'apify',
+                    credentialSlot: 'primary',
+                    timeoutSecs: 120,
+                    maxItems: 1,
+                    maxTotalChargeUsd: 0.1,
+                },
+                {
+                    resumeRunId: 'StoredRun12345678',
+                    logicalProvider: 'apify',
+                    actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+                    credentialSlot: 'primary',
+                    maxChargeUsd: 0.1,
+                    onCostRunFinished,
+                    recordUsage: vi.fn(),
+                }
+            )).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+
+            expect(call).not.toHaveBeenCalled();
+            expect(client.run).toHaveBeenCalledWith('StoredRun12345678');
+            expect(onCostRunFinished).not.toHaveBeenCalled();
+        }
+    );
+
+    it('retries a status-read transport failure only when the run id was persisted', async () => {
+        const persisted = mockClient([]);
+        persisted.waitForFinish.mockRejectedValueOnce(new Error('socket reset'));
+
+        await expect(startOrResumeApifyActor(
+            persisted.client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                resumeRunId: 'StoredRun12345678',
+                logicalProvider: 'apify',
+                actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+                credentialSlot: 'primary',
+                maxChargeUsd: 0.1,
+                recordUsage: vi.fn(),
+            }
+        )).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+        expect(persisted.call).not.toHaveBeenCalled();
+
+        const ambiguous = mockClient([]);
+        ambiguous.waitForFinish.mockRejectedValueOnce(new Error('socket reset'));
+        await expect(startOrResumeApifyActor(
+            ambiguous.client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            { recordUsage: vi.fn() }
+        )).rejects.toThrow('SCRAPING_ERROR');
+    });
 
     it.each([
         ['FAILED', 'failed'],
@@ -554,7 +632,76 @@ describe('apifyProvider', () => {
         await expect(provider.getProfilesBatch!(['alice', 'bob'], 2)).rejects.toThrow('INCOMPLETE');
     });
 
-    it('outcome batch records a settled Actor subset as explicit unavailable results', async () => {
+    it.each([
+        'ANALYSIS_V2_PROGRESS_FENCE_MISMATCH',
+        'ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR: heartbeat failed (PGRST000).',
+    ])('preserves exact progress error %s and never touches a checkpointed Actor', async message => {
+        const { client, call, waitForFinish } = mockClient([profileItem('alice')]);
+        const provider = makeApifyProvider({ client, env: {} });
+        const progressError = new Error(message);
+        const onProfileStart = vi.fn().mockRejectedValue(progressError);
+
+        await expect(provider.getProfilesBatchOutcomes!(['alice'], 1, {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: 'apify/instagram-profile-scraper',
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.0026,
+            onProfileStart,
+            recordUsage: vi.fn(),
+        })).rejects.toBe(progressError);
+
+        expect(onProfileStart).toHaveBeenCalledWith('alice');
+        expect(call).not.toHaveBeenCalled();
+        expect(client.run).not.toHaveBeenCalled();
+        expect(waitForFinish).not.toHaveBeenCalled();
+    });
+
+    it('does not expose a queued profile as active before the Actor slot is acquired', async () => {
+        let releaseSlot!: () => void;
+        let slotAcquired = false;
+        const slotReleased = new Promise<void>((resolve) => {
+            releaseSlot = resolve;
+        });
+        const slotHolder = runWithApifyActorSlot(1, async () => {
+            slotAcquired = true;
+            await slotReleased;
+        });
+        await vi.waitFor(() => expect(slotAcquired).toBe(true));
+
+        const { client, call } = mockClient([profileItem('alice')]);
+        const provider = makeApifyProvider({
+            client,
+            env: {
+                APIFY_ACTOR_CONCURRENCY: '1',
+                APIFY_DATASET_RETRY_BASE_DELAY_MS: '0',
+            },
+        });
+        const onProfileStart = vi.fn().mockResolvedValue(undefined);
+        const result = provider.getProfilesBatchOutcomes!(['alice'], 1, {
+            onProfileStart,
+            recordUsage: vi.fn(),
+        });
+
+        try {
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(onProfileStart).not.toHaveBeenCalled();
+            expect(call).not.toHaveBeenCalled();
+        } finally {
+            releaseSlot();
+            await slotHolder;
+        }
+        await expect(result).resolves.toMatchObject([{
+            outcome: { requestedUsername: 'alice', status: 'success' },
+        }]);
+
+        expect(onProfileStart).toHaveBeenCalledWith('alice');
+        expect(onProfileStart.mock.invocationCallOrder[0])
+            .toBeLessThan(call.mock.invocationCallOrder[0]);
+    });
+
+    it('keeps a single unexplained Actor omission retryable instead of claiming not-found', async () => {
         const { client, call } = mockClient([profileItem('alice')]);
         const provider = makeApifyProvider({
             client,
@@ -569,9 +716,28 @@ describe('apifyProvider', () => {
             result.outcome.failureCategory,
         ])).toEqual([
             ['alice', 'success', null],
-            ['bob', 'unavailable', 'not_found'],
+            ['bob', 'failed', 'incomplete'],
         ]);
         expect(call).toHaveBeenCalledOnce();
+    });
+
+    it('accepts unavailable only with explicit upstream not-found evidence', async () => {
+        const { client } = mockClient([
+            profileItem('alice'),
+            { username: 'bob', statusCode: 404 },
+        ]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob'], 2);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['alice', 'success', null],
+            ['bob', 'unavailable', 'not_found'],
+        ]);
     });
 
     it('preserves valid profile outcomes when one attributed dataset row is malformed', async () => {
@@ -609,7 +775,7 @@ describe('apifyProvider', () => {
         ))).toBe(true);
     });
 
-    it('allows an unavailable account in a durable one-account profile tail', async () => {
+    it('keeps a durable one-account omission open for exact-run retry', async () => {
         const { client } = mockClient([]);
         const provider = makeApifyProvider({
             client,
@@ -619,10 +785,10 @@ describe('apifyProvider', () => {
         await expect(provider.getProfilesBatch!(['unavailable'], 1, {
             onRunStarted: vi.fn(),
             recordUsage: vi.fn(),
-        })).resolves.toEqual([]);
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
     });
 
-    it('rejects a durable profile batch that omits multiple accounts', async () => {
+    it('keeps a durable profile batch with multiple omissions open for exact-run retry', async () => {
         const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
         const { client } = mockClient(usernames.slice(0, 28).map(profileItem));
         const provider = makeApifyProvider({ client, env: {} });
@@ -630,7 +796,7 @@ describe('apifyProvider', () => {
         await expect(provider.getProfilesBatch!(usernames, 30, {
             onRunStarted: vi.fn(),
             recordUsage: vi.fn(),
-        })).rejects.toThrow('INCOMPLETE');
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
     });
 
     it('still rejects malformed rows in a durable partial profile result', async () => {
@@ -670,7 +836,7 @@ describe('apifyProvider', () => {
             env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
         });
 
-        await expect(provider.getProfilesBatch!(usernames, 30)).resolves.toHaveLength(29);
+        await expect(provider.getProfilesBatch!(usernames, 30)).rejects.toThrow('INCOMPLETE');
         expect(call).toHaveBeenCalledTimes(1);
         expect(listItems).toHaveBeenCalledTimes(2);
     });
@@ -922,6 +1088,28 @@ describe('apifyProvider', () => {
         expect(exhausted.call).toHaveBeenCalledTimes(1);
     });
 
+    it('surfaces exhausted relationship dataset transport as retryable only for a checkpointed run', async () => {
+        const exhausted = mockClient([relationshipItem('alice')]);
+        const failedRead = vi.fn().mockRejectedValue(new Error('transport failure'));
+        vi.mocked(exhausted.client.dataset).mockReturnValue(
+            { listItems: failedRead } as unknown as ReturnType<typeof exhausted.client.dataset>
+        );
+        const provider = makeApifyProvider({
+            client: exhausted.client,
+            env: { APIFY_DATASET_READ_RETRIES: '0' },
+        });
+
+        await expect(provider.getFollowers!('target', 1, {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.1,
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_DATASET_TRANSIENT_ERROR');
+        expect(exhausted.call).not.toHaveBeenCalled();
+    });
+
     it('attributes profile spend per delivered dataset item', async () => {
         const { client, call } = mockClient([profileItem('target')]);
         const provider = makeApifyProvider({ client, env: {} });
@@ -1018,6 +1206,44 @@ describe('apifyProvider', () => {
         expect(listItems).toHaveBeenCalledTimes(2);
     });
 
+    it('rereads an unexplained profile omission through the exact paid run id', async () => {
+        const { client, call, listItems } = mockClient([]);
+        listItems
+            .mockReset()
+            .mockResolvedValueOnce({
+                items: [], total: 0, offset: 0, count: 0, limit: 2,
+            })
+            .mockResolvedValueOnce({
+                items: [profileItem('target')], total: 1, offset: 0, count: 1, limit: 2,
+            });
+        const provider = makeApifyProvider({
+            client,
+            env: {
+                APIFY_DATASET_READ_RETRIES: '0',
+                APIFY_DATASET_RETRY_BASE_DELAY_MS: '0',
+            },
+        });
+
+        await expect(provider.getProfilesBatchOutcomes!(['target'], 1, {
+            onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
+            onRunStarted: vi.fn().mockResolvedValue(undefined),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+
+        await expect(provider.getProfilesBatchOutcomes!(['target'], 1, {
+            resumeRunId: 'RunAbcd1234567890',
+            logicalProvider: 'apify',
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.0026,
+            recordUsage: vi.fn(),
+        })).resolves.toMatchObject([{
+            outcome: { requestedUsername: 'target', status: 'success' },
+        }]);
+
+        expect(call).toHaveBeenCalledOnce();
+        expect(listItems).toHaveBeenCalledTimes(2);
+    });
+
     it('keeps latest posts on the single-profile fallback path', async () => {
         const { client } = mockClient([{
             ...profileItem('target'),
@@ -1037,6 +1263,23 @@ describe('apifyProvider', () => {
                     timestamp: '2026-01-01T00:00:00.000Z',
                 }],
             });
+    });
+
+    it('rejects a public profile whose recent-post snapshot is shorter than min(postsCount, 8)', async () => {
+        const { client } = mockClient([{
+            ...profileItem('target'),
+            postsCount: 9,
+            latestPosts: Array.from({ length: 7 }, (_, index) => ({
+                id: String(index + 1),
+                shortCode: `post${index + 1}`,
+                type: 'Image',
+                displayUrl: `https://example.com/post-${index + 1}.jpg`,
+                timestamp: 1_767_225_600 - index,
+            })),
+        }]);
+
+        await expect(makeApifyProvider({ client, env: {} }).getProfile!('target'))
+            .rejects.toThrow('SCRAPING_INCOMPLETE_ERROR');
     });
 
     it('proves documented Apify carousel completeness and exposes safety contact frames', async () => {

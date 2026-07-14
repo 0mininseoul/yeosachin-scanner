@@ -25,7 +25,9 @@ const MASKED_USERNAME_PATTERN = /^[A-Za-z0-9._]*\*[A-Za-z0-9._*]*$/;
 export const ANALYSIS_V2_PROGRESS_DATABASE_NAMES = Object.freeze({
     stateTable: 'analysis_progress_state',
     eventTable: 'analysis_progress_events',
+    activeProfileHeartbeatTable: 'analysis_v2_active_profile_heartbeats',
     checkpointRpc: 'checkpoint_analysis_v2_progress',
+    heartbeatRpc: 'checkpoint_analysis_v2_active_profile_heartbeat',
     loadRpc: 'load_analysis_v2_progress',
 });
 
@@ -33,6 +35,7 @@ export const ANALYSIS_V2_PROGRESS_EVENT_CODES = [
     'TARGET_PROFILE_READY',
     'RELATIONSHIP_PROGRESS',
     'PROFILE_SCREENED',
+    'SHORTLIST_READY',
     'POTENTIAL_HIGH_RISK_FOUND',
     'FINDING_CORRECTED',
     'FINDING_CONFIRMED',
@@ -89,6 +92,22 @@ const activeProfileInputSchema = z.object({
         .nullable(),
 }).strict();
 
+const activeProfileHeartbeatInputSchema = z.object({
+    requestId: z.string().regex(UUID_PATTERN),
+    jobKey: z.string().regex(JOB_KEY_PATTERN),
+    claimToken: z.string().regex(UUID_PATTERN),
+    jobInputHash: z.string().regex(SHA256_PATTERN),
+    startedAt: z.string().datetime({ offset: true }),
+    totalCount: z.number().int().min(1).max(30),
+    maskedUsername: z.string().min(1).max(30).regex(MASKED_USERNAME_PATTERN),
+    imageUrl: z.string()
+        .trim()
+        .min(1)
+        .max(2_048)
+        .refine(value => value.startsWith('/api/image-proxy?'))
+        .nullable(),
+}).strict();
+
 const etaInputSchema = z.object({
     lowSeconds: z.number().int().min(0).max(3_600),
     highSeconds: z.number().int().min(0).max(3_600),
@@ -106,7 +125,8 @@ const progressEventInputSchema = z.object({
         ? 'provisional'
         : value.eventCode === 'FINDING_CORRECTED'
             ? 'corrected'
-            : ['FINDING_CONFIRMED', 'ANALYSIS_COMPLETED'].includes(value.eventCode)
+            : ['SHORTLIST_READY', 'FINDING_CONFIRMED', 'ANALYSIS_COMPLETED']
+                .includes(value.eventCode)
                 ? 'confirmed'
                 : null;
     if (requiredState !== null && value.state !== requiredState) {
@@ -280,6 +300,16 @@ export interface AnalysisV2ProgressSupabaseClient {
 export interface AnalysisV2ProgressStore {
     checkpoint(input: AnalysisV2ProgressCheckpointInput):
         Promise<AnalysisV2ProgressCheckpointResult>;
+    heartbeatActiveProfile?(input: {
+        requestId: string;
+        jobKey: string;
+        claimToken: string;
+        jobInputHash: string;
+        startedAt: string;
+        totalCount: number;
+        maskedUsername: string;
+        imageUrl: string | null;
+    }): Promise<boolean>;
     loadForOwner(input: {
         requestId: string;
         userId: string;
@@ -437,6 +467,30 @@ export function createAnalysisV2ProgressStore(
     client: AnalysisV2ProgressSupabaseClient = supabaseAdmin
 ): AnalysisV2ProgressStore {
     return {
+        async heartbeatActiveProfile(rawInput) {
+            const input = activeProfileHeartbeatInputSchema.parse(rawInput);
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROGRESS_DATABASE_NAMES.heartbeatRpc,
+                {
+                    p_request_id: input.requestId.toLowerCase(),
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken.toLowerCase(),
+                    p_job_input_hash: input.jobInputHash,
+                    p_started_at: input.startedAt,
+                    p_total_count: input.totalCount,
+                    p_masked_username: input.maskedUsername,
+                    p_image_url: input.imageUrl,
+                }
+            );
+            if (error) throwRpcError(error, 'active profile heartbeat');
+            if (typeof data !== 'boolean') {
+                throw new Error(
+                    'ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR: invalid heartbeat response.'
+                );
+            }
+            return data;
+        },
+
         async checkpoint(rawInput) {
             const input = checkpointInputSchema.parse(rawInput);
             const fingerprint = snapshotFingerprint(input);
