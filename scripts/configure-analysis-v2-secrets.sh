@@ -4,6 +4,8 @@ set -euo pipefail
 readonly SECRET_MANAGER_API="secretmanager.googleapis.com"
 readonly SECRET_LOCATION="asia-northeast3"
 readonly SECRET_ACCESSOR_ROLE="roles/secretmanager.secretAccessor"
+readonly SECRET_OBSERVE_ATTEMPTS=6
+readonly SECRET_OBSERVE_RETRY_DELAY_SECONDS=1
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 
@@ -162,14 +164,29 @@ secret_json() {
     --format=json 2>/dev/null
 }
 
+wait_for_secret_json() {
+  local secret_id="$1"
+  local attempt
+  local config
+  for ((attempt = 1; attempt <= SECRET_OBSERVE_ATTEMPTS; attempt += 1)); do
+    if config="$(secret_json "$secret_id")"; then
+      printf '%s\n' "$config"
+      return 0
+    fi
+    ((attempt < SECRET_OBSERVE_ATTEMPTS)) || break
+    sleep "$SECRET_OBSERVE_RETRY_DELAY_SECONDS"
+  done
+  return 1
+}
+
 secret_replication_matches() {
   local config="$1"
   local secret_id="$2"
   jq -e \
-    --arg project "$ANALYSIS_V2_TASKS_PROJECT" \
+    --arg project_number "$tasks_project_number" \
     --arg secret "$secret_id" \
     --arg location "$SECRET_LOCATION" '
-      .name == ("projects/" + $project + "/secrets/" + $secret)
+      .name == ("projects/" + $project_number + "/secrets/" + $secret)
       and ((.replication.userManaged.replicas // []) | length) == 1
       and .replication.userManaged.replicas[0].location == $location
     ' <<<"$config" >/dev/null
@@ -192,17 +209,28 @@ ensure_secret() {
   secret_exists="false"
   secret_created_now="true"
   [[ "$mode" != "check" ]] || die "Secret Manager resource $secret_id does not exist"
-  run_mutation gcloud secrets create "$secret_id" \
-    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
-    '--replication-policy=user-managed' \
-    "--locations=$SECRET_LOCATION" \
-    '--format=none' \
-    --quiet
-  if [[ "$mode" == "apply" ]]; then
-    config="$(secret_json "$secret_id")" \
-      || die "Secret Manager resource $secret_id was not observable after creation"
+  if ! run_mutation gcloud secrets create "$secret_id" \
+      "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+      '--replication-policy=user-managed' \
+      "--locations=$SECRET_LOCATION" \
+      '--format=none' \
+      --quiet; then
+    [[ "$mode" == "apply" ]] \
+      || die "Secret Manager resource $secret_id could not be created"
+    config="$(wait_for_secret_json "$secret_id")" \
+      || die "Secret Manager resource $secret_id create failed and the resource was not observable after bounded retry"
     secret_replication_matches "$config" "$secret_id" \
-      || die "Secret Manager resource $secret_id was created with unexpected replication"
+      || die "Secret Manager resource $secret_id became observable with unexpected replication or ownership"
+    secret_exists="true"
+    secret_created_now="false"
+    log "verified: Secret Manager resource $secret_id became observable after create returned an error"
+    return 0
+  fi
+  if [[ "$mode" == "apply" ]]; then
+    config="$(wait_for_secret_json "$secret_id")" \
+      || die "Secret Manager resource $secret_id was not observable after creation within the bounded retry window"
+    secret_replication_matches "$config" "$secret_id" \
+      || die "Secret Manager resource $secret_id was created with unexpected replication or ownership"
     secret_exists="true"
   fi
 }
@@ -352,10 +380,10 @@ verify_enabled_version() {
   config="$(version_json "$secret_id" "$version")" \
     || die "pinned version $version for $secret_id does not exist"
   jq -e \
-    --arg project "$ANALYSIS_V2_TASKS_PROJECT" \
+    --arg project_number "$tasks_project_number" \
     --arg secret "$secret_id" \
     --arg version "$version" '
-      .name == ("projects/" + $project + "/secrets/" + $secret + "/versions/" + $version)
+      .name == ("projects/" + $project_number + "/secrets/" + $secret + "/versions/" + $version)
       and .state == "ENABLED"
     ' <<<"$config" >/dev/null \
     || die "pinned version $version for $secret_id is not enabled or exact"
@@ -371,7 +399,7 @@ inspect_enabled_versions() {
   enabled_version_count=0
   single_enabled_version=""
   versions_output="$(gcloud secrets versions list \
-    "--secret=$secret_id" \
+    "$secret_id" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     '--filter=state=ENABLED' \
     '--format=value(name)')" \
@@ -381,6 +409,8 @@ inspect_enabled_versions() {
     version="${line##*/}"
     [[ "$version" =~ ^[1-9][0-9]*$ ]] \
       || die "enabled version discovery for $secret_id returned a non-numeric version"
+    [[ "$line" == "projects/$tasks_project_number/secrets/$secret_id/versions/$version" ]] \
+      || die "enabled version discovery for $secret_id returned an unexpected resource name"
     single_enabled_version="$version"
     enabled_version_count=$((enabled_version_count + 1))
   done <<<"$versions_output"
@@ -389,13 +419,19 @@ inspect_enabled_versions() {
 secret_has_version_history() {
   local secret_id="$1"
   local first_version
+  local version
   first_version="$(gcloud secrets versions list \
-    "--secret=$secret_id" \
+    "$secret_id" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     '--limit=1' \
     '--format=value(name)')" \
     || die "could not inspect version history for $secret_id"
-  [[ -n "$first_version" ]]
+  [[ -n "$first_version" ]] || return 1
+  version="${first_version##*/}"
+  [[ "$version" =~ ^[1-9][0-9]*$ \
+    && "$first_version" == "projects/$tasks_project_number/secrets/$secret_id/versions/$version" ]] \
+    || die "version history for $secret_id returned an unexpected resource name"
+  return 0
 }
 
 resolved_version=""
@@ -568,9 +604,12 @@ readonly worker_source_dir="$(cd -P "$worker_source_input" && pwd -P)"
 
 active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -n 1)"
 [[ -n "$active_account" ]] || die "gcloud has no active authenticated account"
-gcloud projects describe "$ANALYSIS_V2_TASKS_PROJECT" \
-  '--format=value(projectNumber)' | grep -Eq '^[0-9]+$' \
+tasks_project_number="$(gcloud projects describe "$ANALYSIS_V2_TASKS_PROJECT" \
+  '--format=value(projectNumber)')" \
   || die "could not resolve the GCP project number"
+[[ "$tasks_project_number" =~ ^[1-9][0-9]*$ ]] \
+  || die "could not resolve the GCP project number"
+readonly tasks_project_number
 disabled="$(gcloud iam service-accounts describe \
   "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
   "--project=$ANALYSIS_V2_TASKS_PROJECT" \

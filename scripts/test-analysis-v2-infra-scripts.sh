@@ -333,7 +333,7 @@ case "$command_line" in
     [[ "$identity_ready" == "true" ]] || exit 1
     secret_id="$3"
     jq -nc \
-      --arg name "projects/test-project/secrets/$secret_id" \
+      --arg name "projects/123456789012/secrets/$secret_id" \
       '{name: $name, replication: {userManaged: {replicas: [{location: "asia-northeast3"}]}}}'
     ;;
   "secrets versions describe"*)
@@ -344,16 +344,17 @@ case "$command_line" in
       [[ "$argument" == --secret=* ]] && secret_id="${argument#--secret=}"
     done
     jq -nc \
-      --arg name "projects/test-project/secrets/$secret_id/versions/$version" \
+      --arg name "projects/123456789012/secrets/$secret_id/versions/$version" \
       '{name: $name, state: "ENABLED"}'
     ;;
   "secrets versions list"*)
     [[ "$identity_ready" == "true" ]] || exit 1
-    secret_id=""
+    secret_id="$4"
+    [[ -n "$secret_id" && "$secret_id" != --* ]] || exit 90
     for argument in "$@"; do
-      [[ "$argument" == --secret=* ]] && secret_id="${argument#--secret=}"
+      [[ "$argument" != --secret=* ]] || exit 90
     done
-    printf 'projects/test-project/secrets/%s/versions/7\n' "$secret_id"
+    printf 'projects/123456789012/secrets/%s/versions/7\n' "$secret_id"
     ;;
   "secrets get-iam-policy"*)
     [[ "$identity_ready" == "true" ]] || exit 1

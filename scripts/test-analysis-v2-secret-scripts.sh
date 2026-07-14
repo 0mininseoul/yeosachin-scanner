@@ -38,6 +38,7 @@ set -euo pipefail
 
 state_dir="${FAKE_GCLOUD_STATE_DIR:?}"
 command_line="$*"
+project_number="${FAKE_GCLOUD_PROJECT_NUMBER:-123456789012}"
 
 secret_path() {
   printf '%s/secrets/%s\n' "$state_dir" "$1"
@@ -48,7 +49,7 @@ case "$command_line" in
     printf 'operator@example.test\n'
     ;;
   "projects describe"*)
-    printf '123456789012\n'
+    printf '%s\n' "$project_number"
     ;;
   "projects get-iam-policy"*)
     if [[ -f "$state_dir/project-secret-role" ]]; then
@@ -69,18 +70,38 @@ case "$command_line" in
     secret_id="$3"
     path="$(secret_path "$secret_id")"
     [[ -f "$path/metadata.json" ]] || exit 1
+    [[ ! -f "$path/describe-always-invisible" ]] || exit 1
+    if [[ -f "$path/describe-invisible-count" ]]; then
+      remaining="$(<"$path/describe-invisible-count")"
+      if ((remaining > 0)); then
+        printf '%s\n' "$((remaining - 1))" >"$path/describe-invisible-count"
+        exit 1
+      fi
+    fi
     cat "$path/metadata.json"
     ;;
   "secrets create"*)
     secret_id="$3"
     path="$(secret_path "$secret_id")"
+    if [[ -f "$path/metadata.json" ]]; then
+      count=0
+      [[ ! -f "$state_dir/create-conflict-count" ]] \
+        || count="$(<"$state_dir/create-conflict-count")"
+      printf '%s\n' "$((count + 1))" >"$state_dir/create-conflict-count"
+      printf 'fake gcloud: secret %s already exists\n' "$secret_id" >&2
+      exit 9
+    fi
     mkdir -p "$path/versions"
     jq -nc \
-      --arg name "projects/test-project/secrets/$secret_id" \
+      --arg name "projects/$project_number/secrets/$secret_id" \
       '{name: $name, replication: {userManaged: {replicas: [{location: "asia-northeast3"}]}}}' \
       >"$path/metadata.json"
     printf '%s\n' '{"version":1,"etag":"fixture","bindings":[]}' >"$path/policy.json"
     printf '0\n' >"$path/version-counter"
+    if [[ -n "${FAKE_GCLOUD_HIDE_DESCRIBE_AFTER_CREATE_COUNT:-}" ]]; then
+      printf '%s\n' "$FAKE_GCLOUD_HIDE_DESCRIBE_AFTER_CREATE_COUNT" \
+        >"$path/describe-invisible-count"
+    fi
     ;;
   "secrets versions add"*)
     secret_id="$4"
@@ -108,9 +129,10 @@ case "$command_line" in
     version=$(( $(<"$path/version-counter") + 1 ))
     printf '%s\n' "$version" >"$path/version-counter"
     jq -nc \
-      --arg name "projects/test-project/secrets/$secret_id/versions/$version" \
+      --arg name "projects/$project_number/secrets/$secret_id/versions/$version" \
       '{name: $name, state: "ENABLED"}' >"$path/versions/$version.json"
-    printf 'projects/test-project/secrets/%s/versions/%s\n' "$secret_id" "$version"
+    printf 'projects/%s/secrets/%s/versions/%s\n' \
+      "$project_number" "$secret_id" "$version"
     ;;
   "secrets versions describe"*)
     version="$4"
@@ -123,10 +145,11 @@ case "$command_line" in
     cat "$path/versions/$version.json"
     ;;
   "secrets versions list"*)
-    secret_id=""
+    secret_id="$4"
+    [[ -n "$secret_id" && "$secret_id" != --* ]] || exit 97
     filter_enabled="false"
     for argument in "$@"; do
-      [[ "$argument" == --secret=* ]] && secret_id="${argument#--secret=}"
+      [[ "$argument" != --secret=* ]] || exit 98
       [[ "$argument" == --filter=state=ENABLED ]] && filter_enabled="true"
     done
     path="$(secret_path "$secret_id")"
@@ -164,6 +187,12 @@ case "$command_line" in
 esac
 EOF
 chmod +x "$temp_dir/bin/gcloud"
+cat >"$temp_dir/bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${FAKE_GCLOUD_STATE_DIR:?}/sleep-calls"
+EOF
+chmod +x "$temp_dir/bin/sleep"
 
 cat >"$temp_dir/source.env" <<'EOF'
 NEXT_PUBLIC_SUPABASE_URL=https://fixture.supabase.co
@@ -254,6 +283,7 @@ for secret_id in \
 done
 
 env "${secret_env[@]}" \
+  'FAKE_GCLOUD_HIDE_DESCRIBE_AFTER_CREATE_COUNT=2' \
   bash "$script_dir/configure-analysis-v2-secrets.sh" \
   >"$temp_dir/missing-apply.out"
 [[ -f "$temp_dir/state/api-enabled" ]] \
@@ -270,6 +300,11 @@ for secret_id in \
   ai-baram-v2-image-proxy-signing; do
   [[ -f "$temp_dir/state/secrets/$secret_id/versions/1.json" ]] \
     || fail "initial apply did not create version 1 for $secret_id"
+  jq -e \
+    --arg expected "projects/123456789012/secrets/$secret_id" \
+    '.name == $expected' \
+    "$temp_dir/state/secrets/$secret_id/metadata.json" >/dev/null \
+    || fail "initial apply did not accept the canonical numeric project resource name for $secret_id"
   jq -e '
     (.bindings | length) == 1
     and .bindings[0].role == "roles/secretmanager.secretAccessor"
@@ -277,6 +312,8 @@ for secret_id in \
   ' "$temp_dir/state/secrets/$secret_id/policy.json" >/dev/null \
     || fail "initial apply did not create exact IAM for $secret_id"
 done
+[[ "$(wc -l <"$temp_dir/state/sleep-calls" | tr -d ' ')" == "6" ]] \
+  || fail "post-create visibility retry was not bounded to the injected transient failures"
 for sentinel in \
   SUPABASE_SECRET_SENTINEL_0123456789 \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
@@ -294,6 +331,39 @@ env "${secret_env[@]}" "${pinned_env[@]}" \
   >"$temp_dir/ready-check.out"
 assert_contains "$temp_dir/ready-check.out" \
   "Analysis V2 Secret Manager configuration verified"
+
+conflict_sleep_count_before="$(wc -l <"$temp_dir/state/sleep-calls" | tr -d ' ')"
+printf '3\n' \
+  >"$temp_dir/state/secrets/ai-baram-v2-supabase-service-role/describe-invisible-count"
+env "${secret_env[@]}" "${pinned_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" \
+  >"$temp_dir/create-conflict-recovery.out" 2>&1
+assert_contains "$temp_dir/create-conflict-recovery.out" \
+  "became observable after create returned an error"
+[[ "$(<"$temp_dir/state/create-conflict-count")" == "1" ]] \
+  || fail "transient describe invisibility did not exercise create-conflict recovery"
+conflict_sleep_count_after="$(wc -l <"$temp_dir/state/sleep-calls" | tr -d ' ')"
+[[ "$((conflict_sleep_count_after - conflict_sleep_count_before))" == "2" ]] \
+  || fail "create-conflict recovery did not retry until the existing secret became observable"
+[[ "$(<"$temp_dir/state/secrets/ai-baram-v2-supabase-service-role/version-counter")" == "1" ]] \
+  || fail "create-conflict recovery unexpectedly added a secret version"
+
+cp -R "$temp_dir/state" "$temp_dir/retry-exhaustion-state"
+rm -f "$temp_dir/retry-exhaustion-state/sleep-calls"
+touch "$temp_dir/retry-exhaustion-state/secrets/ai-baram-v2-supabase-service-role/describe-always-invisible"
+retry_exhaustion_env=(
+  "${secret_env[@]}"
+  "FAKE_GCLOUD_STATE_DIR=$temp_dir/retry-exhaustion-state"
+)
+if env "${retry_exhaustion_env[@]}" "${pinned_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" \
+  >"$temp_dir/retry-exhaustion.out" 2>&1; then
+  fail "permanently invisible Secret Manager resource was accepted"
+fi
+assert_contains "$temp_dir/retry-exhaustion.out" \
+  "create failed and the resource was not observable after bounded retry"
+[[ "$(wc -l <"$temp_dir/retry-exhaustion-state/sleep-calls" | tr -d ' ')" == "5" ]] \
+  || fail "Secret Manager visibility retry did not stop at the bounded attempt limit"
 
 cp -R "$temp_dir/state" "$temp_dir/disabled-history-state"
 jq '.state = "DISABLED"' \
@@ -325,6 +395,18 @@ assert_contains "$temp_dir/disabled-history-rotate.out" \
 
 cp "$temp_dir/state/secrets/ai-baram-v2-supabase-service-role/metadata.json" \
   "$temp_dir/supabase-metadata.json"
+jq '.name = "projects/test-project/secrets/ai-baram-v2-supabase-service-role"' \
+  "$temp_dir/supabase-metadata.json" \
+  >"$temp_dir/state/secrets/ai-baram-v2-supabase-service-role/metadata.json"
+if env "${secret_env[@]}" "${pinned_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
+  >"$temp_dir/ownership-drift.out" 2>&1; then
+  fail "Secret Manager project-ID resource name was accepted instead of the canonical numeric name"
+fi
+assert_contains "$temp_dir/ownership-drift.out" "unexpected replication or ownership"
+cp "$temp_dir/supabase-metadata.json" \
+  "$temp_dir/state/secrets/ai-baram-v2-supabase-service-role/metadata.json"
+
 jq '.replication.userManaged.replicas[0].location = "us-central1"' \
   "$temp_dir/supabase-metadata.json" \
   >"$temp_dir/state/secrets/ai-baram-v2-supabase-service-role/metadata.json"
