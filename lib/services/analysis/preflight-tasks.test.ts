@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    PreflightTaskEnqueueError,
     enqueueFreshAdmissionTask,
     enqueuePreflightTask,
     freshAdmissionTaskId,
@@ -143,6 +144,96 @@ describe('preflight Cloud Tasks', () => {
         await expect(enqueuePreflightTask(preflightId, 1, { config, client }))
             .resolves.toBe('exists');
         expect(createTask).toHaveBeenCalledOnce();
+    });
+
+    it('confirms an ambiguous response loss through deterministic ALREADY_EXISTS replay', async () => {
+        const createTask = vi.fn()
+            .mockRejectedValueOnce({ code: 4 })
+            .mockRejectedValueOnce({ code: 6 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        await expect(enqueuePreflightTask(preflightId, 1, { config, client }))
+            .resolves.toBe('exists');
+        expect(createTask).toHaveBeenCalledTimes(2);
+        expect(createTask.mock.calls[0][0]).toEqual(createTask.mock.calls[1][0]);
+    });
+
+    it('retries one ambiguous failure and accepts a subsequent create', async () => {
+        const createTask = vi.fn()
+            .mockRejectedValueOnce({ code: 14 })
+            .mockResolvedValueOnce([{}]);
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        await expect(enqueuePreflightTask(preflightId, 1, { config, client }))
+            .resolves.toBe('enqueued');
+        expect(createTask).toHaveBeenCalledTimes(2);
+        expect(createTask.mock.calls[0][0]).toEqual(createTask.mock.calls[1][0]);
+    });
+
+    it('classifies a definitive rejection without retrying', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 7 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        const error = await enqueuePreflightTask(preflightId, 1, { config, client })
+            .catch(caught => caught);
+        expect(error).toBeInstanceOf(PreflightTaskEnqueueError);
+        expect(error).toMatchObject({ disposition: 'terminal' });
+        expect(createTask).toHaveBeenCalledOnce();
+    });
+
+    it('keeps resource exhaustion replayable after the bounded retry', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 8 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        const error = await enqueuePreflightTask(preflightId, 1, { config, client })
+            .catch(caught => caught);
+        expect(error).toBeInstanceOf(PreflightTaskEnqueueError);
+        expect(error).toMatchObject({ disposition: 'replayable' });
+        expect(createTask).toHaveBeenCalledTimes(2);
+    });
+
+    it('preserves an ambiguous outcome after the bounded deterministic retry', async () => {
+        const createTask = vi.fn()
+            .mockRejectedValueOnce({ code: 4 })
+            .mockRejectedValueOnce({ code: 7 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        const error = await enqueuePreflightTask(preflightId, 1, { config, client })
+            .catch(caught => caught);
+        expect(error).toBeInstanceOf(PreflightTaskEnqueueError);
+        expect(error).toMatchObject({ disposition: 'replayable' });
+        expect(createTask).toHaveBeenCalledTimes(2);
+        expect(createTask.mock.calls[0][0]).toEqual(createTask.mock.calls[1][0]);
     });
 
     it('creates a separately named, generation-fenced fresh-admission task', async () => {

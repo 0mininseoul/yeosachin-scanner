@@ -37,6 +37,15 @@ interface CloudTasksClientLike {
     createTask(request: Record<string, unknown>): PromiseLike<unknown>;
 }
 
+export type PreflightTaskEnqueueFailureDisposition = 'terminal' | 'replayable';
+
+export class PreflightTaskEnqueueError extends Error {
+    constructor(readonly disposition: PreflightTaskEnqueueFailureDisposition) {
+        super('PREFLIGHT_TASKS_ENQUEUE_ERROR: task creation failed.');
+        this.name = 'PreflightTaskEnqueueError';
+    }
+}
+
 interface IdTokenTicketLike {
     getPayload(): {
         email?: string;
@@ -198,6 +207,28 @@ function isAlreadyExists(error: unknown): boolean {
         || (typeof value.message === 'string' && value.message.includes('ALREADY_EXISTS'));
 }
 
+const TERMINAL_CREATE_ERROR_CODES = new Set<unknown>([
+    3,
+    5,
+    7,
+    9,
+    11,
+    12,
+    16,
+    'INVALID_ARGUMENT',
+    'NOT_FOUND',
+    'PERMISSION_DENIED',
+    'FAILED_PRECONDITION',
+    'OUT_OF_RANGE',
+    'UNIMPLEMENTED',
+    'UNAUTHENTICATED',
+]);
+
+function isTerminalCreateFailure(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    return TERMINAL_CREATE_ERROR_CODES.has((error as { code?: unknown }).code);
+}
+
 function taskRequest(
     payload: Record<string, unknown>,
     taskName: string,
@@ -241,13 +272,23 @@ export async function enqueuePreflightTask(
     const parent = client.queuePath(config.project, config.location, config.queue);
     const name = client.taskPath(config.project, config.location, config.queue, taskId);
 
-    try {
-        await client.createTask(taskRequest({ preflightId }, name, parent, config));
-        return 'enqueued';
-    } catch (error) {
-        if (isAlreadyExists(error)) return 'exists';
-        throw new Error('PREFLIGHT_TASKS_ENQUEUE_ERROR: task creation failed.');
+    const request = taskRequest({ preflightId }, name, parent, config);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            await client.createTask(request);
+            return 'enqueued';
+        } catch (error) {
+            if (isAlreadyExists(error)) return 'exists';
+            if (attempt === 0 && isTerminalCreateFailure(error)) {
+                throw new PreflightTaskEnqueueError('terminal');
+            }
+            if (attempt === 1) {
+                // Do not terminalize retryable or outcome-ambiguous failures.
+                throw new PreflightTaskEnqueueError('replayable');
+            }
+        }
     }
+    throw new PreflightTaskEnqueueError('replayable');
 }
 
 export async function enqueueFreshAdmissionTask(

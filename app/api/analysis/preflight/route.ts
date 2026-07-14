@@ -16,6 +16,7 @@ import {
     type PreflightAuthProvider,
 } from '@/lib/services/analysis/preflight';
 import {
+    PreflightTaskEnqueueError,
     enqueuePreflightTask,
     resolvePreflightDispatchPolicy,
 } from '@/lib/services/analysis/preflight-tasks';
@@ -146,11 +147,16 @@ export async function POST(request: Request) {
                 await enqueuePreflightTask(created.preflightId, reservation.generation, {
                     config: dispatchPolicy.config,
                 });
-            } catch {
-                try {
-                    await preflightStore.blockQueueUnavailable(created.preflightId, user.id);
-                } catch {
-                    console.error('Preflight queue failure terminalization failed.');
+            } catch (error) {
+                if (
+                    error instanceof PreflightTaskEnqueueError
+                    && error.disposition === 'terminal'
+                ) {
+                    try {
+                        await preflightStore.blockQueueUnavailable(created.preflightId, user.id);
+                    } catch {
+                        console.error('Preflight queue failure terminalization failed.');
+                    }
                 }
                 return errorResponse(
                     503,

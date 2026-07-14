@@ -38,10 +38,14 @@ vi.mock('@/lib/services/analysis/preflight', async (importOriginal) => {
         trustedPreflightAccessMode: mocks.trustedAccessMode,
     };
 });
-vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
-    enqueuePreflightTask: mocks.enqueue,
-    resolvePreflightDispatchPolicy: mocks.resolveDispatch,
-}));
+vi.mock('@/lib/services/analysis/preflight-tasks', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('./preflight-tasks')>();
+    return {
+        ...actual,
+        enqueuePreflightTask: mocks.enqueue,
+        resolvePreflightDispatchPolicy: mocks.resolveDispatch,
+    };
+});
 vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
     isAnalysisV2AdmissionAvailable: mocks.admissionAvailable,
 }));
@@ -55,6 +59,7 @@ import {
     InvalidPreflightExclusionError,
     PreflightRateLimitedError,
 } from './preflight';
+import { PreflightTaskEnqueueError } from './preflight-tasks';
 import { createAnalysisTestAdmission } from './test-entitlement';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
@@ -253,12 +258,21 @@ describe('preflight owner routes', () => {
         });
     });
 
-    it('returns 503 instead of pending when deterministic task enqueue fails', async () => {
-        mocks.enqueue.mockRejectedValue(new Error('queue down'));
+    it('terminalizes only a definitive deterministic task rejection', async () => {
+        mocks.enqueue.mockRejectedValue(new PreflightTaskEnqueueError('terminal'));
         const response = await createPreflight(postRequest());
         expect(response.status).toBe(503);
         expect(mocks.store.createOrReplay).toHaveBeenCalled();
         expect(mocks.store.blockQueueUnavailable).toHaveBeenCalledWith(preflightId, userId);
+    });
+
+    it('keeps an ambiguous deterministic task reservation replayable', async () => {
+        mocks.enqueue.mockRejectedValue(new PreflightTaskEnqueueError('replayable'));
+        const response = await createPreflight(postRequest());
+        expect(response.status).toBe(503);
+        expect(mocks.store.createOrReplay).toHaveBeenCalled();
+        expect(mocks.store.blockQueueUnavailable).not.toHaveBeenCalled();
+        expect(mocks.store.markDispatched).not.toHaveBeenCalled();
     });
 
     it('does not enqueue another task when an idempotent replay returns an existing row', async () => {
