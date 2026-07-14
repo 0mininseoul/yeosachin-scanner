@@ -33,4 +33,4 @@ export ANALYSIS_TASKS_EXACT_IAM="true"
 export ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL"
 export ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS="none"
 
-exec "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"
+exec bash "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"
