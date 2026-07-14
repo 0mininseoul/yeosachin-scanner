@@ -57,26 +57,26 @@ const STEPS = [
   {
     n: '01',
     title: '아이디 하나면 충분',
-    body: ['남자친구 인스타그램 아이디만 넣으세요.', '나머지 파고드는 건 전부 AI 몫입니다.'],
+    body: ['남자친구 인스타그램 아이디만 넣으세요.', '나머지는 AI가 알아서 전부 파 드립니다.'],
   },
   {
     n: '02',
     title: '직접 못 찾는 것까지 판독',
-    body: ['팔로워·팔로잉에서 맞팔 계정을 찾고,', '공개 프로필과 게시물 정보를 바탕으로 계정 특성을 분석합니다.'],
+    body: ['맞팔 수백 명의 성별을 식별해 이성만 추려내고,', '상호작용·친밀도·프로필 분위기까지 5개 축으로 교차 분석합니다.'],
   },
   {
     n: '03',
     title: '위협 등급 리포트',
-    body: ['위장 여사친 후보를 위험도 순으로 정렬하고,', '공개 정보에서 확인한 분석 근거를 함께 보여드립니다.'],
+    body: ['위장 여사친 후보를 위험도 순으로 정렬하고,', '위장여사친들의 정체를 구체적 근거 기반으로 전부 보여드립니다.'],
   },
 ];
 
 // 신뢰 블록 — "직접은 불가능, AI만 가능"을 강조 (자극적 톤)
 const TRUST = [
-  { title: '맞팔 계정 스캔', body: '수집 가능한 공개 맞팔 계정을 범위 내에서 살펴봅니다.' },
-  { title: '후보 계정 분류', body: '공개 프로필을 바탕으로 위장 여사친 후보를 분류합니다.' },
-  { title: '공개 정보 분석', body: '공개 프로필과 게시물 정보를 바탕으로 계정 특성을 분석합니다.' },
-  { title: '별도 통보 없음', body: '서비스가 분석 요청을 당사자에게 별도로 알리지는 않습니다.' },
+  { title: '맞팔 전수조사', body: '수백 명을 일일이 볼 순 없죠. AI가 한 명도 빠짐없이 훑습니다.' },
+  { title: '여사친들만 선별', body: '성별을 식별해 위장 여사친 후보만 골라냅니다.' },
+  { title: '상호작용 추적', body: '좋아요·댓글·태그·멘션·친밀도까지 정밀 분석합니다.' },
+  { title: '상대방은 절대 모름', body: '조회 흔적도, 알림도 남지 않습니다.' },
 ];
 
 const REVIEWS = [
@@ -223,13 +223,13 @@ export default function LandingPage() {
               <span className="num text-[11px] tracking-[0.2em] text-fg-mute">NO. 0421-KR</span>
             </div>
 
-            <h1 className="text-[34px] font-bold leading-[1.14] tracking-[-0.02em] text-fg">
+            <h1 className="text-[26px] font-bold leading-[1.2] tracking-[-0.02em] text-fg sm:text-[34px] sm:leading-[1.14]">
               내 남친이 맞팔 중인 여자들,
               <br />
               <span className="text-blood">누가 제일 위험할까?</span>
             </h1>
             <p className="mt-4 text-[15px] leading-relaxed text-fg-dim">
-              공개된 인스타그램 정보를 바탕으로 AI 참고 결과를 제공합니다.
+              &quot;그냥 친구야&quot;라는 말, AI가 팩트 체크해드립니다.
             </p>
           </motion.div>
 
@@ -325,7 +325,7 @@ export default function LandingPage() {
               )}
             </PrimaryButton>
             <p className="text-center text-[12px] text-fg-mute">
-              서비스가 분석 요청을 당사자에게 별도로 알리지는 않습니다.
+              판독 결과는 상대방에게 절대 통보되지 않습니다.
             </p>
           </div>
         </section>
@@ -335,7 +335,7 @@ export default function LandingPage() {
           <div className="anim-marquee flex w-max whitespace-nowrap">
             {[0, 1].map((k) => (
               <div key={k} className="flex items-center" aria-hidden={k === 1}>
-                {['공개 정보 기반 분석', '서비스 별도 통보 없음', '인스타 비밀번호 불필요', '완료 후 결과 제공'].map((t) => (
+                {['상대방 통보 없음', '비밀 보장 100%', '아이디 하나면 끝', '5분이면 결과 완료'].map((t) => (
                   <span key={t} className="flex items-center px-6 text-[12px] font-medium tracking-[0.08em] text-fg-dim">
                     <span className="mr-6 h-1 w-1 bg-blood" />
                     {t}
@@ -377,7 +377,7 @@ export default function LandingPage() {
             직접 뒤지는 건 <span className="text-blood">불가능</span>합니다
           </h2>
           <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-            수집 가능한 공개 정보를 AI가 분석해 보기 쉽게 정리합니다.
+            밤새 프로필을 눌러봐도 못 찾는 걸, AI는 5분이면 끝냅니다.
           </p>
 
           <div className="mt-8 grid grid-cols-2 gap-3">
@@ -415,18 +415,18 @@ export default function LandingPage() {
           <CaseCard bracket="var(--color-blood)" className="px-6 py-10 text-center">
             <Eyebrow className="justify-center">AI 정밀 판독</Eyebrow>
             <h2 className="mt-4 text-[26px] font-extrabold leading-tight tracking-tight text-fg">
-              공개 정보 속
+              남자친구가
               <br />
-              확인할 단서
+              알려주지 않는 진실
             </h2>
             <p className="mt-3.5 text-[13px] leading-relaxed text-fg-dim">
               불안해하며 시간 낭비하지 마세요.
               <br />
-              AI가 공개된 정보를 분석해 참고 결과를 정리해 드립니다.
+              AI가 5분 안에 사실을 정리해 드립니다.
             </p>
             <div className="mt-7">
               <PrimaryButton onClick={focusInput} size="lg">
-                지금 바로 위장 여사친 후보 확인하기
+                지금 바로 위장 여사친 찾아내기
               </PrimaryButton>
             </div>
           </CaseCard>
