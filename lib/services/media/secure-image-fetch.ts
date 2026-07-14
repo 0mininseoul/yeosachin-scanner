@@ -1,5 +1,7 @@
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { request as httpsRequest } from 'node:https';
+import { isIP, type LookupFunction } from 'node:net';
+import { Readable } from 'node:stream';
 
 export const INSTAGRAM_MEDIA_HOST_SUFFIXES = [
     'instagram.com',
@@ -29,9 +31,20 @@ export interface ResolvedAddress {
 
 export type ResolveHostname = (hostname: string) => Promise<ResolvedAddress[]>;
 
+export interface SecureImageRequestOptions {
+    signal: AbortSignal;
+    headers?: HeadersInit;
+}
+
+export type SecureImageRequest = (
+    url: URL,
+    options: SecureImageRequestOptions,
+    addresses: readonly ResolvedAddress[]
+) => Promise<Response>;
+
 export interface SecureImageDownloadOptions {
     allowedHostSuffixes: readonly string[];
-    fetchImpl?: typeof fetch;
+    requestImpl?: SecureImageRequest;
     resolveHostname?: ResolveHostname;
     maxBytes: number;
     timeoutMs: number;
@@ -84,6 +97,80 @@ function secureImageFetchError(
 
 async function defaultResolveHostname(hostname: string): Promise<ResolvedAddress[]> {
     return lookup(hostname, { all: true, verbatim: true });
+}
+
+function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
+    return (_hostname, options, callback) => {
+        const requestedFamily = options.family || 0;
+        const eligible = requestedFamily === 0
+            ? addresses
+            : addresses.filter(({ family }) => family === requestedFamily);
+        if (eligible.length === 0) {
+            const error = new Error(
+                'No validated image address matches the requested family'
+            ) as NodeJS.ErrnoException;
+            error.code = 'ENOTFOUND';
+            callback(error, '', 0);
+            return;
+        }
+        if (options.all) {
+            callback(null, eligible.map(({ address, family }) => ({ address, family })));
+            return;
+        }
+        callback(null, eligible[0].address, eligible[0].family);
+    };
+}
+
+async function requestPinnedHttpsImage(
+    url: URL,
+    options: SecureImageRequestOptions,
+    addresses: readonly ResolvedAddress[]
+): Promise<Response> {
+    return new Promise((resolve, reject) => {
+        const headers = new Headers(options.headers);
+        headers.delete('connection');
+        headers.delete('content-length');
+        headers.delete('host');
+        headers.delete('transfer-encoding');
+
+        const request = httpsRequest(url, {
+            agent: false,
+            method: 'GET',
+            headers: Object.fromEntries(headers.entries()),
+            lookup: pinnedLookup(addresses),
+            servername: url.hostname,
+            signal: options.signal,
+        }, response => {
+            try {
+                const status = response.statusCode;
+                if (!status || status < 200 || status > 599) {
+                    response.destroy();
+                    reject(new Error('Image server returned an invalid HTTP status'));
+                    return;
+                }
+                const responseHeaders = new Headers();
+                for (let index = 0; index < response.rawHeaders.length; index += 2) {
+                    responseHeaders.append(
+                        response.rawHeaders[index],
+                        response.rawHeaders[index + 1] ?? ''
+                    );
+                }
+                resolve(new Response(
+                    Readable.toWeb(response) as ReadableStream<Uint8Array>,
+                    {
+                        status,
+                        statusText: response.statusMessage,
+                        headers: responseHeaders,
+                    }
+                ));
+            } catch (error) {
+                response.destroy();
+                reject(error);
+            }
+        });
+        request.once('error', reject);
+        request.end();
+    });
 }
 
 export function matchesAllowedHostSuffix(hostname: string, suffix: string): boolean {
@@ -186,11 +273,16 @@ function assertPositiveInteger(value: number, name: string): void {
     }
 }
 
-export async function validateAllowedRemoteImageUrl(
+interface ValidatedRemoteImageUrl {
+    url: URL;
+    addresses: ResolvedAddress[];
+}
+
+async function resolveAllowedRemoteImageUrl(
     rawUrl: string,
     allowedHostSuffixes: readonly string[],
     resolveHostname: ResolveHostname = defaultResolveHostname
-): Promise<URL> {
+): Promise<ValidatedRemoteImageUrl> {
     if (typeof rawUrl !== 'string' || rawUrl.length === 0 || rawUrl.length > 8_192) {
         secureImageFetchError('invalid_url', 'permanent', 'Image URL is invalid');
     }
@@ -242,7 +334,16 @@ export async function validateAllowedRemoteImageUrl(
             'Image host lookup failed'
         );
     }
-    if (addresses.length === 0 || addresses.some(({ address }) => !isPublicNetworkAddress(address))) {
+    const normalizedAddresses = addresses.map(({ address }) => ({
+        address,
+        family: isIP(address),
+    }));
+    if (
+        normalizedAddresses.length === 0
+        || normalizedAddresses.some(({ address, family }) => (
+            family === 0 || !isPublicNetworkAddress(address)
+        ))
+    ) {
         secureImageFetchError(
             'blocked_source',
             'permanent',
@@ -252,7 +353,19 @@ export async function validateAllowedRemoteImageUrl(
 
     parsed.hostname = hostname;
     parsed.hash = '';
-    return parsed;
+    return { url: parsed, addresses: normalizedAddresses };
+}
+
+export async function validateAllowedRemoteImageUrl(
+    rawUrl: string,
+    allowedHostSuffixes: readonly string[],
+    resolveHostname: ResolveHostname = defaultResolveHostname
+): Promise<URL> {
+    return (await resolveAllowedRemoteImageUrl(
+        rawUrl,
+        allowedHostSuffixes,
+        resolveHostname
+    )).url;
 }
 
 async function cancelBody(response: Response): Promise<void> {
@@ -269,7 +382,7 @@ export async function downloadSecureImage(
 ): Promise<SecureImageDownload> {
     const {
         allowedHostSuffixes,
-        fetchImpl = fetch,
+        requestImpl = requestPinnedHttpsImage,
         resolveHostname = defaultResolveHostname,
         maxBytes,
         timeoutMs,
@@ -300,28 +413,26 @@ export async function downloadSecureImage(
 
     try {
         let current = await Promise.race([
-            validateAllowedRemoteImageUrl(rawUrl, allowedHostSuffixes, resolveHostname),
+            resolveAllowedRemoteImageUrl(rawUrl, allowedHostSuffixes, resolveHostname),
             abortPromise,
         ]);
         const visited = new Set<string>();
 
         for (let redirectCount = 0; ; redirectCount++) {
-            if (visited.has(current.href)) {
+            if (visited.has(current.url.href)) {
                 secureImageFetchError(
                     'invalid_redirect',
                     'permanent',
                     'Image redirect loop detected'
                 );
             }
-            visited.add(current.href);
+            visited.add(current.url.href);
 
             const response = await Promise.race([
-                fetchImpl(current, {
-                    method: 'GET',
-                    redirect: 'manual',
+                requestImpl(current.url, {
                     signal: controller.signal,
                     headers,
-                }),
+                }, current.addresses),
                 abortPromise,
             ]);
 
@@ -342,9 +453,9 @@ export async function downloadSecureImage(
                         'Image redirect did not include a location'
                     );
                 }
-                const nextUrl = new URL(location, current);
+                const nextUrl = new URL(location, current.url);
                 current = await Promise.race([
-                    validateAllowedRemoteImageUrl(
+                    resolveAllowedRemoteImageUrl(
                         nextUrl.href,
                         allowedHostSuffixes,
                         resolveHostname
@@ -439,7 +550,7 @@ export async function downloadSecureImage(
             return {
                 bytes: Buffer.concat(chunks, totalBytes),
                 contentType,
-                finalUrl: current.href,
+                finalUrl: current.url.href,
             };
         }
     } catch (error) {

@@ -12,6 +12,7 @@ import {
     TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
     validateAllowedRemoteImageUrl,
     type ResolveHostname,
+    type SecureImageRequest,
 } from '@/lib/services/media/secure-image-fetch';
 
 export const DEFAULT_MAX_ANALYSIS_IMAGES = 11;
@@ -142,7 +143,7 @@ export interface PreparedAnalysisImage extends AnalysisImageCandidate {
 }
 
 interface DownloadImageOptions {
-    fetchImpl?: typeof fetch;
+    requestImpl?: SecureImageRequest;
     resolveHostname?: ResolveHostname;
     maxBytes?: number;
     timeoutMs?: number;
@@ -243,7 +244,7 @@ export async function downloadImageBytes(
     options: DownloadImageOptions = {}
 ): Promise<Buffer> {
     const {
-        fetchImpl = fetch,
+        requestImpl,
         resolveHostname,
         maxBytes = MAX_IMAGE_DOWNLOAD_BYTES,
         timeoutMs = IMAGE_DOWNLOAD_TIMEOUT_MS,
@@ -251,7 +252,7 @@ export async function downloadImageBytes(
     try {
         const downloaded = await downloadSecureImage(url, {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            fetchImpl,
+            ...(requestImpl ? { requestImpl } : {}),
             ...(resolveHostname ? { resolveHostname } : {}),
             maxBytes,
             timeoutMs,

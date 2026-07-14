@@ -6,6 +6,7 @@ import {
     SecureImageFetchError,
     validateAllowedRemoteImageUrl,
     type ResolveHostname,
+    type SecureImageRequest,
 } from './secure-image-fetch';
 
 const publicResolver: ResolveHostname = async () => [{
@@ -68,24 +69,24 @@ describe('secure image URL validation', () => {
 
 describe('secure image downloads', () => {
     it('revalidates redirects and blocks a redirect to a malicious suffix', async () => {
-        const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, {
+        const requestImpl = vi.fn<SecureImageRequest>(async () => new Response(null, {
             status: 302,
             headers: { location: 'https://instagram.com.attacker.test/private' },
         }));
 
         await expect(downloadSecureImage('https://scontent.cdninstagram.com/image.jpg', {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 100,
             timeoutMs: 1_000,
         })).rejects.toThrow('host');
-        expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(requestImpl).toHaveBeenCalledOnce();
     });
 
     it('follows an allowed redirect and returns a bounded raster response', async () => {
         const resolver = vi.fn<ResolveHostname>(publicResolver);
-        const fetchImpl = vi.fn<typeof fetch>()
+        const requestImpl = vi.fn<SecureImageRequest>()
             .mockResolvedValueOnce(new Response(null, {
                 status: 302,
                 headers: { location: 'https://scontent.fbcdn.net/final.jpg' },
@@ -99,7 +100,7 @@ describe('secure image downloads', () => {
             'https://scontent.cdninstagram.com/image.jpg',
             {
                 allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-                fetchImpl,
+                requestImpl,
                 resolveHostname: resolver,
                 maxBytes: 100,
                 timeoutMs: 1_000,
@@ -111,26 +112,61 @@ describe('secure image downloads', () => {
         expect(resolver).toHaveBeenCalledTimes(2);
     });
 
+    it('pins each request to the exact public addresses validated before connecting', async () => {
+        const resolver = vi.fn<ResolveHostname>(async hostname => hostname.includes('fbcdn')
+            ? [{ address: '8.8.4.4', family: 4 }]
+            : [
+                { address: '93.184.216.34', family: 6 },
+                { address: '2606:4700:4700::1111', family: 4 },
+            ]);
+        const requestImpl = vi.fn<SecureImageRequest>()
+            .mockResolvedValueOnce(new Response(null, {
+                status: 302,
+                headers: { location: 'https://scontent.fbcdn.net/final.jpg' },
+            }))
+            .mockResolvedValueOnce(new Response(new Uint8Array([1]), {
+                status: 200,
+                headers: { 'content-type': 'image/jpeg' },
+            }));
+
+        await downloadSecureImage('https://cdninstagram.com/image.jpg', {
+            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            requestImpl,
+            resolveHostname: resolver,
+            maxBytes: 100,
+            timeoutMs: 1_000,
+        });
+
+        expect(requestImpl.mock.calls[0]?.[2]).toEqual([
+            { address: '93.184.216.34', family: 4 },
+            { address: '2606:4700:4700::1111', family: 6 },
+        ]);
+        expect(requestImpl.mock.calls[1]?.[2]).toEqual([
+            { address: '8.8.4.4', family: 4 },
+        ]);
+        expect(resolver).toHaveBeenCalledTimes(2);
+    });
+
     it('rejects declared and streamed bodies over the byte ceiling', async () => {
-        const declared = vi.fn<typeof fetch>(async () => new Response('large', {
+        const declared = vi.fn<SecureImageRequest>(async () => new Response('large', {
             status: 200,
             headers: { 'content-type': 'image/jpeg', 'content-length': '101' },
         }));
         await expect(downloadSecureImage('https://cdninstagram.com/a.jpg', {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            fetchImpl: declared,
+            requestImpl: declared,
             resolveHostname: publicResolver,
             maxBytes: 100,
             timeoutMs: 1_000,
         })).rejects.toThrow('byte download limit');
 
-        const streamed = vi.fn<typeof fetch>(async () => new Response(new Uint8Array(101), {
+        const streamed = vi.fn<SecureImageRequest>(async () => new Response(new Uint8Array(101), {
             status: 200,
             headers: { 'content-type': 'image/jpeg' },
         }));
         await expect(downloadSecureImage('https://cdninstagram.com/b.jpg', {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            fetchImpl: streamed,
+            requestImpl: streamed,
             resolveHostname: publicResolver,
             maxBytes: 100,
             timeoutMs: 1_000,
@@ -138,13 +174,13 @@ describe('secure image downloads', () => {
     });
 
     it('rejects SVG payloads even when the host is trusted', async () => {
-        const fetchImpl = vi.fn<typeof fetch>(async () => new Response('<svg/>', {
+        const requestImpl = vi.fn<SecureImageRequest>(async () => new Response('<svg/>', {
             status: 200,
             headers: { 'content-type': 'image/svg+xml' },
         }));
         await expect(downloadSecureImage('https://cdninstagram.com/a.svg', {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 100,
             timeoutMs: 1_000,
@@ -152,13 +188,13 @@ describe('secure image downloads', () => {
     });
 
     it('aborts a stalled download at the overall timeout', async () => {
-        const fetchImpl = vi.fn<typeof fetch>((_input, init) => new Promise((_resolve, reject) => {
-            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        const requestImpl = vi.fn<SecureImageRequest>((_input, options) => new Promise((_resolve, reject) => {
+            options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
         }));
 
         await expect(downloadSecureImage('https://cdninstagram.com/stalled.jpg', {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 100,
             timeoutMs: 10,
@@ -167,10 +203,10 @@ describe('secure image downloads', () => {
 
     it('returns a bounded retry disposition without exposing the requested URL', async () => {
         const signedUrl = 'https://cdninstagram.com/private.jpg?signature=secret';
-        const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 503 }));
+        const requestImpl = vi.fn<SecureImageRequest>(async () => new Response(null, { status: 503 }));
         const failure = await downloadSecureImage(signedUrl, {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 100,
             timeoutMs: 1_000,

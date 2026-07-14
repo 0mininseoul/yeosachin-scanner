@@ -9,6 +9,7 @@ import {
     verifyImageProxyToken,
 } from '@/lib/services/media/image-proxy-token';
 import { resolveAnalysisV2ResultImageLocator } from '@/lib/services/media/result-image-resolver';
+import { createClient } from '@/lib/supabase/server';
 
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
 const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
@@ -34,7 +35,18 @@ function getPlaceholderResponse() {
     });
 }
 
-function imageCacheHeaders(expiresAt: string): Record<string, string> {
+function imageCacheHeaders(
+    expiresAt: string,
+    ownerScoped: boolean
+): Record<string, string> {
+    if (ownerScoped) {
+        return {
+            'Cache-Control': 'private, no-store',
+            'CDN-Cache-Control': 'private, no-store',
+            'Vercel-CDN-Cache-Control': 'private, no-store',
+            Vary: 'Cookie',
+        };
+    }
     const remainingSeconds = Math.max(
         0,
         Number(expiresAt) - Math.ceil(Date.now() / 1_000)
@@ -56,12 +68,17 @@ function imageCacheHeaders(expiresAt: string): Record<string, string> {
     };
 }
 
-function imageResponse(bytes: Buffer, contentType: string, expiresAt: string) {
+function imageResponse(
+    bytes: Buffer,
+    contentType: string,
+    expiresAt: string,
+    ownerScoped: boolean
+) {
     return new NextResponse(new Uint8Array(bytes), {
         headers: {
             'Content-Type': contentType,
             'Content-Length': String(bytes.byteLength),
-            ...imageCacheHeaders(expiresAt),
+            ...imageCacheHeaders(expiresAt, ownerScoped),
             'Cross-Origin-Resource-Policy': 'same-origin',
             'X-Content-Type-Options': 'nosniff',
         },
@@ -116,7 +133,11 @@ export async function GET(request: NextRequest) {
         ? verifyImageProxyToken(token, expires)
         : await (async () => {
             const locator = verifyAnalysisV2ResultImageProxyToken(token, expires);
-            return locator ? resolveAnalysisV2ResultImageLocator(locator) : null;
+            if (!locator) return null;
+            const supabase = await createClient();
+            const { data: { user }, error } = await supabase.auth.getUser();
+            if (error || !user) return null;
+            return resolveAnalysisV2ResultImageLocator(locator, user.id);
         })();
     if (!authorizedUrl) {
         return errorResponse('Image proxy token rejected', 403);
@@ -139,12 +160,18 @@ export async function GET(request: NextRequest) {
                 Referer: 'https://www.instagram.com/',
             },
         });
-        return imageResponse(direct.bytes, direct.contentType, expires);
+        return imageResponse(direct.bytes, direct.contentType, expires, isResult);
     } catch {
         // A trusted image proxy is a compatibility fallback for CDN-region failures.
     }
 
     if (Date.now() - startedAt >= IMAGE_PROXY_TOTAL_TIMEOUT_MS) {
+        return getPlaceholderResponse();
+    }
+
+    // Result CDN URLs are private server-side data. Never disclose them to a
+    // third-party compatibility proxy when the direct origin is unavailable.
+    if (isResult) {
         return getPlaceholderResponse();
     }
 
@@ -156,7 +183,7 @@ export async function GET(request: NextRequest) {
             timeoutMs: remainingTimeoutMs(),
             headers: { Accept: IMAGE_ACCEPT },
         });
-        return imageResponse(proxied.bytes, proxied.contentType, expires);
+        return imageResponse(proxied.bytes, proxied.contentType, expires, false);
     } catch {
         return getPlaceholderResponse();
     }

@@ -4,6 +4,8 @@ import { NextRequest } from 'next/server';
 const mocks = vi.hoisted(() => ({
     downloadSecureImage: vi.fn(),
     resolveResultImage: vi.fn(),
+    createClient: vi.fn(),
+    getUser: vi.fn(),
 }));
 
 vi.mock('@/lib/services/media/secure-image-fetch', async (importOriginal) => {
@@ -19,6 +21,7 @@ vi.mock('@/lib/services/media/secure-image-fetch', async (importOriginal) => {
 vi.mock('@/lib/services/media/result-image-resolver', () => ({
     resolveAnalysisV2ResultImageLocator: mocks.resolveResultImage,
 }));
+vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 
 import { GET } from '@/app/api/image-proxy/route';
 import {
@@ -46,6 +49,11 @@ describe('image proxy route authorization', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         process.env.IMAGE_PROXY_SIGNING_SECRET = SECRET;
+        mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: '223e4567-e89b-42d3-a456-426614174000' } },
+            error: null,
+        });
         mocks.downloadSecureImage.mockResolvedValue({
             bytes: Buffer.from([1, 2, 3]),
             contentType: 'image/jpeg',
@@ -122,10 +130,53 @@ describe('image proxy route authorization', () => {
             requestId: '123e4567-e89b-42d3-a456-426614174000',
             kind: 'female',
             candidateId: 'candidate-1',
-        });
+        }, '223e4567-e89b-42d3-a456-426614174000');
         expect(mocks.downloadSecureImage).toHaveBeenCalledWith(
             'https://cdninstagram.com/result-photo.jpg?oe=abc',
             expect.any(Object)
         );
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+        expect(response.headers.get('vercel-cdn-cache-control')).toBe('private, no-store');
+        expect(response.headers.get('vary')).toBe('Cookie');
+    });
+
+    it('requires an authenticated owner before resolving a result image', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+
+        const response = await GET(signedResultRequest());
+
+        expect(response.status).toBe(403);
+        expect(mocks.resolveResultImage).not.toHaveBeenCalled();
+        expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
+    });
+
+    it('never sends an owner-scoped result CDN URL to the third-party fallback', async () => {
+        mocks.downloadSecureImage.mockRejectedValueOnce(new Error('origin unavailable'));
+
+        const response = await GET(signedResultRequest());
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe('image/svg+xml');
+        expect(mocks.downloadSecureImage).toHaveBeenCalledOnce();
+        expect(mocks.downloadSecureImage.mock.calls[0]?.[0])
+            .toBe('https://cdninstagram.com/result-photo.jpg?oe=abc');
+    });
+
+    it('retains the trusted compatibility fallback for generic signed images', async () => {
+        mocks.downloadSecureImage
+            .mockRejectedValueOnce(new Error('origin unavailable'))
+            .mockResolvedValueOnce({
+                bytes: Buffer.from([4, 5, 6]),
+                contentType: 'image/jpeg',
+                finalUrl: 'https://images.weserv.nl/proxied.jpg',
+            });
+
+        const response = await GET(signedRequest());
+
+        expect(response.status).toBe(200);
+        expect(mocks.createClient).not.toHaveBeenCalled();
+        expect(mocks.downloadSecureImage).toHaveBeenCalledTimes(2);
+        expect(mocks.downloadSecureImage.mock.calls[1]?.[0])
+            .toContain('https://images.weserv.nl/?url=');
     });
 });

@@ -238,16 +238,16 @@ describe('image preprocessing', () => {
     });
 
     it('rejects declared downloads larger than the byte limit', async () => {
-        const fetchImpl = vi.fn(async () => new Response('too large', {
+        const requestImpl = vi.fn(async () => new Response('too large', {
             status: 200,
             headers: {
                 'content-length': '9',
                 'content-type': 'image/jpeg',
             },
-        })) as unknown as typeof fetch;
+        }));
 
         await expect(downloadImageBytes('https://cdninstagram.com/image.jpg', {
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 8,
         })).rejects.toMatchObject({
@@ -257,13 +257,13 @@ describe('image preprocessing', () => {
     });
 
     it('stops streamed downloads that cross the byte limit', async () => {
-        const fetchImpl = vi.fn(async () => new Response(new Uint8Array(9), {
+        const requestImpl = vi.fn(async () => new Response(new Uint8Array(9), {
             status: 200,
             headers: { 'content-type': 'image/jpeg' },
-        })) as unknown as typeof fetch;
+        }));
 
         await expect(downloadImageBytes('https://cdninstagram.com/image.jpg', {
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 8,
         })).rejects.toMatchObject({
