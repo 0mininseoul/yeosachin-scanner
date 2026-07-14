@@ -32,7 +32,7 @@ export function Wordmark({ className = "" }: { className?: string }) {
     <span className={`flex items-center gap-2.5 ${className}`}>
       <BrandMark className="text-blood" />
       <span className="text-[15px] font-extrabold leading-none tracking-tight text-fg">
-        위장 여사친 <span className="text-blood">판독기</span>
+        위장여사친 <span className="text-blood">판독기</span>
       </span>
     </span>
   );

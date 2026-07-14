@@ -198,7 +198,7 @@ export default function LandingPage() {
                 onClick={() => router.push('/mypage')}
                 className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
               >
-                기록실
+                보관함
               </button>
               <button
                 onClick={() => router.push('/analyze')}
@@ -226,9 +226,8 @@ export default function LandingPage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.55, ease: EASE }}
           >
-            <div className="mb-5 flex items-center justify-between">
-              <Eyebrow>CASE FILE · 판독 의뢰</Eyebrow>
-              <span className="num text-[11px] tracking-[0.2em] text-fg-mute">NO. 0421-KR</span>
+            <div className="mb-5">
+              <Eyebrow>국내 유일 위장여사친 판독 서비스</Eyebrow>
             </div>
 
             <h1 className="text-[26px] font-bold leading-[1.2] tracking-[-0.02em] text-fg sm:text-[34px] sm:leading-[1.14]">
@@ -295,11 +294,15 @@ export default function LandingPage() {
             </CaseCard>
           </motion.div>
 
-          {/* input + CTA */}
+          {/* input + submit */}
           <div className="mt-8 space-y-2.5">
+            <label htmlFor="ig-hero" className="block text-[15px] font-bold text-fg">
+              지금 바로 위장여사친 판독하기
+            </label>
             <div className="relative">
               <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
               <input
+                id="ig-hero"
                 ref={inputRef}
                 type="text"
                 value={igId}
@@ -313,25 +316,24 @@ export default function LandingPage() {
                 autoCorrect="off"
                 spellCheck={false}
                 aria-label="남자친구 인스타그램 아이디"
-                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
+                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-16 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
               />
+              <button
+                onClick={handleStart}
+                disabled={starting}
+                aria-label="판독하기"
+                className="absolute right-1.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center bg-blood text-white transition-colors hover:bg-blood-2 disabled:bg-panel disabled:text-fg-mute"
+              >
+                {starting ? (
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                ) : (
+                  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M5 12h13M12 5.5 18.5 12 12 18.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </button>
             </div>
             {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
-            <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
-              {starting ? (
-                <>
-                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  판독 요청 중…
-                </>
-              ) : (
-                <>
-                  지금 바로 판독하기
-                  <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
-                    →
-                  </span>
-                </>
-              )}
-            </PrimaryButton>
             <p className="text-center text-[12px] text-fg-mute">
               판독 결과는 상대방에게 절대 통보되지 않습니다.
             </p>
@@ -420,17 +422,15 @@ export default function LandingPage() {
 
         {/* ---------- bottom CTA ---------- */}
         <section className="pb-16">
-          <CaseCard bracket="var(--color-blood)" className="px-6 py-10 text-center">
+          <CaseCard bracket="var(--color-blood)" className="px-5 py-10 text-center">
             <Eyebrow className="justify-center">AI 정밀 판독</Eyebrow>
-            <h2 className="mt-4 text-[26px] font-extrabold leading-tight tracking-tight text-fg">
-              남자친구가
-              <br />
-              알려주지 않는 진실
+            <h2 className="mt-4 text-[20px] font-extrabold leading-tight tracking-tight text-fg sm:text-[26px]">
+              남자친구가 알려주지 않는 진실
             </h2>
             <p className="mt-3.5 text-[13px] leading-relaxed text-fg-dim">
               불안해하며 시간 낭비하지 마세요.
               <br />
-              AI가 5분 안에 사실을 정리해 드립니다.
+              AI가 5분 안에 진실을 파헤쳐 드립니다.
             </p>
             <div className="mt-7">
               <PrimaryButton onClick={focusInput} size="lg">
@@ -443,10 +443,12 @@ export default function LandingPage() {
         {/* ---------- footer ---------- */}
         <footer className="border-t border-line py-9">
           <div className="mb-4">
-            <span className="eyebrow">AI 위장 여사친 판독기</span>
+            <span className="eyebrow">위장여사친 판독기</span>
           </div>
           <p className="text-[12px] leading-relaxed text-fg-mute">
-            본 서비스는 AI 기술로 공개된 정보를 분석합니다. 판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
+            본 서비스는 AI 기술로 공개된 정보를 분석합니다.
+            <br />
+            판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
           </p>
           <div className="mt-5 flex gap-5 text-[12px] text-fg-dim">
             <Link href="/terms" className="transition-colors hover:text-fg">

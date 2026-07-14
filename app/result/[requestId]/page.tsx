@@ -264,7 +264,7 @@ export default function ResultPage({ params }: PageProps) {
                             onClick={() => router.push('/mypage')}
                             className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
                         >
-                            기록실
+                            보관함
                         </button>
                         <button
                             onClick={handleLogout}

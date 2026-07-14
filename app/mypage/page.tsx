@@ -4,7 +4,7 @@ import { TopBar, Eyebrow } from '@/components/case-ui';
 import AnalysisList from './analysis-list';
 
 export const metadata = {
-    title: '기록실 - AI 위장 여사친 판독기',
+    title: '보관함 - AI 위장 여사친 판독기',
 };
 
 export default async function MyPage() {
@@ -46,8 +46,8 @@ export default async function MyPage() {
             />
 
             <main className="mx-auto max-w-[480px] px-5 pt-10">
-                <Eyebrow>판독 기록 보관함</Eyebrow>
-                <h1 className="mt-3 text-[26px] font-extrabold tracking-tight text-fg">기록실</h1>
+                <Eyebrow>판독 기록</Eyebrow>
+                <h1 className="mt-3 text-[26px] font-extrabold tracking-tight text-fg">보관함</h1>
                 <p className="mt-2 text-[13px] text-fg-dim">지난 판독 기록을 확인하고 관리하세요.</p>
 
                 <div className="mt-8">
