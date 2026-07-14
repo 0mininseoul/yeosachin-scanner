@@ -244,7 +244,7 @@ bucket_security_matches() {
 }
 
 write_lifecycle_file() {
-  lifecycle_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-lifecycle.XXXXXX.json")"
+  lifecycle_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-lifecycle.XXXXXX")"
   printf '%s\n' \
     '{"rule":[{"action":{"type":"Delete"},"condition":{"age":1}}]}' \
     >"$lifecycle_file"
@@ -324,7 +324,7 @@ bucket_iam_matches() {
 
 write_exact_bucket_policy() {
   local current_policy="$1"
-  bucket_policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-bucket-iam.XXXXXX.json")"
+  bucket_policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-bucket-iam.XXXXXX")"
   jq \
     --arg member "$worker_member" \
     --arg role "$custom_role_name" '

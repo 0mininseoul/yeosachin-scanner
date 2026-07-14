@@ -472,7 +472,7 @@ written_iam_policy_file=""
 write_exact_task_identity_policy() {
   local current="$1"
   local file
-  file="$(mktemp "${TMPDIR:-/tmp}/analysis-task-sa-iam.XXXXXX.json")"
+  file="$(mktemp "${TMPDIR:-/tmp}/analysis-task-sa-iam.XXXXXX")"
   iam_policy_files+=("$file")
   jq \
     --arg enqueuer "$enqueuer_member" \
@@ -489,7 +489,7 @@ write_exact_task_identity_policy() {
 write_exact_queue_policy() {
   local current="$1"
   local file
-  file="$(mktemp "${TMPDIR:-/tmp}/analysis-queue-iam.XXXXXX.json")"
+  file="$(mktemp "${TMPDIR:-/tmp}/analysis-queue-iam.XXXXXX")"
   iam_policy_files+=("$file")
   if [[ "$RUNTIME_QUEUE_ACCESS" == "enqueue-view" ]]; then
     jq --arg enqueuer "$enqueuer_member" --arg runtime "$runtime_member" '

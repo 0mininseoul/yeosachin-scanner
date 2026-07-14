@@ -762,7 +762,7 @@ service_iam_matches() {
 
 write_exact_service_policy() {
   local current_policy="$1"
-  service_policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-run-iam.XXXXXX.json")"
+  service_policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-run-iam.XXXXXX")"
   jq \
     --arg task_member "$task_member" \
     --arg maintenance_member "$maintenance_member" '

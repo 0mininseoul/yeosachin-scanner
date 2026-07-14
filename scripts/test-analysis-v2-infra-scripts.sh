@@ -1445,4 +1445,15 @@ fi
 assert_contains "$temp_dir/queue-bound.out" \
   "ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES must be an integer from 1 through 100"
 
+for portable_mktemp_script in \
+  configure-analysis-v2-worker-identity.sh \
+  configure-analysis-v2-media-bucket.sh \
+  configure-analysis-tasks-queue.sh \
+  deploy-analysis-v2-worker.sh; do
+  if grep -Eq 'mktemp .+XXXXXX\.[A-Za-z0-9]' \
+    "$script_dir/$portable_mktemp_script"; then
+    fail "non-portable mktemp suffix found: $portable_mktemp_script"
+  fi
+done
+
 printf 'Analysis V2 infrastructure script dry-run tests passed\n'

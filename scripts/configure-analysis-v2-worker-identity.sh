@@ -516,7 +516,7 @@ written_policy_file=""
 write_exact_deployer_policy() {
   local policy="$1"
   local policy_file
-  policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-identity-iam.XXXXXX.json")"
+  policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-identity-iam.XXXXXX")"
   policy_files+=("$policy_file")
   jq --arg member "$ANALYSIS_V2_DEPLOYER_IAM_MEMBER" '
     .bindings = [{
