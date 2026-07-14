@@ -7,12 +7,21 @@ readonly CLOUD_BUILD_API="cloudbuild.googleapis.com"
 readonly ARTIFACT_REGISTRY_API="artifactregistry.googleapis.com"
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
+readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
 readonly DEFAULT_CPU="2"
 readonly DEFAULT_MEMORY="2Gi"
 readonly DEFAULT_CONCURRENCY="2"
 readonly DEFAULT_MAX_INSTANCES="6"
 readonly DEFAULT_TIMEOUT_SECONDS="300"
 readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
+readonly SERVICE_JSON_NOT_FOUND_STATUS="44"
+readonly -a APIFY_TOKEN_SLOTS=(
+  primary
+  secondary
+  tertiary
+  quaternary
+  quinary
+)
 
 mode="apply"
 reconcile_iam="false"
@@ -51,6 +60,7 @@ Required environment variables:
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
+  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
   ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT
 
 The deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL alias remains
@@ -87,8 +97,10 @@ For a first deployment, ANALYSIS_V2_WORKER_ENV_VARS_FILE is required. Runtime
 and build env files must both resolve outside ANALYSIS_V2_WORKER_SOURCE_DIR so
 source upload cannot include them. The runtime file is non-secret and rejects
 all provider and Google credential keys. Updates without it preserve existing
-non-secret variables. Every deployment reapplies exactly three numeric pinned
-Secret Manager references; `latest` and plaintext secret values are forbidden.
+non-secret variables. Every deployment reapplies numeric pinned Secret Manager
+references for Supabase, image signing, preflight identity HMAC, the selected Apify slot, and any valid
+Apify slot references retained solely to recover older provider runs. `latest`
+and plaintext secret values are forbidden.
 
 Options:
   --dry-run  Run read-only preflight checks and print required mutations.
@@ -174,10 +186,11 @@ validate_deploy_lock_bucket() {
 }
 
 validate_slot() {
-  case "$1" in
-    primary|secondary|tertiary|quaternary|quinary) ;;
-    *) die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, or quinary" ;;
-  esac
+  local allowed
+  for allowed in "${APIFY_TOKEN_SLOTS[@]}"; do
+    [[ "$1" != "$allowed" ]] || return 0
+  done
+  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, or quinary"
 }
 
 validate_numeric_version() {
@@ -278,11 +291,91 @@ verify_no_project_wide_invoker() {
   log "verified: no project-wide Cloud Run invoker binding"
 }
 
+report_cloud_run_lookup_failure() {
+  local operation="$1"
+  local status="$2"
+  local diagnostic_file="$3"
+  local category="unknown"
+  if grep -Eqi 'PERMISSION_DENIED|permission|forbidden' "$diagnostic_file"; then
+    category="permission-denied"
+  elif grep -Eqi 'UNAUTHENTICATED|authentication|credential|login' "$diagnostic_file"; then
+    category="authentication-failed"
+  elif grep -Eqi 'API.*(disabled|not enabled)|SERVICE_DISABLED' "$diagnostic_file"; then
+    category="api-disabled"
+  elif grep -Eqi 'network|connection|timeout|timed out|unavailable' "$diagnostic_file"; then
+    category="transport-unavailable"
+  elif grep -Eqi 'NOT_FOUND|not found' "$diagnostic_file"; then
+    category="not-found-race"
+  elif [[ ! -s "$diagnostic_file" ]]; then
+    category="no-diagnostic"
+  fi
+  printf 'Cloud Run service %s failed (category=%s, gcloud_status=%s); provider diagnostic was securely classified and suppressed\n' \
+    "$operation" "$category" "$status" >&2
+}
+
 service_json() {
-  gcloud run services describe "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
+  local diagnostic_file
+  local list_json
+  local list_count
+  local describe_json
+  local status
+  diagnostic_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-service-lookup.XXXXXX")"
+
+  if list_json="$(gcloud run services list \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
-    --format=json 2>/dev/null
+    "--filter=metadata.name=$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
+    --format=json 2>"$diagnostic_file")"; then
+    :
+  else
+    status="$?"
+    report_cloud_run_lookup_failure "list" "$status" "$diagnostic_file"
+    rm -f "$diagnostic_file"
+    return 1
+  fi
+  : >"$diagnostic_file"
+
+  list_count="$(jq -er \
+    --arg service "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" '
+      if type == "array"
+        and all(.[]; type == "object" and .metadata.name == $service)
+      then length
+      else error("invalid service list")
+      end
+    ' <<<"$list_json")" || {
+      printf 'Cloud Run service list returned invalid or non-exact JSON; refusing to infer absence\n' >&2
+      rm -f "$diagnostic_file"
+      return 1
+    }
+  if [[ "$list_count" == "0" ]]; then
+    rm -f "$diagnostic_file"
+    return "$SERVICE_JSON_NOT_FOUND_STATUS"
+  fi
+  if [[ "$list_count" != "1" ]]; then
+    printf 'Cloud Run service list returned %s exact matches; refusing ambiguous deployment state\n' \
+      "$list_count" >&2
+    rm -f "$diagnostic_file"
+    return 1
+  fi
+
+  if describe_json="$(gcloud run services describe "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
+    --format=json 2>"$diagnostic_file")"; then
+    :
+  else
+    status="$?"
+    report_cloud_run_lookup_failure "describe" "$status" "$diagnostic_file"
+    rm -f "$diagnostic_file"
+    return 1
+  fi
+  rm -f "$diagnostic_file"
+  jq -ce --arg service "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" '
+    select(type == "object" and .metadata.name == $service)
+  ' <<<"$describe_json" || {
+    printf 'Cloud Run service describe returned invalid or mismatched JSON\n' >&2
+    return 1
+  }
 }
 
 service_runtime_config_matches() {
@@ -298,8 +391,11 @@ service_runtime_config_matches() {
     --arg supabase_version "$supabase_secret_version" \
     --arg apify_secret "$apify_secret_id" \
     --arg apify_version "$apify_secret_version" \
+    --argjson expected_apify_refs "$expected_apify_secret_refs_json" \
     --arg image_secret "$IMAGE_SIGNING_SECRET_ID" \
     --arg image_version "$image_signing_secret_version" \
+    --arg identity_hmac_secret "$PREFLIGHT_IDENTITY_HMAC_SECRET_ID" \
+    --arg identity_hmac_version "$preflight_identity_hmac_secret_version" \
     --arg cpu "$worker_cpu" \
     --arg memory "$worker_memory" \
     --arg concurrency "$worker_concurrency" \
@@ -310,6 +406,23 @@ service_runtime_config_matches() {
       def annotation_values($key): [annotations[][$key] // empty];
       def env: (.spec.template.spec.containers[0].env // []);
       def env_names: [env[]?.name];
+      def apify_specs: [
+        {env: "APIFY_PRIMARY_API_TOKEN", secret: "ai-baram-v2-apify-primary"},
+        {env: "APIFY_SECONDARY_API_TOKEN", secret: "ai-baram-v2-apify-secondary"},
+        {env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
+        {env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
+        {env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"}
+      ];
+      def apify_env_names: [apify_specs[].env];
+      def apify_refs:
+        [env[]
+          | select(.name as $name | apify_env_names | index($name))
+          | {
+              env: .name,
+              secret: (.valueFrom.secretKeyRef.name // ""),
+              version: ((.valueFrom.secretKeyRef.key // "") | tostring)
+            }]
+        | sort_by(.env);
       def value($name): [env[] | select(.name == $name) | .value];
       def secret_ref($env_name; $secret_name; $version):
         [env[] | select(.name == $env_name)] as $entries
@@ -320,8 +433,9 @@ service_runtime_config_matches() {
       def forbidden_plaintext_names:
         [env[]
           | select(.name != "SUPABASE_SERVICE_ROLE_KEY")
-          | select(.name != $apify_env_key)
+          | select(.name as $name | apify_env_names | index($name) | not)
           | select(.name != "IMAGE_PROXY_SIGNING_SECRET")
+          | select(.name != "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
           | select(.name | test("(^|_)(SECRET|PASSWORD|CREDENTIALS?|PRIVATE_KEY|SERVICE_ROLE_KEY|API_KEY|API_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|OIDC_TOKEN|TOKEN|KEY_BASE64)$"))
           | .name];
       (.spec.template.spec.containers | length) == 1
@@ -336,7 +450,21 @@ service_runtime_config_matches() {
         and secret_ref("SUPABASE_SERVICE_ROLE_KEY"; $supabase_secret; $supabase_version)
         and secret_ref($apify_env_key; $apify_secret; $apify_version)
         and secret_ref("IMAGE_PROXY_SIGNING_SECRET"; $image_secret; $image_version)
-        and ([env[] | select(.name | test("^APIFY_.*_API_TOKEN$"))] | length) == 1
+        and secret_ref("ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET"; $identity_hmac_secret; $identity_hmac_version)
+        and (apify_refs == ($expected_apify_refs | sort_by(.env)))
+        and (apify_refs | length) >= 1
+        and (apify_refs | length) <= 5
+        and ([env[]
+          | select(.name as $name | apify_env_names | index($name))
+          | select(has("value"))] | length) == 0
+        and (apify_refs | all(.version | test("^[1-9][0-9]*$")))
+        and (apify_refs | all(
+          . as $ref | apify_specs | any(
+            .env == $ref.env and .secret == $ref.secret
+          )
+        ))
+        and ([env[] | select(.name | test("^APIFY_.*_API_TOKEN$"))] | length)
+          == (apify_refs | length)
         and (forbidden_plaintext_names | length) == 0
         and (env_names | length) == (env_names | unique | length)
         and ([env_names[] | select(
@@ -397,24 +525,220 @@ service_runtime_matches() {
 
 service_has_forbidden_plaintext_credential() {
   local config="$1"
-  jq -e \
-    --arg apify_env_key "$apify_env_key" '
-    [.spec.template.spec.containers[]?.env[]?
+  jq -e '
+    def containers: (.spec.template.spec.containers // .spec.containers // []);
+    def allowed_apify_env_names: [
+      "APIFY_PRIMARY_API_TOKEN",
+      "APIFY_SECONDARY_API_TOKEN",
+      "APIFY_TERTIARY_API_TOKEN",
+      "APIFY_QUATERNARY_API_TOKEN",
+      "APIFY_QUINARY_API_TOKEN"
+    ];
+    [containers[]?.env[]?
       | select(
           (.name == "SUPABASE_SERVICE_ROLE_KEY"
-            or .name == $apify_env_key
-            or .name == "IMAGE_PROXY_SIGNING_SECRET")
+            or (.name as $name | allowed_apify_env_names | index($name))
+            or .name == "IMAGE_PROXY_SIGNING_SECRET"
+            or .name == "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
           and has("value")
         )
       | .name] as $plaintext_secret_refs
-    | [.spec.template.spec.containers[]?.env[]?
+    | [containers[]?.env[]?
         | select(.name | test("(^|_)(SECRET|PASSWORD|CREDENTIALS?|PRIVATE_KEY|SERVICE_ROLE_KEY|API_KEY|API_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|OIDC_TOKEN|TOKEN|KEY_BASE64)$"))
         | select(.name != "SUPABASE_SERVICE_ROLE_KEY")
-        | select(.name != $apify_env_key)
+        | select(.name as $name | allowed_apify_env_names | index($name) | not)
         | select(.name != "IMAGE_PROXY_SIGNING_SECRET")
+        | select(.name != "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
         | .name] as $other_credentials
     | ($plaintext_secret_refs | length) > 0 or ($other_credentials | length) > 0
   ' <<<"$config" >/dev/null
+}
+
+verify_existing_preflight_identity_hmac_ref() {
+  local config="$1"
+  local surface="$2"
+  jq -e \
+    --arg secret "$PREFLIGHT_IDENTITY_HMAC_SECRET_ID" \
+    --arg version "$preflight_identity_hmac_secret_version" '
+      def containers: (.spec.template.spec.containers // .spec.containers // []);
+      [containers[]?.env[]?
+        | select(.name == "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")] as $entries
+      | ($entries | length) == 1
+          and ($entries[0] | has("value") | not)
+          and $entries[0].valueFrom.secretKeyRef.name == $secret
+          and (($entries[0].valueFrom.secretKeyRef.key | tostring) | test("^[1-9][0-9]*$"))
+          and ($entries[0].valueFrom.secretKeyRef.key | tostring) == $version
+    ' <<<"$config" >/dev/null \
+    || die "$surface existing preflight identity HMAC reference is invalid or its numeric version changed; it must be exactly one canonical ref at the requested numeric version; production in-place rotation is blocked until a DB-backed drain audit path exists"
+}
+
+apify_identity_for_existing_config() {
+  local config="$1"
+  jq -ce \
+    '
+      def containers: (.spec.template.spec.containers // .spec.containers // []);
+      def env: (containers[0].env // []);
+      def specs: [
+        {slot: "primary", env: "APIFY_PRIMARY_API_TOKEN", secret: "ai-baram-v2-apify-primary"},
+        {slot: "secondary", env: "APIFY_SECONDARY_API_TOKEN", secret: "ai-baram-v2-apify-secondary"},
+        {slot: "tertiary", env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
+        {slot: "quaternary", env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
+        {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"}
+      ];
+      [env[] | select(.name | test("^APIFY_.*_API_TOKEN$"))] as $entries
+      | [$entries[].name] as $names
+      | [env[] | select(.name == "ANALYSIS_V2_APIFY_API_TOKEN_SLOT") | .value]
+          as $runtime_slots
+      | ($runtime_slots[0] // "") as $runtime_slot
+      | [specs[] | select(.slot == $runtime_slot)] as $runtime_specs
+      | [$entries[] | select(.name == ($runtime_specs[0].env // ""))]
+          as $runtime_refs
+      | if (containers | length) != 1 then error("invalid container count")
+        elif ($entries | length) < 1 or ($entries | length) > 5
+          then error("invalid Apify ref count")
+        elif ($names | length) != ($names | unique | length)
+          then error("duplicate Apify ref")
+        elif ($runtime_slots | length) != 1 or ($runtime_specs | length) != 1
+          then error("invalid active Apify slot")
+        elif ($entries | all(
+          . as $entry
+          | ($entry | has("value") | not)
+            and (($entry.valueFrom.secretKeyRef.key // "" | tostring) | test("^[1-9][0-9]*$"))
+            and ([specs[]
+              | select(.env == $entry.name)
+              | .secret] == [($entry.valueFrom.secretKeyRef.name // "")])
+        ) | not) then error("invalid Apify ref")
+        elif ($runtime_refs | length) != 1
+          then error("active Apify slot has no exact ref")
+        else {
+          runtimeSlot: $runtime_slot,
+          refs: ([$entries[] | {
+            env: .name,
+            secret: .valueFrom.secretKeyRef.name,
+            version: (.valueFrom.secretKeyRef.key | tostring)
+          }] | sort_by(.env))
+        }
+        end
+    ' <<<"$config"
+}
+
+verify_existing_service_secret_identity() {
+  local latest_config="$1"
+  local active_config="$2"
+  local latest_identity
+  local active_identity
+
+  service_has_forbidden_plaintext_credential "$latest_config" \
+    && die "deployed worker contains a forbidden plaintext provider or credential value in the latest Cloud Run service template"
+  service_has_forbidden_plaintext_credential "$active_config" \
+    && die "deployed worker contains a forbidden plaintext provider or credential value in the active known-good Cloud Run revision"
+  verify_existing_preflight_identity_hmac_ref "$latest_config" \
+    "latest Cloud Run service template"
+  verify_existing_preflight_identity_hmac_ref "$active_config" \
+    "active known-good Cloud Run revision"
+
+  latest_identity="$(apify_identity_for_existing_config "$latest_config")" \
+    || die "existing worker Apify references are invalid or the selected slot version changed in the latest Cloud Run service template; active and latest identities must agree, and same-slot overwrite can strand unresolved runs and account identity"
+  active_identity="$(apify_identity_for_existing_config "$active_config")" \
+    || die "existing worker Apify references are invalid or the selected slot version changed in the active known-good Cloud Run revision; active and latest identities must agree, and same-slot overwrite can strand unresolved runs and account identity"
+  jq -ne \
+    --arg requested_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
+    --arg requested_env "$apify_env_key" \
+    --arg requested_secret "$apify_secret_id" \
+    --arg requested_version "$apify_secret_version" \
+    --argjson latest "$latest_identity" \
+    --argjson active "$active_identity" '
+      def requested_ref($identity):
+        [$identity.refs[] | select(.env == $requested_env)];
+      def requested_ref_is_exact($identity):
+        requested_ref($identity) == [{
+          env: $requested_env,
+          secret: $requested_secret,
+          version: $requested_version
+        }];
+      ([$active.refs[]
+          | select(. as $ref | $latest.refs | index($ref) | not)] | length) == 0
+        and ($latest.runtimeSlot == $active.runtimeSlot
+          or $latest.runtimeSlot == $requested_slot)
+        and (requested_ref($latest) | length) <= 1
+        and ((requested_ref($latest) | length) == 0
+          or requested_ref_is_exact($latest))
+        and ($latest.runtimeSlot != $requested_slot
+          or requested_ref_is_exact($latest))
+        and ($active.runtimeSlot != $requested_slot
+          or requested_ref_is_exact($active))
+    ' >/dev/null \
+    || die "existing worker Apify references are invalid or the selected slot version changed; active and latest identities must agree, latest may not drop an active recovery reference, and same-slot overwrite can strand unresolved runs and account identity"
+}
+
+prepare_apify_secret_assignments() {
+  local config="${1:-}"
+  local retained_refs='[]'
+  if [[ -n "$config" ]]; then
+    retained_refs="$(jq -ce \
+      --arg selected_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
+      --arg selected_version "$apify_secret_version" '
+        . as $config
+        | def env: ($config.spec.template.spec.containers[0].env // []);
+        def specs: [
+          {slot: "primary", env: "APIFY_PRIMARY_API_TOKEN", secret: "ai-baram-v2-apify-primary"},
+          {slot: "secondary", env: "APIFY_SECONDARY_API_TOKEN", secret: "ai-baram-v2-apify-secondary"},
+          {slot: "tertiary", env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
+          {slot: "quaternary", env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
+          {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"}
+        ];
+        def entries($name): [env[] | select(.name == $name)];
+        if (specs | all(entries(.env) | length <= 1)) then
+          (specs[] | select(.slot == $selected_slot)) as $selected
+          | if (entries($selected.env) | length) == 0 then .
+            elif (entries($selected.env) | length) == 1
+              and (entries($selected.env)[0] | has("value") | not)
+              and entries($selected.env)[0].valueFrom.secretKeyRef.name == $selected.secret
+              and ((entries($selected.env)[0].valueFrom.secretKeyRef.key | tostring) == $selected_version)
+            then .
+            else error("selected Apify slot version is immutable")
+            end
+          |
+          [specs[]
+            | select(.slot != $selected_slot)
+            | . as $spec
+            | entries($spec.env)[]
+            | select(
+                (has("value") | not)
+                and .valueFrom.secretKeyRef.name == $spec.secret
+                and ((.valueFrom.secretKeyRef.key | tostring) | test("^[1-9][0-9]*$"))
+              )
+            | {
+                env: $spec.env,
+                secret: $spec.secret,
+                version: (.valueFrom.secretKeyRef.key | tostring)
+              }
+          ] as $valid
+          | ([specs[]
+              | select(.slot != $selected_slot)
+              | select((entries(.env) | length) == 1)] | length) == ($valid | length)
+            or error("invalid recovery reference")
+          | $valid
+        else error("duplicate Apify token environment variable")
+        end
+      ' <<<"$config")" \
+      || die "existing worker Apify references are invalid or the selected slot version changed; same-slot overwrite can strand unresolved runs and account identity"
+  fi
+
+  expected_apify_secret_refs_json="$(jq -cn \
+    --arg selected_env "$apify_env_key" \
+    --arg selected_secret "$apify_secret_id" \
+    --arg selected_version "$apify_secret_version" \
+    --argjson retained "$retained_refs" '
+      ($retained + [{
+        env: $selected_env,
+        secret: $selected_secret,
+        version: $selected_version
+      }]) | sort_by(.env)
+    ')"
+  apify_secret_assignments="$(jq -r '
+      map("\(.env)=\(.secret):\(.version)") | join(",")
+    ' <<<"$expected_apify_secret_refs_json")"
 }
 
 service_origin() {
@@ -539,12 +863,12 @@ ensure_worker_endpoint_env() {
   local config
   local origin
   local -a staging_args=(--no-traffic)
-  if ! config="$(service_json)"; then
-    [[ "$mode" == "dry-run" ]] \
-      || die "Cloud Run worker is unavailable for endpoint configuration"
+  if [[ "$mode" == "dry-run" && "$initial_deployment" == "true" ]]; then
     log "[dry-run] canonical Cloud Run task targets will be set after source deployment"
     return 0
   fi
+  config="$(service_json)" \
+    || die "Cloud Run worker is unavailable for endpoint configuration"
   origin="$(service_origin "$config")" \
     || die "Cloud Run worker has no canonical HTTPS URL"
   [[ "$origin" =~ ^https://[a-z0-9.-]+$ ]] \
@@ -760,7 +1084,7 @@ build_deploy_args() {
     "--revision-suffix=$build_revision_suffix"
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha"
     '--description=Private durable Analysis V2 Cloud Tasks worker'
-    "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SECRET_ID:$supabase_secret_version,$apify_env_key=$apify_secret_id:$apify_secret_version,IMAGE_PROXY_SIGNING_SECRET=$IMAGE_SIGNING_SECRET_ID:$image_signing_secret_version"
+    "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SECRET_ID:$supabase_secret_version,$apify_secret_assignments,IMAGE_PROXY_SIGNING_SECRET=$IMAGE_SIGNING_SECRET_ID:$image_signing_secret_version,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=$PREFLIGHT_IDENTITY_HMAC_SECRET_ID:$preflight_identity_hmac_secret_version"
     '--quiet'
   )
 
@@ -778,16 +1102,56 @@ build_deploy_args() {
   fi
 }
 
+resolve_known_good_service_revision() {
+  local config="$1"
+  known_good_revision="$(jq -er '
+    [.status.traffic[]? | select((.percent // 0) > 0)] as $traffic
+    | if (($traffic | length) == 1
+        and ($traffic[0].percent | tonumber) == 100
+        and ($traffic[0].revisionName // "") != "")
+      then $traffic[0].revisionName
+      else error("ambiguous traffic")
+      end
+  ' <<<"$config")" \
+    || die "existing Cloud Run traffic must be one known-good revision at 100% before deployment"
+  known_good_config="$(revision_json "$known_good_revision")" \
+    || die "known-good Cloud Run revision was not observable"
+  revision_is_ready "$known_good_config" "$known_good_revision" \
+    || die "known-good Cloud Run traffic revision is not Ready"
+  if bootstrap_revision_is_execution_disabled "$known_good_config"; then
+    known_good_is_bootstrap="true"
+    log "active known-good revision is an execution-disabled bootstrap rollback revision"
+  fi
+  known_good_recovery_enabled="$(jq -r '
+    def containers: (.spec.containers // .spec.template.spec.containers // []);
+    [containers[0].env[]?
+      | select(.name == "ANALYSIS_V2_RECOVERY_ENABLED") | .value][0] // "false"
+  ' <<<"$known_good_config")"
+  [[ "$known_good_recovery_enabled" == "true" \
+    || "$known_good_recovery_enabled" == "false" ]] \
+    || die "known-good revision has an invalid recovery gate"
+  log "recorded known-good rollback revision: $known_good_revision"
+}
+
 deploy_or_verify_service() {
   local existing="false"
   local config=""
   local latest_ready=""
+  local lookup_status="0"
   if config="$(service_json)"; then
     existing="true"
-    service_has_forbidden_plaintext_credential "$config" \
-      && die "deployed worker contains a forbidden plaintext provider or credential value"
+    resolve_known_good_service_revision "$config"
+    verify_existing_service_secret_identity "$config" "$known_good_config"
+    prepare_apify_secret_assignments "$config"
+  else
+    lookup_status="$?"
+    if [[ "$lookup_status" == "$SERVICE_JSON_NOT_FOUND_STATUS" ]]; then
+      initial_deployment="true"
+      prepare_apify_secret_assignments
+    else
+      die "Cloud Run worker lookup failed; refusing to infer a first deployment"
+    fi
   fi
-  [[ "$existing" != "false" ]] || initial_deployment="true"
 
   if [[ "$mode" == "check" ]]; then
     [[ "$existing" == "true" ]] || die "Cloud Run worker does not exist"
@@ -814,33 +1178,6 @@ deploy_or_verify_service() {
   fi
 
   if [[ "$existing" == "true" ]]; then
-    known_good_revision="$(jq -er '
-      [.status.traffic[]? | select((.percent // 0) > 0)] as $traffic
-      | if (($traffic | length) == 1
-          and ($traffic[0].percent | tonumber) == 100
-          and ($traffic[0].revisionName // "") != "")
-        then $traffic[0].revisionName
-        else error("ambiguous traffic")
-        end
-    ' <<<"$config")" \
-      || die "existing Cloud Run traffic must be one known-good revision at 100% before deployment"
-    known_good_config="$(revision_json "$known_good_revision")" \
-      || die "known-good Cloud Run revision was not observable"
-    revision_is_ready "$known_good_config" "$known_good_revision" \
-      || die "known-good Cloud Run traffic revision is not Ready"
-    if bootstrap_revision_is_execution_disabled "$known_good_config"; then
-      known_good_is_bootstrap="true"
-      log "active known-good revision is an execution-disabled bootstrap rollback revision"
-    fi
-    known_good_recovery_enabled="$(jq -r '
-      def containers: (.spec.containers // .spec.template.spec.containers // []);
-      [containers[0].env[]?
-        | select(.name == "ANALYSIS_V2_RECOVERY_ENABLED") | .value][0] // "false"
-    ' <<<"$known_good_config")"
-    [[ "$known_good_recovery_enabled" == "true" \
-      || "$known_good_recovery_enabled" == "false" ]] \
-      || die "known-good revision has an invalid recovery gate"
-    log "recorded known-good rollback revision: $known_good_revision"
     if [[ "$known_good_is_bootstrap" == "true" ]]; then
       log "manual rollback step 1: pause recovery and retention Scheduler jobs"
       log "manual rollback step 2: gcloud run services update-traffic $ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE --project=$ANALYSIS_V2_TASKS_PROJECT --region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION --to-revisions=$known_good_revision=100"
@@ -903,7 +1240,7 @@ configure_queue_and_oidc() {
   [[ -f "$queue_script" ]] || die "configure-analysis-v2-tasks-queue.sh is missing"
   [[ -f "$preflight_script" ]] || die "configure-preflight-tasks-queue.sh is missing"
 
-  if [[ "$operation_mode" == "dry-run" ]] && ! service_json >/dev/null; then
+  if [[ "$operation_mode" == "dry-run" && "$initial_deployment" == "true" ]]; then
     print_command bash "$queue_script" --dry-run
     print_command bash "$preflight_script" --dry-run
     log "[dry-run] V2 and preflight queue/OIDC checks will run after the worker service exists"
@@ -1028,7 +1365,7 @@ configure_maintenance() {
   [[ "$operation_mode" == "check" ]] && maintenance_args+=(--check)
   [[ "$reconcile_jobs" == "true" && "$operation_mode" != "check" ]] \
     && maintenance_args+=(--reconcile-jobs)
-  if [[ "$operation_mode" == "dry-run" ]] && ! service_json >/dev/null; then
+  if [[ "$operation_mode" == "dry-run" && "$initial_deployment" == "true" ]]; then
     print_command env "ANALYSIS_V2_RECOVERY_ENABLED=$gate_value" \
       bash "$maintenance_script" "${maintenance_args[@]}"
     log "[dry-run] maintenance scheduler checks will run after the worker service exists"
@@ -1302,7 +1639,8 @@ for name in \
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION \
-  ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION; do
+  ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION \
+  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION; do
   required_env "$name"
 done
 required_env ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT
@@ -1341,6 +1679,7 @@ readonly apify_secret_id="ai-baram-v2-apify-$ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
 readonly supabase_secret_version="$ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION"
 readonly apify_secret_version="$ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION"
 readonly image_signing_secret_version="$ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION"
+readonly preflight_identity_hmac_secret_version="$ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION"
 
 [[ -z "${ANALYSIS_V2_WORKER_EXECUTION_ENABLED:-}" ]] \
   || die "ANALYSIS_V2_WORKER_EXECUTION_ENABLED was removed; set ANALYSIS_V2_WORKER_ENABLED and ANALYSIS_V2_RECOVERY_ENABLED separately"
@@ -1361,6 +1700,8 @@ validate_numeric_version "$apify_secret_version" \
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
 validate_numeric_version "$image_signing_secret_version" \
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
+validate_numeric_version "$preflight_identity_hmac_secret_version" \
+  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
 [[ "$worker_enabled" == "true" || "$worker_enabled" == "false" ]] \
   || die "ANALYSIS_V2_WORKER_ENABLED must be true or false"
 [[ "$recovery_enabled" == "true" || "$recovery_enabled" == "false" ]] \

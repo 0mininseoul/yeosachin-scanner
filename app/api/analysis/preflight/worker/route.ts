@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { processPreflight } from '@/lib/services/analysis/preflight';
+import {
+    classifyPreflightWorkerFailure,
+    processPreflight,
+} from '@/lib/services/analysis/preflight';
 import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -56,8 +59,16 @@ export async function POST(request: Request) {
             })
             : await processPreflight(parsed.data.preflightId);
         return NextResponse.json({ status: outcome });
-    } catch {
-        console.error('Preflight worker failed.');
+    } catch (error) {
+        const failure = classifyPreflightWorkerFailure(error);
+        console.error(JSON.stringify({
+            event: 'preflight_worker_failed',
+            operation: 'kind' in parsed.data ? 'fresh_admission' : 'profile',
+            category: failure.category,
+            retryable: failure.retryable,
+            httpStatus: failure.httpStatus,
+            workerAttemptCount: failure.workerAttemptCount,
+        }));
         return NextResponse.json({ code: 'ANALYSIS_FAILED' }, { status: 500 });
     }
 }

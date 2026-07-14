@@ -14,7 +14,7 @@ Build V2 beside the existing pipeline and move new test requests behind a featur
 
 V2 has four architectural changes:
 
-1. A free, self-hosted-only target preflight runs before payment or paid crawling.
+1. A pre-payment, selfhosted-first target preflight runs before full analysis. Only a classified selfhosted provider failure may use one bounded Apify profile-summary fallback.
 2. Analysis becomes a resumable Cloud Tasks DAG instead of one request-wide sequential state machine.
 3. Profile crawling checkpoints each username and sends only unresolved usernames to the paid fallback.
 4. Gender triage, feature analysis, interaction evidence, score classification, and narrative generation become separate versioned stages with explicit contracts.
@@ -25,7 +25,7 @@ V2 has four architectural changes:
 
 ```text
 target username submitted
-  -> self-hosted-only target preflight starts immediately
+  -> selfhosted-first target preflight starts immediately
   -> girlfriend username is entered or explicitly skipped while preflight runs
   -> target avatar, username, bio and relationship counts are shown
   -> server highlights the eligible plan; all plans remain visible
@@ -137,7 +137,7 @@ The previous `0_min._.00` canaries did not show a total self-hosted crawler fail
 ```text
 Vercel UI/API
   |
-  +-- preflight API -- self-hosted target profile only -- Supabase preflight
+  +-- preflight API -- selfhosted-first target summary, bounded fallback -- Supabase preflight
   |
   +-- entitlement/payment boundary
              |
@@ -236,9 +236,10 @@ type PreflightStatusV1 =
   | { schemaVersion: 1; preflightId: string; status: 'blocked'; code: string };
 ```
 
-- `POST` persists the preflight, enqueues a free target-profile job, and returns `PreflightAcceptedV1` immediately. `GET /api/analysis/preflight/:id` returns `PreflightStatusV1`.
-- The Cloud Run worker uses the self-hosted profile provider only with `fallback=false`, so target preflight and girlfriend input genuinely run in parallel and use the selected dynamic GCP egress path.
-- No relationship, interaction, Gemini, or paid-provider ledger rows.
+- `POST` persists the preflight, enqueues a target-profile job, and returns `PreflightAcceptedV1` immediately. `GET /api/analysis/preflight/:id` returns `PreflightStatusV1`.
+- The Cloud Run worker tries the logged-out selfhosted summary first. Only a classified selfhosted provider failure may enter one Apify profile-summary fallback per preflight; explicit selfhosted not-found does not fallback.
+- The fallback is reserved before Actor start, capped by `maxTotalChargeUsd=$0.0026`, and retried only by resuming the stored run ID. Settled usage is reconciled by an authenticated read no earlier than 30 seconds later, including for expired or abandoned preflights.
+- Preflight creates no relationship, interaction, or Gemini usage. It creates a paid-provider ledger row only when the bounded fallback is reserved, and neither provider receives an Instagram login cookie or session.
 - Owner scoped, idempotent, 30-minute TTL, signed image proxy only.
 
 `PATCH /api/analysis/preflight/:id`
@@ -299,17 +300,20 @@ Additive migration first; V1 active requests continue on legacy tables and route
 
 1. `analysis_preflights`
    - owner, target snapshot, required plan, exclusion, status, idempotency key, expiry, pricing version.
-2. `analysis_pipeline_jobs`
+2. `analysis_preflight_provider_runs`
+   - PII-free reservation and cost ledger for the single bounded Apify target-profile summary fallback, including run ID, credential slot, fixed ceiling, terminal state, provider finish time, and delayed actual usage. Period cost uses the long-lived aggregate RPC plus current unsettled maximum exposure, never a direct ledger sum.
+   - Target identities use a domain-separated HMAC with the dedicated, stable `ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET`; it is not an auth, image, or provider secret.
+3. `analysis_pipeline_jobs`
    - request, job key, track, kind, batch, status, input hash, lease fencing token, attempt count, timestamps, error code.
-3. `analysis_profile_fetch_results`
+4. `analysis_profile_fetch_results`
    - request, username, source (`cache/selfhosted/apify`), status, bounded profile/media snapshot, failure category, capture time.
-4. `analysis_candidate_ai_results`
+5. `analysis_candidate_ai_results`
    - request, username, stage (`triage/features/partner_safety`), model/thinking/prompt/schema versions, input hash, strict result.
-5. `analysis_target_interactors`
+6. `analysis_target_interactors`
    - bounded raw target-post liker/comment staging collected before gender is known; service-role only and purged at terminal state.
-6. `analysis_progress_state` and `analysis_progress_events`
+7. `analysis_progress_state` and `analysis_progress_events`
    - owner-readable sanitized state/events with monotonic revision and sequence.
-7. `analysis_v2_active_profile_heartbeats`
+8. `analysis_v2_active_profile_heartbeats`
    - service-only masked profile-start heartbeats, one per live profile job; owner progress reads project only the latest-started live row.
 
 ### Existing-table extensions
@@ -336,10 +340,15 @@ All new staging tables deny anon/authenticated reads. Only sanitized progress an
 Implementation status: complete on the backend branch. The migration remains unapplied until the
 test-project integration gate in Phase I.
 
+The original Phase B acceptance required zero paid-provider usage. The current operational decision
+supersedes that point only: a classified selfhosted provider failure may use one bounded Apify
+profile-summary fallback without Instagram login cookies. Selfhosted success and explicit
+selfhosted not-found still produce zero paid-provider runs.
+
 1. Add migration, RLS, expiry, and idempotency for preflights.
 2. Add asynchronous preflight POST/GET, self-hosted Cloud Run job, and exclusion route.
 3. Add an internal signed test entitlement; keep payment out of scope.
-4. Ensure preflight creates zero Gemini, relationship, interaction, or paid-provider usage.
+4. Ensure preflight creates zero Gemini, relationship, and interaction usage. Assert zero paid-provider runs on selfhosted success/not-found, or exactly one pre-reserved, `$0.0026`-capped, same-run-resumable Apify summary fallback after an eligible classified failure.
 
 ### Phase C: V2 job foundation
 
@@ -504,7 +513,8 @@ Required frontend fixtures before live integration:
 
 ### Performance
 
-- Preflight p95 under five seconds on cache miss.
+- Selfhosted-success preflight p95 under five seconds on cache miss.
+- A worker attempt that starts or resumes the Apify fallback has a 105-second provider hard deadline; fallback latency is measured separately from the selfhosted-success p95.
 - First confirmed useful progress fact under 60 seconds.
 - Full result p95 target under 300 seconds for each enabled plan at its advertised limit.
 - Higher plans remain disabled for launch if their load test misses the five-minute gate.
@@ -512,7 +522,8 @@ Required frontend fixtures before live integration:
 
 ### Cost
 
-- Preflight produces zero paid-provider and Gemini cost.
+- Preflight always produces zero Gemini cost. Selfhosted success/not-found produces zero paid-provider cost; an eligible classified selfhosted failure may produce one Apify summary run capped at `$0.0026`, even when fallback ultimately reports that the target is missing.
+- Abandoned or expired preflight fallback spend remains part of total acquisition cost and is allocated across paid conversions rather than discarded from unit economics.
 - Every paid provider run has expectation, run ID, credential slot, input hash, actual/ceiling cost, and terminal reconciliation.
 - Every Gemini call records stage, model, thinking, image count, latency, tokens, cache hit, and estimated cost.
 - The measured 95th percentile cost for all three plans fits the price catalog before payment work starts.
@@ -521,7 +532,7 @@ Required frontend fixtures before live integration:
 
 | Failure | User state | Rescue |
 |---|---|---|
-| target missing/private | preflight blocked | no charge; correct username |
+| target missing/private | preflight blocked | no checkout/user charge; if the bounded fallback ran, operator cost may reach `$0.0026`; correct username |
 | target count exceeds Plus | unsupported | waitlist/manual quote |
 | count drifts over paid scope | upgrade required | stop before paid Actor; upgrade/refund |
 | relationship coverage below 99% | processing failed | resume same run or one configured fallback; no partial result |
@@ -548,7 +559,7 @@ Required frontend fixtures before live integration:
 ## 14. Implementation Tasks
 
 1. Contract and policy SSOT with fixtures and boundary tests.
-2. Preflight/exclusion schema, RLS, API, and zero-cost test.
+2. Preflight/exclusion schema, RLS, API, zero-cost selfhosted acceptance, and bounded single-fallback cost/idempotency tests.
 3. V2 job table, leases, dispatcher, coordinator, and terminal purge.
 4. Media-item mappers, carousel hydration, reel thumbnails, and selection tests.
 5. Per-username crawler checkpoint and unresolved-only paid fallback.

@@ -21,6 +21,8 @@ Unset `SCRAPER_*` values use the production defaults above. Explicit invalid pro
 
 `selfhosted` makes direct, unauthenticated public-profile reads only. A process-global request-start gate defaults to one start every 1.5 seconds, each request has a bounded timeout and classified retry policy, and batch concurrency defaults to one. Shared circuit breakers open on rate-limit/auth failures, repeated successful-response schema failures, or a small burst of retryable transport/5xx/timeout failures; remaining batch items then fail before entering the gate so the router can make its single Apify batch fallback. Only HTTP 404 or an explicit `data.user: null` returns `null`; every other HTTP 200 envelope and required profile field is validated before the circuit records success.
 
+The pre-payment target preflight is selfhosted-first. Only a classified selfhosted provider failure may enter one Apify profile-summary fallback per preflight, with `maxTotalChargeUsd=$0.0026`; an explicit selfhosted not-found result does not fallback. The PII-free `analysis_preflight_provider_runs` ledger is reserved before Actor start, retries resume the same stored run ID instead of starting another run, and authenticated usage is reconciled no earlier than 30 seconds after the run settles. An expired or abandoned preflight retains its run ledger until reconciliation. Neither path supplies an Instagram login cookie or session.
+
 ### FlashAPI manual diagnostic provider
 
 Host: `flashapi1.p.rapidapi.com`

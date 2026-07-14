@@ -5,6 +5,7 @@ import type { ClaimedPreflight, PreflightStore } from './preflight';
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import { processPreflight } from './preflight';
+import type { PreflightProviderRunStore } from './preflight-provider-run';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -21,6 +22,7 @@ function store(): PreflightStore {
             userId,
             targetInstagramId: 'target.name',
             accessMode: 'test_entitlement',
+            workerAttemptCount: 1,
             catalogSnapshot: {
                 plans: {
                     basic: {
@@ -55,8 +57,17 @@ function store(): PreflightStore {
     };
 }
 
+function providerRunStore(): PreflightProviderRunStore {
+    return {
+        load: vi.fn(async () => null),
+        reserve: vi.fn(),
+        checkpointStarted: vi.fn(),
+        checkpointTerminal: vi.fn(),
+    };
+}
+
 describe('preflight free-provider boundary', () => {
-    it('binds the worker directly to the count-only self-hosted capability', async () => {
+    it('keeps count-only self-hosted as primary and does not pay on primary success', async () => {
         const source = readFileSync(new URL('./preflight.ts', import.meta.url), 'utf8');
         expect(source).toContain(
             "import { getSelfHostedProfileSummary } from '@/lib/services/instagram/providers/selfhosted'"
@@ -75,11 +86,22 @@ describe('preflight free-provider boundary', () => {
             isVerified: false,
             // No latestPosts: preflight must not depend on timeline completeness.
         }));
+        const getFallbackProfile = vi.fn();
         const preflightStore = store();
 
-        await expect(processPreflight(preflightId, { store: preflightStore, getProfile }))
+        await expect(processPreflight(preflightId, {
+            store: preflightStore,
+            getProfile,
+            getFallbackProfile,
+            providerRunStore: providerRunStore(),
+            env: {
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET:
+                    Buffer.alloc(32, 21).toString('base64url'),
+            },
+        }))
             .resolves.toBe('ready');
         expect(getProfile).toHaveBeenCalledWith('target.name');
+        expect(getFallbackProfile).not.toHaveBeenCalled();
         expect(preflightStore.finalizeReady).toHaveBeenCalledOnce();
     });
 });

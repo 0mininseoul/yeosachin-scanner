@@ -28,6 +28,7 @@ export interface ApifyActorRunOptions {
     timeoutSecs: number;
     maxItems: number;
     maxTotalChargeUsd: number;
+    invocationWaitLimitSecs?: number;
 }
 
 export interface ApifyRelationshipActorDefinition {
@@ -95,6 +96,31 @@ class SharedActorSemaphore {
 
 const sharedActorSemaphore = new SharedActorSemaphore();
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+async function withinInvocationDeadline<T>(
+    pending: Promise<T>,
+    deadlineAtMs: number | undefined
+): Promise<T> {
+    if (deadlineAtMs === undefined) return pending;
+    const remainingMs = deadlineAtMs - Date.now();
+    if (!Number.isFinite(deadlineAtMs) || remainingMs <= 0) {
+        throw new Error('SCRAPING_INVOCATION_DEADLINE_ERROR');
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            pending,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error('SCRAPING_INVOCATION_DEADLINE_ERROR')),
+                    remainingMs
+                );
+            }),
+        ]);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+    }
+}
 
 export function runWithApifyActorSlot<T>(
     concurrency: number,
@@ -214,6 +240,15 @@ export async function startOrResumeApifyActor(
     ) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored maximum charge is invalid.');
     }
+    const invocationWaitLimitSecs = options.invocationWaitLimitSecs
+        ?? MAX_INVOCATION_WAIT_SECS;
+    if (
+        !Number.isInteger(invocationWaitLimitSecs)
+        || invocationWaitLimitSecs < 1
+        || invocationWaitLimitSecs > MAX_INVOCATION_WAIT_SECS
+    ) {
+        throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify invocation wait limit.');
+    }
 
     let runId = resumeRunId;
     let durablyCheckpointed = Boolean(resumeRunId);
@@ -237,13 +272,16 @@ export async function startOrResumeApifyActor(
         }
         let startedRun;
         try {
-            startedRun = await client.actor(actorId).start(input, {
-                ...(options.actorBuild ? { build: options.actorBuild } : {}),
-                timeout: options.timeoutSecs,
-                maxItems: options.maxItems,
-                maxTotalChargeUsd,
-                restartOnError: false,
-            });
+            startedRun = await withinInvocationDeadline(
+                client.actor(actorId).start(input, {
+                    ...(options.actorBuild ? { build: options.actorBuild } : {}),
+                    timeout: options.timeoutSecs,
+                    maxItems: options.maxItems,
+                    maxTotalChargeUsd,
+                    restartOnError: false,
+                }),
+                context?.invocationDeadlineAtMs
+            );
         } catch {
             // Apify does not expose an idempotency key for Actor starts. Retrying an
             // ambiguous POST can double-charge, so this error is intentionally terminal.
@@ -287,9 +325,12 @@ export async function startOrResumeApifyActor(
 
     let run;
     try {
-        run = await client.run(runId).waitForFinish({
-            waitSecs: Math.min(options.timeoutSecs, MAX_INVOCATION_WAIT_SECS),
-        });
+        run = await withinInvocationDeadline(
+            client.run(runId).waitForFinish({
+                waitSecs: Math.min(options.timeoutSecs, invocationWaitLimitSecs),
+            }),
+            context?.invocationDeadlineAtMs
+        );
     } catch {
         if (durablyCheckpointed) {
             throw new Error(

@@ -26,18 +26,44 @@ interface FetchOptions {
 
 type ProfileValidationMode = 'full' | 'admission';
 
-type FailureKind = 'auth' | 'circuit' | 'http' | 'rate_limit' | 'schema' | 'timeout' | 'transport';
+export type WebProfileFailureKind =
+    | 'auth'
+    | 'circuit'
+    | 'http'
+    | 'rate_limit'
+    | 'schema'
+    | 'timeout'
+    | 'transport';
+
+export interface WebProfileFailureClassification {
+    kind: WebProfileFailureKind;
+    retryable: boolean;
+    httpStatus: number | null;
+}
 
 class WebProfileRequestError extends Error {
     constructor(
         message: string,
-        readonly kind: FailureKind,
+        readonly kind: WebProfileFailureKind,
         readonly retryable: boolean,
-        readonly retryAfterMs?: number
+        readonly retryAfterMs?: number,
+        readonly httpStatus: number | null = null
     ) {
         super(message);
         this.name = 'WebProfileRequestError';
     }
+}
+
+/** PII-free metadata for routing and telemetry. The provider message stays private. */
+export function classifyWebProfileFailure(
+    error: unknown
+): WebProfileFailureClassification | null {
+    if (!(error instanceof WebProfileRequestError)) return null;
+    return Object.freeze({
+        kind: error.kind,
+        retryable: error.retryable,
+        httpStatus: error.httpStatus,
+    });
 }
 
 export interface WebProfileCircuitBreaker {
@@ -202,7 +228,8 @@ function responseError(
             `SCRAPING_ERROR: web_profile_info authorization failure (HTTP ${response.status}).`,
             'auth',
             false,
-            retryAfterMs
+            retryAfterMs,
+            response.status
         );
     }
     if (response.status === 429) {
@@ -210,7 +237,8 @@ function responseError(
             'SCRAPING_ERROR: web_profile_info rate limited (HTTP 429).',
             'rate_limit',
             true,
-            retryAfterMs
+            retryAfterMs,
+            response.status
         );
     }
     const retryable = response.status === 408 || response.status === 425 || response.status >= 500;
@@ -218,7 +246,8 @@ function responseError(
         `SCRAPING_ERROR: web_profile_info request failed (HTTP ${response.status}).`,
         'http',
         retryable,
-        retryAfterMs
+        retryAfterMs,
+        response.status
     );
 }
 

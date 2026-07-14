@@ -267,6 +267,8 @@ async function runAttempt<T>(
         credentialSlot: options?.providerRun?.credentialSlot,
         maxChargeUsd: options?.providerRun?.maxChargeUsd,
         startReserved: options?.providerRun?.startReserved,
+        invocationWaitLimitSecs: options?.providerRun?.invocationWaitLimitSecs,
+        invocationDeadlineAtMs: options?.providerRun?.invocationDeadlineAtMs,
         onBeforeRunStart: options?.providerRun?.onBeforeRunStart,
         onRunStarted: options?.providerRun?.onRunStarted,
         onProfileStart: options?.onProfileStart,

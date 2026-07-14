@@ -97,6 +97,10 @@ export interface ProviderRunCheckpoint extends ProviderCostRunCallbacks {
     credentialSlot?: ApifyCredentialSlot;
     maxChargeUsd?: number;
     startReserved?: boolean;
+    /** Per-invocation wait budget; it is not part of the durable billing identity. */
+    invocationWaitLimitSecs?: number;
+    /** Absolute runtime deadline for provider I/O; it is not a durable billing identity. */
+    invocationDeadlineAtMs?: number;
     onBeforeRunStart?(input: {
         logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
         actorId: string;
@@ -135,6 +139,8 @@ export interface ProviderCallContext extends ProviderCostRunCallbacks {
     credentialSlot?: ApifyCredentialSlot;
     maxChargeUsd?: number;
     startReserved?: boolean;
+    invocationWaitLimitSecs?: number;
+    invocationDeadlineAtMs?: number;
     onBeforeRunStart?(input: {
         logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
         actorId: string;

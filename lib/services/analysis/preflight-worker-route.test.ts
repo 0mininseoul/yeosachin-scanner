@@ -21,6 +21,7 @@ vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
 }));
 
 import { POST } from '@/app/api/analysis/preflight/worker/route';
+import { PreflightWorkerRetryError } from './preflight';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const dispatchToken = '123e4567-e89b-42d3-a456-426614174005';
@@ -105,9 +106,26 @@ describe('preflight worker route', () => {
     });
 
     it('returns a retryable 500 when processing fails', async () => {
-        mocks.process.mockRejectedValue(new Error('transient'));
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mocks.process.mockRejectedValue(new PreflightWorkerRetryError({
+            category: 'rate_limit',
+            retryable: true,
+            httpStatus: 429,
+        }, 2, new Error('raw target.name bearer-secret')));
         const response = await POST(request({ preflightId }));
         expect(response.status).toBe(500);
         await expect(response.json()).resolves.toEqual({ code: 'ANALYSIS_FAILED' });
+        expect(log).toHaveBeenCalledOnce();
+        const record = String(log.mock.calls[0][0]);
+        expect(JSON.parse(record)).toEqual({
+            event: 'preflight_worker_failed',
+            operation: 'profile',
+            category: 'rate_limit',
+            retryable: true,
+            httpStatus: 429,
+            workerAttemptCount: 2,
+        });
+        expect(record).not.toContain('target.name');
+        expect(record).not.toContain('bearer-secret');
     });
 });

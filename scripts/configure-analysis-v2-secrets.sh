@@ -8,6 +8,7 @@ readonly SECRET_OBSERVE_ATTEMPTS=6
 readonly SECRET_OBSERVE_RETRY_DELAY_SECONDS=1
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
+readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
 
 mode="apply"
 rotate_target=""
@@ -17,7 +18,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/configure-analysis-v2-secrets.sh [--dry-run | --check] [--rotate TARGET] [--reconcile-iam]
 
-Creates or verifies the three Analysis V2 Secret Manager resources and grants
+Creates or verifies the four Analysis V2 Secret Manager resources and grants
 the Cloud Run runtime identity resource-scoped access. Secret values are read
 only when a version must be created, and are streamed from an outside-source
 dotenv file directly to gcloud over stdin.
@@ -33,26 +34,35 @@ accepted during migration. If both names are set, they must match exactly.
 Required for creating or rotating a version:
   ANALYSIS_V2_SECRET_SOURCE_ENV_FILE
     Dotenv file outside ANALYSIS_V2_WORKER_SOURCE_DIR. It must contain
-    SUPABASE_SERVICE_ROLE_KEY, IMAGE_PROXY_SIGNING_SECRET, and the one selected
-    APIFY_<SLOT>_API_TOKEN. The file is never sourced as shell code.
+    SUPABASE_SERVICE_ROLE_KEY, IMAGE_PROXY_SIGNING_SECRET,
+    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET, and the one selected
+    APIFY_<SLOT>_API_TOKEN. The file is never sourced as shell code. The preflight
+    identity secret must be base64/base64url encoding of at least 32 random bytes.
 
 Optional exact numeric version pins:
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
+  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
 
 When a pin is omitted, exactly one enabled numeric version must be discoverable.
-`latest` is never accepted. Deployments require all three explicit pins. A
+`latest` is never accepted. Deployments require all four explicit pins. A
 create-only interrupted resource with no version history resumes its initial
 version on ordinary apply. If version history exists but every version is
 disabled, ordinary apply fails closed and an explicit rotation is required.
 
 Rotate targets:
-  supabase | apify | image-signing
+  supabase | apify | image-signing | preflight-identity-hmac
 
 Rotation is explicit and adds one enabled version without disabling the old
 version. The script prints the new non-secret numeric pin; update the deployment
-pin and redeploy before disabling the prior version.
+pin only after the matching rollout safety procedure. Apify same-slot rollout is
+blocked until unresolved provider rows are audited and the credential is retired;
+switching to another slot preserves old numeric refs for recovery. Preflight
+identity-HMAC rotation may create a new version, but the current production deploy
+path unconditionally rejects changing an existing service's numeric pin. A drain is
+only prerequisite evidence for a future DB-backed audited migration path or a new
+service, not permission for an in-place rollout. Keep every prior version enabled.
 
 Options:
   --dry-run       Validate inputs and print only sanitized intended mutations.
@@ -361,6 +371,16 @@ validate_secret_source_value() {
         console.error(`required secret source value is missing or invalid: ${key}`);
         process.exit(1);
       }
+      if (key === "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET") {
+        const raw = value.trim();
+        if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw) || raw.length % 4 === 1) process.exit(1);
+        const normalized = raw.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+        const decoded = Buffer.from(normalized + "=".repeat((4 - normalized.length % 4) % 4), "base64");
+        if (decoded.length < 32 || decoded.toString("base64").replace(/=+$/, "") !== normalized) {
+          console.error(`required secret source value is missing or invalid: ${key}`);
+          process.exit(1);
+        }
+      }
     ' "$env_key"
 }
 
@@ -544,7 +564,7 @@ while (($# > 0)); do
       ;;
     --rotate)
       shift
-      (($# > 0)) || die "--rotate requires supabase, apify, or image-signing"
+      (($# > 0)) || die "--rotate requires supabase, apify, image-signing, or preflight-identity-hmac"
       [[ -z "$rotate_target" ]] || die "choose only one rotate target"
       rotate_target="$1"
       ;;
@@ -566,8 +586,8 @@ done
 normalize_worker_runtime_identity
 
 case "$rotate_target" in
-  ''|supabase|apify|image-signing) ;;
-  *) die "--rotate requires supabase, apify, or image-signing" ;;
+  ''|supabase|apify|image-signing|preflight-identity-hmac) ;;
+  *) die "--rotate requires supabase, apify, image-signing, or preflight-identity-hmac" ;;
 esac
 [[ "$mode" != "check" || -z "$rotate_target" ]] \
   || die "--check cannot be combined with --rotate"
@@ -646,6 +666,12 @@ process_secret \
   IMAGE_PROXY_SIGNING_SECRET \
   "${ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION:-}" \
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
+process_secret \
+  preflight-identity-hmac \
+  "$PREFLIGHT_IDENTITY_HMAC_SECRET_ID" \
+  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET \
+  "${ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION:-}" \
+  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
 
 if [[ "$mode" == "dry-run" ]]; then
   log "dry-run complete: no mutations were applied and no secret value was printed"

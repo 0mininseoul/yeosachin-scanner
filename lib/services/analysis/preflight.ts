@@ -34,16 +34,31 @@ import {
     assertAnalysisTestEntitlementConfiguration,
 } from './test-entitlement';
 import { getSelfHostedProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
+import { getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
+import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
+import {
+    classifyWebProfileFailure,
+    type WebProfileFailureKind,
+} from '@/lib/services/instagram/providers/selfhosted/web-client';
 import { isInstagramUsername } from '@/lib/services/instagram/username';
 import {
     canonicalizeImageProxyUrl,
     createImageProxyPath,
 } from '@/lib/services/media/image-proxy-token';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import type { ProviderRunCheckpoint } from '@/lib/services/instagram/providers/types';
 import {
+    PREFLIGHT_PROVIDER_DEADLINE_MS,
     PREFLIGHT_WORKER_LEASE_SECONDS,
     assertPreflightRuntimePolicy,
 } from './preflight-runtime-policy';
+import {
+    bindPreflightProviderRunCheckpoint,
+    preflightProviderIdentity,
+    preflightProviderRunStore,
+    type PreflightProviderRunStore,
+} from './preflight-provider-run';
+import { preflightTargetInputHash } from './preflight-identity';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -91,7 +106,41 @@ export interface ClaimedPreflight {
     userId: string;
     targetInstagramId: string;
     accessMode: PlanAccessMode;
+    workerAttemptCount: number;
     catalogSnapshot: PreflightCatalogSnapshot;
+}
+
+export interface PreflightWorkerFailureClassification {
+    category: WebProfileFailureKind | 'configuration' | 'persistence' | 'run_pending' | 'unknown';
+    retryable: boolean;
+    httpStatus: number | null;
+    workerAttemptCount: number | null;
+}
+
+export class PreflightWorkerRetryError extends Error {
+    readonly classification: PreflightWorkerFailureClassification;
+
+    constructor(
+        classification: Omit<PreflightWorkerFailureClassification, 'workerAttemptCount'>,
+        workerAttemptCount: number,
+        cause?: unknown
+    ) {
+        super('PREFLIGHT_WORKER_RETRY', { cause });
+        this.name = 'PreflightWorkerRetryError';
+        this.classification = Object.freeze({ ...classification, workerAttemptCount });
+    }
+}
+
+export function classifyPreflightWorkerFailure(
+    error: unknown
+): PreflightWorkerFailureClassification {
+    if (error instanceof PreflightWorkerRetryError) return error.classification;
+    return Object.freeze({
+        category: 'unknown',
+        retryable: true,
+        httpStatus: null,
+        workerAttemptCount: null,
+    });
 }
 
 export interface PreflightCatalogSnapshot {
@@ -427,6 +476,13 @@ function requiredUsername(value: unknown): string {
     return value.toLowerCase();
 }
 
+function requiredWorkerAttemptCount(value: unknown): number {
+    if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 7) {
+        throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid worker attempt count.');
+    }
+    return value as number;
+}
+
 function nullableBoundedString(value: unknown, maximum: number, field: string): string | null {
     if (value === null || value === undefined) return null;
     if (typeof value !== 'string' || value.length > maximum) {
@@ -680,6 +736,7 @@ export function createSupabasePreflightStore(
                 userId: requiredUuid(row.user_id, 'user id'),
                 targetInstagramId: requiredUsername(row.target_instagram_id),
                 accessMode: requiredAccessMode(row.access_mode),
+                workerAttemptCount: requiredWorkerAttemptCount(row.worker_attempt_count),
                 catalogSnapshot: {
                     plans: planCatalogSnapshotSchema.parse(row.plan_catalog_snapshot),
                     pricingVersion: z.string()
@@ -841,30 +898,188 @@ export function buildReadyPreflightSnapshot(
     }) as ReadyPreflightSnapshot;
 }
 
+interface ClassifiedPreflightError {
+    category: PreflightWorkerFailureClassification['category'];
+    retryable: boolean;
+    httpStatus: number | null;
+    paidFallbackEligible: boolean;
+}
+
+const PREFLIGHT_FALLBACK_MAX_WAIT_SECONDS = 75;
+
+function classifyPreflightError(error: unknown): ClassifiedPreflightError {
+    const webFailure = classifyWebProfileFailure(error);
+    if (webFailure) return {
+        category: webFailure.kind,
+        retryable: webFailure.retryable,
+        httpStatus: webFailure.httpStatus,
+        paidFallbackEligible: true,
+    };
+    const message = error instanceof Error ? error.message : '';
+    if (message.startsWith('SCRAPING_RUN_PENDING_ERROR:')) {
+        return {
+            category: 'run_pending',
+            retryable: true,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
+    if (
+        message.startsWith('SCRAPING_CONFIG_ERROR:')
+        || message.startsWith('PREFLIGHT_TASKS_CONFIG_ERROR:')
+        || message.startsWith('SCRAPING_BUDGET_ERROR:')
+    ) {
+        return {
+            category: 'configuration',
+            retryable: false,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
+    if (
+        message.startsWith('PREFLIGHT_PROVIDER_RUN_VALIDATION_ERROR')
+        || message.startsWith('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT')
+        || message.startsWith('PREFLIGHT_PROVIDER_RUN_NOT_RESERVED')
+        || message.startsWith('PREFLIGHT_PROVIDER_RUN_ALREADY_RESERVED')
+        || message.startsWith('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid')
+        || message.startsWith('PREFLIGHT_PERSISTENCE_ERROR: invalid')
+    ) {
+        return {
+            category: 'persistence',
+            retryable: false,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
+    if (
+        message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+        || message.startsWith('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR:')
+        || message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+    ) {
+        return {
+            category: 'persistence',
+            retryable: true,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
+    if (message.startsWith('SCRAPING_SCHEMA_ERROR:')) {
+        return {
+            category: 'schema',
+            retryable: false,
+            httpStatus: null,
+            paidFallbackEligible: true,
+        };
+    }
+    return {
+        category: 'unknown',
+        retryable: false,
+        httpStatus: null,
+        paidFallbackEligible: false,
+    };
+}
+
+function assertMatchingProfile(profile: InstagramProfile, username: string): void {
+    if (profile.username.toLowerCase() !== username) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: provider summary username mismatch.');
+    }
+}
+
+function fallbackCallContext(
+    checkpoint: ProviderRunCheckpoint,
+    startedAt: number
+) {
+    const deadlineAtMs = startedAt + PREFLIGHT_PROVIDER_DEADLINE_MS;
+    const remainingMs = Math.max(
+        1_000,
+        deadlineAtMs - Date.now()
+    );
+    return {
+        ...checkpoint,
+        invocationDeadlineAtMs: deadlineAtMs,
+        invocationWaitLimitSecs: Math.min(
+            PREFLIGHT_FALLBACK_MAX_WAIT_SECONDS,
+            Math.max(1, Math.floor(remainingMs / 1_000))
+        ),
+        recordUsage: () => undefined,
+    };
+}
+
 export async function processPreflight(
     preflightId: string,
     dependencies: {
         store?: PreflightStore;
         getProfile?: typeof getSelfHostedProfileSummary;
+        getFallbackProfile?: typeof getApifyProfileSummary;
+        providerRunStore?: PreflightProviderRunStore;
+        env?: Record<string, string | undefined>;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
+    const providerRuns = dependencies.providerRunStore ?? preflightProviderRunStore;
     const claim = await store.claim(preflightId);
     if (!claim) return 'noop';
+    const workerStartedAt = Date.now();
     let terminalized = false;
     try {
-        assertPreflightRuntimePolicy();
-        const profile = await (dependencies.getProfile ?? getSelfHostedProfileSummary)(
-            claim.targetInstagramId
+        const inputHash = preflightTargetInputHash(
+            claim.targetInstagramId,
+            dependencies.env ?? process.env
         );
+        const existingRun = await providerRuns.load({
+            preflightId: claim.preflightId,
+            claimToken: claim.claimToken,
+            inputHash,
+        });
+
+        let profile: InstagramProfile | null;
+        if (existingRun) {
+            if (['starting', 'failed', 'aborted', 'timed_out'].includes(existingRun.status)) {
+                await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
+                terminalized = true;
+                return 'blocked';
+            }
+            const bound = await bindPreflightProviderRunCheckpoint({
+                store: providerRuns,
+                claim,
+                inputHash,
+                identity: preflightProviderIdentity(existingRun.credentialSlot),
+            });
+            profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
+                claim.targetInstagramId,
+                fallbackCallContext(bound.checkpoint, workerStartedAt)
+            );
+        } else {
+            assertPreflightRuntimePolicy(dependencies.env);
+            try {
+                profile = await (dependencies.getProfile ?? getSelfHostedProfileSummary)(
+                    claim.targetInstagramId
+                );
+                if (profile) assertMatchingProfile(profile, claim.targetInstagramId);
+            } catch (error) {
+                const failure = classifyPreflightError(error);
+                if (!failure.paidFallbackEligible) throw error;
+                const identity = preflightProviderIdentity(
+                    selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                );
+                const bound = await bindPreflightProviderRunCheckpoint({
+                    store: providerRuns,
+                    claim,
+                    inputHash,
+                    identity,
+                });
+                profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
+                    claim.targetInstagramId,
+                    fallbackCallContext(bound.checkpoint, workerStartedAt)
+                );
+            }
+        }
         if (!profile) {
             await store.finalizeBlocked(claim, 'TARGET_NOT_FOUND');
             terminalized = true;
             return 'blocked';
         }
-        if (profile.username.toLowerCase() !== claim.targetInstagramId) {
-            throw new Error('PREFLIGHT_PROFILE_ERROR: returned username does not match target.');
-        }
+        assertMatchingProfile(profile, claim.targetInstagramId);
 
         const snapshot = buildReadyPreflightSnapshot(
             profile,
@@ -880,6 +1095,16 @@ export async function processPreflight(
         terminalized = true;
         return 'ready';
     } catch (error) {
+        const failure = classifyPreflightError(error);
+        if (!terminalized && !failure.retryable) {
+            try {
+                await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
+                terminalized = true;
+                return 'blocked';
+            } catch (blockError) {
+                error = blockError;
+            }
+        }
         if (!terminalized) {
             try {
                 await store.releaseClaim(claim);
@@ -887,7 +1112,12 @@ export async function processPreflight(
                 console.error('Preflight claim release failed after a transient worker error.');
             }
         }
-        throw error;
+        const retryFailure = classifyPreflightError(error);
+        throw new PreflightWorkerRetryError({
+            category: retryFailure.category,
+            retryable: true,
+            httpStatus: retryFailure.httpStatus,
+        }, claim.workerAttemptCount, error);
     }
 }
 

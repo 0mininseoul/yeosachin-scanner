@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRequestStartGate } from './rate-limit';
 import {
+    classifyWebProfileFailure,
     createWebProfileCircuitBreaker,
     getWebProfileConfig,
     makeWebProfileAdmissionFetcher,
@@ -93,6 +94,30 @@ describe('selfhosted web profile client', () => {
         await expect(fetchProfile('first')).rejects.toThrow('rate limited');
         await expect(fetchProfile('second')).rejects.toThrow('circuit is open');
         expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('exposes only bounded routing metadata for an empty text/plain 429', async () => {
+        const fetchProfile = makeWebProfileFetcher({
+            env: env(),
+            fetchFn: vi.fn<typeof fetch>(async () => new Response('', {
+                status: 429,
+                headers: { 'content-type': 'text/plain' },
+            })),
+        });
+
+        const error = await fetchProfile('target').catch(caught => caught);
+
+        expect(classifyWebProfileFailure(error)).toEqual({
+            kind: 'rate_limit',
+            retryable: true,
+            httpStatus: 429,
+        });
+        expect(Object.keys(classifyWebProfileFailure(error) ?? {})).toEqual([
+            'kind',
+            'retryable',
+            'httpStatus',
+        ]);
+        expect(classifyWebProfileFailure(new Error('target raw response'))).toBeNull();
     });
 
     it('opens after the configured successful-response schema burst threshold', async () => {

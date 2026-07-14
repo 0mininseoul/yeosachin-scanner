@@ -1,8 +1,22 @@
 import { getWebProfileConfig } from '@/lib/services/instagram/providers/selfhosted/web-client';
+import { APIFY_PROFILE_DATASET_HEADROOM_MS } from '@/lib/services/instagram/providers/apify';
 
 export const PREFLIGHT_TASK_DISPATCH_DEADLINE_SECONDS = 120;
 export const PREFLIGHT_WORKER_LEASE_SECONDS = 120;
-export const PREFLIGHT_PROFILE_RUNTIME_BUDGET_MS = 90_000;
+export const PREFLIGHT_PROVIDER_DEADLINE_MS = 105_000;
+export const PREFLIGHT_MINIMUM_FALLBACK_START_WINDOW_MS = 5_000;
+export const PREFLIGHT_PROFILE_RUNTIME_BUDGET_MS =
+    PREFLIGHT_PROVIDER_DEADLINE_MS
+    - APIFY_PROFILE_DATASET_HEADROOM_MS
+    - PREFLIGHT_MINIMUM_FALLBACK_START_WINDOW_MS;
+
+export function fallbackStartWindowMs(
+    env: Record<string, string | undefined> = process.env
+): number {
+    return PREFLIGHT_PROVIDER_DEADLINE_MS
+        - APIFY_PROFILE_DATASET_HEADROOM_MS
+        - maximumSelfHostedProfileRuntimeMs(env);
+}
 
 export function maximumSelfHostedProfileRuntimeMs(
     env: Record<string, string | undefined> = process.env
@@ -26,7 +40,10 @@ export function assertPreflightRuntimePolicy(
     env: Record<string, string | undefined> = process.env
 ): void {
     const maximumRuntimeMs = maximumSelfHostedProfileRuntimeMs(env);
-    if (maximumRuntimeMs > PREFLIGHT_PROFILE_RUNTIME_BUDGET_MS) {
+    if (
+        maximumRuntimeMs > PREFLIGHT_PROFILE_RUNTIME_BUDGET_MS
+        || fallbackStartWindowMs(env) < PREFLIGHT_MINIMUM_FALLBACK_START_WINDOW_MS
+    ) {
         throw new Error(
             'PREFLIGHT_TASKS_CONFIG_ERROR: self-hosted profile retry policy exceeds '
             + 'the preflight worker runtime budget.'

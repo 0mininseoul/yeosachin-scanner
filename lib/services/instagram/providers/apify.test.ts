@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+    APIFY_PROFILE_ACTOR_ID,
+    APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
     APIFY_RELATIONSHIP_ACTOR_ID,
     apifyProvider,
     makeApifyProvider,
@@ -158,6 +160,47 @@ describe('apifyProvider', () => {
             .toBeLessThan(onCostRunFinished.mock.invocationCallOrder[0]);
         expect(client.run).toHaveBeenCalledWith('RunAbcd1234567890');
         expect(waitForFinish).toHaveBeenCalledWith({ waitSecs: 240 });
+    });
+
+    it('treats an Actor start deadline as ambiguous and never starts again', async () => {
+        vi.useFakeTimers();
+        try {
+            const { client, call, waitForFinish } = mockClient([]);
+            call.mockImplementation(() => new Promise(() => undefined));
+            const onBeforeRunStart = vi.fn().mockResolvedValue(undefined);
+            const onRunStarted = vi.fn();
+
+            const pending = startOrResumeApifyActor(
+                client,
+                APIFY_RELATIONSHIP_ACTOR_ID,
+                { Account: ['target'] },
+                {
+                    logicalProvider: 'apify',
+                    credentialSlot: 'primary',
+                    timeoutSecs: 300,
+                    maxItems: 1,
+                    maxTotalChargeUsd: 0.1,
+                },
+                {
+                    invocationDeadlineAtMs: Date.now() + 1_000,
+                    onBeforeRunStart,
+                    onRunStarted,
+                    recordUsage: vi.fn(),
+                }
+            );
+            const rejection = expect(pending).rejects.toThrow(
+                'SCRAPING_AMBIGUOUS_START_ERROR'
+            );
+
+            await vi.advanceTimersByTimeAsync(1_000);
+            await rejection;
+            expect(onBeforeRunStart).toHaveBeenCalledOnce();
+            expect(call).toHaveBeenCalledOnce();
+            expect(onRunStarted).not.toHaveBeenCalled();
+            expect(waitForFinish).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it('resumes a checkpointed Actor without starting or checkpointing another run', async () => {
@@ -462,8 +505,30 @@ describe('apifyProvider', () => {
         expect(abort).toHaveBeenCalledOnce();
     });
 
+    it('rejects an invalid invocation wait budget before starting an Actor', async () => {
+        const { client, call } = mockClient([]);
+
+        await expect(startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+                invocationWaitLimitSecs: 0,
+            },
+            { recordUsage: vi.fn() }
+        )).rejects.toThrow('SCRAPING_CONFIG_ERROR');
+
+        expect(call).not.toHaveBeenCalled();
+    });
+
     it('name과 지원 기능이 노출된다', () => {
         expect(apifyProvider.name).toBe('apify');
+        expect(typeof apifyProvider.getProfileSummary).toBe('function');
         expect(typeof apifyProvider.getProfile).toBe('function');
         expect(typeof apifyProvider.getFollowers).toBe('function');
         expect(typeof apifyProvider.getFollowing).toBe('function');
@@ -1130,6 +1195,112 @@ describe('apifyProvider', () => {
                 restartOnError: false,
             })
         );
+    });
+
+    it('uses a one-item 75-second bounded Actor run for a timeline-independent summary', async () => {
+        const { client, call, waitForFinish } = mockClient([{
+            ...profileItem('target'),
+            postsCount: 20,
+            latestPosts: [{ malformed: 'ignored by summary' }],
+        }]);
+        const provider = makeApifyProvider({ client, env: {} });
+        const onBeforeRunStart = vi.fn().mockResolvedValue(undefined);
+        const onRunStarted = vi.fn().mockResolvedValue(undefined);
+
+        await expect(provider.getProfileSummary!('target', {
+            credentialSlot: 'quinary',
+            maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
+            onBeforeRunStart,
+            onRunStarted,
+            recordUsage: vi.fn(),
+        })).resolves.toMatchObject({
+            username: 'target',
+            postsCount: 20,
+        });
+
+        expect(client.actor).toHaveBeenCalledWith(APIFY_PROFILE_ACTOR_ID);
+        expect(call).toHaveBeenCalledWith(
+            { usernames: ['target'] },
+            expect.objectContaining({
+                maxItems: 1,
+                maxTotalChargeUsd: 0.0026,
+                restartOnError: false,
+            })
+        );
+        expect(waitForFinish).toHaveBeenCalledWith({ waitSecs: 75 });
+        expect(onBeforeRunStart).toHaveBeenCalledWith(expect.objectContaining({
+            actorId: APIFY_PROFILE_ACTOR_ID,
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.0026,
+        }));
+    });
+
+    it('keeps a running summary retryable and resumes without another Actor start', async () => {
+        const { client, call, waitForFinish } = mockClient([profileItem('target')], 'RUNNING');
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getProfileSummary!('target', {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: APIFY_PROFILE_ACTOR_ID,
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.0026,
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+
+        expect(call).not.toHaveBeenCalled();
+        expect(waitForFinish).toHaveBeenCalledWith({ waitSecs: 75 });
+    });
+
+    it('accepts only explicit matching not-found evidence on a summary row', async () => {
+        const missing = mockClient([{ username: 'target', statusCode: 404 }]);
+        await expect(makeApifyProvider({ client: missing.client, env: {} })
+            .getProfileSummary!('target')).resolves.toBeNull();
+
+        const mismatch = mockClient([{ username: 'other', statusCode: 404 }]);
+        await expect(makeApifyProvider({ client: mismatch.client, env: {} })
+            .getProfileSummary!('target')).rejects.toThrow('username mismatch');
+    });
+
+    it('never converts an ambiguous empty summary dataset into target-not-found', async () => {
+        const durable = mockClient([]);
+        await expect(makeApifyProvider({
+            client: durable.client,
+            env: { APIFY_DATASET_READ_RETRIES: '0' },
+        }).getProfileSummary!('target', {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: APIFY_PROFILE_ACTOR_ID,
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.0026,
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+
+        const nonDurable = mockClient([]);
+        await expect(makeApifyProvider({
+            client: nonDurable.client,
+            env: { APIFY_DATASET_READ_RETRIES: '0' },
+        }).getProfileSummary!('target', {
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_INCOMPLETE_ERROR');
+    });
+
+    it('does not reserve or start a paid summary when the end-to-end deadline is too close', async () => {
+        const { client, call, waitForFinish } = mockClient([profileItem('target')]);
+        const onBeforeRunStart = vi.fn();
+
+        await expect(makeApifyProvider({ client, env: {} }).getProfileSummary!('target', {
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.0026,
+            invocationDeadlineAtMs: Date.now() + 19_000,
+            onBeforeRunStart,
+            onRunStarted: vi.fn(),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+
+        expect(onBeforeRunStart).not.toHaveBeenCalled();
+        expect(call).not.toHaveBeenCalled();
+        expect(waitForFinish).not.toHaveBeenCalled();
     });
 
     it('retries a running profile Actor by the same checkpointed run id without another start', async () => {
