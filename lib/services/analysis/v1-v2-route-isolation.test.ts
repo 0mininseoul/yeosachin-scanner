@@ -7,6 +7,33 @@ function source(relativePath: string): string {
 }
 
 describe('V1 route isolation from durable V2 requests', () => {
+    it('routes every public intake through preflight instead of the legacy start endpoint', () => {
+        const landingPage = source('app/page.tsx');
+        const analyzePage = source('app/analyze/page.tsx');
+        const preflightHook = source('hooks/useAnalysisV2Preflight.ts');
+
+        expect(landingPage).not.toContain("fetch('/api/analysis/start'");
+        expect(analyzePage).not.toContain("fetch('/api/analysis/start'");
+        expect(preflightHook).toContain("fetch('/api/analysis/preflight'");
+        expect(preflightHook).toContain("method: 'PATCH'");
+        expect(preflightHook).toContain('/entitle`');
+        expect(preflightHook).toContain('X-Analysis-Test-Entitlement');
+    });
+
+    it('preserves landing autostart through authentication and renders server plan limits', () => {
+        const landingPage = source('app/page.tsx');
+        const analyzePage = source('app/analyze/page.tsx');
+        const proxy = source('proxy.ts');
+
+        expect(landingPage).toContain('redirectTo="/analyze?autostart=1"');
+        expect(proxy).toContain('request.nextUrl.search');
+        expect(proxy).toContain("request.nextUrl.searchParams.get('redirectTo')");
+        expect(proxy).toContain('appRedirectUrlForRequest(');
+        expect(proxy).toContain('redirectResponse.cookies.set(cookie)');
+        expect(analyzePage).toContain('plan.relationshipCapacity');
+        expect(analyzePage).not.toContain("capacity: '팔로워·팔로잉 각 400명 이하'");
+    });
+
     it('never runs status-driven V1 stale cleanup for a V2 request', () => {
         const route = source('app/api/analysis/status/[requestId]/route.ts');
 
@@ -38,6 +65,9 @@ describe('V1 route isolation from durable V2 requests', () => {
         expect(progressHook).toContain("payload.progressUrl.startsWith('/api/analysis/progress/')");
         expect(progressHook).toContain('analysisV2ProgressCopy({');
         expect(progressHook).toContain('activeProfile: progress.snapshot.activeProfile');
+        expect(progressHook).toContain("table: 'analysis_progress_state'");
+        expect(progressHook).toContain("table: 'analysis_progress_events'");
+        expect(progressHook).toContain('mergeProgressEvents(');
         expect(progressPage).toContain("data.pipelineVersion === 'v2'");
         expect(progressPage).toContain("data?.pipelineVersion === 'v2'");
         expect(resultPage).toContain("result.code === 'V2_ROUTE_REQUIRED'");

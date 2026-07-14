@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { appRedirectUrlForRequest } from '@/lib/constants/app-url';
 
 export async function proxy(request: NextRequest) {
     let supabaseResponse = NextResponse.next({
@@ -44,6 +45,14 @@ export async function proxy(request: NextRequest) {
         data: { user },
     } = await supabase.auth.getUser();
 
+    const redirectWithAuthCookies = (url: URL) => {
+        const redirectResponse = NextResponse.redirect(url);
+        supabaseResponse.cookies.getAll().forEach(cookie => {
+            redirectResponse.cookies.set(cookie);
+        });
+        return redirectResponse;
+    };
+
     // 디버깅: 로그인 직후 리다이렉트된 경우인데 유저가 없으면 로그 출력
     if (request.nextUrl.searchParams.get('verified') === 'true' && !user) {
         console.error('Proxy: Login verified but NO USER FOUND.');
@@ -60,17 +69,20 @@ export async function proxy(request: NextRequest) {
     // 보호된 경로인데 로그인 안 된 경우 → 로그인 페이지로
     if (isProtectedPath && !user) {
         const url = request.nextUrl.clone();
+        const redirectTo = `${request.nextUrl.pathname}${request.nextUrl.search}`;
         url.pathname = '/login';
-        url.searchParams.delete('verified'); // 무한 루프 방지용 param 정리
-        url.searchParams.set('redirectTo', request.nextUrl.pathname);
-        return NextResponse.redirect(url);
+        url.search = '';
+        url.searchParams.set('redirectTo', redirectTo);
+        return redirectWithAuthCookies(url);
     }
 
-    // 이미 로그인된 사용자가 로그인 페이지 접근 시 → 분석 페이지로
+    // 이미 로그인된 사용자는 검증된 내부 목적지로 이동
     if (request.nextUrl.pathname === '/login' && user) {
-        const url = request.nextUrl.clone();
-        url.pathname = '/analyze';
-        return NextResponse.redirect(url);
+        const redirectUrl = appRedirectUrlForRequest(
+            request.url,
+            request.nextUrl.searchParams.get('redirectTo')
+        );
+        return redirectWithAuthCookies(redirectUrl);
     }
 
     return supabaseResponse;

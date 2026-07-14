@@ -39,6 +39,13 @@ describe('canonical app origin', () => {
         ).toString()).toBe('http://127.0.0.1:3100/result/request-1');
     });
 
+    it('preserves an authenticated landing autostart query', () => {
+        expect(appRedirectUrlForRequest(
+            'http://127.0.0.1:3000/login?redirectTo=%2Fanalyze%3Fautostart%3D1',
+            '/analyze?autostart=1'
+        ).toString()).toBe('http://127.0.0.1:3000/analyze?autostart=1');
+    });
+
     it.each([
         'https://attacker.example/path',
         '//attacker.example/path',

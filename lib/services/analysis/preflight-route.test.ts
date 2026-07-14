@@ -9,6 +9,14 @@ const mocks = vi.hoisted(() => ({
     process: vi.fn(),
     resolveDispatch: vi.fn(),
     trustedAccessMode: vi.fn(),
+    admin: {
+        from: vi.fn(),
+    },
+    adminQuery: {
+        select: vi.fn(),
+        eq: vi.fn(),
+        maybeSingle: vi.fn(),
+    },
     store: {
         createOrReplay: vi.fn(),
         findForOwner: vi.fn(),
@@ -23,7 +31,7 @@ const mocks = vi.hoisted(() => ({
     },
 }));
 
-vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('next/server', async (importOriginal) => {
     const actual = await importOriginal<typeof import('next/server')>();
@@ -64,6 +72,7 @@ import { createAnalysisTestAdmission } from './test-entitlement';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
+const consumedRequestId = '323e4567-e89b-42d3-a456-426614174000';
 const expiresAt = '2030-07-13T13:00:00.000Z';
 const taskConfig = {
     project: 'example-project',
@@ -124,6 +133,7 @@ describe('preflight owner routes', () => {
             expiresAt,
             blockedCode: null,
             readySnapshot: null,
+            exclusionDecision: 'pending',
         });
         mocks.store.reserveDispatch.mockResolvedValue({
             shouldEnqueue: true,
@@ -136,6 +146,18 @@ describe('preflight owner routes', () => {
         mocks.store.blockQueueUnavailable.mockResolvedValue(undefined);
         mocks.enqueue.mockResolvedValue('enqueued');
         mocks.process.mockResolvedValue('ready');
+        mocks.admin.from.mockReturnValue(mocks.adminQuery);
+        mocks.adminQuery.select.mockReturnValue(mocks.adminQuery);
+        mocks.adminQuery.eq.mockReturnValue(mocks.adminQuery);
+        mocks.adminQuery.maybeSingle.mockResolvedValue({
+            data: {
+                id: consumedRequestId,
+                user_id: userId,
+                preflight_id: preflightId,
+                pipeline_version: 'v2',
+            },
+            error: null,
+        });
     });
 
     afterEach(() => {
@@ -240,6 +262,7 @@ describe('preflight owner routes', () => {
             preflightId,
             expiresAt,
             status: 'pending',
+            exclusionDecision: 'pending',
         });
         expect(mocks.store.createOrReplay).toHaveBeenCalledWith({
             userId,
@@ -309,16 +332,84 @@ describe('preflight owner routes', () => {
             .toBe(200);
         expect(mocks.store.findForOwner).toHaveBeenCalledWith(preflightId, userId);
 
+        const pendingResponse = await getPreflight(
+            new Request('https://example.com'),
+            context()
+        );
+        await expect(pendingResponse.json()).resolves.toEqual({
+            schemaVersion: 1,
+            preflightId,
+            expiresAt,
+            status: 'pending',
+            exclusionDecision: 'pending',
+        });
+
         mocks.store.findForOwner.mockResolvedValue({
             preflightId,
             status: 'expired',
             expiresAt,
             blockedCode: null,
             readySnapshot: null,
+            exclusionDecision: 'pending',
         });
         const expired = await getPreflight(new Request('https://example.com'), context());
         expect(expired.status).toBe(410);
         await expect(expired.json()).resolves.toMatchObject({ code: 'PREFLIGHT_EXPIRED' });
+    });
+
+    it('owner-recovers a consumed request even after the preflight TTL', async () => {
+        mocks.store.findForOwner.mockResolvedValue({
+            preflightId,
+            status: 'consumed',
+            expiresAt: '2026-07-13T12:00:00.000Z',
+            blockedCode: null,
+            readySnapshot: null,
+            exclusionDecision: 'exclude',
+        });
+
+        const response = await getPreflight(new Request('https://example.com'), context());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            schemaVersion: 1,
+            preflightId,
+            status: 'consumed',
+            exclusionDecision: 'exclude',
+            requestId: consumedRequestId,
+        });
+        expect(mocks.admin.from).toHaveBeenCalledWith('analysis_requests');
+        expect(mocks.adminQuery.eq).toHaveBeenNthCalledWith(1, 'preflight_id', preflightId);
+        expect(mocks.adminQuery.eq).toHaveBeenNthCalledWith(2, 'user_id', userId);
+        expect(mocks.adminQuery.eq).toHaveBeenNthCalledWith(3, 'pipeline_version', 'v2');
+    });
+
+    it('fails closed when a consumed owner row has no bound request', async () => {
+        mocks.store.findForOwner.mockResolvedValue({
+            preflightId,
+            status: 'consumed',
+            expiresAt,
+            blockedCode: null,
+            readySnapshot: null,
+            exclusionDecision: 'skip',
+        });
+        mocks.adminQuery.maybeSingle.mockResolvedValue({
+            data: {
+                id: null,
+                user_id: userId,
+                preflight_id: preflightId,
+                pipeline_version: 'v2',
+            },
+            error: null,
+        });
+
+        const response = await getPreflight(new Request('https://example.com'), context());
+
+        expect(response.status).toBe(500);
+        await expect(response.json()).resolves.toEqual({
+            schemaVersion: 1,
+            code: 'ANALYSIS_FAILED',
+            error: '사전 점검 상태 조회에 실패했습니다.',
+        });
     });
 
     it('strictly stores exclude/skip decisions and rejects target exclusion', async () => {

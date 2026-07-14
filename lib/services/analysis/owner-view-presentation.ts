@@ -33,6 +33,9 @@ const V2_PROGRESS_COPY: Readonly<Record<string, string>> = {
     HIGH_RISK_NARRATIVES_WRITING: '고위험 후보의 총평을 정리하고 있습니다.',
     RESULT_FINALIZING: '최종 판독 결과를 정리하고 있습니다.',
     ANALYSIS_COMPLETED: '판독이 완료됐습니다.',
+    POTENTIAL_HIGH_RISK_FOUND: '고위험 여성 후보 발견. AI가 단서를 더 맞춰보고 있어요.',
+    FINDING_CORRECTED: '의심 신호 하나는 재판독으로 바로잡았어요.',
+    FINDING_CONFIRMED: '의심 신호가 교차 확인됐어요. 증거는 계속 합산 중입니다.',
     RELATIONSHIP_AI_QUEUED: '관계 분석을 준비하고 있습니다.',
     RELATIONSHIP_AI_RUNNING: '맞팔 계정의 특징을 확인하고 있습니다.',
     RELATIONSHIP_AI_COMPLETE: '맞팔 계정 판독을 마쳤습니다.',
@@ -43,6 +46,10 @@ const V2_PROGRESS_COPY: Readonly<Record<string, string>> = {
     FINALIZATION_RUNNING: '최종 결과를 정리하고 있습니다.',
     FINALIZATION_COMPLETE: '최종 결과 정리를 마쳤습니다.',
 };
+
+export function analysisV2EventCopy(copyCode: string): string {
+    return V2_PROGRESS_COPY[copyCode] ?? '새로운 판독 단서를 확인하고 있습니다.';
+}
 
 export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): string {
     if (input.status === 'completed') return V2_PROGRESS_COPY.ANALYSIS_COMPLETED;
@@ -65,7 +72,7 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
     }
 
     const latestCopyCode = input.events.at(-1)?.copyCode;
-    return (latestCopyCode && V2_PROGRESS_COPY[latestCopyCode])
+    return (latestCopyCode && analysisV2EventCopy(latestCopyCode))
         || '서버에서 판독을 진행하고 있습니다.';
 }
 

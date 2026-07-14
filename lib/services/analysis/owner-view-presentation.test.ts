@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     analysisPlanBadgePresentation,
+    analysisV2EventCopy,
     analysisV2ProgressCopy,
     boundedOwnerResultPage,
     paginatedCountLabel,
@@ -43,6 +44,15 @@ describe('owner view presentation behavior', () => {
             events: historicalEvent,
             activeProfile: null,
         })).toBe('맞팔 관계를 정리했습니다.');
+    });
+
+    it('presents provisional high-risk events without turning them into confirmed facts', () => {
+        expect(analysisV2EventCopy('POTENTIAL_HIGH_RISK_FOUND'))
+            .toContain('고위험 여성 후보 발견');
+        expect(analysisV2EventCopy('POTENTIAL_HIGH_RISK_FOUND'))
+            .toContain('단서를 더 맞춰보고');
+        expect(analysisV2EventCopy('UNKNOWN_CODE'))
+            .toBe('새로운 판독 단서를 확인하고 있습니다.');
     });
 
     it('marks incomplete paginated counts and becomes exact on the final page', () => {

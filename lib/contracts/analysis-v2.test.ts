@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
     analysisResultPageV1Schema,
+    freshAdmissionErrorResponseV1Schema,
     preflightStatusV1Schema,
     progressSnapshotV1Schema,
+    testEntitlementResponseV1Schema,
 } from './analysis-v2';
 import { encodeResultCursor } from '@/lib/domain/analysis/result-pagination';
 
@@ -10,12 +12,142 @@ const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const expiresAt = '2026-07-13T12:00:00.000Z';
 
 describe('analysis V2 public contracts', () => {
+    it('recovers only a strictly bound consumed preflight request', () => {
+        expect(preflightStatusV1Schema.parse({
+            schemaVersion: 1,
+            preflightId: requestId,
+            status: 'consumed',
+            exclusionDecision: 'exclude',
+            requestId,
+        })).toEqual({
+            schemaVersion: 1,
+            preflightId: requestId,
+            status: 'consumed',
+            exclusionDecision: 'exclude',
+            requestId,
+        });
+        expect(preflightStatusV1Schema.safeParse({
+            schemaVersion: 1,
+            preflightId: requestId,
+            status: 'consumed',
+            exclusionDecision: 'exclude',
+        }).success).toBe(false);
+        expect(preflightStatusV1Schema.safeParse({
+            schemaVersion: 1,
+            preflightId: requestId,
+            status: 'consumed',
+            requestId,
+            targetInstagramId: 'raw.target',
+        }).success).toBe(false);
+    });
+
+    it('strictly validates fresh admission plan snapshots before client use', () => {
+        const latestPlan = {
+            followersCount: 620,
+            followingCount: 710,
+            capacityRequiredPlanId: 'standard',
+            requiredPlanId: 'standard',
+            selectedPlanId: 'basic',
+            pricingVersion: 'deferred',
+            refreshedAt: '2026-07-14T12:00:00.000Z',
+            plans: [
+                {
+                    planId: 'basic',
+                    launchStatus: 'test_only',
+                    relationshipCapacity: { followers: 400, following: 400 },
+                    detailedMutualLimit: 300,
+                    selectionState: 'unavailable',
+                    unavailableReason: 'below_required_plan',
+                    pricingVersion: 'deferred',
+                    price: { status: 'deferred', currency: 'KRW', amountKrw: null },
+                },
+                {
+                    planId: 'standard',
+                    launchStatus: 'test_only',
+                    relationshipCapacity: { followers: 800, following: 800 },
+                    detailedMutualLimit: 600,
+                    selectionState: 'required',
+                    unavailableReason: null,
+                    pricingVersion: 'deferred',
+                    price: { status: 'deferred', currency: 'KRW', amountKrw: null },
+                },
+                {
+                    planId: 'plus',
+                    launchStatus: 'test_only',
+                    relationshipCapacity: { followers: 1_200, following: 1_200 },
+                    detailedMutualLimit: 900,
+                    selectionState: 'available_upgrade',
+                    unavailableReason: null,
+                    pricingVersion: 'deferred',
+                    price: { status: 'deferred', currency: 'KRW', amountKrw: null },
+                },
+            ],
+        } as const;
+        const response = {
+            error: '최신 계정 정보로 분석 가능 여부를 확인할 수 없습니다.',
+            code: 'ANALYSIS_V2_PLAN_NOT_ALLOWED',
+            latestPlan,
+        } as const;
+
+        expect(freshAdmissionErrorResponseV1Schema.safeParse(response).success).toBe(true);
+        expect(freshAdmissionErrorResponseV1Schema.safeParse({
+            ...response,
+            latestPlan: { ...latestPlan, rawProfile: { username: 'target' } },
+        }).success).toBe(false);
+        expect(freshAdmissionErrorResponseV1Schema.safeParse({
+            ...response,
+            latestPlan: {
+                ...latestPlan,
+                plans: latestPlan.plans.map((plan, index) => index === 1
+                    ? { ...plan, pricingVersion: 'tampered' }
+                    : plan),
+            },
+        }).success).toBe(false);
+        expect(freshAdmissionErrorResponseV1Schema.safeParse({
+            ...response,
+            latestPlan: { ...latestPlan, requiredPlanId: null },
+        }).success).toBe(false);
+        expect(freshAdmissionErrorResponseV1Schema.safeParse({
+            ...response,
+            latestPlan: {
+                ...latestPlan,
+                plans: [latestPlan.plans[1], latestPlan.plans[0], latestPlan.plans[2]],
+            },
+        }).success).toBe(false);
+    });
+
+    it('distinguishes durable admission polling from an accepted analysis request', () => {
+        expect(testEntitlementResponseV1Schema.parse({
+            schemaVersion: 1,
+            preflightId: requestId,
+            status: 'admission_pending',
+            backgroundProcessing: true,
+            retryAfterMs: 1_000,
+        })).toMatchObject({ status: 'admission_pending', retryAfterMs: 1_000 });
+
+        expect(testEntitlementResponseV1Schema.parse({
+            schemaVersion: 1,
+            requestId,
+            status: 'queued',
+            backgroundProcessing: true,
+        })).toMatchObject({ status: 'queued', requestId });
+
+        expect(testEntitlementResponseV1Schema.safeParse({
+            schemaVersion: 1,
+            preflightId: requestId,
+            status: 'admission_pending',
+            backgroundProcessing: false,
+            retryAfterMs: 1_000,
+        }).success).toBe(false);
+    });
+
     it('keeps every plan visible and identifies the required plan', () => {
         const result = preflightStatusV1Schema.parse({
             schemaVersion: 1,
             preflightId: requestId,
             expiresAt,
             status: 'ready',
+            exclusionDecision: 'exclude',
             target: {
                 username: 'Target.Name',
                 fullName: null,
@@ -65,6 +197,8 @@ describe('analysis V2 public contracts', () => {
 
         expect(result.status).toBe('ready');
         if (result.status === 'ready') {
+            expect(result.exclusionDecision).toBe('exclude');
+            expect('excludedInstagramId' in result).toBe(false);
             expect(result.target.username).toBe('target.name');
             expect(result.plans).toHaveLength(3);
             expect(result.plans[2]).toMatchObject({
@@ -373,6 +507,7 @@ describe('analysis V2 public contracts', () => {
             preflightId: requestId,
             expiresAt,
             status: 'ready',
+            exclusionDecision: 'pending',
             target: {
                 username: 'target',
                 fullName: null,

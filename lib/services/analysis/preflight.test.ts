@@ -179,6 +179,7 @@ describe('preflight persistence adapter', () => {
                 plan_cards_snapshot: planCards,
                 pricing_version: snapshot.pricingVersion,
                 pricing_snapshot: prices,
+                exclusion_decision: 'exclude',
             },
             error: null,
         }));
@@ -198,6 +199,8 @@ describe('preflight persistence adapter', () => {
         });
         expect(query.eq).toHaveBeenNthCalledWith(1, 'id', preflightId);
         expect(query.eq).toHaveBeenNthCalledWith(2, 'user_id', userId);
+        expect(query.select).toHaveBeenCalledWith(expect.stringContaining('exclusion_decision'));
+        expect(query.select.mock.calls[0][0]).not.toContain('excluded_instagram_id');
     });
 
     it('uses fenced completion, blocking, and scalar exclusion RPC contracts', async () => {
@@ -467,12 +470,15 @@ describe('preflight public mapping', () => {
             expiresAt,
             blockedCode: null,
             readySnapshot: snapshot,
+            exclusionDecision: 'exclude',
         }, () => '/api/image-proxy?token=signed');
 
         expect(result).toMatchObject({
             status: 'ready',
+            exclusionDecision: 'exclude',
             target: { profileImage: '/api/image-proxy?token=signed' },
         });
+        expect(JSON.stringify(result)).not.toContain('excludedInstagramId');
         expect(JSON.stringify(result)).not.toContain('cdninstagram.com');
     });
 
@@ -488,6 +494,7 @@ describe('preflight public mapping', () => {
             expiresAt: '2026-07-13T12:00:00.000Z',
             blockedCode: null,
             readySnapshot: snapshot,
+            exclusionDecision: 'skip',
         }, () => undefined, Date.parse('2026-07-13T12:00:00.001Z'))).toThrow('PREFLIGHT_EXPIRED');
     });
 

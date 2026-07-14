@@ -12,6 +12,7 @@ import {
     type AnalysisV2ErrorCode,
     type PlanQuoteV1,
     type PreflightAcceptedV1,
+    type PreflightExclusionDecisionV1,
     type PreflightStatusV1,
 } from '@/lib/contracts/analysis-v2';
 import {
@@ -182,6 +183,7 @@ export interface StoredPreflight {
     expiresAt: string;
     blockedCode: AnalysisV2ErrorCode | null;
     readySnapshot: ReadyPreflightSnapshot | null;
+    exclusionDecision: PreflightExclusionDecisionV1;
 }
 
 export interface PreflightStore {
@@ -503,12 +505,21 @@ function storedPreflightFromRow(row: Record<string, unknown>): StoredPreflight {
     const readySnapshot = status === 'ready' || status === 'consumed'
         ? readySnapshotFromColumns(row)
         : null;
+    const exclusionDecision = row.exclusion_decision;
+    if (
+        exclusionDecision !== 'pending'
+        && exclusionDecision !== 'exclude'
+        && exclusionDecision !== 'skip'
+    ) {
+        throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid exclusion decision.');
+    }
     return {
         preflightId: requiredUuid(row.id, 'preflight id'),
         status: status as StoredPreflight['status'],
         expiresAt: requiredTimestamp(row.expires_at),
         blockedCode,
         readySnapshot,
+        exclusionDecision,
     };
 }
 
@@ -575,7 +586,8 @@ export function createSupabasePreflightStore(
                     required_plan_id,
                     plan_cards_snapshot,
                     pricing_version,
-                    pricing_snapshot
+                    pricing_snapshot,
+                    exclusion_decision
                 `)
                 .eq('id', preflightId)
                 .eq('user_id', userId)
@@ -885,6 +897,7 @@ export function acceptedPreflightDto(created: CreatedPreflight): PreflightAccept
         preflightId: created.preflightId,
         expiresAt: created.expiresAt,
         status: 'pending',
+        exclusionDecision: 'pending',
     });
 }
 
@@ -903,6 +916,7 @@ export function publicPreflightStatusDto(
             preflightId: stored.preflightId,
             expiresAt: stored.expiresAt,
             status: 'pending',
+            exclusionDecision: stored.exclusionDecision,
         });
     }
     if (stored.status === 'blocked') {
@@ -911,6 +925,7 @@ export function publicPreflightStatusDto(
             preflightId: stored.preflightId,
             expiresAt: stored.expiresAt,
             status: 'blocked',
+            exclusionDecision: stored.exclusionDecision,
             code: stored.blockedCode ?? 'ANALYSIS_FAILED',
         });
     }
@@ -924,6 +939,7 @@ export function publicPreflightStatusDto(
         preflightId: stored.preflightId,
         expiresAt: stored.expiresAt,
         status: 'ready',
+        exclusionDecision: stored.exclusionDecision,
         target: {
             ...publicTarget,
             profileImage: imageProxyPath(profileImageUrl) ?? null,

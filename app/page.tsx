@@ -16,10 +16,6 @@ import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { useAuth } from '@/hooks/useAuth';
 import { LoginModal } from '@/components/login-modal';
 import {
-  getAnalysisStartIdempotency,
-  type AnalysisStartIdempotency,
-} from '@/lib/services/analysis/client-idempotency';
-import {
   TopBar,
   BrandMark,
   Eyebrow,
@@ -108,7 +104,6 @@ export default function LandingPage() {
   const reduce = useReducedMotion();
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
   const [igId, setIgId] = useState('');
   const [starting, setStarting] = useState(false);
   const [heroError, setHeroError] = useState<string | null>(null);
@@ -142,33 +137,14 @@ export default function LandingPage() {
       return;
     }
 
-    setStarting(true);
-    setHeroError(null);
     try {
-      idempotencyRef.current = getAnalysisStartIdempotency(
-        idempotencyRef.current,
-        id,
-        'male'
-      );
-      const res = await fetch('/api/analysis/start', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': idempotencyRef.current.key,
-        },
-        body: JSON.stringify({ targetInstagramId: id, targetGender: 'male' }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setHeroError(data.error || '판독 시작에 실패했습니다.');
-        setStarting(false);
-        return;
-      }
-      trackEvent(EVENTS.ANALYSIS_START);
-      router.push(`/progress/${data.requestId}`);
+      sessionStorage.setItem('pending_ig', id);
+      setStarting(true);
+      setHeroError(null);
+      router.push('/analyze?autostart=1');
     } catch (err) {
-      console.error('Failed to start analysis:', err);
-      setHeroError('서버 오류가 발생했습니다.');
+      console.error('Failed to continue analysis:', err);
+      setHeroError('판독 화면을 열 수 없습니다.');
       setStarting(false);
     }
   };
@@ -465,7 +441,11 @@ export default function LandingPage() {
         </footer>
       </main>
 
-      <LoginModal open={loginOpen} onClose={closeLogin} redirectTo="/analyze" />
+      <LoginModal
+        open={loginOpen}
+        onClose={closeLogin}
+        redirectTo="/analyze?autostart=1"
+      />
     </div>
   );
 }

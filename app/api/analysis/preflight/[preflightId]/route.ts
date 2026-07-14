@@ -3,16 +3,17 @@ import { createClient } from '@/lib/supabase/server';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
     preflightExclusionRequestV1Schema,
+    preflightStatusV1Schema,
 } from '@/lib/contracts/analysis-v2';
 import {
     InvalidPreflightExclusionError,
-    PreflightConsumedError,
     PreflightExpiredError,
     PreflightImmutableError,
     PreflightNotFoundError,
     preflightStore,
     publicPreflightStatusDto,
 } from '@/lib/services/analysis/preflight';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -28,6 +29,40 @@ async function authenticatedUser() {
     const supabase = await createClient();
     const { data: { user }, error } = await supabase.auth.getUser();
     return error || !user ? null : user;
+}
+
+async function consumedPreflightStatus(
+    preflightId: string,
+    userId: string,
+    exclusionDecision: 'exclude' | 'skip'
+) {
+    const { data, error } = await supabaseAdmin
+        .from('analysis_requests')
+        .select('id, user_id, preflight_id, pipeline_version')
+        .eq('preflight_id', preflightId)
+        .eq('user_id', userId)
+        .eq('pipeline_version', 'v2')
+        .maybeSingle();
+    if (error || !data) {
+        throw new Error('PREFLIGHT_PERSISTENCE_ERROR: consumed request lookup failed.');
+    }
+    const row = data as Record<string, unknown>;
+    if (
+        typeof row.id !== 'string'
+        || !UUID_PATTERN.test(row.id)
+        || row.user_id !== userId.toLowerCase()
+        || row.preflight_id !== preflightId.toLowerCase()
+        || row.pipeline_version !== 'v2'
+    ) {
+        throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid consumed request lookup.');
+    }
+    return preflightStatusV1Schema.parse({
+        schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+        preflightId,
+        status: 'consumed',
+        exclusionDecision,
+        requestId: row.id,
+    });
 }
 
 export async function GET(
@@ -46,13 +81,20 @@ export async function GET(
         if (!stored) {
             return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
         }
+        if (stored.status === 'consumed') {
+            if (stored.exclusionDecision === 'pending') {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: consumed exclusion is pending.');
+            }
+            return NextResponse.json(await consumedPreflightStatus(
+                preflightId,
+                user.id,
+                stored.exclusionDecision
+            ));
+        }
         return NextResponse.json(publicPreflightStatusDto(stored));
     } catch (error) {
         if (error instanceof PreflightExpiredError) {
             return errorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.');
-        }
-        if (error instanceof PreflightConsumedError) {
-            return errorResponse(409, 'PREFLIGHT_CONSUMED', '이미 사용된 사전 점검 요청입니다.');
         }
         console.error('Preflight status read failed.');
         return errorResponse(500, 'ANALYSIS_FAILED', '사전 점검 상태 조회에 실패했습니다.');

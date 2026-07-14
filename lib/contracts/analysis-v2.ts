@@ -98,6 +98,7 @@ export const planIdSchema = z.enum(PLAN_IDS);
 export const planLaunchStatusSchema = z.enum(PLAN_LAUNCH_STATUSES);
 export const planAccessModeSchema = z.enum(PLAN_ACCESS_MODES);
 export const riskBandSchema = z.enum(RISK_BANDS);
+export const preflightExclusionDecisionV1Schema = z.enum(['pending', 'exclude', 'skip']);
 
 export const analysisV2ErrorCodeSchema = z.enum([
     'TARGET_NOT_FOUND',
@@ -171,14 +172,18 @@ export const preflightAcceptedV1Schema = z.object({
     preflightId: uuidSchema,
     expiresAt: timestampSchema,
     status: z.literal('pending'),
+    exclusionDecision: z.literal('pending'),
 }).strict();
 
-const preflightPendingV1Schema = preflightAcceptedV1Schema;
+const preflightPendingV1Schema = preflightAcceptedV1Schema.extend({
+    exclusionDecision: preflightExclusionDecisionV1Schema,
+});
 const preflightReadyV1Schema = z.object({
     schemaVersion: z.literal(ANALYSIS_V2_SCHEMA_VERSION),
     preflightId: uuidSchema,
     expiresAt: timestampSchema,
     status: z.literal('ready'),
+    exclusionDecision: preflightExclusionDecisionV1Schema,
     target: z.object({
         username: usernameSchema,
         fullName: z.string().max(200).nullable(),
@@ -279,13 +284,22 @@ const preflightBlockedV1Schema = z.object({
     preflightId: uuidSchema,
     expiresAt: timestampSchema,
     status: z.literal('blocked'),
+    exclusionDecision: preflightExclusionDecisionV1Schema,
     code: analysisV2ErrorCodeSchema,
+}).strict();
+const preflightConsumedV1Schema = z.object({
+    schemaVersion: z.literal(ANALYSIS_V2_SCHEMA_VERSION),
+    preflightId: uuidSchema,
+    status: z.literal('consumed'),
+    exclusionDecision: z.enum(['exclude', 'skip']),
+    requestId: uuidSchema,
 }).strict();
 
 export const preflightStatusV1Schema = z.discriminatedUnion('status', [
     preflightPendingV1Schema,
     preflightReadyV1Schema,
     preflightBlockedV1Schema,
+    preflightConsumedV1Schema,
 ]);
 
 export const preflightExclusionRequestV1Schema = z.discriminatedUnion('decision', [
@@ -301,7 +315,152 @@ export const preflightExclusionRequestV1Schema = z.discriminatedUnion('decision'
 export type PreflightRequestV1 = z.infer<typeof preflightRequestV1Schema>;
 export type PreflightAcceptedV1 = z.infer<typeof preflightAcceptedV1Schema>;
 export type PreflightStatusV1 = z.infer<typeof preflightStatusV1Schema>;
+export type PreflightExclusionDecisionV1 = z.infer<typeof preflightExclusionDecisionV1Schema>;
 export type PreflightExclusionRequestV1 = z.infer<typeof preflightExclusionRequestV1Schema>;
+
+const analysisRequestStatusSchema = z.enum([
+    'queued',
+    'processing',
+    'completed',
+    'failed',
+    'upgrade_required',
+]);
+
+const freshAdmissionErrorCodeV1Schema = z.enum([
+    'ANALYSIS_V2_PREFLIGHT_NOT_FOUND',
+    'ANALYSIS_V2_PREFLIGHT_NOT_READY',
+    'ANALYSIS_V2_PREFLIGHT_EXPIRED',
+    'ANALYSIS_V2_PLAN_NOT_ALLOWED',
+    'ANALYSIS_V2_TARGET_NOT_FOUND',
+    'ANALYSIS_V2_TARGET_PRIVATE',
+    'ANALYSIS_V2_TARGET_MISMATCH',
+    'ANALYSIS_V2_OVER_PLUS_CAPACITY',
+    'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE',
+]);
+
+const freshPlanQuoteV1Schema = planQuoteV1Schema.extend({
+    unavailableReason: z.enum([
+        'below_required_plan',
+        'launch_gate',
+        'over_plus_capacity',
+    ]).nullable(),
+}).strict();
+
+const freshPlanQuotesV1Schema = z.array(freshPlanQuoteV1Schema)
+    .length(PLAN_IDS.length)
+    .superRefine((plans, context) => {
+        plans.forEach((plan, index) => {
+            if (plan.planId !== PLAN_IDS[index]) {
+                context.addIssue({
+                    code: 'custom',
+                    message: 'Fresh plans must use canonical catalog order.',
+                    path: [index, 'planId'],
+                });
+            }
+        });
+    });
+
+export const freshPlanSnapshotV1Schema = z.object({
+    followersCount: z.number().int().nonnegative().max(10_000_000),
+    followingCount: z.number().int().nonnegative().max(10_000_000),
+    capacityRequiredPlanId: planIdSchema.nullable(),
+    requiredPlanId: planIdSchema.nullable(),
+    selectedPlanId: planIdSchema,
+    plans: freshPlanQuotesV1Schema,
+    pricingVersion: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/),
+    refreshedAt: timestampSchema,
+}).strict().superRefine((value, context) => {
+    const capacityPlanPresent = value.capacityRequiredPlanId !== null;
+    const requiredPlanPresent = value.requiredPlanId !== null;
+    if (capacityPlanPresent !== requiredPlanPresent) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Fresh capacity and required plans must both be present or absent.',
+            path: ['requiredPlanId'],
+        });
+    }
+
+    value.plans.forEach((plan, index) => {
+        if (plan.pricingVersion !== value.pricingVersion) {
+            context.addIssue({
+                code: 'custom',
+                message: 'Fresh plan pricing version must match its snapshot.',
+                path: ['plans', index, 'pricingVersion'],
+            });
+        }
+    });
+
+    if (!capacityPlanPresent || !requiredPlanPresent) {
+        value.plans.forEach((plan, index) => {
+            if (plan.selectionState !== 'unavailable') {
+                context.addIssue({
+                    code: 'custom',
+                    message: 'A blocked fresh snapshot cannot expose a selectable plan.',
+                    path: ['plans', index, 'selectionState'],
+                });
+            }
+        });
+        return;
+    }
+
+    const capacityIndex = PLAN_IDS.indexOf(value.capacityRequiredPlanId!);
+    const requiredIndex = PLAN_IDS.indexOf(value.requiredPlanId!);
+    if (requiredIndex < capacityIndex) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Fresh required plan cannot be below its capacity plan.',
+            path: ['requiredPlanId'],
+        });
+    }
+    value.plans.forEach((plan, index) => {
+        if (index < capacityIndex && (
+            plan.selectionState !== 'unavailable'
+            || plan.unavailableReason !== 'below_required_plan'
+        )) {
+            context.addIssue({
+                code: 'custom',
+                message: 'A plan below fresh capacity must be unavailable.',
+                path: ['plans', index],
+            });
+        }
+        if (index === requiredIndex && (
+            plan.selectionState !== 'required'
+            || plan.unavailableReason !== null
+        )) {
+            context.addIssue({
+                code: 'custom',
+                message: 'Fresh required plan card does not match requiredPlanId.',
+                path: ['plans', index],
+            });
+        }
+    });
+});
+
+export const freshAdmissionErrorResponseV1Schema = z.object({
+    error: z.string().trim().min(1).max(200),
+    code: freshAdmissionErrorCodeV1Schema,
+    latestPlan: freshPlanSnapshotV1Schema.optional(),
+}).strict();
+
+export type FreshPlanSnapshotV1 = z.infer<typeof freshPlanSnapshotV1Schema>;
+
+export const testEntitlementResponseV1Schema = z.discriminatedUnion('status', [
+    z.object({
+        schemaVersion: z.literal(ANALYSIS_V2_SCHEMA_VERSION),
+        preflightId: uuidSchema,
+        status: z.literal('admission_pending'),
+        backgroundProcessing: z.literal(true),
+        retryAfterMs: z.number().int().min(250).max(30_000),
+    }).strict(),
+    z.object({
+        schemaVersion: z.literal(ANALYSIS_V2_SCHEMA_VERSION),
+        requestId: uuidSchema,
+        status: analysisRequestStatusSchema,
+        backgroundProcessing: z.boolean(),
+    }).strict(),
+]);
+
+export type TestEntitlementResponseV1 = z.infer<typeof testEntitlementResponseV1Schema>;
 
 const progressTrackSchema = z.object({
     state: z.enum(['pending', 'running', 'completed', 'failed']),
