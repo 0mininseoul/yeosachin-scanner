@@ -534,7 +534,11 @@ export async function downloadSecureImage(
                     totalBytes += value.byteLength;
                     if (totalBytes > maxBytes) {
                         controller.abort();
-                        await reader.cancel();
+                        try {
+                            await reader.cancel();
+                        } catch {
+                            // The abort can reject a signal-linked stream before cancellation settles.
+                        }
                         secureImageFetchError(
                             'response_too_large',
                             'permanent',

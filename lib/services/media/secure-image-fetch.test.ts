@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createServer } from 'node:http';
 import {
     downloadSecureImage,
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
@@ -171,6 +172,47 @@ describe('secure image downloads', () => {
             maxBytes: 100,
             timeoutMs: 1_000,
         })).rejects.toThrow('byte download limit');
+    });
+
+    it('preserves the permanent size failure when abort rejects a live response stream', async () => {
+        const server = createServer((_request, response) => {
+            response.writeHead(200, { 'content-type': 'image/jpeg' });
+            response.write(Buffer.alloc(60));
+            setTimeout(() => response.end(Buffer.alloc(60)), 10);
+        });
+        await new Promise<void>((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(0, '127.0.0.1', () => {
+                server.off('error', reject);
+                resolve();
+            });
+        });
+
+        try {
+            const address = server.address();
+            if (!address || typeof address === 'string') {
+                throw new Error('Test server did not bind to a TCP port');
+            }
+            const requestImpl: SecureImageRequest = (_url, options) => fetch(
+                `http://127.0.0.1:${address.port}`,
+                { signal: options.signal }
+            );
+
+            await expect(downloadSecureImage('https://cdninstagram.com/live-stream.jpg', {
+                allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+                requestImpl,
+                resolveHostname: publicResolver,
+                maxBytes: 100,
+                timeoutMs: 1_000,
+            })).rejects.toMatchObject({
+                reason: 'response_too_large',
+                disposition: 'permanent',
+            });
+        } finally {
+            await new Promise<void>((resolve, reject) => {
+                server.close(error => error ? reject(error) : resolve());
+            });
+        }
     });
 
     it('rejects SVG payloads even when the host is trusted', async () => {
