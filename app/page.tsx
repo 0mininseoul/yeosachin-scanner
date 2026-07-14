@@ -448,16 +448,19 @@ export default function LandingPage() {
             <br />
             판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
           </p>
-          <div className="mt-5 flex gap-5 text-[12px] text-fg-dim">
+          <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[12px] text-fg-dim">
             <Link href="/terms" className="transition-colors hover:text-fg">
               이용약관
             </Link>
             <Link href="/privacy" className="transition-colors hover:text-fg">
               개인정보처리방침
             </Link>
+            <a href="mailto:contact@ascentum.co.kr" className="transition-colors hover:text-fg">
+              contact@ascentum.co.kr
+            </a>
           </div>
-          <p className="num mt-5 text-[11px] leading-relaxed text-fg-mute">
-            Company: Ascentum · Representative: Youngmin Park · BRN: 478-59-01063
+          <p className="mt-5 text-[8.5px] leading-relaxed tracking-tight text-fg-mute">
+            Company: Ascentum · BRN: 478-59-01063 · Representative: Youngmin Park
           </p>
         </footer>
       </main>
