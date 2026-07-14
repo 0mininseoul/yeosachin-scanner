@@ -132,6 +132,7 @@ export default function ShareResultPage({ params }: PageProps) {
     const [data, setData] = useState<ResultData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [tab, setTab] = useState<'public' | 'private'>('public');
 
     useEffect(() => {
         const fetchResult = async () => {
@@ -266,12 +267,29 @@ export default function ShareResultPage({ params }: PageProps) {
                     </div>
                 </CaseCard>
 
-                {/* suspects */}
-                <section className="mt-9">
-                    <div className="flex items-baseline justify-between">
-                        <Eyebrow>위협 등급 순위</Eyebrow>
-                        <span className="num text-[12px] text-fg-dim">{femaleAccounts.length}명</span>
-                    </div>
+                {/* public / private tabs */}
+                <div className="mt-9 grid grid-cols-2 border border-line bg-ink-2">
+                    {([
+                        { key: 'public', label: '공개 계정', count: femaleAccounts.length },
+                        { key: 'private', label: '비공개 계정', count: privateAccounts.length },
+                    ] as const).map((t) => (
+                        <button
+                            key={t.key}
+                            onClick={() => setTab(t.key)}
+                            className={`flex items-center justify-center gap-1.5 px-4 py-3 text-[13px] font-bold tracking-tight transition-colors ${
+                                tab === t.key ? 'bg-blood text-white' : 'text-fg-dim hover:bg-panel hover:text-fg'
+                            }`}
+                        >
+                            {t.label}
+                            <span className="num text-[12px] opacity-80">{t.count}</span>
+                        </button>
+                    ))}
+                </div>
+
+                {tab === 'public' ? (
+                <section className="mt-5">
+                    <Eyebrow>위협 등급 순위</Eyebrow>
+
                     {femaleAccounts.length === 0 ? (
                         <CaseCard className="mt-5 px-4 py-10 text-center">
                             <p className="text-[13px] text-fg-mute">판독된 여성 계정이 없습니다.</p>
@@ -326,12 +344,10 @@ export default function ShareResultPage({ params }: PageProps) {
                     )}
                 </section>
 
-                {/* private */}
-                <section className="mt-9">
-                    <div className="flex items-baseline justify-between">
-                        <Eyebrow>숨은 위험인물들 / 비공개 계정</Eyebrow>
-                        <span className="num text-[12px] text-fg-dim">{privateAccounts.length}개</span>
-                    </div>
+                ) : (
+                <section className="mt-5">
+                    <Eyebrow>숨은 위험인물들</Eyebrow>
+
                     {privateAccounts.length === 0 ? (
                         <CaseCard className="mt-5 px-4 py-10 text-center">
                             <p className="text-[13px] text-fg-mute">비공개 계정이 없습니다.</p>
@@ -367,6 +383,7 @@ export default function ShareResultPage({ params }: PageProps) {
                     )}
                     <p className="mt-3 text-[11px] text-fg-mute">비공개 계정은 이름 텍스트의 여성형 가능성 순이며, 이 추정은 틀릴 수 있어요.</p>
                 </section>
+                )}
 
                 {/* actions */}
                 <div className="mt-9 space-y-2.5">
