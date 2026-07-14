@@ -633,7 +633,6 @@ build_deploy_args() {
     "--project=$ANALYSIS_V2_TASKS_PROJECT"
     "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION"
     "--source=$worker_deploy_source_dir"
-    "--ignore-file=$source_ignore_file"
     "--service-account=$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL"
     '--execution-environment=gen2'
     "--cpu=$worker_cpu"
@@ -724,7 +723,11 @@ configure_queue_and_oidc() {
   [[ "$mode" == "dry-run" ]] && queue_mode_args+=(--dry-run)
   [[ "$mode" == "check" ]] && queue_mode_args+=(--check)
   [[ "$reconcile_iam" == "true" ]] && queue_mode_args+=(--reconcile-iam)
-  bash "$queue_script" "${queue_mode_args[@]}"
+  if ((${#queue_mode_args[@]} == 0)); then
+    bash "$queue_script"
+  else
+    bash "$queue_script" "${queue_mode_args[@]}"
+  fi
 
   export PREFLIGHT_TASKS_PROJECT="$ANALYSIS_V2_TASKS_PROJECT"
   export PREFLIGHT_TASKS_LOCATION="$ANALYSIS_V2_TASKS_LOCATION"
@@ -734,7 +737,11 @@ configure_queue_and_oidc() {
   export PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL"
   export PREFLIGHT_TASKS_CLOUD_RUN_SERVICE="$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE"
   export PREFLIGHT_TASKS_CLOUD_RUN_REGION="$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION"
-  bash "$preflight_script" "${queue_mode_args[@]}"
+  if ((${#queue_mode_args[@]} == 0)); then
+    bash "$preflight_script"
+  else
+    bash "$preflight_script" "${queue_mode_args[@]}"
+  fi
 }
 
 service_iam_policy() {
@@ -871,7 +878,6 @@ worker_source_dir_input="${ANALYSIS_V2_WORKER_SOURCE_DIR:-$script_dir/..}"
   || die "ANALYSIS_V2_WORKER_SOURCE_DIR must be a directory"
 readonly worker_source_dir="$(cd -P "$worker_source_dir_input" && pwd -P)"
 worker_deploy_source_dir="$worker_source_dir"
-readonly source_ignore_file="$script_dir/analysis-v2-source.gcloudignore"
 readonly worker_env_file="${ANALYSIS_V2_WORKER_ENV_VARS_FILE:-}"
 readonly worker_build_env_file="${ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE:-}"
 readonly worker_build_service_account="$ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT"
@@ -933,7 +939,6 @@ validate_runtime_tuning
 
 [[ -d "$worker_source_dir" && -f "$worker_source_dir/package.json" ]] \
   || die "ANALYSIS_V2_WORKER_SOURCE_DIR must contain package.json"
-[[ -f "$source_ignore_file" ]] || die "analysis-v2-source.gcloudignore is missing"
 if [[ -n "$worker_env_file" ]]; then
   [[ -f "$worker_env_file" ]] || die "ANALYSIS_V2_WORKER_ENV_VARS_FILE does not exist"
   validate_env_file_upload_boundary "$worker_env_file" \
@@ -1008,7 +1013,11 @@ if [[ "$mode" == "dry-run" ]] && ! service_json >/dev/null; then
   print_command bash "$maintenance_script" "${maintenance_args[@]}"
   log "[dry-run] maintenance scheduler checks will run after the worker service exists"
 else
-  bash "$maintenance_script" "${maintenance_args[@]}"
+  if ((${#maintenance_args[@]} == 0)); then
+    bash "$maintenance_script"
+  else
+    bash "$maintenance_script" "${maintenance_args[@]}"
+  fi
 fi
 
 if [[ "$mode" == "dry-run" ]]; then

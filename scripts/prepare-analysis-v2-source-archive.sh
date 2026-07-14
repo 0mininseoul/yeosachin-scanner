@@ -44,5 +44,9 @@ git -C "$source_dir" archive --format=tar HEAD | tar -xf - -C "$destination_dir"
 if find "$destination_dir" -type l -print -quit | grep -q .; then
   die "tracked source archive contains a symbolic link"
 fi
+source_ignore_policy="$destination_dir/scripts/analysis-v2-source.gcloudignore"
+[[ -f "$source_ignore_policy" ]] \
+  || die "tracked source archive does not contain the Cloud Run ignore policy"
+cp "$source_ignore_policy" "$destination_dir/.gcloudignore"
 
 printf '%s\n' "$destination_dir"

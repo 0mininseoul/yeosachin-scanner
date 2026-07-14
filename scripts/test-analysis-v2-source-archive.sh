@@ -15,9 +15,16 @@ mkdir -p "$repo" "$temp_dir/archive-clean"
 git -C "$temp_dir" init -q repo
 git -C "$repo" config user.email test@example.test
 git -C "$repo" config user.name Test
+mkdir -p "$repo/scripts"
 printf '{"private":true}\n' >"$repo/package.json"
 printf 'tracked\n' >"$repo/tracked.txt"
-git -C "$repo" add package.json tracked.txt
+printf '.env.local\n' >"$repo/.gitignore"
+cat >"$repo/scripts/analysis-v2-source.gcloudignore" <<'EOF'
+.gcloudignore
+.env*
+!.env.example
+EOF
+git -C "$repo" add .gitignore package.json scripts tracked.txt
 git -C "$repo" commit -qm initial
 
 bash "$script_dir/prepare-analysis-v2-source-archive.sh" \
@@ -25,6 +32,21 @@ bash "$script_dir/prepare-analysis-v2-source-archive.sh" \
 [[ "$(<"$temp_dir/archive-clean/tracked.txt")" == "tracked" ]] \
   || fail "tracked file was not archived"
 [[ ! -e "$temp_dir/archive-clean/.git" ]] || fail ".git was archived"
+cmp -s \
+  "$temp_dir/archive-clean/scripts/analysis-v2-source.gcloudignore" \
+  "$temp_dir/archive-clean/.gcloudignore" \
+  || fail "tracked Cloud Run ignore policy was not installed at the archive root"
+
+printf 'IGNORED_SECRET_SENTINEL\n' >"$repo/.env.local"
+mkdir "$temp_dir/archive-ignored-secret"
+bash "$script_dir/prepare-analysis-v2-source-archive.sh" \
+  "$repo" "$temp_dir/archive-ignored-secret" >/dev/null
+[[ ! -e "$temp_dir/archive-ignored-secret/.env.local" ]] \
+  || fail "ignored untracked secret was archived"
+if grep -R -Fq -- 'IGNORED_SECRET_SENTINEL' "$temp_dir/archive-ignored-secret"; then
+  fail "ignored untracked secret content was archived"
+fi
+rm "$repo/.env.local"
 
 mkdir "$temp_dir/archive-untracked"
 printf '{"private_key":"SECRET_SENTINEL"}\n' >"$repo/service-account.json"

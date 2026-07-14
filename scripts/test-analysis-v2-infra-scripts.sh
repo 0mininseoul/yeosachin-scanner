@@ -428,6 +428,54 @@ case "$command_line" in
     ' "$policy_file" >/dev/null
     printf 'bucket_exact\n' >"$FAKE_GCLOUD_STATE_FILE"
     ;;
+  "run deploy"*)
+    deploy_source=''
+    deploy_source_count=0
+    for argument in "$@"; do
+      case "$argument" in
+        --ignore-file|--ignore-file=*)
+          printf 'unsupported Cloud Run deploy --ignore-file flag\n' >&2
+          exit 91
+          ;;
+        --source=*)
+          deploy_source="${argument#--source=}"
+          deploy_source_count=$((deploy_source_count + 1))
+          ;;
+      esac
+    done
+    [[ "$deploy_source_count" -eq 1 ]] || exit 92
+    [[ -n "$deploy_source" && -d "$deploy_source" ]] || exit 92
+    case "$deploy_source" in
+      "${TMPDIR:-/tmp}"/analysis-v2-source.*) ;;
+      *) exit 92 ;;
+    esac
+    [[ -f "$deploy_source/package.json" ]] || exit 93
+    [[ -f "$deploy_source/.gcloudignore" ]] || exit 94
+    grep -Fxq '.env*' "$deploy_source/.gcloudignore" || exit 95
+    [[ ! -e "$deploy_source/.git" && ! -e "$deploy_source/.env.local" ]] || exit 96
+    if find "$deploy_source" -type l -print -quit | grep -q .; then
+      exit 96
+    fi
+    if grep -R -Fq -- 'UNTRACKED_DEPLOY_SECRET_SENTINEL' "$deploy_source"; then
+      exit 97
+    fi
+    if [[ -n "${ANALYSIS_V2_WORKER_SOURCE_DIR:-}" ]]; then
+      [[ "$(cd -P "$deploy_source" && pwd -P)" \
+        != "$(cd -P "$ANALYSIS_V2_WORKER_SOURCE_DIR" && pwd -P)" ]] || exit 98
+    fi
+    if [[ -n "${FAKE_GCLOUD_DEPLOY_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >"$FAKE_GCLOUD_DEPLOY_LOG"
+    fi
+    if [[ -n "${FAKE_GCLOUD_DEPLOY_SOURCE_MANIFEST:-}" ]]; then
+      (cd "$deploy_source" && find . -type f -print | LC_ALL=C sort) \
+        >"$FAKE_GCLOUD_DEPLOY_SOURCE_MANIFEST"
+    fi
+    if [[ -n "${FAKE_GCLOUD_DEPLOY_SOURCE_PATH:-}" ]]; then
+      printf '%s\n' "$deploy_source" >"$FAKE_GCLOUD_DEPLOY_SOURCE_PATH"
+    fi
+    [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
+    printf 'ready\n' >"$FAKE_GCLOUD_STATE_FILE"
+    ;;
   "run services describe"*)
     if [[ "$infra_ready" != "true" ]]; then
       exit 1
@@ -944,6 +992,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker.out"
 assert_contains "$temp_dir/worker.out" "gcloud run deploy analysis-worker"
+assert_not_contains "$temp_dir/worker.out" "--ignore-file"
 assert_contains "$temp_dir/worker.out" "--concurrency=2"
 assert_contains "$temp_dir/worker.out" "--max=6"
 assert_contains "$temp_dir/worker.out" "--cpu-throttling"
@@ -957,6 +1006,42 @@ assert_not_contains "$temp_dir/worker.out" "SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_not_contains "$temp_dir/worker.out" "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_contains "$temp_dir/worker.out" \
   "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
+
+deploy_source_repo="$temp_dir/deploy-source-repo"
+mkdir -p "$deploy_source_repo/scripts"
+git -C "$temp_dir" init -q deploy-source-repo
+git -C "$deploy_source_repo" config user.email test@example.test
+git -C "$deploy_source_repo" config user.name Test
+printf '{"private":true}\n' >"$deploy_source_repo/package.json"
+printf 'tracked deploy source\n' >"$deploy_source_repo/deploy-marker.txt"
+printf '.env.local\n' >"$deploy_source_repo/.gitignore"
+cp "$script_dir/analysis-v2-source.gcloudignore" \
+  "$deploy_source_repo/scripts/analysis-v2-source.gcloudignore"
+git -C "$deploy_source_repo" add .gitignore deploy-marker.txt package.json scripts
+git -C "$deploy_source_repo" commit -qm initial
+printf 'UNTRACKED_DEPLOY_SECRET_SENTINEL\n' >"$deploy_source_repo/.env.local"
+printf 'prerequisites_ready\n' >"$temp_dir/deploy-state"
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/deploy-state" \
+  "FAKE_GCLOUD_DEPLOY_LOG=$temp_dir/deploy-command.out" \
+  "FAKE_GCLOUD_DEPLOY_SOURCE_MANIFEST=$temp_dir/deploy-source-manifest.out" \
+  "FAKE_GCLOUD_DEPLOY_SOURCE_PATH=$temp_dir/deploy-source-path.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/worker-apply.out"
+assert_contains "$temp_dir/worker-apply.out" \
+  "verified: source deploy uses a clean tracked commit archive"
+assert_contains "$temp_dir/deploy-command.out" "run deploy analysis-worker"
+assert_not_contains "$temp_dir/deploy-command.out" "--ignore-file"
+assert_contains "$temp_dir/deploy-source-manifest.out" "./.gcloudignore"
+assert_contains "$temp_dir/deploy-source-manifest.out" "./deploy-marker.txt"
+assert_not_contains "$temp_dir/deploy-source-manifest.out" "./.env.local"
+assert_not_contains "$temp_dir/worker-apply.out" "UNTRACKED_DEPLOY_SECRET_SENTINEL"
+deploy_archive_path="$(<"$temp_dir/deploy-source-path.out")"
+[[ ! -e "$deploy_archive_path" ]] \
+  || fail "temporary deploy source archive was not removed"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'ANALYSIS_V2_WORKER_ENABLED=true' \
