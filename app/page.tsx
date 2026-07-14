@@ -271,7 +271,7 @@ export default function LandingPage() {
                 </>
               ) : (
                 <>
-                  지금 바로 위장여사친 판독하기
+                  지금 바로 확인하기
                   <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
                     →
                   </span>
