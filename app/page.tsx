@@ -1,5 +1,13 @@
 'use client';
 
+/* ============================================================================
+ * ⚠️ 랜딩 마케팅 카피 = 프론트엔드 소관 (확정 문구). — CLAUDE.md Project Rules #4
+ * 히어로 헤드라인/서브·미세문구, 판독 절차 STEP, '왜 AI 판독인가' 신뢰 블록,
+ * 신뢰 스트립, 하단 CTA 헤드라인/서브/버튼 등을 백엔드·기능 작업 중에
+ * 임의로 수정하거나 순화하지 마세요. 기능(로직·props)만 추가하고 문구는 그대로.
+ * 변경이 꼭 필요하면 사용자에게 먼저 확인할 것. (과거 순화 덮어쓰기 사례 있음)
+ * ============================================================================ */
+
 import { useCallback, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -57,26 +65,26 @@ const STEPS = [
   {
     n: '01',
     title: '아이디 하나면 충분',
-    body: ['남자친구 인스타그램 아이디만 넣으세요.', '나머지 파고드는 건 전부 AI 몫입니다.'],
+    body: ['남자친구 인스타그램 아이디만 넣으세요.', '나머지는 AI가 알아서 전부 파 드립니다.'],
   },
   {
     n: '02',
     title: '직접 못 찾는 것까지 판독',
-    body: ['팔로워·팔로잉에서 맞팔 계정을 찾고,', '공개 프로필과 게시물 정보를 바탕으로 계정 특성을 분석합니다.'],
+    body: ['맞팔 수백 명의 성별을 식별해 이성만 추려내고,', '상호작용·친밀도·프로필 분위기까지 5개 축으로 교차 분석합니다.'],
   },
   {
     n: '03',
     title: '위협 등급 리포트',
-    body: ['위장 여사친 후보를 위험도 순으로 정렬하고,', '공개 정보에서 확인한 분석 근거를 함께 보여드립니다.'],
+    body: ['위장 여사친 후보를 위험도 순으로 정렬하고,', '위장여사친들의 정체를 구체적 근거 기반으로 전부 보여드립니다.'],
   },
 ];
 
 // 신뢰 블록 — "직접은 불가능, AI만 가능"을 강조 (자극적 톤)
 const TRUST = [
-  { title: '맞팔 계정 스캔', body: '수집 가능한 공개 맞팔 계정을 범위 내에서 살펴봅니다.' },
-  { title: '후보 계정 분류', body: '공개 프로필을 바탕으로 위장 여사친 후보를 분류합니다.' },
-  { title: '공개 정보 분석', body: '공개 프로필과 게시물 정보를 바탕으로 계정 특성을 분석합니다.' },
-  { title: '별도 통보 없음', body: '서비스가 분석 요청을 당사자에게 별도로 알리지는 않습니다.' },
+  { title: '맞팔 전수조사', body: '수백 명을 일일이 볼 순 없죠. AI가 한 명도 빠짐없이 훑습니다.' },
+  { title: '여사친들만 선별', body: '성별을 식별해 위장 여사친 후보만 골라냅니다.' },
+  { title: '상호작용 추적', body: '좋아요·댓글·태그·멘션·친밀도까지 정밀 분석합니다.' },
+  { title: '상대방은 절대 모름', body: '조회 흔적도, 알림도 남지 않습니다.' },
 ];
 
 const REVIEWS = [
@@ -190,7 +198,7 @@ export default function LandingPage() {
                 onClick={() => router.push('/mypage')}
                 className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
               >
-                기록실
+                보관함
               </button>
               <button
                 onClick={() => router.push('/analyze')}
@@ -218,27 +226,69 @@ export default function LandingPage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.55, ease: EASE }}
           >
-            <div className="mb-5 flex items-center justify-between">
-              <Eyebrow>CASE FILE · 판독 의뢰</Eyebrow>
-              <span className="num text-[11px] tracking-[0.2em] text-fg-mute">NO. 0421-KR</span>
+            <div className="mb-5">
+              <Eyebrow>국내 유일 위장여사친 판독 서비스</Eyebrow>
             </div>
 
-            <h1 className="text-[34px] font-bold leading-[1.14] tracking-[-0.02em] text-fg">
+            <h1 className="text-[26px] font-bold leading-[1.2] tracking-[-0.02em] text-fg sm:text-[34px] sm:leading-[1.14]">
               내 남친이 맞팔 중인 여자들,
               <br />
               <span className="text-blood">누가 제일 위험할까?</span>
             </h1>
             <p className="mt-4 text-[15px] leading-relaxed text-fg-dim">
-              공개된 인스타그램 정보를 바탕으로 AI 참고 결과를 제공합니다.
+              &quot;그냥 친구야&quot;라는 말, AI가 팩트 체크해드립니다.
             </p>
           </motion.div>
+
+          {/* input + submit — 서브카피 바로 아래(액션 우선). 도감 카드는 그 아래에서 결과 미리보기 */}
+          <div className="mt-7 space-y-2.5">
+            <div className="relative">
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
+              <input
+                id="ig-hero"
+                ref={inputRef}
+                type="text"
+                value={igId}
+                onChange={(e) => {
+                  setIgId(e.target.value);
+                  if (heroError) setHeroError(null);
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && !starting && handleStart()}
+                placeholder="남자친구 인스타그램 아이디"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                aria-label="남자친구 인스타그램 아이디"
+                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
+              />
+            </div>
+            {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
+            <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
+              {starting ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  판독 요청 중…
+                </>
+              ) : (
+                <>
+                  지금 바로 확인하기
+                  <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
+                    →
+                  </span>
+                </>
+              )}
+            </PrimaryButton>
+            <p className="text-center text-[12px] text-fg-mute">
+              판독 결과는 상대방에게 절대 통보되지 않습니다.
+            </p>
+          </div>
 
           {/* signature: live dossier readout */}
           <motion.div
             initial={reduce ? false : { opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ delay: reduce ? 0 : 0.25, duration: 0.5, ease: EASE }}
-            className="mt-8"
+            className="mt-10"
           >
             <CaseCard bracket="var(--color-blood)" className="overflow-hidden">
               {/* scanning line */}
@@ -286,48 +336,6 @@ export default function LandingPage() {
               </div>
             </CaseCard>
           </motion.div>
-
-          {/* input + CTA */}
-          <div className="mt-8 space-y-2.5">
-            <div className="relative">
-              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
-              <input
-                ref={inputRef}
-                type="text"
-                value={igId}
-                onChange={(e) => {
-                  setIgId(e.target.value);
-                  if (heroError) setHeroError(null);
-                }}
-                onKeyDown={(e) => e.key === 'Enter' && !starting && handleStart()}
-                placeholder="남자친구 인스타그램 아이디"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                aria-label="남자친구 인스타그램 아이디"
-                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
-              />
-            </div>
-            {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
-            <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
-              {starting ? (
-                <>
-                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  판독 요청 중…
-                </>
-              ) : (
-                <>
-                  지금 바로 판독하기
-                  <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
-                    →
-                  </span>
-                </>
-              )}
-            </PrimaryButton>
-            <p className="text-center text-[12px] text-fg-mute">
-              서비스가 분석 요청을 당사자에게 별도로 알리지는 않습니다.
-            </p>
-          </div>
         </section>
 
         {/* ---------- assurance strip ---------- */}
@@ -335,7 +343,7 @@ export default function LandingPage() {
           <div className="anim-marquee flex w-max whitespace-nowrap">
             {[0, 1].map((k) => (
               <div key={k} className="flex items-center" aria-hidden={k === 1}>
-                {['공개 정보 기반 분석', '서비스 별도 통보 없음', '인스타 비밀번호 불필요', '완료 후 결과 제공'].map((t) => (
+                {['상대방 통보 없음', '비밀 보장 100%', '아이디 하나면 끝', '5분이면 결과 완료'].map((t) => (
                   <span key={t} className="flex items-center px-6 text-[12px] font-medium tracking-[0.08em] text-fg-dim">
                     <span className="mr-6 h-1 w-1 bg-blood" />
                     {t}
@@ -377,7 +385,7 @@ export default function LandingPage() {
             직접 뒤지는 건 <span className="text-blood">불가능</span>합니다
           </h2>
           <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-            수집 가능한 공개 정보를 AI가 분석해 보기 쉽게 정리합니다.
+            밤새 프로필을 눌러봐도 못 찾는 걸, AI는 5분이면 끝냅니다.
           </p>
 
           <div className="mt-8 grid grid-cols-2 gap-3">
@@ -412,21 +420,19 @@ export default function LandingPage() {
 
         {/* ---------- bottom CTA ---------- */}
         <section className="pb-16">
-          <CaseCard bracket="var(--color-blood)" className="px-6 py-10 text-center">
+          <CaseCard bracket="var(--color-blood)" className="px-5 py-10 text-center">
             <Eyebrow className="justify-center">AI 정밀 판독</Eyebrow>
-            <h2 className="mt-4 text-[26px] font-extrabold leading-tight tracking-tight text-fg">
-              공개 정보 속
-              <br />
-              확인할 단서
+            <h2 className="mt-4 text-[20px] font-extrabold leading-tight tracking-tight text-fg sm:text-[26px]">
+              남자친구가 알려주지 않는 진실
             </h2>
             <p className="mt-3.5 text-[13px] leading-relaxed text-fg-dim">
               불안해하며 시간 낭비하지 마세요.
               <br />
-              AI가 공개된 정보를 분석해 참고 결과를 정리해 드립니다.
+              AI가 5분 안에 진실을 파헤쳐 드립니다.
             </p>
             <div className="mt-7">
               <PrimaryButton onClick={focusInput} size="lg">
-                지금 바로 위장 여사친 후보 확인하기
+                지금 바로 위장 여사친 찾아내기
               </PrimaryButton>
             </div>
           </CaseCard>
@@ -435,19 +441,27 @@ export default function LandingPage() {
         {/* ---------- footer ---------- */}
         <footer className="border-t border-line py-9">
           <div className="mb-4">
-            <span className="eyebrow">AI 위장 여사친 판독기</span>
+            <span className="eyebrow">위장여사친 판독기</span>
           </div>
           <p className="text-[12px] leading-relaxed text-fg-mute">
-            본 서비스는 AI 기술로 공개된 정보를 분석합니다. 판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
+            본 서비스는 AI 기술로 공개된 정보를 분석합니다.
+            <br />
+            판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
           </p>
-          <div className="mt-5 flex gap-5 text-[12px] text-fg-dim">
+          <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[12px] text-fg-dim">
             <Link href="/terms" className="transition-colors hover:text-fg">
               이용약관
             </Link>
             <Link href="/privacy" className="transition-colors hover:text-fg">
               개인정보처리방침
             </Link>
+            <a href="mailto:contact@ascentum.co.kr" className="transition-colors hover:text-fg">
+              contact@ascentum.co.kr
+            </a>
           </div>
+          <p className="mt-5 text-[8.5px] leading-relaxed tracking-tight text-fg-mute">
+            Company: Ascentum · BRN: 478-59-01063 · Representative: Youngmin Park
+          </p>
         </footer>
       </main>
 

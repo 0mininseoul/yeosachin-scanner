@@ -39,10 +39,10 @@ export const metadata: Metadata = {
     description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",
     images: [
       {
-        url: "/logo.png",
-        width: 512,
-        height: 512,
-        alt: "AI 위장 여사친 판독기 로고",
+        url: "/og.png",
+        width: 1200,
+        height: 630,
+        alt: "위장여사친 판독기",
       },
     ],
   },
@@ -50,11 +50,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "AI 위장 여사친 판독기",
     description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까?",
-    images: ["/logo.png"],
-  },
-  icons: {
-    icon: "/favicon.ico",
-    apple: "/apple-touch-icon.png",
+    images: ["/og.png"],
   },
   manifest: "/manifest.json",
 };

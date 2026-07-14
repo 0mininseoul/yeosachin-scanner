@@ -1,11 +1,11 @@
 {
-    "name": "AI 바람감지기",
-    "short_name": "바람감지기",
-    "description": "AI가 애인의 인스타그램을 분석해 바람 위험도가 높은 인물을 찾아드립니다",
+    "name": "AI 위장 여사친 판독기",
+    "short_name": "위장여사친 판독기",
+    "description": "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",
     "start_url": "/",
     "display": "standalone",
-    "background_color": "#000000",
-    "theme_color": "#6EE7B7",
+    "background_color": "#0c0a0b",
+    "theme_color": "#0c0a0b",
     "icons": [
         {
             "src": "/icon-192.png",
