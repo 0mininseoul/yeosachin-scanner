@@ -36,8 +36,14 @@ describe('V1 route isolation from durable V2 requests', () => {
 
         expect(progressHook).toContain("payload.code === 'V2_ROUTE_REQUIRED'");
         expect(progressHook).toContain("payload.progressUrl.startsWith('/api/analysis/progress/')");
+        expect(progressHook).toContain('analysisV2ProgressCopy({');
+        expect(progressHook).toContain('activeProfile: progress.snapshot.activeProfile');
         expect(progressPage).toContain("data.pipelineVersion === 'v2'");
+        expect(progressPage).toContain("data?.pipelineVersion === 'v2'");
         expect(resultPage).toContain("result.code === 'V2_ROUTE_REQUIRED'");
         expect(resultPage).toContain("result.resultUrl.startsWith('/api/analysis/v2/result/')");
+        expect(resultPage).toContain('v2ResultFailureAction({');
+        expect(resultPage).toContain('paginatedCountLabel(');
+        expect(resultPage).toContain('setLoadMoreError(kind)');
     });
 });

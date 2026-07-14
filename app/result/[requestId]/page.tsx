@@ -6,6 +6,11 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import {
+    paginatedCountLabel,
+    v2ResultFailureAction,
+    type OwnerProgressStatus,
+} from '@/lib/services/analysis/owner-view-presentation';
+import {
     TopBar,
     Eyebrow,
     CaseCard,
@@ -137,6 +142,10 @@ interface ShareResponse {
     shareToken: string;
 }
 
+interface V2ProgressStatusResponse {
+    snapshot?: { status?: OwnerProgressStatus };
+}
+
 const InstaLink = ({ url }: { url: string }) => (
     <a
         href={url}
@@ -216,19 +225,24 @@ export default function ResultPage({ params }: PageProps) {
     const [error, setError] = useState<string | null>(null);
     const [shareLoading, setShareLoading] = useState(false);
     const [loadMoreKind, setLoadMoreKind] = useState<'public' | 'private' | null>(null);
+    const [loadMoreError, setLoadMoreError] = useState<'public' | 'private' | null>(null);
+    const [resultRetry, setResultRetry] = useState(0);
     const [tab, setTab] = useState<'public' | 'private'>('public');
     const router = useRouter();
     const requestedPipeline = useSearchParams().get('pipeline');
 
     useEffect(() => {
+        const abortController = new AbortController();
+
         const fetchResult = async () => {
             try {
+                setError(null);
                 let isV2Request = requestedPipeline === 'v2';
                 let response = await fetch(
                     requestedPipeline === 'v2'
                         ? `/api/analysis/v2/result/${requestId}?pageSize=50`
                         : `/api/analysis/result/${requestId}`,
-                    { cache: 'no-store' }
+                    { cache: 'no-store', signal: abortController.signal }
                 );
                 let result = await response.json();
 
@@ -240,14 +254,34 @@ export default function ResultPage({ params }: PageProps) {
                     && result.resultUrl.startsWith('/api/analysis/v2/result/')
                 ) {
                     isV2Request = true;
-                    response = await fetch(`${result.resultUrl}?pageSize=50`, { cache: 'no-store' });
+                    response = await fetch(`${result.resultUrl}?pageSize=50`, {
+                        cache: 'no-store',
+                        signal: abortController.signal,
+                    });
                     result = await response.json();
                 }
 
                 if (!response.ok) {
                     if (isV2Request) {
-                        router.push(`/progress/${requestId}`);
-                        return;
+                        let progressStatus: OwnerProgressStatus | null = null;
+                        if (response.status === 404) {
+                            const progressResponse = await fetch(
+                                `/api/analysis/progress/${encodeURIComponent(requestId)}?limit=1`,
+                                { cache: 'no-store', signal: abortController.signal }
+                            );
+                            if (progressResponse.ok) {
+                                const progress = await progressResponse.json() as V2ProgressStatusResponse;
+                                progressStatus = progress.snapshot?.status ?? null;
+                            }
+                        }
+                        if (v2ResultFailureAction({
+                            resultStatus: response.status,
+                            progressStatus,
+                        }) === 'show_progress') {
+                            router.replace(`/progress/${requestId}`);
+                            return;
+                        }
+                        throw new Error('V2_RESULT_UNAVAILABLE');
                     }
                     if (result.status && result.status !== 'completed') {
                         router.push(`/progress/${requestId}`);
@@ -263,23 +297,27 @@ export default function ResultPage({ params }: PageProps) {
                     ? mapV2Result(result as AnalysisResultPageV1)
                     : { ...result, pipelineVersion: 'v1' as const };
                 setData(displayResult);
+                setError(null);
                 trackEvent(EVENTS.VIEW_RESULT, { femaleCount: result.femaleAccounts?.length });
             } catch (err) {
+                if (err instanceof Error && err.name === 'AbortError') return;
                 console.error('Failed to fetch analysis result:', err);
-                setError('결과를 불러오는데 실패했습니다.');
+                setError('완료된 판독 결과를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.');
             } finally {
-                setLoading(false);
+                if (!abortController.signal.aborted) setLoading(false);
             }
         };
 
-        fetchResult();
-    }, [requestId, requestedPipeline, router]);
+        void fetchResult();
+        return () => abortController.abort();
+    }, [requestId, requestedPipeline, resultRetry, router]);
 
     const handleLoadMore = async (kind: 'public' | 'private') => {
         if (!data || data.pipelineVersion !== 'v2' || loadMoreKind) return;
         const cursor = kind === 'public' ? data.femaleNextCursor : data.privateNextCursor;
         if (!cursor) return;
         setLoadMoreKind(kind);
+        setLoadMoreError(current => current === kind ? null : current);
         try {
             const cursorName = kind === 'public' ? 'femaleCursor' : 'privateCursor';
             const response = await fetch(
@@ -307,6 +345,7 @@ export default function ResultPage({ params }: PageProps) {
                 : current);
         } catch (err) {
             console.error('Failed to load the next V2 result page:', err);
+            setLoadMoreError(kind);
         } finally {
             setLoadMoreKind(null);
         }
@@ -376,13 +415,32 @@ export default function ResultPage({ params }: PageProps) {
     if (error || !data) {
         return (
             <div className="flex min-h-dvh flex-col items-center justify-center px-5">
-                <p className="mb-5 text-[14px] text-blood">{error}</p>
-                <button
-                    onClick={() => router.push('/analyze')}
-                    className="border border-line-2 px-5 py-2.5 text-[13px] font-bold text-fg transition-colors hover:border-fg-dim hover:bg-panel"
-                >
-                    다시 시도하기
-                </button>
+                <CaseCard bracket="var(--color-blood)" className="w-full max-w-[400px] p-8 text-center">
+                    <Eyebrow className="justify-center">결과 조회 오류</Eyebrow>
+                    <h1 className="mt-4 text-[21px] font-extrabold tracking-tight text-fg">
+                        판독 결과를 열지 못했습니다
+                    </h1>
+                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim" role="alert">
+                        {error || '판독 결과를 찾을 수 없습니다.'}
+                    </p>
+                    <div className="mt-7">
+                        <PrimaryButton
+                            onClick={() => {
+                                setLoading(true);
+                                setResultRetry(value => value + 1);
+                            }}
+                        >
+                            결과 다시 불러오기
+                        </PrimaryButton>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => router.push('/analyze')}
+                        className="mt-4 text-[12px] font-medium text-fg-mute transition-colors hover:text-fg"
+                    >
+                        새 판독으로 돌아가기
+                    </button>
+                </CaseCard>
             </div>
         );
     }
@@ -494,8 +552,22 @@ export default function ResultPage({ params }: PageProps) {
                 {/* public / private tabs */}
                 <div className="mt-9 grid grid-cols-2 border border-line bg-ink-2">
                     {([
-                        { key: 'public', label: '공개 계정', count: femaleAccounts.length },
-                        { key: 'private', label: '비공개 계정', count: privateAccounts.length },
+                        {
+                            key: 'public',
+                            label: '공개 계정',
+                            count: paginatedCountLabel(
+                                femaleAccounts.length,
+                                Boolean(data.femaleNextCursor)
+                            ),
+                        },
+                        {
+                            key: 'private',
+                            label: '비공개 계정',
+                            count: paginatedCountLabel(
+                                privateAccounts.length,
+                                Boolean(data.privateNextCursor)
+                            ),
+                        },
                     ] as const).map((t) => (
                         <button
                             key={t.key}
@@ -581,14 +653,25 @@ export default function ResultPage({ params }: PageProps) {
                         </div>
                     )}
                     {data.pipelineVersion === 'v2' && data.femaleNextCursor && (
-                        <button
-                            type="button"
-                            onClick={() => handleLoadMore('public')}
-                            disabled={loadMoreKind !== null}
-                            className="mt-4 w-full border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
-                        >
-                            {loadMoreKind === 'public' ? '불러오는 중…' : '공개 계정 더 보기'}
-                        </button>
+                        <div className="mt-4">
+                            <button
+                                type="button"
+                                onClick={() => handleLoadMore('public')}
+                                disabled={loadMoreKind !== null}
+                                className="w-full border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
+                            >
+                                {loadMoreKind === 'public'
+                                    ? '불러오는 중…'
+                                    : loadMoreError === 'public'
+                                        ? '공개 계정 다시 불러오기'
+                                        : '공개 계정 더 보기'}
+                            </button>
+                            {loadMoreError === 'public' && (
+                                <p className="mt-2 text-center text-[11px] text-blood" role="alert">
+                                    다음 공개 계정을 불러오지 못했습니다. 다시 시도해 주세요.
+                                </p>
+                            )}
+                        </div>
                     )}
                 </section>
                 ) : (
@@ -632,14 +715,25 @@ export default function ResultPage({ params }: PageProps) {
                         </div>
                     )}
                     {data.pipelineVersion === 'v2' && data.privateNextCursor && (
-                        <button
-                            type="button"
-                            onClick={() => handleLoadMore('private')}
-                            disabled={loadMoreKind !== null}
-                            className="mt-4 w-full border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
-                        >
-                            {loadMoreKind === 'private' ? '불러오는 중…' : '비공개 계정 더 보기'}
-                        </button>
+                        <div className="mt-4">
+                            <button
+                                type="button"
+                                onClick={() => handleLoadMore('private')}
+                                disabled={loadMoreKind !== null}
+                                className="w-full border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
+                            >
+                                {loadMoreKind === 'private'
+                                    ? '불러오는 중…'
+                                    : loadMoreError === 'private'
+                                        ? '비공개 계정 다시 불러오기'
+                                        : '비공개 계정 더 보기'}
+                            </button>
+                            {loadMoreError === 'private' && (
+                                <p className="mt-2 text-center text-[11px] text-blood" role="alert">
+                                    다음 비공개 계정을 불러오지 못했습니다. 다시 시도해 주세요.
+                                </p>
+                            )}
+                        </div>
                     )}
                     <p className="mt-3 text-[11px] text-fg-mute">
                         비공개 계정은 이름 텍스트의 여성형 가능성 순이며, 이 추정은 틀릴 수 있어요.

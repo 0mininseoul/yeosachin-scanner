@@ -37,7 +37,11 @@ export default function ProgressPage({ params }: PageProps) {
 
     // 단계별 분석 실행 함수
     const runNextStep = useCallback(async () => {
-        if (data?.backgroundProcessing === true || isRunningStep.current) return;
+        if (
+            data?.pipelineVersion === 'v2'
+            || data?.backgroundProcessing === true
+            || isRunningStep.current
+        ) return;
         isRunningStep.current = true;
 
         try {
@@ -129,7 +133,7 @@ export default function ProgressPage({ params }: PageProps) {
                 scheduleNextStep(ANALYSIS_STEP_RECOVERY_DELAY_MS, true);
             }
         }
-    }, [data?.backgroundProcessing, refetch, requestId, scheduleNextStep]);
+    }, [data?.backgroundProcessing, data?.pipelineVersion, refetch, requestId, scheduleNextStep]);
 
     useEffect(() => {
         runNextStepRef.current = runNextStep;
@@ -138,6 +142,7 @@ export default function ProgressPage({ params }: PageProps) {
     // pending 또는 processing 상태이면 분석 단계 실행
     useEffect(() => {
         if (
+            data?.pipelineVersion === 'v2' ||
             data?.backgroundProcessing === true ||
             data?.status === 'completed' ||
             data?.status === 'failed'
@@ -164,7 +169,7 @@ export default function ProgressPage({ params }: PageProps) {
             }
             runNextStep();
         }
-    }, [data?.backgroundProcessing, data?.progress, data?.status, runNextStep]);
+    }, [data?.backgroundProcessing, data?.pipelineVersion, data?.progress, data?.status, runNextStep]);
 
     // 탭 복귀 시 파이프라인 재개
     useEffect(() => {
@@ -175,7 +180,8 @@ export default function ProgressPage({ params }: PageProps) {
             if (retryTimeoutRef.current || stepTimeoutRef.current) return;
 
             // 분석 진행 중이고 step이 안 돌고 있으면 재개
-            if (shouldClientDriveAnalysis(data?.status, data?.backgroundProcessing) &&
+            if (data?.pipelineVersion !== 'v2'
+                && shouldClientDriveAnalysis(data?.status, data?.backgroundProcessing) &&
                 !isRunningStep.current) {
                 retryCountRef.current = 0; // 탭 복귀는 fresh start
                 runNextStep();
@@ -184,7 +190,7 @@ export default function ProgressPage({ params }: PageProps) {
 
         document.addEventListener('visibilitychange', handleVisibility);
         return () => document.removeEventListener('visibilitychange', handleVisibility);
-    }, [data?.backgroundProcessing, data?.status, runNextStep]);
+    }, [data?.backgroundProcessing, data?.pipelineVersion, data?.status, runNextStep]);
 
     // 컴포넌트 언마운트 시 정리
     useEffect(() => {
@@ -294,7 +300,7 @@ export default function ProgressPage({ params }: PageProps) {
                     </div>
                 </div>
                 <h1 className="mt-8 text-[22px] font-extrabold tracking-tight text-fg">판독 중…</h1>
-                <p className="mt-2 text-center text-[13px] text-fg-dim">
+                <p className="mt-2 text-center text-[13px] text-fg-dim" aria-live="polite">
                     {data.progressStep || '판독을 준비하고 있습니다.'}
                 </p>
 
