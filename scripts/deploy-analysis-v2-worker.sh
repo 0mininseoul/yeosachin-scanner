@@ -287,6 +287,8 @@ service_json() {
 
 service_runtime_config_matches() {
   local config="$1"
+  # A ready --no-traffic revision advances latestCreated but not service-level latestReady.
+  # The exact staged revision readiness and provenance are verified separately below.
   jq -e \
     --arg runtime_sa "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
     --arg bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
@@ -365,8 +367,7 @@ service_runtime_config_matches() {
         and (env_names | index("GOOGLE_SERVICE_ACCOUNT_KEY_BASE64")) == null
         and ([.status.conditions[]? |
           select(.type == "Ready" and .status == "True")] | length) == 1
-        and (.status.latestCreatedRevisionName // "") != ""
-        and .status.latestCreatedRevisionName == .status.latestReadyRevisionName' \
+        and (.status.latestCreatedRevisionName // "") != ""' \
     <<<"$config" >/dev/null
 }
 
@@ -383,10 +384,14 @@ service_traffic_matches_revision() {
 
 service_runtime_matches() {
   local config="$1"
+  local latest_created
   local latest_ready
+  latest_created="$(jq -er '.status.latestCreatedRevisionName' <<<"$config")" \
+    || return 1
   latest_ready="$(jq -er '.status.latestReadyRevisionName' <<<"$config")" \
     || return 1
-  service_runtime_config_matches "$config" \
+  [[ "$latest_created" == "$latest_ready" ]] \
+    && service_runtime_config_matches "$config" \
     && service_traffic_matches_revision "$config" "$latest_ready"
 }
 

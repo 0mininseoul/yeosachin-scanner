@@ -124,7 +124,7 @@ case "$state" in
     enqueuer_identity_ready="true"
     bucket_ready="true"
     ;;
-  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|runtime_env_drift|runtime_admission_env|runtime_legacy_gate_env|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
+  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|unpromoted_latest|runtime_env_drift|runtime_admission_env|runtime_legacy_gate_env|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
     identity_ready="true"
     vertex_ready="true"
     build_identity_ready="true"
@@ -133,6 +133,7 @@ case "$state" in
     build_operator_ready="true"
     enqueuer_identity_ready="true"
     if [[ "$state" == "failed_latest" || "$state" == "old_traffic" \
+      || "$state" == "unpromoted_latest" \
       || "$state" == "runtime_env_drift" || "$state" == "credential_override" \
       || "$state" == "credential_key_base64" || "$state" == "plaintext_secret" \
       || "$state" == "secret_ref_drift" || "$state" == "slot_drift" \
@@ -589,19 +590,20 @@ case "$command_line" in
       latest_created='analysis-worker-00002'
       latest_ready='analysis-worker-00002'
       traffic_revision='analysis-worker-00002'
+      # Match Cloud Run: no-traffic staging leaves latestReady on the serving revision.
       source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
       if [[ "$state" == "staged_build" ]]; then
         latest_created="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
-        latest_ready="$latest_created"
         if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" \
           || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
+          latest_ready="$latest_created"
           traffic_revision="$latest_created"
         fi
       elif [[ "$state" == "staged_final" ]]; then
         latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
-        latest_ready="$latest_created"
         if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" \
           || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
+          latest_ready="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
           traffic_revision="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         fi
       elif [[ "$state" == "promoted" ]]; then
@@ -634,6 +636,7 @@ case "$command_line" in
       legacy_gate_env='false'
       [[ "$state" != "failed_latest" ]] || latest_ready='analysis-worker-00001'
       [[ "$state" != "old_traffic" ]] || traffic_revision='analysis-worker-00001'
+      [[ "$state" != "unpromoted_latest" ]] || latest_created='analysis-worker-unpromoted'
       [[ "$state" != "runtime_env_drift" ]] || runtime_queue='wrong-v2-queue'
       [[ "$state" != "credential_override" ]] || credential_name='GOOGLE_APPLICATION_CREDENTIALS'
       [[ "$state" != "credential_key_base64" ]] || credential_name='GOOGLE_SERVICE_ACCOUNT_KEY_BASE64'
@@ -2270,7 +2273,7 @@ fi
 assert_contains "$temp_dir/v2-task-project-role.out" \
   "task OIDC identity must have no project-wide role"
 
-for drift_state in failed_latest old_traffic; do
+for drift_state in failed_latest old_traffic unpromoted_latest; do
   if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$drift_state" \
     bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
     >"$temp_dir/worker-$drift_state.out" 2>&1; then
