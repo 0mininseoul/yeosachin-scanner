@@ -31,12 +31,41 @@ import {
     type ApifyRelationshipKind,
 } from './apify-relationship';
 
-const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
+export const APIFY_PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
+export const APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD = 0.0026;
+const APIFY_PROFILE_SUMMARY_WAIT_LIMIT_SECS = 75;
 export const APIFY_RELATIONSHIP_ACTOR_ID =
     'scraping_solutions/instagram-scraper-followers-following-no-cookies';
 const DEFAULT_APIFY_RELATIONSHIP_BUILD = '0.0.71';
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const RESUMABLE_APIFY_STATUSES = new Set(['READY', 'RUNNING', 'TIMING-OUT', 'ABORTING']);
+export const APIFY_PROFILE_DATASET_HEADROOM_MS = 20_000;
+
+async function withinProfileDeadline<T>(pending: Promise<T>, deadlineAtMs?: number): Promise<T> {
+    if (deadlineAtMs === undefined) return pending;
+    const remainingMs = deadlineAtMs - Date.now();
+    if (!Number.isFinite(deadlineAtMs) || remainingMs <= 0) {
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
+        );
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            pending,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error(
+                        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
+                    )),
+                    remainingMs
+                );
+            }),
+        ]);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+    }
+}
 
 interface ApifyProviderDeps {
     client?: ApifyClientLike;
@@ -544,14 +573,23 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         apify: ApifyClientLike,
         datasetId: string,
         maximumItems: number,
-        settings: ReturnType<typeof profileSettings>
+        settings: ReturnType<typeof profileSettings>,
+        deadlineAtMs?: number
     ) {
         let lastPage;
         for (let attempt = 0; attempt <= settings.datasetReadRetries; attempt++) {
+            if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
+                throw new Error(
+                    'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
+                );
+            }
             try {
-                lastPage = await apify.dataset(datasetId).listItems({
-                    limit: maximumItems + 1,
-                });
+                lastPage = await withinProfileDeadline(
+                    apify.dataset(datasetId).listItems({
+                        limit: maximumItems + 1,
+                    }),
+                    deadlineAtMs
+                );
             } catch {
                 lastPage = undefined;
             }
@@ -570,7 +608,13 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 }
             }
             if (attempt < settings.datasetReadRetries) {
-                await sleep(settings.datasetRetryBaseDelayMs * 2 ** attempt);
+                const delayMs = settings.datasetRetryBaseDelayMs * 2 ** attempt;
+                if (deadlineAtMs !== undefined && Date.now() + delayMs >= deadlineAtMs) {
+                    throw new Error(
+                        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
+                    );
+                }
+                await sleep(delayMs);
             }
         }
         if (lastPage && !Array.isArray(lastPage.items)) {
@@ -581,14 +625,44 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         );
     }
 
-    async function getProfile(
+    async function getSingleProfile(
         username: string,
+        includePosts: boolean,
+        invocationWaitLimitSecs: number | undefined,
         context?: ProviderCallContext
     ): Promise<InstagramProfile | null> {
         const settings = profileSettings();
-        const maximumChargeUsd = context?.maxChargeUsd
-            ?? profileMaximumChargeUsd(1, settings);
+        let effectiveInvocationWaitLimitSecs = invocationWaitLimitSecs;
+        if (context?.invocationDeadlineAtMs !== undefined) {
+            const waitBudgetMs = context.invocationDeadlineAtMs
+                - Date.now()
+                - APIFY_PROFILE_DATASET_HEADROOM_MS;
+            if (waitBudgetMs < 1_000) {
+                throw profileRunPending(
+                    'Apify profile invocation deadline is too close; retry the checkpointed run.'
+                );
+            }
+            effectiveInvocationWaitLimitSecs = Math.min(
+                effectiveInvocationWaitLimitSecs ?? APIFY_PROFILE_SUMMARY_WAIT_LIMIT_SECS,
+                Math.floor(waitBudgetMs / 1_000)
+            );
+        }
+        const configuredMaximumChargeUsd = profileMaximumChargeUsd(1, settings);
+        const maximumChargeUsd = context?.maxChargeUsd ?? (
+            includePosts
+                ? configuredMaximumChargeUsd
+                : Math.min(configuredMaximumChargeUsd, APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD)
+        );
+        if (
+            !includePosts
+            && maximumChargeUsd > APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD + Number.EPSILON
+        ) {
+            throw new Error(
+                'SCRAPING_BUDGET_ERROR: Apify profile summary charge exceeds its fixed ceiling.'
+            );
+        }
         const apify = client(context?.credentialSlot);
+        const durableRun = hasDurableProfileRunCheckpoint(context);
         context?.recordUsage({ request_count: 1 });
         let run;
         try {
@@ -596,7 +670,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 settings.actorConcurrency,
                 () => startOrResumeApifyActor(
                     apify,
-                    PROFILE_ACTOR_ID,
+                    APIFY_PROFILE_ACTOR_ID,
                     { usernames: [username] },
                     {
                         logicalProvider: 'apify',
@@ -604,6 +678,9 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                         timeoutSecs: settings.timeoutSecs,
                         maxItems: 1,
                         maxTotalChargeUsd: maximumChargeUsd,
+                        ...(effectiveInvocationWaitLimitSecs === undefined
+                            ? {}
+                            : { invocationWaitLimitSecs: effectiveInvocationWaitLimitSecs }),
                     },
                     context
                 )
@@ -614,7 +691,11 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 && (
                     error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+                    || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                    || error.message.startsWith('SCRAPING_CONFIG_ERROR:')
+                    || error.message.startsWith('SCRAPING_BUDGET_ERROR:')
+                    || error.message.startsWith('SCRAPING_SCHEMA_ERROR:')
                 )
             ) {
                 throw error;
@@ -622,32 +703,89 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             throw new Error('SCRAPING_ERROR: Apify profile actor transport request failed.');
         }
         if (run.status !== 'SUCCEEDED') {
+            if (durableRun && RESUMABLE_APIFY_STATUSES.has(run.status)) {
+                throw profileRunPending(
+                    `Apify profile run status=${run.status}; retry the checkpointed run.`
+                );
+            }
             throw new Error(`SCRAPING_ERROR: Apify profile actor 실행 실패 (status=${run.status}).`);
         }
         if (!run.defaultDatasetId) {
             throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile run에 defaultDatasetId가 없습니다.');
         }
 
-        const page = await waitForSettledProfileDataset(
-            apify,
-            run.defaultDatasetId,
-            1,
-            settings
-        );
+        let page;
+        try {
+            page = await waitForSettledProfileDataset(
+                apify,
+                run.defaultDatasetId,
+                1,
+                settings,
+                context?.invocationDeadlineAtMs
+            );
+        } catch (error) {
+            if (
+                durableRun
+                && isTypedScrapingError(error, 'SCRAPING_INCOMPLETE_ERROR:', 'SCRAPING_ERROR:')
+            ) {
+                throw profileRunPending(
+                    'Apify profile dataset is not yet readable; retry the checkpointed run.'
+                );
+            }
+            throw error;
+        }
         context?.recordUsage({
             estimated_cost_usd: page.items.length * settings.estimatedCostPerResultUsd,
         });
         const { items } = page;
-        if (items.length === 0) return null;
+        if (items.length === 0) {
+            if (durableRun) {
+                throw profileRunPending(
+                    'Apify profile dataset is empty; retry the checkpointed run.'
+                );
+            }
+            throw new Error(
+                'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset is empty without explicit not-found evidence.'
+            );
+        }
         if (items.length > 1) {
             throw new Error('SCRAPING_SCHEMA_ERROR: 단일 프로필 요청에 여러 결과가 반환되었습니다.');
         }
         context?.recordUsage({ result_count: 1 });
-        const profile = mapProfile(items[0] as Record<string, unknown>, true);
+        const explicitNotFound = profileNotFoundEnvelopeSchema.safeParse(items[0]);
+        if (explicitNotFound.success) {
+            if (explicitNotFound.data.username.toLowerCase() !== username.toLowerCase()) {
+                throw new Error('SCRAPING_SCHEMA_ERROR: Apify not-found username mismatch.');
+            }
+            return null;
+        }
+        const profile = mapProfile(items[0] as Record<string, unknown>, includePosts);
         if (profile.username.toLowerCase() !== username.toLowerCase()) {
             throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile username이 요청과 다릅니다.');
         }
         return profile;
+    }
+
+    async function getProfile(
+        username: string,
+        context?: ProviderCallContext
+    ): Promise<InstagramProfile | null> {
+        return getSingleProfile(username, true, undefined, context);
+    }
+
+    async function getProfileSummary(
+        username: string,
+        context?: ProviderCallContext
+    ): Promise<InstagramProfile | null> {
+        return getSingleProfile(
+            username,
+            false,
+            Math.min(
+                context?.invocationWaitLimitSecs ?? APIFY_PROFILE_SUMMARY_WAIT_LIMIT_SECS,
+                APIFY_PROFILE_SUMMARY_WAIT_LIMIT_SECS
+            ),
+            context
+        );
     }
 
     interface CollectedProfileBatch {
@@ -697,7 +835,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                         if (batch[0]) await reportProfileStart(context, batch[0]);
                         return startOrResumeApifyActor(
                             apify,
-                            PROFILE_ACTOR_ID,
+                            APIFY_PROFILE_ACTOR_ID,
                             { usernames: batch },
                             {
                                 logicalProvider: 'apify',
@@ -947,6 +1085,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
     return {
         name: 'apify',
         paid: true,
+        getProfileSummary,
         getProfile,
         getFollowers: (username, limit, context) =>
             collectRelationship(username, limit, 'followers', context),
@@ -958,3 +1097,13 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
 }
 
 export const apifyProvider = makeApifyProvider();
+
+export async function getApifyProfileSummary(
+    username: string,
+    context?: ProviderCallContext
+): Promise<InstagramProfile | null> {
+    if (!apifyProvider.getProfileSummary) {
+        throw new Error('SCRAPING_CONFIG_ERROR: Apify summary capability is unavailable.');
+    }
+    return apifyProvider.getProfileSummary(username, context);
+}

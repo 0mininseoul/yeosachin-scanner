@@ -33,7 +33,11 @@ describe('preflight retention route', () => {
         vi.clearAllMocks();
         mocks.config.mockReturnValue(config);
         mocks.verify.mockResolvedValue(true);
-        mocks.retain.mockResolvedValue({ expiredPurged: 2, terminalScrubbed: 1 });
+        mocks.retain.mockResolvedValue({
+            providerCosts: { eligible: 1, finalized: 1, failed: 0, hasMore: false },
+            expiredPurged: 2,
+            terminalScrubbed: 1,
+        });
     });
 
     it('runs only for the dedicated maintenance identity', async () => {
@@ -41,6 +45,7 @@ describe('preflight retention route', () => {
         expect(response.status).toBe(200);
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
         await expect(response.json()).resolves.toEqual({
+            providerCosts: { eligible: 1, finalized: 1, failed: 0, hasMore: false },
             expiredPurged: 2,
             terminalScrubbed: 1,
         });

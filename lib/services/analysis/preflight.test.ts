@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
+import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
+import { makeWebProfileFetcher } from '@/lib/services/instagram/providers/selfhosted/web-client';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -17,12 +20,29 @@ import {
     type PreflightStore,
     type ReadyPreflightSnapshot,
 } from './preflight';
+import type {
+    PreflightProviderRunStore,
+    StoredPreflightProviderRun,
+} from './preflight-provider-run';
+import { preflightTargetInputHash } from './preflight-identity';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
 const claimToken = '323e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
 const expiresAt = '2030-07-13T13:00:00.000Z';
 const entitlementSecret = Buffer.alloc(32, 13).toString('base64url');
+const preflightIdentitySecret = Buffer.alloc(32, 14).toString('base64url');
+const preflightInputHash = preflightTargetInputHash('target.name', {
+    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+});
+
+beforeAll(() => {
+    vi.stubEnv('ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET', preflightIdentitySecret);
+});
+
+afterAll(() => {
+    vi.unstubAllEnvs();
+});
 
 function profile(overrides: Partial<InstagramProfile> = {}): InstagramProfile {
     return {
@@ -46,6 +66,7 @@ function claim(overrides: Partial<ClaimedPreflight> = {}): ClaimedPreflight {
         userId,
         targetInstagramId: 'target.name',
         accessMode: 'test_entitlement',
+        workerAttemptCount: 1,
         catalogSnapshot: {
             plans: {
                 basic: {
@@ -73,6 +94,64 @@ function claim(overrides: Partial<ClaimedPreflight> = {}): ClaimedPreflight {
         } satisfies PreflightCatalogSnapshot,
         ...overrides,
     };
+}
+
+function providerRunStore(): PreflightProviderRunStore {
+    return {
+        load: vi.fn(async () => null),
+        reserve: vi.fn(),
+        checkpointStarted: vi.fn(),
+        checkpointTerminal: vi.fn(),
+    };
+}
+
+function storedRun(
+    status: 'starting' | 'running' | 'succeeded' = 'running'
+): StoredPreflightProviderRun {
+    return {
+        preflightId,
+        inputHash: preflightInputHash,
+        logicalProvider: 'apify' as const,
+        actorId: APIFY_PROFILE_ACTOR_ID,
+        credentialSlot: 'quinary' as const,
+        maxChargeUsd: 0.0026 as const,
+        status,
+        runId: status === 'starting' ? null : 'StoredRun12345678',
+        actualUsageUsd: null,
+        reservedAt: '2026-07-14T17:59:00.000Z',
+        runStartedAt: status === 'starting' ? null : '2026-07-14T17:59:30.000Z',
+        terminalizedAt: status === 'succeeded' ? '2026-07-14T18:05:00.000Z' : null,
+    };
+}
+
+async function completeFallbackRun(
+    context: ProviderCallContext | undefined,
+    result: InstagramProfile | null = profile()
+) {
+    await context?.onBeforeRunStart?.({
+        logicalProvider: 'apify',
+        actorId: APIFY_PROFILE_ACTOR_ID,
+        credentialSlot: 'quinary',
+        maxChargeUsd: 0.0026,
+    });
+    await context?.onRunStarted?.('StartedRun1234567');
+    await context?.onCostRunStarted?.({
+        logicalProvider: 'apify',
+        actorId: APIFY_PROFILE_ACTOR_ID,
+        credentialSlot: 'quinary',
+        maxChargeUsd: 0.0026,
+        runId: 'StartedRun1234567',
+    });
+    await context?.onCostRunFinished?.({
+        logicalProvider: 'apify',
+        actorId: APIFY_PROFILE_ACTOR_ID,
+        credentialSlot: 'quinary',
+        maxChargeUsd: 0.0026,
+        runId: 'StartedRun1234567',
+        status: 'succeeded',
+        usageTotalUsd: null,
+    });
+    return result;
 }
 
 function workerStore(claimed: ClaimedPreflight | null = claim()) {
@@ -378,6 +457,7 @@ describe('preflight persistence adapter', () => {
         });
 
         await expect(store.claim(preflightId)).resolves.toMatchObject({
+            workerAttemptCount: 1,
             catalogSnapshot: {
                 pricingVersion: 'quoted-v1',
                 prices: {
@@ -393,7 +473,11 @@ describe('preflight worker domain', () => {
         const store = workerStore();
         const getProfile = vi.fn(async () => profile());
 
-        await expect(processPreflight(preflightId, { store, getProfile }))
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile,
+            providerRunStore: providerRunStore(),
+        }))
             .resolves.toBe('ready');
         expect(getProfile).toHaveBeenCalledWith('target.name');
         expect(store.finalizeReady).toHaveBeenCalledWith(
@@ -423,6 +507,7 @@ describe('preflight worker domain', () => {
         await expect(processPreflight(preflightId, {
             store,
             getProfile: vi.fn(async () => result),
+            providerRunStore: providerRunStore(),
         })).resolves.toBe('blocked');
         expect(store.finalizeBlocked).toHaveBeenCalledWith(
             expect.objectContaining({ preflightId }),
@@ -436,6 +521,7 @@ describe('preflight worker domain', () => {
         await expect(processPreflight(preflightId, {
             store,
             getProfile: vi.fn(async () => profile()),
+            providerRunStore: providerRunStore(),
         })).resolves.toBe('blocked');
         expect(store.finalizeBlocked).toHaveBeenCalledWith(
             expect.anything(),
@@ -446,36 +532,270 @@ describe('preflight worker domain', () => {
     it('does nothing when an idempotent worker delivery cannot claim the row', async () => {
         const store = workerStore(null);
         const getProfile = vi.fn();
-        await expect(processPreflight(preflightId, { store, getProfile }))
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile,
+            providerRunStore: providerRunStore(),
+        }))
             .resolves.toBe('noop');
         expect(getProfile).not.toHaveBeenCalled();
     });
 
-    it('releases the fenced claim and rethrows a transient crawler failure for task retry', async () => {
+    it('blocks an unclassified primary failure without starting paid work', async () => {
         const store = workerStore();
+        const runs = providerRunStore();
         const failure = new Error('transient self-hosted failure');
+        const fallback = vi.fn();
         await expect(processPreflight(preflightId, {
             store,
             getProfile: vi.fn(async () => { throw failure; }),
-        })).rejects.toBe(failure);
-        expect(store.releaseClaim).toHaveBeenCalledWith(
-            expect.objectContaining({ preflightId, claimToken })
-        );
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+        })).resolves.toBe('blocked');
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(store.releaseClaim).not.toHaveBeenCalled();
         expect(store.finalizeReady).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'ANALYSIS_FAILED');
+    });
+
+    it('falls back exactly once for a self-hosted 429 and persists the paid run', async () => {
+        const store = workerStore();
+        const runs = providerRunStore();
+        vi.mocked(runs.reserve).mockResolvedValue({ created: true, run: storedRun('starting') });
+        vi.mocked(runs.checkpointStarted).mockResolvedValue({
+            ...storedRun('running'),
+            runId: 'StartedRun1234567',
+        });
+        vi.mocked(runs.checkpointTerminal).mockResolvedValue({
+            ...storedRun('succeeded'),
+            runId: 'StartedRun1234567',
+        });
+        const fetchProfile = makeWebProfileFetcher({
+            env: {
+                SELFHOSTED_PROFILE_TIMEOUT_MS: '1000',
+                SELFHOSTED_PROFILE_RETRIES: '0',
+                SELFHOSTED_PROFILE_RETRY_BASE_DELAY_MS: '0',
+                SELFHOSTED_PROFILE_MIN_INTERVAL_MS: '0',
+                SELFHOSTED_PROFILE_CIRCUIT_COOLDOWN_MS: '1000',
+                SELFHOSTED_PROFILE_SCHEMA_FAILURE_THRESHOLD: '2',
+                SELFHOSTED_PROFILE_TRANSIENT_FAILURE_THRESHOLD: '3',
+                SELFHOSTED_PROFILE_MAX_RETRY_AFTER_MS: '60000',
+            },
+            fetchFn: vi.fn<typeof fetch>(async () => new Response('', {
+                status: 429,
+                headers: { 'content-type': 'text/plain' },
+            })),
+        });
+        const fallback = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext
+        ) => {
+            expect(context?.invocationWaitLimitSecs).toBeGreaterThan(0);
+            expect(context?.invocationWaitLimitSecs).toBeLessThanOrEqual(75);
+            expect(context?.invocationDeadlineAtMs).toBeGreaterThan(Date.now());
+            return completeFallbackRun(context);
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: async username => {
+                await fetchProfile(username);
+                return null;
+            },
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+            env: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('ready');
+
+        expect(fallback).toHaveBeenCalledOnce();
+        expect(runs.reserve).toHaveBeenCalledOnce();
+        expect(runs.checkpointStarted).toHaveBeenCalledOnce();
+        expect(runs.checkpointTerminal).toHaveBeenCalledOnce();
+        expect(JSON.stringify(vi.mocked(runs.reserve).mock.calls[0])).not.toContain('target.name');
+    });
+
+    it('resumes an existing paid run without calling self-hosted or starting another Actor', async () => {
+        const store = workerStore(claim({ workerAttemptCount: 2 }));
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('running'));
+        const primary = vi.fn();
+        const fallback = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext
+        ) => {
+            expect(context).toMatchObject({
+                resumeRunId: 'StoredRun12345678',
+                credentialSlot: 'quinary',
+                maxChargeUsd: 0.0026,
+            });
+            return profile();
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: primary,
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+        })).resolves.toBe('ready');
+
+        expect(primary).not.toHaveBeenCalled();
+        expect(fallback).toHaveBeenCalledOnce();
+        expect(runs.reserve).not.toHaveBeenCalled();
+    });
+
+    it('releases only a checkpointed RUN_PENDING result for same-run task retry', async () => {
+        const store = workerStore(claim({ workerAttemptCount: 3 }));
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('running'));
+
+        const result = processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => {
+                throw new Error('SCRAPING_RUN_PENDING_ERROR: still running');
+            }),
+            providerRunStore: runs,
+        });
+
+        await expect(result).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'run_pending',
+                workerAttemptCount: 3,
+            },
+        });
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
     });
 
-    it('rejects a mismatched provider username and releases the claim for retry', async () => {
+    it.each([
+        'SCRAPING_CONFIG_ERROR: local configuration is invalid.',
+        'PREFLIGHT_TASKS_CONFIG_ERROR: runtime budget is invalid.',
+        'PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid stored run.',
+    ])('never starts paid work for deterministic local failure: %s', async message => {
         const store = workerStore();
+        const runs = providerRunStore();
+        const fallback = vi.fn();
+
         await expect(processPreflight(preflightId, {
             store,
-            getProfile: vi.fn(async () => profile({ username: 'different.target' })),
-        })).rejects.toThrow('returned username does not match target');
-        expect(store.releaseClaim).toHaveBeenCalledWith(
-            expect.objectContaining({ preflightId, claimToken })
-        );
-        expect(store.finalizeReady).not.toHaveBeenCalled();
+            getProfile: vi.fn(async () => { throw new Error(message); }),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+        })).resolves.toBe('blocked');
+
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        'PREFLIGHT_PERSISTENCE_ERROR: finalize failed (08006).',
+        'PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: load failed (08006).',
+        'ANALYSIS_PERSISTENCE_ERROR: provider checkpoint is temporarily unavailable.',
+    ])('releases transient persistence failures without paid fallback: %s', async message => {
+        const store = workerStore(claim({ workerAttemptCount: 4 }));
+        const runs = providerRunStore();
+        const fallback = vi.fn();
+
+        const result = processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(async () => { throw new Error(message); }),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+        });
+
+        await expect(result).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'persistence',
+                retryable: true,
+                workerAttemptCount: 4,
+            },
+        });
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('releases a transient provider-ledger load failure before self-hosted work', async () => {
+        const store = workerStore();
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockRejectedValue(
+            new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: load failed (08006).')
+        );
+        const primary = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: primary,
+            providerRunStore: runs,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: { category: 'persistence' },
+        });
+
+        expect(primary).not.toHaveBeenCalled();
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('releases a transient finalize-ready failure instead of replacing it with blocked', async () => {
+        const store = workerStore();
+        vi.mocked(store.finalizeReady).mockRejectedValue(
+            new Error('PREFLIGHT_PERSISTENCE_ERROR: finalize ready failed (08006).')
+        );
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(async () => profile()),
+            providerRunStore: providerRunStore(),
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: { category: 'persistence' },
+        });
+
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('keeps an explicit self-hosted null free and terminal', async () => {
+        const store = workerStore();
+        const runs = providerRunStore();
+        const fallback = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(async () => null),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+        })).resolves.toBe('blocked');
+
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'TARGET_NOT_FOUND');
+    });
+
+    it('blocks a reserved start without a run id before invoking any paid provider', async () => {
+        const store = workerStore(claim({ workerAttemptCount: 2 }));
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('starting'));
+        const fallback = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+        })).resolves.toBe('blocked');
+
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'ANALYSIS_FAILED');
     });
 });
 

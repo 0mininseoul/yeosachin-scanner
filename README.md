@@ -176,6 +176,7 @@ ai-baram-detector/
 | `analysis_requests` | 분석 요청 상태/진행률/단계 데이터 |
 | `analysis_step_events` | PII 없는 단계별 시작/완료/재시도/실패와 지연시간 |
 | `analysis_provider_usage_expectations` | 유료 Actor 시작 전 고정한 작업과 최대 과금액 |
+| `analysis_preflight_provider_runs` | 결제 전 대상 profile-summary fallback의 예약, 단일 Apify run, `$0.0026` 상한, 30초 후 실제액 정산 |
 | `analysis_gemini_usage_expectations` | Gemini 실행 전 고정한 예상 비용 로그 수 |
 | `analysis_operational_cost_summary` | 요청별 Apify 30초 후 확정 실제액, 보수 상한, Gemini 추정액 통합 view |
 | `analysis_results` | 위험도 순위 결과 (share_token 포함) |
@@ -192,6 +193,8 @@ ai-baram-detector/
 
 ### Instagram 수집 라우팅
 
+- 결제 전 대상 프로필 preflight는 로그인 없는 자체 summary 수집이 기본입니다. 분류된 자체 provider 실패일 때만 Apify profile-summary Actor를 preflight당 최대 1회, `maxTotalChargeUsd=$0.0026`로 fallback합니다.
+- 이 fallback은 Actor 시작 전 원장을 예약하고, retry 시 새 run을 만들지 않고 저장된 같은 run ID를 재개합니다. provider가 제공한 `finishedAt`이 인증 재조회 시점 기준 최소 30초 이상 지난 경우에만 실제액을 정산하며, 30초 미만은 미정산으로 남겨 다시 조회합니다. preflight가 만료·이탈해도 정산 전 원장을 유지합니다.
 - 공개 프로필과 프로필 배치는 로그인 없는 직접 수집이 기본이며, 실패 시 Apify를 한 번만 호출합니다.
 - Apify terminal 직후 비용과 dataset count는 임시값일 수 있어 결과 처리는 지연하지 않고 30초 뒤 같은 run을 재조회합니다. 비용은 인증된 `usageTotalUsd`만 확정하며, 유료 run을 다시 시작하지 않습니다.
 - 체크포인트가 있는 유료 프로필 batch는 스키마가 유효한 결과에서 확인 불가 계정 최대 1개만 제외합니다. 여러 계정 누락, 요청 외 username과 중복은 항상 실패 처리하며, 체크포인트 없는 일반 호출은 95% 완전성 기준을 유지합니다.
@@ -205,7 +208,14 @@ ai-baram-detector/
 
 ### 운영 관측성
 
-Vercel runtime log만으로 비용과 단계 이력을 판단하지 않습니다. 파이프라인은 `analysis_step_events`에 PII 없는 이벤트를 남기고, `analysis_operational_cost_summary`가 Apify 원장과 Gemini 추정 비용을 `requestId`별로 집계합니다. Apify 실제액은 terminal 30초 뒤 인증 재조회가 끝나기 전까지 미확정으로 표시됩니다. 완료·실패 후 Cloud Task가 요청별 정산을 재시도하고, 종료 작업은 삭제된 요청을 포함한 전역 미정산 원장도 제한적으로 복구합니다. Cloud Tasks가 비활성화된 브라우저 fallback은 응답 후 `after()`에서 요청별 정산을 재시도하며, 운영자 비용 조회도 해당 요청을 보조 정산합니다. 운영자 조회는 `GET /api/admin/analysis-observability?requestId=<uuid>`이며 `ADMIN_API_KEY` Bearer 인증이 필요합니다. 원가 정의와 중복 집계 방지 규칙은 [운영 비용 및 가격 모델](docs/operations-cost-model.md)에 정리되어 있습니다.
+Vercel runtime log만으로 비용과 단계 이력을 판단하지 않습니다. 파이프라인은 `analysis_step_events`에 PII 없는 이벤트를 남기고, `analysis_operational_cost_summary`가 Apify 원장과 Gemini 추정 비용을 `requestId`별로 집계합니다. Apify 실제액은 terminal 30초 뒤 인증 재조회가 끝나기 전까지 미확정으로 표시됩니다. 완료·실패 후 Cloud Task가 요청별 정산을 재시도하고, 종료 작업은 삭제된 요청을 포함한 전역 미정산 원장도 제한적으로 복구합니다. Cloud Tasks가 비활성화된 브라우저 fallback은 응답 후 `after()`에서 요청별 정산을 재시도하며, 운영자 비용 조회도 해당 요청을 보조 정산합니다. 운영자 조회는 `GET /api/admin/analysis-observability?requestId=<uuid>`이며 `ADMIN_API_KEY` Bearer 인증이 필요합니다. 기간별 preflight 획득 비용의 정본은 `aggregate_analysis_preflight_acquisition_costs` RPC가 반환하는 장기 확정 이벤트와 현재 미정산 최대 노출의 합이며, provider-run 테이블 직접 조회가 아닙니다. 원가 정의와 중복 집계 방지 규칙은 [운영 비용 및 가격 모델](docs/operations-cost-model.md)에 정리되어 있습니다.
+
+정산 30초 경계는 worker가 terminal을 관측한 시각이 아니라 provider `finishedAt`을 기준으로 한다. 기간 합계 RPC는 `STABLE` 단일 SQL statement snapshot에서 확정 이벤트와 미정산 노출을 같이 읽는다.
+
+기존 Cloud Run service에 preflight identity HMAC reference가 없으면 일반 deploy는
+fail-closed 된다. 현재 image digest와 runtime을 유지한 별도 HMAC bootstrap 변경 후
+service template과 100% serving revision을 모두 확인해야 하며, 절차는
+[Apify 모호 start 해소 runbook](docs/preflight-ambiguous-apify-start-resolution-runbook.md)을 따른다.
 
 ## 스크립트
 

@@ -93,7 +93,7 @@ case "$state" in
     build_operator_ready="true"
     enqueuer_identity_ready="true"
     ;;
-  ready|staged_build|staged_final|promoted|rolled_back|rolled_back_bootstrap|foreign_promoted)
+  ready|staged_build|staged_final|promoted|rolled_back|rolled_back_bootstrap|foreign_promoted|service_list_failure|service_describe_failure|service_describe_invalid_json|service_list_invalid_json|service_list_duplicate)
     identity_ready="true"
     vertex_ready="true"
     build_identity_ready="true"
@@ -583,7 +583,32 @@ case "$command_line" in
     fi
     printf 'staged_final\n' >"$FAKE_GCLOUD_STATE_FILE"
     ;;
+  "run services list"*)
+    [[ "$command_line" == *"--project=test-project"* \
+      && "$command_line" == *"--region=asia-northeast3"* \
+      && "$command_line" == *"--filter=metadata.name=analysis-worker"* \
+      && "$command_line" == *"--format=json"* ]] || exit 98
+    if [[ "$state" == "service_list_failure" ]]; then
+      printf 'PERMISSION_DENIED SECRET_SERVICE_LOOKUP_SENTINEL_MUST_NOT_BE_PRINTED\n' >&2
+      exit 73
+    elif [[ "$state" == "service_list_invalid_json" ]]; then
+      printf '{not-json\n'
+    elif [[ "$state" == "service_list_duplicate" ]]; then
+      printf '[{"metadata":{"name":"analysis-worker"}},{"metadata":{"name":"analysis-worker"}}]\n'
+    elif [[ "$infra_ready" == "true" ]]; then
+      printf '[{"metadata":{"name":"analysis-worker"}}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
   "run services describe"*)
+    if [[ "$state" == "service_describe_failure" ]]; then
+      printf 'UNAVAILABLE SECRET_SERVICE_DESCRIBE_SENTINEL_MUST_NOT_BE_PRINTED\n' >&2
+      exit 74
+    elif [[ "$state" == "service_describe_invalid_json" ]]; then
+      printf '{invalid-describe-json\n'
+      exit 0
+    fi
     if [[ "$infra_ready" != "true" ]]; then
       exit 1
     elif [[ "$command_line" == *"format=json"* ]]; then
@@ -627,7 +652,12 @@ case "$command_line" in
       runtime_slot='quinary'
       worker_gate='false'
       recovery_gate='false'
-      apify_secret_version='7'
+      apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-quinary}"
+      apify_secret_version="${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}"
+      apify_plaintext_slot="${FAKE_GCLOUD_APIFY_PLAINTEXT_SLOT:-}"
+      apify_bad_ref_slot="${FAKE_GCLOUD_APIFY_BAD_REF_SLOT:-}"
+      identity_hmac_mode="${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}"
+      identity_hmac_version="${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}"
       supabase_plaintext='false'
       sidecar='false'
       placement='false'
@@ -663,7 +693,12 @@ case "$command_line" in
         --arg runtime_slot "$runtime_slot" \
         --arg worker_gate "$worker_gate" \
         --arg recovery_gate "$recovery_gate" \
+        --arg apify_secret_slots "$apify_secret_slots" \
         --arg apify_secret_version "$apify_secret_version" \
+        --arg apify_plaintext_slot "$apify_plaintext_slot" \
+        --arg apify_bad_ref_slot "$apify_bad_ref_slot" \
+        --arg identity_hmac_mode "$identity_hmac_mode" \
+        --arg identity_hmac_version "$identity_hmac_version" \
         --argjson supabase_plaintext "$supabase_plaintext" \
         --argjson sidecar "$sidecar" \
         --argjson placement "$placement" \
@@ -726,9 +761,45 @@ case "$command_line" in
                   else
                     {name: "SUPABASE_SERVICE_ROLE_KEY", valueFrom: {secretKeyRef: {name: "ai-baram-v2-supabase-service-role", key: "7"}}}
                   end),
-                  {name: "APIFY_QUINARY_API_TOKEN", valueFrom: {secretKeyRef: {name: "ai-baram-v2-apify-quinary", key: $apify_secret_version}}},
-                  {name: "IMAGE_PROXY_SIGNING_SECRET", valueFrom: {secretKeyRef: {name: "ai-baram-v2-image-proxy-signing", key: "7"}}}
+                  ($apify_secret_slots
+                    | split(",")
+                    | map(select(length > 0))
+                    | map(. as $slot | {
+                        name: ("APIFY_" + ($slot | ascii_upcase) + "_API_TOKEN"),
+                        valueFrom: {secretKeyRef: {
+                          name: (if $slot == $apify_bad_ref_slot
+                            then "unexpected-apify-secret"
+                            else "ai-baram-v2-apify-" + $slot
+                            end),
+                          key: $apify_secret_version
+                        }}
+                      }
+                      | if $slot == $apify_plaintext_slot then
+                          {name: .name, value: "APIFY_PLAINTEXT_SENTINEL_MUST_NOT_BE_PRINTED"}
+                        else . end)),
+                  {name: "IMAGE_PROXY_SIGNING_SECRET", valueFrom: {secretKeyRef: {name: "ai-baram-v2-image-proxy-signing", key: "7"}}},
+                  (if $identity_hmac_mode == "absent" then []
+                   elif $identity_hmac_mode == "plaintext" then [{
+                     name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+                     value: "PLAINTEXT_HMAC_SENTINEL_MUST_NOT_BE_PRINTED"
+                   }]
+                   elif $identity_hmac_mode == "wrong-secret" then [{
+                     name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+                     valueFrom: {secretKeyRef: {name: "wrong-preflight-hmac", key: $identity_hmac_version}}
+                   }]
+                   elif $identity_hmac_mode == "duplicate" then [{
+                     name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+                     valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $identity_hmac_version}}
+                   }, {
+                     name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+                     valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $identity_hmac_version}}
+                   }]
+                   else [{
+                     name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+                     valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $identity_hmac_version}}
+                   }] end)
                 ]
+                  | flatten
                   + if $credential_name == "" then [] else
                     [{name: $credential_name, value: "fixture-path"}] end
                   + if $placement then [{name: "VERCEL", value: "1"}] else [] end
@@ -756,6 +827,11 @@ case "$command_line" in
     revision="$4"
     source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
     known_good_recovery="${FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED:-false}"
+    active_runtime_slot="${FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT:-quinary}"
+    active_apify_secret_slots="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS:-${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-quinary}}"
+    active_apify_secret_version="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION:-${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}}"
+    active_identity_hmac_mode="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE:-${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}}"
+    active_identity_hmac_version="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_VERSION:-${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}}"
     revision_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     bootstrap_revision='false'
     if [[ "$revision" == analysis-worker-b* \
@@ -766,6 +842,11 @@ case "$command_line" in
       --arg revision "$revision" \
       --arg source_commit "$source_commit" \
       --arg known_good_recovery "$known_good_recovery" \
+      --arg active_runtime_slot "$active_runtime_slot" \
+      --arg active_apify_secret_slots "$active_apify_secret_slots" \
+      --arg active_apify_secret_version "$active_apify_secret_version" \
+      --arg active_identity_hmac_mode "$active_identity_hmac_mode" \
+      --arg active_identity_hmac_version "$active_identity_hmac_version" \
       --arg revision_image "$revision_image" \
       --argjson bootstrap_revision "$bootstrap_revision" '{
       metadata: {
@@ -773,16 +854,48 @@ case "$command_line" in
         labels: {"analysis-v2-source-commit": $source_commit}
       },
       spec: {
-        containers: [{image: $revision_image, env: (
+        containers: [{image: $revision_image, env: ((
           if $bootstrap_revision then [
-            {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: "false"}
+            {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: "false"},
+            {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot}
           ] else [
             {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
             {name: "ANALYSIS_V2_WORKER_ENABLED", value: "false"},
             {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $known_good_recovery},
+            {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot},
             {name: "PREFLIGHT_TASKS_ENABLED", value: "true"},
             {name: "PREFLIGHT_LOCAL_AFTER_ENABLED", value: "false"}
           ] end)
+          + ($active_apify_secret_slots
+            | split(",")
+            | map(select(length > 0))
+            | map(. as $slot | {
+                name: ("APIFY_" + ($slot | ascii_upcase) + "_API_TOKEN"),
+                valueFrom: {secretKeyRef: {
+                  name: ("ai-baram-v2-apify-" + $slot),
+                  key: $active_apify_secret_version
+                }}
+              }))
+          + (if $active_identity_hmac_mode == "absent" then []
+             elif $active_identity_hmac_mode == "plaintext" then [{
+               name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+               value: "PLAINTEXT_ACTIVE_HMAC_SENTINEL_MUST_NOT_BE_PRINTED"
+             }]
+             elif $active_identity_hmac_mode == "wrong-secret" then [{
+               name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "wrong-preflight-hmac", key: $active_identity_hmac_version}}
+             }]
+             elif $active_identity_hmac_mode == "duplicate" then [{
+               name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $active_identity_hmac_version}}
+             }, {
+               name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $active_identity_hmac_version}}
+             }]
+             else [{
+               name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $active_identity_hmac_version}}
+             }] end))
         }]
       },
       status: {conditions: [{type: "Ready", status: "True"}]}
@@ -1135,6 +1248,7 @@ common_env=(
   'ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION=7'
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=7'
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=7'
+  'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=7'
   'ANALYSIS_V2_WORKER_ENABLED=false'
   'ANALYSIS_V2_RECOVERY_ENABLED=false'
   'ANALYSIS_V2_DEPLOY_REVISION_NONCE=abc12'
@@ -1412,7 +1526,7 @@ assert_contains "$temp_dir/worker.out" \
 assert_contains "$temp_dir/worker.out" \
   "--build-service-account=projects/test-project/serviceAccounts/analysis-build@test-project.iam.gserviceaccount.com"
 assert_contains "$temp_dir/worker.out" \
-  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7"
+  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7\\,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7"
 assert_contains "$temp_dir/worker.out" "roles/run.invoker will contain only task and maintenance OIDC identities"
 assert_not_contains "$temp_dir/worker.out" "SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_not_contains "$temp_dir/worker.out" "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
@@ -1420,6 +1534,35 @@ assert_contains "$temp_dir/worker.out" \
   "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
 assert_contains "$temp_dir/worker.out" \
   "deploy-lock bucket metadata and IAM are audited separately by an admin"
+
+for lookup_failure_state in \
+  service_list_failure \
+  service_describe_failure \
+  service_describe_invalid_json \
+  service_list_invalid_json \
+  service_list_duplicate; do
+  if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$lookup_failure_state" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-$lookup_failure_state.out" 2>&1; then
+    fail "Cloud Run lookup failure was treated as a first deployment: $lookup_failure_state"
+  fi
+  assert_contains "$temp_dir/worker-$lookup_failure_state.out" \
+    'Cloud Run worker lookup failed; refusing to infer a first deployment'
+  assert_not_contains "$temp_dir/worker-$lookup_failure_state.out" \
+    'first deployment has no prior traffic revision'
+  assert_not_contains "$temp_dir/worker-$lookup_failure_state.out" \
+    'gcloud run deploy analysis-worker'
+  assert_not_contains "$temp_dir/worker-$lookup_failure_state.out" '--no-traffic'
+done
+assert_contains "$temp_dir/worker-service_list_failure.out" \
+  'category=permission-denied'
+assert_contains "$temp_dir/worker-service_describe_failure.out" \
+  'category=transport-unavailable'
+assert_not_contains "$temp_dir/worker-service_list_failure.out" \
+  'SECRET_SERVICE_LOOKUP_SENTINEL_MUST_NOT_BE_PRINTED'
+assert_not_contains "$temp_dir/worker-service_describe_failure.out" \
+  'SECRET_SERVICE_DESCRIBE_SENTINEL_MUST_NOT_BE_PRINTED'
 
 deploy_source_repo="$temp_dir/deploy-source-repo"
 mkdir -p "$deploy_source_repo/scripts"
@@ -1838,6 +1981,240 @@ assert_contains "$temp_dir/worker-secondary-slot.out" \
   "APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7"
 assert_not_contains "$temp_dir/worker-secondary-slot.out" \
   "APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7"
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quaternary,quinary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=6' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-secondary-slot-recovery.out"
+for retained_assignment in \
+  'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:6' \
+  'APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:6' \
+  'APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:6' \
+  'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6'; do
+  assert_contains "$temp_dir/worker-secondary-slot-recovery.out" \
+    "$retained_assignment"
+done
+assert_contains "$temp_dir/worker-secondary-slot-recovery.out" \
+  'APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7'
+assert_not_contains "$temp_dir/worker-secondary-slot-recovery.out" \
+  'APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:6'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=6' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-same-slot-version-overwrite.out" 2>&1; then
+  fail "same selected Apify slot v6 to v7 overwrite was accepted"
+fi
+assert_contains "$temp_dir/worker-same-slot-version-overwrite.out" \
+  'same-slot overwrite can strand unresolved runs and account identity'
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=7' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-same-slot-same-version.out"
+assert_contains "$temp_dir/worker-same-slot-same-version.out" \
+  'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7'
+
+for requested_apify_version in 7 8; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    'FAKE_GCLOUD_APIFY_SECRET_VERSION=8' \
+    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION=7' \
+    "ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=$requested_apify_version" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-apify-active-v7-latest-v8-requested-v$requested_apify_version.out" 2>&1; then
+    fail "active Apify v7/latest v8 divergence matched requested v$requested_apify_version"
+  fi
+  assert_contains \
+    "$temp_dir/worker-apify-active-v7-latest-v8-requested-v$requested_apify_version.out" \
+    'active and latest identities must agree'
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,quinary' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-apify-dropped-active-recovery-ref.out" 2>&1; then
+  fail "latest template dropped an active Apify recovery reference"
+fi
+assert_contains "$temp_dir/worker-apify-dropped-active-recovery-ref.out" \
+  'latest may not drop an active recovery reference'
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,quinary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=quinary' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-apify-latest-superset.out"
+assert_contains "$temp_dir/worker-apify-latest-superset.out" \
+  'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:7'
+assert_contains "$temp_dir/worker-apify-latest-superset.out" \
+  'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7'
+
+# A deployed identity HMAC reference is immutable. Only the exact canonical
+# numeric version may be reused; only a service that does not exist may add it.
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'FAKE_GCLOUD_IDENTITY_HMAC_MODE=absent' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-hmac-initial.out"
+assert_contains "$temp_dir/worker-hmac-initial.out" \
+  'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7'
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_IDENTITY_HMAC_VERSION=7' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-hmac-same-version.out"
+assert_contains "$temp_dir/worker-hmac-same-version.out" \
+  'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_IDENTITY_HMAC_VERSION=7' \
+  'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=8' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-hmac-version-change.out" 2>&1; then
+  fail "existing preflight identity HMAC v7 to v8 overwrite was accepted"
+fi
+assert_contains "$temp_dir/worker-hmac-version-change.out" \
+  'production in-place rotation is blocked until a DB-backed drain audit path exists'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_IDENTITY_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE=absent' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-hmac-existing-absent.out" 2>&1; then
+  fail "existing service without a preflight identity HMAC reference was bootstrapped in-place"
+fi
+assert_contains "$temp_dir/worker-hmac-existing-absent.out" \
+  'must be exactly one canonical ref at the requested numeric version'
+
+for requested_hmac_version in 7 8; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    'FAKE_GCLOUD_IDENTITY_HMAC_VERSION=8' \
+    'FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_VERSION=7' \
+    "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=$requested_hmac_version" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-hmac-active-v7-latest-v8-requested-v$requested_hmac_version.out" 2>&1; then
+    fail "active HMAC v7/latest v8 divergence matched requested v$requested_hmac_version"
+  fi
+  assert_contains \
+    "$temp_dir/worker-hmac-active-v7-latest-v8-requested-v$requested_hmac_version.out" \
+    'existing preflight identity HMAC reference is invalid or its numeric version changed'
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE=wrong-secret' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-hmac-active-wrong-secret.out" 2>&1; then
+  fail "invalid active known-good HMAC reference was accepted"
+fi
+assert_contains "$temp_dir/worker-hmac-active-wrong-secret.out" \
+  'active known-good Cloud Run revision existing preflight identity HMAC reference is invalid'
+
+for active_identity_hmac_mode in plaintext duplicate; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    "FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE=$active_identity_hmac_mode" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-hmac-active-$active_identity_hmac_mode.out" 2>&1; then
+    fail "invalid active known-good HMAC reference was accepted: $active_identity_hmac_mode"
+  fi
+done
+assert_contains "$temp_dir/worker-hmac-active-plaintext.out" \
+  'active known-good Cloud Run revision'
+assert_contains "$temp_dir/worker-hmac-active-duplicate.out" \
+  'active known-good Cloud Run revision existing preflight identity HMAC reference is invalid'
+assert_not_contains "$temp_dir/worker-hmac-active-plaintext.out" \
+  'PLAINTEXT_ACTIVE_HMAC_SENTINEL_MUST_NOT_BE_PRINTED'
+
+for identity_hmac_mode in wrong-secret duplicate; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    "FAKE_GCLOUD_IDENTITY_HMAC_MODE=$identity_hmac_mode" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-hmac-$identity_hmac_mode.out" 2>&1; then
+    fail "invalid existing preflight identity HMAC reference was accepted: $identity_hmac_mode"
+  fi
+  assert_contains "$temp_dir/worker-hmac-$identity_hmac_mode.out" \
+    'existing preflight identity HMAC reference is invalid or its numeric version changed'
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_IDENTITY_HMAC_MODE=plaintext' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-hmac-plaintext.out" 2>&1; then
+  fail "plaintext existing preflight identity HMAC reference was accepted"
+fi
+assert_contains "$temp_dir/worker-hmac-plaintext.out" \
+  'deployed worker contains a forbidden plaintext provider or credential value'
+assert_not_contains "$temp_dir/worker-hmac-plaintext.out" \
+  'PLAINTEXT_HMAC_SENTINEL_MUST_NOT_BE_PRINTED'
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-five-slot-recovery-check.out"
+assert_contains "$temp_dir/worker-five-slot-recovery-check.out" \
+  'verified: private worker runtime, bounded scaling, and default dynamic egress'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,quinary' \
+  'FAKE_GCLOUD_APIFY_PLAINTEXT_SLOT=primary' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-recovery-plaintext.out" 2>&1; then
+  fail "plaintext recovery-only Apify token was accepted"
+fi
+assert_contains "$temp_dir/worker-recovery-plaintext.out" \
+  'deployed worker contains a forbidden plaintext provider or credential value'
+assert_not_contains "$temp_dir/worker-recovery-plaintext.out" \
+  'APIFY_PLAINTEXT_SENTINEL_MUST_NOT_BE_PRINTED'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,quinary' \
+  'FAKE_GCLOUD_APIFY_BAD_REF_SLOT=primary' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-recovery-bad-ref.out" 2>&1; then
+  fail "non-canonical recovery-only Apify secret reference was accepted"
+fi
+assert_contains "$temp_dir/worker-recovery-bad-ref.out" \
+  'existing worker Apify references are invalid or the selected slot version changed'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,quinary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=latest' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-recovery-latest-ref.out" 2>&1; then
+  fail "latest recovery-only Apify secret version was accepted"
+fi
+assert_contains "$temp_dir/worker-recovery-latest-ref.out" \
+  'existing worker Apify references are invalid or the selected slot version changed'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary,senary' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-recovery-unallowlisted.out" 2>&1; then
+  fail "unallowlisted recovery-only Apify token slot was accepted"
+fi
+assert_contains "$temp_dir/worker-recovery-unallowlisted.out" \
+  'deployed worker contains a forbidden plaintext provider or credential value'
 
 mkdir -p "$temp_dir/source"
 printf '{}\n' >"$temp_dir/source/package.json"
@@ -2283,7 +2660,15 @@ for drift_state in failed_latest old_traffic unpromoted_latest; do
     "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
 done
 
-for boundary_state in runtime_sidecar runtime_placement runtime_duplicate_env; do
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=runtime_sidecar' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-runtime_sidecar.out" 2>&1; then
+  fail "Cloud Run sidecar boundary drift was accepted"
+fi
+assert_contains "$temp_dir/worker-runtime_sidecar.out" \
+  "existing worker Apify references are invalid"
+
+for boundary_state in runtime_placement runtime_duplicate_env; do
   if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$boundary_state" \
     bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
     >"$temp_dir/worker-$boundary_state.out" 2>&1; then
@@ -2313,14 +2698,22 @@ assert_contains "$temp_dir/worker-plaintext-secret.out" \
 assert_not_contains "$temp_dir/worker-plaintext-secret.out" \
   "PLAINTEXT_SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 
-for secret_drift_state in secret_ref_drift slot_drift; do
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=secret_ref_drift' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-secret_ref_drift.out" 2>&1; then
+  fail "Cloud Run exact secret mapping drift was accepted: secret_ref_drift"
+fi
+assert_contains "$temp_dir/worker-secret_ref_drift.out" \
+  'same-slot overwrite can strand unresolved runs and account identity'
+
+for secret_drift_state in slot_drift; do
   if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$secret_drift_state" \
     bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
     >"$temp_dir/worker-$secret_drift_state.out" 2>&1; then
     fail "Cloud Run exact secret mapping drift was accepted: $secret_drift_state"
   fi
   assert_contains "$temp_dir/worker-$secret_drift_state.out" \
-    "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
+    "active and latest identities must agree"
 done
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=runtime_env_drift' \

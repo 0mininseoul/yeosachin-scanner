@@ -124,6 +124,9 @@ case "$command_line" in
       ai-baram-v2-image-proxy-signing)
         [[ "$payload" == "IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789" ]] || exit 94
         ;;
+      ai-baram-v2-preflight-identity-hmac)
+        [[ "$payload" == "ERERERERERERERERERERERERERERERERERERERERERE" ]] || exit 94
+        ;;
       *) exit 95 ;;
     esac
     version=$(( $(<"$path/version-counter") + 1 ))
@@ -204,6 +207,7 @@ ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary
 SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SECRET_SENTINEL_0123456789
 APIFY_QUINARY_API_TOKEN=APIFY_QUINARY_SECRET_SENTINEL_0123456789
 IMAGE_PROXY_SIGNING_SECRET=IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789
+ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ERERERERERERERERERERERERERERERERERERERERERE
 EOF
 
 secret_env=(
@@ -235,10 +239,13 @@ assert_contains "$temp_dir/missing-dry-run.out" \
   "gcloud secrets create ai-baram-v2-supabase-service-role"
 assert_contains "$temp_dir/missing-dry-run.out" \
   "would stream allowlisted APIFY_QUINARY_API_TOKEN directly"
+assert_contains "$temp_dir/missing-dry-run.out" \
+  "gcloud secrets create ai-baram-v2-preflight-identity-hmac"
 for sentinel in \
   SUPABASE_SECRET_SENTINEL_0123456789 \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
-  IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789; do
+  IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789 \
+  ERERERERERERERERERERERERERERERERERERERERERE; do
   assert_not_contains "$temp_dir/missing-dry-run.out" "$sentinel"
 done
 
@@ -277,7 +284,8 @@ assert_contains "$temp_dir/create-only-resume.out" \
 for secret_id in \
   ai-baram-v2-supabase-service-role \
   ai-baram-v2-apify-quinary \
-  ai-baram-v2-image-proxy-signing; do
+  ai-baram-v2-image-proxy-signing \
+  ai-baram-v2-preflight-identity-hmac; do
   [[ -f "$temp_dir/recovery-state/secrets/$secret_id/versions/1.json" ]] \
     || fail "interrupted apply recovery did not create version 1 for $secret_id"
 done
@@ -294,10 +302,13 @@ assert_contains "$temp_dir/missing-apply.out" \
   "pin: ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=1"
 assert_contains "$temp_dir/missing-apply.out" \
   "pin: ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=1"
+assert_contains "$temp_dir/missing-apply.out" \
+  "pin: ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=1"
 for secret_id in \
   ai-baram-v2-supabase-service-role \
   ai-baram-v2-apify-quinary \
-  ai-baram-v2-image-proxy-signing; do
+  ai-baram-v2-image-proxy-signing \
+  ai-baram-v2-preflight-identity-hmac; do
   [[ -f "$temp_dir/state/secrets/$secret_id/versions/1.json" ]] \
     || fail "initial apply did not create version 1 for $secret_id"
   jq -e \
@@ -312,12 +323,13 @@ for secret_id in \
   ' "$temp_dir/state/secrets/$secret_id/policy.json" >/dev/null \
     || fail "initial apply did not create exact IAM for $secret_id"
 done
-[[ "$(wc -l <"$temp_dir/state/sleep-calls" | tr -d ' ')" == "6" ]] \
+[[ "$(wc -l <"$temp_dir/state/sleep-calls" | tr -d ' ')" == "8" ]] \
   || fail "post-create visibility retry was not bounded to the injected transient failures"
 for sentinel in \
   SUPABASE_SECRET_SENTINEL_0123456789 \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
-  IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789; do
+  IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789 \
+  ERERERERERERERERERERERERERERERERERERERERERE; do
   assert_not_contains "$temp_dir/missing-apply.out" "$sentinel"
 done
 
@@ -325,6 +337,7 @@ pinned_env=(
   'ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION=1'
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=1'
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=1'
+  'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=1'
 )
 env "${secret_env[@]}" "${pinned_env[@]}" \
   bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
@@ -386,6 +399,7 @@ assert_contains "$temp_dir/disabled-history-apply.out" \
 env "${disabled_history_env[@]}" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=1' \
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=1' \
+  'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=1' \
   bash "$script_dir/configure-analysis-v2-secrets.sh" --rotate supabase \
   >"$temp_dir/disabled-history-rotate.out"
 assert_contains "$temp_dir/disabled-history-rotate.out" \
@@ -534,7 +548,8 @@ expected_build_keys="$(printf '%s\n' \
 for sentinel in \
   SUPABASE_SECRET_SENTINEL_0123456789 \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
-  IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789; do
+  IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789 \
+  ERERERERERERERERERERERERERERERERERERERERERE; do
   assert_not_contains "$runtime_file" "$sentinel"
   assert_not_contains "$build_file" "$sentinel"
   assert_not_contains "$temp_dir/generator.out" "$sentinel"
