@@ -8,6 +8,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const policyMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260715103605_expose_v2_access_mode_to_collection_context.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 describe('analysis V2 collection request context migration contract', () => {
     it('locks preflight, request, then job before refreshing the clock and checking the fence', () => {
@@ -46,5 +53,24 @@ describe('analysis V2 collection request context migration contract', () => {
         expect(migration).toContain('TO service_role');
         expect(migration).not.toContain('profile_image_url');
         expect(migration).not.toContain('target_bio');
+    });
+
+    it('adds only a service-bound immutable test policy to the collection snapshot', () => {
+        for (const fragment of [
+            'analysis_v2_provider_execution_policies',
+            'consume_analysis_v2_authorized_test_entitlement',
+            "v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'",
+            "'accessMode', v_request.plan_access_mode_snapshot",
+            "'providerExecutionPolicy'",
+            'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH',
+        ]) expect(policyMigration).toContain(fragment);
+        expect(policyMigration).toContain(
+            'ALTER TABLE public.analysis_v2_provider_execution_policies FORCE ROW LEVEL SECURITY'
+        );
+        expect(policyMigration).toContain(
+            'REVOKE ALL ON TABLE public.analysis_v2_provider_execution_policies'
+        );
+        expect(policyMigration).not.toMatch(/\bapi_token\s+(?:TEXT|VARCHAR)/i);
+        expect(policyMigration).not.toMatch(/\bsecret_value\s+(?:TEXT|VARCHAR)/i);
     });
 });

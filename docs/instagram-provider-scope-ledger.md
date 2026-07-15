@@ -26,3 +26,13 @@ This ledger is the current source of truth for relationship-provider scope. Hist
 - Bounded no-login canaries passed for liker and comment schema, uniqueness, and post attribution. DataDoping does not provide a completeness SLA, so ongoing canaries remain required.
 
 No approved implementation accepts Instagram passwords, login cookies, session tokens, proxy credentials, or evasion settings.
+
+## Temporary authorized E2E exception
+
+- One signed `test_entitlement` request for the exact allowlisted target may bind an immutable operation-to-slot map before the initial job is dispatched.
+- Followers and following are separate provider operations. Each operation remains on one credential slot; a single relationship side is never paged or pooled across credentials.
+- The exception is not reachable from production admission, ordinary signed tests, early access, or paid analysis. Absence of the request-bound policy preserves the deployment's existing single Starter slot behavior.
+- PostgreSQL stores slot labels only. Provider tokens remain deployment secrets, and a durable provider run can resume only with its recorded slot.
+- The exception must be disabled after the authorized `0_min._.00` E2E. It is not a beta or launch operating mode.
+- The exception is allowlisted to Supabase owner UUID `974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd` (`ym1113@kakao.com`) as well as the exact target. Success includes ownership of the request, terminal completion, visibility on that account's `기록` page, and result-link re-entry.
+- Reservation deposit, early-access pricing, and full-price payment are deferred until after this E2E and cost validation. The intended later stages are a KRW 1,900 reservation deposit, discounted early access, and full-price production payment.

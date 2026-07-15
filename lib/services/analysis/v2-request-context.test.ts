@@ -26,6 +26,8 @@ describe('analysis V2 collection request context', () => {
             requestId,
             targetUsername: 'target',
             excludedUsername: 'girlfriend',
+            accessMode: 'production',
+            providerExecutionPolicy: null,
             planId: 'standard',
             followersDeclaredCount: 799,
             followingDeclaredCount: 800,
@@ -66,12 +68,65 @@ describe('analysis V2 collection request context', () => {
             requestId,
             targetUsername: 'target',
             excludedUsername: null,
+            accessMode: 'production',
+            providerExecutionPolicy: null,
             planId: 'basic',
             followersDeclaredCount: 401,
             followingDeclaredCount: 1,
             detailedMutualLimit: 300,
         });
         await expect(createAnalysisV2CollectionRequestContextStore(drift.value).load({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+        })).rejects.toThrow('snapshot drift');
+    });
+
+    it('loads an immutable operation split only for a signed test access snapshot', async () => {
+        const providerExecutionPolicy = {
+            mode: 'test_operation_split',
+            policyVersion: 'authorized-free-e2e-v1',
+            operationSlots: {
+                'target-profile': 'tertiary',
+                'relationship-followers': 'primary',
+                'relationship-following': 'secondary',
+                'profile-fallback': 'tertiary',
+                'target-likers': 'quaternary',
+                'target-comments': 'tertiary',
+                'candidate-likers': 'quinary',
+            },
+        } as const;
+        const authorized = client({
+            requestId,
+            targetUsername: 'target',
+            excludedUsername: null,
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy,
+            planId: 'basic',
+            followersDeclaredCount: 2,
+            followingDeclaredCount: 2,
+            detailedMutualLimit: 300,
+        });
+        await expect(createAnalysisV2CollectionRequestContextStore(authorized.value).load({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+        })).resolves.toMatchObject({ accessMode: 'test_entitlement', providerExecutionPolicy });
+
+        const invalidProduction = client({
+            requestId,
+            targetUsername: 'target',
+            excludedUsername: null,
+            accessMode: 'production',
+            providerExecutionPolicy,
+            planId: 'basic',
+            followersDeclaredCount: 2,
+            followingDeclaredCount: 2,
+            detailedMutualLimit: 300,
+        });
+        await expect(createAnalysisV2CollectionRequestContextStore(invalidProduction.value).load({
             requestId,
             jobKey: 'track:relationships:collect',
             claimToken,

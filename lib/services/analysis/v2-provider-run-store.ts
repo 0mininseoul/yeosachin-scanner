@@ -646,6 +646,7 @@ function throwRpcError(error: RpcError, operation: string): never {
     if (
         error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED'
         || error.message === 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_NOT_READY'
+        || error.message === 'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH'
     ) {
         throw new Error(error.message);
     }

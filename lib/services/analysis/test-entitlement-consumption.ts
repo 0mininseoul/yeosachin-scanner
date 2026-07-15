@@ -9,6 +9,10 @@ import {
     type PlanEligibilityCatalog,
 } from '@/lib/domain/analysis/plan-catalog';
 import { ANALYSIS_V2_BOOTSTRAP_JOB_KEY } from './v2-coordinator';
+import {
+    authorizedTestProviderExecutionPolicySchema,
+    type AuthorizedTestProviderExecutionPolicy,
+} from './authorized-test-provider-policy';
 
 const ENTITLEMENT_JTI_DOMAIN = 'analysis-test-entitlement-jti-v1';
 
@@ -88,7 +92,17 @@ const consumptionInputSchema = z.object({
     selectedPlanId: z.enum(PLAN_IDS),
     entitlementJtiHash: z.string().regex(/^[a-f0-9]{64}$/),
     admissionToken: uuidSchema.nullable().optional().default(null),
-}).strict();
+    targetUsername: usernameSchema.nullable().optional().default(null),
+    providerExecutionPolicy: authorizedTestProviderExecutionPolicySchema
+        .nullable().optional().default(null),
+}).strict().superRefine((value, context) => {
+    if ((value.targetUsername === null) !== (value.providerExecutionPolicy === null)) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Authorized provider policy and target must be supplied together.',
+        });
+    }
+});
 
 export const ANALYSIS_V2_ENTITLEMENT_ERROR_CODES = [
     'ANALYSIS_V2_PREFLIGHT_NOT_FOUND',
@@ -98,6 +112,10 @@ export const ANALYSIS_V2_ENTITLEMENT_ERROR_CODES = [
     'ANALYSIS_V2_PLAN_NOT_ALLOWED',
     'ANALYSIS_V2_ENTITLEMENT_CONFLICT',
     'ANALYSIS_ALREADY_IN_PROGRESS',
+    'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_INVALID',
+    'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SCOPE_MISMATCH',
+    'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_CONFLICT',
+    'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_TOO_LATE',
 ] as const;
 
 export type AnalysisV2EntitlementErrorCode =
@@ -153,6 +171,8 @@ export interface ConsumeAnalysisV2TestEntitlementInput {
     selectedPlanId: PlanId;
     entitlementJtiHash: string;
     admissionToken?: string | null;
+    targetUsername?: string | null;
+    providerExecutionPolicy?: AuthorizedTestProviderExecutionPolicy | null;
 }
 
 export interface ConsumedAnalysisV2TestEntitlement {
@@ -350,9 +370,21 @@ export async function consumeAnalysisV2TestEntitlement(
     }
     const validatedInput = parsedInput.data;
 
+    const authorized = validatedInput.providerExecutionPolicy !== null;
     const { data, error } = await client.rpc(
-        'consume_analysis_v2_test_entitlement',
-        {
+        authorized
+            ? 'consume_analysis_v2_authorized_test_entitlement'
+            : 'consume_analysis_v2_test_entitlement',
+        authorized ? {
+            p_preflight_id: validatedInput.preflightId,
+            p_user_id: validatedInput.userId,
+            p_selected_plan_id: validatedInput.selectedPlanId,
+            p_entitlement_jti_hash: validatedInput.entitlementJtiHash,
+            p_admission_token: validatedInput.admissionToken,
+            p_target_instagram_id: validatedInput.targetUsername,
+            p_policy_version: validatedInput.providerExecutionPolicy!.policyVersion,
+            p_operation_slot_map: validatedInput.providerExecutionPolicy!.operationSlots,
+        } : {
             p_preflight_id: validatedInput.preflightId,
             p_user_id: validatedInput.userId,
             p_selected_plan_id: validatedInput.selectedPlanId,
