@@ -61,7 +61,7 @@ export interface AnalysisV2CollectionRequestContextSupabaseClient {
 }
 
 export const ANALYSIS_V2_COLLECTION_CONTEXT_DATABASE_NAMES = Object.freeze({
-    loadRpc: 'load_analysis_v2_collection_request_context',
+    loadRpc: 'load_analysis_v2_collection_context_with_policy',
 });
 
 export class AnalysisV2CollectionContextFenceError extends Error {

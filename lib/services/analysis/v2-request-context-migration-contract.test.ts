@@ -59,6 +59,7 @@ describe('analysis V2 collection request context migration contract', () => {
         for (const fragment of [
             'analysis_v2_provider_execution_policies',
             'consume_analysis_v2_authorized_test_entitlement',
+            'load_analysis_v2_collection_context_with_policy',
             "v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'",
             "'accessMode', v_request.plan_access_mode_snapshot",
             "'providerExecutionPolicy'",
@@ -69,6 +70,9 @@ describe('analysis V2 collection request context migration contract', () => {
         );
         expect(policyMigration).toContain(
             'REVOKE ALL ON TABLE public.analysis_v2_provider_execution_policies'
+        );
+        expect(policyMigration).not.toContain(
+            'CREATE OR REPLACE FUNCTION public.load_analysis_v2_collection_request_context('
         );
         expect(policyMigration).not.toMatch(/\bapi_token\s+(?:TEXT|VARCHAR)/i);
         expect(policyMigration).not.toMatch(/\bsecret_value\s+(?:TEXT|VARCHAR)/i);

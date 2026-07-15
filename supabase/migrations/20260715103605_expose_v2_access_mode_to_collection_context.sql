@@ -257,7 +257,7 @@ GRANT EXECUTE ON FUNCTION public.consume_analysis_v2_authorized_test_entitlement
     UUID, UUID, TEXT, TEXT, UUID, TEXT, TEXT, JSONB
 ) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.load_analysis_v2_collection_request_context(
+CREATE OR REPLACE FUNCTION public.load_analysis_v2_collection_context_with_policy(
     p_request_id UUID,
     p_job_key TEXT,
     p_claim_token UUID,
@@ -368,14 +368,14 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.load_analysis_v2_collection_request_context(
+REVOKE ALL ON FUNCTION public.load_analysis_v2_collection_context_with_policy(
     UUID, TEXT, UUID, TEXT
 ) FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.load_analysis_v2_collection_request_context(
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_collection_context_with_policy(
     UUID, TEXT, UUID, TEXT
 ) TO service_role;
 
-COMMENT ON FUNCTION public.load_analysis_v2_collection_request_context(
+COMMENT ON FUNCTION public.load_analysis_v2_collection_context_with_policy(
     UUID, TEXT, UUID, TEXT
 ) IS 'Returns the immutable V2 target, access mode, optional authorized test credential policy, exclusion, selected plan, and exact relationship counts only for the exact live collection job claim.';
 

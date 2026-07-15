@@ -456,7 +456,7 @@ describe('authorized test provider policy migration PGlite contract', () => {
         );
 
         const result = await serviceQuery<JsonRow<CollectionContextJson>>(
-            `SELECT public.load_analysis_v2_collection_request_context(
+            `SELECT public.load_analysis_v2_collection_context_with_policy(
                 $1, $2, $3, $4
             ) AS result`,
             [REQUEST_ID, JOB_KEY, CLAIM_TOKEN, INPUT_HASH]
