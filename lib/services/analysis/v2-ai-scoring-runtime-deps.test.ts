@@ -98,6 +98,36 @@ function profileClient(data: unknown) {
     return { rpc, client: { rpc } as AnalysisV2ProfileConsumerSupabaseClient };
 }
 
+const authorizedProviderPolicy = {
+    mode: 'test_operation_split',
+    policyVersion: 'authorized-free-e2e-v1',
+    operationSlots: {
+        'target-profile': 'tertiary',
+        'relationship-followers': 'primary',
+        'relationship-following': 'secondary',
+        'profile-fallback': 'tertiary',
+        'target-likers': 'quaternary',
+        'target-comments': 'tertiary',
+        'candidate-likers': 'quinary',
+    },
+} as const;
+
+function reverseLikeContext(policy: typeof authorizedProviderPolicy | null = null) {
+    return {
+        load: vi.fn(async () => ({
+            requestId,
+            targetUsername: 'target.account',
+            excludedUsername: null,
+            accessMode: policy ? 'test_entitlement' as const : 'production' as const,
+            providerExecutionPolicy: policy,
+            planId: 'basic' as const,
+            followersDeclaredCount: 1,
+            followingDeclaredCount: 1,
+            detailedMutualLimit: 300 as const,
+        })),
+    };
+}
+
 describe('analysis V2 production profile consumer', () => {
     it('accepts a terminal unavailable outcome while preserving exact producer order', async () => {
         const fake = profileClient(resume('unavailable'));
@@ -184,8 +214,16 @@ describe('analysis V2 reverse-like production collector', () => {
         }]);
         const collector = createAnalysisV2ReverseLikeCollector({
             providerRunStore,
+            contextStore: reverseLikeContext(authorizedProviderPolicy),
             adapter: { getPostLikers, getPostComments: vi.fn() },
-            env: { ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary' },
+            env: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+                APIFY_SECONDARY_API_TOKEN: 'secondary-test-token',
+                APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+                APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+                APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+            },
         });
 
         const result = await collector.collect({
@@ -246,6 +284,7 @@ describe('analysis V2 reverse-like production collector', () => {
         })));
         const collector = createAnalysisV2ReverseLikeCollector({
             providerRunStore,
+            contextStore: reverseLikeContext(),
             adapter: { getPostLikers, getPostComments: vi.fn() },
             env: {},
         });
@@ -281,6 +320,7 @@ describe('analysis V2 reverse-like production collector', () => {
         })));
         const collector = createAnalysisV2ReverseLikeCollector({
             providerRunStore,
+            contextStore: reverseLikeContext(),
             adapter: { getPostLikers, getPostComments: vi.fn() },
             env: {},
         });
@@ -322,6 +362,7 @@ describe('analysis V2 reverse-like production collector', () => {
         ]);
         const collector = createAnalysisV2ReverseLikeCollector({
             providerRunStore,
+            contextStore: reverseLikeContext(),
             adapter: { getPostLikers, getPostComments: vi.fn() },
             env: {},
         });
@@ -365,6 +406,7 @@ describe('analysis V2 reverse-like production collector', () => {
             providerRunStore: {
                 bindAdapterCheckpoint,
             } as unknown as AnalysisV2ProviderRunStore,
+            contextStore: reverseLikeContext(),
             adapter: { getPostLikers, getPostComments: vi.fn() },
             env: {},
         });

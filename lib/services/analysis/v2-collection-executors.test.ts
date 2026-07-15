@@ -43,6 +43,28 @@ const inputHash = 'a'.repeat(64);
 const resultHash = 'b'.repeat(64);
 const capturedAt = '2026-07-13T07:30:00.000Z';
 
+const authorizedProviderPolicy = {
+    mode: 'test_operation_split',
+    policyVersion: 'authorized-free-e2e-v1',
+    operationSlots: {
+        'target-profile': 'tertiary',
+        'relationship-followers': 'primary',
+        'relationship-following': 'secondary',
+        'profile-fallback': 'tertiary',
+        'target-likers': 'quaternary',
+        'target-comments': 'tertiary',
+        'candidate-likers': 'quinary',
+    },
+} as const;
+
+const authorizedProviderEnv = {
+    APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+    APIFY_SECONDARY_API_TOKEN: 'secondary-test-token',
+    APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+    APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+    APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+};
+
 function requestContext(
     overrides: Partial<AnalysisV2CollectionRequestContext> = {}
 ): AnalysisV2CollectionRequestContext {
@@ -50,6 +72,8 @@ function requestContext(
         requestId,
         targetUsername: 'target',
         excludedUsername: 'girlfriend',
+        accessMode: 'production',
+        providerExecutionPolicy: null,
         planId: 'basic',
         followersDeclaredCount: 2,
         followingDeclaredCount: 2,
@@ -479,6 +503,64 @@ describe('analysis V2 concrete collection executors', () => {
         });
     });
 
+    it('uses different immutable relationship slots only for the authorized test policy', async () => {
+        const providers = providerStore();
+        const rows = [{ username: 'alice', isPrivate: false, isVerified: false }];
+        const checkpointRelationshipSide = vi.fn(async (input) => ({
+            side: input.side,
+            sourceStatus: input.source.status,
+            revision: 1,
+            declaredCount: input.declaredCount,
+            collectedCount: input.rows.length,
+            coverageBps: 10_000,
+            inputHash: input.source.inputHash,
+            resultHash,
+        }));
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                providerExecutionPolicy: authorizedProviderPolicy,
+                followersDeclaredCount: 1,
+                followingDeclaredCount: 1,
+            })),
+            providerRunStore: providers.value,
+            env: authorizedProviderEnv,
+            getFollowers: vi.fn(async () => rows),
+            getFollowing: vi.fn(async () => rows),
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 1,
+                    publicCount: 1,
+                    privateCount: 0,
+                    detailedPublicCount: 1,
+                    unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: ['alice'],
+                    privateMutualUsernames: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await executor(stageContext('relationships', state()));
+
+        const byOperation = new Map(providers.bindAdapterCheckpoint.mock.calls.map(([call]) => [
+            call.operationKey.split(':', 1)[0],
+            call.credentialSlot,
+        ]));
+        expect(byOperation).toEqual(new Map([
+            ['relationship-followers', 'primary'],
+            ['relationship-following', 'secondary'],
+        ]));
+    });
+
     it('fails before provider work on stale leases and declared-count/plan drift', async () => {
         const getFollowersMock = vi.fn();
         const staleStore: AnalysisV2CollectionRequestContextStore = {
@@ -555,13 +637,16 @@ describe('analysis V2 concrete collection executors', () => {
             commentCount: input.rows.filter(row => row.signal === 'target_post_comment').length,
         }));
         const executor = createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                providerExecutionPolicy: authorizedProviderPolicy,
+            })),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
+            env: authorizedProviderEnv,
             interactionAdapter: { getPostLikers, getPostComments },
             evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
             getProfilesBatchV2: vi.fn(),
-            env: { APIFY_API_TOKEN_SLOT: 'primary' },
         });
 
         await executor(stageContext('target_evidence', state()));
@@ -582,6 +667,12 @@ describe('analysis V2 concrete collection executors', () => {
         expect(saved.likerSource.coverage).toHaveLength(4);
         expect(saved.commentSource.coverage).toHaveLength(6);
         expect(saved.rows.some(row => row.content === 'comment 0')).toBe(true);
+        const byOperation = new Map(providers.bindAdapterCheckpoint.mock.calls.map(([call]) => [
+            call.operationKey.split(':', 1)[0],
+            call.credentialSlot,
+        ]));
+        expect(byOperation.get('target-likers')).toBe('quaternary');
+        expect(byOperation.get('target-comments')).toBe('tertiary');
     });
 
     it('proves zero-post target interactions as not applicable without starting paid actors', async () => {
@@ -686,12 +777,15 @@ describe('analysis V2 concrete collection executors', () => {
             };
         });
         const executor = createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                providerExecutionPolicy: authorizedProviderPolicy,
+            })),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
+            env: authorizedProviderEnv,
             evidenceStore: relationshipEvidence(usernames),
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
-            env: { APIFY_API_TOKEN_SLOT: 'primary' },
         });
         const dagState = state({ relationships: relationshipManifest(topology) });
 
@@ -724,6 +818,9 @@ describe('analysis V2 concrete collection executors', () => {
                     }),
                 ]),
             })
+        );
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
+            expect.objectContaining({ credentialSlot: 'tertiary' })
         );
     });
 

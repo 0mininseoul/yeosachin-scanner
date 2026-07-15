@@ -14,7 +14,6 @@ import {
 } from '@/lib/services/instagram/providers/apify-interactions';
 import {
     numberSetting,
-    selectAnalysisV2ApifyCredentialSlot,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -48,6 +47,7 @@ import type {
     AnalysisV2StageReadClaim,
     AnalysisV2TargetProfileReadModel,
 } from './v2-ai-scoring-executors';
+import { resolveAnalysisV2ApifyCredentialSlot } from './authorized-test-provider-policy';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -353,10 +353,12 @@ function providerContext(
 export function createAnalysisV2ReverseLikeCollector(input: {
     adapter?: ApifyInteractionAdapter;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    contextStore?: AnalysisV2CollectionRequestContextStore;
     env?: Record<string, string | undefined>;
 } = {}): AnalysisV2ReverseLikeCollector {
     const adapter = input.adapter ?? apifyInteractionAdapter;
     const providerRunStore = input.providerRunStore ?? analysisV2ProviderRunStore;
+    const contextStore = input.contextStore ?? analysisV2CollectionRequestContextStore;
     const env = input.env ?? process.env;
     return {
         async collect(rawInput) {
@@ -376,6 +378,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
             if (rawInput.candidates.length === 0) {
                 return Object.freeze({ operationKey: null, results: Object.freeze([]) });
             }
+            const requestContext = await contextStore.load(claim);
             const targetUsername = z.string().trim().toLowerCase()
                 .regex(/^[a-z0-9._]{1,30}$/)
                 .parse(rawInput.targetUsername);
@@ -412,7 +415,12 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 inputHash: createAnalysisV2ProviderInputHash(canonicalInput),
                 logicalProvider: 'apify',
                 actorId: APIFY_LIKERS_ACTOR_ID,
-                credentialSlot: selectAnalysisV2ApifyCredentialSlot(env),
+                credentialSlot: resolveAnalysisV2ApifyCredentialSlot({
+                    accessMode: requestContext.accessMode,
+                    policy: requestContext.providerExecutionPolicy,
+                    operation: 'candidate-likers',
+                    env,
+                }),
                 maxChargeUsd: reverseLikeMaximumCharge(candidates.length, env),
             });
             const likers = await adapter.getPostLikers(

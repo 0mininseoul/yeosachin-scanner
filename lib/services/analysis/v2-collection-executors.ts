@@ -11,7 +11,6 @@ import {
 } from '@/lib/services/instagram/providers/apify-interactions';
 import {
     numberSetting,
-    selectAnalysisV2ApifyCredentialSlot,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import {
@@ -61,6 +60,10 @@ import type {
     AnalysisV2StageExecutor,
     AnalysisV2StageExecutorRegistry,
 } from './v2-worker';
+import {
+    resolveAnalysisV2ApifyCredentialSlot,
+    type AuthorizedTestProviderOperationKind,
+} from './authorized-test-provider-policy';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
 const TARGET_LIKER_LIMIT = 150;
@@ -266,6 +269,8 @@ function interactionMaximumCharge(
 async function bindApifyRun(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
+    operation: AuthorizedTestProviderOperationKind;
     operationKey: string;
     inputHash: string;
     actorId: string;
@@ -279,7 +284,12 @@ async function bindApifyRun(input: {
         inputHash: input.inputHash,
         logicalProvider: 'apify',
         actorId: input.actorId,
-        credentialSlot: selectAnalysisV2ApifyCredentialSlot(input.dependencies.env),
+        credentialSlot: resolveAnalysisV2ApifyCredentialSlot({
+            accessMode: input.request.accessMode,
+            policy: input.request.providerExecutionPolicy,
+            operation: input.operation,
+            env: input.dependencies.env,
+        }),
         maxChargeUsd: input.maxChargeUsd,
     });
 }
@@ -360,6 +370,10 @@ export function createAnalysisV2RelationshipsExecutor(
             const binding = await bindApifyRun({
                 dependencies,
                 claim,
+                request,
+                operation: side === 'followers'
+                    ? 'relationship-followers'
+                    : 'relationship-following',
                 operationKey,
                 inputHash,
                 actorId: APIFY_RELATIONSHIP_ACTOR_ID,
@@ -476,10 +490,11 @@ function profileFallbackIdentity(usernames: readonly string[]): string {
 async function durableProfiles(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
     usernames: readonly string[];
     onProfileStart?: (username: string) => Promise<void>;
 }): Promise<AnalysisV2ProfileFetchResume> {
-    const { dependencies, claim, usernames, onProfileStart } = input;
+    const { dependencies, claim, request, usernames, onProfileStart } = input;
     const identity = profileIdentity(claim);
     let resume = await dependencies.profileCheckpointStore.load(identity);
     if (
@@ -494,6 +509,8 @@ async function durableProfiles(input: {
         const binding = await bindApifyRun({
             dependencies,
             claim,
+            request,
+            operation: 'profile-fallback',
             operationKey: createAnalysisV2ProviderOperationKey('profile-fallback', canonicalInput),
             inputHash: createAnalysisV2ProviderInputHash(canonicalInput),
             actorId: PROFILE_ACTOR_ID,
@@ -599,6 +616,7 @@ function targetProfilePosts(profile: AnalysisV2CheckpointProfile): InstagramPost
 async function collectedTargetSource(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
     targetUsername: string;
     kind: 'likers' | 'comments';
     posts: readonly InstagramPost[];
@@ -619,6 +637,8 @@ async function collectedTargetSource(input: {
     const binding = await bindApifyRun({
         dependencies: input.dependencies,
         claim: input.claim,
+        request: input.request,
+        operation: input.kind === 'likers' ? 'target-likers' : 'target-comments',
         operationKey,
         inputHash,
         actorId: input.kind === 'likers' ? APIFY_LIKERS_ACTOR_ID : APIFY_COMMENTS_ACTOR_ID,
@@ -659,6 +679,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
         const targetResume = await durableProfiles({
             dependencies,
             claim,
+            request,
             usernames: [request.targetUsername],
         });
         const [targetProfile] = durableSuccessfulProfiles(targetResume, [request.targetUsername]);
@@ -690,6 +711,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
                 collectedTargetSource({
                     dependencies,
                     claim,
+                    request,
                     targetUsername: request.targetUsername,
                     kind: 'likers',
                     posts: likerPosts,
@@ -697,6 +719,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
                 collectedTargetSource({
                     dependencies,
                     claim,
+                    request,
                     targetUsername: request.targetUsername,
                     kind: 'comments',
                     posts: commentPosts,
@@ -814,6 +837,7 @@ export function createAnalysisV2ProfileFetchExecutor(
         const resume = await durableProfiles({
             dependencies,
             claim,
+            request,
             usernames,
             onProfileStart: context.reportActiveProfile,
         });

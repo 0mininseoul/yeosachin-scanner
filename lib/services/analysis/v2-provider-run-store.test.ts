@@ -375,6 +375,22 @@ describe('analysis V2 provider run store', () => {
         );
     });
 
+    it('preserves the bounded authorized-policy slot mismatch for diagnosis', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({
+            data: null,
+            error: {
+                code: 'P0001',
+                message: 'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH',
+            },
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.reserve(identity)).rejects.toThrow(
+            'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH'
+        );
+    });
+
     it('rejects a replay whose stored immutable identity changed', async () => {
         const { rpc, client } = clientWithRpc();
         rpc.mockResolvedValueOnce({

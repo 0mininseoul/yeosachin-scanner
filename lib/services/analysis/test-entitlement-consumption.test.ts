@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
+import type {
+    AuthorizedTestProviderExecutionPolicy,
+} from './authorized-test-provider-policy';
 import { ANALYSIS_V2_BOOTSTRAP_JOB_KEY } from './v2-coordinator';
 import {
     AnalysisV2EntitlementConsumptionError,
@@ -14,6 +17,19 @@ const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
 const USER_ID = '123e4567-e89b-42d3-b456-426614174001';
 const REQUEST_ID = '123e4567-e89b-42d3-a456-426614174002';
 const NOW_MS = Date.UTC(2026, 6, 13, 6, 0, 0);
+const authorizedPolicy: AuthorizedTestProviderExecutionPolicy = {
+    mode: 'test_operation_split',
+    policyVersion: 'authorized-free-e2e-v1',
+    operationSlots: {
+        'target-profile': 'tertiary',
+        'relationship-followers': 'primary',
+        'relationship-following': 'secondary',
+        'profile-fallback': 'tertiary',
+        'target-likers': 'quaternary',
+        'target-comments': 'tertiary',
+        'candidate-likers': 'quinary',
+    },
+};
 
 function preflightRow(
     overrides: Partial<AnalysisV2PreflightRow> = {}
@@ -358,6 +374,64 @@ describe('test entitlement consumption RPC', () => {
         }
     });
 
+    it('binds an exact target and operation-slot policy through the authorized RPC', async () => {
+        const entitlementJtiHash = hashAnalysisTestEntitlementJti(
+            'authorized_test_nonce_01'
+        );
+        const { client, rpc } = clientWith([{
+            request_id: REQUEST_ID,
+            created: true,
+            initial_job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+            request_status: 'pending',
+            background_processing: false,
+        }]);
+
+        await consumeAnalysisV2TestEntitlement(client, {
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            selectedPlanId: 'standard',
+            entitlementJtiHash,
+            admissionToken: '123e4567-e89b-42d3-a456-426614174003',
+            targetUsername: '0_min._.00',
+            providerExecutionPolicy: authorizedPolicy,
+        });
+
+        expect(rpc).toHaveBeenCalledWith(
+            'consume_analysis_v2_authorized_test_entitlement',
+            {
+                p_preflight_id: PREFLIGHT_ID,
+                p_user_id: USER_ID,
+                p_selected_plan_id: 'standard',
+                p_entitlement_jti_hash: entitlementJtiHash,
+                p_admission_token: '123e4567-e89b-42d3-a456-426614174003',
+                p_target_instagram_id: '0_min._.00',
+                p_policy_version: 'authorized-free-e2e-v1',
+                p_operation_slot_map: authorizedPolicy.operationSlots,
+            }
+        );
+    });
+
+    it('rejects a target or policy supplied without its matching pair', async () => {
+        const hash = hashAnalysisTestEntitlementJti('authorized_test_nonce_02');
+        const { client, rpc } = clientWith([]);
+        const base = {
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            selectedPlanId: 'standard' as const,
+            entitlementJtiHash: hash,
+        };
+
+        await expect(consumeAnalysisV2TestEntitlement(client, {
+            ...base,
+            targetUsername: '0_min._.00',
+        })).rejects.toThrow('invalid input');
+        await expect(consumeAnalysisV2TestEntitlement(client, {
+            ...base,
+            providerExecutionPolicy: authorizedPolicy,
+        })).rejects.toThrow('invalid input');
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
     it('maps only bounded database messages and redacts arbitrary database details', async () => {
         const hash = hashAnalysisTestEntitlementJti('abcdefghijklmnop');
         const input = {
@@ -374,6 +448,10 @@ describe('test entitlement consumption RPC', () => {
             'ANALYSIS_V2_PLAN_NOT_ALLOWED',
             'ANALYSIS_V2_ENTITLEMENT_CONFLICT',
             'ANALYSIS_ALREADY_IN_PROGRESS',
+            'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_INVALID',
+            'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SCOPE_MISMATCH',
+            'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_CONFLICT',
+            'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_TOO_LATE',
         ]) {
             const bounded = clientWith(null, { code: 'P0001', message: code });
             await expect(consumeAnalysisV2TestEntitlement(bounded.client, input))

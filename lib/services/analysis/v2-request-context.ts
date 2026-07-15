@@ -1,10 +1,16 @@
 import { z } from 'zod';
 import {
     getAnalysisPlan,
+    PLAN_ACCESS_MODES,
     PLAN_IDS,
     type PlanId,
+    type PlanAccessMode,
 } from '@/lib/domain/analysis/plan-catalog';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    authorizedTestProviderExecutionPolicySchema,
+    type AuthorizedTestProviderExecutionPolicy,
+} from './authorized-test-provider-policy';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -14,6 +20,8 @@ const contextSchema = z.object({
     requestId: z.string().regex(UUID_PATTERN),
     targetUsername: z.string().regex(/^[a-z0-9._]{1,30}$/),
     excludedUsername: z.string().regex(/^[a-z0-9._]{1,30}$/).nullable(),
+    accessMode: z.enum(PLAN_ACCESS_MODES),
+    providerExecutionPolicy: authorizedTestProviderExecutionPolicySchema.nullable(),
     planId: z.enum(PLAN_IDS),
     followersDeclaredCount: z.number().int().min(0).max(1_200),
     followingDeclaredCount: z.number().int().min(0).max(1_200),
@@ -31,6 +39,8 @@ export interface AnalysisV2CollectionRequestContext {
     requestId: string;
     targetUsername: string;
     excludedUsername: string | null;
+    accessMode: PlanAccessMode;
+    providerExecutionPolicy: AuthorizedTestProviderExecutionPolicy | null;
     planId: PlanId;
     followersDeclaredCount: number;
     followingDeclaredCount: number;
@@ -109,7 +119,9 @@ export function createAnalysisV2CollectionRequestContextStore(
             }
             const plan = getAnalysisPlan(parsed.data.planId);
             if (
-                parsed.data.detailedMutualLimit !== plan.detailedMutualLimit
+                (parsed.data.providerExecutionPolicy !== null
+                    && parsed.data.accessMode !== 'test_entitlement')
+                || parsed.data.detailedMutualLimit !== plan.detailedMutualLimit
                 || parsed.data.followersDeclaredCount > plan.relationshipCapacity.followers
                 || parsed.data.followingDeclaredCount > plan.relationshipCapacity.following
                 || parsed.data.excludedUsername === parsed.data.targetUsername

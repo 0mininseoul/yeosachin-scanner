@@ -19,6 +19,9 @@ import {
     type AnalysisV2PreflightRow,
 } from '@/lib/services/analysis/test-entitlement-consumption';
 import {
+    configuredAuthorizedTestProviderPolicy,
+} from '@/lib/services/analysis/authorized-test-provider-policy';
+import {
     AnalysisV2FreshAdmissionError,
     markAnalysisV2FreshAdmissionDispatched,
     releaseAnalysisV2FreshAdmissionDispatch,
@@ -71,6 +74,10 @@ const ERROR_STATUS: Readonly<Record<AnalysisV2EntitlementErrorCode, number>> = {
     ANALYSIS_V2_PLAN_NOT_ALLOWED: 409,
     ANALYSIS_V2_ENTITLEMENT_CONFLICT: 409,
     ANALYSIS_ALREADY_IN_PROGRESS: 409,
+    ANALYSIS_V2_AUTHORIZED_TEST_POLICY_INVALID: 503,
+    ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SCOPE_MISMATCH: 403,
+    ANALYSIS_V2_AUTHORIZED_TEST_POLICY_CONFLICT: 409,
+    ANALYSIS_V2_AUTHORIZED_TEST_POLICY_TOO_LATE: 409,
 };
 
 const FRESH_ADMISSION_ERROR_STATUS: Readonly<
@@ -221,6 +228,24 @@ export async function POST(
             body.data.planId,
             { deferPlanSelectionToFreshAdmission: true }
         );
+        let providerExecutionPolicy;
+        try {
+            providerExecutionPolicy = configuredAuthorizedTestProviderPolicy(
+                {
+                    targetUsername: row.target_instagram_id,
+                    ownerUserId: user.id,
+                }
+            );
+        } catch {
+            console.error('Authorized analysis test provider policy is invalid.');
+            return NextResponse.json(
+                {
+                    error: '분석 테스트 공급자 설정을 확인할 수 없습니다.',
+                    code: 'TEST_PROVIDER_POLICY_UNAVAILABLE',
+                },
+                { status: 503 }
+            );
+        }
 
         let analysisTasksConfig;
         let preflightTasksConfig;
@@ -329,6 +354,10 @@ export async function POST(
             selectedPlanId: body.data.planId,
             entitlementJtiHash,
             admissionToken,
+            ...(providerExecutionPolicy ? {
+                targetUsername: row.target_instagram_id,
+                providerExecutionPolicy,
+            } : {}),
         });
 
         const terminal = consumed.requestStatus === 'completed'

@@ -37,6 +37,17 @@ const ADMISSION_TOKEN = '123e4567-e89b-42d3-a456-426614174003';
 const DISPATCH_TOKEN = '123e4567-e89b-42d3-a456-426614174004';
 const DISPATCH_GENERATION = 3;
 const ENTITLEMENT_SECRET = Buffer.alloc(32, 11).toString('base64url');
+const AUTHORIZED_TEST_ENV_KEYS = [
+    'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED',
+    'ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET',
+    'ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID',
+    'ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT',
+    'ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT',
+    'ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT',
+    'ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT',
+    'ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT',
+    'ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT',
+] as const;
 
 const taskConfig = { queue: 'analysis-v2' };
 const preflightTaskConfig = { queue: 'analysis-preflight' };
@@ -202,6 +213,9 @@ describe('analysis V2 durable test-entitlement route', () => {
             if (name === 'consume_analysis_v2_test_entitlement') {
                 return { data: consumedResult(), error: null };
             }
+            if (name === 'consume_analysis_v2_authorized_test_entitlement') {
+                return { data: consumedResult(), error: null };
+            }
             if (name === 'mark_analysis_v2_preflight_admission_dispatched') {
                 return { data: true, error: null };
             }
@@ -216,6 +230,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         delete process.env.ANALYSIS_TEST_ENTITLEMENT_SECRET;
         delete process.env.ANALYSIS_TEST_ENTITLEMENTS_ENABLED;
         delete process.env.ANALYSIS_V2_ADMISSION_ENABLED;
+        for (const key of AUTHORIZED_TEST_ENV_KEYS) delete process.env[key];
         vi.restoreAllMocks();
     });
 
@@ -317,6 +332,128 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(mocks.dispatchJob).toHaveBeenCalledWith(
             REQUEST_ID,
             ANALYSIS_V2_BOOTSTRAP_JOB_KEY
+        );
+    });
+
+    it('atomically binds the exact authorized target policy before initial dispatch', async () => {
+        installPreflightQuery(preflightRow({
+            target_instagram_id: '0_min._.00',
+        }));
+        Object.assign(process.env, {
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: 'true',
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET: '0_min._.00',
+            ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID: USER_ID,
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'primary',
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT: 'secondary',
+            ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT: 'quaternary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT: 'quinary',
+        });
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(201);
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'reserve_analysis_v2_preflight_admission',
+            'consume_analysis_v2_authorized_test_entitlement',
+        ]);
+        expect(mocks.rpc.mock.calls[1][1]).toMatchObject({
+            p_user_id: USER_ID,
+            p_target_instagram_id: '0_min._.00',
+            p_policy_version: 'authorized-free-e2e-v1',
+            p_operation_slot_map: {
+                'target-profile': 'tertiary',
+                'relationship-followers': 'primary',
+                'relationship-following': 'secondary',
+                'profile-fallback': 'tertiary',
+                'target-likers': 'quaternary',
+                'target-comments': 'tertiary',
+                'candidate-likers': 'quinary',
+            },
+        });
+        expect(mocks.dispatchJob).toHaveBeenCalledWith(
+            REQUEST_ID,
+            ANALYSIS_V2_BOOTSTRAP_JOB_KEY
+        );
+    });
+
+    it('keeps ordinary targets on the original consumption RPC when test sharding is enabled', async () => {
+        Object.assign(process.env, {
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: 'true',
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET: '0_min._.00',
+            ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID: USER_ID,
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'primary',
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT: 'secondary',
+            ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT: 'quaternary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT: 'quinary',
+        });
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(201);
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'reserve_analysis_v2_preflight_admission',
+            'consume_analysis_v2_test_entitlement',
+        ]);
+    });
+
+    it('keeps the exact target on the original RPC for a different signed-test owner', async () => {
+        installPreflightQuery(preflightRow({
+            target_instagram_id: '0_min._.00',
+        }));
+        Object.assign(process.env, {
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: 'true',
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET: '0_min._.00',
+            ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID:
+                '123e4567-e89b-42d3-a456-426614174099',
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'primary',
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT: 'secondary',
+            ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT: 'quaternary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT: 'quinary',
+        });
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(201);
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'reserve_analysis_v2_preflight_admission',
+            'consume_analysis_v2_test_entitlement',
+        ]);
+    });
+
+    it('rejects an invalid exact-target policy before admission or provider work', async () => {
+        installPreflightQuery(preflightRow({
+            target_instagram_id: '0_min._.00',
+        }));
+        Object.assign(process.env, {
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: 'true',
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET: '0_min._.00',
+            ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID: USER_ID,
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'primary',
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT: 'primary',
+            ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT: 'quaternary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT: 'quinary',
+        });
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'TEST_PROVIDER_POLICY_UNAVAILABLE',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.dispatchAdmission).not.toHaveBeenCalled();
+        expect(mocks.dispatchJob).not.toHaveBeenCalled();
+        expect(errorSpy).toHaveBeenCalledWith(
+            'Authorized analysis test provider policy is invalid.'
         );
     });
 
