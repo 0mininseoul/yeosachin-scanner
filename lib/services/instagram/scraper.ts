@@ -26,6 +26,7 @@ import {
     type ScraperConfig,
 } from './config';
 import { apifyProvider } from './providers/apify';
+import { APIFY_PROVIDER_QUOTA_ERROR_CODE } from './providers/apify-relationship';
 import { coderXProvider } from './providers/coderx';
 import { flashApiProvider } from './providers/flashapi';
 import { rapidApiProvider } from './providers/rapidapi';
@@ -487,13 +488,16 @@ async function runProfileOutcomeAttempt(
         ) {
             throw error;
         }
-        const paidRunBarrierError = error instanceof Error && [
-            'SCRAPING_AMBIGUOUS_START_ERROR:',
-            'SCRAPING_RUN_CHECKPOINT_ERROR:',
-            'SCRAPING_RUN_PENDING_ERROR:',
-            'ANALYSIS_PERSISTENCE_ERROR:',
-            'ANALYSIS_V2_PROGRESS_',
-        ].some(prefix => error.message.startsWith(prefix))
+        const paidRunBarrierError = error instanceof Error && (
+            error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
+            || [
+                'SCRAPING_AMBIGUOUS_START_ERROR:',
+                'SCRAPING_RUN_CHECKPOINT_ERROR:',
+                'SCRAPING_RUN_PENDING_ERROR:',
+                'ANALYSIS_PERSISTENCE_ERROR:',
+                'ANALYSIS_V2_PROGRESS_',
+            ].some(prefix => error.message.startsWith(prefix))
+        )
             ? error
             : undefined;
         return {

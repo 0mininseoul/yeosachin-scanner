@@ -635,6 +635,8 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_STAGE_INVALID_JSON',
             'ANALYSIS_V2_REVERSE_LIKE_BUDGET_EXCEEDED',
             'ANALYSIS_V2_PROFILE_AI_BATCH_DRIFT',
+            'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE',
+            'ANALYSIS_V2_REVERSE_LIKE_RESULT_LIMIT_EXCEEDED',
             'ANALYSIS_V2_AI_SCORING_STAGE_CONFLICT',
             'ANALYSIS_V2_RESULT_VALIDATION_ERROR: invalid result.',
             'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid cache response.',
@@ -649,6 +651,7 @@ describe('analysis V2 durable DAG worker', () => {
         }
         for (const message of [
             'ANALYSIS_V2_PROFILE_CONSUMER_NOT_READY',
+            'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: reserve failed (08006).',
             'ANALYSIS_V2_AI_SCORING_STAGE_PERSISTENCE_ERROR: rpc failed (08006).',
             'ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT',
             'AI_RATE_LIMIT_ERROR: provider rejected before generation.',
@@ -665,6 +668,31 @@ describe('analysis V2 durable DAG worker', () => {
             });
         }
         expect(classifyAnalysisV2JobFailure(
+            new Error('ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: reserve failed (08006).')
+        )).toMatchObject({
+            code: 'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR',
+            disposition: 'transient',
+            retryable: true,
+        });
+        for (const code of [
+            'ANALYSIS_V2_PROFILE_AI_CHECKPOINT_COUNT_DRIFT',
+            'ANALYSIS_V2_PRIVATE_NAME_CHECKPOINT_COUNT_DRIFT',
+            'ANALYSIS_V2_SCREENING_CHECKPOINT_COUNT_DRIFT',
+            'ANALYSIS_V2_REVERSE_LIKES_CHECKPOINT_COUNT_DRIFT',
+            'ANALYSIS_V2_PARTNER_SAFETY_CHECKPOINT_COUNT_DRIFT',
+            'ANALYSIS_V2_FINAL_SCORE_CHECKPOINT_COUNT_DRIFT',
+            'ANALYSIS_V2_NARRATIVE_CHECKPOINT_COUNT_DRIFT',
+            'INVALID_CAROUSEL_METADATA',
+            'CAROUSEL_COMPLETENESS_MISMATCH',
+            'RISK_POLICY_ERROR',
+        ]) {
+            expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+                code,
+                disposition: 'permanent',
+                retryable: false,
+            });
+        }
+        expect(classifyAnalysisV2JobFailure(
             new Error('ANALYSIS_V2_AI_SCORING_STAGE_FENCE_MISMATCH')
         )).toMatchObject({ disposition: 'fence', retryable: false });
         expect(classifyAnalysisV2JobFailure(
@@ -675,6 +703,21 @@ describe('analysis V2 durable DAG worker', () => {
         });
         expect(classifyAnalysisV2JobFailure(
             new Error(`${'A'.repeat(65)}: oversized provider prefix`)
+        )).toMatchObject({
+            code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+            disposition: 'permanent',
+            retryable: false,
+        });
+        expect(classifyAnalysisV2JobFailure(
+            new Error('APIFY_TOKEN_PROVIDER_SECRET_ERROR: provider-secret')
+        )).toMatchObject({
+            code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+            disposition: 'permanent',
+            retryable: false,
+        });
+        expect(new AnalysisV2JobExecutionError(
+            'APIFY_TOKEN_PROVIDER_SECRET_ERROR',
+            true
         )).toMatchObject({
             code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
             disposition: 'permanent',
@@ -845,6 +888,13 @@ describe('analysis V2 durable DAG worker', () => {
         expect(classifyAnalysisV2JobFailure(
             new Error('SCRAPING_ERROR: Apify actor failed (status=TIMED-OUT).')
         )).toMatchObject({ disposition: 'permanent', retryable: false });
+        expect(classifyAnalysisV2JobFailure(
+            new Error('SCRAPING_PROVIDER_QUOTA_ERROR')
+        )).toMatchObject({
+            code: 'SCRAPING_PROVIDER_QUOTA_ERROR',
+            disposition: 'permanent',
+            retryable: false,
+        });
     });
 
     it('atomically terminalizes a retryable failure on the final attempt', async () => {

@@ -44,12 +44,20 @@ function comment(id: string, postUrl?: string) {
 
 function mockClient(
     items: Array<Record<string, unknown>>,
-    options: { status?: string; total?: number; usageTotalUsd?: number } = {}
+    options: {
+        status?: string;
+        statusMessage?: string;
+        total?: number;
+        usageTotalUsd?: number;
+    } = {}
 ) {
     const call = vi.fn().mockResolvedValue({ id: 'RunAbcd1234567890' });
     const waitForFinish = vi.fn().mockResolvedValue({
         status: options.status ?? 'SUCCEEDED',
         defaultDatasetId: 'dataset',
+        ...(options.statusMessage === undefined
+            ? {}
+            : { statusMessage: options.statusMessage }),
         ...(options.usageTotalUsd === undefined
             ? {}
             : { usageTotalUsd: options.usageTotalUsd }),
@@ -187,6 +195,18 @@ describe('Apify interaction adapter', () => {
         }).getPostLikers([post], 1, checkpoint))
             .rejects.toThrow('SCRAPING_DATASET_TRANSIENT_ERROR');
         expect(unreadable.call).not.toHaveBeenCalled();
+    });
+
+    it('preserves a terminal provider quota error before reading interaction results', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client, listItems } = mockClient([], {
+            statusMessage: 'Free API / MCP daily limit reached. Upgrade to a paid plan.',
+        });
+        const adapter = makeApifyInteractionAdapter({ client, env: BASE_ENV });
+
+        await expect(adapter.getPostLikers([post], 1))
+            .rejects.toThrow('SCRAPING_PROVIDER_QUOTA_ERROR');
+        expect(listItems).not.toHaveBeenCalled();
     });
 
     it('supports the ten URL x one hundred candidate-liker product ceiling', async () => {

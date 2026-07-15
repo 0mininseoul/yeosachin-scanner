@@ -48,13 +48,15 @@ function profileItem(username: string) {
 function mockClient(
     items: Array<Record<string, unknown>>,
     status = 'SUCCEEDED',
-    usageTotalUsd?: number
+    usageTotalUsd?: number,
+    statusMessage?: string
 ) {
     const call = vi.fn().mockResolvedValue({ id: 'RunAbcd1234567890' });
     const waitForFinish = vi.fn().mockResolvedValue({
         status,
         defaultDatasetId: 'dataset',
         ...(usageTotalUsd === undefined ? {} : { usageTotalUsd }),
+        ...(statusMessage === undefined ? {} : { statusMessage }),
     });
     const abort = vi.fn().mockResolvedValue(undefined);
     const listItems = vi.fn(async ({ offset = 0, limit = items.length }: { offset?: number; limit?: number } = {}) => ({
@@ -378,6 +380,65 @@ describe('apifyProvider', () => {
         }));
         expect(waitForFinish.mock.invocationCallOrder[0])
             .toBeLessThan(onCostRunFinished.mock.invocationCallOrder[0]);
+    });
+
+    it('fails a terminal free-tier quota run with a stable provider code', async () => {
+        const message = [
+            'Free API / MCP daily limit reached.',
+            'To process larger exports, please upgrade to a paid Apify plan.',
+            'Free users can still test manually from the Apify Console / Web UI.',
+        ].join(' ');
+        const { client } = mockClient([], 'SUCCEEDED', 0, message);
+        const onCostRunFinished = vi.fn();
+
+        await expect(startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            { onCostRunFinished, recordUsage: vi.fn() }
+        )).rejects.toThrow('SCRAPING_PROVIDER_QUOTA_ERROR');
+
+        expect(onCostRunFinished).toHaveBeenCalledWith(expect.objectContaining({
+            status: 'succeeded',
+        }));
+    });
+
+    it.each([
+        'Delivered 25 items with the Free API. Upgrade to a paid plan for larger batches.',
+        'Daily limit reached for a separate integration; delivered requested results.',
+        'Free API / MCP daily limit is available. Upgrade to a paid plan for more features.',
+    ])('does not mistake a normal delivered status for a quota failure: %s', async message => {
+        const { client } = mockClient([], 'SUCCEEDED', 0, message);
+
+        await expect(startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            { recordUsage: vi.fn() }
+        )).resolves.toMatchObject({ status: 'SUCCEEDED', statusMessage: message });
+    });
+
+    it('preserves the quota code through the relationship provider wrapper', async () => {
+        const message = 'Free API/MCP daily limit has been reached. Upgrade to paid plan now.';
+        const { client, listItems } = mockClient([], 'SUCCEEDED', 0, message);
+
+        await expect(makeApifyProvider({ client, env: {} }).getFollowers!('target', 1))
+            .rejects.toThrow('SCRAPING_PROVIDER_QUOTA_ERROR');
+        expect(listItems).not.toHaveBeenCalled();
     });
 
     it('preserves a checkpointed run for retry when the cost-start write fails', async () => {

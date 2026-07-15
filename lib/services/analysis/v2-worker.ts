@@ -51,6 +51,10 @@ import { prepareAnalysisV2ProviderRunsForTerminalFailure } from './v2-provider-l
 import { analysisV2ProviderRunStore } from './v2-provider-run-store';
 import { getAnalysisV2ProductionExecutorRegistry } from './v2-production-executors';
 import { dispatchAnalysisV2Job } from './v2-tasks';
+import {
+    ANALYSIS_V2_GENERIC_JOB_FAILURE_CODE,
+    isAnalysisV2WorkerErrorCode,
+} from './v2-worker-error-codes';
 
 const PROFILE_FETCH_JOB_PATTERN = /^track:profiles:batch:\d+$/;
 const PROFILE_AI_JOB_PATTERN = /^track:profile-ai:batch:\d+$/;
@@ -146,9 +150,6 @@ export type AnalysisV2WorkerOutcome =
 
 export type AnalysisV2JobFailureDisposition = 'permanent' | 'transient' | 'fence';
 
-const SAFE_JOB_FAILURE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,63}$/;
-const GENERIC_JOB_FAILURE_CODE = 'ANALYSIS_V2_JOB_HANDLER_FAILED';
-
 export class AnalysisV2JobExecutionError extends Error {
     readonly code: string;
     readonly disposition: AnalysisV2JobFailureDisposition;
@@ -158,13 +159,13 @@ export class AnalysisV2JobExecutionError extends Error {
         code: string,
         disposition: AnalysisV2JobFailureDisposition | boolean
     ) {
-        const safeCode = SAFE_JOB_FAILURE_CODE_PATTERN.test(code)
+        const safeCode = isAnalysisV2WorkerErrorCode(code)
             ? code
-            : GENERIC_JOB_FAILURE_CODE;
+            : ANALYSIS_V2_GENERIC_JOB_FAILURE_CODE;
         super(safeCode);
         this.name = 'AnalysisV2JobExecutionError';
         this.code = safeCode;
-        this.disposition = !SAFE_JOB_FAILURE_CODE_PATTERN.test(code)
+        this.disposition = !isAnalysisV2WorkerErrorCode(code)
             ? 'permanent'
             : typeof disposition === 'boolean'
                 ? disposition ? 'transient' : 'permanent'
@@ -595,6 +596,7 @@ const PERMANENT_FAILURE_CODES = new Set([
     'ANALYSIS_V2_AI_ATTEMPT_NOT_RETRYABLE',
     'ANALYSIS_V2_JOB_HANDLER_UNAVAILABLE',
     'ANALYSIS_V2_TARGET_PROFILE_UNAVAILABLE',
+    'SCRAPING_PROVIDER_QUOTA_ERROR',
 ]);
 
 const TRANSIENT_TRANSPORT_PATTERNS = [
@@ -605,7 +607,8 @@ const TRANSIENT_TRANSPORT_PATTERNS = [
 
 function stableFailureCode(error: Error): string | null {
     const match = error.message.match(/^([A-Z][A-Z0-9_]{2,63})(?::|\s|\(|$)/);
-    return match?.[1] ?? null;
+    const code = match?.[1];
+    return isAnalysisV2WorkerErrorCode(code) ? code : null;
 }
 
 function hasTransientTransportSignal(error: unknown, depth = 0): boolean {
@@ -746,7 +749,7 @@ export function classifyAnalysisV2JobFailure(error: unknown): AnalysisV2JobExecu
         }
     }
     return new AnalysisV2JobExecutionError(
-        GENERIC_JOB_FAILURE_CODE,
+        ANALYSIS_V2_GENERIC_JOB_FAILURE_CODE,
         'permanent'
     );
 }

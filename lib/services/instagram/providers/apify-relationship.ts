@@ -14,12 +14,22 @@ export type ApifyRelationshipKind = 'followers' | 'following';
 
 const APIFY_RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
 const MAX_INVOCATION_WAIT_SECS = 240;
+export const APIFY_PROVIDER_QUOTA_ERROR_CODE = 'SCRAPING_PROVIDER_QUOTA_ERROR';
 const RESUMABLE_APIFY_RUN_STATUSES = new Set([
     'READY',
     'RUNNING',
     'TIMING-OUT',
     'ABORTING',
 ]);
+
+function hasExplicitFreeTierQuotaSignal(statusMessage: unknown): boolean {
+    if (typeof statusMessage !== 'string') return false;
+    return /\bfree\s+(?:api(?:\s*\/\s*mcp)?|mcp)\b/i.test(statusMessage)
+        && /\bdaily\s+(?:api\s+|mcp\s+)?limit\s+(?:has\s+been\s+)?reached\b/i
+            .test(statusMessage)
+        && /\bupgrade\s+to\s+(?:a\s+)?paid(?:\s+apify)?\s+plan\b/i
+            .test(statusMessage);
+}
 
 export interface ApifyActorRunOptions {
     logicalProvider: 'apify' | 'coderx';
@@ -369,6 +379,9 @@ export async function startOrResumeApifyActor(
             );
         }
     }
+    if (terminalStatus && hasExplicitFreeTierQuotaSignal(run.statusMessage)) {
+        throw new Error(APIFY_PROVIDER_QUOTA_ERROR_CODE);
+    }
     if (!terminalStatus && RESUMABLE_APIFY_RUN_STATUSES.has(run.status) && durablyCheckpointed) {
         throw new Error(
             `SCRAPING_RUN_PENDING_ERROR: Apify run status=${run.status}; retry the checkpointed run.`
@@ -493,6 +506,7 @@ export async function runApifyRelationshipActor(
                     error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
+                    || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
                 )
             ) {
