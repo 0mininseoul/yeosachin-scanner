@@ -10,6 +10,7 @@ import {
     type ApifyPostLiker,
 } from '@/lib/services/instagram/providers/apify-interactions';
 import {
+    isApifyQueuedStartCancellation,
     numberSetting,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
@@ -111,6 +112,29 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         interactionAdapter: input.interactionAdapter ?? apifyInteractionAdapter,
         env: input.env ?? process.env,
     };
+}
+
+async function awaitSettledBranches<const T extends readonly unknown[]>(
+    branches: { readonly [K in keyof T]: (signal: AbortSignal) => Promise<T[K]> }
+): Promise<T> {
+    const controller = new AbortController();
+    const pending = branches.map(branch => Promise.resolve()
+        .then(() => branch(controller.signal))
+        .catch((error: unknown) => {
+            if (!isApifyQueuedStartCancellation(error)) controller.abort();
+            throw error;
+        }));
+    const results = await Promise.allSettled(pending);
+    const failure = results.find(result => (
+        result.status === 'rejected'
+        && !isApifyQueuedStartCancellation(result.reason)
+    )) ?? results.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+    const values: unknown[] = [];
+    for (const result of results) {
+        if (result.status === 'fulfilled') values.push(result.value);
+    }
+    return values as unknown as T;
 }
 
 function sha256(value: string): string {
@@ -340,7 +364,10 @@ export function createAnalysisV2RelationshipsExecutor(
         const request = await dependencies.requestContextStore.load(claim);
         assertScopeMatchesState(request, context.state);
 
-        const collect = async (side: 'followers' | 'following') => {
+        const collect = async (
+            side: 'followers' | 'following',
+            startCancellationSignal: AbortSignal
+        ) => {
             const declaredCount = side === 'followers'
                 ? request.followersDeclaredCount
                 : request.followingDeclaredCount;
@@ -387,7 +414,7 @@ export function createAnalysisV2RelationshipsExecutor(
                 fallback: false,
                 expectedResultCount: declaredCount,
                 requestId: claim.requestId,
-                providerRun: binding.checkpoint,
+                providerRun: { ...binding.checkpoint, startCancellationSignal },
             });
             const run = await requireSucceededRun(dependencies.providerRunStore, {
                 requestId: claim.requestId,
@@ -409,7 +436,10 @@ export function createAnalysisV2RelationshipsExecutor(
             });
         };
 
-        await Promise.all([collect('followers'), collect('following')]);
+        await awaitSettledBranches([
+            signal => collect('followers', signal),
+            signal => collect('following', signal),
+        ] as const);
         const manifest = await dependencies.evidenceStore.freezeRelationships({
             ...claim,
             detailedMutualLimit: request.detailedMutualLimit,
@@ -601,8 +631,11 @@ function profileBatchResultHash(
     ].join('\n'));
 }
 
-function interactionContext(checkpoint: ProviderRunCheckpoint): ProviderCallContext {
-    return { ...checkpoint, recordUsage: () => undefined };
+function interactionContext(
+    checkpoint: ProviderRunCheckpoint,
+    startCancellationSignal: AbortSignal
+): ProviderCallContext {
+    return { ...checkpoint, startCancellationSignal, recordUsage: () => undefined };
 }
 
 function targetProfilePosts(profile: AnalysisV2CheckpointProfile): InstagramPost[] {
@@ -620,6 +653,7 @@ async function collectedTargetSource(input: {
     targetUsername: string;
     kind: 'likers' | 'comments';
     posts: readonly InstagramPost[];
+    startCancellationSignal: AbortSignal;
 }) {
     const limitPerPost = input.kind === 'likers' ? TARGET_LIKER_LIMIT : TARGET_COMMENT_LIMIT;
     const postUrls = input.posts.map(instagramPostUrl);
@@ -653,12 +687,12 @@ async function collectedTargetSource(input: {
         ? await input.dependencies.interactionAdapter.getPostLikers(
             postUrls,
             limitPerPost,
-            interactionContext(binding.checkpoint)
+            interactionContext(binding.checkpoint, input.startCancellationSignal)
         )
         : await input.dependencies.interactionAdapter.getPostComments(
             postUrls,
             limitPerPost,
-            interactionContext(binding.checkpoint)
+            interactionContext(binding.checkpoint, input.startCancellationSignal)
         );
     const run = await requireSucceededRun(input.dependencies.providerRunStore, {
         requestId: input.claim.requestId,
@@ -707,24 +741,26 @@ export function createAnalysisV2TargetEvidenceExecutor(
             likerSource = { status: 'not_applicable', inputHash: proofHash };
             commentSource = { status: 'not_applicable', inputHash: proofHash };
         } else {
-            const [likers, comments] = await Promise.all([
-                collectedTargetSource({
+            const [likers, comments] = await awaitSettledBranches([
+                signal => collectedTargetSource({
                     dependencies,
                     claim,
                     request,
                     targetUsername: request.targetUsername,
                     kind: 'likers',
                     posts: likerPosts,
+                    startCancellationSignal: signal,
                 }),
-                collectedTargetSource({
+                signal => collectedTargetSource({
                     dependencies,
                     claim,
                     request,
                     targetUsername: request.targetUsername,
                     kind: 'comments',
                     posts: commentPosts,
+                    startCancellationSignal: signal,
                 }),
-            ]);
+            ] as const);
             likerRows = likers.rows as ApifyPostLiker[];
             commentRows = comments.rows as ApifyPostComment[];
 

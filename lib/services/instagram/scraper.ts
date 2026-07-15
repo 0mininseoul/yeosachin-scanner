@@ -270,6 +270,7 @@ async function runAttempt<T>(
         startReserved: options?.providerRun?.startReserved,
         invocationWaitLimitSecs: options?.providerRun?.invocationWaitLimitSecs,
         invocationDeadlineAtMs: options?.providerRun?.invocationDeadlineAtMs,
+        startCancellationSignal: options?.providerRun?.startCancellationSignal,
         onBeforeRunStart: options?.providerRun?.onBeforeRunStart,
         onRunStarted: options?.providerRun?.onRunStarted,
         onProfileStart: options?.onProfileStart,

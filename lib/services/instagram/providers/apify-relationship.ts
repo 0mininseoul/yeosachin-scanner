@@ -15,12 +15,91 @@ export type ApifyRelationshipKind = 'followers' | 'following';
 const APIFY_RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
 const MAX_INVOCATION_WAIT_SECS = 240;
 export const APIFY_PROVIDER_QUOTA_ERROR_CODE = 'SCRAPING_PROVIDER_QUOTA_ERROR';
+export const APIFY_QUEUED_START_CANCELLED_ERROR_CODE = 'SCRAPING_QUEUED_START_CANCELLED';
+const PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR =
+    'ANALYSIS_V2_PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR';
+const PROVIDER_RUN_COST_START_PERSISTENCE_ERROR =
+    'ANALYSIS_V2_PROVIDER_RUN_COST_START_PERSISTENCE_ERROR';
+const PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR =
+    'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR';
+const PROVIDER_RUN_PERSISTENCE_ERROR = 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR';
+const SCRAPING_RUN_CHECKPOINT_ERROR =
+    'SCRAPING_RUN_CHECKPOINT_ERROR: Apify run id could not be persisted.';
 const RESUMABLE_APIFY_RUN_STATUSES = new Set([
     'READY',
     'RUNNING',
     'TIMING-OUT',
     'ABORTING',
 ]);
+export const APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES = Object.freeze([
+    'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH',
+    'ANALYSIS_V2_PROVIDER_RUN_ALREADY_RESERVED',
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_CONFLICT',
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_INTENT_CONFLICT',
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_NOT_READY',
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+    'ANALYSIS_V2_PROVIDER_RUN_COST_IDENTITY_CONFLICT',
+    'ANALYSIS_V2_PROVIDER_RUN_ERROR',
+    'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH',
+    'ANALYSIS_V2_PROVIDER_RUN_IDENTITY_CONFLICT',
+    PROVIDER_RUN_PERSISTENCE_ERROR,
+    'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_CONFLICT',
+    'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_NOT_READY',
+    PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR,
+    PROVIDER_RUN_COST_START_PERSISTENCE_ERROR,
+    PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR,
+    'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT',
+    'ANALYSIS_V2_PROVIDER_RUN_STATE_CONFLICT',
+    'ANALYSIS_V2_PROVIDER_RUN_TERMINAL_CONFLICT',
+    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR',
+] as const);
+const DURABLE_PROVIDER_CALLBACK_ERROR_CODE_SET = new Set<string>(
+    APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES
+);
+
+function durableProviderCallbackCode(error: unknown): string | undefined {
+    const code = error instanceof Error
+        ? error.message.match(/^([A-Z][A-Z0-9_]{2,63})(?::|\s|\(|$)/)?.[1]
+        : undefined;
+    return code && DURABLE_PROVIDER_CALLBACK_ERROR_CODE_SET.has(code) ? code : undefined;
+}
+
+export function isApifyProviderLifecycleError(error: unknown): boolean {
+    return durableProviderCallbackCode(error) !== undefined;
+}
+
+export function isApifyQueuedStartCancellation(error: unknown): boolean {
+    return error instanceof Error
+        && error.message === APIFY_QUEUED_START_CANCELLED_ERROR_CODE;
+}
+
+export function throwIfApifyQueuedStartCancelled(context?: ProviderCallContext): void {
+    if (
+        context?.startCancellationSignal?.aborted
+        && !context.resumeRunId?.trim()
+        && !context.startReserved
+    ) {
+        throw new Error(APIFY_QUEUED_START_CANCELLED_ERROR_CODE);
+    }
+}
+
+function sanitizedProviderCallbackError(error: unknown, fallbackMessage: string): Error {
+    const code = durableProviderCallbackCode(error);
+    return new Error(
+        code && code !== PROVIDER_RUN_PERSISTENCE_ERROR
+            ? code
+            : fallbackMessage
+    );
+}
+
+function sanitizedRunCheckpointError(error: unknown): Error {
+    const code = durableProviderCallbackCode(error);
+    return new Error(
+        code && code !== PROVIDER_RUN_PERSISTENCE_ERROR
+            ? code
+            : SCRAPING_RUN_CHECKPOINT_ERROR
+    );
+}
 
 function hasExplicitFreeTierQuotaSignal(statusMessage: unknown): boolean {
     if (typeof statusMessage !== 'string') return false;
@@ -275,9 +354,10 @@ export async function startOrResumeApifyActor(
                 credentialSlot,
                 maxChargeUsd: maxTotalChargeUsd,
             });
-        } catch {
-            throw new Error(
-                'ANALYSIS_PERSISTENCE_ERROR: Apify Actor start intent could not be reserved.'
+        } catch (error) {
+            throw sanitizedProviderCallbackError(
+                error,
+                PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR
             );
         }
         let startedRun;
@@ -306,15 +386,13 @@ export async function startOrResumeApifyActor(
         try {
             await context?.onRunStarted?.(runId);
             durablyCheckpointed = typeof context?.onRunStarted === 'function';
-        } catch {
+        } catch (error) {
             try {
                 await client.run(runId).abort();
             } catch {
                 // The run checkpoint failure remains terminal even if best-effort abort fails.
             }
-            throw new Error(
-                'SCRAPING_RUN_CHECKPOINT_ERROR: Apify run id could not be persisted.'
-            );
+            throw sanitizedRunCheckpointError(error);
         }
     }
 
@@ -327,9 +405,10 @@ export async function startOrResumeApifyActor(
     };
     try {
         await context?.onCostRunStarted?.(costRun);
-    } catch {
-        throw new Error(
-            'ANALYSIS_PERSISTENCE_ERROR: Apify run cost start could not be persisted.'
+    } catch (error) {
+        throw sanitizedProviderCallbackError(
+            error,
+            PROVIDER_RUN_COST_START_PERSISTENCE_ERROR
         );
     }
 
@@ -373,9 +452,10 @@ export async function startOrResumeApifyActor(
                 // authenticated reconciliation finalizes usage without delaying users.
                 usageTotalUsd: null,
             });
-        } catch {
-            throw new Error(
-                'ANALYSIS_PERSISTENCE_ERROR: Apify terminal cost could not be persisted.'
+        } catch (error) {
+            throw sanitizedProviderCallbackError(
+                error,
+                PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR
             );
         }
     }
@@ -481,6 +561,7 @@ export async function runApifyRelationshipActor(
         );
     }
     return runWithApifyActorSlot(definition.actorConcurrency, async () => {
+        throwIfApifyQueuedStartCancelled(context);
         context?.recordUsage({ request_count: 1 });
         let run;
         try {
@@ -508,6 +589,7 @@ export async function runApifyRelationshipActor(
                     || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                    || isApifyProviderLifecycleError(error)
                 )
             ) {
                 throw error;

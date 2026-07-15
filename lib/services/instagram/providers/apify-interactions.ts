@@ -4,6 +4,8 @@ import {
     APIFY_PROVIDER_QUOTA_ERROR_CODE,
     getApifyClient,
     integerSetting,
+    isApifyProviderLifecycleError,
+    throwIfApifyQueuedStartCancelled,
     numberSetting,
     runWithApifyActorSlot,
     selectApifyCredentialSlot,
@@ -433,6 +435,7 @@ async function runActor(
         context?.maxChargeUsd
     );
     return runWithApifyActorSlot(config.actorConcurrency, async () => {
+        throwIfApifyQueuedStartCancelled(context);
         context?.recordUsage({ request_count: 1 });
         let run;
         try {
@@ -453,6 +456,7 @@ async function runActor(
                     || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                    || isApifyProviderLifecycleError(error)
                 )
             ) {
                 throw error;

@@ -146,6 +146,21 @@ describe('Apify interaction adapter', () => {
         }));
     });
 
+    it('preserves terminal persistence phase through the interaction wrapper', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client } = mockClient([liker('alice', post)]);
+        const adapter = makeApifyInteractionAdapter({ client, env: BASE_ENV });
+
+        await expect(adapter.getPostLikers([post], 1, {
+            onCostRunFinished: vi.fn().mockRejectedValue(new Error(
+                'database unavailable with secret detail'
+            )),
+            recordUsage: vi.fn(),
+        })).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR'
+        ));
+    });
+
     it('resumes interactions with the stored credential slot and charge cap', async () => {
         const post = 'https://www.instagram.com/p/PostA/';
         const { client, call } = mockClient([liker('alice', post)]);
@@ -168,6 +183,30 @@ describe('Apify interaction adapter', () => {
             credentialSlot: 'secondary',
             maxChargeUsd: 0.009,
         }));
+    });
+
+    it('does not start or account for a cancelled unreserved interaction', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client, call, waitForFinish } = mockClient([liker('alice', post)]);
+        const adapter = makeApifyInteractionAdapter({ client, env: BASE_ENV });
+        const controller = new AbortController();
+        const recordUsage = vi.fn();
+        const onBeforeRunStart = vi.fn();
+        const onCostRunStarted = vi.fn();
+        controller.abort();
+
+        await expect(adapter.getPostLikers([post], 1, {
+            startCancellationSignal: controller.signal,
+            onBeforeRunStart,
+            onCostRunStarted,
+            recordUsage,
+        })).rejects.toThrow('SCRAPING_QUEUED_START_CANCELLED');
+
+        expect(recordUsage).not.toHaveBeenCalled();
+        expect(onBeforeRunStart).not.toHaveBeenCalled();
+        expect(onCostRunStarted).not.toHaveBeenCalled();
+        expect(call).not.toHaveBeenCalled();
+        expect(waitForFinish).not.toHaveBeenCalled();
     });
 
     it('retries pending and temporarily unreadable interaction runs without a second start', async () => {

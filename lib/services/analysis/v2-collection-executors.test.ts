@@ -4,7 +4,7 @@ import type {
     ApifyPostComment,
     ApifyPostLiker,
 } from '@/lib/services/instagram/providers/apify-interactions';
-import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
+import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 import type { AnalysisV2DagState } from './v2-dag-planner';
 import type { AnalysisV2EvidenceStore } from './v2-evidence-store';
 import type { AnalysisV2TargetEvidenceCheckpointInput } from './v2-evidence-store';
@@ -436,6 +436,163 @@ describe('analysis V2 concrete collection executors', () => {
         expect(followerOptions).not.toHaveProperty('session');
     });
 
+    it('waits for both relationship branches and rethrows the first failure by input order', async () => {
+        const followerFailure = new Error('followers failed after following');
+        const followingFailure = new Error('following failed first');
+        let rejectFollowers: (reason?: unknown) => void = () => undefined;
+        const getFollowersMock = vi.fn(() => new Promise<InstagramFollower[]>((_, reject) => {
+            rejectFollowers = reject;
+        }));
+        const getFollowingMock = vi.fn(async (): Promise<InstagramFollower[]> => {
+            throw followingFailure;
+        });
+        const freezeRelationships = vi.fn();
+        const checkpointRelationshipSide = vi.fn();
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providerStore().value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships,
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        const execution = executor(stageContext('relationships', state()));
+        let outcome: 'pending' | 'fulfilled' | 'rejected' = 'pending';
+        let rejection: unknown;
+        const observed = execution.then(
+            () => { outcome = 'fulfilled'; },
+            (reason: unknown) => {
+                outcome = 'rejected';
+                rejection = reason;
+            }
+        );
+
+        await vi.waitFor(() => {
+            expect(getFollowersMock).toHaveBeenCalledOnce();
+            expect(getFollowingMock).toHaveBeenCalledOnce();
+        });
+        await Promise.resolve();
+
+        expect(outcome).toBe('pending');
+
+        rejectFollowers(followerFailure);
+        await observed;
+
+        expect(outcome).toBe('rejected');
+        expect(rejection).toBe(followerFailure);
+        expect(checkpointRelationshipSide).not.toHaveBeenCalled();
+        expect(freezeRelationships).not.toHaveBeenCalled();
+    });
+
+    it('cancels an earlier queued relationship tuple without masking a later real failure', async () => {
+        const realFailure = new Error('following provider failed');
+        let followerSignal: AbortSignal | undefined;
+        let rejectFollowers: (reason?: unknown) => void = () => undefined;
+        let rejectFollowing: (reason?: unknown) => void = () => undefined;
+        const getFollowersMock = vi.fn((_username, _limit, options) => (
+            new Promise<InstagramFollower[]>((_, reject) => {
+                rejectFollowers = reject;
+                followerSignal = options?.providerRun?.startCancellationSignal;
+                followerSignal?.addEventListener('abort', () => {
+                    reject(new Error('SCRAPING_QUEUED_START_CANCELLED'));
+                }, { once: true });
+            })
+        ));
+        const getFollowingMock = vi.fn(() => new Promise<InstagramFollower[]>((_, reject) => {
+            rejectFollowing = reject;
+        }));
+        const freezeRelationships = vi.fn();
+        const checkpointRelationshipSide = vi.fn();
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providerStore().value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships,
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        const execution = executor(stageContext('relationships', state()));
+        const rejection = expect(execution).rejects.toBe(realFailure);
+        await vi.waitFor(() => {
+            expect(getFollowersMock).toHaveBeenCalledOnce();
+            expect(getFollowingMock).toHaveBeenCalledOnce();
+        });
+
+        rejectFollowing(realFailure);
+        await Promise.resolve();
+        if (!followerSignal) {
+            rejectFollowers(new Error('SCRAPING_QUEUED_START_CANCELLED'));
+        }
+
+        await rejection;
+        expect(followerSignal?.aborted).toBe(true);
+        expect(checkpointRelationshipSide).not.toHaveBeenCalled();
+        expect(freezeRelationships).not.toHaveBeenCalled();
+    });
+
+    it('checkpoints a successful relationship side but never freezes after its sibling fails', async () => {
+        const followerFailure = new Error('followers failed');
+        let resolveFollowing: (rows: InstagramFollower[]) => void = () => undefined;
+        const getFollowersMock = vi.fn(async (): Promise<InstagramFollower[]> => {
+            throw followerFailure;
+        });
+        const getFollowingMock = vi.fn(() => new Promise<InstagramFollower[]>((resolve) => {
+            resolveFollowing = resolve;
+        }));
+        const checkpointRelationshipSide = vi.fn(async (value: unknown) => value);
+        const freezeRelationships = vi.fn();
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providerStore().value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships,
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        const execution = executor(stageContext('relationships', state()));
+        let outcome: 'pending' | 'fulfilled' | 'rejected' = 'pending';
+        let rejection: unknown;
+        const observed = execution.then(
+            () => { outcome = 'fulfilled'; },
+            (reason: unknown) => {
+                outcome = 'rejected';
+                rejection = reason;
+            }
+        );
+
+        await vi.waitFor(() => {
+            expect(getFollowersMock).toHaveBeenCalledOnce();
+            expect(getFollowingMock).toHaveBeenCalledOnce();
+        });
+        await Promise.resolve();
+
+        expect(outcome).toBe('pending');
+        expect(checkpointRelationshipSide).not.toHaveBeenCalled();
+
+        resolveFollowing([
+            { username: 'alice', isPrivate: false, isVerified: false },
+        ]);
+        await observed;
+
+        expect(outcome).toBe('rejected');
+        expect(rejection).toBe(followerFailure);
+        expect(checkpointRelationshipSide).toHaveBeenCalledOnce();
+        expect(checkpointRelationshipSide).toHaveBeenCalledWith(expect.objectContaining({
+            side: 'following',
+            rows: [expect.objectContaining({ username: 'alice' })],
+        }));
+        expect(freezeRelationships).not.toHaveBeenCalled();
+    });
+
     it('freezes exact zero relationship sides without reserving or starting Actors', async () => {
         const providers = providerStore();
         const getFollowersMock = vi.fn();
@@ -673,6 +830,168 @@ describe('analysis V2 concrete collection executors', () => {
         ]));
         expect(byOperation.get('target-likers')).toBe('quaternary');
         expect(byOperation.get('target-comments')).toBe('tertiary');
+    });
+
+    it('waits for both target interaction branches and rethrows the first failure by input order', async () => {
+        const likerFailure = new Error('likers failed after comments');
+        const commentFailure = new Error('comments failed first');
+        let rejectLikers: (reason?: unknown) => void = () => undefined;
+        const getPostLikers = vi.fn(() => new Promise<ApifyPostLiker[]>((_, reject) => {
+            rejectLikers = reject;
+        }));
+        const getPostComments = vi.fn(async (): Promise<ApifyPostComment[]> => {
+            throw commentFailure;
+        });
+        const target = profile('target', [post(0)]);
+        const profileStore = inMemoryProfileStore({
+            ...completedResume(['target'], [{ ...success('target'), profile: target }]),
+            jobKey: 'track:target-evidence:collect',
+        });
+        const checkpointTargetEvidence = vi.fn();
+        const executor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providerStore().value,
+            interactionAdapter: { getPostLikers, getPostComments },
+            evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
+            getProfilesBatchV2: vi.fn(),
+        });
+
+        const execution = executor(stageContext('target_evidence', state()));
+        let outcome: 'pending' | 'fulfilled' | 'rejected' = 'pending';
+        let rejection: unknown;
+        const observed = execution.then(
+            () => { outcome = 'fulfilled'; },
+            (reason: unknown) => {
+                outcome = 'rejected';
+                rejection = reason;
+            }
+        );
+
+        await vi.waitFor(() => {
+            expect(getPostLikers).toHaveBeenCalledOnce();
+            expect(getPostComments).toHaveBeenCalledOnce();
+        });
+        await Promise.resolve();
+
+        expect(outcome).toBe('pending');
+
+        rejectLikers(likerFailure);
+        await observed;
+
+        expect(outcome).toBe('rejected');
+        expect(rejection).toBe(likerFailure);
+        expect(checkpointTargetEvidence).not.toHaveBeenCalled();
+    });
+
+    it('cancels an earlier queued target tuple without masking a later real failure', async () => {
+        const realFailure = new Error('comments provider failed');
+        let likerSignal: AbortSignal | undefined;
+        let rejectLikers: (reason?: unknown) => void = () => undefined;
+        let rejectComments: (reason?: unknown) => void = () => undefined;
+        const getPostLikers = vi.fn((_urls, _limit, context) => (
+            new Promise<ApifyPostLiker[]>((_, reject) => {
+                rejectLikers = reject;
+                likerSignal = context?.startCancellationSignal;
+                likerSignal?.addEventListener('abort', () => {
+                    reject(new Error('SCRAPING_QUEUED_START_CANCELLED'));
+                }, { once: true });
+            })
+        ));
+        const getPostComments = vi.fn(() => new Promise<ApifyPostComment[]>((_, reject) => {
+            rejectComments = reject;
+        }));
+        const target = profile('target', [post(0)]);
+        const profileStore = inMemoryProfileStore({
+            ...completedResume(['target'], [{ ...success('target'), profile: target }]),
+            jobKey: 'track:target-evidence:collect',
+        });
+        const checkpointTargetEvidence = vi.fn();
+        const executor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providerStore().value,
+            interactionAdapter: { getPostLikers, getPostComments },
+            evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
+            getProfilesBatchV2: vi.fn(),
+        });
+
+        const execution = executor(stageContext('target_evidence', state()));
+        const rejection = expect(execution).rejects.toBe(realFailure);
+        await vi.waitFor(() => {
+            expect(getPostLikers).toHaveBeenCalledOnce();
+            expect(getPostComments).toHaveBeenCalledOnce();
+        });
+
+        rejectComments(realFailure);
+        await Promise.resolve();
+        if (!likerSignal) {
+            rejectLikers(new Error('SCRAPING_QUEUED_START_CANCELLED'));
+        }
+
+        await rejection;
+        expect(likerSignal?.aborted).toBe(true);
+        expect(checkpointTargetEvidence).not.toHaveBeenCalled();
+    });
+
+    it('settles a successful target source but never checkpoints aggregate evidence after sibling failure', async () => {
+        const likerFailure = new Error('likers failed');
+        let resolveComments: (rows: ApifyPostComment[]) => void = () => undefined;
+        const getPostLikers = vi.fn(async (): Promise<ApifyPostLiker[]> => {
+            throw likerFailure;
+        });
+        const getPostComments = vi.fn(() => new Promise<ApifyPostComment[]>((resolve) => {
+            resolveComments = resolve;
+        }));
+        const target = profile('target', [post(0)]);
+        const profileStore = inMemoryProfileStore({
+            ...completedResume(['target'], [{ ...success('target'), profile: target }]),
+            jobKey: 'track:target-evidence:collect',
+        });
+        const providers = providerStore();
+        const checkpointTargetEvidence = vi.fn();
+        const executor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            interactionAdapter: { getPostLikers, getPostComments },
+            evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
+            getProfilesBatchV2: vi.fn(),
+        });
+
+        const execution = executor(stageContext('target_evidence', state()));
+        let outcome: 'pending' | 'fulfilled' | 'rejected' = 'pending';
+        let rejection: unknown;
+        const observed = execution.then(
+            () => { outcome = 'fulfilled'; },
+            (reason: unknown) => {
+                outcome = 'rejected';
+                rejection = reason;
+            }
+        );
+
+        await vi.waitFor(() => {
+            expect(getPostLikers).toHaveBeenCalledOnce();
+            expect(getPostComments).toHaveBeenCalledOnce();
+        });
+        await Promise.resolve();
+
+        expect(outcome).toBe('pending');
+        expect(checkpointTargetEvidence).not.toHaveBeenCalled();
+
+        resolveComments([{
+            postUrl: 'https://www.instagram.com/p/code_0/',
+            id: 'comment-0',
+            text: 'comment 0',
+            ownerUsername: 'commenter_0',
+            timestamp: capturedAt,
+        }]);
+        await observed;
+
+        expect(outcome).toBe('rejected');
+        expect(rejection).toBe(likerFailure);
+        expect(providers.load).toHaveBeenCalledOnce();
+        expect(checkpointTargetEvidence).not.toHaveBeenCalled();
     });
 
     it('proves zero-post target interactions as not applicable without starting paid actors', async () => {

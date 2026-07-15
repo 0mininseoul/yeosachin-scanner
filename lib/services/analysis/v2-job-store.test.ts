@@ -374,6 +374,53 @@ describe('analysis V2 job store', () => {
         });
     });
 
+    it('defers an exact live claim through the cleanup-only service RPC', async () => {
+        const job = { ...claimedJob(), attemptCount: 7 };
+        const rpc = vi.fn().mockResolvedValue({
+            data: [{
+                released: true,
+                job_status: 'pending',
+                attempt_count: 7,
+                request_status: 'processing',
+            }],
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.deferTerminalCleanup(job)).resolves.toEqual({
+            released: true,
+            status: 'pending',
+            attemptCount: 7,
+            requestStatus: 'processing',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_DATABASE_NAMES.deferTerminalCleanupRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_claim_token: job.claimToken,
+            }
+        );
+    });
+
+    it('rejects a non-pending cleanup defer result', async () => {
+        const job = claimedJob();
+        const rpc = vi.fn().mockResolvedValue({
+            data: [{
+                released: false,
+                job_status: 'processing',
+                attempt_count: 1,
+                request_status: 'processing',
+            }],
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.deferTerminalCleanup(job)).rejects.toThrow(
+            'invalid terminal cleanup defer'
+        );
+    });
+
     it('completes and fans out camelCase successor contracts atomically', async () => {
         const job = claimedJob();
         const rpc = vi.fn().mockResolvedValue({

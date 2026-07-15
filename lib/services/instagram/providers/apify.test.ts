@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
@@ -16,6 +19,10 @@ import {
     startOrResumeApifyActor,
 } from './apify-relationship';
 import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
+import {
+    createAnalysisV2ProviderRunStore,
+    type AnalysisV2ProviderRunSupabaseClient,
+} from '@/lib/services/analysis/v2-provider-run-store';
 
 function relationshipItem(username: string, overrides: Record<string, unknown> = {}) {
     return {
@@ -458,12 +465,74 @@ describe('apifyProvider', () => {
             {
                 onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
                 onRunStarted: vi.fn().mockResolvedValue(undefined),
-                onCostRunStarted: vi.fn().mockRejectedValue(new Error('database unavailable')),
+                onCostRunStarted: vi.fn().mockRejectedValue(new Error(
+                    'database unavailable with secret detail'
+                )),
                 recordUsage: vi.fn(),
             }
-        )).rejects.toThrow('ANALYSIS_PERSISTENCE_ERROR');
+        )).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_COST_START_PERSISTENCE_ERROR'
+        ));
 
         expect(abort).not.toHaveBeenCalled();
+        expect(waitForFinish).not.toHaveBeenCalled();
+    });
+
+    it('preserves a typed conflict from the cost-start callback', async () => {
+        const { client, waitForFinish } = mockClient([]);
+        const pending = startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
+                onRunStarted: vi.fn().mockResolvedValue(undefined),
+                onCostRunStarted: vi.fn().mockRejectedValue(new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_COST_IDENTITY_CONFLICT: secret detail'
+                )),
+                recordUsage: vi.fn(),
+            }
+        );
+
+        await expect(pending).rejects.toEqual(
+            new Error('ANALYSIS_V2_PROVIDER_RUN_COST_IDENTITY_CONFLICT')
+        );
+        expect(waitForFinish).not.toHaveBeenCalled();
+    });
+
+    it('maps generic provider persistence from cost-start to its phase code', async () => {
+        const { client, waitForFinish } = mockClient([]);
+        const pending = startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
+                onRunStarted: vi.fn().mockResolvedValue(undefined),
+                onCostRunStarted: vi.fn().mockRejectedValue(new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: secret detail'
+                )),
+                recordUsage: vi.fn(),
+            }
+        );
+
+        await expect(pending).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_COST_START_PERSISTENCE_ERROR'
+        ));
         expect(waitForFinish).not.toHaveBeenCalled();
     });
 
@@ -482,11 +551,69 @@ describe('apifyProvider', () => {
                 maxTotalChargeUsd: 0.1,
             },
             {
-                onBeforeRunStart: vi.fn().mockRejectedValue(new Error('database unavailable')),
+                onBeforeRunStart: vi.fn().mockRejectedValue(new Error(
+                    'database unavailable with secret detail'
+                )),
                 recordUsage: vi.fn(),
             }
-        )).rejects.toThrow('ANALYSIS_PERSISTENCE_ERROR');
+        )).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR'
+        ));
 
+        expect(call).not.toHaveBeenCalled();
+    });
+
+    it('preserves a typed cleanup error from the start-intent callback', async () => {
+        const { client, call } = mockClient([]);
+        const pending = startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onBeforeRunStart: vi.fn().mockRejectedValue(new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED: secret detail'
+                )),
+                recordUsage: vi.fn(),
+            }
+        );
+
+        await expect(pending).rejects.toEqual(
+            new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED')
+        );
+        expect(call).not.toHaveBeenCalled();
+    });
+
+    it('maps generic provider persistence from start reservation to its phase code', async () => {
+        const { client, call } = mockClient([]);
+        const pending = startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onBeforeRunStart: vi.fn().mockRejectedValue(new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: secret detail'
+                )),
+                recordUsage: vi.fn(),
+            }
+        );
+
+        await expect(pending).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR'
+        ));
         expect(call).not.toHaveBeenCalled();
     });
 
@@ -508,12 +635,45 @@ describe('apifyProvider', () => {
                 onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
                 onRunStarted: vi.fn().mockResolvedValue(undefined),
                 onCostRunStarted: vi.fn().mockResolvedValue(undefined),
-                onCostRunFinished: vi.fn().mockRejectedValue(new Error('database unavailable')),
+                onCostRunFinished: vi.fn().mockRejectedValue(new Error(
+                    'database unavailable with secret detail'
+                )),
                 recordUsage: vi.fn(),
             }
-        )).rejects.toThrow('ANALYSIS_PERSISTENCE_ERROR');
+        )).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR'
+        ));
 
         expect(abort).not.toHaveBeenCalled();
+    });
+
+    it('maps generic provider persistence from terminal cost to its phase code', async () => {
+        const { client } = mockClient([], 'SUCCEEDED', 0.02);
+        const pending = startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
+                onRunStarted: vi.fn().mockResolvedValue(undefined),
+                onCostRunStarted: vi.fn().mockResolvedValue(undefined),
+                onCostRunFinished: vi.fn().mockRejectedValue(new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: secret database detail'
+                )),
+                recordUsage: vi.fn(),
+            }
+        );
+
+        await expect(pending).rejects.toEqual(
+            new Error('ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR')
+        );
     });
 
     it('never starts again when a prior start intent has no confirmed run id', async () => {
@@ -558,11 +718,94 @@ describe('apifyProvider', () => {
                 maxTotalChargeUsd: 0.1,
             },
             {
-                onRunStarted: vi.fn().mockRejectedValue(new Error('database unavailable')),
+                onRunStarted: vi.fn().mockRejectedValue(new Error(
+                    'database unavailable with secret detail'
+                )),
                 recordUsage: vi.fn(),
             }
-        )).rejects.toThrow('SCRAPING_RUN_CHECKPOINT_ERROR');
+        )).rejects.toEqual(new Error(
+            'SCRAPING_RUN_CHECKPOINT_ERROR: Apify run id could not be persisted.'
+        ));
 
+        expect(abort).toHaveBeenCalledOnce();
+    });
+
+    it('maps the real generic run checkpoint persistence error to the permanent checkpoint code', async () => {
+        const { client, abort } = mockClient([]);
+        const rpc = vi.fn().mockResolvedValue({
+            data: null,
+            error: {
+                code: 'PGRST000',
+                message: 'secret database detail',
+            },
+        });
+        const providerRunStore = createAnalysisV2ProviderRunStore({
+            rpc,
+        } as AnalysisV2ProviderRunSupabaseClient);
+
+        const pending = startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onRunStarted: async runId => {
+                    await providerRunStore.checkpointStarted({
+                        requestId: '11111111-1111-4111-8111-111111111111',
+                        jobKey: 'track:relationships:collect',
+                        claimToken: '22222222-2222-4222-8222-222222222222',
+                        operationKey: `relationship-followers:${'a'.repeat(64)}`,
+                        inputHash: 'b'.repeat(64),
+                        reservationToken: '33333333-3333-4333-8333-333333333333',
+                        runId,
+                    });
+                },
+                recordUsage: vi.fn(),
+            }
+        );
+
+        const error = await pending.catch(cause => cause as Error);
+        expect(error).toEqual(new Error(
+            'SCRAPING_RUN_CHECKPOINT_ERROR: Apify run id could not be persisted.'
+        ));
+        expect((error as Error).message).not.toContain('secret database detail');
+        expect(abort).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH',
+        'ANALYSIS_V2_PROVIDER_RUN_IDENTITY_CONFLICT',
+        'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+    ])('preserves typed %s from the run-id checkpoint after aborting the new run', async code => {
+        const { client, abort } = mockClient([]);
+        const pending = startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onRunStarted: vi.fn().mockRejectedValue(new Error(
+                    `${code}: secret detail`
+                )),
+                recordUsage: vi.fn(),
+            }
+        );
+
+        await expect(pending).rejects.toEqual(
+            new Error(code)
+        );
         expect(abort).toHaveBeenCalledOnce();
     });
 
@@ -651,10 +894,28 @@ describe('apifyProvider', () => {
         const provider = makeApifyProvider({ client, env: {} });
 
         await expect(provider.getFollowers!('target', 1, {
-            onBeforeRunStart: vi.fn().mockRejectedValue(new Error('database unavailable')),
+            onBeforeRunStart: vi.fn().mockRejectedValue(new Error(
+                'database unavailable with secret detail'
+            )),
             recordUsage: vi.fn(),
-        })).rejects.toThrow('ANALYSIS_PERSISTENCE_ERROR');
+        })).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR'
+        ));
         expect(call).not.toHaveBeenCalled();
+    });
+
+    it('preserves terminal persistence phase through the profile provider wrapper', async () => {
+        const { client } = mockClient([profileItem('alice')]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getProfilesBatch!(['alice'], 1, {
+            onCostRunFinished: vi.fn().mockRejectedValue(new Error(
+                'database unavailable with secret detail'
+            )),
+            recordUsage: vi.fn(),
+        })).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR'
+        ));
     });
 
     it('accepts only exact relationship build pins and forwards an override', async () => {
@@ -1055,6 +1316,84 @@ describe('apifyProvider', () => {
         expect(start).toHaveBeenCalledTimes(2);
     });
 
+    it('cancels a queued unreserved relationship run before usage, reservation, or Actor start', async () => {
+        let releaseFirst!: () => void;
+        const start = vi.fn().mockResolvedValue({ id: 'FirstRun12345678' });
+        const waitForFinish = vi.fn()
+            .mockImplementationOnce(() => new Promise((resolve) => {
+                releaseFirst = () => resolve({ status: 'SUCCEEDED', defaultDatasetId: 'dataset' });
+            }))
+            .mockResolvedValueOnce({ status: 'SUCCEEDED', defaultDatasetId: 'dataset' });
+        const listItems = vi.fn().mockResolvedValue({
+            items: [relationshipItem('alice')],
+            total: 1,
+            offset: 0,
+            count: 1,
+            limit: 1,
+        });
+        const client = {
+            actor: vi.fn(() => ({ start })),
+            run: vi.fn(() => ({ waitForFinish, abort: vi.fn() })),
+            dataset: vi.fn(() => ({ listItems })),
+        } as unknown as ApifyClientLike;
+        const provider = makeApifyProvider({
+            client,
+            env: {
+                APIFY_ACTOR_CONCURRENCY: '1',
+                APIFY_DATASET_RETRY_BASE_DELAY_MS: '0',
+            },
+        });
+        const controller = new AbortController();
+        const recordQueuedUsage = vi.fn();
+        const onBeforeQueuedStart = vi.fn();
+        const onQueuedCostStart = vi.fn();
+        const onQueuedCostFinished = vi.fn();
+
+        const active = provider.getFollowers!('target', 1);
+        await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+        const queued = provider.getFollowing!('target', 1, {
+            startCancellationSignal: controller.signal,
+            onBeforeRunStart: onBeforeQueuedStart,
+            onCostRunStarted: onQueuedCostStart,
+            onCostRunFinished: onQueuedCostFinished,
+            recordUsage: recordQueuedUsage,
+        });
+        const queuedRejection = expect(queued).rejects.toThrow(
+            'SCRAPING_QUEUED_START_CANCELLED'
+        );
+
+        controller.abort();
+        releaseFirst();
+
+        await expect(active).resolves.toHaveLength(1);
+        await queuedRejection;
+        expect(start).toHaveBeenCalledOnce();
+        expect(recordQueuedUsage).not.toHaveBeenCalled();
+        expect(onBeforeQueuedStart).not.toHaveBeenCalled();
+        expect(onQueuedCostStart).not.toHaveBeenCalled();
+        expect(onQueuedCostFinished).not.toHaveBeenCalled();
+    });
+
+    it('resumes a checkpointed relationship run despite queued-start cancellation', async () => {
+        const { client, call } = mockClient([relationshipItem('alice')]);
+        const provider = makeApifyProvider({ client, env: {} });
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(provider.getFollowers!('target', 1, {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.1,
+            startCancellationSignal: controller.signal,
+            recordUsage: vi.fn(),
+        })).resolves.toHaveLength(1);
+
+        expect(call).not.toHaveBeenCalled();
+        expect(client.run).toHaveBeenCalledWith('StoredRun12345678');
+    });
+
     it('rereads a page after a transient pagination-metadata mismatch without double cost', async () => {
         const { client } = mockClient([relationshipItem('alice')]);
         const listItems = vi.fn()
@@ -1294,6 +1633,26 @@ describe('apifyProvider', () => {
             credentialSlot: 'quinary',
             maxChargeUsd: 0.0026,
         }));
+    });
+
+    it('preserves queued-start cancellation before a new profile Actor reservation', async () => {
+        const { client, call, waitForFinish } = mockClient([profileItem('target')]);
+        const provider = makeApifyProvider({ client, env: {} });
+        const controller = new AbortController();
+        const recordUsage = vi.fn();
+        const onBeforeRunStart = vi.fn();
+        controller.abort();
+
+        await expect(provider.getProfile!('target', {
+            startCancellationSignal: controller.signal,
+            onBeforeRunStart,
+            recordUsage,
+        })).rejects.toThrow('SCRAPING_QUEUED_START_CANCELLED');
+
+        expect(recordUsage).not.toHaveBeenCalled();
+        expect(onBeforeRunStart).not.toHaveBeenCalled();
+        expect(call).not.toHaveBeenCalled();
+        expect(waitForFinish).not.toHaveBeenCalled();
     });
 
     it('keeps a running summary retryable and resumes without another Actor start', async () => {

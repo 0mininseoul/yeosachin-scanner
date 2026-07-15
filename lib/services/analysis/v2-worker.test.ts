@@ -127,6 +127,12 @@ function store(
         deferRecovery: vi.fn(),
         markDispatched: vi.fn(),
         claim: vi.fn(async () => claimed),
+        deferTerminalCleanup: vi.fn(async () => ({
+            released: true,
+            status: 'pending' as const,
+            attemptCount: claimed.attemptCount,
+            requestStatus: 'processing',
+        })),
         releaseClaim: vi.fn(async (_claim, failure) => ({
             released: true,
             status: failure?.retryable === false ? 'failed' as const : 'pending' as const,
@@ -243,6 +249,188 @@ describe('analysis V2 durable DAG worker', () => {
             expect.anything(),
             'JOB_ATTEMPTS_EXHAUSTED'
         );
+    });
+
+    it('defers a new permanent failure while provider cleanup is still pending', async () => {
+        const jobStore = store(bootstrapClaim);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+        const terminalFailureFinalizer = vi.fn(async () => {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED');
+        });
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error('SCRAPING_PROVIDER_QUOTA_ERROR');
+            },
+            terminalFailureFinalizer,
+            terminalMediaCleanup,
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+        });
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
+            bootstrapClaim,
+            'SCRAPING_PROVIDER_QUOTA_ERROR'
+        );
+        expect(jobStore.deferTerminalCleanup).toHaveBeenCalledWith(bootstrapClaim);
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalMediaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('defers a sibling whose concurrent terminal failure loses the cleanup-intent race', async () => {
+        const jobStore = store(bootstrapClaim);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error('SCRAPING_PROVIDER_QUOTA_ERROR');
+            },
+            terminalFailureFinalizer: async () => {
+                throw new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_INTENT_CONFLICT');
+            },
+            terminalMediaCleanup,
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+        });
+        expect(jobStore.deferTerminalCleanup).toHaveBeenCalledWith(bootstrapClaim);
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalMediaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('defers a persisted terminal failure while provider cleanup is still pending', async () => {
+        const jobStore = store(bootstrapClaim);
+        const handler = vi.fn();
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+        const terminalFailureFinalizer = vi.fn(async () => {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED');
+        });
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler,
+            terminalFailureIntentLoader: async () => 'ORIGINAL_PROVIDER_FAILURE',
+            terminalFailureFinalizer,
+            terminalMediaCleanup,
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+        });
+        expect(handler).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
+            bootstrapClaim,
+            'ORIGINAL_PROVIDER_FAILURE'
+        );
+        expect(jobStore.deferTerminalCleanup).toHaveBeenCalledWith(bootstrapClaim);
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalMediaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('defers the claim when loading a sibling terminal intent requires provider cleanup', async () => {
+        const jobStore = store(bootstrapClaim);
+        const handler = vi.fn();
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler,
+            terminalFailureIntentLoader: async () => {
+                throw new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED');
+            },
+            terminalFailureFinalizer,
+            terminalMediaCleanup,
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+        });
+        expect(jobStore.deferTerminalCleanup).toHaveBeenCalledWith(bootstrapClaim);
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(handler).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+        expect(terminalMediaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when loading a terminal failure intent throws an unrelated error', async () => {
+        const jobStore = store(bootstrapClaim);
+        const handler = vi.fn();
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler,
+            terminalFailureIntentLoader: async () => {
+                throw new Error('unexpected intent load failure');
+            },
+        })).rejects.toThrow('unexpected intent load failure');
+        expect(jobStore.deferTerminalCleanup).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when terminal failure finalization throws an unrelated error', async () => {
+        const jobStore = store(bootstrapClaim);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error('SCRAPING_PROVIDER_QUOTA_ERROR');
+            },
+            terminalFailureFinalizer: async () => {
+                throw new Error('unexpected finalizer failure');
+            },
+            terminalMediaCleanup,
+        })).rejects.toThrow('unexpected finalizer failure');
+        expect(jobStore.deferTerminalCleanup).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalMediaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('defers cleanup without consuming another handler attempt on the final attempt', async () => {
+        const finalAttemptClaim = {
+            ...bootstrapClaim,
+            attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        };
+        const jobStore = store(finalAttemptClaim);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error('SCRAPING_PROVIDER_QUOTA_ERROR');
+            },
+            terminalFailureFinalizer: async () => {
+                throw new Error('ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED');
+            },
+            terminalMediaCleanup,
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
+        });
+        expect(jobStore.deferTerminalCleanup).toHaveBeenCalledWith(finalAttemptClaim);
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalMediaCleanup).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED: detail',
+        'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_NOT_READY',
+    ])('fails closed on a near-match provider cleanup error: %s', async errorMessage => {
+        const jobStore = store(bootstrapClaim);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error('SCRAPING_PROVIDER_QUOTA_ERROR');
+            },
+            terminalFailureFinalizer: async () => {
+                throw new Error(errorMessage);
+            },
+        })).rejects.toThrow(errorMessage);
+        expect(jobStore.deferTerminalCleanup).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
     });
 
     it('initializes bootstrap under its live claim and fans out canonical root jobs', async () => {

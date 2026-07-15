@@ -22,6 +22,9 @@ import {
     APIFY_PROVIDER_QUOTA_ERROR_CODE,
     getApifyClient,
     integerSetting,
+    isApifyProviderLifecycleError,
+    isApifyQueuedStartCancellation,
+    throwIfApifyQueuedStartCancelled,
     numberSetting,
     runApifyRelationshipActor,
     runWithApifyActorSlot,
@@ -664,27 +667,30 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         }
         const apify = client(context?.credentialSlot);
         const durableRun = hasDurableProfileRunCheckpoint(context);
-        context?.recordUsage({ request_count: 1 });
         let run;
         try {
             run = await runWithApifyActorSlot(
                 settings.actorConcurrency,
-                () => startOrResumeApifyActor(
-                    apify,
-                    APIFY_PROFILE_ACTOR_ID,
-                    { usernames: [username] },
-                    {
-                        logicalProvider: 'apify',
-                        credentialSlot: settings.credentialSlot,
-                        timeoutSecs: settings.timeoutSecs,
-                        maxItems: 1,
-                        maxTotalChargeUsd: maximumChargeUsd,
-                        ...(effectiveInvocationWaitLimitSecs === undefined
-                            ? {}
-                            : { invocationWaitLimitSecs: effectiveInvocationWaitLimitSecs }),
-                    },
-                    context
-                )
+                () => {
+                    throwIfApifyQueuedStartCancelled(context);
+                    context?.recordUsage({ request_count: 1 });
+                    return startOrResumeApifyActor(
+                        apify,
+                        APIFY_PROFILE_ACTOR_ID,
+                        { usernames: [username] },
+                        {
+                            logicalProvider: 'apify',
+                            credentialSlot: settings.credentialSlot,
+                            timeoutSecs: settings.timeoutSecs,
+                            maxItems: 1,
+                            maxTotalChargeUsd: maximumChargeUsd,
+                            ...(effectiveInvocationWaitLimitSecs === undefined
+                                ? {}
+                                : { invocationWaitLimitSecs: effectiveInvocationWaitLimitSecs }),
+                        },
+                        context
+                    );
+                }
             );
         } catch (error) {
             if (
@@ -695,6 +701,8 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                     || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                    || isApifyProviderLifecycleError(error)
+                    || isApifyQueuedStartCancellation(error)
                     || error.message.startsWith('SCRAPING_CONFIG_ERROR:')
                     || error.message.startsWith('SCRAPING_BUDGET_ERROR:')
                     || error.message.startsWith('SCRAPING_SCHEMA_ERROR:')
@@ -826,12 +834,13 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             const batch = usernames.slice(i, i + batchSize);
             const maximumChargeUsd = context?.maxChargeUsd
                 ?? profileMaximumChargeUsd(batch.length, settings);
-            context?.recordUsage({ request_count: 1 });
             let run;
             try {
                 run = await runWithApifyActorSlot(
                     settings.actorConcurrency,
                     async () => {
+                        throwIfApifyQueuedStartCancelled(context);
+                        context?.recordUsage({ request_count: 1 });
                         // Apify executes the whole batch remotely, so expose one real
                         // representative only after the Actor slot is actually acquired.
                         if (batch[0]) await reportProfileStart(context, batch[0]);
@@ -862,7 +871,10 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                     'SCRAPING_CONFIG_ERROR:',
                     'SCRAPING_BUDGET_ERROR:',
                     'SCRAPING_SCHEMA_ERROR:'
-                )) {
+                )
+                    || isApifyProviderLifecycleError(error)
+                    || isApifyQueuedStartCancellation(error)
+                ) {
                     throw error;
                 }
                 if (

@@ -101,6 +101,8 @@ export interface ProviderRunCheckpoint extends ProviderCostRunCallbacks {
     invocationWaitLimitSecs?: number;
     /** Absolute runtime deadline for provider I/O; it is not a durable billing identity. */
     invocationDeadlineAtMs?: number;
+    /** Internal request fence checked only before a new paid provider run is reserved. */
+    startCancellationSignal?: AbortSignal;
     onBeforeRunStart?(input: {
         logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
         actorId: string;
@@ -141,6 +143,8 @@ export interface ProviderCallContext extends ProviderCostRunCallbacks {
     startReserved?: boolean;
     invocationWaitLimitSecs?: number;
     invocationDeadlineAtMs?: number;
+    /** Internal request fence checked only before a new paid provider run is reserved. */
+    startCancellationSignal?: AbortSignal;
     onBeforeRunStart?(input: {
         logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
         actorId: string;

@@ -148,6 +148,13 @@ export type AnalysisV2WorkerOutcome =
         pendingRecoveryCount: number;
     }>;
 
+const PROVIDER_RUN_CLEANUP_REQUIRED_CODE =
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED';
+const PROVIDER_RUN_CLEANUP_DEFER_CODES = new Set([
+    PROVIDER_RUN_CLEANUP_REQUIRED_CODE,
+    'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_INTENT_CONFLICT',
+]);
+
 export type AnalysisV2JobFailureDisposition = 'permanent' | 'transient' | 'fence';
 
 export class AnalysisV2JobExecutionError extends Error {
@@ -703,6 +710,41 @@ function failureDispositionForCode(
     return 'permanent';
 }
 
+async function finalizeTerminalFailureOrDeferProviderCleanup(
+    claim: ClaimedAnalysisV2Job,
+    errorCode: string,
+    store: AnalysisV2JobStore,
+    finalizer: AnalysisV2TerminalFailureFinalizer
+): Promise<Extract<AnalysisV2WorkerOutcome, { status: 'retry' }> | null> {
+    try {
+        await finalizer(claim, errorCode);
+        return null;
+    } catch (error) {
+        return deferClaimForProviderCleanupRetry(claim, store, error);
+    }
+}
+
+async function deferClaimForProviderCleanupRetry(
+    claim: ClaimedAnalysisV2Job,
+    store: AnalysisV2JobStore,
+    error: unknown
+): Promise<Extract<AnalysisV2WorkerOutcome, { status: 'retry' }>> {
+    if (
+        !(error instanceof Error)
+        || !PROVIDER_RUN_CLEANUP_DEFER_CODES.has(error.message)
+    ) {
+        throw error;
+    }
+    const deferred = await store.deferTerminalCleanup(claim);
+    if (!deferred.released || deferred.status !== 'pending') {
+        throw new Error('ANALYSIS_V2_TERMINAL_FAILURE_CLEANUP_REQUIRED');
+    }
+    return Object.freeze({
+        status: 'retry',
+        errorCode: PROVIDER_RUN_CLEANUP_REQUIRED_CODE,
+    });
+}
+
 /** Maps executor failures to one sanitized code and an explicit retry/fence disposition. */
 export function classifyAnalysisV2JobFailure(error: unknown): AnalysisV2JobExecutionError {
     if (error instanceof AnalysisV2JobExecutionError) return error;
@@ -778,14 +820,22 @@ export async function processAnalysisV2TaskDelivery(
     const claim = await store.claim(delivery);
     if (!claim) return Object.freeze({ status: 'already_terminal' });
 
-    const pendingTerminalFailure = await (
-        dependencies.terminalFailureIntentLoader ?? loadTerminalFailureIntent
-    )(claim);
+    let pendingTerminalFailure: string | null;
+    try {
+        pendingTerminalFailure = await (
+            dependencies.terminalFailureIntentLoader ?? loadTerminalFailureIntent
+        )(claim);
+    } catch (error) {
+        return deferClaimForProviderCleanupRetry(claim, store, error);
+    }
     if (pendingTerminalFailure) {
-        await (dependencies.terminalFailureFinalizer ?? finalizeTerminalFailure)(
+        const cleanupRetry = await finalizeTerminalFailureOrDeferProviderCleanup(
             claim,
-            pendingTerminalFailure
+            pendingTerminalFailure,
+            store,
+            dependencies.terminalFailureFinalizer ?? finalizeTerminalFailure
         );
+        if (cleanupRetry) return cleanupRetry;
         try {
             await (dependencies.terminalMediaCleanup ?? cleanupTerminalMedia)();
         } catch {
@@ -808,10 +858,13 @@ export async function processAnalysisV2TaskDelivery(
         const exhausted = failure.retryable
             && claim.attemptCount >= ANALYSIS_V2_JOB_MAX_ATTEMPTS;
         if (!failure.retryable || exhausted) {
-            await (dependencies.terminalFailureFinalizer ?? finalizeTerminalFailure)(
+            const cleanupRetry = await finalizeTerminalFailureOrDeferProviderCleanup(
                 claim,
-                exhausted ? 'JOB_ATTEMPTS_EXHAUSTED' : failure.code
+                exhausted ? 'JOB_ATTEMPTS_EXHAUSTED' : failure.code,
+                store,
+                dependencies.terminalFailureFinalizer ?? finalizeTerminalFailure
             );
+            if (cleanupRetry) return cleanupRetry;
             try {
                 await (dependencies.terminalMediaCleanup ?? cleanupTerminalMedia)();
             } catch {

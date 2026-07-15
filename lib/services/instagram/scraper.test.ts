@@ -49,6 +49,23 @@ describe('라우팅', () => {
         expect(flash).not.toHaveBeenCalled();
     });
 
+    it('forwards the internal paid-start cancellation fence to the provider context', async () => {
+        const apify = vi.fn().mockResolvedValue([]);
+        const controller = new AbortController();
+        __setProvidersForTest(
+            { SCRAPER_FOLLOWERS: 'apify', SCRAPER_FALLBACK: 'false' },
+            { apify: providerWith({ name: 'apify', getFollowers: apify }) }
+        );
+
+        await getFollowers('x', 1, {
+            providerRun: { startCancellationSignal: controller.signal },
+        });
+
+        expect(apify).toHaveBeenCalledWith('x', 1, expect.objectContaining({
+            startCancellationSignal: controller.signal,
+        }));
+    });
+
     it('stored Apify run ID가 있으면 원래 primary 대신 같은 run을 재개한다', async () => {
         const selfhosted = vi.fn().mockResolvedValue({ username: 'selfhosted-result' });
         const apify = vi.fn().mockResolvedValue({ username: 'apify-result' });
