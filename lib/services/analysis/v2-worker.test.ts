@@ -845,6 +845,13 @@ describe('analysis V2 durable DAG worker', () => {
         expect(classifyAnalysisV2JobFailure(
             new Error('SCRAPING_ERROR: Apify actor failed (status=TIMED-OUT).')
         )).toMatchObject({ disposition: 'permanent', retryable: false });
+        expect(classifyAnalysisV2JobFailure(
+            new Error('SCRAPING_PROVIDER_QUOTA_ERROR')
+        )).toMatchObject({
+            code: 'SCRAPING_PROVIDER_QUOTA_ERROR',
+            disposition: 'permanent',
+            retryable: false,
+        });
     });
 
     it('atomically terminalizes a retryable failure on the final attempt', async () => {

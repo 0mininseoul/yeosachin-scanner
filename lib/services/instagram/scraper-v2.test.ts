@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fixture from './providers/selfhosted/__fixtures__/web-profile-info.json';
 import { makeSelfHostedProvider } from './providers/selfhosted';
+import { APIFY_PROVIDER_QUOTA_ERROR_CODE } from './providers/apify-relationship';
 import type {
     ProfileAttemptResult,
     ProviderCallContext,
@@ -202,6 +203,32 @@ describe('getProfilesBatchV2', () => {
             providerRun: durablePaidStart(),
             persistAttemptOutcomes: async snapshot => { snapshots.push(snapshot); },
         })).rejects.toThrow('SCRAPING_RUN_CHECKPOINT_ERROR');
+
+        expect(snapshots).toHaveLength(1);
+        expect(snapshots[0].attempt).toBe('primary');
+    });
+
+    it('preserves provider quota exhaustion instead of sealing synthetic fallback outcomes', async () => {
+        const snapshots: ProfilesBatchV2AttemptSnapshot[] = [];
+        __setProvidersForTest({}, {
+            selfhosted: provider({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatchOutcomes: vi.fn().mockRejectedValue(new Error('primary failed')),
+            }),
+            apify: provider({
+                name: 'apify',
+                paid: true,
+                getProfilesBatch: vi.fn().mockRejectedValue(
+                    new Error(APIFY_PROVIDER_QUOTA_ERROR_CODE)
+                ),
+            }),
+        });
+
+        await expect(getProfilesBatchV2(['alice'], {
+            providerRun: durablePaidStart(),
+            persistAttemptOutcomes: async snapshot => { snapshots.push(snapshot); },
+        })).rejects.toThrow(APIFY_PROVIDER_QUOTA_ERROR_CODE);
 
         expect(snapshots).toHaveLength(1);
         expect(snapshots[0].attempt).toBe('primary');

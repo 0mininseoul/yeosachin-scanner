@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { INSTAGRAM_USERNAME_PATTERN } from '../username';
 import {
+    APIFY_PROVIDER_QUOTA_ERROR_CODE,
     getApifyClient,
     integerSetting,
     numberSetting,
@@ -450,6 +451,7 @@ async function runActor(
                     error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
+                    || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
                     || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
                 )
             ) {
