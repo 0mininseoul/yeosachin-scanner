@@ -142,6 +142,7 @@ function storedProviderRun(
 ): StoredPreflightProviderRun {
     return {
         preflightId: PREFLIGHT_ID,
+        operationKey: 'target-profile-fresh-admission:g4',
         inputHash: 'f'.repeat(64),
         logicalProvider: 'apify',
         actorId: 'apify/instagram-profile-scraper',

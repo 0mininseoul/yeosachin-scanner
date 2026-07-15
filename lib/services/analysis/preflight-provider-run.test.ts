@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: vi.fn() } }));
 
 import {
+    FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES,
     PREFLIGHT_PROVIDER_RECONCILIATION_BATCH_LIMIT,
     PREFLIGHT_PROVIDER_RECONCILIATION_CALL_TIMEOUT_MS,
     PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES,
     bindPreflightProviderRunCheckpoint,
+    createFreshAdmissionProviderRunStore,
     createPreflightProviderRunStore,
     preflightProviderIdentity,
     reconcileSettledPreflightProviderCosts,
@@ -47,6 +49,36 @@ function row(
 }
 
 describe('preflight provider-run adapter', () => {
+    it('binds fresh admission to its generation-scoped RPC and operation', async () => {
+        const rpc = vi.fn(async () => ({
+            data: row('running', {
+                operationKey: 'target-profile-fresh-admission:g4',
+            }),
+            error: null,
+        }));
+        const store = createFreshAdmissionProviderRunStore({ rpc }, 4);
+
+        await expect(store.load({ preflightId, claimToken, inputHash })).resolves.toMatchObject({
+            operationKey: 'target-profile-fresh-admission:g4',
+            runId,
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            {
+                p_preflight_id: preflightId,
+                p_claim_token: claimToken,
+                p_input_hash: inputHash,
+                p_admission_generation: 4,
+            }
+        );
+
+        const wrongOperation = createFreshAdmissionProviderRunStore({
+            rpc: vi.fn(async () => ({ data: row(), error: null })),
+        }, 4);
+        await expect(wrongOperation.load({ preflightId, claimToken, inputHash }))
+            .rejects.toThrow('IDENTITY_CONFLICT');
+    });
+
     it('loads a fenced hashed identity without sending raw provider input', async () => {
         const rpc = vi.fn(async () => ({ data: row(), error: null }));
         const store = createPreflightProviderRunStore({ rpc });

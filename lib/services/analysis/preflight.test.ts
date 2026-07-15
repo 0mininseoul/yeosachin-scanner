@@ -110,6 +110,7 @@ function storedRun(
 ): StoredPreflightProviderRun {
     return {
         preflightId,
+        operationKey: 'target-profile-fallback',
         inputHash: preflightInputHash,
         logicalProvider: 'apify' as const,
         actorId: APIFY_PROFILE_ACTOR_ID,

@@ -65,6 +65,7 @@ BEGIN
     INTO v_existing
     FROM public.analysis_preflight_provider_runs AS provider_run
     WHERE provider_run.preflight_id = p_preflight_id
+      AND provider_run.operation_key = 'target-profile-fallback'
     FOR UPDATE;
     IF FOUND THEN
         IF v_existing.operation_key IS DISTINCT FROM 'target-profile-fallback'
@@ -170,7 +171,8 @@ BEGIN
     SELECT provider_run.*
     INTO v_run
     FROM public.analysis_preflight_provider_runs AS provider_run
-    WHERE provider_run.preflight_id = p_preflight_id;
+    WHERE provider_run.preflight_id = p_preflight_id
+      AND provider_run.operation_key = 'target-profile-fallback';
     IF NOT FOUND THEN
         RETURN NULL;
     END IF;
@@ -255,6 +257,7 @@ BEGIN
     INTO v_run
     FROM public.analysis_preflight_provider_runs AS provider_run
     WHERE provider_run.preflight_id = p_preflight_id
+      AND provider_run.operation_key = 'target-profile-fallback'
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING
@@ -284,6 +287,7 @@ BEGIN
         run_started_at = v_now,
         updated_at = v_now
     WHERE provider_run.preflight_id = p_preflight_id
+      AND provider_run.operation_key = 'target-profile-fallback'
     RETURNING provider_run.* INTO v_run;
 
     RETURN public.analysis_preflight_provider_run_json(v_run);
@@ -376,6 +380,7 @@ BEGIN
     INTO v_run
     FROM public.analysis_preflight_provider_runs AS provider_run
     WHERE provider_run.preflight_id = p_preflight_id
+      AND provider_run.operation_key = 'target-profile-fallback'
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING
@@ -413,6 +418,7 @@ BEGIN
                 usage_reconciled_at = v_now,
                 updated_at = v_now
             WHERE provider_run.preflight_id = p_preflight_id
+              AND provider_run.operation_key = 'target-profile-fallback'
             RETURNING provider_run.* INTO v_run;
         END IF;
         IF v_run.actual_usage_usd IS NOT NULL THEN
@@ -446,6 +452,7 @@ BEGIN
         END,
         updated_at = v_now
     WHERE provider_run.preflight_id = p_preflight_id
+      AND provider_run.operation_key = 'target-profile-fallback'
     RETURNING provider_run.* INTO v_run;
 
     IF v_run.actual_usage_usd IS NOT NULL THEN

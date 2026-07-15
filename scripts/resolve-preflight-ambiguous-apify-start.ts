@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import {
+    isAmbiguousStartOperationKey,
     parseAmbiguousStartOptions,
+    type AmbiguousStartOperationKey,
 } from './preflight-ambiguous-start-resolution-options';
 
 const MAX_EVIDENCE_REFERENCE_BYTES = 4_096;
@@ -13,7 +15,7 @@ interface RpcError {
 
 interface PiiFreeCandidate {
     preflightId: string;
-    operationKey: string;
+    operationKey: AmbiguousStartOperationKey;
     inputHash: string;
     logicalProvider: string;
     actorId: string;
@@ -40,12 +42,16 @@ function stringField(row: Record<string, unknown>, name: string): string {
 function projectCandidate(value: unknown): PiiFreeCandidate {
     const row = record(value);
     const maxChargeUsd = Number(row.maxChargeUsd);
+    const operationKey = stringField(row, 'operationKey');
     if (!Number.isFinite(maxChargeUsd) || maxChargeUsd !== 0.0026) {
         throw new Error('RPC returned an invalid maxChargeUsd');
     }
+    if (!isAmbiguousStartOperationKey(operationKey)) {
+        throw new Error('RPC returned an invalid operationKey');
+    }
     return {
         preflightId: stringField(row, 'preflightId'),
-        operationKey: stringField(row, 'operationKey'),
+        operationKey,
         inputHash: stringField(row, 'inputHash'),
         logicalProvider: stringField(row, 'logicalProvider'),
         actorId: stringField(row, 'actorId'),

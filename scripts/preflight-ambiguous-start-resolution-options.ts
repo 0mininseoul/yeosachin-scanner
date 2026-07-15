@@ -4,6 +4,7 @@ export const AMBIGUOUS_START_CONFIRMATION =
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+const OPERATION_KEY_PATTERN = /^(?:target-profile-fallback|target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100))$/;
 const CREDENTIAL_SLOTS = new Set([
     'primary',
     'secondary',
@@ -17,10 +18,20 @@ export interface AmbiguousStartListOptions {
     limit: number;
 }
 
+export type AmbiguousStartOperationKey =
+    | 'target-profile-fallback'
+    | `target-profile-fresh-admission:g${number}`;
+
+export function isAmbiguousStartOperationKey(
+    value: string
+): value is AmbiguousStartOperationKey {
+    return OPERATION_KEY_PATTERN.test(value);
+}
+
 export interface AmbiguousStartResolveOptions {
     mode: 'resolve';
     preflightId: string;
-    operationKey: 'target-profile-fallback';
+    operationKey: AmbiguousStartOperationKey;
     inputHash: string;
     logicalProvider: 'apify';
     actorId: 'apify/instagram-profile-scraper';
@@ -136,7 +147,7 @@ export function parseAmbiguousStartOptions(argv: string[]): AmbiguousStartOption
     const confirmation = required(parsed, 'confirm');
 
     if (!UUID_PATTERN.test(preflightId)) fail('--preflight-id must be a UUID');
-    if (operationKey !== 'target-profile-fallback') fail('unsupported --operation-key');
+    if (!isAmbiguousStartOperationKey(operationKey)) fail('unsupported --operation-key');
     if (!SHA256_PATTERN.test(inputHash)) fail('--input-hash must be a lowercase SHA-256');
     if (logicalProvider !== 'apify') fail('unsupported --logical-provider');
     if (actorId !== 'apify/instagram-profile-scraper') fail('unsupported --actor-id');

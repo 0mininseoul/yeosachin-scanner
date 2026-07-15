@@ -47,6 +47,7 @@ describe('preflight retention maintenance', () => {
         const providerRunStore = {
             listUnreconciled: vi.fn(async () => [{
                 preflightId: '123e4567-e89b-42d3-a456-426614174000',
+                operationKey: 'target-profile-fallback',
                 inputHash: 'a'.repeat(64),
                 logicalProvider: 'apify' as const,
                 actorId: 'apify/instagram-profile-scraper' as const,

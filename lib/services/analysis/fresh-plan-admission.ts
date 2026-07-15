@@ -13,8 +13,8 @@ import {
 } from './preflight';
 import {
     bindPreflightProviderRunCheckpoint,
+    createFreshAdmissionProviderRunStore,
     preflightProviderIdentity,
-    preflightProviderRunStore,
     type PreflightProviderRunStore,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
@@ -607,7 +607,8 @@ export async function processAnalysisV2FreshAdmission(
     );
     if (!claim) return 'noop';
 
-    const providerRuns = dependencies.providerRunStore ?? preflightProviderRunStore;
+    const providerRuns = dependencies.providerRunStore
+        ?? createFreshAdmissionProviderRunStore(client, input.generation);
     const workerStartedAt = Date.now();
     let claimSettled = false;
     const retryWithoutFailureBudget = async (error: unknown): Promise<never> => {

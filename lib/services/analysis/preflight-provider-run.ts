@@ -32,6 +32,16 @@ export const PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     reconcileUsageRpc: 'reconcile_analysis_preflight_provider_run_usage',
 });
 
+export const FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
+    loadRpc: 'load_analysis_v2_fresh_admission_provider_run',
+    reserveRpc: 'reserve_analysis_v2_fresh_admission_provider_run',
+    checkpointStartedRpc: 'checkpoint_analysis_v2_fresh_admission_provider_run_started',
+    checkpointTerminalRpc: 'checkpoint_analysis_v2_fresh_admission_provider_run_terminal',
+});
+
+const INITIAL_PROFILE_OPERATION_KEY = 'target-profile-fallback';
+const FRESH_PROFILE_OPERATION_KEY_PATTERN = /^target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100)$/;
+
 export const PREFLIGHT_PROVIDER_RECONCILIATION_BATCH_LIMIT = 16;
 export const PREFLIGHT_PROVIDER_RECONCILIATION_CALL_TIMEOUT_MS = 8_000;
 export const PREFLIGHT_PROVIDER_FINISH_STABILITY_MS = 30_000;
@@ -49,6 +59,7 @@ export type PreflightProviderRunStatus =
 
 export interface StoredPreflightProviderRun {
     preflightId: string;
+    operationKey: string;
     inputHash: string;
     logicalProvider: 'apify';
     actorId: typeof APIFY_PROFILE_ACTOR_ID;
@@ -213,7 +224,10 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
     const credentialSlot = row.credentialSlot;
     if (
         !UUID_PATTERN.test(String(row.preflightId))
-        || row.operationKey !== 'target-profile-fallback'
+        || (
+            row.operationKey !== INITIAL_PROFILE_OPERATION_KEY
+            && !FRESH_PROFILE_OPERATION_KEY_PATTERN.test(String(row.operationKey))
+        )
         || typeof row.inputHash !== 'string'
         || !SHA256_PATTERN.test(row.inputHash)
         || row.logicalProvider !== 'apify'
@@ -251,6 +265,7 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
     }
     return Object.freeze({
         preflightId: String(row.preflightId).toLowerCase(),
+        operationKey: String(row.operationKey),
         inputHash: row.inputHash,
         logicalProvider: 'apify',
         actorId: APIFY_PROFILE_ACTOR_ID,
@@ -508,6 +523,67 @@ export function createPreflightProviderRunStore(
                 throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
             }
             return run;
+        },
+    };
+}
+
+export function freshAdmissionProviderOperationKey(generation: number): string {
+    if (!Number.isSafeInteger(generation) || generation < 1 || generation > 100) {
+        throw new Error('PREFLIGHT_PROVIDER_RUN_VALIDATION_ERROR');
+    }
+    return `target-profile-fresh-admission:g${generation}`;
+}
+
+export function createFreshAdmissionProviderRunStore(
+    client: PreflightProviderRunClient,
+    generation: number
+): PreflightProviderRunStore {
+    const operationKey = freshAdmissionProviderOperationKey(generation);
+    const rpcNames = new Map<string, string>([
+        [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.loadRpc],
+        [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.reserveRpc],
+        [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointStartedRpc,
+            FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.checkpointStartedRpc],
+        [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointTerminalRpc,
+            FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.checkpointTerminalRpc],
+    ]);
+    const store = createPreflightProviderRunStore({
+        rpc(name, params) {
+            const freshName = rpcNames.get(name);
+            if (!freshName) {
+                return Promise.resolve({
+                    data: null,
+                    error: { code: 'INVALID_RPC' },
+                });
+            }
+            return client.rpc(freshName, {
+                ...params,
+                p_admission_generation: generation,
+            });
+        },
+    });
+    const assertOperation = (run: StoredPreflightProviderRun) => {
+        if (run.operationKey !== operationKey) {
+            throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
+        }
+        return run;
+    };
+    return {
+        async load(input) {
+            const run = await store.load(input);
+            return run === null ? null : assertOperation(run);
+        },
+        async reserve(input) {
+            const reserved = await store.reserve(input);
+            return { ...reserved, run: assertOperation(reserved.run) };
+        },
+        async checkpointStarted(input) {
+            return assertOperation(await store.checkpointStarted(input));
+        },
+        async checkpointTerminal(input) {
+            return assertOperation(await store.checkpointTerminal(input));
         },
     };
 }
