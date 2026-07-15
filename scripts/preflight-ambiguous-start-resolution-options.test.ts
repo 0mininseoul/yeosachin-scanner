@@ -45,6 +45,18 @@ describe('ambiguous preflight start resolution CLI options', () => {
         });
     });
 
+    it('accepts the exact fresh-admission generation operation identity', () => {
+        const freshArguments = resolveArguments.map((argument) =>
+            argument === '--operation-key=target-profile-fallback'
+                ? '--operation-key=target-profile-fresh-admission:g4'
+                : argument
+        );
+        expect(parseAmbiguousStartOptions(freshArguments)).toMatchObject({
+            mode: 'resolve',
+            operationKey: 'target-profile-fresh-admission:g4',
+        });
+    });
+
     it('rejects an incomplete or weakly confirmed mutation', () => {
         expect(() => parseAmbiguousStartOptions([])).toThrow(/choose exactly one/);
         expect(() => parseAmbiguousStartOptions([
@@ -69,5 +81,16 @@ describe('ambiguous preflight start resolution CLI options', () => {
                 ? '--max-charge-usd=0'
                 : argument
         ))).toThrow(/--max-charge-usd must be/);
+        for (const operationKey of [
+            'target-profile-fresh-admission:g0',
+            'target-profile-fresh-admission:g01',
+            'target-profile-fresh-admission:g101',
+        ]) {
+            expect(() => parseAmbiguousStartOptions(resolveArguments.map((argument) =>
+                argument === '--operation-key=target-profile-fallback'
+                    ? `--operation-key=${operationKey}`
+                    : argument
+            ))).toThrow(/unsupported --operation-key/);
+        }
     });
 });

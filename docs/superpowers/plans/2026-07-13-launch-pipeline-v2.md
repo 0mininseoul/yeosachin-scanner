@@ -238,7 +238,9 @@ type PreflightStatusV1 =
 
 - `POST` persists the preflight, enqueues a target-profile job, and returns `PreflightAcceptedV1` immediately. `GET /api/analysis/preflight/:id` returns `PreflightStatusV1`.
 - The Cloud Run worker tries the logged-out selfhosted summary first. Only a classified selfhosted provider failure may enter one Apify profile-summary fallback per preflight; explicit selfhosted not-found does not fallback.
-- The fallback is reserved before Actor start, capped by `maxTotalChargeUsd=$0.0026`, and retried only by resuming the stored run ID. Settled usage is reconciled by an authenticated read no earlier than 30 seconds later, including for expired or abandoned preflights.
+- The initial fallback is reserved before Actor start, capped by `maxTotalChargeUsd=$0.0026`, and retried only by resuming the stored run ID. Settled usage is reconciled by an authenticated read no earlier than 30 seconds later, including for expired or abandoned preflights.
+- Checkout-time fresh admission is also selfhosted-first. Each admission generation owns a distinct provider-run operation row and may reserve at most one `$0.0026` fallback. A retry of the same generation resumes that row and run ID; it never rereads the initial preflight run as fresh evidence. The normal initial-plus-one-fresh path therefore has a `$0.0052` combined ceiling when both selfhosted reads fail.
+- Migration remains database-first compatible: a generation RPC adopts only a legacy-worker row reserved at or after that generation's `admission_requested_at`. It never adopts an older initial-preflight row. If the generation row already exists, a legacy operation insert fails before Actor start, preventing either mixed-version retry order from creating a second paid run.
 - Preflight creates no relationship, interaction, or Gemini usage. It creates a paid-provider ledger row only when the bounded fallback is reserved, and neither provider receives an Instagram login cookie or session.
 - Owner scoped, idempotent, 30-minute TTL, signed image proxy only.
 
@@ -522,7 +524,7 @@ Required frontend fixtures before live integration:
 
 ### Cost
 
-- Preflight always produces zero Gemini cost. Selfhosted success/not-found produces zero paid-provider cost; an eligible classified selfhosted failure may produce one Apify summary run capped at `$0.0026`, even when fallback ultimately reports that the target is missing.
+- Preflight always produces zero Gemini cost. Selfhosted success/not-found produces zero paid-provider cost; an eligible classified selfhosted failure may produce one initial Apify summary run capped at `$0.0026`, even when fallback ultimately reports that the target is missing. Each later fresh-admission generation is independently selfhosted-first and may add one separately reconciled `$0.0026` run. Initial plus one fresh generation is capped at `$0.0052`; retries within either operation do not add runs.
 - Abandoned or expired preflight fallback spend remains part of total acquisition cost and is allocated across paid conversions rather than discarded from unit economics.
 - Every paid provider run has expectation, run ID, credential slot, input hash, actual/ceiling cost, and terminal reconciliation.
 - Every Gemini call records stage, model, thinking, image count, latency, tokens, cache hit, and estimated cost.

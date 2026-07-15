@@ -110,6 +110,7 @@ function storedRun(
 ): StoredPreflightProviderRun {
     return {
         preflightId,
+        operationKey: 'target-profile-fallback',
         inputHash: preflightInputHash,
         logicalProvider: 'apify' as const,
         actorId: APIFY_PROFILE_ACTOR_ID,
@@ -560,6 +561,7 @@ describe('preflight worker domain', () => {
     });
 
     it('falls back exactly once for a self-hosted 429 and persists the paid run', async () => {
+        const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
         const store = workerStore();
         const runs = providerRunStore();
         vi.mocked(runs.reserve).mockResolvedValue({ created: true, run: storedRun('starting') });
@@ -616,6 +618,17 @@ describe('preflight worker domain', () => {
         expect(runs.checkpointStarted).toHaveBeenCalledOnce();
         expect(runs.checkpointTerminal).toHaveBeenCalledOnce();
         expect(JSON.stringify(vi.mocked(runs.reserve).mock.calls[0])).not.toContain('target.name');
+        const record = String(info.mock.calls[0]?.[0]);
+        expect(JSON.parse(record)).toEqual({
+            event: 'preflight_profile_fallback_entered',
+            operation: 'profile',
+            category: 'rate_limit',
+            httpStatus: 429,
+            existingRun: false,
+        });
+        expect(record).not.toContain('target.name');
+        expect(record).not.toContain('StartedRun1234567');
+        info.mockRestore();
     });
 
     it('resumes an existing paid run without calling self-hosted or starting another Actor', async () => {

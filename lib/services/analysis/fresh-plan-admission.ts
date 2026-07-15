@@ -2,7 +2,22 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getSelfHostedAdmissionProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
+import { getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
+import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
 import { assertPreflightRuntimePolicy } from './preflight-runtime-policy';
+import {
+    PreflightWorkerRetryError,
+    classifyPreflightError,
+    fallbackCallContext,
+    logPreflightProfileFallbackEntry,
+} from './preflight';
+import {
+    bindPreflightProviderRunCheckpoint,
+    createFreshAdmissionProviderRunStore,
+    preflightProviderIdentity,
+    type PreflightProviderRunStore,
+} from './preflight-provider-run';
+import { preflightTargetInputHash } from './preflight-identity';
 
 export const ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
     reserveRpc: 'reserve_analysis_v2_preflight_admission',
@@ -217,6 +232,7 @@ interface ClaimedAnalysisV2FreshAdmission {
 }
 
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
+export type AnalysisV2FreshFallbackProfileFetcher = typeof getApifyProfileSummary;
 
 export class AnalysisV2FreshAdmissionError extends Error {
     readonly code: AnalysisV2FreshAdmissionErrorCode;
@@ -483,7 +499,7 @@ async function releaseAnalysisV2FreshAdmission(
 async function recordAnalysisV2FreshAdmissionFailure(
     client: AnalysisV2FreshAdmissionRpcClient,
     claim: ClaimedAnalysisV2FreshAdmission
-): Promise<'pending' | 'blocked'> {
+): Promise<Readonly<{ status: 'pending' | 'blocked'; failureCount: number }>> {
     const { data, error } = await client.rpc(
         ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc,
         {
@@ -511,7 +527,10 @@ async function recordAnalysisV2FreshAdmissionFailure(
     ) {
         throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: inconsistent failure result.');
     }
-    return row.admission_status;
+    return Object.freeze({
+        status: row.admission_status,
+        failureCount: row.failure_count,
+    });
 }
 
 async function blockAnalysisV2FreshAdmission(
@@ -575,6 +594,9 @@ export async function processAnalysisV2FreshAdmission(
     },
     dependencies: {
         getProfile?: AnalysisV2FreshProfileFetcher;
+        getFallbackProfile?: AnalysisV2FreshFallbackProfileFetcher;
+        providerRunStore?: PreflightProviderRunStore;
+        env?: Record<string, string | undefined>;
         createClaimToken?: () => string;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
@@ -585,11 +607,41 @@ export async function processAnalysisV2FreshAdmission(
     );
     if (!claim) return 'noop';
 
+    const providerRuns = dependencies.providerRunStore
+        ?? createFreshAdmissionProviderRunStore(client, input.generation);
+    const workerStartedAt = Date.now();
     let claimSettled = false;
+    const retryWithoutFailureBudget = async (error: unknown): Promise<never> => {
+        const failure = classifyPreflightError(error);
+        await releaseAnalysisV2FreshAdmission(client, claim);
+        claimSettled = true;
+        throw new PreflightWorkerRetryError({
+            category: failure.category,
+            retryable: true,
+            httpStatus: failure.httpStatus,
+        }, null, error);
+    };
+    const settleFailure = async (error: unknown): Promise<'blocked'> => {
+        const failure = classifyPreflightError(error);
+        if (
+            failure.category === 'run_pending'
+            || (failure.category === 'persistence' && failure.retryable)
+        ) {
+            return await retryWithoutFailureBudget(error);
+        }
+        const result = await recordAnalysisV2FreshAdmissionFailure(client, claim);
+        claimSettled = true;
+        if (result.status === 'blocked') return 'blocked';
+        throw new PreflightWorkerRetryError({
+            category: failure.category,
+            retryable: true,
+            httpStatus: failure.httpStatus,
+        }, result.failureCount, error);
+    };
     try {
         let profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
         try {
-            assertPreflightRuntimePolicy();
+            assertPreflightRuntimePolicy(dependencies.env);
             profile = await (
                 dependencies.getProfile ?? getSelfHostedAdmissionProfileSummary
             )(claim.targetInstagramId);
@@ -603,11 +655,57 @@ export async function processAnalysisV2FreshAdmission(
                 assertFreshCount(profile.followersCount);
                 assertFreshCount(profile.followingCount);
             }
-        } catch {
-            const failureStatus = await recordAnalysisV2FreshAdmissionFailure(client, claim);
-            claimSettled = true;
-            if (failureStatus === 'blocked') return 'blocked';
-            throw new Error('ANALYSIS_V2_FRESH_ADMISSION_RETRY');
+        } catch (primaryError) {
+            const primaryFailure = classifyPreflightError(primaryError);
+            if (!primaryFailure.paidFallbackEligible) {
+                return await settleFailure(primaryError);
+            }
+            try {
+                const inputHash = preflightTargetInputHash(
+                    claim.targetInstagramId,
+                    dependencies.env
+                );
+                const existingRun = await providerRuns.load({
+                    preflightId: claim.preflightId,
+                    claimToken: claim.claimToken,
+                    inputHash,
+                });
+                logPreflightProfileFallbackEntry({
+                    operation: 'fresh_admission',
+                    failure: primaryFailure,
+                    existingRun: existingRun !== null,
+                });
+                const identity = preflightProviderIdentity(
+                    existingRun?.credentialSlot
+                    ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                );
+                const bound = await bindPreflightProviderRunCheckpoint({
+                    store: providerRuns,
+                    claim,
+                    inputHash,
+                    identity,
+                });
+                profile = await (
+                    dependencies.getFallbackProfile ?? getApifyProfileSummary
+                )(
+                    claim.targetInstagramId,
+                    fallbackCallContext(bound.checkpoint, workerStartedAt)
+                );
+                if (
+                    profile
+                    && profile.username.trim().toLowerCase() !== claim.targetInstagramId
+                ) {
+                    throw new Error(
+                        'ANALYSIS_V2_FRESH_ADMISSION_ERROR: target identity mismatch.'
+                    );
+                }
+                if (profile) {
+                    assertFreshCount(profile.followersCount);
+                    assertFreshCount(profile.followingCount);
+                }
+            } catch (fallbackError) {
+                return await settleFailure(fallbackError);
+            }
         }
         if (!profile) {
             const outcome = await blockAnalysisV2FreshAdmission(

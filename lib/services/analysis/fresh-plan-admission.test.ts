@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import {
     ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES,
     AnalysisV2FreshAdmissionError,
@@ -10,6 +11,11 @@ import {
     reserveAnalysisV2FreshAdmission,
     type AnalysisV2FreshAdmissionRpcClient,
 } from './fresh-plan-admission';
+import { PreflightWorkerRetryError } from './preflight';
+import type {
+    PreflightProviderRunStore,
+    StoredPreflightProviderRun,
+} from './preflight-provider-run';
 
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
 const USER_ID = '123e4567-e89b-42d3-b456-426614174001';
@@ -19,6 +25,10 @@ const DISPATCH_TOKEN = '123e4567-e89b-42d3-a456-426614174005';
 const DISPATCH_GENERATION = 3;
 const ENTITLEMENT_JTI_HASH = 'a'.repeat(64);
 const REFRESHED_AT = '2026-07-14T01:00:00.000Z';
+const FRESH_ENV = Object.freeze({
+    ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary',
+    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: Buffer.alloc(32, 7).toString('base64'),
+});
 
 const pricing = {
     basic: { status: 'deferred', currency: 'KRW', amountKrw: null },
@@ -124,6 +134,57 @@ function workerInput() {
         generation: 2,
         dispatchGeneration: DISPATCH_GENERATION,
         dispatchToken: DISPATCH_TOKEN,
+    };
+}
+
+function storedProviderRun(
+    status: StoredPreflightProviderRun['status'] = 'succeeded'
+): StoredPreflightProviderRun {
+    return {
+        preflightId: PREFLIGHT_ID,
+        operationKey: 'target-profile-fresh-admission:g4',
+        inputHash: 'f'.repeat(64),
+        logicalProvider: 'apify',
+        actorId: 'apify/instagram-profile-scraper',
+        credentialSlot: 'quinary',
+        maxChargeUsd: 0.0026,
+        status,
+        runId: status === 'starting' ? null : 'FreshAdmissionRun123',
+        actualUsageUsd: status === 'succeeded' ? 0.0026 : null,
+        reservedAt: '2026-07-14T01:00:00.000Z',
+        runStartedAt: status === 'starting' ? null : '2026-07-14T01:00:01.000Z',
+        terminalizedAt: ['starting', 'running'].includes(status)
+            ? null
+            : '2026-07-14T01:00:02.000Z',
+    };
+}
+
+function providerRunStore(
+    existing: StoredPreflightProviderRun | null = null
+): PreflightProviderRunStore {
+    return {
+        load: vi.fn(async input => existing ? { ...existing, inputHash: input.inputHash } : null),
+        reserve: vi.fn(async input => ({
+            created: true,
+            run: {
+                ...storedProviderRun('starting'),
+                inputHash: input.inputHash,
+                credentialSlot: input.credentialSlot,
+            },
+        })),
+        checkpointStarted: vi.fn(async input => ({
+            ...storedProviderRun('running'),
+            inputHash: input.inputHash,
+            credentialSlot: input.credentialSlot,
+            runId: input.runId,
+        })),
+        checkpointTerminal: vi.fn(async input => ({
+            ...storedProviderRun(input.status),
+            inputHash: input.inputHash,
+            credentialSlot: input.credentialSlot,
+            runId: input.runId,
+            actualUsageUsd: input.actualUsageUsd,
+        })),
     };
 }
 
@@ -415,6 +476,275 @@ describe('durable fresh V2 admission worker', () => {
         );
     });
 
+    it('rereads an existing successful preflight fallback without a second paid run', async () => {
+        const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const { client } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                return {
+                    data: [{ admission_status: 'ready', admission_error_code: null }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore(storedProviderRun('succeeded'));
+        const fallback = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext
+        ) => {
+            expect(context).toMatchObject({
+                resumeRunId: 'FreshAdmissionRun123',
+                credentialSlot: 'quinary',
+                maxChargeUsd: 0.0026,
+            });
+            return profile({ followersCount: 621, followingCount: 711 });
+        });
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockRejectedValue(
+                new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
+            ),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).resolves.toBe('ready');
+
+        expect(fallback).toHaveBeenCalledOnce();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(runs.checkpointStarted).not.toHaveBeenCalled();
+        const record = String(info.mock.calls[0]?.[0]);
+        expect(JSON.parse(record)).toEqual({
+            event: 'preflight_profile_fallback_entered',
+            operation: 'fresh_admission',
+            category: 'schema',
+            httpStatus: null,
+            existingRun: true,
+        });
+        expect(record).not.toContain('target.account');
+        expect(record).not.toContain('FreshAdmissionRun123');
+        info.mockRestore();
+    });
+
+    it('keeps a pending existing run retryable without consuming the failure budget', async () => {
+        const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const { client, rpc } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseRpc) {
+                return { data: true, error: null };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore(storedProviderRun('running'));
+        const fallback = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext
+        ) => {
+            expect(context?.resumeRunId).toBe('FreshAdmissionRun123');
+            throw new Error('SCRAPING_RUN_PENDING_ERROR: fixture is still running');
+        });
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockRejectedValue(
+                new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
+            ),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'run_pending',
+                retryable: true,
+                workerAttemptCount: null,
+            },
+        });
+
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(runs.checkpointStarted).not.toHaveBeenCalled();
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseRpc,
+            expect.objectContaining({ p_claim_token: CLAIM_TOKEN })
+        );
+        expect(rpc).not.toHaveBeenCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc,
+            expect.anything()
+        );
+        info.mockRestore();
+    });
+
+    it('releases a transient provider-run persistence failure without consuming the budget', async () => {
+        const { client, rpc } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseRpc) {
+                return { data: true, error: null };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockRejectedValueOnce(new Error(
+            'PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: transient database failure.'
+        ));
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockRejectedValue(
+                new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
+            ),
+            providerRunStore: runs,
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'persistence',
+                retryable: true,
+                workerAttemptCount: null,
+            },
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseRpc,
+            expect.objectContaining({ p_claim_token: CLAIM_TOKEN })
+        );
+        expect(rpc).not.toHaveBeenCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc,
+            expect.anything()
+        );
+    });
+
+    it('reserves the one preflight fallback when fresh admission is its first eligible failure', async () => {
+        const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const { client } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                return {
+                    data: [{ admission_status: 'ready', admission_error_code: null }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore();
+        const fallback = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext
+        ) => {
+            const identity = {
+                logicalProvider: 'apify' as const,
+                actorId: 'apify/instagram-profile-scraper',
+                credentialSlot: 'quinary' as const,
+                maxChargeUsd: 0.0026 as const,
+            };
+            await context?.onBeforeRunStart?.(identity);
+            await context?.onRunStarted?.('FreshAdmissionRun456');
+            await context?.onCostRunStarted?.({
+                ...identity,
+                runId: 'FreshAdmissionRun456',
+            });
+            await context?.onCostRunFinished?.({
+                ...identity,
+                runId: 'FreshAdmissionRun456',
+                status: 'succeeded',
+                usageTotalUsd: null,
+            });
+            return profile();
+        });
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockRejectedValue(
+                new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
+            ),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).resolves.toBe('ready');
+
+        expect(runs.reserve).toHaveBeenCalledOnce();
+        expect(runs.checkpointStarted).toHaveBeenCalledOnce();
+        expect(runs.checkpointTerminal).toHaveBeenCalledOnce();
+        expect(JSON.stringify(vi.mocked(runs.reserve).mock.calls)).not.toContain(
+            'target.account'
+        );
+        info.mockRestore();
+    });
+
+    it('keeps an explicit selfhosted not-found result free and terminal', async () => {
+        const { client } = clientWith(async (name, params) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.blockRpc) {
+                return {
+                    data: [{
+                        admission_status: 'blocked',
+                        admission_error_code: params.p_error_code,
+                    }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore();
+        const fallback = vi.fn();
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockResolvedValue(null),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).resolves.toBe('blocked');
+
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.load).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+    });
+
     it.each([
         ['transport', new Error('transient transport failure')],
         ['identity', profile({ username: 'different.account' })],
@@ -449,7 +779,13 @@ describe('durable fresh V2 admission worker', () => {
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile,
             createClaimToken: () => CLAIM_TOKEN,
-        })).rejects.toThrow('ANALYSIS_V2_FRESH_ADMISSION_RETRY');
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'unknown',
+                workerAttemptCount: 1,
+            },
+        });
         expect(rpc).toHaveBeenLastCalledWith(
             ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc,
             expect.objectContaining({ p_claim_token: CLAIM_TOKEN })
@@ -560,7 +896,7 @@ describe('durable fresh V2 admission worker', () => {
             await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
                 getProfile,
                 createClaimToken: () => CLAIM_TOKEN,
-            })).rejects.toThrow('ANALYSIS_V2_FRESH_ADMISSION_RETRY');
+            })).rejects.toBeInstanceOf(PreflightWorkerRetryError);
             expect(getProfile).not.toHaveBeenCalled();
         } finally {
             if (previousRetries === undefined) delete process.env.SELFHOSTED_PROFILE_RETRIES;

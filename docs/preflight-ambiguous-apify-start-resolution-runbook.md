@@ -1,6 +1,6 @@
 # Preflight Apify ambiguous start 수동 해소
 
-이 절차는 preflight profile fallback의 Actor 시작 응답이 유실되어
+이 절차는 최초 preflight 또는 fresh-admission generation별 profile fallback의 Actor 시작 응답이 유실되어
 `analysis_preflight_provider_runs.status = 'starting'`이고 `run_id IS NULL`인 경우에만
 사용한다. 이 상태는 Actor가 실제로 생성되지 않았다는 뜻이 아니다. 자동 worker와 비용
 reconciler는 이 상태를 0원이나 실패로 추정하지 않으며, 같은 작업의 새 Actor도 시작하지
@@ -44,6 +44,8 @@ npx tsx --env-file=.env.local \
 
 출력되는 `preflightId`, `operationKey`, `inputHash`, `logicalProvider`, `actorId`,
 `credentialSlot`, `maxChargeUsd`, `reservedAt`은 이후 해소 요청의 불변 identity다.
+`operationKey`는 최초 실행의 `target-profile-fallback` 또는 fresh generation의
+`target-profile-fresh-admission:g1`~`g100`이며, 후보 조회가 반환한 값을 그대로 사용한다.
 
 ## 2. Apify 확인
 
@@ -113,7 +115,7 @@ npx tsx \
   scripts/resolve-preflight-ambiguous-apify-start.ts \
   --resolve \
   --preflight-id='00000000-0000-4000-8000-000000000000' \
-  --operation-key='target-profile-fallback' \
+  --operation-key='target-profile-fresh-admission:g4' \
   --input-hash='64-character-lowercase-sha256' \
   --logical-provider='apify' \
   --actor-id='apify/instagram-profile-scraper' \

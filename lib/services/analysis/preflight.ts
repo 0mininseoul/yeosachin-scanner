@@ -122,7 +122,7 @@ export class PreflightWorkerRetryError extends Error {
 
     constructor(
         classification: Omit<PreflightWorkerFailureClassification, 'workerAttemptCount'>,
-        workerAttemptCount: number,
+        workerAttemptCount: number | null,
         cause?: unknown
     ) {
         super('PREFLIGHT_WORKER_RETRY', { cause });
@@ -898,7 +898,7 @@ export function buildReadyPreflightSnapshot(
     }) as ReadyPreflightSnapshot;
 }
 
-interface ClassifiedPreflightError {
+export interface ClassifiedPreflightError {
     category: PreflightWorkerFailureClassification['category'];
     retryable: boolean;
     httpStatus: number | null;
@@ -907,7 +907,7 @@ interface ClassifiedPreflightError {
 
 const PREFLIGHT_FALLBACK_MAX_WAIT_SECONDS = 75;
 
-function classifyPreflightError(error: unknown): ClassifiedPreflightError {
+export function classifyPreflightError(error: unknown): ClassifiedPreflightError {
     const webFailure = classifyWebProfileFailure(error);
     if (webFailure) return {
         category: webFailure.kind,
@@ -979,13 +979,27 @@ function classifyPreflightError(error: unknown): ClassifiedPreflightError {
     };
 }
 
+export function logPreflightProfileFallbackEntry(input: {
+    operation: 'profile' | 'fresh_admission';
+    failure: ClassifiedPreflightError;
+    existingRun: boolean;
+}): void {
+    console.info(JSON.stringify({
+        event: 'preflight_profile_fallback_entered',
+        operation: input.operation,
+        category: input.failure.category,
+        httpStatus: input.failure.httpStatus,
+        existingRun: input.existingRun,
+    }));
+}
+
 function assertMatchingProfile(profile: InstagramProfile, username: string): void {
     if (profile.username.toLowerCase() !== username) {
         throw new Error('SCRAPING_SCHEMA_ERROR: provider summary username mismatch.');
     }
 }
 
-function fallbackCallContext(
+export function fallbackCallContext(
     checkpoint: ProviderRunCheckpoint,
     startedAt: number
 ) {
@@ -1059,6 +1073,11 @@ export async function processPreflight(
             } catch (error) {
                 const failure = classifyPreflightError(error);
                 if (!failure.paidFallbackEligible) throw error;
+                logPreflightProfileFallbackEntry({
+                    operation: 'profile',
+                    failure,
+                    existingRun: false,
+                });
                 const identity = preflightProviderIdentity(
                     selectAnalysisV2ApifyCredentialSlot(dependencies.env)
                 );

@@ -211,7 +211,7 @@ type PreflightAcceptedV1 = {
 };
 ```
 
-worker는 로그인 없는 자체 summary를 먼저 시도한다. 명시적 대상 없음은 fallback하지 않고, 분류된 자체 provider 실패일 때만 preflight당 Apify profile-summary fallback 1회를 허용한다. fallback은 Actor 시작 전 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, retry에서는 저장된 같은 run ID만 재개한다. 안정된 실제액은 최소 30초 후 인증 재조회로 정산하고, 만료·이탈 preflight도 정산 전 원장을 유지한다. 사전 점검은 관계·상호작용·Gemini를 실행하지 않으며, 두 provider 모두 Instagram 로그인 쿠키/세션을 사용하지 않는다. 소유자 범위, 멱등성, 30분 TTL, 서명된 이미지 proxy를 적용한다.
+worker는 로그인 없는 자체 summary를 먼저 시도한다. 명시적 대상 없음은 fallback하지 않고, 분류된 자체 provider 실패일 때만 최초 preflight에 Apify profile-summary fallback 1회를 허용한다. fallback은 Actor 시작 전 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, retry에서는 저장된 같은 run ID만 재개한다. 결제 직전 fresh admission도 자체 수집을 먼저 시도한다. 각 admission generation은 별도의 provider-run operation 행을 사용하고 최대 1회의 `$0.0026` fallback만 예약한다. 같은 generation의 retry는 그 행과 run ID를 재개하지만, 최초 preflight의 성공 run이나 오래된 count snapshot을 fresh evidence로 재사용하지 않는다. DB 우선 배포 기간에는 generation RPC가 해당 generation의 `admission_requested_at` 이후 구 worker가 예약한 행만 세대별 operation으로 원자적 승계하고, 더 오래된 최초 preflight 행은 승계하지 않는다. 세대별 행이 이미 있으면 구 operation 삽입은 Actor 시작 전에 실패한다. 따라서 최초 fallback과 fresh generation 1회가 모두 실행되는 정상 경로의 합산 상한은 `$0.0052`다. 안정된 실제액은 각 run 종료 최소 30초 후 인증 재조회로 정산하고, 만료·이탈 preflight도 모든 operation 행의 정산 전에는 원장을 유지한다. 사전 점검은 관계·상호작용·Gemini를 실행하지 않으며, 두 provider 모두 Instagram 로그인 쿠키/세션을 사용하지 않는다. 소유자 범위, 멱등성, 30분 TTL, 서명된 이미지 proxy를 적용한다.
 
 `PATCH /api/analysis/preflight/:id`는 정규화된 `excludedInstagramId` 하나 또는 명시적 skip을 저장한다. 대상 username, 잘못된 username, 다른 소유자, 이용권 소비 후 변경은 거부한다.
 
@@ -365,7 +365,7 @@ git worktree add ../ai-baram-detector-frontend -b feat/launch-funnel-ui <contrac
 
 ### 비용
 
-사전 점검은 Gemini 비용을 항상 0으로 유지한다. 자체 성공/명시적 대상 없음은 유료 provider 0건이고, 허용된 분류 실패에서만 최대 `$0.0026`의 Apify summary run 1건이 생길 수 있다. fallback이 대상 없음을 확인한 경우와 만료·이탈 preflight 비용도 총 획득 원가에 포함한다. 모든 유료 provider 실행에는 예상/실제·상한 비용, run ID, credential slot, input hash, 종료 대사가 있어야 한다. Gemini 호출마다 stage, model, thinking, 이미지 수, 지연, 토큰, cache hit, 예상 비용을 기록한다. 세 플랜의 측정 p95 비용이 가격 catalog에 들어온 뒤에만 결제를 붙인다.
+사전 점검은 Gemini 비용을 항상 0으로 유지한다. 자체 성공/명시적 대상 없음은 유료 provider 0건이고, 허용된 분류 실패에서만 최초 preflight에 최대 `$0.0026`의 Apify summary run 1건이 생길 수 있다. 이후 각 fresh-admission generation도 자체 수집 실패 시 별도로 최대 `$0.0026`의 run 1건을 가질 수 있다. 최초와 fresh 1회가 모두 실행되면 합산 상한은 `$0.0052`이며, 같은 operation의 retry는 새 run을 만들지 않는다. fallback이 대상 없음을 확인한 경우와 만료·이탈 preflight 비용도 총 획득 원가에 포함한다. 모든 유료 provider 실행에는 예상/실제·상한 비용, run ID, credential slot, input hash, 종료 대사가 있어야 한다. Gemini 호출마다 stage, model, thinking, 이미지 수, 지연, 토큰, cache hit, 예상 비용을 기록한다. 세 플랜의 측정 p95 비용이 가격 catalog에 들어온 뒤에만 결제를 붙인다.
 
 ## 12. 오류 및 구제 표
 

@@ -128,4 +128,34 @@ describe('preflight worker route', () => {
         expect(record).not.toContain('target.name');
         expect(record).not.toContain('bearer-secret');
     });
+
+    it('logs only sanitized fresh-admission failure metadata and its bounded attempt', async () => {
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mocks.processAdmission.mockRejectedValue(new PreflightWorkerRetryError({
+            category: 'rate_limit',
+            retryable: true,
+            httpStatus: 429,
+        }, 1, new Error('raw target.name provider-secret')));
+
+        const response = await POST(request({
+            preflightId,
+            kind: 'fresh_admission',
+            generation: 3,
+            dispatchGeneration: 2,
+            dispatchToken,
+        }));
+
+        expect(response.status).toBe(500);
+        const record = String(log.mock.calls[0][0]);
+        expect(JSON.parse(record)).toEqual({
+            event: 'preflight_worker_failed',
+            operation: 'fresh_admission',
+            category: 'rate_limit',
+            retryable: true,
+            httpStatus: 429,
+            workerAttemptCount: 1,
+        });
+        expect(record).not.toContain('target.name');
+        expect(record).not.toContain('provider-secret');
+    });
 });

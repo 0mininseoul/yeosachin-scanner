@@ -8,13 +8,36 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const freshAdmissionFenceMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260715001843_allow_fresh_admission_preflight_provider_run_fence.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const splitFreshAdmissionLedgerMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260715002600_split_fresh_admission_provider_run_ledger.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const migrationHistory = [
+    splitFreshAdmissionLedgerMigration,
+    freshAdmissionFenceMigration,
+    migration,
+];
+const allMigrations = migrationHistory.toReversed().join('\n');
 
 function functionDefinition(name: string): string {
-    const start = migration.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
-    expect(start, `${name} must exist`).toBeGreaterThanOrEqual(0);
-    const end = migration.indexOf('\n$$;', start);
-    expect(end, `${name} must have a bounded body`).toBeGreaterThan(start);
-    return migration.slice(start, end);
+    for (const source of migrationHistory) {
+        const start = source.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
+        if (start < 0) continue;
+        const end = source.indexOf('\n$$;', start);
+        expect(end, `${name} must have a bounded body`).toBeGreaterThan(start);
+        return source.slice(start, end);
+    }
+    expect.fail(`${name} must exist`);
 }
 
 function tableDefinition(): string {
@@ -60,11 +83,20 @@ describe('preflight Apify provider-run migration contract', () => {
         expect(migration).not.toContain('CREATE POLICY');
     });
 
-    it('stores only the fixed paid operation identity and a SHA-256 target identity', () => {
+    it('stores one initial and one generation-bounded fresh intent per preflight', () => {
         const table = tableDefinition();
 
         expect(table).toContain("operation_key TEXT NOT NULL DEFAULT 'target-profile-fallback'");
         expect(table).toContain("operation_key = 'target-profile-fallback'");
+        expect(splitFreshAdmissionLedgerMigration).toContain(
+            'PRIMARY KEY (preflight_id, operation_key)'
+        );
+        expect(splitFreshAdmissionLedgerMigration).toContain(
+            "operation_key = 'target-profile-fallback'"
+        );
+        expect(splitFreshAdmissionLedgerMigration).toContain(
+            "operation_key ~ '^target-profile-fresh-admission:g([1-9]|[1-9][0-9]|100)$'"
+        );
         expect(table).toContain("logical_provider TEXT NOT NULL DEFAULT 'apify'");
         expect(table).toContain("logical_provider = 'apify'");
         expect(table).toContain(
@@ -78,7 +110,7 @@ describe('preflight Apify provider-run migration contract', () => {
         );
     });
 
-    it('fences load, reserve, started, and terminal RPCs with a live preflight claim', () => {
+    it('keeps the original RPC signatures and fences them to the initial operation row', () => {
         for (const rpc of [
             'load_analysis_preflight_provider_run',
             'reserve_analysis_preflight_provider_run',
@@ -86,21 +118,130 @@ describe('preflight Apify provider-run migration contract', () => {
             'checkpoint_analysis_preflight_provider_run_terminal',
         ]) {
             const definition = functionDefinition(rpc);
-            expect(definition).toContain("v_preflight.status <> 'processing'");
             expect(definition).toContain(
-                'v_preflight.lease_token IS DISTINCT FROM p_claim_token'
+                "provider_run.operation_key = 'target-profile-fallback'"
             );
-            expect(definition).toContain('v_preflight.lease_expires_at <= v_now');
+            expect(definition).toContain("v_preflight.status = 'processing'");
+            expect(definition).toContain(
+                'v_preflight.lease_token IS NOT DISTINCT FROM p_claim_token'
+            );
+            expect(definition).toContain('v_preflight.lease_expires_at > v_now');
+            expect(definition).toContain("v_preflight.status = 'ready'");
+            expect(definition).toContain('v_preflight.consumed_request_id IS NULL');
+            expect(definition).toContain(
+                "v_preflight.admission_status = 'processing'"
+            );
+            expect(definition).toContain(
+                'v_preflight.admission_claim_token IS NOT DISTINCT FROM p_claim_token'
+            );
+            expect(definition).toContain(
+                'v_preflight.admission_lease_expires_at > v_now'
+            );
             expect(definition).toContain('v_preflight.expires_at <= v_now');
             expect(definition).toContain(
                 "MESSAGE = 'ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH'"
             );
             expect(definition).toContain('SECURITY DEFINER');
             expect(definition).toContain("SET search_path = ''");
-            expect(migration).toMatch(new RegExp(
+            expect(freshAdmissionFenceMigration).toMatch(new RegExp(
                 `GRANT EXECUTE ON FUNCTION public\\.${rpc}\\(`
             ));
         }
+    });
+
+    it('fences every fresh-admission RPC to the exact live unconsumed generation claim', () => {
+        for (const rpc of [
+            'load_analysis_v2_fresh_admission_provider_run',
+            'reserve_analysis_v2_fresh_admission_provider_run',
+            'checkpoint_analysis_v2_fresh_admission_provider_run_started',
+            'checkpoint_analysis_v2_fresh_admission_provider_run_terminal',
+        ]) {
+            const definition = functionDefinition(rpc);
+            expect(definition).toContain('p_admission_generation NOT BETWEEN 1 AND 100');
+            expect(definition).toContain(
+                "v_operation_key := 'target-profile-fresh-admission:g'"
+            );
+            expect(definition).toContain("v_preflight.status IS DISTINCT FROM 'ready'");
+            expect(definition).toContain('v_preflight.consumed_request_id IS NOT NULL');
+            expect(definition).toContain('v_preflight.expires_at <= v_now');
+            expect(definition).toContain(
+                'v_preflight.admission_generation IS DISTINCT FROM p_admission_generation'
+            );
+            expect(definition).toContain(
+                "v_preflight.admission_status IS DISTINCT FROM 'processing'"
+            );
+            expect(definition).toContain(
+                'v_preflight.admission_claim_token IS DISTINCT FROM p_claim_token'
+            );
+            expect(definition).toContain(
+                'v_preflight.admission_lease_expires_at <= v_now'
+            );
+            expect(definition).toContain(
+                'provider_run.operation_key = v_operation_key'
+            );
+            expect(definition).toContain(
+                'PERFORM public.adopt_legacy_fresh_admission_provider_run'
+            );
+            expect(definition).toContain('SECURITY DEFINER');
+            expect(definition).toContain("SET search_path = ''");
+            expect(splitFreshAdmissionLedgerMigration).toMatch(new RegExp(
+                `GRANT EXECUTE ON FUNCTION public\\.${rpc}\\([\\s\\S]*?TO service_role`
+            ));
+        }
+    });
+
+    it('adopts only a same-generation legacy reservation during migration-first rollout', () => {
+        const adoption = functionDefinition(
+            'adopt_legacy_fresh_admission_provider_run'
+        );
+        expect(adoption).toContain(
+            "provider_run.operation_key = 'target-profile-fallback'"
+        );
+        expect(adoption).toContain(
+            'provider_run.reserved_at >= p_admission_requested_at'
+        );
+        expect(adoption).toContain(
+            'current_generation.operation_key = p_operation_key'
+        );
+        expect(adoption).toContain('SECURITY DEFINER');
+        expect(adoption).toContain("SET search_path = ''");
+        expect(splitFreshAdmissionLedgerMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.adopt_legacy_fresh_admission_provider_run\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(splitFreshAdmissionLedgerMigration).not.toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.adopt_legacy_fresh_admission_provider_run/
+        );
+
+        const guard = functionDefinition(
+            'guard_legacy_fresh_admission_provider_run_insert'
+        );
+        expect(guard).toContain("NEW.operation_key <> 'target-profile-fallback'");
+        expect(guard).toContain('NEW.reserved_at >= v_preflight.admission_requested_at');
+        expect(guard).toContain(
+            "'target-profile-fresh-admission:g'"
+        );
+        expect(guard).toContain(
+            'ANALYSIS_PREFLIGHT_PROVIDER_RUN_LEGACY_FRESH_CONFLICT'
+        );
+        expect(splitFreshAdmissionLedgerMigration).toContain(
+            'CREATE TRIGGER guard_legacy_fresh_admission_provider_run_insert'
+        );
+        expect(splitFreshAdmissionLedgerMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.guard_legacy_fresh_admission_provider_run_insert\(\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(splitFreshAdmissionLedgerMigration).not.toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.guard_legacy_fresh_admission_provider_run_insert/
+        );
+    });
+
+    it('does not broaden the provider-run RPC grants while adding the fresh fence', () => {
+        expect(allMigrations).not.toMatch(
+            /GRANT EXECUTE[\s\S]*TO (?:PUBLIC|anon|authenticated)/
+        );
+        expect(allMigrations).not.toMatch(
+            /GRANT .* ON TABLE public\.analysis_preflight_provider_runs/
+        );
+        expect(allMigrations).not.toContain('CREATE POLICY');
     });
 
     it('commits one immutable intent before a caller may start an Actor', () => {
@@ -132,6 +273,12 @@ describe('preflight Apify provider-run migration contract', () => {
         const reserve = functionDefinition('reserve_analysis_preflight_provider_run');
 
         expect(table).toContain('preflight_id UUID PRIMARY KEY');
+        expect(splitFreshAdmissionLedgerMigration).toContain(
+            'DROP CONSTRAINT analysis_preflight_provider_runs_pkey'
+        );
+        expect(splitFreshAdmissionLedgerMigration).toContain(
+            'PRIMARY KEY (preflight_id, operation_key)'
+        );
         expect(table).toContain("status TEXT NOT NULL DEFAULT 'starting'");
         expect(table).toContain("status = 'starting'");
         expect(table).toContain('AND run_id IS NULL');
@@ -183,9 +330,9 @@ describe('preflight Apify provider-run migration contract', () => {
         expect(list).toContain('usage_reconciliation_attempt_count + 1');
         expect(list).not.toMatch(/username|api_token|access_token|payload/i);
 
+        expect(reconcile).toContain('provider_run.input_hash = p_input_hash');
+        expect(reconcile).toContain('provider_run.run_id = p_run_id');
         for (const identityCheck of [
-            'v_run.input_hash IS DISTINCT FROM p_input_hash',
-            'v_run.run_id IS DISTINCT FROM p_run_id',
             'v_run.logical_provider IS DISTINCT FROM p_logical_provider',
             'v_run.actor_id IS DISTINCT FROM p_actor_id',
             'v_run.credential_slot IS DISTINCT FROM p_credential_slot',
@@ -219,10 +366,10 @@ describe('preflight Apify provider-run migration contract', () => {
             'list_analysis_preflight_unreconciled_provider_runs',
             'reconcile_analysis_preflight_provider_run_usage',
         ]) {
-            expect(migration).toMatch(new RegExp(
+            expect(allMigrations).toMatch(new RegExp(
                 `REVOKE ALL ON FUNCTION public\\.${rpc}\\([\\s\\S]*?FROM PUBLIC, anon, authenticated, service_role`
             ));
-            expect(migration).toMatch(new RegExp(
+            expect(allMigrations).toMatch(new RegExp(
                 `GRANT EXECUTE ON FUNCTION public\\.${rpc}\\(`
             ));
         }
