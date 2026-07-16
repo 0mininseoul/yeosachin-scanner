@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
-import type { SelectedAnalysisMedia } from './media-policy';
+import { extractInstagramMentions } from '@/lib/services/instagram/username';
+import {
+    MAX_CAROUSEL_MEDIA,
+    MAX_PARTNER_SAFETY_CONTACT_MEDIA,
+    type SelectedAnalysisMedia,
+} from './media-policy';
 
 const DOSSIER_CHARACTER_LIMIT = 2_000;
 const MIN_CANONICAL_CAROUSEL_ITEMS = 3;
@@ -119,6 +124,10 @@ function canonicalCompleteCarousel(post: InstagramPost | undefined): post is Ins
         || post.childrenComplete !== true
         || !Array.isArray(post.mediaItems)
         || post.mediaItems.length < MIN_CANONICAL_CAROUSEL_ITEMS
+        || post.mediaItems.length > MAX_CAROUSEL_MEDIA
+        || post.declaredMediaCount === undefined
+        || post.declaredMediaCount < MIN_CANONICAL_CAROUSEL_ITEMS
+        || post.declaredMediaCount > MAX_CAROUSEL_MEDIA
     ) {
         return false;
     }
@@ -149,18 +158,27 @@ function partnerCaptionEvidence(
     carousel: InstagramPost | null
 ): CarouselCaptionEvidence[] {
     if (!carousel) return [];
-    return input.partnerSelections.flatMap(selection => {
-        if (selection.postId !== carousel.id || selection.mediaIndex === undefined) return [];
+    const captions: CarouselCaptionEvidence[] = [];
+    for (const selection of input.partnerSelections) {
+        if (
+            selection.role !== 'partner_safety_contact'
+            || selection.postId !== carousel.id
+            || selection.mediaIndex === undefined
+        ) {
+            continue;
+        }
         const text = normalizeCaption(carousel.mediaItems?.[selection.mediaIndex]?.caption);
-        if (!text) return [];
-        return [captionEvidence({
+        if (!text) continue;
+        captions.push(captionEvidence({
             profileUsername: input.profile.username,
             postId: carousel.id,
             mediaIndex: selection.mediaIndex,
             selectionId: selection.selectionId,
             text,
-        })];
-    });
+        }));
+        if (captions.length === MAX_PARTNER_SAFETY_CONTACT_MEDIA) break;
+    }
+    return captions;
 }
 
 function uniqueSlideCaptions(carousel: InstagramPost): SlideCaption[] {
@@ -176,13 +194,13 @@ function uniqueSlideCaptions(carousel: InstagramPost): SlideCaption[] {
 }
 
 function exactMention(text: string, targetUsername: string): boolean {
-    const username = targetUsername.normalize('NFKC').trim().replace(/^@+/, '');
+    const username = targetUsername
+        .normalize('NFKC')
+        .trim()
+        .replace(/^@/, '')
+        .toLowerCase();
     if (!username) return false;
-    const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(
-        `(?:^|[^A-Za-z0-9._])@${escaped}(?=$|[^A-Za-z0-9._])`,
-        'iu'
-    ).test(text);
+    return extractInstagramMentions(text).includes(username);
 }
 
 function excerpt(text: string, allocation: number): string {
@@ -192,7 +210,7 @@ function excerpt(text: string, allocation: number): string {
 }
 
 function packDossier(slides: readonly SlideCaption[], targetUsername: string): string {
-    const labels = slides.map(slide => `Slide ${slide.mediaIndex + 1}: `);
+    const labels = slides.map(slide => `[슬라이드 ${slide.mediaIndex + 1}] `);
     const separatorCharacters = Math.max(0, slides.length - 1);
     const availableCharacters = DOSSIER_CHARACTER_LIMIT
         - labels.reduce((sum, label) => sum + label.length, 0)

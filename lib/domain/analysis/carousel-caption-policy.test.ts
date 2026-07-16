@@ -121,7 +121,7 @@ describe('buildCarouselCaptionPolicy', () => {
             ...result.featureCaptions,
             ...result.partnerCaptions,
         ].map(row => row.evidenceRefId)).size).toBe(7);
-        expect(result.dossier?.text).toContain('Slide 5: @target.user spotted');
+        expect(result.dossier?.text).toContain('[슬라이드 5] @target.user spotted');
         expect(result.dossier?.text.length).toBeLessThanOrEqual(2_000);
     });
 
@@ -154,8 +154,8 @@ describe('buildCarouselCaptionPolicy', () => {
         ]);
         expect(first.partnerCaptions.map(row => row.text)).toEqual(['ABC caption']);
         expect(first.dossier?.text).toBe([
-            'Slide 1: ABC caption',
-            'Slide 4: Second caption',
+            '[슬라이드 1] ABC caption',
+            '[슬라이드 4] Second caption',
         ].join('\n'));
         expect(first).toEqual(second);
     });
@@ -200,6 +200,78 @@ describe('buildCarouselCaptionPolicy', () => {
         expect(result.dossier).toBeNull();
     });
 
+    it('rejects a declared complete carousel above the canonical 20-slide bound', () => {
+        const carousel = completeCarousel(Array.from(
+            { length: 21 },
+            (_, index) => `caption-${index + 1}`
+        ));
+
+        const result = buildCarouselCaptionPolicy({
+            targetUsername: 'target.user',
+            profile: profile([carousel]),
+            featureSelections: [
+                selection('post:carousel:1', 'carousel_context', 'carousel', 1),
+            ],
+            partnerSelections: [
+                selection('post:carousel:0', 'partner_safety_contact', 'carousel', 0),
+            ],
+        });
+
+        expect(result.partnerCaptions).toEqual([]);
+        expect(result.dossier).toBeNull();
+    });
+
+    it('accepts only partner-safety rows and caps aligned captions at 17 in input order', () => {
+        const carousel = completeCarousel(Array.from(
+            { length: 20 },
+            (_, index) => `caption-${index + 1}`
+        ));
+        const validIndexes = Array.from({ length: 20 }, (_, index) => 19 - index);
+        const partnerSelections = [
+            selection('wrong-role', 'carousel_context', 'carousel', 0),
+            ...validIndexes.map(index => selection(
+                `partner:${index}`,
+                'partner_safety_contact',
+                'carousel',
+                index
+            )),
+            selection('wrong-role-tail', 'post_representative', 'carousel', 1),
+        ];
+
+        const result = buildCarouselCaptionPolicy({
+            targetUsername: 'target.user',
+            profile: profile([carousel]),
+            featureSelections: [
+                selection('post:carousel:10', 'carousel_context', 'carousel', 10),
+            ],
+            partnerSelections,
+        });
+
+        expect(result.partnerCaptions.map(row => row.selectionId)).toEqual(
+            validIndexes.slice(0, 17).map(index => `partner:${index}`)
+        );
+    });
+
+    it('builds a complete three-slide dossier without partner rows', () => {
+        const carousel = completeCarousel(['first', 'second', 'third']);
+
+        const result = buildCarouselCaptionPolicy({
+            targetUsername: 'target.user',
+            profile: profile([carousel]),
+            featureSelections: [
+                selection('post:carousel:1', 'carousel_context', 'carousel', 1),
+            ],
+            partnerSelections: [],
+        });
+
+        expect(result.partnerCaptions).toEqual([]);
+        expect(result.dossier?.text).toBe([
+            '[슬라이드 1] first',
+            '[슬라이드 2] second',
+            '[슬라이드 3] third',
+        ].join('\n'));
+    });
+
     it('uses the first partner post when no carousel-context feature selection exists', () => {
         const carousel = completeCarousel(['first', 'second', 'third']);
 
@@ -215,7 +287,32 @@ describe('buildCarouselCaptionPolicy', () => {
         });
 
         expect(result.partnerCaptions.map(row => row.text)).toEqual(['second']);
-        expect(result.dossier?.text).toContain('Slide 3: third');
+        expect(result.dossier?.text).toContain('[슬라이드 3] third');
+    });
+
+    it('prioritizes only an exact extracted target mention for residual characters', () => {
+        const suffix = 'x'.repeat(2_200);
+        const carousel = completeCarousel([
+            `email person@target.user ${suffix}`,
+            `near @target.user2 ${suffix}`,
+            `double @@target.user ${suffix}`,
+            `exact @TARGET.USER ${suffix}`,
+        ]);
+        const result = buildCarouselCaptionPolicy({
+            targetUsername: '  ＠TARGET.USER  ',
+            profile: profile([carousel]),
+            featureSelections: [
+                selection('post:carousel:1', 'carousel_context', 'carousel', 1),
+            ],
+            partnerSelections: [],
+        });
+
+        const excerpts = (result.dossier?.text ?? '').split('\n').map(line => (
+            line.replace(/^\[슬라이드 \d+\] /u, '')
+        ));
+        expect(excerpts[3].length).toBeGreaterThan(excerpts[0].length);
+        expect(excerpts[3].length).toBeGreaterThan(excerpts[1].length);
+        expect(excerpts[3].length).toBeGreaterThan(excerpts[2].length);
     });
 
     it('caps the dossier at 2,000 characters and gives every unique slide an excerpt', () => {
@@ -250,10 +347,10 @@ describe('buildCarouselCaptionPolicy', () => {
         expect(dossier.length).toBeLessThanOrEqual(2_000);
         expect(lines).toHaveLength(20);
         for (const [index, line] of lines.entries()) {
-            expect(line).toMatch(new RegExp(`^Slide ${index + 1}: .+`));
+            expect(line).toMatch(new RegExp(`^\\[슬라이드 ${index + 1}\\] .+`));
         }
-        const firstExcerpt = lines[0].split(': ', 2)[1];
-        const targetExcerpt = lines[19].split(': ', 2)[1];
+        const firstExcerpt = lines[0].replace(/^\[슬라이드 1\] /u, '');
+        const targetExcerpt = lines[19].replace(/^\[슬라이드 20\] /u, '');
         expect(targetExcerpt.length).toBeGreaterThan(firstExcerpt.length);
     });
 });
