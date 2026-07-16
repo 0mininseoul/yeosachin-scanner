@@ -20,9 +20,11 @@ import {
     featureAnalysisModelResponseSchema,
     genderTriage,
     highRiskNarrative,
+    highRiskNarrativeInputSchema,
     highRiskNarrativeModelResponseSchema,
     normalizedAiMediaSelectionSchema,
     partnerSafetyAnalysis,
+    partnerSafetyInputSchema,
     partnerSafetyModelResponseSchema,
     type FeatureAnalysisInput,
     type FeatureAnalysisResult,
@@ -168,6 +170,21 @@ function contactSheet() {
         sourceSelectionIds: ['post:carousel:media:1', 'post:carousel:media:2'],
         width: 388,
         height: 192,
+    };
+}
+
+function partnerCaptions() {
+    return [{
+        evidenceRefId: 'carousel-caption:second-slide',
+        selectionId: 'post:carousel:media:2',
+        text: '  @target.user\nsecond slide text  ',
+    }];
+}
+
+function carouselCaptionDossier() {
+    return {
+        evidenceRefId: 'carousel-dossier:latest-complete-carousel',
+        text: '[슬라이드 1] city walk\n[슬라이드 2] @target.user with candidate.user',
     };
 }
 
@@ -545,6 +562,117 @@ describe('V2 staged AI services', () => {
         });
     });
 
+    it('keeps caption fields optional for old partner and narrative callers', () => {
+        expect(partnerSafetyInputSchema.parse({
+            feature: verifiedFeatureResult(),
+            contactSheet: null,
+        }).partnerCaptions).toEqual([]);
+        expect(highRiskNarrativeInputSchema.parse(narrativeInput()).carouselCaptionDossier)
+            .toBeNull();
+    });
+
+    it('validates bounded unique contact-sheet-aligned partner captions', () => {
+        const base = {
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+            partnerCaptions: partnerCaptions(),
+        };
+        expect(partnerSafetyInputSchema.parse(base).partnerCaptions).toHaveLength(1);
+        expect(() => partnerSafetyInputSchema.parse({
+            ...base,
+            contactSheet: null,
+        })).toThrow('contact sheet');
+        expect(() => partnerSafetyInputSchema.parse({
+            ...base,
+            partnerCaptions: [{
+                ...partnerCaptions()[0],
+                selectionId: 'post:not-in-contact-sheet',
+            }],
+        })).toThrow('contact-sheet');
+        expect(() => partnerSafetyInputSchema.parse({
+            ...base,
+            partnerCaptions: [partnerCaptions()[0], partnerCaptions()[0]],
+        })).toThrow('unique');
+        expect(() => partnerSafetyInputSchema.parse({
+            ...base,
+            partnerCaptions: [
+                partnerCaptions()[0],
+                { ...partnerCaptions()[0], evidenceRefId: 'carousel-caption:other-ref' },
+            ],
+        })).toThrow('unique');
+        expect(() => partnerSafetyInputSchema.parse({
+            ...base,
+            partnerCaptions: Array.from({ length: 18 }, (_, index) => ({
+                evidenceRefId: `caption:${index}`,
+                selectionId: `post:${index}`,
+                text: 'caption',
+            })),
+        })).toThrow();
+        expect(() => partnerSafetyInputSchema.parse({
+            ...base,
+            partnerCaptions: [{
+                ...partnerCaptions()[0],
+                text: 'x'.repeat(2_201),
+            }],
+        })).toThrow();
+        expect(() => partnerSafetyInputSchema.parse({
+            ...base,
+            contactSheet: {
+                ...contactSheet(),
+                sourceSelectionIds: [
+                    'post:carousel:media:1',
+                    'post:carousel:media:2',
+                ],
+            },
+            partnerCaptions: [
+                {
+                    evidenceRefId: 'caption:1',
+                    selectionId: 'post:carousel:media:1',
+                    text: 'x'.repeat(1_001),
+                },
+                {
+                    evidenceRefId: 'caption:2',
+                    selectionId: 'post:carousel:media:2',
+                    text: 'y'.repeat(1_000),
+                },
+            ],
+        })).toThrow('2,000');
+    });
+
+    it('maps untrusted partner captions to the exact visual cell and includes them in identity', async () => {
+        const input = {
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+            partnerCaptions: partnerCaptions(),
+        } as Parameters<typeof partnerSafetyAnalysis>[0];
+        const withoutCaptions = createPartnerSafetyResultIdentity({
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+        });
+        expect(createPartnerSafetyResultIdentity(input)?.inputHash)
+            .not.toBe(withoutCaptions?.inputHash);
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            companionPattern: 'none',
+            partnerEvidence: 'none',
+            exclusionContext: 'none',
+            confidence: 'medium',
+            evidenceSourceSelectionIds: [],
+        }));
+
+        await partnerSafetyAnalysis(input, audit('partnerSafety', input));
+
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('carousel-caption:second-slide');
+        expect(prompt).toContain('"cellNumber":2');
+        expect(prompt).toContain('"selectionId":"post:carousel:media:2"');
+        expect(prompt).toContain('신뢰할 수 없는');
+        expect(prompt).toContain('시각');
+    });
+
     it('uses one contact sheet and records a non-excluded two-person photo as pending weak evidence', async () => {
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,
@@ -618,6 +746,11 @@ describe('V2 staged AI services', () => {
     });
 
     it('falls back to feature-only partner evidence for invalid contact-sheet refs without regenerating', async () => {
+        const input = {
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+            partnerCaptions: partnerCaptions(),
+        } as Parameters<typeof partnerSafetyAnalysis>[0];
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,
             _images: string[],
@@ -627,13 +760,10 @@ describe('V2 staged AI services', () => {
             partnerEvidence: 'weak',
             exclusionContext: 'none',
             confidence: 'medium',
-            evidenceSourceSelectionIds: ['post:not-supplied'],
+            evidenceSourceSelectionIds: ['carousel-caption:second-slide'],
         }));
 
-        const result = await partnerSafetyAnalysis({
-            feature: verifiedFeatureResult(),
-            contactSheet: contactSheet(),
-        }, audit('partnerSafety'));
+        const result = await partnerSafetyAnalysis(input, audit('partnerSafety', input));
 
         expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
         expect(result).toMatchObject({
@@ -684,6 +814,125 @@ describe('V2 staged AI services', () => {
             onBeforeAttempt: hooks.onBeforeAttempt,
             onAttemptTelemetry: hooks.onAttemptTelemetry,
         });
+    });
+
+    it('uses a sanitized carousel caption dossier only as first-line persona evidence', async () => {
+        const input = {
+            ...narrativeInput(),
+            carouselCaptionDossier: carouselCaptionDossier(),
+        } as HighRiskNarrativeInput;
+        expect(createHighRiskNarrativeResultIdentity(input).inputHash)
+            .not.toBe(createHighRiskNarrativeResultIdentity(narrativeInput()).inputHash);
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            lines: [{
+                text: '도시 산책과 사진 연출을 공교롭게도 자주 엮는 꽤 계획적인 계정입니다.',
+                evidenceRefs: ['carousel-dossier:latest-complete-carousel'],
+            }, {
+                text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글의 보자 표현은 공교롭지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+
+        const result = await highRiskNarrative(input, audit('highRiskNarrative', input));
+
+        expect(result.source).toBe('gemini');
+        expect(result.evidenceRefs[0]).toContain('carousel-dossier:latest-complete-carousel');
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('carousel-dossier:latest-complete-carousel');
+        expect(prompt).toContain('[계정명 제거]');
+        expect(prompt).not.toContain('@target.user');
+        expect(prompt).not.toContain('candidate.user');
+        expect(prompt).toContain('페르소나');
+    });
+
+    it('rejects an over-budget dossier and never accepts its ref on the interaction line', async () => {
+        expect(() => highRiskNarrativeInputSchema.parse({
+            ...narrativeInput(),
+            carouselCaptionDossier: {
+                ...carouselCaptionDossier(),
+                text: 'x'.repeat(2_001),
+            },
+        })).toThrow();
+
+        const input = {
+            ...narrativeInput(),
+            carouselCaptionDossier: carouselCaptionDossier(),
+        } as HighRiskNarrativeInput;
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            lines: [{
+                text: '도시 산책과 사진 연출을 공교롭게도 자주 엮는 꽤 계획적인 계정입니다.',
+                evidenceRefs: ['carousel-dossier:latest-complete-carousel'],
+            }, {
+                text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글의 보자 표현은 공교롭지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'carousel-dossier:latest-complete-carousel',
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+
+        const result = await highRiskNarrative(input, audit('highRiskNarrative', input));
+
+        expect(result.source).toBe('safe_fallback');
+        expect(result.evidenceRefs[0]).toContain('carousel-dossier:latest-complete-carousel');
+        expect(result.evidenceRefs[1]).not.toContain('carousel-dossier:latest-complete-carousel');
+    });
+
+    it('rejects a dossier ref that collides with any supplied evidence namespace', () => {
+        for (const evidenceRefId of [
+            'coverage:target-interactions',
+            'caption:1',
+            'post:1:thumbnail',
+            'like:candidate-to-target',
+            'like:target-to-candidate',
+            'comment:1',
+            'target-post:1',
+            'profile:bio',
+        ]) {
+            expect(() => highRiskNarrativeInputSchema.parse({
+                ...narrativeInput(),
+                carouselCaptionDossier: {
+                    ...carouselCaptionDossier(),
+                    evidenceRefId,
+                },
+            }), evidenceRefId).toThrow('collide');
+        }
+    });
+
+    it('rejects dossier-only input that has no style fact after sanitization', async () => {
+        const input = {
+            ...narrativeInput(),
+            bio: null,
+            media: [],
+            captions: [],
+            carouselCaptionDossier: {
+                evidenceRefId: 'carousel-dossier:empty-after-sanitization',
+                text: '<b>',
+            },
+        } as HighRiskNarrativeInput;
+
+        expect(() => createHighRiskNarrativeResultIdentity(input)).toThrow('sanitized');
+        await expect(highRiskNarrative(
+            input,
+            {} as StagedAiAuditContext
+        )).rejects.toThrow('sanitized');
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
     it('uses one deterministic safe fallback without a second generation for invalid output', async () => {

@@ -19,6 +19,7 @@ export type InstagramPostMediaType = 'image' | 'video' | 'reel';
 export interface InstagramPostMediaItem {
     id?: string;
     type: InstagramPostMediaType;
+    caption?: string;
     imageUrl?: string;
     thumbnailUrl?: string;
     videoUrl?: string;

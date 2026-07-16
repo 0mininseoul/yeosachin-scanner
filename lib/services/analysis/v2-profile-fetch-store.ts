@@ -5,6 +5,7 @@ import {
     type ProfileFetchOutcome,
 } from '@/lib/domain/analysis/profile-fetch-outcome';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import { INSTAGRAM_MENTION_MAX_COUNT } from '@/lib/services/instagram/username';
 import { z } from 'zod';
 
 const MAX_PROFILE_BATCH_SIZE = 30;
@@ -32,6 +33,7 @@ const boundedMediaIdSchema = z.string().trim().min(1).max(255);
 export const analysisV2CheckpointMediaItemSchema = z.object({
     id: boundedMediaIdSchema.optional(),
     type: z.enum(['image', 'video', 'reel']),
+    caption: z.string().max(2_200).optional(),
     imageUrl: boundedUrlSchema.optional(),
     thumbnailUrl: boundedUrlSchema.optional(),
     videoUrl: boundedUrlSchema.optional(),
@@ -62,7 +64,7 @@ export const analysisV2CheckpointPostSchema = z.object({
     commentsCount: boundedCountSchema,
     timestamp: z.string().datetime({ offset: true }),
     taggedUsers: z.array(usernameSchema).max(50),
-    mentionedUsers: z.array(usernameSchema).max(50),
+    mentionedUsers: z.array(usernameSchema).max(INSTAGRAM_MENTION_MAX_COUNT),
 }).strict().superRefine((value, context) => {
     if (value.type !== 'carousel' && (
         value.mediaItems !== undefined
