@@ -7,10 +7,21 @@ import {
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
 
-// Kakao / Google OAuth buttons, shared by the /login page and the login modal.
+// Kakao / Google OAuth buttons, shared by the /login 페이지·로그인 모달·회원가입 페이지.
 // 로그인 버튼만 필요하므로 full useAuth(유저 조회/구독) 대신 supabase를 직접 호출한다.
-export function AuthButtons({ redirectTo = '/analyze' }: { redirectTo?: string }) {
+export function AuthButtons({
+    redirectTo = '/analyze',
+    disabled = false,
+    label = 'login',
+}: {
+    redirectTo?: string;
+    disabled?: boolean;
+    label?: 'login' | 'signup';
+}) {
     const [pending, setPending] = useState<'kakao' | 'google' | null>(null);
+    const busy = disabled || pending !== null;
+    const kakaoText = label === 'signup' ? '카카오로 회원가입' : '카카오로 3초 만에 시작하기';
+    const googleText = label === 'signup' ? 'Google로 회원가입' : 'Google로 3초 만에 시작하기';
 
     const signIn = async (provider: 'kakao' | 'google') => {
         setPending(provider);
@@ -44,18 +55,18 @@ export function AuthButtons({ redirectTo = '/analyze' }: { redirectTo?: string }
         <div className="space-y-2.5">
             <button
                 onClick={() => signIn('kakao')}
-                disabled={pending !== null}
+                disabled={busy}
                 className="flex w-full items-center justify-center gap-2.5 bg-[#FEE500] px-4 py-3.5 text-[14px] font-bold text-[#3C1E1E] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M12 3C6.48 3 2 6.58 2 11c0 2.83 1.89 5.31 4.71 6.73l-.97 3.59c-.11.41.32.73.69.51l4.09-2.61c.49.05.99.08 1.48.08 5.52 0 10-3.58 10-8s-4.48-8-10-8z" />
                 </svg>
-                카카오로 3초 만에 시작하기
+                {kakaoText}
             </button>
 
             <button
                 onClick={() => signIn('google')}
-                disabled={pending !== null}
+                disabled={busy}
                 className="flex w-full items-center justify-center gap-2.5 border border-line-2 bg-paper px-4 py-3.5 text-[14px] font-bold text-[#1f1c1a] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
                 <svg width="18" height="18" viewBox="0 0 24 24">
@@ -64,7 +75,7 @@ export function AuthButtons({ redirectTo = '/analyze' }: { redirectTo?: string }
                     <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
                     <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
                 </svg>
-                Google로 3초 만에 시작하기
+                {googleText}
             </button>
         </div>
     );

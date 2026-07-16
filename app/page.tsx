@@ -184,12 +184,20 @@ export default function LandingPage() {
               </button>
             </>
           ) : (
-            <button
-              onClick={() => setLoginOpen(true)}
-              className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
-            >
-              로그인
-            </button>
+            <>
+              <button
+                onClick={() => setLoginOpen(true)}
+                className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
+              >
+                로그인
+              </button>
+              <button
+                onClick={() => router.push('/signup')}
+                className="border border-blood bg-blood px-3.5 py-1.5 text-[13px] font-bold text-white transition-colors hover:bg-blood-2"
+              >
+                회원가입
+              </button>
+            </>
           )
         }
       />

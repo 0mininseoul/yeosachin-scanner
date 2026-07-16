@@ -70,6 +70,13 @@ export function LoginModal({
                     </Link>
                     에 동의하게 됩니다.
                 </p>
+
+                <p className="mt-3 text-center text-[12px] text-fg-mute">
+                    아직 회원이 아니신가요?{' '}
+                    <Link href="/signup" className="font-semibold text-blood underline underline-offset-2 hover:text-blood-2">
+                        회원가입
+                    </Link>
+                </p>
             </div>
         </div>
     );
