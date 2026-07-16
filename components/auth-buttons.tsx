@@ -34,10 +34,17 @@ export function AuthButtons({
                 'next',
                 `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`
             );
+            // 카카오는 승인된 동의항목(이름·성별·출생연도·전화번호 등)을 받기 위해 scope를 명시.
+            // 구글은 기본 scope(email·profile) 사용.
+            const scopes =
+                provider === 'kakao'
+                    ? 'account_email profile_nickname profile_image name gender birthyear phone_number'
+                    : undefined;
             const { error } = await supabase.auth.signInWithOAuth({
                 provider,
                 options: {
                     redirectTo: callbackUrl.toString(),
+                    scopes,
                 },
             });
             if (error) {
