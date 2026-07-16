@@ -22,7 +22,7 @@ export interface AiStagePolicy {
     schemaVersion: number;
 }
 
-export const AI_STAGE_POLICY_VERSION = 'ai-stage-policy-v2.3';
+export const AI_STAGE_POLICY_VERSION = 'ai-stage-policy-v2.4';
 /**
  * This limit is enforced only inside one server process. Deployment-wide Vertex AI quota and
  * admission control remain an external pre-open gate for the V2 worker fleet.
@@ -39,8 +39,8 @@ export const AI_STAGE_POLICIES = Object.freeze({
         feedImageLimit: 4,
         maxOutputTokens: 512,
         concurrency: 10,
-        promptVersion: 'gender-triage-v1',
-        schemaVersion: 1,
+        promptVersion: 'gender-triage-v2',
+        schemaVersion: 2,
     }),
     featureAnalysis: Object.freeze({
         model: 'gemini-3.1-flash-lite',
@@ -50,8 +50,8 @@ export const AI_STAGE_POLICIES = Object.freeze({
         feedImageLimit: 10,
         maxOutputTokens: 2_048,
         concurrency: 8,
-        promptVersion: 'feature-analysis-v1',
-        schemaVersion: 1,
+        promptVersion: 'feature-analysis-v2',
+        schemaVersion: 2,
     }),
     partnerSafety: Object.freeze({
         model: 'gemini-3.1-flash-lite',

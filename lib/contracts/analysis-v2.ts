@@ -653,6 +653,7 @@ export const analysisResultSummaryV1Schema = z.object({
     successfullyScreenedMutuals: z.number().int().nonnegative(),
     fetchUnavailableMutuals: z.number().int().nonnegative(),
     mediaUnavailableMutuals: z.number().int().nonnegative(),
+    analysisUnavailableMutuals: z.number().int().nonnegative().default(0),
     notScreenedMutuals: z.number().int().nonnegative(),
     exclusionApplied: z.boolean(),
     scorePolicyVersion: z.literal(RISK_POLICY_VERSION),
@@ -722,6 +723,7 @@ export const analysisResultSummaryV1Schema = z.object({
         value.successfullyScreenedMutuals
             + value.fetchUnavailableMutuals
             + value.mediaUnavailableMutuals
+            + value.analysisUnavailableMutuals
         !== value.screenedMutuals
     ) {
         context.addIssue({

@@ -151,6 +151,117 @@ describe('analysis V2 AI/scoring stage store', () => {
         expect(loaded.every(row => row.mediaCoverage.selectedCount === 0)).toBe(true);
     });
 
+    it('round-trips an analysis-unavailable profile without AI or media data', async () => {
+        const outcome = {
+            candidateId: 'candidate:analysis-unavailable',
+            instagramId: 'analysis.unavailable',
+            status: 'analysis_unavailable' as const,
+            unavailableReason: 'ai_response' as const,
+            profile: {
+                username: 'analysis.unavailable',
+                fullName: '분석 불가 계정',
+                followersCount: 10,
+                followingCount: 20,
+                postsCount: 0,
+                isPrivate: false,
+                isVerified: false,
+            },
+            triage: null,
+            feature: null,
+            normalizedSelectionIds: [],
+            mediaCoverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            captions: [],
+            genderOperationKey: null,
+            genderResultHash: null,
+            featureOperationKey: null,
+            featureResultHash: null,
+            mediaBundlePersisted: false,
+        };
+        const envelope = {
+            stageKind: 'profile_ai_batch',
+            batch: 0,
+            revision: 1,
+            resultHash: digest('analysis-unavailable'),
+            itemCount: 1,
+            payload: { outcomes: [outcome] },
+        };
+        const fake = clientWith(
+            { data: envelope, error: null },
+            { data: [envelope], error: null }
+        );
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [outcome],
+        })).resolves.toEqual({
+            revision: 1,
+            resultHash: digest('analysis-unavailable'),
+            itemCount: 1,
+        });
+        await expect(store.loadProfileAiOutcomes(claim())).resolves.toEqual([outcome]);
+        expect(fake.rpc).toHaveBeenNthCalledWith(
+            1,
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({ p_payload: { outcomes: [outcome] } })
+        );
+    });
+
+    it('rejects inconsistent analysis-unavailable outcomes before persistence', async () => {
+        const base = {
+            candidateId: 'candidate:analysis-unavailable',
+            instagramId: 'analysis.unavailable',
+            status: 'analysis_unavailable' as const,
+            unavailableReason: 'ai_response' as const,
+            profile: {
+                username: 'analysis.unavailable',
+                followersCount: 10,
+                followingCount: 20,
+                postsCount: 0,
+                isPrivate: false,
+                isVerified: false,
+            },
+            triage: null,
+            feature: null,
+            normalizedSelectionIds: [],
+            mediaCoverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            captions: [],
+            genderOperationKey: null,
+            genderResultHash: null,
+            featureOperationKey: null,
+            featureResultHash: null,
+            mediaBundlePersisted: false,
+        };
+
+        for (const inconsistent of [
+            { ...base, unavailableReason: 'profile_fetch' as const },
+            { ...base, profile: null },
+            {
+                ...base,
+                normalizedSelectionIds: ['profile:analysis.unavailable'],
+                mediaCoverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            },
+            {
+                ...base,
+                captions: [{
+                    evidenceRefId: 'caption:one',
+                    selectionId: 'profile:analysis.unavailable',
+                    text: 'retained caption',
+                }],
+            },
+        ]) {
+            const fake = clientWith();
+            const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+            await expect(store.checkpointProfileAiBatch({
+                ...claim('track:profile-ai:batch:0'),
+                batch: 0,
+                outcomes: [inconsistent],
+            })).rejects.toThrow();
+            expect(fake.rpc).not.toHaveBeenCalled();
+        }
+    });
+
     it('maps immutable replay and lease failures to distinct typed errors', async () => {
         const conflict = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
             data: null,

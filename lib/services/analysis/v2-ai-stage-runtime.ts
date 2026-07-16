@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
 import {
     analyzePrivateAccountNames,
     createPrivateNameBatchResponseSchema,
@@ -39,6 +40,7 @@ export interface AnalysisV2AiJobFence {
     requestId: string;
     jobKey: string;
     claimToken: string;
+    aiStagePolicyVersion: string;
 }
 
 export interface AnalysisV2AuditedResult<T> {
@@ -120,11 +122,20 @@ function adapter<T>(
     resultIdentity: AnalysisV2AiResultIdentity,
     resultSchema: z.ZodType<T>
 ): AnalysisV2AiAuditAdapter<T> {
+    const { requestId, jobKey, claimToken } = fence;
     return createAudit({
-        ...fence,
+        requestId,
+        jobKey,
+        claimToken,
         resultIdentity,
         resultSchema,
     });
+}
+
+function assertAiStagePolicyVersion(fence: AnalysisV2AiJobFence): void {
+    if (fence.aiStagePolicyVersion !== AI_STAGE_POLICY_VERSION) {
+        throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
+    }
 }
 
 /**
@@ -143,6 +154,7 @@ export function createDurableAnalysisV2AiStageRuntime(
 
     return {
         async gender(input, fence) {
+            assertAiStagePolicyVersion(fence);
             const identity = createGenderTriageResultIdentity(input);
             const audit = adapter(
                 createAudit,
@@ -160,6 +172,7 @@ export function createDurableAnalysisV2AiStageRuntime(
         },
 
         async features(input, fence) {
+            assertAiStagePolicyVersion(fence);
             const identity = createFeatureAnalysisResultIdentity(input);
             const audit = adapter(
                 createAudit,
@@ -177,6 +190,7 @@ export function createDurableAnalysisV2AiStageRuntime(
         },
 
         async privateNames(input, fence) {
+            assertAiStagePolicyVersion(fence);
             let operationKey: string | null = null;
             let envelopeHash: string | null = null;
             let checkpointed = false;
@@ -238,6 +252,7 @@ export function createDurableAnalysisV2AiStageRuntime(
         },
 
         async partnerSafety(input, fence) {
+            assertAiStagePolicyVersion(fence);
             const identity = createPartnerSafetyResultIdentity(input);
             if (!identity) {
                 const result = await runPartnerSafety(input);
@@ -266,6 +281,7 @@ export function createDurableAnalysisV2AiStageRuntime(
         },
 
         async narrative(input, fence) {
+            assertAiStagePolicyVersion(fence);
             const identity = createHighRiskNarrativeResultIdentity(input);
             const audit = adapter(
                 createAudit,

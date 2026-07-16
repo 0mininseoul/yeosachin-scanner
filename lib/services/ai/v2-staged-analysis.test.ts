@@ -4,13 +4,15 @@ const mocks = vi.hoisted(() => ({
     analyzeWithGemini: vi.fn(),
 }));
 
-vi.mock('./gemini', () => ({
+vi.mock('./gemini', async importOriginal => ({
+    ...await importOriginal<typeof import('./gemini')>(),
     analyzeWithGemini: mocks.analyzeWithGemini,
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import { parseSafePublicRiskNarrative } from '@/lib/services/analysis/narrative-privacy';
+import { zodToGeminiResponseJsonSchema } from './gemini';
 import {
     createFeatureAnalysisResultIdentity,
     createGenderTriageResultIdentity,
@@ -268,7 +270,15 @@ describe('V2 staged AI services', () => {
         const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
         expect(images).toHaveLength(5);
         expect(prompt).toContain('multiple_or_unclear');
+        expect(prompt).toContain('중복 selectionId');
+        expect(prompt).toContain('unknown, low, not_visible');
         expect(prompt).not.toContain('post:5:thumbnail');
+        expect(zodToGeminiResponseJsonSchema(
+            options.schema as Parameters<typeof zodToGeminiResponseJsonSchema>[0]
+        )).toMatchObject({
+            type: 'object',
+            properties: { evidenceSelectionIds: { type: 'array' } },
+        });
         expect(options).toMatchObject({
             stage: 'genderTriage',
             requestId,
@@ -343,7 +353,7 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
-    it('rejects hallucinated triage evidence and requires both durable attempt hooks', async () => {
+    it('filters and deduplicates hallucinated triage evidence before routing', async () => {
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,
             _images: string[],
@@ -352,12 +362,49 @@ describe('V2 staged AI services', () => {
             inferredGender: 'male',
             confidence: 'high',
             ownerConsistency: 'same_person',
-            evidenceSelectionIds: ['post:not-supplied'],
+            evidenceSelectionIds: [
+                'profile:candidate',
+                'profile:candidate',
+                'post:not-supplied',
+            ],
         }));
 
-        await expect(genderTriage({ media: media() }, audit())).rejects.toThrow(
-            'not supplied to this stage'
-        );
+        const result = await genderTriage({ media: media() }, audit());
+
+        expect(result.assessment).toEqual({
+            inferredGender: 'male',
+            confidence: 'medium',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate'],
+        });
+        expect(result.routingDecision).toBe('route_to_feature_analysis');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
+    it('neutralizes triage when no supplied evidence remains', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['post:not-supplied', 'post:not-supplied'],
+        }));
+
+        const result = await genderTriage({ media: media() }, audit());
+
+        expect(result.assessment).toEqual({
+            inferredGender: 'unknown',
+            confidence: 'low',
+            ownerConsistency: 'not_visible',
+            evidenceSelectionIds: [],
+        });
+        expect(result.routingDecision).toBe('route_to_feature_analysis');
+    });
+
+    it('requires both durable attempt hooks', async () => {
         await expect(genderTriage({ media: media() }, {
             ...audit(),
             onBeforeAttempt: undefined,
@@ -368,7 +415,7 @@ describe('V2 staged AI services', () => {
         })).rejects.toThrow('operationKey');
     });
 
-    it('rejects high-confidence gender based on only one visual item', async () => {
+    it('downgrades high-confidence gender based on only one visual item', async () => {
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,
             _images: string[],
@@ -380,9 +427,11 @@ describe('V2 staged AI services', () => {
             evidenceSelectionIds: ['profile:candidate'],
         }));
 
-        await expect(genderTriage({ media: media() }, audit())).rejects.toThrow(
-            'at least two distinct visual evidence items'
-        );
+        const result = await genderTriage({ media: media() }, audit());
+
+        expect(result.assessment.confidence).toBe('medium');
+        expect(result.routingDecision).toBe('route_to_feature_analysis');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
     });
 
     it('runs feature analysis with medium-stage policy inputs and verifies an unconflicted woman', async () => {
@@ -402,6 +451,30 @@ describe('V2 staged AI services', () => {
         expect(images).toHaveLength(11);
         expect(prompt).toContain('여행과 일상 기록');
         expect(prompt).toContain('caption:10');
+        expect(prompt).toContain('근거가 없으면 보수적인 중립값');
+        expect(prompt).toContain('서로 모순되게 반환하지 마세요');
+        expect(prompt).toContain(
+            'gender=unknown, genderConfidence=low, ownerConsistency=not_visible'
+        );
+        expect(prompt).toContain(
+            'businessClassification=uncertain, businessConfidence=low'
+        );
+        expect(prompt).toContain(
+            'marriageEvidence=none, partnerEvidence=none, partnerExclusionContext=none'
+        );
+        expect(prompt).toContain('appearanceGrade=1, exposureScore=0');
+        expect(prompt).toContain(
+            '공개된 프로필과 게시물을 바탕으로 보수적으로 분석한 계정입니다.'
+        );
+        expect(zodToGeminiResponseJsonSchema(
+            options.schema as Parameters<typeof zodToGeminiResponseJsonSchema>[0]
+        )).toMatchObject({
+            type: 'object',
+            properties: {
+                evidenceSelectionIds: { type: 'object' },
+                oneLineOverview: { type: 'string' },
+            },
+        });
         expect(options).toMatchObject({
             stage: 'featureAnalysis',
             requestId,
@@ -469,16 +542,29 @@ describe('V2 staged AI services', () => {
             .toBe('unresolved_stage_conflict');
     });
 
-    it('keeps low-confidence feature gender unresolved and rejects unsupported evidence IDs', async () => {
+    it('downgrades single-item feature gender and drops unsupported evidence IDs', async () => {
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
             _images: string[],
             options: { schema: { parse(value: unknown): unknown } }
-        ) => options.schema.parse(featureResponse({ genderConfidence: 'medium' })));
-        expect((await featureAnalysis(
+        ) => options.schema.parse(featureResponse({
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                gender: [
+                    'profile:candidate',
+                    'profile:candidate',
+                    'post:not-supplied',
+                ],
+            },
+        })));
+        const downgraded = await featureAnalysis(
             featureInput(),
             audit('featureAnalysis')
-        )).finalGenderDecision).toBe('unresolved');
+        );
+        expect(downgraded.features.genderConfidence).toBe('medium');
+        expect(downgraded.features.evidenceSelectionIds.gender)
+            .toEqual(['profile:candidate']);
+        expect(downgraded.finalGenderDecision).toBe('unresolved');
 
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
@@ -490,9 +576,9 @@ describe('V2 staged AI services', () => {
                 appearance: ['post:not-supplied'],
             },
         })));
-        await expect(featureAnalysis(featureInput(), audit('featureAnalysis'))).rejects.toThrow(
-            'not supplied to this stage'
-        );
+        const normalized = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+        expect(normalized.features.evidenceSelectionIds.appearance).toEqual([]);
+        expect(normalized.features.appearanceGrade).toBe(1);
     });
 
     it('rejects contradictory partner signals and internal metrics in one-line overviews', () => {
@@ -509,36 +595,259 @@ describe('V2 staged AI services', () => {
         }))).toThrow('internals');
     });
 
-    it('requires supplied visual evidence before score or attenuation signals can be consumed', async () => {
-        for (const response of [
-            featureResponse({
-                evidenceSelectionIds: { ...featureResponse().evidenceSelectionIds, appearance: [] },
-            }),
-            featureResponse({
-                evidenceSelectionIds: { ...featureResponse().evidenceSelectionIds, exposure: [] },
-            }),
-            featureResponse({
-                businessClassification: 'business',
-                evidenceSelectionIds: { ...featureResponse().evidenceSelectionIds, business: [] },
-            }),
-            featureResponse({
-                partnerEvidence: 'strong',
+    it('normalizes unsupported feature evidence and unsafe claims to strict grounded values', async () => {
+        const response = featureResponse({
+            appearanceGrade: 5,
+            exposureScore: 5,
+            businessClassification: 'business',
+            businessConfidence: 'high',
+            marriageEvidence: 'strong',
+            partnerEvidence: 'strong',
+            partnerExclusionContext: 'older_relative',
+            evidenceSelectionIds: {
+                gender: [
+                    'profile:candidate',
+                    'profile:candidate',
+                    'post:1:thumbnail',
+                    'post:not-supplied',
+                ],
+                appearance: ['post:not-supplied'],
+                exposure: [],
+                business: ['post:not-supplied'],
+                marriagePartner: [
+                    'post:2:thumbnail',
+                    'post:2:thumbnail',
+                    'post:not-supplied',
+                ],
+            },
+            oneLineOverview: '고위험 점수 상위 계정입니다.',
+        });
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(response));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toEqual({
+            ...featureResponse(),
+            appearanceGrade: 1,
+            exposureScore: 0,
+            businessClassification: 'uncertain',
+            businessConfidence: 'low',
+            marriageEvidence: 'strong',
+            partnerEvidence: 'strong',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: {
+                gender: ['profile:candidate', 'post:1:thumbnail'],
+                appearance: [],
+                exposure: [],
+                business: [],
+                marriagePartner: ['post:2:thumbnail'],
+            },
+            oneLineOverview: '공개된 프로필과 게시물을 바탕으로 보수적으로 분석한 계정입니다.',
+        });
+        expect(() => featureAnalysisModelResponseSchema.parse(result.features)).not.toThrow();
+        expect(result.finalGenderDecision).toBe('verified_female');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
+    it('preserves grounded relationship signals and drops a contradictory exclusion', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            marriageEvidence: 'possible',
+            partnerEvidence: 'weak',
+            partnerExclusionContext: 'group_or_unclear',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:2:thumbnail'],
+            },
+        })));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toMatchObject({
+            marriageEvidence: 'possible',
+            partnerEvidence: 'weak',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: {
+                marriagePartner: ['post:2:thumbnail'],
+            },
+        });
+        expect(() => featureAnalysisModelResponseSchema.parse(result.features)).not.toThrow();
+    });
+
+    it('neutralizes missing appearance and exposure evidence for uncertain owners', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            genderConfidence: 'medium',
+            ownerConsistency: 'multiple_or_unclear',
+            appearanceGrade: 5,
+            exposureScore: 5,
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                appearance: ['post:not-supplied'],
+                exposure: [],
+            },
+        })));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toMatchObject({
+            genderConfidence: 'medium',
+            ownerConsistency: 'multiple_or_unclear',
+            appearanceGrade: 1,
+            exposureScore: 0,
+            evidenceSelectionIds: { appearance: [], exposure: [] },
+        });
+        expect(result.finalGenderDecision).toBe('unresolved');
+    });
+
+    it('neutralizes uncertain relationship fields when no valid evidence remains', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            marriageEvidence: 'uncertain',
+            partnerEvidence: 'uncertain',
+            partnerExclusionContext: 'older_relative',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:not-supplied'],
+            },
+        })));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toMatchObject({
+            marriageEvidence: 'none',
+            partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: { marriagePartner: [] },
+        });
+    });
+
+    it('neutralizes uncertain relationship fields after clearing valid IDs with no signal', async () => {
+        let checkpointedFeatures: FeatureAnalysisResult['features'] | null = null;
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => {
+            checkpointedFeatures = options.schema.parse(featureResponse({
+                marriageEvidence: 'uncertain',
+                partnerEvidence: 'uncertain',
+                partnerExclusionContext: 'none',
                 evidenceSelectionIds: {
                     ...featureResponse().evidenceSelectionIds,
-                    marriagePartner: [],
+                    marriagePartner: ['post:2:thumbnail'],
                 },
-            }),
-        ]) {
-            mocks.analyzeWithGemini.mockImplementationOnce(async (
-                _prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } }
-            ) => options.schema.parse(response));
-            await expect(featureAnalysis(
-                featureInput(),
-                audit('featureAnalysis')
-            )).rejects.toThrow('evidence');
-        }
+            })) as FeatureAnalysisResult['features'];
+            return checkpointedFeatures;
+        });
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(checkpointedFeatures).toMatchObject({
+            marriageEvidence: 'none',
+            partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: { marriagePartner: [] },
+        });
+        expect(result.features).toMatchObject({
+            marriageEvidence: 'none',
+            partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: { marriagePartner: [] },
+        });
+        expect(() => featureAnalysisModelResponseSchema.parse(result.features)).not.toThrow();
+    });
+
+    it('neutralizes unsupported relationship and gender signals without fabricating evidence', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            gender: 'female',
+            genderConfidence: 'high',
+            ownerConsistency: 'same_person',
+            marriageEvidence: 'strong',
+            partnerEvidence: 'weak',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                gender: ['post:not-supplied'],
+                appearance: [],
+                exposure: [],
+                marriagePartner: ['post:not-supplied'],
+            },
+        })));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toMatchObject({
+            gender: 'unknown',
+            genderConfidence: 'low',
+            ownerConsistency: 'not_visible',
+            appearanceGrade: 1,
+            exposureScore: 0,
+            marriageEvidence: 'none',
+            partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: {
+                gender: [],
+                marriagePartner: [],
+            },
+        });
+        expect(result.finalGenderDecision).toBe('unresolved');
+    });
+
+    it('clears relationship IDs when no signal exists and leaves a valid response unchanged', async () => {
+        const noSignal = featureResponse({
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:2:thumbnail'],
+            },
+        });
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(noSignal));
+        expect((await featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis')
+        )).features.evidenceSelectionIds.marriagePartner).toEqual([]);
+
+        const valid = featureResponse();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(valid));
+        expect((await featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis')
+        )).features).toEqual(valid);
+    });
+
+    it('still rejects malformed structural feature responses without another generation', async () => {
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+        ));
+
+        await expect(featureAnalysis(featureInput(), audit('featureAnalysis'))).rejects.toThrow(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR'
+        );
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
     });
 
     it('skips partner-safety generation when no contact sheet exists and preserves feature evidence', async () => {

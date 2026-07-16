@@ -155,7 +155,8 @@ export type GeminiAttemptDisposition =
     | 'success'
     | 'rate_limited'
     | 'ambiguous'
-    | 'rejected';
+    | 'rejected'
+    | 'response_rejected';
 
 export interface GeminiRequestTelemetry {
     tokenUsage: TokenUsage | null;
@@ -820,7 +821,7 @@ export async function analyzeWithGemini<T>(
                 estimatedCostUsd: costEstimate?.totalCostUsd ?? null,
                 attempt: attemptNumber,
                 retryCount: attemptNumber - 1,
-                disposition: completionError ? 'rejected' : 'success',
+                disposition: completionError ? 'response_rejected' : 'success',
                 finishReason,
             };
 

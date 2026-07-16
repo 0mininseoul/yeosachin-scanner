@@ -50,4 +50,17 @@ describe('analysis V2 worker error codes', () => {
             retryable: false,
         });
     });
+
+    it.each([
+        ['ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent', false],
+        ['ANALYSIS_V2_AI_STAGE_POLICY_VALIDATION_ERROR', 'permanent', false],
+        ['ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR', 'transient', true],
+    ] as const)('classifies the AI policy fence code %s', (code, disposition, retryable) => {
+        expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+            code,
+            disposition,
+            retryable,
+        });
+    });
 });

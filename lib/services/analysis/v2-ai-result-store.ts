@@ -5,6 +5,9 @@ import type {
     GeminiAttemptTelemetry,
 } from '@/lib/services/ai/gemini';
 import {
+    AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
+} from '@/lib/services/ai/gemini-generation-policy';
+import {
     analysisV2AiAttemptStore,
     type AnalysisV2AiAttemptRecord,
     type AnalysisV2AiAttemptReservation,
@@ -1055,6 +1058,28 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     };
                 }
 
+                const attempts = await attemptStore.loadOperation({
+                    requestId: request.data.requestId,
+                    operationKey: resultIdentity.operationKey,
+                });
+                if (attempts.some(attempt => (
+                    !attemptMatchesResultIdentity(attempt, request.data.jobKey, resultIdentity)
+                ))) {
+                    throw new Error(
+                        'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: operation metadata drift.'
+                    );
+                }
+                if (attempts.slice(0, -1).some(attempt => attempt.status !== 'rate_limited')) {
+                    throw new AnalysisV2AiResultReplayBlockedError();
+                }
+                const last = attempts.at(-1);
+                if (last?.status === 'response_rejected') {
+                    terminal = true;
+                    throw new Error(
+                        `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} durable response rejection.`
+                    );
+                }
+
                 if (resultIdentity.cacheScope === 'global_ttl') {
                     const cached = await resultStore.checkpointGlobalHit({
                         requestId: request.data.requestId,
@@ -1074,21 +1099,6 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     }
                 }
 
-                const attempts = await attemptStore.loadOperation({
-                    requestId: request.data.requestId,
-                    operationKey: resultIdentity.operationKey,
-                });
-                if (attempts.some(attempt => (
-                    !attemptMatchesResultIdentity(attempt, request.data.jobKey, resultIdentity)
-                ))) {
-                    throw new Error(
-                        'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: operation metadata drift.'
-                    );
-                }
-                if (attempts.slice(0, -1).some(attempt => attempt.status !== 'rate_limited')) {
-                    throw new AnalysisV2AiResultReplayBlockedError();
-                }
-                const last = attempts.at(-1);
                 if (!last) {
                     expectedAttempt = 1;
                 } else if (last.status === 'rate_limited' && last.attempt < 4) {

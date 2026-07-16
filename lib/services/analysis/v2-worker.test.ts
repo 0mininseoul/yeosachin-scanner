@@ -23,6 +23,7 @@ import {
     ANALYSIS_V2_JOB_MAX_ATTEMPTS,
     AnalysisV2JobExecutionError,
     classifyAnalysisV2JobFailure,
+    executeAnalysisV2DagJob,
     executeAnalysisV2FoundationJob,
     finalizeAnalysisV2TerminalFailure,
     processAnalysisV2TaskDelivery as processAnalysisV2TaskDeliveryImpl,
@@ -179,6 +180,41 @@ function progressReporter(): AnalysisV2ProgressReporter {
 }
 
 describe('analysis V2 durable DAG worker', () => {
+    it('blocks a cross-version AI stage before invoking its executor', async () => {
+        const relationshipState: AnalysisV2DagState = {
+            ...baseState(),
+            relationships: relationshipManifest(),
+        };
+        const fetchJob = buildAnalysisV2DagPlan(requestId, relationshipState).jobs
+            .find(job => job.jobKey === 'track:profiles:batch:0');
+        if (!fetchJob) throw new Error('Missing profile fetch fixture job');
+        const initial: AnalysisV2DagState = {
+            ...relationshipState,
+            profileFetchBatches: [{
+                batch: 0,
+                itemCount: relationshipState.relationships!.profileBatches[0]!.itemCount,
+                producerInputHash: fetchJob.inputHash,
+                revision: 1,
+                resultHash: digest('profile-fetch-result:0'),
+            }],
+        };
+        const profileAiClaim = claimFor(initial, 'track:profile-ai:batch:0');
+        const executor = vi.fn();
+        const loadAiStagePolicyVersion = vi.fn(async () => 'ai-stage-policy-v2.3');
+
+        await expect(executeAnalysisV2DagJob(profileAiClaim, {
+            stateStore: stateStore(initial),
+            executors: { profile_ai: executor },
+            aiPolicyStore: { loadAiStagePolicyVersion },
+        })).rejects.toMatchObject({
+            code: 'ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH',
+            disposition: 'permanent',
+        });
+
+        expect(loadAiStagePolicyVersion).toHaveBeenCalledWith(requestId);
+        expect(executor).not.toHaveBeenCalled();
+    });
+
     it('confirms provider cleanup before invoking the request failure RPC', async () => {
         const order: string[] = [];
         const prepareProviderRuns = vi.fn(async input => {

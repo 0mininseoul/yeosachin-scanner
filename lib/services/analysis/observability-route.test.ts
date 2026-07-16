@@ -94,6 +94,7 @@ function v2Payload() {
                 notScreenedMutuals: 0,
                 fetchUnavailableCount: 2,
                 mediaUnavailableCount: 1,
+                analysisUnavailableCount: 0,
             },
         },
         jobs: [{

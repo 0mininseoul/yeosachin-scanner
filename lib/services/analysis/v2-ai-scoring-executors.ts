@@ -16,6 +16,7 @@ import {
     type AnalysisImagePreparationFailureDisposition,
     type AnalysisImagePreparationFailureReason,
 } from '@/lib/services/ai/image-preprocessing';
+import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import type {
     FeatureAnalysisResult,
     GenderTriageResult,
@@ -76,7 +77,12 @@ export type AnalysisV2ProfileAiTerminalStatus =
     | 'unresolved'
     | 'unresolved_stage_conflict'
     | 'fetch_unavailable'
-    | 'media_unavailable';
+    | 'media_unavailable'
+    | 'analysis_unavailable';
+
+export type AnalysisV2ProfileUnavailableReason =
+    | 'profile_fetch'
+    | 'ai_response';
 
 export interface AnalysisV2ProfileMediaCoverage {
     selectedCount: number;
@@ -105,6 +111,7 @@ export interface AnalysisV2ProfileAiOutcome {
     candidateId: string;
     instagramId: string;
     status: AnalysisV2ProfileAiTerminalStatus;
+    unavailableReason: AnalysisV2ProfileUnavailableReason | null;
     profile: AnalysisV2CheckpointProfile | null;
     triage: GenderTriageResult | null;
     feature: FeatureAnalysisResult | null;
@@ -116,6 +123,30 @@ export interface AnalysisV2ProfileAiOutcome {
     featureOperationKey: string | null;
     featureResultHash: string | null;
     mediaBundlePersisted: boolean;
+}
+
+function analysisUnavailableOutcome(
+    candidateId: string,
+    instagramId: string,
+    profile: AnalysisV2CheckpointProfile
+): AnalysisV2ProfileAiOutcome {
+    return {
+        candidateId,
+        instagramId: normalizeUsername(instagramId),
+        status: 'analysis_unavailable',
+        unavailableReason: 'ai_response',
+        profile,
+        triage: null,
+        feature: null,
+        normalizedSelectionIds: [],
+        mediaCoverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+        captions: [],
+        genderOperationKey: null,
+        genderResultHash: null,
+        featureOperationKey: null,
+        featureResultHash: null,
+        mediaBundlePersisted: false,
+    };
 }
 
 export interface AnalysisV2PrimaryJoinCandidate {
@@ -610,7 +641,11 @@ function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
 }
 
 function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2VerifiedFemaleFeatureRow {
-    if (outcome.status === 'fetch_unavailable' || outcome.status === 'media_unavailable') {
+    if (
+        outcome.status === 'fetch_unavailable'
+        || outcome.status === 'media_unavailable'
+        || outcome.status === 'analysis_unavailable'
+    ) {
         const mediaUnavailable = outcome.status === 'media_unavailable';
         return {
             candidateId: outcome.candidateId,
@@ -849,6 +884,16 @@ function checkpointClaim(context: AnalysisV2StageExecutorContext<AnalysisV2Stage
     };
 }
 
+function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>) {
+    if (!context.aiStagePolicyVersion) {
+        throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
+    }
+    return {
+        ...checkpointClaim(context),
+        aiStagePolicyVersion: context.aiStagePolicyVersion,
+    };
+}
+
 function partnerScoreSource(row: AnalysisV2PartnerSafetyRow | undefined):
 AnalysisV2CandidateScoreRow['partnerSafetySource'] {
     if (!row) return 'not_collected';
@@ -946,7 +991,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (results.length !== topology.itemCount) {
                 throw new Error('ANALYSIS_V2_PROFILE_AI_ITEM_COUNT_DRIFT');
             }
-            const aiFence = checkpointClaim(context);
+            const aiFence = aiJobFence(context);
             const outcomes = await runBounded(results, profileConcurrency, async item => {
                 await context.reportActiveProfile?.(item.username);
                 const outcome = await (async () => {
@@ -956,6 +1001,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'fetch_unavailable' as const,
+                            unavailableReason: 'profile_fetch' as const,
                             profile: null,
                             triage: null,
                             feature: null,
@@ -987,6 +1033,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'media_unavailable' as const,
+                            unavailableReason: null,
                             profile: item.profile,
                             triage: null,
                             feature: null,
@@ -1002,14 +1049,27 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
-                    const gender = await dependencies.ai.gender({
-                        media: triageNormalized.media,
-                    }, aiFence);
+                    let gender: Awaited<ReturnType<AnalysisV2AiStageRuntime['gender']>>;
+                    try {
+                        gender = await dependencies.ai.gender({
+                            media: triageNormalized.media,
+                        }, aiFence);
+                    } catch (error) {
+                        if (isRecoverableGeminiResponseError(error)) {
+                            return analysisUnavailableOutcome(
+                                candidateId,
+                                item.username,
+                                item.profile
+                            );
+                        }
+                        throw error;
+                    }
                     if (gender.result.routingDecision === 'exclude_high_confidence_male') {
                         return {
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'verified_non_female' as const,
+                            unavailableReason: null,
                             profile: item.profile,
                             triage: gender.result,
                             feature: null,
@@ -1042,6 +1102,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'media_unavailable' as const,
+                            unavailableReason: null,
                             profile: item.profile,
                             triage: null,
                             feature: null,
@@ -1069,12 +1130,24 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const captions = captionPolicy.featureCaptions.filter(caption => (
                         normalizedSelectionIds.has(caption.selectionId)
                     ));
-                    const features = await dependencies.ai.features({
-                        triage: gender.result,
-                        bio: item.profile.bio ?? null,
-                        media: normalized.media,
-                        captions,
-                    }, aiFence);
+                    let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
+                    try {
+                        features = await dependencies.ai.features({
+                            triage: gender.result,
+                            bio: item.profile.bio ?? null,
+                            media: normalized.media,
+                            captions,
+                        }, aiFence);
+                    } catch (error) {
+                        if (isRecoverableGeminiResponseError(error)) {
+                            return analysisUnavailableOutcome(
+                                candidateId,
+                                item.username,
+                                item.profile
+                            );
+                        }
+                        throw error;
+                    }
                     const status = features.result.finalGenderDecision === 'verified_female'
                         ? 'verified_female' as const
                         : features.result.finalGenderDecision === 'verified_non_female'
@@ -1105,6 +1178,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         candidateId,
                         instagramId: normalizeUsername(item.username),
                         status,
+                        unavailableReason: null,
                         profile: item.profile,
                         triage: gender.result,
                         feature: features.result,
@@ -1163,7 +1237,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 id: analysisV2CandidateId(row.username),
                 username: row.username,
                 ...(row.fullName ? { fullName: row.fullName } : {}),
-            })), checkpointClaim(context));
+            })), aiJobFence(context));
             if (analyzed.results.length !== rows.length) {
                 throw new Error('ANALYSIS_V2_PRIVATE_NAME_COUNT_DRIFT');
             }
@@ -1475,7 +1549,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     feature: outcome.feature,
                     contactSheet,
                     partnerCaptions,
-                }, checkpointClaim(context));
+                }, aiJobFence(context));
                 return {
                     candidateId: candidate.candidateId,
                     shortlistRank: candidate.verificationShortlistRank!,
@@ -1733,7 +1807,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         carouselCaptionDossier: captionPolicy.dossier,
                         targetEvidence,
                         reverse: reverseById.get(candidateId),
-                    }), checkpointClaim(context));
+                    }), aiJobFence(context));
                     return {
                         candidateId,
                         lines: analyzed.result.lines,

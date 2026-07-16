@@ -87,7 +87,9 @@ const profileOutcomeSchema = z.object({
         'unresolved_stage_conflict',
         'fetch_unavailable',
         'media_unavailable',
+        'analysis_unavailable',
     ]),
+    unavailableReason: z.enum(['profile_fetch', 'ai_response']).nullable().optional(),
     profile: analysisV2CheckpointProfileSchema.nullable(),
     triage: genderTriageResultSchema.nullable(),
     feature: featureAnalysisResultSchema.nullable(),
@@ -99,17 +101,47 @@ const profileOutcomeSchema = z.object({
     featureOperationKey: profileAiOperationKeySchema.regex(/^feature-analysis:/).nullable(),
     featureResultHash: hashSchema.nullable(),
     mediaBundlePersisted: z.boolean(),
-}).strict().superRefine((value, context) => {
-    const unavailable = value.status === 'fetch_unavailable';
-    if (unavailable !== (value.profile === null)) {
+}).strict().transform(value => ({
+    ...value,
+    unavailableReason: value.unavailableReason
+        ?? (value.status === 'fetch_unavailable'
+            ? 'profile_fetch' as const
+            : value.status === 'analysis_unavailable'
+                ? 'ai_response' as const
+                : null),
+})).superRefine((value, context) => {
+    const fetchUnavailable = value.status === 'fetch_unavailable';
+    if (fetchUnavailable !== (value.unavailableReason === 'profile_fetch')) {
+        context.addIssue({ code: 'custom', message: 'Profile unavailable reason mismatch.' });
+    }
+    if (fetchUnavailable !== (value.profile === null)) {
         context.addIssue({ code: 'custom', path: ['profile'], message: 'Profile status mismatch.' });
     }
-    if (unavailable && (
+    if (fetchUnavailable && (
         value.triage || value.feature || value.genderOperationKey || value.genderResultHash
         || value.featureOperationKey || value.featureResultHash
         || value.normalizedSelectionIds.length > 0 || value.mediaBundlePersisted
     )) {
         context.addIssue({ code: 'custom', message: 'Unavailable outcome contains analysis data.' });
+    }
+    const analysisUnavailable = value.status === 'analysis_unavailable';
+    if (analysisUnavailable !== (value.unavailableReason === 'ai_response')) {
+        context.addIssue({ code: 'custom', message: 'Analysis unavailable reason mismatch.' });
+    }
+    if (analysisUnavailable && (
+        value.profile === null || value.triage || value.feature
+        || value.genderOperationKey || value.genderResultHash
+        || value.featureOperationKey || value.featureResultHash
+        || value.normalizedSelectionIds.length > 0 || value.captions.length > 0
+        || value.mediaCoverage.selectedCount > 0
+        || value.mediaCoverage.normalizedCount > 0
+        || value.mediaCoverage.failures.length > 0
+        || value.mediaBundlePersisted
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Analysis-unavailable outcome contains analysis or media data.',
+        });
     }
     const mediaUnavailable = value.status === 'media_unavailable';
     if (mediaUnavailable && (
@@ -120,7 +152,7 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Media-unavailable outcome is inconsistent.' });
     }
-    if (!unavailable && !mediaUnavailable && (
+    if (!fetchUnavailable && !mediaUnavailable && !analysisUnavailable && (
         !value.triage || !value.genderOperationKey || !value.genderResultHash
         || value.normalizedSelectionIds.length === 0
     )) {

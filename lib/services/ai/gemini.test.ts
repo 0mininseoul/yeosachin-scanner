@@ -234,7 +234,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         }));
         expect(telemetry).not.toHaveBeenCalled();
         expect(attemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
-            disposition: 'rejected',
+            disposition: 'response_rejected',
             tokenUsage: {
                 promptTokens: 12,
                 completionTokens: 0,
@@ -267,7 +267,7 @@ describe('analyzeWithGemini generation retry policy', () => {
             'AI_GENERATION_RESPONSE_REJECTED_ERROR'
         );
         expect(attemptTelemetry).toHaveBeenLastCalledWith(expect.objectContaining({
-            disposition: 'rejected',
+            disposition: 'response_rejected',
             finishReason: null,
         }));
 
@@ -282,7 +282,7 @@ describe('analyzeWithGemini generation retry policy', () => {
             'AI_GENERATION_RESPONSE_REJECTED_ERROR'
         );
         expect(attemptTelemetry).toHaveBeenLastCalledWith(expect.objectContaining({
-            disposition: 'rejected',
+            disposition: 'response_rejected',
             finishReason: 'MAX_TOKENS',
         }));
         expect(mocks.generateContent).toHaveBeenCalledTimes(2);
@@ -560,8 +560,8 @@ describe('analyzeWithGemini stage request policy', () => {
             thinkingLevel: 'MEDIUM',
             mediaCount: 2,
             mediaResolution: 'MEDIUM',
-            promptVersion: 'feature-analysis-v1',
-            schemaVersion: 1,
+            promptVersion: 'feature-analysis-v2',
+            schemaVersion: 2,
             maxOutputTokens: 2_048,
             latencyMs: expect.any(Number),
             estimatedCostUsd: expect.any(Number),

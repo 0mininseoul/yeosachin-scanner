@@ -32,6 +32,7 @@ export const ANALYSIS_V2_AI_ATTEMPT_STATUSES = [
     'rate_limited',
     'ambiguous',
     'rejected',
+    'response_rejected',
 ] as const;
 
 const TERMINAL_STATUSES = [
@@ -39,6 +40,7 @@ const TERMINAL_STATUSES = [
     'rate_limited',
     'ambiguous',
     'rejected',
+    'response_rejected',
 ] as const;
 
 export type AnalysisV2AiStage = typeof ANALYSIS_V2_AI_STAGES[number];

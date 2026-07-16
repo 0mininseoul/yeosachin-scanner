@@ -340,6 +340,20 @@ describe('analysis V2 AI attempt store', () => {
         });
     });
 
+    it('persists a model response rejection separately from a rejected request', async () => {
+        const responseRejected = successRecord({ status: 'response_rejected' });
+        const rpc = vi.fn().mockResolvedValue({ data: responseRejected, error: null });
+        const store = createAnalysisV2AiAttemptStore(rpcClient(rpc));
+
+        await expect(store.terminalize(terminalInput({
+            status: 'response_rejected',
+        }))).resolves.toEqual(responseRejected);
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_ATTEMPT_DATABASE_NAMES.terminalizeRpc,
+            expect.objectContaining({ p_status: 'response_rejected' })
+        );
+    });
+
     it('fails closed on inconsistent or fabricated usage before the RPC', async () => {
         const rpc = vi.fn();
         const store = createAnalysisV2AiAttemptStore(rpcClient(rpc));
