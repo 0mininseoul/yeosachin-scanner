@@ -87,6 +87,7 @@ const profileOutcomeSchema = z.object({
         'unresolved_stage_conflict',
         'fetch_unavailable',
         'media_unavailable',
+        'analysis_unavailable',
     ]),
     profile: analysisV2CheckpointProfileSchema.nullable(),
     triage: genderTriageResultSchema.nullable(),
@@ -100,16 +101,32 @@ const profileOutcomeSchema = z.object({
     featureResultHash: hashSchema.nullable(),
     mediaBundlePersisted: z.boolean(),
 }).strict().superRefine((value, context) => {
-    const unavailable = value.status === 'fetch_unavailable';
-    if (unavailable !== (value.profile === null)) {
+    const fetchUnavailable = value.status === 'fetch_unavailable';
+    if (fetchUnavailable !== (value.profile === null)) {
         context.addIssue({ code: 'custom', path: ['profile'], message: 'Profile status mismatch.' });
     }
-    if (unavailable && (
+    if (fetchUnavailable && (
         value.triage || value.feature || value.genderOperationKey || value.genderResultHash
         || value.featureOperationKey || value.featureResultHash
         || value.normalizedSelectionIds.length > 0 || value.mediaBundlePersisted
     )) {
         context.addIssue({ code: 'custom', message: 'Unavailable outcome contains analysis data.' });
+    }
+    const analysisUnavailable = value.status === 'analysis_unavailable';
+    if (analysisUnavailable && (
+        value.profile === null || value.triage || value.feature
+        || value.genderOperationKey || value.genderResultHash
+        || value.featureOperationKey || value.featureResultHash
+        || value.normalizedSelectionIds.length > 0 || value.captions.length > 0
+        || value.mediaCoverage.selectedCount > 0
+        || value.mediaCoverage.normalizedCount > 0
+        || value.mediaCoverage.failures.length > 0
+        || value.mediaBundlePersisted
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Analysis-unavailable outcome contains analysis or media data.',
+        });
     }
     const mediaUnavailable = value.status === 'media_unavailable';
     if (mediaUnavailable && (
@@ -120,7 +137,7 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Media-unavailable outcome is inconsistent.' });
     }
-    if (!unavailable && !mediaUnavailable && (
+    if (!fetchUnavailable && !mediaUnavailable && !analysisUnavailable && (
         !value.triage || !value.genderOperationKey || !value.genderResultHash
         || value.normalizedSelectionIds.length === 0
     )) {

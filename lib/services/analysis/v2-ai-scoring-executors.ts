@@ -16,6 +16,7 @@ import {
     type AnalysisImagePreparationFailureDisposition,
     type AnalysisImagePreparationFailureReason,
 } from '@/lib/services/ai/image-preprocessing';
+import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import type {
     FeatureAnalysisResult,
     GenderTriageResult,
@@ -76,7 +77,8 @@ export type AnalysisV2ProfileAiTerminalStatus =
     | 'unresolved'
     | 'unresolved_stage_conflict'
     | 'fetch_unavailable'
-    | 'media_unavailable';
+    | 'media_unavailable'
+    | 'analysis_unavailable';
 
 export interface AnalysisV2ProfileMediaCoverage {
     selectedCount: number;
@@ -116,6 +118,29 @@ export interface AnalysisV2ProfileAiOutcome {
     featureOperationKey: string | null;
     featureResultHash: string | null;
     mediaBundlePersisted: boolean;
+}
+
+function analysisUnavailableOutcome(
+    candidateId: string,
+    instagramId: string,
+    profile: AnalysisV2CheckpointProfile
+): AnalysisV2ProfileAiOutcome {
+    return {
+        candidateId,
+        instagramId: normalizeUsername(instagramId),
+        status: 'analysis_unavailable',
+        profile,
+        triage: null,
+        feature: null,
+        normalizedSelectionIds: [],
+        mediaCoverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+        captions: [],
+        genderOperationKey: null,
+        genderResultHash: null,
+        featureOperationKey: null,
+        featureResultHash: null,
+        mediaBundlePersisted: false,
+    };
 }
 
 export interface AnalysisV2PrimaryJoinCandidate {
@@ -610,7 +635,11 @@ function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
 }
 
 function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2VerifiedFemaleFeatureRow {
-    if (outcome.status === 'fetch_unavailable' || outcome.status === 'media_unavailable') {
+    if (
+        outcome.status === 'fetch_unavailable'
+        || outcome.status === 'media_unavailable'
+        || outcome.status === 'analysis_unavailable'
+    ) {
         const mediaUnavailable = outcome.status === 'media_unavailable';
         return {
             candidateId: outcome.candidateId,
@@ -1002,9 +1031,21 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
-                    const gender = await dependencies.ai.gender({
-                        media: triageNormalized.media,
-                    }, aiFence);
+                    let gender: Awaited<ReturnType<AnalysisV2AiStageRuntime['gender']>>;
+                    try {
+                        gender = await dependencies.ai.gender({
+                            media: triageNormalized.media,
+                        }, aiFence);
+                    } catch (error) {
+                        if (isRecoverableGeminiResponseError(error)) {
+                            return analysisUnavailableOutcome(
+                                candidateId,
+                                item.username,
+                                item.profile
+                            );
+                        }
+                        throw error;
+                    }
                     if (gender.result.routingDecision === 'exclude_high_confidence_male') {
                         return {
                             candidateId,
@@ -1069,12 +1110,24 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const captions = captionPolicy.featureCaptions.filter(caption => (
                         normalizedSelectionIds.has(caption.selectionId)
                     ));
-                    const features = await dependencies.ai.features({
-                        triage: gender.result,
-                        bio: item.profile.bio ?? null,
-                        media: normalized.media,
-                        captions,
-                    }, aiFence);
+                    let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
+                    try {
+                        features = await dependencies.ai.features({
+                            triage: gender.result,
+                            bio: item.profile.bio ?? null,
+                            media: normalized.media,
+                            captions,
+                        }, aiFence);
+                    } catch (error) {
+                        if (isRecoverableGeminiResponseError(error)) {
+                            return analysisUnavailableOutcome(
+                                candidateId,
+                                item.username,
+                                item.profile
+                            );
+                        }
+                        throw error;
+                    }
                     const status = features.result.finalGenderDecision === 'verified_female'
                         ? 'verified_female' as const
                         : features.result.finalGenderDecision === 'verified_non_female'

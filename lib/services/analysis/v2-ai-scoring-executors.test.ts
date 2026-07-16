@@ -629,6 +629,170 @@ describe('V2 AI and scoring executors', () => {
         ]);
     });
 
+    it('isolates a recoverable gender rejection and checkpoints the rest of the same batch', async () => {
+        const memoryState = memory();
+        const usernames = ['rejected.gender', 'male.sibling', 'female.sibling'];
+        const accounts = usernames.map(username => profile(username));
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: usernames,
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0]
+        ) => {
+            const ids = input.media.map(row => row.selectionId);
+            if (ids.some(id => id.includes('rejected.gender'))) {
+                throw new Error(
+                    'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+                );
+            }
+            const isMale = ids.some(id => id === 'profile:male.sibling');
+            return {
+                result: triage(ids, isMale ? 'male' : 'unknown'),
+                operationKey: `gender-triage:${digest(isMale ? 'isolated-male' : 'isolated-female')}`,
+                resultHash: digest(isMale ? 'isolated-male-result' : 'isolated-female-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+
+        const output = await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0 })
+        );
+
+        expect(output.checkpoint.manifest.itemCount).toBe(3);
+        expect(memoryState.outcomes.map(row => row.status)).toEqual([
+            'analysis_unavailable', 'verified_non_female', 'verified_female',
+        ]);
+        expect(memoryState.outcomes[0]).toMatchObject({
+            profile: accounts[0],
+            triage: null,
+            feature: null,
+            normalizedSelectionIds: [],
+            captions: [],
+            genderOperationKey: null,
+            genderResultHash: null,
+            featureOperationKey: null,
+            featureResultHash: null,
+            mediaBundlePersisted: false,
+        });
+        expect(memoryState.outcomes[0]!.mediaCoverage).toEqual({
+            selectedCount: 0,
+            normalizedCount: 0,
+            failures: [],
+        });
+        expect(vi.mocked(deps.ai.gender).mock.calls.filter(([input]) => (
+            input.media.some(row => row.selectionId.includes('rejected.gender'))
+        ))).toHaveLength(1);
+        expect(deps.ai.gender).toHaveBeenCalledTimes(3);
+        expect(deps.ai.features).toHaveBeenCalledOnce();
+        expect(vi.mocked(deps.resultStore.checkpointFeatureBatch).mock.calls[0]![0].rows
+            .map(row => row.classification)).toEqual([
+            'unavailable', 'verified_non_female', 'verified_female',
+        ]);
+    });
+
+    it('isolates a recoverable feature rejection without retaining partial AI output', async () => {
+        const memoryState = memory();
+        const usernames = ['rejected.feature', 'first.sibling', 'second.sibling'];
+        const accounts = usernames.map(username => profile(username));
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: usernames,
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        deps.ai.features = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['features']>[0]
+        ) => {
+            const ids = input.media.map(row => row.selectionId);
+            if (ids.some(id => id.includes('rejected.feature'))) {
+                throw new Error(
+                    'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+                );
+            }
+            return {
+                result: feature(ids),
+                operationKey: `feature-analysis:${digest(ids.join(':'))}`,
+                resultHash: digest(`feature-result:${ids.join(':')}`),
+                source: 'checkpoint' as const,
+            };
+        });
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0 })
+        );
+
+        expect(memoryState.outcomes.map(row => row.status)).toEqual([
+            'analysis_unavailable', 'verified_female', 'verified_female',
+        ]);
+        expect(memoryState.outcomes[0]).toMatchObject({
+            profile: accounts[0],
+            triage: null,
+            feature: null,
+            normalizedSelectionIds: [],
+            captions: [],
+            genderOperationKey: null,
+            genderResultHash: null,
+            featureOperationKey: null,
+            featureResultHash: null,
+            mediaBundlePersisted: false,
+        });
+        expect(vi.mocked(deps.ai.features).mock.calls.filter(([input]) => (
+            input.media.some(row => row.selectionId.includes('rejected.feature'))
+        ))).toHaveLength(1);
+        expect(deps.ai.gender).toHaveBeenCalledTimes(3);
+        expect(deps.ai.features).toHaveBeenCalledTimes(3);
+        expect(deps.mediaStore.persistBundle).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(deps.resultStore.checkpointFeatureBatch).mock.calls[0]![0].rows
+            .map(row => row.classification)).toEqual([
+            'unavailable', 'verified_female', 'verified_female',
+        ]);
+    });
+
+    it.each([
+        'AI_AMBIGUOUS_GENERATION_ERROR: transport outcome is unknown.',
+        'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt result was not durably stored.',
+        'NONRECOVERABLE_PROFILE_AI_FAILURE',
+    ])('still rejects the profile job for nonrecoverable AI failure: %s', async message => {
+        const memoryState = memory();
+        const accounts = ['one.account', 'two.account', 'three.account'].map(username => (
+            profile(username)
+        ));
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: accounts.map(account => account.username),
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        deps.ai.gender = vi.fn().mockRejectedValue(new Error(message));
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0 })
+        )).rejects.toThrow(message);
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        expect(memoryState.outcomes).toEqual([]);
+    });
+
     it('reports each real profile AI task start without exposing media URLs', async () => {
         const memoryState = memory();
         const reportActiveProfile = vi.fn(async () => undefined);
