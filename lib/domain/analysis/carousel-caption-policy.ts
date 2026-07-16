@@ -31,7 +31,13 @@ type CaptionPolicyInput = Readonly<{
 
 interface SlideCaption {
     mediaIndex: number;
+    mediaIndexes: number[];
     text: string;
+}
+
+interface PackedDossier {
+    text: string;
+    excerptsByMediaIndex: ReadonlyMap<number, string>;
 }
 
 function normalizeCaption(value: string | undefined): string | null {
@@ -155,9 +161,11 @@ function selectedCarousel(
 
 function partnerCaptionEvidence(
     input: CaptionPolicyInput,
-    carousel: InstagramPost | null
+    carousel: InstagramPost | null,
+    excerptsByMediaIndex: ReadonlyMap<number, string> | null
 ): CarouselCaptionEvidence[] {
-    if (!carousel) return [];
+    if (!carousel || !excerptsByMediaIndex) return [];
+    const seen = new Set<string>();
     const captions: CarouselCaptionEvidence[] = [];
     for (const selection of input.partnerSelections) {
         if (
@@ -167,8 +175,10 @@ function partnerCaptionEvidence(
         ) {
             continue;
         }
-        const text = normalizeCaption(carousel.mediaItems?.[selection.mediaIndex]?.caption);
-        if (!text) continue;
+        const normalized = normalizeCaption(carousel.mediaItems?.[selection.mediaIndex]?.caption);
+        const text = excerptsByMediaIndex.get(selection.mediaIndex);
+        if (!normalized || !text || seen.has(normalized)) continue;
+        seen.add(normalized);
         captions.push(captionEvidence({
             profileUsername: input.profile.username,
             postId: carousel.id,
@@ -182,13 +192,19 @@ function partnerCaptionEvidence(
 }
 
 function uniqueSlideCaptions(carousel: InstagramPost): SlideCaption[] {
-    const seen = new Set<string>();
+    const byText = new Map<string, SlideCaption>();
     const captions: SlideCaption[] = [];
     for (const [mediaIndex, item] of (carousel.mediaItems ?? []).entries()) {
         const text = normalizeCaption(item.caption);
-        if (!text || seen.has(text)) continue;
-        seen.add(text);
-        captions.push({ mediaIndex, text });
+        if (!text) continue;
+        const existing = byText.get(text);
+        if (existing) {
+            existing.mediaIndexes.push(mediaIndex);
+            continue;
+        }
+        const caption = { mediaIndex, mediaIndexes: [mediaIndex], text };
+        byText.set(text, caption);
+        captions.push(caption);
     }
     return captions;
 }
@@ -209,7 +225,10 @@ function excerpt(text: string, allocation: number): string {
     return `${text.slice(0, allocation - 3)}...`;
 }
 
-function packDossier(slides: readonly SlideCaption[], targetUsername: string): string {
+function packDossier(
+    slides: readonly SlideCaption[],
+    targetUsername: string
+): PackedDossier {
     const labels = slides.map(slide => `[슬라이드 ${slide.mediaIndex + 1}] `);
     const separatorCharacters = Math.max(0, slides.length - 1);
     const availableCharacters = DOSSIER_CHARACTER_LIMIT
@@ -220,56 +239,64 @@ function packDossier(slides: readonly SlideCaption[], targetUsername: string): s
     }
 
     const fullLength = slides.reduce((sum, slide) => sum + slide.text.length, 0);
-    if (fullLength <= availableCharacters) {
-        return slides.map((slide, index) => `${labels[index]}${slide.text}`).join('\n');
+    const allocations = slides.map(slide => slide.text.length);
+    if (fullLength > availableCharacters) {
+        const fairShare = Math.floor(availableCharacters / slides.length);
+        for (const [index, slide] of slides.entries()) {
+            allocations[index] = Math.min(slide.text.length, fairShare);
+        }
+        let remaining = availableCharacters
+            - allocations.reduce((sum, allocation) => sum + allocation, 0);
+        const priority = slides
+            .map((slide, index) => ({
+                index,
+                mediaIndex: slide.mediaIndex,
+                mentionsTarget: exactMention(slide.text, targetUsername),
+            }))
+            .sort((left, right) => (
+                Number(right.mentionsTarget) - Number(left.mentionsTarget)
+                || left.mediaIndex - right.mediaIndex
+            ));
+        for (const item of priority) {
+            if (remaining === 0) break;
+            const capacity = slides[item.index].text.length - allocations[item.index];
+            const granted = Math.min(capacity, remaining);
+            allocations[item.index] += granted;
+            remaining -= granted;
+        }
     }
 
-    const fairShare = Math.floor(availableCharacters / slides.length);
-    const allocations = slides.map(slide => Math.min(slide.text.length, fairShare));
-    let remaining = availableCharacters
-        - allocations.reduce((sum, allocation) => sum + allocation, 0);
-    const priority = slides
-        .map((slide, index) => ({
-            index,
-            mediaIndex: slide.mediaIndex,
-            mentionsTarget: exactMention(slide.text, targetUsername),
-        }))
-        .sort((left, right) => (
-            Number(right.mentionsTarget) - Number(left.mentionsTarget)
-            || left.mediaIndex - right.mediaIndex
-        ));
-    for (const item of priority) {
-        if (remaining === 0) break;
-        const capacity = slides[item.index].text.length - allocations[item.index];
-        const granted = Math.min(capacity, remaining);
-        allocations[item.index] += granted;
-        remaining -= granted;
-    }
-
-    const packed = slides.map((slide, index) => (
-        `${labels[index]}${excerpt(slide.text, allocations[index])}`
+    const excerpts = slides.map((slide, index) => (
+        excerpt(slide.text, allocations[index])
+    ));
+    const text = slides.map((slide, index) => (
+        `${labels[index]}${excerpts[index]}`
     )).join('\n');
-    if (packed.length > DOSSIER_CHARACTER_LIMIT) {
+    if (text.length > DOSSIER_CHARACTER_LIMIT) {
         throw new Error('CAROUSEL_CAPTION_POLICY_BUDGET_DRIFT');
     }
-    return packed;
+    const excerptsByMediaIndex = new Map<number, string>();
+    for (const [index, slide] of slides.entries()) {
+        for (const mediaIndex of slide.mediaIndexes) {
+            excerptsByMediaIndex.set(mediaIndex, excerpts[index]);
+        }
+    }
+    return { text, excerptsByMediaIndex };
 }
 
 function dossier(
     input: CaptionPolicyInput,
-    carousel: InstagramPost | null
+    carousel: InstagramPost | null,
+    packed: PackedDossier | null
 ): CarouselCaptionPolicy['dossier'] {
-    if (!carousel) return null;
-    const slides = uniqueSlideCaptions(carousel);
-    if (slides.length === 0) return null;
-    const text = packDossier(slides, input.targetUsername);
+    if (!carousel || !packed) return null;
     return Object.freeze({
         evidenceRefId: `carousel-dossier:${digest('carousel-caption-dossier-v1', {
             username: input.profile.username.toLowerCase(),
             postId: carousel.id,
-            text,
+            text: packed.text,
         })}`,
-        text,
+        text: packed.text,
     });
 }
 
@@ -278,9 +305,17 @@ export function buildCarouselCaptionPolicy(
 ): Readonly<CarouselCaptionPolicy> {
     const posts = postMap(input.profile);
     const carousel = selectedCarousel(input, posts);
+    const slides = carousel ? uniqueSlideCaptions(carousel) : [];
+    const packed = slides.length > 0
+        ? packDossier(slides, input.targetUsername)
+        : null;
     return Object.freeze({
         featureCaptions: featureCaptionEvidence(input, posts),
-        partnerCaptions: partnerCaptionEvidence(input, carousel),
-        dossier: dossier(input, carousel),
+        partnerCaptions: partnerCaptionEvidence(
+            input,
+            carousel,
+            packed?.excerptsByMediaIndex ?? null
+        ),
+        dossier: dossier(input, carousel, packed),
     });
 }

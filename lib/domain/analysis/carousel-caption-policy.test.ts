@@ -45,6 +45,16 @@ function selection(
     };
 }
 
+function dossierExcerptMap(text: string): ReadonlyMap<number, string> {
+    const excerpts = new Map<number, string>();
+    for (const line of text.split('\n')) {
+        const match = line.match(/^\[슬라이드 (\d+)\] (.+)$/u);
+        if (!match) throw new Error(`invalid dossier line: ${line}`);
+        excerpts.set(Number(match[1]) - 1, match[2]);
+    }
+    return excerpts;
+}
+
 function completeCarousel(
     captions: Array<string | undefined>,
     overrides: Partial<InstagramPost> = {}
@@ -117,6 +127,12 @@ describe('buildCarouselCaptionPolicy', () => {
             ['post:carousel:2', 'Partner two'],
             ['post:carousel:4', '@target.user spotted'],
         ]);
+        const excerpts = dossierExcerptMap(result.dossier?.text ?? '');
+        expect(result.partnerCaptions.map(row => row.text)).toEqual([
+            excerpts.get(1),
+            excerpts.get(2),
+            excerpts.get(4),
+        ]);
         expect(new Set([
             ...result.featureCaptions,
             ...result.partnerCaptions,
@@ -157,6 +173,9 @@ describe('buildCarouselCaptionPolicy', () => {
             '[슬라이드 1] ABC caption',
             '[슬라이드 4] Second caption',
         ].join('\n'));
+        expect(first.partnerCaptions[0]?.text).toBe(
+            dossierExcerptMap(first.dossier?.text ?? '').get(0)
+        );
         expect(first).toEqual(second);
     });
 
@@ -315,10 +334,12 @@ describe('buildCarouselCaptionPolicy', () => {
         expect(excerpts[3].length).toBeGreaterThan(excerpts[2].length);
     });
 
-    it('caps the dossier at 2,000 characters and gives every unique slide an excerpt', () => {
-        const captions = Array.from({ length: 20 }, (_, index) => (
-            `${index === 19 ? '@target.user ' : ''}slide-${index + 1} ${String(index).repeat(2_200)}`
-        ));
+    it('reuses the bounded dossier excerpts for 20 long partner captions', () => {
+        const captions = Array.from({ length: 20 }, (_, index) => {
+            const prefix = `${index === 19 ? '@target.user ' : ''}slide-${index + 1} `;
+            return `${prefix}${String(index % 10).repeat(2_200 - prefix.length)}`;
+        });
+        expect(captions.every(caption => caption.length === 2_200)).toBe(true);
         const carousel = completeCarousel(captions);
         const featureSelections = [0, 10, 19].map((index, position) => selection(
             `post:carousel:${index}`,
@@ -352,5 +373,21 @@ describe('buildCarouselCaptionPolicy', () => {
         const firstExcerpt = lines[0].replace(/^\[슬라이드 1\] /u, '');
         const targetExcerpt = lines[19].replace(/^\[슬라이드 20\] /u, '');
         expect(targetExcerpt.length).toBeGreaterThan(firstExcerpt.length);
+        const excerpts = dossierExcerptMap(dossier);
+        const partnerIndexes = Array.from({ length: 20 }, (_, index) => index)
+            .filter(index => ![0, 10, 19].includes(index));
+        expect(result.partnerCaptions).toHaveLength(partnerIndexes.length);
+        for (const [position, row] of result.partnerCaptions.entries()) {
+            expect(row.text).toBe(excerpts.get(partnerIndexes[position]));
+        }
+        expect(result.partnerCaptions.reduce(
+            (sum, row) => sum + row.text.length,
+            0
+        )).toBeLessThanOrEqual(2_000);
+        expect(result.featureCaptions.map(row => row.text)).toEqual([
+            captions[0],
+            captions[10],
+            captions[19],
+        ]);
     });
 });
