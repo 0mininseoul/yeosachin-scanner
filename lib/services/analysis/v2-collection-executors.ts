@@ -57,6 +57,10 @@ import {
     type AnalysisV2CollectionRequestContextStore,
 } from './v2-request-context';
 import { extractRawTargetInteractions } from './v2-target-interactions';
+import {
+    analysisV2TargetProfileReuseStore,
+    type AnalysisV2TargetProfileReuseStore,
+} from './v2-target-profile-reuse';
 import type {
     AnalysisV2StageExecutor,
     AnalysisV2StageExecutorRegistry,
@@ -80,6 +84,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     evidenceStore?: AnalysisV2EvidenceStore;
     profileCheckpointStore?: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    targetProfileReuseStore?: AnalysisV2TargetProfileReuseStore;
     getFollowers?: RelationshipGetter;
     getFollowing?: RelationshipGetter;
     getProfilesBatchV2?: ProfileBatchFetcher;
@@ -92,6 +97,7 @@ interface ResolvedDependencies {
     evidenceStore: AnalysisV2EvidenceStore;
     profileCheckpointStore: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore: AnalysisV2ProviderRunStore;
+    targetProfileReuseStore: AnalysisV2TargetProfileReuseStore;
     getFollowers: RelationshipGetter;
     getFollowing: RelationshipGetter;
     getProfilesBatchV2: ProfileBatchFetcher;
@@ -106,6 +112,8 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         profileCheckpointStore:
             input.profileCheckpointStore ?? analysisV2ProfileFetchCheckpointStore,
         providerRunStore: input.providerRunStore ?? analysisV2ProviderRunStore,
+        targetProfileReuseStore:
+            input.targetProfileReuseStore ?? analysisV2TargetProfileReuseStore,
         getFollowers: input.getFollowers ?? getFollowers,
         getFollowing: input.getFollowing ?? getFollowing,
         getProfilesBatchV2: input.getProfilesBatchV2 ?? getProfilesBatchV2,
@@ -535,6 +543,33 @@ async function durableProfiles(input: {
     const mutableProviderRun: ProviderRunCheckpoint = {};
     const bindFallback = async (unresolved: readonly string[]) => {
         if (unresolved.length === 0) return;
+        if (claim.jobKey === 'track:target-evidence:collect') {
+            if (
+                unresolved.length !== 1
+                || unresolved[0] !== request.targetUsername
+                || usernames.length !== 1
+                || usernames[0] !== request.targetUsername
+            ) {
+                throw new Error('ANALYSIS_V2_TARGET_PROFILE_REUSE_IDENTITY_DRIFT');
+            }
+            const reusable = await dependencies.targetProfileReuseStore.load({
+                requestId: claim.requestId,
+                jobKey: claim.jobKey,
+                claimToken: claim.claimToken,
+                jobInputHash: claim.jobInputHash,
+                targetUsername: request.targetUsername,
+            });
+            if (reusable) {
+                Object.assign(mutableProviderRun, {
+                    resumeRunId: reusable.runId,
+                    logicalProvider: reusable.logicalProvider,
+                    actorId: reusable.actorId,
+                    credentialSlot: reusable.credentialSlot,
+                    maxChargeUsd: reusable.maxChargeUsd,
+                });
+                return;
+            }
+        }
         const canonicalInput = profileFallbackIdentity(unresolved);
         const binding = await bindApifyRun({
             dependencies,

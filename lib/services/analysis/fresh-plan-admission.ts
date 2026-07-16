@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getSelfHostedAdmissionProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
-import { getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
+import { getApifyProfile } from '@/lib/services/instagram/providers/apify';
 import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
 import {
     PREFLIGHT_PROVIDER_DEADLINE_MS,
@@ -18,7 +18,7 @@ import {
     bindPreflightProviderRunCheckpoint,
     createFreshAdmissionProviderRunStore,
     preflightProviderIdentity,
-    type PreflightProviderRunStore,
+    type FreshAdmissionProviderRunStore,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
 
@@ -235,7 +235,7 @@ interface ClaimedAnalysisV2FreshAdmission {
 }
 
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
-export type AnalysisV2FreshFallbackProfileFetcher = typeof getApifyProfileSummary;
+export type AnalysisV2FreshFallbackProfileFetcher = typeof getApifyProfile;
 
 export class AnalysisV2FreshAdmissionError extends Error {
     readonly code: AnalysisV2FreshAdmissionErrorCode;
@@ -598,7 +598,7 @@ export async function processAnalysisV2FreshAdmission(
     dependencies: {
         getProfile?: AnalysisV2FreshProfileFetcher;
         getFallbackProfile?: AnalysisV2FreshFallbackProfileFetcher;
-        providerRunStore?: PreflightProviderRunStore;
+        providerRunStore?: FreshAdmissionProviderRunStore;
         env?: Record<string, string | undefined>;
         createClaimToken?: () => string;
     } = {}
@@ -643,6 +643,7 @@ export async function processAnalysisV2FreshAdmission(
     };
     try {
         let profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
+        let reusableProfileInputHash: string | null = null;
         try {
             assertPreflightRuntimePolicy(dependencies.env);
             profile = await (
@@ -691,7 +692,7 @@ export async function processAnalysisV2FreshAdmission(
                     identity,
                 });
                 profile = await (
-                    dependencies.getFallbackProfile ?? getApifyProfileSummary
+                    dependencies.getFallbackProfile ?? getApifyProfile
                 )(
                     claim.targetInstagramId,
                     fallbackCallContext(bound.checkpoint, workerStartedAt)
@@ -707,6 +708,7 @@ export async function processAnalysisV2FreshAdmission(
                 if (profile) {
                     assertFreshCount(profile.followersCount);
                     assertFreshCount(profile.followingCount);
+                    reusableProfileInputHash = inputHash;
                 }
             } catch (fallbackError) {
                 return await settleFailure(fallbackError);
@@ -729,6 +731,31 @@ export async function processAnalysisV2FreshAdmission(
             );
             claimSettled = true;
             return outcome;
+        }
+        if (reusableProfileInputHash !== null) {
+            try {
+                const reusableRun = await providerRuns.load({
+                    preflightId: claim.preflightId,
+                    claimToken: claim.claimToken,
+                    inputHash: reusableProfileInputHash,
+                });
+                if (
+                    reusableRun?.status !== 'succeeded'
+                    || reusableRun.runId === null
+                ) {
+                    throw new Error(
+                        'PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: reusable profile run is not succeeded.'
+                    );
+                }
+                await providerRuns.markReusableProfileSchemaV1({
+                    preflightId: claim.preflightId,
+                    claimToken: claim.claimToken,
+                    inputHash: reusableProfileInputHash,
+                    runId: reusableRun.runId,
+                });
+            } catch (attestationError) {
+                return await settleFailure(attestationError);
+            }
         }
         const outcome = await completeAnalysisV2FreshAdmission(client, claim, profile);
         claimSettled = true;

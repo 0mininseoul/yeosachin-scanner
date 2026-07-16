@@ -7,6 +7,7 @@ import {
     APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
     APIFY_RELATIONSHIP_ACTOR_ID,
     apifyProvider,
+    getApifyProfile,
     makeApifyProvider,
     parseApifyRelationshipDataset,
 } from './apify';
@@ -23,6 +24,7 @@ import {
     createAnalysisV2ProviderRunStore,
     type AnalysisV2ProviderRunSupabaseClient,
 } from '@/lib/services/analysis/v2-provider-run-store';
+import type { InstagramProfile } from '@/lib/types/instagram';
 
 function relationshipItem(username: string, overrides: Record<string, unknown> = {}) {
     return {
@@ -1895,6 +1897,74 @@ describe('apifyProvider', () => {
                     timestamp: '2026-01-01T00:00:00.000Z',
                 }],
             });
+    });
+
+    it('exports the full-profile wrapper without stripping latest posts', async () => {
+        const expected: InstagramProfile = {
+            username: 'target',
+            followersCount: 1,
+            followingCount: 1,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [{
+                id: '1',
+                shortCode: 'abcde',
+                imageUrl: 'https://example.com/post.jpg',
+                type: 'image' as const,
+                hashtags: [],
+                likesCount: 0,
+                commentsCount: 0,
+                timestamp: '2026-01-01T00:00:00.000Z',
+                taggedUsers: [],
+                mentionedUsers: [],
+            }],
+        };
+        const getProfile = vi.fn().mockResolvedValueOnce(expected);
+        const originalGetProfile = apifyProvider.getProfile;
+        apifyProvider.getProfile = getProfile;
+        const context = {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify' as const,
+            actorId: APIFY_PROFILE_ACTOR_ID,
+            credentialSlot: 'quinary' as const,
+            maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
+            recordUsage: vi.fn(),
+        };
+
+        try {
+            await expect(getApifyProfile('target', context)).resolves.toEqual(expected);
+            expect(getProfile).toHaveBeenCalledWith('target', context);
+        } finally {
+            apifyProvider.getProfile = originalGetProfile;
+        }
+    });
+
+    it('maps latest posts while replaying a full-profile run without another Actor start', async () => {
+        const { client, call } = mockClient([{
+            ...profileItem('target'),
+            postsCount: 1,
+            latestPosts: [{
+                id: '1',
+                shortCode: 'abcde',
+                type: 'Image',
+                displayUrl: 'https://example.com/post.jpg',
+                timestamp: 1_767_225_600,
+            }],
+        }]);
+
+        await expect(makeApifyProvider({ client, env: {} }).getProfile!('target', {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: APIFY_PROFILE_ACTOR_ID,
+            credentialSlot: 'quinary',
+            maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
+            recordUsage: vi.fn(),
+        })).resolves.toMatchObject({
+            latestPosts: [{ shortCode: 'abcde' }],
+        });
+        expect(call).not.toHaveBeenCalled();
+        expect(client.run).toHaveBeenCalledWith('StoredRun12345678');
     });
 
     it('rejects a public profile whose recent-post snapshot is shorter than min(postsCount, 8)', async () => {

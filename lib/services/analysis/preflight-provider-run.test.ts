@@ -79,6 +79,29 @@ describe('preflight provider-run adapter', () => {
             .rejects.toThrow('IDENTITY_CONFLICT');
     });
 
+    it('marks one exact fresh-admission run as schema-v1 reusable through its generation fence', async () => {
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: true, error: null })
+            .mockResolvedValueOnce({ data: false, error: null });
+        const store = createFreshAdmissionProviderRunStore({ rpc }, 4);
+        const input = { preflightId, claimToken, inputHash, runId };
+
+        await expect(store.markReusableProfileSchemaV1(input)).resolves.toBe('marked');
+        await expect(store.markReusableProfileSchemaV1(input)).resolves.toBe('already_marked');
+        expect(rpc).toHaveBeenNthCalledWith(
+            1,
+            FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.markReusableProfileSchemaV1Rpc,
+            {
+                p_preflight_id: preflightId,
+                p_admission_generation: 4,
+                p_claim_token: claimToken,
+                p_input_hash: inputHash,
+                p_run_id: runId,
+            }
+        );
+        expect(JSON.stringify(rpc.mock.calls)).not.toContain('target.name');
+    });
+
     it('loads a fenced hashed identity without sending raw provider input', async () => {
         const rpc = vi.fn(async () => ({ data: row(), error: null }));
         const store = createPreflightProviderRunStore({ rpc });

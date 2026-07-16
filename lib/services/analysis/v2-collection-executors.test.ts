@@ -18,6 +18,7 @@ import type {
     AnalysisV2ProviderRunStore,
     StoredAnalysisV2ProviderRun,
 } from './v2-provider-run-store';
+import type { AnalysisV2TargetProfileReuseStore } from './v2-target-profile-reuse';
 import {
     AnalysisV2CollectionContextFenceError,
     type AnalysisV2CollectionRequestContext,
@@ -367,6 +368,20 @@ function providerStore(callOrder: string[] = []) {
             load,
         } as unknown as AnalysisV2ProviderRunStore,
     };
+}
+
+function reusableTargetProfileRunStore(
+    value: Awaited<ReturnType<AnalysisV2TargetProfileReuseStore['load']>> = {
+        runId: 'FreshAdmissionRun123',
+        inputHash: 'f'.repeat(64),
+        logicalProvider: 'apify',
+        actorId: 'apify/instagram-profile-scraper',
+        credentialSlot: 'quinary',
+        maxChargeUsd: 0.0026,
+    }
+) {
+    const load = vi.fn(async () => value);
+    return { load, value: { load } as AnalysisV2TargetProfileReuseStore };
 }
 
 describe('analysis V2 concrete collection executors', () => {
@@ -1058,6 +1073,351 @@ describe('analysis V2 concrete collection executors', () => {
             commentSource: { status: 'not_applicable' },
             rows: [],
         });
+    });
+
+    it('replays an attested fresh-admission profile after the target primary 429 without binding a V2 run', async () => {
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const reusable = reusableTargetProfileRunStore();
+        const fallbackProfile = profile('target', []);
+        const primary = [{
+            outcome: {
+                ...failure('target').outcome,
+                failureCategory: 'rate_limit' as const,
+                httpStatus: 429,
+            },
+        }] as ProfileAttemptResult[];
+        const fallback = [{
+            outcome: success('target', 'apify').outcome,
+            profile: fallbackProfile,
+        }] as ProfileAttemptResult[];
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: requested,
+                results: primary,
+            });
+            expect(options.providerRun).toEqual(expect.objectContaining({
+                resumeRunId: 'FreshAdmissionRun123',
+                logicalProvider: 'apify',
+                actorId: 'apify/instagram-profile-scraper',
+                credentialSlot: 'quinary',
+                maxChargeUsd: 0.0026,
+            }));
+            expect(options.providerRun?.onBeforeRunStart).toBeUndefined();
+            expect(options.providerRun?.onCostRunStarted).toBeUndefined();
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: ['target'],
+                results: fallback,
+            });
+            return {
+                results: fallback,
+                profiles: [fallbackProfile],
+                primaryResults: primary,
+                fallbackResults: fallback,
+                frozenUnresolvedUsernames: ['target'],
+            };
+        });
+
+        await createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            targetProfileReuseStore: reusable.value,
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
+            evidenceStore: {
+                checkpointTargetEvidence: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    inputHash,
+                    interactorCount: 0,
+                    likerCount: 0,
+                    commentCount: 0,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        })(stageContext('target_evidence', state()));
+
+        expect(reusable.load).toHaveBeenCalledWith({
+            requestId,
+            jobKey: 'track:target-evidence:collect',
+            claimToken,
+            jobInputHash: inputHash,
+            targetUsername: 'target',
+        });
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(providers.load).not.toHaveBeenCalled();
+    });
+
+    it('preserves the bound target fallback when no attested reusable run exists', async () => {
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const reusable = reusableTargetProfileRunStore(null);
+        const primary = [failure('target')] as ProfileAttemptResult[];
+        const fallbackProfile = profile('target', []);
+        const fallback = [{
+            outcome: success('target', 'apify').outcome,
+            profile: fallbackProfile,
+        }] as ProfileAttemptResult[];
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: requested,
+                results: primary,
+            });
+            expect(options.providerRun?.onBeforeRunStart).toEqual(expect.any(Function));
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: ['target'],
+                results: fallback,
+            });
+            return {
+                results: fallback,
+                profiles: [fallbackProfile],
+                primaryResults: primary,
+                fallbackResults: fallback,
+                frozenUnresolvedUsernames: ['target'],
+            };
+        });
+
+        await createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            targetProfileReuseStore: reusable.value,
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
+            evidenceStore: {
+                checkpointTargetEvidence: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    inputHash,
+                    interactorCount: 0,
+                    likerCount: 0,
+                    commentCount: 0,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        })(stageContext('target_evidence', state()));
+
+        expect(reusable.load).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
+            jobKey: 'track:target-evidence:collect',
+            operationKey: expect.stringMatching(/^profile-fallback:/),
+        }));
+    });
+
+    it('reuses the same fresh run when a target job retries after its primary checkpoint', async () => {
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const reusable = reusableTargetProfileRunStore();
+        const primary = [failure('target')] as ProfileAttemptResult[];
+        const fallbackProfile = profile('target', []);
+        const fallback = [{
+            outcome: success('target', 'apify').outcome,
+            profile: fallbackProfile,
+        }] as ProfileAttemptResult[];
+        const observedRunIds: Array<string | undefined> = [];
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            if (!options.resume) {
+                await options.persistAttemptOutcomes({
+                    attempt: 'primary',
+                    source: 'selfhosted',
+                    requestedUsernames: requested,
+                    results: primary,
+                });
+                observedRunIds.push(options.providerRun?.resumeRunId);
+                throw new Error('SCRAPING_RUN_PENDING_ERROR: replay later');
+            }
+            observedRunIds.push(options.providerRun?.resumeRunId);
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: ['target'],
+                results: fallback,
+            });
+            return {
+                results: fallback,
+                profiles: [fallbackProfile],
+                primaryResults: primary,
+                fallbackResults: fallback,
+                frozenUnresolvedUsernames: ['target'],
+            };
+        });
+        const executor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            targetProfileReuseStore: reusable.value,
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
+            evidenceStore: {
+                checkpointTargetEvidence: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    inputHash,
+                    interactorCount: 0,
+                    likerCount: 0,
+                    commentCount: 0,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await expect(executor(stageContext('target_evidence', state())))
+            .rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+        await expect(executor(stageContext('target_evidence', state()))).resolves.toBeDefined();
+
+        expect(observedRunIds).toEqual([
+            'FreshAdmissionRun123',
+            'FreshAdmissionRun123',
+        ]);
+        expect(profileStore.store.checkpointPrimary).toHaveBeenCalledOnce();
+        expect(reusable.load).toHaveBeenCalledTimes(2);
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
+    it('seals a malformed reusable replay and never retries or binds a replacement Actor', async () => {
+        const primary = [failure('target')] as AnalysisV2ProfileFetchResume['primaryResults'];
+        const profileStore = inMemoryProfileStore({
+            requestId,
+            jobKey: 'track:target-evidence:collect',
+            requestedUsernames: ['target'],
+            frozenUnresolvedUsernames: ['target'],
+            primaryResults: primary,
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        });
+        const providers = providerStore();
+        const reusable = reusableTargetProfileRunStore();
+        const fallbackSchemaFailure = [{
+            outcome: {
+                requestedUsername: 'target',
+                source: 'apify' as const,
+                status: 'failed' as const,
+                failureCategory: 'schema' as const,
+                httpStatus: null,
+                requestCount: 1,
+                latencyMs: 10,
+                capturedAt,
+            },
+        }] as ProfileAttemptResult[];
+        const observedProviderRuns: Array<Parameters<
+            typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2
+        >[1]['providerRun']> = [];
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            observedProviderRuns.push(options.providerRun);
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: requested,
+                results: fallbackSchemaFailure,
+            });
+            return {
+                results: fallbackSchemaFailure,
+                profiles: [],
+                primaryResults: primary,
+                fallbackResults: fallbackSchemaFailure,
+                frozenUnresolvedUsernames: ['target'],
+            };
+        });
+        const executor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            targetProfileReuseStore: reusable.value,
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+        });
+
+        await expect(executor(stageContext('target_evidence', state())))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+        await expect(executor(stageContext('target_evidence', state())))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+
+        expect(fetcher).toHaveBeenCalledOnce();
+        expect(profileStore.store.checkpointFallback).toHaveBeenCalledOnce();
+        expect(profileStore.current()?.fallbackResults).toEqual(fallbackSchemaFailure);
+        expect(observedProviderRuns).toEqual([expect.objectContaining({
+            resumeRunId: 'FreshAdmissionRun123',
+            logicalProvider: 'apify',
+            actorId: 'apify/instagram-profile-scraper',
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.0026,
+        })]);
+        expect(observedProviderRuns[0]?.startReserved).toBeUndefined();
+        expect(observedProviderRuns[0]?.onBeforeRunStart).toBeUndefined();
+        expect(observedProviderRuns[0]?.onRunStarted).toBeUndefined();
+        expect(reusable.load).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(providers.load).not.toHaveBeenCalled();
+    });
+
+    it('never loads target reuse for a non-target profile batch', async () => {
+        const usernames = ['alice'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const primary = [failure('alice')] as ProfileAttemptResult[];
+        const profileStore = inMemoryProfileStore({
+            requestId,
+            jobKey: 'track:profiles:batch:0',
+            requestedUsernames: usernames,
+            frozenUnresolvedUsernames: usernames,
+            primaryResults: primary as AnalysisV2ProfileFetchResume['primaryResults'],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        });
+        const reusable = reusableTargetProfileRunStore();
+        const fallback = [success('alice', 'apify')] as ProfileAttemptResult[];
+        const fetcher = vi.fn(async (
+            _requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: usernames,
+                results: fallback,
+            });
+            return {
+                results: fallback,
+                profiles: [profile('alice')],
+                primaryResults: primary,
+                fallbackResults: fallback,
+                frozenUnresolvedUsernames: usernames,
+            };
+        });
+
+        await createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providerStore().value,
+            targetProfileReuseStore: reusable.value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ));
+
+        expect(reusable.load).not.toHaveBeenCalled();
     });
 
     it('persists all primary outcomes before binding and freezes exactly unresolved fallback input', async () => {

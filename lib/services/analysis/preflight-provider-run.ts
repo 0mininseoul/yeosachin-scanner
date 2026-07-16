@@ -37,6 +37,8 @@ export const FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     reserveRpc: 'reserve_analysis_v2_fresh_admission_provider_run',
     checkpointStartedRpc: 'checkpoint_analysis_v2_fresh_admission_provider_run_started',
     checkpointTerminalRpc: 'checkpoint_analysis_v2_fresh_admission_provider_run_terminal',
+    markReusableProfileSchemaV1Rpc:
+        'mark_analysis_v2_fresh_admission_profile_run_reusable_v1',
 });
 
 const INITIAL_PROFILE_OPERATION_KEY = 'target-profile-fallback';
@@ -103,6 +105,12 @@ export interface PreflightProviderRunStore {
         status: Exclude<PreflightProviderRunStatus, 'starting' | 'running'>;
         actualUsageUsd: number | null;
     }): Promise<StoredPreflightProviderRun>;
+}
+
+export interface FreshAdmissionProviderRunStore extends PreflightProviderRunStore {
+    markReusableProfileSchemaV1(input: RunClaimInput & {
+        runId: string;
+    }): Promise<'marked' | 'already_marked'>;
 }
 
 interface PreflightProviderRunUsageReconciliationInput extends ProviderIdentity {
@@ -537,7 +545,7 @@ export function freshAdmissionProviderOperationKey(generation: number): string {
 export function createFreshAdmissionProviderRunStore(
     client: PreflightProviderRunClient,
     generation: number
-): PreflightProviderRunStore {
+): FreshAdmissionProviderRunStore {
     const operationKey = freshAdmissionProviderOperationKey(generation);
     const rpcNames = new Map<string, string>([
         [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
@@ -584,6 +592,33 @@ export function createFreshAdmissionProviderRunStore(
         },
         async checkpointTerminal(input) {
             return assertOperation(await store.checkpointTerminal(input));
+        },
+        async markReusableProfileSchemaV1(input) {
+            assertClaimInput(input);
+            if (!RUN_ID_PATTERN.test(input.runId)) {
+                throw new Error('PREFLIGHT_PROVIDER_RUN_VALIDATION_ERROR');
+            }
+            const { data, error } = await client.rpc(
+                FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.markReusableProfileSchemaV1Rpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_admission_generation: generation,
+                    p_claim_token: input.claimToken,
+                    p_input_hash: input.inputHash,
+                    p_run_id: input.runId,
+                }
+            );
+            if (error) {
+                throw new Error(
+                    `PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: reusable profile attestation failed (${safeRpcCode(error)}).`
+                );
+            }
+            if (typeof data !== 'boolean') {
+                throw new Error(
+                    'PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reusable profile attestation.'
+                );
+            }
+            return data ? 'marked' : 'already_marked';
         },
     };
 }

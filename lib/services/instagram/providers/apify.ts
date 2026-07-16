@@ -1119,6 +1119,16 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
 
 export const apifyProvider = makeApifyProvider();
 
+export async function getApifyProfile(
+    username: string,
+    context?: ProviderCallContext
+): Promise<InstagramProfile | null> {
+    if (!apifyProvider.getProfile) {
+        throw new Error('SCRAPING_CONFIG_ERROR: Apify full profile capability is unavailable.');
+    }
+    return apifyProvider.getProfile(username, context);
+}
+
 export async function getApifyProfileSummary(
     username: string,
     context?: ProviderCallContext

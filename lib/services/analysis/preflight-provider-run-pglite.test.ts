@@ -24,6 +24,13 @@ const splitFreshAdmissionLedgerMigration = readFileSync(
     ),
     'utf8'
 );
+const reusableTargetProfileMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260716143000_reuse_fresh_admission_target_profile.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const INPUT_HASH = 'a'.repeat(64);
 const OTHER_INPUT_HASH = 'b'.repeat(64);
@@ -80,6 +87,26 @@ CREATE TABLE public.analysis_preflights (
     pii_scrubbed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp()
+);
+`;
+
+const reusableTargetProfileBootstrap = `
+CREATE TABLE public.analysis_requests (
+    id UUID PRIMARY KEY,
+    pipeline_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    preflight_id UUID,
+    target_instagram_id TEXT NOT NULL
+);
+
+CREATE TABLE public.analysis_pipeline_jobs (
+    request_id UUID NOT NULL,
+    job_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    lease_token UUID,
+    lease_expires_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (request_id, job_key)
 );
 `;
 
@@ -213,6 +240,73 @@ async function terminalizeWithoutUsage(
     );
 }
 
+async function terminalizeFresh(
+    preflightId: string,
+    freshRunId = FRESH_RUN_ID
+): Promise<void> {
+    await reserveFresh(preflightId);
+    await serviceQuery(
+        `SELECT public.checkpoint_analysis_v2_fresh_admission_provider_run_started(
+            $1, $2, $3, $4, $5, $6, $7
+        )`,
+        [
+            preflightId,
+            FRESH_GENERATION,
+            CLAIM_TOKEN,
+            INPUT_HASH,
+            'quinary',
+            '0.0026',
+            freshRunId,
+        ]
+    );
+    await serviceQuery(
+        `SELECT public.checkpoint_analysis_v2_fresh_admission_provider_run_terminal(
+            $1, $2, $3, $4, $5, $6, $7, $8, $9
+        )`,
+        [
+            preflightId,
+            FRESH_GENERATION,
+            CLAIM_TOKEN,
+            INPUT_HASH,
+            'quinary',
+            '0.0026',
+            freshRunId,
+            'succeeded',
+            null,
+        ]
+    );
+}
+
+async function consumeFreshForTargetEvidence(input: {
+    preflightId: string;
+    requestId: string;
+    jobInputHash?: string;
+}): Promise<void> {
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET status = 'consumed', consumed_request_id = $2,
+             admission_status = 'ready', admission_claim_token = NULL,
+             admission_lease_expires_at = NULL, target_instagram_id = 'target'
+         WHERE id = $1`,
+        [input.preflightId, input.requestId]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_requests (
+            id, pipeline_version, status, preflight_id, target_instagram_id
+         ) VALUES ($1, 'v2', 'processing', $2, 'target')`,
+        [input.requestId, input.preflightId]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_pipeline_jobs (
+            request_id, job_key, status, input_hash, lease_token, lease_expires_at
+         ) VALUES (
+            $1, 'track:target-evidence:collect', 'processing', $2, $3,
+            pg_catalog.clock_timestamp() + INTERVAL '5 minutes'
+         )`,
+        [input.requestId, input.jobInputHash ?? INPUT_HASH, CLAIM_TOKEN]
+    );
+}
+
 describe('preflight Apify provider-run PGlite contract', () => {
     beforeAll(async () => {
         db = await PGlite.create();
@@ -220,12 +314,16 @@ describe('preflight Apify provider-run PGlite contract', () => {
         await db.exec(migration);
         await db.exec(freshAdmissionFenceMigration);
         await db.exec(splitFreshAdmissionLedgerMigration);
+        await db.exec(reusableTargetProfileBootstrap);
+        await db.exec(reusableTargetProfileMigration);
     }, 30_000);
 
     beforeEach(async () => {
         await db.exec(
             `TRUNCATE public.analysis_preflight_acquisition_cost_events,
                 public.analysis_preflight_provider_runs,
+                public.analysis_pipeline_jobs,
+                public.analysis_requests,
                 public.analysis_preflights`
         );
     });
@@ -453,6 +551,169 @@ describe('preflight Apify provider-run PGlite contract', () => {
             'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_preflight_provider_runs'
         );
         expect(count.rows[0].count).toBe(1);
+    });
+
+    it('attests one exact succeeded fresh run idempotently and exposes both RPCs only to service_role', async () => {
+        const preflightId = '11100000-0000-4000-8000-000000000001';
+        await seedFreshAdmission(preflightId);
+        await terminalizeFresh(preflightId);
+
+        await expect(serviceQuery(
+            `SELECT public.mark_analysis_v2_fresh_admission_profile_run_reusable_v1(
+                $1, $2, $3, $4, $5
+            ) AS result`,
+            [preflightId, FRESH_GENERATION, OTHER_CLAIM_TOKEN, INPUT_HASH, FRESH_RUN_ID]
+        )).rejects.toThrow(/FENCE_MISMATCH/);
+        await expect(serviceQuery(
+            `SELECT public.mark_analysis_v2_fresh_admission_profile_run_reusable_v1(
+                $1, $2, $3, $4, $5
+            ) AS result`,
+            [preflightId, FRESH_GENERATION, CLAIM_TOKEN, INPUT_HASH, RUN_ID]
+        )).rejects.toThrow(/RUN_MISMATCH/);
+
+        const first = await serviceQuery<JsonRow<boolean>>(
+            `SELECT public.mark_analysis_v2_fresh_admission_profile_run_reusable_v1(
+                $1, $2, $3, $4, $5
+            ) AS result`,
+            [preflightId, FRESH_GENERATION, CLAIM_TOKEN, INPUT_HASH, FRESH_RUN_ID]
+        );
+        const replay = await serviceQuery<JsonRow<boolean>>(
+            `SELECT public.mark_analysis_v2_fresh_admission_profile_run_reusable_v1(
+                $1, $2, $3, $4, $5
+            ) AS result`,
+            [preflightId, FRESH_GENERATION, CLAIM_TOKEN, INPUT_HASH, FRESH_RUN_ID]
+        );
+        expect(first.rows[0].result).toBe(true);
+        expect(replay.rows[0].result).toBe(false);
+
+        await db.exec('SET ROLE authenticated');
+        try {
+            await expect(db.query(
+                `SELECT public.mark_analysis_v2_fresh_admission_profile_run_reusable_v1(
+                    $1, $2, $3, $4, $5
+                )`,
+                [preflightId, FRESH_GENERATION, CLAIM_TOKEN, INPUT_HASH, FRESH_RUN_ID]
+            )).rejects.toThrow(/permission denied/i);
+            await expect(db.query(
+                `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                    $1, 'track:target-evidence:collect', $2, $3
+                )`,
+                ['33333333-3333-4333-8333-333333333333', CLAIM_TOKEN, INPUT_HASH]
+            )).rejects.toThrow(/permission denied/i);
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('loads only the exact live consumed target generation and never trusts a legacy NULL marker', async () => {
+        const preflightId = '11200000-0000-4000-8000-000000000001';
+        const requestId = '33333333-3333-4333-8333-333333333333';
+        await seedFreshAdmission(preflightId);
+        await terminalizeFresh(preflightId);
+        await serviceQuery(
+            `SELECT public.mark_analysis_v2_fresh_admission_profile_run_reusable_v1(
+                $1, $2, $3, $4, $5
+            )`,
+            [preflightId, FRESH_GENERATION, CLAIM_TOKEN, INPUT_HASH, FRESH_RUN_ID]
+        );
+        await consumeFreshForTargetEvidence({ preflightId, requestId });
+
+        const loaded = await serviceQuery<JsonRow<Record<string, unknown>>>(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:target-evidence:collect', $2, $3
+            ) AS result`,
+            [requestId, CLAIM_TOKEN, INPUT_HASH]
+        );
+        expect(loaded.rows[0].result).toEqual({
+            runId: FRESH_RUN_ID,
+            inputHash: INPUT_HASH,
+            actorId: 'apify/instagram-profile-scraper',
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.0026,
+        });
+
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:profiles:batch:0', $2, $3
+            )`,
+            [requestId, CLAIM_TOKEN, INPUT_HASH]
+        )).rejects.toThrow(/INVALID/);
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:target-evidence:collect', $2, $3
+            )`,
+            ['44444444-4444-4444-8444-444444444444', CLAIM_TOKEN, INPUT_HASH]
+        )).rejects.toThrow(/FENCE_MISMATCH/);
+
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET lease_token = $2
+             WHERE request_id = $1`,
+            [requestId, OTHER_CLAIM_TOKEN]
+        );
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:target-evidence:collect', $2, $3
+            )`,
+            [requestId, CLAIM_TOKEN, INPUT_HASH]
+        )).rejects.toThrow(/FENCE_MISMATCH/);
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET lease_token = $2
+             WHERE request_id = $1`,
+            [requestId, CLAIM_TOKEN]
+        );
+
+        const unrelatedPreflightId = '11200000-0000-4000-8000-000000000002';
+        await seedFreshAdmission(unrelatedPreflightId);
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET preflight_id = $2
+             WHERE id = $1`,
+            [requestId, unrelatedPreflightId]
+        );
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:target-evidence:collect', $2, $3
+            )`,
+            [requestId, CLAIM_TOKEN, INPUT_HASH]
+        )).rejects.toThrow(/FENCE_MISMATCH/);
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET preflight_id = $2
+             WHERE id = $1`,
+            [requestId, preflightId]
+        );
+
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_generation = $2
+             WHERE id = $1`,
+            [preflightId, FRESH_GENERATION + 1]
+        );
+        const wrongGeneration = await serviceQuery<JsonRow<null>>(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:target-evidence:collect', $2, $3
+            ) AS result`,
+            [requestId, CLAIM_TOKEN, INPUT_HASH]
+        );
+        expect(wrongGeneration.rows[0].result).toBeNull();
+
+        const legacyPreflightId = '11300000-0000-4000-8000-000000000001';
+        const legacyRequestId = '55555555-5555-4555-8555-555555555555';
+        await seedFreshAdmission(legacyPreflightId);
+        await terminalizeFresh(legacyPreflightId, 'LegacyFreshRun123');
+        await consumeFreshForTargetEvidence({
+            preflightId: legacyPreflightId,
+            requestId: legacyRequestId,
+        });
+        const legacy = await serviceQuery<JsonRow<null>>(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:target-evidence:collect', $2, $3
+            ) AS result`,
+            [legacyRequestId, CLAIM_TOKEN, INPUT_HASH]
+        );
+        expect(legacy.rows[0].result).toBeNull();
     });
 
     it('adopts a legacy worker reservation made during the same fresh generation', async () => {

@@ -162,30 +162,40 @@ function storedProviderRun(
 
 function providerRunStore(
     existing: StoredPreflightProviderRun | null = null
-): PreflightProviderRunStore {
+): PreflightProviderRunStore & {
+    markReusableProfileSchemaV1: ReturnType<typeof vi.fn>;
+} {
+    let current = existing;
     return {
-        load: vi.fn(async input => existing ? { ...existing, inputHash: input.inputHash } : null),
-        reserve: vi.fn(async input => ({
-            created: true,
-            run: {
+        load: vi.fn(async input => current ? { ...current, inputHash: input.inputHash } : null),
+        reserve: vi.fn(async input => {
+            current = {
                 ...storedProviderRun('starting'),
                 inputHash: input.inputHash,
                 credentialSlot: input.credentialSlot,
-            },
-        })),
-        checkpointStarted: vi.fn(async input => ({
-            ...storedProviderRun('running'),
-            inputHash: input.inputHash,
-            credentialSlot: input.credentialSlot,
-            runId: input.runId,
-        })),
-        checkpointTerminal: vi.fn(async input => ({
-            ...storedProviderRun(input.status),
-            inputHash: input.inputHash,
-            credentialSlot: input.credentialSlot,
-            runId: input.runId,
-            actualUsageUsd: input.actualUsageUsd,
-        })),
+            };
+            return { created: true, run: current };
+        }),
+        checkpointStarted: vi.fn(async input => {
+            current = {
+                ...storedProviderRun('running'),
+                inputHash: input.inputHash,
+                credentialSlot: input.credentialSlot,
+                runId: input.runId,
+            };
+            return current;
+        }),
+        checkpointTerminal: vi.fn(async input => {
+            current = {
+                ...storedProviderRun(input.status),
+                inputHash: input.inputHash,
+                credentialSlot: input.credentialSlot,
+                runId: input.runId,
+                actualUsageUsd: input.actualUsageUsd,
+            };
+            return current;
+        }),
+        markReusableProfileSchemaV1: vi.fn(async () => 'marked' as const),
     };
 }
 
@@ -489,6 +499,7 @@ describe('durable fresh V2 admission worker', () => {
 
     it('rereads an existing successful preflight fallback without a second paid run', async () => {
         const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const callOrder: string[] = [];
         const { client } = clientWith(async (name) => {
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
                 return {
@@ -501,6 +512,7 @@ describe('durable fresh V2 admission worker', () => {
                 };
             }
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                callOrder.push('complete');
                 return {
                     data: [{ admission_status: 'ready', admission_error_code: null }],
                     error: null,
@@ -509,6 +521,10 @@ describe('durable fresh V2 admission worker', () => {
             throw new Error(`unexpected RPC ${name}`);
         });
         const runs = providerRunStore(storedProviderRun('succeeded'));
+        vi.mocked(runs.markReusableProfileSchemaV1).mockImplementationOnce(async () => {
+            callOrder.push('attest');
+            return 'already_marked';
+        });
         const fallback = vi.fn(async (
             _username: string,
             context?: ProviderCallContext
@@ -518,7 +534,12 @@ describe('durable fresh V2 admission worker', () => {
                 credentialSlot: 'quinary',
                 maxChargeUsd: 0.0026,
             });
-            return profile({ followersCount: 621, followingCount: 711 });
+            return profile({
+                followersCount: 621,
+                followingCount: 711,
+                postsCount: 0,
+                latestPosts: [],
+            });
         });
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
@@ -534,6 +555,13 @@ describe('durable fresh V2 admission worker', () => {
         expect(fallback).toHaveBeenCalledOnce();
         expect(runs.reserve).not.toHaveBeenCalled();
         expect(runs.checkpointStarted).not.toHaveBeenCalled();
+        expect(runs.markReusableProfileSchemaV1).toHaveBeenCalledWith({
+            preflightId: PREFLIGHT_ID,
+            claimToken: CLAIM_TOKEN,
+            inputHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+            runId: 'FreshAdmissionRun123',
+        });
+        expect(callOrder).toEqual(['attest', 'complete']);
         const record = String(info.mock.calls[0]?.[0]);
         expect(JSON.parse(record)).toEqual({
             event: 'preflight_profile_fallback_entered',
@@ -653,6 +681,7 @@ describe('durable fresh V2 admission worker', () => {
 
     it('reserves the one preflight fallback when fresh admission is its first eligible failure', async () => {
         const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const callOrder: string[] = [];
         const { client } = clientWith(async (name) => {
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
                 return {
@@ -665,6 +694,7 @@ describe('durable fresh V2 admission worker', () => {
                 };
             }
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                callOrder.push('complete');
                 return {
                     data: [{ admission_status: 'ready', admission_error_code: null }],
                     error: null,
@@ -695,7 +725,11 @@ describe('durable fresh V2 admission worker', () => {
                 status: 'succeeded',
                 usageTotalUsd: null,
             });
-            return profile();
+            return profile({ postsCount: 0, latestPosts: [] });
+        });
+        vi.mocked(runs.markReusableProfileSchemaV1).mockImplementationOnce(async () => {
+            callOrder.push('attest');
+            return 'marked';
         });
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
@@ -711,10 +745,62 @@ describe('durable fresh V2 admission worker', () => {
         expect(runs.reserve).toHaveBeenCalledOnce();
         expect(runs.checkpointStarted).toHaveBeenCalledOnce();
         expect(runs.checkpointTerminal).toHaveBeenCalledOnce();
+        expect(runs.markReusableProfileSchemaV1).toHaveBeenCalledWith(expect.objectContaining({
+            runId: 'FreshAdmissionRun456',
+        }));
+        expect(callOrder).toEqual(['attest', 'complete']);
         expect(JSON.stringify(vi.mocked(runs.reserve).mock.calls)).not.toContain(
             'target.account'
         );
         info.mockRestore();
+    });
+
+    it('never attests or completes when the paid full-profile dataset fails schema parsing', async () => {
+        const { client, rpc } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc) {
+                return {
+                    data: [{
+                        admission_status: 'pending',
+                        failure_count: 1,
+                        admission_error_code: null,
+                    }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore(storedProviderRun('succeeded'));
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockRejectedValue(
+                new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
+            ),
+            getFallbackProfile: vi.fn().mockRejectedValue(
+                new Error('SCRAPING_SCHEMA_ERROR: malformed latestPosts')
+            ),
+            providerRunStore: runs,
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: { category: 'schema', workerAttemptCount: 1 },
+        });
+
+        expect(runs.markReusableProfileSchemaV1).not.toHaveBeenCalled();
+        expect(rpc).not.toHaveBeenCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc,
+            expect.anything()
+        );
     });
 
     it('keeps an explicit selfhosted not-found result free and terminal', async () => {

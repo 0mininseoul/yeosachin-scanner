@@ -32,7 +32,7 @@ The worker must have Secret Manager references for every slot named by the polic
 
 ## Pre-run checks
 
-1. Apply `20260716130001_add_selfhosted_profile_global_gate.sql` through the normal ordered migration path. Do not use `--include-all`.
+1. Apply migrations through `20260716143000_reuse_fresh_admission_target_profile.sql` using the normal ordered migration path. Do not use `--include-all`.
 2. Only after that migration succeeds, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
 4. Confirm all five Apify slots resolve to distinct intended test accounts without displaying token values.
@@ -62,6 +62,7 @@ paid account instead of rotating free accounts.
 4. The request reaches `completed`; failed or incomplete relationship coverage is not presented as a complete result.
 5. The completed request appears on the same user's `기록` page and the result link can be reopened after leaving the browser.
 6. Record total duration, stage durations, provider usage, Gemini usage, and any fallback reason without recording credentials or private payloads.
+7. When fresh admission produced a schema-v1 attested target profile run, confirm target evidence replayed that run ID without a second profile Actor or `analysis_v2_provider_runs` row. Attribute its cost only to the preflight. If no attested descriptor exists, confirm the existing bound profile fallback was used instead.
 
 ## Teardown
 
@@ -109,6 +110,17 @@ The next authorized canary still must prove full relationship coverage, mutual-p
 Gemini latency, result rendering, and the five-minute success target. The target profile's observed
 logged-out HTTP 429 also remains a separate self-hosted crawler reliability issue; this recovery
 change does not classify the fallback as proof that logged-out collection is production-ready.
+
+### Fresh-admission target profile reuse
+
+A successful fresh-admission Apify run is reusable by `track:target-evidence:collect` only when its
+bounded full-profile snapshot passed schema-v1 validation (`latestPosts` parser max 10) and the
+request, target, admission generation, job
+input hash, and live lease still match. Replay reads the existing dataset and writes the normal
+profile checkpoint, but does not start another profile Actor, bind a V2 provider-run row, or record
+the cost again. Missing or legacy `NULL` attestations use the existing bound fallback. Malformed
+descriptors and replay parse failures fail closed; they never authorize an automatic replacement
+Actor.
 
 ### Production-wide self-hosted start coordination
 
