@@ -10,6 +10,7 @@ import type {
     GenderTriageResult,
     PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
+import { featureAnalysisInputSchema } from '@/lib/services/ai/v2-staged-analysis';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
 import type {
@@ -924,6 +925,85 @@ describe('V2 AI and scoring executors', () => {
             normalizedCount: 9,
             failures: [],
         });
+    });
+
+    it('sends one caption evidence row when a selected carousel contributes three images', async () => {
+        const memoryState = memory();
+        const baseAccount = profile('woman.carousel_caption', { postCount: 8 });
+        const account: AnalysisV2CheckpointProfile = {
+            ...baseAccount,
+            latestPosts: [{
+                ...baseAccount.latestPosts![0],
+                id: 'caption-carousel-post',
+                shortCode: 'captioncarouselpost',
+                type: 'carousel',
+                imageUrl: 'https://cdninstagram.com/carousel/cover.jpg',
+                mediaItems: Array.from({ length: 5 }, (_, index) => ({
+                    id: `caption-frame-${index + 1}`,
+                    type: 'image' as const,
+                    imageUrl: `https://cdninstagram.com/carousel/frame-${index + 1}.jpg`,
+                })),
+                declaredMediaCount: 5,
+                childrenComplete: true,
+            }, ...baseAccount.latestPosts!.slice(1)],
+        };
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username, status: 'success' as const, profile: account,
+                    }],
+                })),
+            },
+        });
+        deps.ai.features = vi.fn(async rawInput => {
+            const input = featureAnalysisInputSchema.parse(rawInput);
+            return {
+                result: feature(input.media.map(row => row.selectionId)),
+                operationKey: `feature-analysis:${digest('feature-carousel-caption')}`,
+                resultHash: digest('feature-carousel-caption-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const base = state();
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        detectedMutualCount: 1,
+                        publicCount: 1,
+                        detailedSelectedPublicCount: 1,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('profile-topology-carousel-caption'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('profile-producer-carousel-caption'),
+                        revision: 1,
+                        resultHash: digest('profile-result-carousel-caption'),
+                    }],
+                }),
+            })
+        )).resolves.toBeDefined();
+
+        const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
+        expect(featureInput.media.filter(media => (
+            media.postId === 'caption-carousel-post'
+        ))).toHaveLength(3);
+        expect(featureInput.captions.filter(caption => (
+            caption.selectionId.includes('caption-carousel-post')
+        ))).toHaveLength(1);
+        expect(new Set(featureInput.captions.map(caption => caption.evidenceRefId)).size)
+            .toBe(featureInput.captions.length);
     });
 
     it('distinguishes successful profile fetches with zero usable media from fetch failures', async () => {

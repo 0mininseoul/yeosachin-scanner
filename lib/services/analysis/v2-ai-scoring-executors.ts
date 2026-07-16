@@ -467,10 +467,12 @@ function captionEvidence(
     selections: readonly NormalizedAiMediaSelection[]
 ): AnalysisV2StoredCaptionEvidence[] {
     const postById = new Map((profile.latestPosts ?? []).map(post => [post.id, post]));
+    const seenPostIds = new Set<string>();
     return selections.flatMap(selection => {
-        if (!selection.postId) return [];
+        if (!selection.postId || seenPostIds.has(selection.postId)) return [];
         const caption = postById.get(selection.postId)?.caption?.trim();
         if (!caption) return [];
+        seenPostIds.add(selection.postId);
         return [{
             evidenceRefId: `caption:${sha256('analysis-v2-caption-ref-v1', {
                 candidate: profile.username,

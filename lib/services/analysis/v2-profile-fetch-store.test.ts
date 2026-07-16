@@ -73,7 +73,7 @@ function primaryResults() {
     return [
         {
             outcome: outcome({ username: 'alice', source: 'cache', status: 'success' }),
-            profile: profile('alice', 10),
+            profile: profile('alice', 12),
         },
         {
             outcome: outcome({
@@ -168,8 +168,8 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         expect(persistedOutcomes[0].profile.latestPosts.map(
             (value: InstagramPost) => value.id
         )).toEqual([
-            'post-9', 'post-8', 'post-7', 'post-6',
-            'post-5', 'post-4', 'post-3', 'post-2',
+            'post-11', 'post-10', 'post-9', 'post-8',
+            'post-7', 'post-6', 'post-5', 'post-4',
         ]);
         expect(persistedOutcomes[1]).toMatchObject({
             username: 'bob',
