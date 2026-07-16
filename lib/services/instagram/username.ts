@@ -1,4 +1,5 @@
 export const INSTAGRAM_USERNAME_MAX_LENGTH = 30;
+export const INSTAGRAM_MENTION_MAX_COUNT = 50;
 export const INSTAGRAM_USERNAME_PATTERN = /^[A-Za-z0-9._]{1,30}$/;
 const INSTAGRAM_MENTION_PATTERN = /(^|[^A-Za-z0-9._@])@([A-Za-z0-9._]+)/g;
 
@@ -35,10 +36,12 @@ export function mergeInstagramMentions(
     const seen = new Set<string>();
     for (const username of parentMentions) {
         appendInstagramUsername(mentions, seen, username);
+        if (mentions.length === INSTAGRAM_MENTION_MAX_COUNT) return mentions;
     }
     for (const caption of childCaptions) {
         for (const username of extractInstagramMentions(caption)) {
             appendInstagramUsername(mentions, seen, username);
+            if (mentions.length === INSTAGRAM_MENTION_MAX_COUNT) return mentions;
         }
     }
     return mentions;
