@@ -546,6 +546,35 @@ function verifiedOutcome(
     };
 }
 
+function completeCarouselOutcome(username: string): AnalysisV2ProfileAiOutcome {
+    const candidate = verifiedOutcome(username);
+    candidate.profile = {
+        ...candidate.profile!,
+        postsCount: 1,
+        latestPosts: [{
+            id: 'carousel-post',
+            shortCode: 'carouselpost',
+            caption: 'parent carousel caption',
+            imageUrl: 'https://cdninstagram.com/carousel/cover.jpg',
+            type: 'carousel',
+            mediaItems: Array.from({ length: 20 }, (_, index) => ({
+                id: `frame-${index + 1}`,
+                type: 'image' as const,
+                caption: `slide ${index + 1} ${String(index % 10).repeat(180)}`,
+                imageUrl: `https://cdninstagram.com/carousel/frame-${index + 1}.jpg`,
+            })),
+            declaredMediaCount: 20,
+            childrenComplete: true,
+            likesCount: 0,
+            commentsCount: 0,
+            timestamp: new Date(Date.UTC(2026, 6, 10)).toISOString(),
+            taggedUsers: [],
+            mentionedUsers: [],
+        }],
+    };
+    return candidate;
+}
+
 describe('V2 AI and scoring executors', () => {
     it('excludes only high-confidence same-owner men, routes unknowns, and persists every terminal result', async () => {
         const memoryState = memory();
@@ -916,6 +945,7 @@ describe('V2 AI and scoring executors', () => {
 
         const genderInput = vi.mocked(deps.ai.gender).mock.calls[0]![0];
         const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
+        expect(deps.ai.features).toHaveBeenCalledOnce();
         expect(genderInput.media).toHaveLength(5);
         expect(featureInput.media).toHaveLength(9);
         expect(normalizeMedia).toHaveBeenCalledTimes(9);
@@ -927,7 +957,7 @@ describe('V2 AI and scoring executors', () => {
         });
     });
 
-    it('sends one caption evidence row when a selected carousel contributes three images', async () => {
+    it('aligns first, middle, and last child captions with the canonical feature selections', async () => {
         const memoryState = memory();
         const baseAccount = profile('woman.carousel_caption', { postCount: 8 });
         const account: AnalysisV2CheckpointProfile = {
@@ -938,12 +968,13 @@ describe('V2 AI and scoring executors', () => {
                 shortCode: 'captioncarouselpost',
                 type: 'carousel',
                 imageUrl: 'https://cdninstagram.com/carousel/cover.jpg',
-                mediaItems: Array.from({ length: 5 }, (_, index) => ({
+                mediaItems: Array.from({ length: 20 }, (_, index) => ({
                     id: `caption-frame-${index + 1}`,
                     type: 'image' as const,
+                    caption: `slide caption ${index + 1}`,
                     imageUrl: `https://cdninstagram.com/carousel/frame-${index + 1}.jpg`,
                 })),
-                declaredMediaCount: 5,
+                declaredMediaCount: 20,
                 childrenComplete: true,
             }, ...baseAccount.latestPosts!.slice(1)],
         };
@@ -996,12 +1027,17 @@ describe('V2 AI and scoring executors', () => {
         )).resolves.toBeDefined();
 
         const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
+        expect(deps.ai.features).toHaveBeenCalledOnce();
         expect(featureInput.media.filter(media => (
             media.postId === 'caption-carousel-post'
         ))).toHaveLength(3);
         expect(featureInput.captions.filter(caption => (
             caption.selectionId.includes('caption-carousel-post')
-        ))).toHaveLength(1);
+        )).map(caption => [caption.selectionId, caption.text])).toEqual([
+            [expect.stringContaining(':media:0:'), 'slide caption 1'],
+            [expect.stringContaining(':media:10:'), 'slide caption 11'],
+            [expect.stringContaining(':media:19:'), 'slide caption 20'],
+        ]);
         expect(new Set(featureInput.captions.map(caption => caption.evidenceRefId)).size)
             .toBe(featureInput.captions.length);
     });
@@ -1257,6 +1293,60 @@ describe('V2 AI and scoring executors', () => {
         expect(deps.ai.gender).toHaveBeenCalledOnce();
     });
 
+    it('passes only the 17 bounded captions aligned with successful contact-sheet cells', async () => {
+        const memoryState = memory();
+        const candidate = completeCarouselOutcome('woman.carousel');
+        memoryState.outcomes = [candidate];
+        memoryState.screening = {
+            revision: 1,
+            resultHash: digest('screening-carousel-captions'),
+            shortlistHash: digest('shortlist-carousel-captions'),
+            candidates: calculateV2PreliminaryScores({
+                candidates: [{
+                    candidateId: candidate.candidateId,
+                    username: candidate.instagramId,
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    isBusinessAccount: false,
+                    hasWeakPartnerEvidence: false,
+                    hasStrongPartnerEvidence: false,
+                    uniqueTargetPostsLikedByCandidate: 0,
+                    boundedCandidateCommentsOnTarget: 0,
+                    hasTagOrCaptionMention: false,
+                }],
+                orderedMutualUsernames: [candidate.instagramId],
+                excludedUsername: null,
+            }),
+        };
+        const createContactSheet = vi.fn(async (
+            sources: readonly { selectionId: string; normalizedJpegBase64: string }[]
+        ) => ({
+            selectionId: `contact-sheet:${digest(sources.map(row => row.selectionId).join('|'))}`,
+            normalizedJpegBase64: Buffer.from('sheet').toString('base64'),
+            sourceSelectionIds: sources.map(row => row.selectionId),
+            width: 768,
+            height: 960,
+        }));
+        const deps = dependencies(memoryState, { createContactSheet });
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).partner_safety!(
+            context('partner_safety')
+        );
+
+        expect(deps.ai.partnerSafety).toHaveBeenCalledOnce();
+        expect(deps.targetProfiles.loadTargetProfile).toHaveBeenCalledOnce();
+        const partnerInput = vi.mocked(deps.ai.partnerSafety).mock.calls[0]![0];
+        expect(partnerInput.contactSheet?.sourceSelectionIds).toHaveLength(17);
+        expect(partnerInput.partnerCaptions).toHaveLength(17);
+        expect(partnerInput.partnerCaptions?.map(row => row.selectionId)).toEqual(
+            partnerInput.contactSheet?.sourceSelectionIds
+        );
+        expect(partnerInput.partnerCaptions?.reduce(
+            (total, row) => total + row.text.length,
+            0
+        )).toBeLessThanOrEqual(2_000);
+    });
+
     it('never treats a partially prepared carousel contact sheet as partner absence', async () => {
         const memoryState = memory();
         const candidate = verifiedOutcome('woman.carousel');
@@ -1315,7 +1405,7 @@ describe('V2 AI and scoring executors', () => {
 
         expect(deps.createContactSheet).not.toHaveBeenCalled();
         expect(deps.ai.partnerSafety).toHaveBeenCalledWith(
-            expect.objectContaining({ contactSheet: null }),
+            expect.objectContaining({ contactSheet: null, partnerCaptions: [] }),
             expect.any(Object)
         );
         expect(memoryState.partner?.rows[0]).toMatchObject({
@@ -1557,7 +1647,20 @@ describe('V2 AI and scoring executors', () => {
 
     it('reuses the exact private bundle for narrative grounding and never redownloads Instagram media', async () => {
         const memoryState = memory();
-        const candidate = verifiedOutcome('woman.one');
+        const candidate = completeCarouselOutcome('woman.one');
+        const selectedCaptionIds = [0, 10, 19].map(index => (
+            `post:carousel-post:media:${index}:frame-${index + 1}`
+        ));
+        candidate.feature = {
+            ...candidate.feature!,
+            analyzedSelectionIds: selectedCaptionIds,
+        };
+        candidate.normalizedSelectionIds = selectedCaptionIds;
+        candidate.captions = selectedCaptionIds.map((selectionId, index) => ({
+            evidenceRefId: `caption:${digest(`selected-caption-${index}`)}`,
+            selectionId,
+            text: `selected caption ${index + 1}`,
+        }));
         memoryState.outcomes = [candidate];
         memoryState.reverse = {
             revision: 1, resultHash: digest('reverse'),
@@ -1613,7 +1716,11 @@ describe('V2 AI and scoring executors', () => {
             expectedSelectionIds: candidate.feature!.analyzedSelectionIds,
         }));
         const narrativeInput = narrative.mock.calls[0]![0];
+        expect(narrative).toHaveBeenCalledOnce();
         expect(narrativeInput.interactions.comments[0].text).toBe(actualComment);
+        expect(narrativeInput.captions).toEqual(candidate.captions);
+        expect(narrativeInput.carouselCaptionDossier?.text).toContain('[슬라이드 1]');
+        expect(narrativeInput.carouselCaptionDossier?.text.length).toBeLessThanOrEqual(2_000);
         expect(memoryState.narrative?.rows[0].lines[1]).toContain(actualComment);
     });
 });

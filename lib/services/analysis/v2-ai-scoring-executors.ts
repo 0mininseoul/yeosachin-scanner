@@ -4,6 +4,7 @@ import {
     selectAnalysisMedia,
     type SelectedAnalysisMedia,
 } from '@/lib/domain/analysis/media-policy';
+import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import {
     calculateRiskPolicy,
     type AppearanceGrade,
@@ -462,28 +463,6 @@ function mediaPolicy(profile: AnalysisV2CheckpointProfile) {
     return policy;
 }
 
-function captionEvidence(
-    profile: AnalysisV2CheckpointProfile,
-    selections: readonly NormalizedAiMediaSelection[]
-): AnalysisV2StoredCaptionEvidence[] {
-    const postById = new Map((profile.latestPosts ?? []).map(post => [post.id, post]));
-    const seenPostIds = new Set<string>();
-    return selections.flatMap(selection => {
-        if (!selection.postId || seenPostIds.has(selection.postId)) return [];
-        const caption = postById.get(selection.postId)?.caption?.trim();
-        if (!caption) return [];
-        seenPostIds.add(selection.postId);
-        return [{
-            evidenceRefId: `caption:${sha256('analysis-v2-caption-ref-v1', {
-                candidate: profile.username,
-                postId: selection.postId,
-            }).slice(0, 48)}`,
-            selectionId: selection.selectionId,
-            text: caption,
-        }];
-    });
-}
-
 async function normalizedSelections(
     selected: readonly SelectedAnalysisMedia[],
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>
@@ -777,6 +756,7 @@ function narrativeInput(input: {
     targetUsername: string;
     outcome: AnalysisV2ProfileAiOutcome;
     media: readonly NormalizedAiMediaSelection[];
+    carouselCaptionDossier: Readonly<{ evidenceRefId: string; text: string }> | null;
     targetEvidence: AnalysisV2TargetEvidenceStagingSnapshot;
     reverse: AnalysisV2ReverseLikeRow | undefined;
 }): HighRiskNarrativeInput {
@@ -809,6 +789,7 @@ function narrativeInput(input: {
         bio: input.outcome.profile?.bio ?? null,
         media: [...input.media],
         captions: [...input.outcome.captions],
+        carouselCaptionDossier: input.carouselCaptionDossier,
         interactions: {
             candidateToTargetLike: interactionObservation(
                 candidateRows,
@@ -1057,7 +1038,18 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
-                    const captions = captionEvidence(item.profile, normalized.media);
+                    const normalizedSelectionIds = new Set(
+                        normalized.media.map(row => row.selectionId)
+                    );
+                    const captionPolicy = buildCarouselCaptionPolicy({
+                        targetUsername: item.profile.username,
+                        profile: item.profile,
+                        featureSelections: policy.feature.media,
+                        partnerSelections: policy.partnerSafetyContactSheetCandidates.media,
+                    });
+                    const captions = captionPolicy.featureCaptions.filter(caption => (
+                        normalizedSelectionIds.has(caption.selectionId)
+                    ));
                     const features = await dependencies.ai.features({
                         triage: gender.result,
                         bio: item.profile.bio ?? null,
@@ -1414,9 +1406,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
         },
 
         async partner_safety(context) {
-            const [screening, outcomes] = await Promise.all([
+            const [screening, outcomes, target] = await Promise.all([
                 dependencies.stageStore.loadScreening(checkpointClaim(context)),
                 dependencies.stageStore.loadProfileAiOutcomes(checkpointClaim(context)),
+                dependencies.targetProfiles.loadTargetProfile(checkpointClaim(context)),
             ]);
             if (!screening) throw new Error('ANALYSIS_V2_SCREENING_NOT_READY');
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
@@ -1430,8 +1423,14 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 if (!outcome?.profile || !outcome.feature) {
                     throw new Error('ANALYSIS_V2_PARTNER_FEATURE_MISSING');
                 }
-                const contactCandidates = mediaPolicy(outcome.profile)
-                    .partnerSafetyContactSheetCandidates.media;
+                const selected = mediaPolicy(outcome.profile);
+                const contactCandidates = selected.partnerSafetyContactSheetCandidates.media;
+                const captionPolicy = buildCarouselCaptionPolicy({
+                    targetUsername: target.username,
+                    profile: outcome.profile,
+                    featureSelections: selected.feature.media,
+                    partnerSelections: contactCandidates,
+                });
                 const normalized = await normalizedSelections(
                     contactCandidates,
                     dependencies.normalizeMedia
@@ -1443,9 +1442,20 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         normalizedJpegBase64: media.normalizedJpegBase64,
                     })))
                     : null;
+                const normalizedSelectionIds = new Set(
+                    normalized.media.map(media => media.selectionId)
+                );
+                const contactSheetSelectionIds = new Set(contactSheet?.sourceSelectionIds ?? []);
+                const partnerCaptions = contactSheet
+                    ? captionPolicy.partnerCaptions.filter(caption => (
+                        normalizedSelectionIds.has(caption.selectionId)
+                        && contactSheetSelectionIds.has(caption.selectionId)
+                    ))
+                    : [];
                 const analyzed = await dependencies.ai.partnerSafety({
                     feature: outcome.feature,
                     contactSheet,
+                    partnerCaptions,
                 }, checkpointClaim(context));
                 return {
                     candidateId: candidate.candidateId,
@@ -1679,7 +1689,14 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         expectedSelectionIds: outcome.feature.analyzedSelectionIds,
                     });
                     if (!bundle) throw new Error('ANALYSIS_V2_NARRATIVE_BUNDLE_MISSING');
-                    const postBySelection = new Map(mediaPolicy(outcome.profile).feature.media
+                    const selected = mediaPolicy(outcome.profile);
+                    const captionPolicy = buildCarouselCaptionPolicy({
+                        targetUsername: target.username,
+                        profile: outcome.profile,
+                        featureSelections: selected.feature.media,
+                        partnerSelections: selected.partnerSafetyContactSheetCandidates.media,
+                    });
+                    const postBySelection = new Map(selected.feature.media
                         .map(media => [media.selectionId, media]));
                     const media: NormalizedAiMediaSelection[] = bundle.map(item => {
                         const selected = postBySelection.get(item.selectionId);
@@ -1694,6 +1711,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         targetUsername: target.username,
                         outcome,
                         media,
+                        carouselCaptionDossier: captionPolicy.dossier,
                         targetEvidence,
                         reverse: reverseById.get(candidateId),
                     }), checkpointClaim(context));

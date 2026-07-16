@@ -31,6 +31,21 @@
 
 FlashAPI, CoderX, Stable RapidAPI는 V2 production DAG에 포함하지 않는다.
 
+## 캐러셀 슬라이드 캡션 증분 비용 제약
+
+기존 profile dataset item에 이미 포함된 자식 캡션만 사용하며, 제공자 선택과 V2 DAG 토폴로지는 바꾸지 않는다.
+
+| 증분 항목 | 변화량 |
+|---|---:|
+| Apify Actor runs | 0 |
+| Apify dataset items | 0 |
+| Gemini generation calls | 0 |
+| DAG jobs | 0 |
+
+- feature 단계의 슬라이드 캡션은 기존 부모 캡션 evidence row를 대체하며, 새 AI 호출이나 별도 캡션 row fanout을 추가하지 않는다.
+- partner contact-sheet 캡션과 high-risk narrative dossier는 같은 결정적 정책에서 나온 발췌문을 재사용한다. partner 캡션 표시 문자 합계와 dossier 전체는 각각 최대 2,000자이다.
+- input token 과금은 이 고정 상한 안에서 변할 수 있으며, 문자 그대로 0원 증가를 보장하지 않는다. 출시는 유료 E2E의 전체 비용과 wall time p95 비회귀 gate를 통과해야 한다.
+
 ## 건당 비용 식
 
 V2 E2E에서 아래 변수를 preflight별 원장과 분석 요청별 원장으로 측정한다.
