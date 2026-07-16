@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     analysisResultPageV1Schema,
+    analysisResultSummaryV1Schema,
     freshAdmissionErrorResponseV1Schema,
     preflightStatusV1Schema,
     progressSnapshotV1Schema,
@@ -12,6 +13,50 @@ const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const expiresAt = '2026-07-13T12:00:00.000Z';
 
 describe('analysis V2 public contracts', () => {
+    it('separates AI response unavailability while defaulting legacy summaries to zero', () => {
+        const legacy = {
+            targetInstagramId: 'target',
+            targetProfileImage: null,
+            planId: 'basic',
+            followers: {
+                declared: 3,
+                collected: 3,
+                coverageRatio: 1,
+                meetsCoverageGate: true,
+                exactCountMatch: true,
+            },
+            following: {
+                declared: 3,
+                collected: 3,
+                coverageRatio: 1,
+                meetsCoverageGate: true,
+                exactCountMatch: true,
+            },
+            detectedMutuals: 3,
+            publicMutuals: 3,
+            privateMutuals: 0,
+            screenedMutuals: 3,
+            successfullyScreenedMutuals: 1,
+            fetchUnavailableMutuals: 1,
+            mediaUnavailableMutuals: 1,
+            notScreenedMutuals: 0,
+            exclusionApplied: false,
+            scorePolicyVersion: 'risk-policy-v2.2',
+        };
+
+        expect(analysisResultSummaryV1Schema.parse(legacy).analysisUnavailableMutuals)
+            .toBe(0);
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
+            successfullyScreenedMutuals: 0,
+            analysisUnavailableMutuals: 1,
+        }).success).toBe(true);
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
+            analysisUnavailableMutuals: 1,
+        }).success).toBe(false);
+    });
+
     it('recovers only a strictly bound consumed preflight request', () => {
         expect(preflightStatusV1Schema.parse({
             schemaVersion: 1,

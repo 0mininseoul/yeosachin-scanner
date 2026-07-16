@@ -674,7 +674,7 @@ describe('analysis V2 Gemini audit adapter', () => {
         }));
     });
 
-    it('checks request and global checkpoints before consulting the attempt ledger', async () => {
+    it('checks a request checkpoint first and attempt history before a global cache hit', async () => {
         const loadOperation = vi.fn();
         const attemptStore = {
             reserve: vi.fn(),
@@ -703,6 +703,7 @@ describe('analysis V2 Gemini audit adapter', () => {
         expect(requestResultStore.checkpointGlobalHit).not.toHaveBeenCalled();
         expect(loadOperation).not.toHaveBeenCalled();
 
+        loadOperation.mockResolvedValue([]);
         const cacheResultStore = {
             terminalizeSuccess: vi.fn(),
             loadRequest: vi.fn().mockResolvedValue(null),
@@ -722,7 +723,10 @@ describe('analysis V2 Gemini audit adapter', () => {
             result: { value: 'female', confidence: 0.9 },
             source: 'global_cache',
         });
-        expect(loadOperation).not.toHaveBeenCalled();
+        expect(loadOperation).toHaveBeenCalledOnce();
+        expect(loadOperation).toHaveBeenCalledBefore(
+            vi.mocked(cacheResultStore.checkpointGlobalHit)
+        );
     });
 
     it.each(['reserved', 'success', 'ambiguous', 'rejected'] as const)(
@@ -774,6 +778,50 @@ describe('analysis V2 Gemini audit adapter', () => {
             );
         }
     );
+
+    it('reconstructs a durable response rejection without reserving another attempt', async () => {
+        const last = reservation({
+            status: 'response_rejected',
+            usageMetadataStatus: 'complete',
+            usageComplete: true,
+            tokenUsage: {
+                promptTokens: 100,
+                completionTokens: 20,
+                thinkingTokens: 5,
+                totalTokens: 125,
+            },
+            latencyMs: 800,
+            estimatedCostUsd: 0.000001,
+            finishReason: 'STOP',
+            terminalizedAt: '2026-07-14T03:00:01.000Z',
+        });
+        const attemptStore = {
+            reserve: vi.fn(),
+            terminalize: vi.fn(),
+            loadOperation: vi.fn().mockResolvedValue([last]),
+        } as unknown as AnalysisV2AiAttemptStore;
+        const resultStore = {
+            terminalizeSuccess: vi.fn(),
+            loadRequest: vi.fn().mockResolvedValue(null),
+            checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+        } as unknown as AnalysisV2AiResultStore;
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            resultIdentity: identity(),
+            resultSchema,
+            attemptStore,
+            resultStore,
+        });
+
+        await expect(adapter.prepare()).rejects.toThrow(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR'
+        );
+        expect(resultStore.checkpointGlobalHit).not.toHaveBeenCalled();
+        expect(attemptStore.reserve).not.toHaveBeenCalled();
+        expect(attemptStore.terminalize).not.toHaveBeenCalled();
+    });
 
     it('blocks a fifth attempt and a history whose earlier outcome was not rate-limited', async () => {
         const makeAttempt = (

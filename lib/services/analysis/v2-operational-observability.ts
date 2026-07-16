@@ -46,6 +46,7 @@ const resultCoverageSchema = z.object({
     notScreenedMutuals: z.number().int().min(0).max(1_200),
     fetchUnavailableCount: z.number().int().min(0).max(900),
     mediaUnavailableCount: z.number().int().min(0).max(900),
+    analysisUnavailableCount: z.number().int().min(0).max(900).default(0),
 }).strict();
 
 const jobSchema = z.object({
@@ -154,6 +155,11 @@ function hasValidSemantics(value: AnalysisV2OperationalObservability): boolean {
         )
         || completeness.resultCoverageAvailable !== (resultCoverage !== null)
         || (resultCoverage !== null && resultCoverage.planId !== summary.planId)
+        || (resultCoverage !== null && (
+            resultCoverage.fetchUnavailableCount
+            + resultCoverage.mediaUnavailableCount
+            + resultCoverage.analysisUnavailableCount
+        ) > resultCoverage.screenedMutuals)
         || completeness.jobCount !== jobs.length
         || completeness.jobCount !== (
             completeness.jobPendingCount

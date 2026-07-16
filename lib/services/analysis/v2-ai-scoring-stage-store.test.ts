@@ -156,6 +156,7 @@ describe('analysis V2 AI/scoring stage store', () => {
             candidateId: 'candidate:analysis-unavailable',
             instagramId: 'analysis.unavailable',
             status: 'analysis_unavailable' as const,
+            unavailableReason: 'ai_response' as const,
             profile: {
                 username: 'analysis.unavailable',
                 fullName: '분석 불가 계정',
@@ -212,6 +213,7 @@ describe('analysis V2 AI/scoring stage store', () => {
             candidateId: 'candidate:analysis-unavailable',
             instagramId: 'analysis.unavailable',
             status: 'analysis_unavailable' as const,
+            unavailableReason: 'ai_response' as const,
             profile: {
                 username: 'analysis.unavailable',
                 followersCount: 10,
@@ -233,6 +235,7 @@ describe('analysis V2 AI/scoring stage store', () => {
         };
 
         for (const inconsistent of [
+            { ...base, unavailableReason: 'profile_fetch' as const },
             { ...base, profile: null },
             {
                 ...base,

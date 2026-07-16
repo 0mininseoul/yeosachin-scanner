@@ -80,6 +80,10 @@ export type AnalysisV2ProfileAiTerminalStatus =
     | 'media_unavailable'
     | 'analysis_unavailable';
 
+export type AnalysisV2ProfileUnavailableReason =
+    | 'profile_fetch'
+    | 'ai_response';
+
 export interface AnalysisV2ProfileMediaCoverage {
     selectedCount: number;
     normalizedCount: number;
@@ -107,6 +111,7 @@ export interface AnalysisV2ProfileAiOutcome {
     candidateId: string;
     instagramId: string;
     status: AnalysisV2ProfileAiTerminalStatus;
+    unavailableReason: AnalysisV2ProfileUnavailableReason | null;
     profile: AnalysisV2CheckpointProfile | null;
     triage: GenderTriageResult | null;
     feature: FeatureAnalysisResult | null;
@@ -129,6 +134,7 @@ function analysisUnavailableOutcome(
         candidateId,
         instagramId: normalizeUsername(instagramId),
         status: 'analysis_unavailable',
+        unavailableReason: 'ai_response',
         profile,
         triage: null,
         feature: null,
@@ -878,6 +884,16 @@ function checkpointClaim(context: AnalysisV2StageExecutorContext<AnalysisV2Stage
     };
 }
 
+function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>) {
+    if (!context.aiStagePolicyVersion) {
+        throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
+    }
+    return {
+        ...checkpointClaim(context),
+        aiStagePolicyVersion: context.aiStagePolicyVersion,
+    };
+}
+
 function partnerScoreSource(row: AnalysisV2PartnerSafetyRow | undefined):
 AnalysisV2CandidateScoreRow['partnerSafetySource'] {
     if (!row) return 'not_collected';
@@ -975,7 +991,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (results.length !== topology.itemCount) {
                 throw new Error('ANALYSIS_V2_PROFILE_AI_ITEM_COUNT_DRIFT');
             }
-            const aiFence = checkpointClaim(context);
+            const aiFence = aiJobFence(context);
             const outcomes = await runBounded(results, profileConcurrency, async item => {
                 await context.reportActiveProfile?.(item.username);
                 const outcome = await (async () => {
@@ -985,6 +1001,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'fetch_unavailable' as const,
+                            unavailableReason: 'profile_fetch' as const,
                             profile: null,
                             triage: null,
                             feature: null,
@@ -1016,6 +1033,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'media_unavailable' as const,
+                            unavailableReason: null,
                             profile: item.profile,
                             triage: null,
                             feature: null,
@@ -1051,6 +1069,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'verified_non_female' as const,
+                            unavailableReason: null,
                             profile: item.profile,
                             triage: gender.result,
                             feature: null,
@@ -1083,6 +1102,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             candidateId,
                             instagramId: normalizeUsername(item.username),
                             status: 'media_unavailable' as const,
+                            unavailableReason: null,
                             profile: item.profile,
                             triage: null,
                             feature: null,
@@ -1158,6 +1178,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         candidateId,
                         instagramId: normalizeUsername(item.username),
                         status,
+                        unavailableReason: null,
                         profile: item.profile,
                         triage: gender.result,
                         feature: features.result,
@@ -1216,7 +1237,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 id: analysisV2CandidateId(row.username),
                 username: row.username,
                 ...(row.fullName ? { fullName: row.fullName } : {}),
-            })), checkpointClaim(context));
+            })), aiJobFence(context));
             if (analyzed.results.length !== rows.length) {
                 throw new Error('ANALYSIS_V2_PRIVATE_NAME_COUNT_DRIFT');
             }
@@ -1528,7 +1549,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     feature: outcome.feature,
                     contactSheet,
                     partnerCaptions,
-                }, checkpointClaim(context));
+                }, aiJobFence(context));
                 return {
                     candidateId: candidate.candidateId,
                     shortlistRank: candidate.verificationShortlistRank!,
@@ -1786,7 +1807,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         carouselCaptionDossier: captionPolicy.dossier,
                         targetEvidence,
                         reverse: reverseById.get(candidateId),
-                    }), checkpointClaim(context));
+                    }), aiJobFence(context));
                     return {
                         candidateId,
                         lines: analyzed.result.lines,

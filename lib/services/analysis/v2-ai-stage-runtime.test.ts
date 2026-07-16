@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
 import {
     createDurableAnalysisV2AiStageRuntime,
     type AnalysisV2AiStageRuntimeDependencies,
@@ -8,7 +9,12 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const claimToken = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow
-const fence = { requestId, claimToken, jobKey: 'track:profile-ai:batch:0' };
+const fence = {
+    requestId,
+    claimToken,
+    jobKey: 'track:profile-ai:batch:0',
+    aiStagePolicyVersion: AI_STAGE_POLICY_VERSION,
+};
 
 function cachedAuditFactory(input: {
     gender?: unknown;
@@ -39,6 +45,34 @@ function cachedAuditFactory(input: {
 }
 
 describe('durable V2 AI stage runtime', () => {
+    it('rejects every cross-version job before creating an audit or calling Gemini', async () => {
+        const dependencies = {
+            createAudit: vi.fn(),
+            runGender: vi.fn(),
+            runFeatures: vi.fn(),
+            runPrivateNames: vi.fn(),
+            runPartnerSafety: vi.fn(),
+            runNarrative: vi.fn(),
+        } satisfies AnalysisV2AiStageRuntimeDependencies;
+        const runtime = createDurableAnalysisV2AiStageRuntime(dependencies);
+        const staleFence = { ...fence, aiStagePolicyVersion: 'ai-stage-policy-v2.3' };
+        const invocations = [
+            () => runtime.gender({ media: [] }, staleFence),
+            () => runtime.features({} as never, staleFence),
+            () => runtime.privateNames([], staleFence),
+            () => runtime.partnerSafety({} as never, staleFence),
+            () => runtime.narrative({} as never, staleFence),
+        ];
+
+        for (const invoke of invocations) {
+            await expect(invoke()).rejects.toThrow('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
+        }
+
+        for (const dependency of Object.values(dependencies)) {
+            expect(dependency).not.toHaveBeenCalled();
+        }
+    });
+
     it('replays the same cached gender operation without opening another provider attempt', async () => {
         const cached = cachedAuditFactory({
             gender: {

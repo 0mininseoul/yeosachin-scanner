@@ -12,6 +12,7 @@ import type {
 } from '@/lib/services/ai/v2-staged-analysis';
 import { featureAnalysisInputSchema } from '@/lib/services/ai/v2-staged-analysis';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
+import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
 import type {
     AnalysisV2RelationshipStagingSnapshot,
@@ -136,6 +137,7 @@ function context<S extends AnalysisV2StageId>(
             requiredJobKeys: [],
         },
         state: options.state ?? state(),
+        aiStagePolicyVersion: AI_STAGE_POLICY_VERSION,
         ...(options.reportActiveProfile
             ? { reportActiveProfile: options.reportActiveProfile }
             : {}),
@@ -452,6 +454,7 @@ function dependencies(
                     successfullyScreenedMutuals: 0,
                     fetchUnavailableMutuals: 0,
                     mediaUnavailableMutuals: 0,
+                    analysisUnavailableMutuals: 0,
                     notScreenedMutuals: 0,
                     privateMutuals: 0,
                     exclusionApplied: false,
@@ -533,6 +536,7 @@ function verifiedOutcome(
         candidateId: analysisV2CandidateId(username),
         instagramId: username,
         status: 'verified_female',
+        unavailableReason: null,
         profile: account,
         triage: triage(ids, 'female'),
         feature: feature(ids, 'verified_female', options),
@@ -618,6 +622,9 @@ describe('V2 AI and scoring executors', () => {
         expect(memoryState.outcomes.map(row => row.status)).toEqual([
             'verified_non_female', 'verified_female', 'fetch_unavailable',
         ]);
+        expect(memoryState.outcomes.map(row => row.unavailableReason)).toEqual([
+            null, null, 'profile_fetch',
+        ]);
         expect(deps.ai.features).toHaveBeenCalledTimes(1);
         expect(deps.mediaStore.persistBundle).toHaveBeenCalledTimes(1);
         expect(deps.mediaStore.persistBundle).toHaveBeenCalledWith(expect.objectContaining({
@@ -672,6 +679,7 @@ describe('V2 AI and scoring executors', () => {
             'analysis_unavailable', 'verified_non_female', 'verified_female',
         ]);
         expect(memoryState.outcomes[0]).toMatchObject({
+            unavailableReason: 'ai_response',
             profile: accounts[0],
             triage: null,
             feature: null,
@@ -697,6 +705,99 @@ describe('V2 AI and scoring executors', () => {
             .map(row => row.classification)).toEqual([
             'unavailable', 'verified_non_female', 'verified_female',
         ]);
+    });
+
+    it('replays a durable response rejection without another generation after checkpoint failure', async () => {
+        const memoryState = memory();
+        const usernames = ['replay.rejected', 'replay.first', 'replay.second'];
+        const accounts = usernames.map(username => profile(username));
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: usernames,
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        let generationCount = 0;
+        const durableGender = new Map<string, 'response_rejected' | GenderTriageResult>();
+        const durableFeatures = new Map<string, FeatureAnalysisResult>();
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0]
+        ) => {
+            const key = input.media.map(row => row.selectionId).join(':');
+            let stored = durableGender.get(key);
+            if (!stored) {
+                generationCount += 1;
+                stored = key.includes('replay.rejected')
+                    ? 'response_rejected'
+                    : triage(input.media.map(row => row.selectionId));
+                durableGender.set(key, stored);
+            }
+            if (stored === 'response_rejected') {
+                throw new Error(
+                    'AI_GENERATION_RESPONSE_REJECTED_ERROR: durable response rejection.'
+                );
+            }
+            return {
+                result: stored,
+                operationKey: `gender-triage:${digest(key)}`,
+                resultHash: digest(`gender-result:${key}`),
+                source: 'checkpoint' as const,
+            };
+        });
+        deps.ai.features = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['features']>[0]
+        ) => {
+            const key = input.media.map(row => row.selectionId).join(':');
+            let stored = durableFeatures.get(key);
+            if (!stored) {
+                generationCount += 1;
+                stored = feature(input.media.map(row => row.selectionId));
+                durableFeatures.set(key, stored);
+            }
+            return {
+                result: stored,
+                operationKey: `feature-analysis:${digest(key)}`,
+                resultHash: digest(`feature-result:${key}`),
+                source: 'checkpoint' as const,
+            };
+        });
+        vi.mocked(deps.resultStore.checkpointFeatureBatch)
+            .mockRejectedValueOnce(new Error('PUBLIC_CHECKPOINT_FAILED'));
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+        const stageContext = context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+        });
+
+        await expect(registry.profile_ai!(stageContext)).rejects.toThrow(
+            'PUBLIC_CHECKPOINT_FAILED'
+        );
+        const generationsAfterFirstExecution = generationCount;
+        expect(generationsAfterFirstExecution).toBe(5);
+        expect(memoryState.outcomes).toEqual([]);
+
+        const output = await registry.profile_ai!(stageContext);
+
+        expect(generationCount).toBe(generationsAfterFirstExecution);
+        expect(output.checkpoint.manifest.itemCount).toBe(3);
+        expect(memoryState.outcomes.map(row => row.status)).toEqual([
+            'analysis_unavailable', 'verified_female', 'verified_female',
+        ]);
+        expect(memoryState.outcomes[0]).toMatchObject({
+            instagramId: 'replay.rejected',
+            unavailableReason: 'ai_response',
+            triage: null,
+            feature: null,
+        });
+        expect(deps.resultStore.checkpointFeatureBatch).toHaveBeenCalledTimes(2);
+        expect(deps.ai.gender).toHaveBeenCalledTimes(6);
+        expect(deps.ai.features).toHaveBeenCalledTimes(4);
     });
 
     it('isolates a recoverable feature rejection without retaining partial AI output', async () => {
@@ -740,6 +841,7 @@ describe('V2 AI and scoring executors', () => {
             'analysis_unavailable', 'verified_female', 'verified_female',
         ]);
         expect(memoryState.outcomes[0]).toMatchObject({
+            unavailableReason: 'ai_response',
             profile: accounts[0],
             triage: null,
             feature: null,

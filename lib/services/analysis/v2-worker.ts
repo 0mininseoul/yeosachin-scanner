@@ -47,6 +47,11 @@ import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
 import { analysisV2ResultStore } from './v2-result-store';
+import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
+import {
+    analysisV2AiPolicyStore,
+    type AnalysisV2AiPolicyStore,
+} from './v2-ai-policy-store';
 import { prepareAnalysisV2ProviderRunsForTerminalFailure } from './v2-provider-lifecycle';
 import { analysisV2ProviderRunStore } from './v2-provider-run-store';
 import { getAnalysisV2ProductionExecutorRegistry } from './v2-production-executors';
@@ -74,6 +79,13 @@ export type AnalysisV2StageId =
     | 'final_score'
     | 'narrative'
     | 'finalize';
+
+const AI_PROVIDER_STAGES: ReadonlySet<AnalysisV2StageId> = new Set([
+    'profile_ai',
+    'private_names',
+    'partner_safety',
+    'narrative',
+]);
 
 type CheckpointWithKind<K extends AnalysisV2DagManifestCheckpoint['kind']> = Extract<
     AnalysisV2DagManifestCheckpoint extends infer Checkpoint
@@ -106,6 +118,7 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     claim: ClaimedAnalysisV2Job;
     job: AnalysisV2DagJob;
     state: AnalysisV2DagState;
+    aiStagePolicyVersion: string | null;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
     reportActiveProfile?: (username: string) => Promise<void>;
 }
@@ -449,6 +462,7 @@ export async function executeAnalysisV2DagJob(
         stateStore?: AnalysisV2DagStateStore;
         executors?: AnalysisV2StageExecutorRegistry;
         progressReporter?: AnalysisV2ProgressReporter | null;
+        aiPolicyStore?: AnalysisV2AiPolicyStore;
     } = {}
 ): Promise<readonly AnalysisV2JobSuccessor[]> {
     const stateStore = dependencies.stateStore ?? defaultDagStateStore;
@@ -462,6 +476,7 @@ export async function executeAnalysisV2DagJob(
         : dependencies.stateStore || dependencies.executors
             ? null
             : defaultProgressReporter;
+    const aiPolicyStore = dependencies.aiPolicyStore ?? analysisV2AiPolicyStore;
 
     if (claim.jobKey === ANALYSIS_V2_BOOTSTRAP_JOB_KEY) {
         assertBootstrapClaim(claim);
@@ -502,6 +517,14 @@ export async function executeAnalysisV2DagJob(
         return successorsForAnalysisV2Job(current.plan, claim);
     }
 
+    let aiStagePolicyVersion: string | null = null;
+    if (AI_PROVIDER_STAGES.has(current.stage)) {
+        aiStagePolicyVersion = await aiPolicyStore.loadAiStagePolicyVersion(claim.requestId);
+        if (aiStagePolicyVersion !== AI_STAGE_POLICY_VERSION) {
+            executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
+        }
+    }
+
     const activeProfileStage = current.stage === 'profile_fetch'
         || current.stage === 'profile_ai'
         ? current.stage
@@ -518,6 +541,7 @@ export async function executeAnalysisV2DagJob(
         claim,
         job: current.job,
         state,
+        aiStagePolicyVersion,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
             reportActiveProfile: async (username: string) => {
                 const startedAtMs = Math.max(
@@ -563,6 +587,7 @@ export async function executeAnalysisV2FoundationJob(
         stateStore?: AnalysisV2DagStateStore;
         executors?: AnalysisV2StageExecutorRegistry;
         progressReporter?: AnalysisV2ProgressReporter | null;
+        aiPolicyStore?: AnalysisV2AiPolicyStore;
     } = {}
 ): Promise<readonly AnalysisV2JobSuccessor[]> {
     return executeAnalysisV2DagJob(job, dependencies);
@@ -573,6 +598,7 @@ const TRANSIENT_FAILURE_CODES = new Set([
     'AI_RATE_LIMIT_ERROR',
     'ANALYSIS_V2_AI_ATTEMPT_NOT_READY',
     'ANALYSIS_V2_AI_RESULT_NOT_READY',
+    'ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR',
     'ANALYSIS_V2_FINALIZE_NOT_READY',
     'ANALYSIS_V2_JOB_DEPENDENCY_NOT_READY',
     'ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT',
@@ -803,6 +829,7 @@ export async function processAnalysisV2TaskDelivery(
         stateStore?: AnalysisV2DagStateStore;
         executors?: AnalysisV2StageExecutorRegistry;
         progressReporter?: AnalysisV2ProgressReporter | null;
+        aiPolicyStore?: AnalysisV2AiPolicyStore;
         handler?: AnalysisV2JobHandler;
         dispatch?: AnalysisV2JobDispatcher;
         terminalFailureFinalizer?: AnalysisV2TerminalFailureFinalizer;
@@ -815,6 +842,7 @@ export async function processAnalysisV2TaskDelivery(
         stateStore: dependencies.stateStore,
         executors: dependencies.executors,
         progressReporter: dependencies.progressReporter,
+        aiPolicyStore: dependencies.aiPolicyStore,
     }));
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
     const claim = await store.claim(delivery);

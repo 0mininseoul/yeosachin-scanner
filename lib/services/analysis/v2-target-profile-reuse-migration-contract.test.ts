@@ -2,6 +2,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const migrationName = '20260716143000_reuse_fresh_admission_target_profile.sql';
+const predecessorName = '20260716130001_add_selfhosted_profile_global_gate.sql';
+const successorName = '20260716162523_harden_analysis_v2_ai_unavailable_replay_policy.sql';
 const migration = readFileSync(
     new URL(`../../../supabase/migrations/${migrationName}`, import.meta.url),
     'utf8'
@@ -16,11 +18,12 @@ function functionBlock(name: string): string {
 }
 
 describe('reusable fresh-admission target profile migration', () => {
-    it('runs after every existing migration and adds only a nullable schema-v1 marker', () => {
+    it('keeps its declared migration order and adds only a nullable schema-v1 marker', () => {
         const names = readdirSync(
             new URL('../../../supabase/migrations/', import.meta.url)
         ).filter(name => name.endsWith('.sql')).sort();
-        expect(names.at(-1)).toBe(migrationName);
+        expect(names.indexOf(predecessorName)).toBeLessThan(names.indexOf(migrationName));
+        expect(names.indexOf(migrationName)).toBeLessThan(names.indexOf(successorName));
         expect(migration).toMatch(
             /ADD COLUMN reusable_profile_schema_version SMALLINT/
         );

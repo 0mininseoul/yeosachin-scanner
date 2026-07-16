@@ -124,6 +124,7 @@ function rawSummary(count = 0) {
         successfullyScreenedMutuals: count,
         fetchUnavailableMutuals: 0,
         mediaUnavailableMutuals: 0,
+        analysisUnavailableMutuals: 0,
         notScreenedMutuals: 0,
         exclusionApplied: true,
         scorePolicyVersion: RISK_POLICY_VERSION,
