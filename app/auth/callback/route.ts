@@ -83,8 +83,8 @@ export async function GET(request: Request) {
     await supabase.auth.getUser();
 
     // 카카오: REST API로 성별·출생연도·전화번호 등 보강 저장
-    const session = exchange.session;
-    const authedUser = exchange.user;
+    const session = exchange?.session;
+    const authedUser = exchange?.user;
     if (
         authedUser &&
         session?.provider_token &&
