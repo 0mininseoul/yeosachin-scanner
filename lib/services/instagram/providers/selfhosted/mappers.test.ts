@@ -71,7 +71,7 @@ describe('mapUserToProfile', () => {
         })).toThrow('SCRAPING_INCOMPLETE_ERROR');
     });
 
-    it('GraphSidecar 자식을 순서대로 매핑하고 선언 개수와 일치할 때만 완전성을 표시한다', () => {
+    it('GraphSidecar 자식의 저자 캡션을 순서대로 보존하고 자식 멘션을 병합한다', () => {
         const sidecar = {
             id: 'sidecar-1',
             shortcode: 'SIDE1',
@@ -79,14 +79,16 @@ describe('mapUserToProfile', () => {
             display_url: 'https://cdn.example.com/sidecar-cover.jpg',
             is_video: false,
             taken_at_timestamp: 1_700_000_000,
-            edge_media_to_caption: { edges: [] },
+            edge_media_to_caption: {
+                edges: [{ node: { text: 'Parent caption @Provider.User' } }],
+            },
             edge_media_to_tagged_user: { edges: [] },
             edge_sidecar_to_children: {
                 count: 3,
                 edges: [
-                    { node: { id: 'child-1', __typename: 'GraphImage', is_video: false, display_url: 'https://cdn.example.com/child-1.jpg' } },
-                    { node: { id: 'child-2', __typename: 'GraphVideo', is_video: true, product_type: 'clips', display_url: 'https://cdn.example.com/child-2.jpg', video_url: 'https://cdn.example.com/child-2.mp4' } },
-                    { node: { id: 'child-3', __typename: 'GraphVideo', is_video: true, display_url: 'https://cdn.example.com/child-3.jpg', video_url: 'https://cdn.example.com/child-3.mp4' } },
+                    { node: { id: 'child-1', __typename: 'GraphImage', is_video: false, display_url: 'https://cdn.example.com/child-1.jpg', caption: ' Direct slide @target.user ', accessibility_caption: 'Photo with @alt.user' } },
+                    { node: { id: 'child-2', __typename: 'GraphVideo', is_video: true, product_type: 'clips', display_url: 'https://cdn.example.com/child-2.jpg', video_url: 'https://cdn.example.com/child-2.mp4', edge_media_to_caption: { edges: [{ node: { text: ' Edge slide @Slide.Two ' } }] }, alt_text: 'Video with @alt.user' } },
+                    { node: { id: 'child-3', __typename: 'GraphVideo', is_video: true, display_url: 'https://cdn.example.com/child-3.jpg', video_url: 'https://cdn.example.com/child-3.mp4', caption: '   ', edge_media_to_caption: { edges: [{ node: { text: '' } }] }, accessibility_caption: 'Video with @alt.user' } },
                 ],
             },
         };
@@ -103,11 +105,13 @@ describe('mapUserToProfile', () => {
             {
                 id: 'child-1',
                 type: 'image',
+                caption: 'Direct slide @target.user',
                 imageUrl: 'https://cdn.example.com/child-1.jpg',
             },
             {
                 id: 'child-2',
                 type: 'reel',
+                caption: 'Edge slide @Slide.Two',
                 thumbnailUrl: 'https://cdn.example.com/child-2.jpg',
                 videoUrl: 'https://cdn.example.com/child-2.mp4',
             },
@@ -117,6 +121,11 @@ describe('mapUserToProfile', () => {
                 thumbnailUrl: 'https://cdn.example.com/child-3.jpg',
                 videoUrl: 'https://cdn.example.com/child-3.mp4',
             },
+        ]);
+        expect(post.mentionedUsers).toEqual([
+            'provider.user',
+            'target.user',
+            'slide.two',
         ]);
     });
 

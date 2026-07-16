@@ -8,13 +8,20 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const childCaptionMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260716013159_allow_carousel_child_captions.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
-function functionDefinition(name: string): string {
-    const start = migration.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
+function functionDefinition(name: string, source = migration): string {
+    const start = source.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
     expect(start, `${name} must exist`).toBeGreaterThanOrEqual(0);
-    const end = migration.indexOf('\n$$;', start);
+    const end = source.indexOf('\n$$;', start);
     expect(end, `${name} must have a bounded body`).toBeGreaterThan(start);
-    return migration.slice(start, end);
+    return source.slice(start, end);
 }
 
 function expectInOrder(source: string, fragments: readonly string[]): void {
@@ -121,6 +128,27 @@ describe('analysis V2 profile checkpoint migration contract', () => {
         expect(migration).not.toContain('credential_slot');
         expect(migration).not.toContain('provider_run_id');
         expect(migration).not.toContain('run_id');
+    });
+
+    it('additively allows only bounded string captions on carousel children', () => {
+        const validator = functionDefinition(
+            'analysis_v2_valid_profile_snapshot',
+            childCaptionMigration
+        );
+        expect(childCaptionMigration.match(/CREATE OR REPLACE FUNCTION/g)).toHaveLength(1);
+        expect(validator).toContain("SET search_path = ''");
+        expect(validator).toContain(
+            "'id', 'type', 'caption', 'imageUrl', 'thumbnailUrl', 'videoUrl'"
+        );
+        expect(validator).toContain(
+            "pg_catalog.jsonb_typeof(media.value->'caption') <> 'string'"
+        );
+        expect(validator).toContain(
+            "pg_catalog.char_length(media.value->>'caption') > 2200"
+        );
+        expect(childCaptionMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.analysis_v2_valid_profile_snapshot\(JSONB\)\s+FROM PUBLIC, anon, authenticated, service_role/
+        );
     });
 
     it('returns outcomes in request order and exposes a terminal-only purge hook', () => {

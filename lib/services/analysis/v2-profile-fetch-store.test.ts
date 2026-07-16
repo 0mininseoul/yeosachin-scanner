@@ -6,6 +6,7 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import {
     ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES,
+    analysisV2CheckpointMediaItemSchema,
     analysisV2ProfileFetchResumeSchema,
     createAnalysisV2ProfileFetchCheckpointStore,
     type AnalysisV2ProfileFetchSupabaseClient,
@@ -134,6 +135,39 @@ function clientWith(...responses: Array<{ data: unknown; error: null | {
 }
 
 describe('analysis V2 profile fetch checkpoint store', () => {
+    it('accepts a bounded authored carousel child caption', () => {
+        expect(analysisV2CheckpointMediaItemSchema.parse({
+            type: 'image',
+            imageUrl: 'https://images.example/slide.jpg',
+            caption: 'slide caption',
+        }).caption).toBe('slide caption');
+    });
+
+    it('rejects an authored carousel child caption over 2,200 characters', () => {
+        const result = analysisV2CheckpointMediaItemSchema.safeParse({
+            type: 'image',
+            imageUrl: 'https://images.example/slide.jpg',
+            caption: 'x'.repeat(2_201),
+        });
+
+        expect(result.success).toBe(false);
+        if (result.success) throw new Error('expected an overlong caption error');
+        expect(result.error.issues).toContainEqual(expect.objectContaining({
+            code: 'too_big',
+            path: ['caption'],
+            maximum: 2_200,
+        }));
+    });
+
+    it('still rejects unknown carousel child keys', () => {
+        expect(analysisV2CheckpointMediaItemSchema.safeParse({
+            type: 'image',
+            imageUrl: 'https://images.example/slide.jpg',
+            caption: 'slide caption',
+            accessibilityCaption: 'not authored evidence',
+        }).success).toBe(false);
+    });
+
     it('persists one complete canonical primary set and bounds the media snapshot', async () => {
         const fake = clientWith({ data: resume(), error: null });
         const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);

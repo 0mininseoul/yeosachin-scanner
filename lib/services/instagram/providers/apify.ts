@@ -16,7 +16,7 @@ import {
     successfulProfileAttempt,
     unavailableProfileAttempt,
 } from './profile-attempt';
-import { INSTAGRAM_USERNAME_PATTERN } from '../username';
+import { INSTAGRAM_USERNAME_PATTERN, mergeInstagramMentions } from '../username';
 import { normalizeInstagramTimestamp } from '../timestamp';
 import {
     APIFY_PROVIDER_QUOTA_ERROR_CODE,
@@ -202,6 +202,7 @@ const latestPostSchema = z.object({
 const latestPostChildSchema = z.object({
     id: z.union([z.string().min(1), z.number().int().nonnegative()]),
     type: z.string().trim().min(1),
+    caption: z.string().nullable().optional(),
     displayUrl: requiredUrlSchema,
     videoUrl: optionalUrlSchema,
 }).passthrough();
@@ -314,11 +315,18 @@ function parseApifyChildPosts(
             );
         }
         const id = String(child.id);
+        const caption = child.caption?.trim() || undefined;
         return type === 'image'
-            ? { id, type, imageUrl: thumbnailUrl }
+            ? {
+                id,
+                type,
+                ...(caption ? { caption } : {}),
+                imageUrl: thumbnailUrl,
+            }
             : {
                 id,
                 type,
+                ...(caption ? { caption } : {}),
                 thumbnailUrl,
                 ...(child.videoUrl ? { videoUrl: child.videoUrl } : {}),
             };
@@ -346,7 +354,6 @@ function parseLatestPosts(rawPosts: unknown): InstagramPost[] {
             post.productType,
             `Apify latestPosts ${index}번`
         );
-        const mentionedUsers = post.mentions ?? [];
         const taggedUsers = (post.taggedUsers ?? []).map((user) => user.username);
         const thumbnailUrl = displayThumbnail(
             post.displayUrl,
@@ -370,6 +377,10 @@ function parseLatestPosts(rawPosts: unknown): InstagramPost[] {
         const carousel = type === 'carousel'
             ? parseApifyChildPosts(post, index)
             : undefined;
+        const mentionedUsers = mergeInstagramMentions(
+            post.mentions ?? [],
+            carousel?.mediaItems.map(media => media.caption) ?? []
+        );
 
         return {
             id: String(post.id),

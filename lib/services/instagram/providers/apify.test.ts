@@ -1882,6 +1882,7 @@ describe('apifyProvider', () => {
                 type: 'Sidecar',
                 displayUrl: 'https://example.com/sidecar-cover.jpg',
                 timestamp: '2026-01-01T00:00:00.000Z',
+                mentions: ['Provider.User', 'TARGET.USER'],
                 images: [
                     'https://example.com/child-1.jpg',
                     'https://example.com/child-2.jpg',
@@ -1893,22 +1894,26 @@ describe('apifyProvider', () => {
                         id: 'child-1',
                         type: 'Image',
                         displayUrl: 'https://example.com/child-1.jpg',
+                        caption: ' First slide with @target.user and plain.user ',
                     },
                     {
                         id: 'child-2',
                         type: 'Video',
                         displayUrl: 'https://example.com/child-2.jpg',
                         videoUrl: 'https://example.com/child-2.mp4',
+                        caption: ' Second slide with @Slide.Two and @TARGET.USER ',
                     },
                     {
                         id: 'child-3',
                         type: 'Image',
                         displayUrl: 'https://example.com/child-3.jpg',
+                        caption: ` Third slide with @${'a'.repeat(31)} `,
                     },
                     {
                         id: 'child-4',
                         type: 'Image',
                         displayUrl: 'https://example.com/child-4.jpg',
+                        caption: null,
                     },
                 ],
             }],
@@ -1928,17 +1933,20 @@ describe('apifyProvider', () => {
             {
                 id: 'child-1',
                 type: 'image',
+                caption: 'First slide with @target.user and plain.user',
                 imageUrl: 'https://example.com/child-1.jpg',
             },
             {
                 id: 'child-2',
                 type: 'video',
+                caption: 'Second slide with @Slide.Two and @TARGET.USER',
                 thumbnailUrl: 'https://example.com/child-2.jpg',
                 videoUrl: 'https://example.com/child-2.mp4',
             },
             {
                 id: 'child-3',
                 type: 'image',
+                caption: `Third slide with @${'a'.repeat(31)}`,
                 imageUrl: 'https://example.com/child-3.jpg',
             },
             {
@@ -1946,6 +1954,11 @@ describe('apifyProvider', () => {
                 type: 'image',
                 imageUrl: 'https://example.com/child-4.jpg',
             },
+        ]);
+        expect(post.mentionedUsers).toEqual([
+            'provider.user',
+            'target.user',
+            'slide.two',
         ]);
         const selected = selectAnalysisMedia({
             posts: profile.latestPosts!.map(post => ({

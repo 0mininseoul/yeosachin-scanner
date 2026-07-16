@@ -32,6 +32,7 @@ const boundedMediaIdSchema = z.string().trim().min(1).max(255);
 export const analysisV2CheckpointMediaItemSchema = z.object({
     id: boundedMediaIdSchema.optional(),
     type: z.enum(['image', 'video', 'reel']),
+    caption: z.string().max(2_200).optional(),
     imageUrl: boundedUrlSchema.optional(),
     thumbnailUrl: boundedUrlSchema.optional(),
     videoUrl: boundedUrlSchema.optional(),

@@ -4,7 +4,11 @@ import type {
     InstagramPost,
 } from '@/lib/types/instagram';
 import { MAX_RECENT_POSTS } from '@/lib/domain/analysis/media-policy';
-import { isInstagramUsername } from '../../username';
+import {
+    extractInstagramMentions,
+    isInstagramUsername,
+    mergeInstagramMentions,
+} from '../../username';
 import { normalizeInstagramTimestamp } from '../../timestamp';
 
 export interface SelfHostedAdmissionProfileSummary {
@@ -20,8 +24,7 @@ export function extractHashtags(caption?: string): string[] {
 }
 
 export function extractMentions(caption?: string): string[] {
-    if (!caption) return [];
-    return (caption.match(/@[A-Za-z0-9._]+/g) || []).map((m) => m.slice(1));
+    return extractInstagramMentions(caption);
 }
 
 function num(value: unknown): number {
@@ -116,6 +119,11 @@ function mapChildMedia(node: unknown): InstagramPostMediaItem | null {
     }
 
     const id = nonEmptyString(value.id);
+    const captionEdges = (
+        value.edge_media_to_caption as { edges?: Array<{ node?: { text?: unknown } }> } | undefined
+    )?.edges;
+    const caption = nonEmptyString(value.caption)
+        ?? nonEmptyString(captionEdges?.[0]?.node?.text);
     const videoUrl = nonEmptyString(value.video_url);
     const candidateThumbnail = displayImageUrl(value.display_url, value.thumbnail_src);
     const thumbnailUrl = candidateThumbnail === videoUrl ? undefined : candidateThumbnail;
@@ -124,11 +132,13 @@ function mapChildMedia(node: unknown): InstagramPostMediaItem | null {
         ? {
             ...(id ? { id } : {}),
             type,
+            ...(caption ? { caption } : {}),
             imageUrl: thumbnailUrl,
         }
         : {
             ...(id ? { id } : {}),
             type,
+            ...(caption ? { caption } : {}),
             thumbnailUrl,
             ...(videoUrl ? { videoUrl } : {}),
         };
@@ -202,6 +212,7 @@ function mapPost(node: Record<string, unknown>): InstagramPost {
     if (!thumbnailUrl) {
         throw new Error('SCRAPING_INCOMPLETE_ERROR: selfhosted 게시물에 사용 가능한 이미지가 없습니다.');
     }
+    const carousel = type === 'carousel' ? mapSidecarChildren(node) : undefined;
 
     return {
         id,
@@ -212,12 +223,15 @@ function mapPost(node: Record<string, unknown>): InstagramPost {
         ...(type === 'video' || type === 'reel' ? { thumbnailUrl } : {}),
         ...(videoUrl ? { videoUrl } : {}),
         type,
-        ...(type === 'carousel' ? mapSidecarChildren(node) : {}),
+        ...(carousel ?? {}),
         likesCount: likes,
         commentsCount: count(node, 'edge_media_to_comment'),
         timestamp: normalizeInstagramTimestamp(node.taken_at_timestamp),
         taggedUsers,
-        mentionedUsers: extractMentions(caption),
+        mentionedUsers: mergeInstagramMentions(
+            extractMentions(caption),
+            carousel?.mediaItems?.map(media => media.caption) ?? []
+        ),
     };
 }
 
