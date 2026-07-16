@@ -589,7 +589,11 @@ function weakFeaturePartnerEvidence(feature: FeatureAnalysisResult): boolean {
 function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
     if (!outcome.profile) return [];
     const normalizedSelectionIds = new Set(outcome.normalizedSelectionIds);
-    const selectedPostIds = new Set(mediaPolicy(outcome.profile).feature.media.flatMap(media => (
+    const policy = mediaPolicy(outcome.profile);
+    const selectedPostIds = new Set([
+        ...policy.triage.media,
+        ...policy.feature.media,
+    ].flatMap(media => (
         media.postId && normalizedSelectionIds.has(media.selectionId) ? [media.postId] : []
     )));
     const emittedPostIds = new Set<string>();
