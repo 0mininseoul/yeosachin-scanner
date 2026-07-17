@@ -1091,7 +1091,7 @@ build_deploy_args() {
   if [[ -n "$worker_env_deploy_file" ]]; then
     deploy_args+=("--env-vars-file=$worker_env_deploy_file")
   else
-    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET")
+    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT")
   fi
   if [[ "$initial_deployment" != "true" ]]; then
     deploy_args+=('--no-traffic')

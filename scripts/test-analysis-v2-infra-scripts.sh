@@ -93,7 +93,7 @@ case "$state" in
     build_operator_ready="true"
     enqueuer_identity_ready="true"
     ;;
-  ready|staged_build|staged_final|promoted|rolled_back|rolled_back_bootstrap|foreign_promoted|service_list_failure|service_describe_failure|service_describe_invalid_json|service_list_invalid_json|service_list_duplicate)
+  ready|staged_build|staged_build_inherited_slot|staged_final|promoted|rolled_back|rolled_back_bootstrap|foreign_promoted|service_list_failure|service_describe_failure|service_describe_invalid_json|service_list_invalid_json|service_list_duplicate)
     identity_ready="true"
     vertex_ready="true"
     build_identity_ready="true"
@@ -473,6 +473,7 @@ case "$command_line" in
     deploy_source_count=0
     runtime_manifest=''
     build_manifest=''
+    source_runtime_env=''
     for argument in "$@"; do
       case "$argument" in
         --ignore-file|--ignore-file=*)
@@ -484,6 +485,7 @@ case "$command_line" in
           deploy_source_count=$((deploy_source_count + 1))
           ;;
         --env-vars-file=*) runtime_manifest="${argument#--env-vars-file=}" ;;
+        --update-env-vars=*) source_runtime_env="${argument#--update-env-vars=}" ;;
         --build-env-vars-file=*) build_manifest="${argument#--build-env-vars-file=}" ;;
       esac
     done
@@ -494,16 +496,27 @@ case "$command_line" in
       *) exit 92 ;;
     esac
     [[ -f "$deploy_source/package.json" ]] || exit 93
-    [[ -f "$runtime_manifest" && -f "$build_manifest" ]] || exit 93
-    [[ "$runtime_manifest" != "${ANALYSIS_V2_WORKER_ENV_VARS_FILE:-}" \
-      && "$build_manifest" != "${ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE:-}" ]] \
-      || exit 93
-    [[ ! -w "$runtime_manifest" && ! -w "$build_manifest" ]] || exit 93
-    jq -e --arg slot "${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}" '
-      .ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET == "test-project-analysis-v2-media"
-        and .ANALYSIS_V2_APIFY_API_TOKEN_SLOT == $slot
-        and (keys | all(test("(TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY)$") | not))
-    ' "$runtime_manifest" >/dev/null || exit 93
+    [[ -f "$build_manifest" ]] || exit 93
+    [[ "$build_manifest" != "${ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE:-}" \
+      && ! -w "$build_manifest" ]] || exit 93
+    source_runtime_slot_applied='false'
+    if [[ -n "$runtime_manifest" ]]; then
+      [[ -f "$runtime_manifest" \
+        && "$runtime_manifest" != "${ANALYSIS_V2_WORKER_ENV_VARS_FILE:-}" \
+        && ! -w "$runtime_manifest" ]] || exit 93
+      jq -e --arg slot "${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}" '
+        .ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET == "test-project-analysis-v2-media"
+          and .ANALYSIS_V2_APIFY_API_TOKEN_SLOT == $slot
+          and (keys | all(test("(TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY)$") | not))
+      ' "$runtime_manifest" >/dev/null || exit 93
+      source_runtime_slot_applied='true'
+    else
+      [[ ",$source_runtime_env," == *",ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media,"* ]] \
+        || exit 93
+      if [[ ",$source_runtime_env," == *",ANALYSIS_V2_APIFY_API_TOKEN_SLOT=${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-},"* ]]; then
+        source_runtime_slot_applied='true'
+      fi
+    fi
     jq -e '
       (keys | sort) == ["NEXT_PUBLIC_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_URL"]
         and ([.[] | select(length == 0)] | length) == 0
@@ -543,7 +556,11 @@ case "$command_line" in
     [[ "$command_line" == *"--revision-suffix=b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"* ]] \
       || exit 98
     [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
-    printf 'staged_build\n' >"$FAKE_GCLOUD_STATE_FILE"
+    if [[ "$source_runtime_slot_applied" == "true" ]]; then
+      printf 'staged_build\n' >"$FAKE_GCLOUD_STATE_FILE"
+    else
+      printf 'staged_build_inherited_slot\n' >"$FAKE_GCLOUD_STATE_FILE"
+    fi
     ;;
   "run services update-traffic"*)
     [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
@@ -617,7 +634,8 @@ case "$command_line" in
       traffic_revision='analysis-worker-00002'
       # Match Cloud Run: no-traffic staging leaves latestReady on the serving revision.
       source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
-      if [[ "$state" == "staged_build" ]]; then
+      if [[ "$state" == "staged_build" \
+        || "$state" == "staged_build_inherited_slot" ]]; then
         latest_created="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" \
           || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
@@ -649,7 +667,7 @@ case "$command_line" in
       fi
       runtime_queue='analysis-v2-pipeline'
       credential_name=''
-      runtime_slot='quinary'
+      runtime_slot="${FAKE_GCLOUD_RUNTIME_SLOT:-quinary}"
       worker_gate='false'
       recovery_gate='false'
       apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-quinary}"
@@ -678,6 +696,20 @@ case "$command_line" in
       [[ "$state" != "runtime_duplicate_env" ]] || duplicate_env='true'
       [[ "$state" != "runtime_admission_env" ]] || admission_env='true'
       [[ "$state" != "runtime_legacy_gate_env" ]] || legacy_gate_env='true'
+      if [[ "$state" == "staged_build" || "$state" == "staged_final" \
+        || "$state" == "promoted" || "$state" == "rolled_back" \
+        || "$state" == "rolled_back_bootstrap" ]]; then
+        runtime_slot="${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-quinary}"
+      fi
+      if [[ "$state" == "staged_build" \
+        || "$state" == "staged_build_inherited_slot" \
+        || "$state" == "staged_final" || "$state" == "promoted" \
+        || "$state" == "rolled_back" || "$state" == "rolled_back_bootstrap" ]]; then
+        case ",$apify_secret_slots," in
+          *",${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-quinary},"*) ;;
+          *) apify_secret_slots="$apify_secret_slots,${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-quinary}" ;;
+        esac
+      fi
       if [[ "$state" == "staged_final" || "$state" == "promoted" \
         || "$state" == "rolled_back" || "$state" == "rolled_back_bootstrap" ]]; then
         worker_gate="${ANALYSIS_V2_WORKER_ENABLED:-false}"
@@ -1631,6 +1663,43 @@ build_snapshot_path="$(grep -o -- '--build-env-vars-file=[^ ]*' \
 [[ -n "$runtime_snapshot_path" && -n "$build_snapshot_path" \
   && ! -e "$runtime_snapshot_path" && ! -e "$build_snapshot_path" ]] \
   || fail "validated env manifest snapshots were not removed after deployment"
+
+printf 'ready\n' >"$temp_dir/slot-staging-state"
+: >"$temp_dir/slot-staging-traffic.out"
+env -u ANALYSIS_V2_WORKER_ENV_VARS_FILE "${common_env[@]}" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/slot-staging-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=quaternary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=quaternary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quaternary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=quaternary' \
+  "FAKE_GCLOUD_DEPLOY_LOG=$temp_dir/slot-staging-deploy.out" \
+  "FAKE_GCLOUD_ENDPOINT_UPDATE_LOG=$temp_dir/slot-staging-endpoint.out" \
+  "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/slot-staging-traffic.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/slot-staging.out"
+assert_not_contains "$temp_dir/slot-staging-deploy.out" ' --env-vars-file='
+assert_contains "$temp_dir/slot-staging-deploy.out" \
+  "--build-env-vars-file="
+assert_contains "$temp_dir/slot-staging-deploy.out" \
+  "--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary"
+assert_contains "$temp_dir/slot-staging.out" \
+  "verified: source-build revision staged without live traffic"
+assert_contains "$temp_dir/slot-staging-endpoint.out" \
+  "--image=asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+assert_contains "$temp_dir/slot-staging.out" \
+  "verified: final worker revision is staged without receiving live traffic"
+assert_contains "$temp_dir/slot-staging-traffic.out" \
+  "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100"
+assert_not_contains "$temp_dir/slot-staging-traffic.out" \
+  "--to-revisions=analysis-worker-b${deploy_source_commit:0:6}abc12=100"
+[[ "$(grep -c 'run services update-traffic' "$temp_dir/slot-staging-traffic.out")" == "1" ]] \
+  || fail "slot-staging deployment changed known-good traffic before final promotion"
+[[ "$(<"$temp_dir/slot-staging-state")" == "promoted" ]] \
+  || fail "slot-staging deployment did not finish on the verified final revision"
 
 printf 'ready\n' >"$temp_dir/deploy-lock-state"
 printf 'locked\n' >"$temp_dir/deploy-lock-object"
