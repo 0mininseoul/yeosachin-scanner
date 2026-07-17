@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+    parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
     parseGroblePaymentCompletedEvent,
     verifyGrobleWebhookSignature,
@@ -10,6 +11,10 @@ const NOW_MS = Date.parse('2026-07-17T12:00:00.000Z');
 const TIMESTAMP = String(Math.floor(NOW_MS / 1_000));
 const SECRET = 'current-secret';
 const PREVIOUS_SECRET = 'previous-secret';
+const WHITESPACE_TEST_EVENT_IDS = [
+    ['leading', ' evt_test_a1b2c3d4e5f60718293a4b5c'],
+    ['trailing', 'evt_test_a1b2c3d4e5f60718293a4b5c\t'],
+] as const;
 
 function signature(secret: string, timestamp: string, rawBody: string): string {
     return createHmac('sha256', secret)
@@ -52,6 +57,24 @@ function paymentPayload(overrides: Record<string, unknown> = {}) {
                 },
                 payment: {
                     purchasedAt: '2026-07-17T21:00:00+09:00',
+                },
+                ...overrides,
+            },
+        },
+    };
+}
+
+function cancelRequestedPayload(overrides: Record<string, unknown> = {}) {
+    const completed = paymentPayload();
+    return {
+        ...completed,
+        type: 'payment.cancel_requested',
+        data: {
+            object: {
+                ...completed.data.object,
+                cancelRequest: {
+                    requestedBy: 'BUYER',
+                    requestedAt: '2026-07-18T09:00:00+09:00',
                 },
                 ...overrides,
             },
@@ -108,6 +131,18 @@ describe('Groble webhook signature verification', () => {
     });
 });
 
+describe('Groble event envelope parser', () => {
+    it.each(WHITESPACE_TEST_EVENT_IDS)(
+        'rejects a test-looking event ID with %s whitespace',
+        (_, eventId) => {
+            expect(() => parseGrobleEventEnvelope(JSON.stringify({
+                id: eventId,
+                type: 'payment.completed',
+            }))).toThrow();
+        }
+    );
+});
+
 describe('Groble payment.completed parser', () => {
     it('projects only the payment evidence needed by the server', () => {
         expect(parseGroblePaymentCompletedEvent(JSON.stringify(paymentPayload()))).toEqual({
@@ -121,9 +156,46 @@ describe('Groble payment.completed parser', () => {
         });
     });
 
-    it('rejects non-window, recurring, non-KRW, malformed, and non-completed events', () => {
+    it.each(['NORMAL', 'SIMPLE'])(
+        'accepts %s input mode for a synthetic test event',
+        inputMode => {
+            const event = paymentPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+
+            expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
+                eventId: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+            });
+        }
+    );
+
+    it.each(['NORMAL', 'SIMPLE'])(
+        'rejects %s input mode for a non-test event',
+        inputMode => {
+            const event = paymentPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+            event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
+
+            expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it.each(WHITESPACE_TEST_EVENT_IDS)(
+        'rejects a NORMAL test event ID with %s whitespace',
+        (_, eventId) => {
+            const event = paymentPayload({
+                content: { ...paymentPayload().data.object.content, inputMode: 'NORMAL' },
+            });
+            event.id = eventId;
+
+            expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it('rejects unsupported modes, recurring, non-KRW, malformed, and non-completed events', () => {
         const invalidObjects = [
-            { content: { ...paymentPayload().data.object.content, inputMode: 'NORMAL' } },
+            { content: { ...paymentPayload().data.object.content, inputMode: 'EMBEDDED' } },
             { content: { ...paymentPayload().data.object.content, paymentType: 'SUBSCRIPTION' } },
             { pricing: { ...paymentPayload().data.object.pricing, currency: 'USD' } },
         ];
@@ -169,5 +241,56 @@ describe('Groble payment.cancel_requested parser', () => {
             amountKrw: 14_900,
             requestedAt: '2026-07-18T09:00:00+09:00',
         });
+    });
+
+    it.each(['NORMAL', 'SIMPLE'])(
+        'accepts %s input mode for a synthetic test event',
+        inputMode => {
+            const event = cancelRequestedPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+
+            expect(parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toMatchObject({
+                eventId: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+            });
+        }
+    );
+
+    it.each(['NORMAL', 'SIMPLE'])(
+        'rejects %s input mode for a non-test event',
+        inputMode => {
+            const event = cancelRequestedPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+            event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
+
+            expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it.each(WHITESPACE_TEST_EVENT_IDS)(
+        'rejects a SIMPLE test event ID with %s whitespace',
+        (_, eventId) => {
+            const event = cancelRequestedPayload({
+                content: { ...paymentPayload().data.object.content, inputMode: 'SIMPLE' },
+            });
+            event.id = eventId;
+
+            expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it('keeps unsupported modes, recurring payments, and non-KRW pricing invalid', () => {
+        const invalidObjects = [
+            { content: { ...paymentPayload().data.object.content, inputMode: 'EMBEDDED' } },
+            { content: { ...paymentPayload().data.object.content, paymentType: 'SUBSCRIPTION' } },
+            { pricing: { ...paymentPayload().data.object.pricing, currency: 'USD' } },
+        ];
+
+        for (const invalidObject of invalidObjects) {
+            expect(() => parseGroblePaymentCancelRequestedEvent(
+                JSON.stringify(cancelRequestedPayload(invalidObject))
+            )).toThrow();
+        }
     });
 });
