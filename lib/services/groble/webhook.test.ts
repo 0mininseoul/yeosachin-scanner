@@ -59,6 +59,24 @@ function paymentPayload(overrides: Record<string, unknown> = {}) {
     };
 }
 
+function cancelRequestedPayload(overrides: Record<string, unknown> = {}) {
+    const completed = paymentPayload();
+    return {
+        ...completed,
+        type: 'payment.cancel_requested',
+        data: {
+            object: {
+                ...completed.data.object,
+                cancelRequest: {
+                    requestedBy: 'BUYER',
+                    requestedAt: '2026-07-18T09:00:00+09:00',
+                },
+                ...overrides,
+            },
+        },
+    };
+}
+
 describe('Groble webhook signature verification', () => {
     it('verifies the raw body with the current secret', () => {
         const rawBody = JSON.stringify(paymentPayload());
@@ -121,9 +139,34 @@ describe('Groble payment.completed parser', () => {
         });
     });
 
-    it('rejects non-window, recurring, non-KRW, malformed, and non-completed events', () => {
+    it.each(['NORMAL', 'SIMPLE'])(
+        'accepts %s input mode for a synthetic test event',
+        inputMode => {
+            const event = paymentPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+
+            expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
+                eventId: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+            });
+        }
+    );
+
+    it.each(['NORMAL', 'SIMPLE'])(
+        'rejects %s input mode for a non-test event',
+        inputMode => {
+            const event = paymentPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+            event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
+
+            expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it('rejects unsupported modes, recurring, non-KRW, malformed, and non-completed events', () => {
         const invalidObjects = [
-            { content: { ...paymentPayload().data.object.content, inputMode: 'NORMAL' } },
+            { content: { ...paymentPayload().data.object.content, inputMode: 'EMBEDDED' } },
             { content: { ...paymentPayload().data.object.content, paymentType: 'SUBSCRIPTION' } },
             { pricing: { ...paymentPayload().data.object.pricing, currency: 'USD' } },
         ];
@@ -169,5 +212,44 @@ describe('Groble payment.cancel_requested parser', () => {
             amountKrw: 14_900,
             requestedAt: '2026-07-18T09:00:00+09:00',
         });
+    });
+
+    it.each(['NORMAL', 'SIMPLE'])(
+        'accepts %s input mode for a synthetic test event',
+        inputMode => {
+            const event = cancelRequestedPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+
+            expect(parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toMatchObject({
+                eventId: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+            });
+        }
+    );
+
+    it.each(['NORMAL', 'SIMPLE'])(
+        'rejects %s input mode for a non-test event',
+        inputMode => {
+            const event = cancelRequestedPayload({
+                content: { ...paymentPayload().data.object.content, inputMode },
+            });
+            event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
+
+            expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it('keeps unsupported modes, recurring payments, and non-KRW pricing invalid', () => {
+        const invalidObjects = [
+            { content: { ...paymentPayload().data.object.content, inputMode: 'EMBEDDED' } },
+            { content: { ...paymentPayload().data.object.content, paymentType: 'SUBSCRIPTION' } },
+            { pricing: { ...paymentPayload().data.object.pricing, currency: 'USD' } },
+        ];
+
+        for (const invalidObject of invalidObjects) {
+            expect(() => parseGroblePaymentCancelRequestedEvent(
+                JSON.stringify(cancelRequestedPayload(invalidObject))
+            )).toThrow();
+        }
     });
 });

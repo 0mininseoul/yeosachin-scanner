@@ -11,6 +11,12 @@ const isoTimestamp = z.string().regex(ISO_TIMESTAMP_PATTERN).refine(
     'Invalid timestamp.'
 );
 
+function acceptsGroblePaymentInputMode(eventId: string, inputMode: string): boolean {
+    return inputMode === 'PAYMENT_WINDOW'
+        || (eventId.startsWith('evt_test_')
+            && (inputMode === 'NORMAL' || inputMode === 'SIMPLE'));
+}
+
 const paymentCompletedSchema = z.object({
     id: boundedIdentifier,
     type: z.literal('payment.completed'),
@@ -25,7 +31,7 @@ const paymentCompletedSchema = z.object({
             content: z.object({
                 id: boundedIdentifier,
                 paymentType: z.literal('ONE_TIME'),
-                inputMode: z.literal('PAYMENT_WINDOW'),
+                inputMode: z.enum(['PAYMENT_WINDOW', 'NORMAL', 'SIMPLE']),
             }),
             pricing: z.object({
                 currency: z.literal('KRW'),
@@ -36,7 +42,10 @@ const paymentCompletedSchema = z.object({
             }),
         }),
     }),
-});
+}).refine(
+    event => acceptsGroblePaymentInputMode(event.id, event.data.object.content.inputMode),
+    { path: ['data', 'object', 'content', 'inputMode'] }
+);
 
 const paymentCancelRequestedSchema = z.object({
     id: boundedIdentifier,
@@ -49,7 +58,7 @@ const paymentCancelRequestedSchema = z.object({
             content: z.object({
                 id: boundedIdentifier,
                 paymentType: z.literal('ONE_TIME'),
-                inputMode: z.literal('PAYMENT_WINDOW'),
+                inputMode: z.enum(['PAYMENT_WINDOW', 'NORMAL', 'SIMPLE']),
             }),
             pricing: z.object({
                 currency: z.literal('KRW'),
@@ -61,7 +70,10 @@ const paymentCancelRequestedSchema = z.object({
             }),
         }),
     }),
-});
+}).refine(
+    event => acceptsGroblePaymentInputMode(event.id, event.data.object.content.inputMode),
+    { path: ['data', 'object', 'content', 'inputMode'] }
+);
 
 const eventEnvelopeSchema = z.object({
     id: boundedIdentifier,
