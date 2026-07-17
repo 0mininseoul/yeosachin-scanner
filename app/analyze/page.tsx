@@ -401,6 +401,7 @@ export default function AnalyzePage() {
                                                     alt={`@${readyPreflight.target.username} 프로필`}
                                                     fill
                                                     sizes="64px"
+                                                    unoptimized
                                                     className="object-cover"
                                                 />
                                             ) : (

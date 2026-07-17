@@ -319,6 +319,7 @@ export default function ProgressPage({ params }: PageProps) {
                                     alt="현재 확인 중인 프로필"
                                     fill
                                     sizes="48px"
+                                    unoptimized
                                     className="object-cover"
                                 />
                             </div>
