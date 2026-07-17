@@ -51,8 +51,8 @@ run can be reused consistently after the request is created.
 
 ## Pre-run checks
 
-1. Apply migrations through `20260717120000_fix_analysis_v2_checkpoint_contracts.sql` using the normal ordered migration path. Do not use `--include-all`.
-2. Only after that migration succeeds, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
+1. Apply migrations through `20260717150000_allow_analysis_v2_multiline_bio.sql` using the normal ordered migration path. Do not use `--include-all`.
+2. Only after those migrations succeed, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
 4. Confirm both intake and worker have effective normal selected slot `primary`, resolved through the current active primary secret reference without rotating to a numeric secret version.
 5. Confirm every credential slot referenced by the policy resolves to its intended physical account without displaying token values.
