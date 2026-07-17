@@ -1,6 +1,6 @@
 # V2 운영 비용 모델
 
-기준일: 2026-07-15. 이 문서는 현재 V2 코드의 **과금 단위와 측정 방법**을 정리한다. V2 유료 E2E가 아직 끝나지 않았으므로 건당 달러 원가와 판매가는 확정하지 않는다. Actor 콘솔 가격, 과거 V1 canary, 환경변수의 예산 상한을 V2 실측 원가로 대체해서는 안 된다.
+기준일: 2026-07-17. 이 문서는 현재 V2 코드의 **과금 단위와 측정 방법**을 정리한다. 2026-07-17 Standard E2E는 실패했으며 V2 유료 성공 E2E가 아직 끝나지 않았으므로 건당 달러 원가와 최종 판매가는 확정하지 않는다. Actor 콘솔 가격, 과거 V1 canary, 환경변수의 예산 상한을 V2 실측 원가로 대체해서는 안 된다.
 
 ## 플랜 범위
 
@@ -15,7 +15,19 @@
 - followers와 following 중 하나라도 상한을 넘으면 해당 플랜을 선택할 수 없다.
 - Plus 상한을 넘는 계정은 현재 지원하지 않는다.
 - 상세 분석 상한은 관계 목록 수집 상한과 다르다. 관계 교집합 전체를 계산한 뒤 정본 순서로 최대 300/600/900명만 프로필·AI 상세 단계에 보낸다.
-- 판매가는 `pricingVersion=deferred`다. V2 실측과 결제 대사가 끝나기 전에는 UI나 문서에 금액을 하드코딩하지 않는다.
+- 런타임 카탈로그 판매가는 `pricingVersion=deferred`다. V2 성공 E2E와 비용 대사가 끝나기 전에는 애플리케이션 UI·설정이나 일반 운영 문서에 런타임 가격을 하드코딩하지 않는다. 아래 Groble 채널 표시안만 이 문서에 둔 예외이며 런타임 가격이나 최종 판매가가 아니다.
+
+## Groble 얼리버드 표시안 (성공 E2E 후 확정)
+
+아래 표는 런타임 카탈로그와 분리된 **잠정 Groble 채널 제안**이다. 성공 E2E와 Groble 상품 심사를 모두 통과한 뒤에만 확정하며, 애플리케이션의 `pricingVersion=deferred`를 변경하지 않는다. 결제 연동은 이 문서와 authorized E2E 범위 밖이며 다른 브랜치에서 진행한다.
+
+| 플랜 | 기준가 | 얼리버드 결제액 | 제공 방식 |
+|---|---:|---:|---|
+| Basic | 39,900원 | 14,900원 | 결제 후 48시간 이내 수동 전달 |
+| Standard | 69,900원 | 19,900원 | 결제 후 48시간 이내 수동 전달 |
+| Plus | - | 대기 신청 | 대기 신청 |
+
+Basic과 Standard 주문을 합쳐 선착순 총 15건만 받는 표시안이다. 이 수량과 금액은 성공 E2E 및 Groble 상품 심사 전에는 게시·판매 조건으로 확정하지 않는다.
 
 ## V2 과금 경로
 
@@ -92,9 +104,21 @@ GCP `$300` credit은 현금 청구 시점을 늦출 뿐 `C_gemini`와 `C_gcp`의
 | V2 Gemini 건당 비용 | 미측정 | 미측정 | 미측정 |
 | V2 Cloud Run/Tasks 건당 비용 | 미측정 | 미측정 | 미측정 |
 | V2 전체 wall time p50/p95 | 미측정 | 미측정 | 미측정 |
-| 권장 판매가 | 보류 | 보류 | 보류 |
+| E2E 기반 최종 판매가 | 보류 | 보류 | 보류 |
 
 2026-07-13의 `0_min._.00` 완료 canary와 그 이전 비용표는 V1 순차 실행, 과거 plan 상한, 과거 batch fallback, 다른 Gemini fanout을 사용했다. 관계/Actor 기능 진단 자료로는 남기되 V2 가격이나 5분 SLA 근거로 사용하지 않는다.
+
+### 2026-07-17 Standard 실패 E2E 비용 하한
+
+Preflight `3d6759a9-948c-4de1-be7a-d02aa72ed8fd`에서 대상 `0_min._.00`의 Standard 요청 `b27bc417-5e45-41b1-aad3-af733fdbb954`를 실행했다. 요청은 완료되지 않았으므로 이 기록은 성공 표본, p50/p95, 5분 SLA 또는 최종 판매가의 근거가 아니다.
+
+- 전체 wall time은 `1,308,289ms`(`21m48.289s`), queue는 `978ms`, processing은 `1,307,311ms`였다. 21개 job 중 11개가 완료되고 1개가 실패했으며 9개가 취소됐다. `private-names` batch 1이 7회 시도를 소진했고 sibling AI checkpoint job들이 취소됐다.
+- 첫 번째 원인은 private-name topology content hash를 독립된 scope의 consumer job hash와 잘못 비교한 것이었다. 두 번째 원인은 executor가 `verified_female`에만 media bundle을 저장하는데도 candidate feature 완료 조건이 non-`verified_female` 분류에도 media bundle을 요구한 것이었다. Forward migration `20260717120000_fix_analysis_v2_checkpoint_contracts.sql`과 PGlite tests는 이 계약을 교정하지만, 아직 배포됐거나 성공 E2E로 검증됐다고 기록하지 않는다.
+- 요청에 귀속된 provider run 12개는 모두 정산됐고 actual은 정확히 `$2.1816`이다. Preflight actual `$0.0052`는 별도다.
+- Gemini는 400 attempts에 대해 `$0.57216325`가 추정됐지만 feature-analysis의 `response-rejected` attempt 2개는 usage가 누락되거나 malformed였다. 따라서 `costComplete=false`이며 요청 비용은 `$2.75376325` 이상, preflight를 포함한 end-to-end 비용은 `$2.75896325` 이상이다. GCP infrastructure와 usage가 불명확한 두 Gemini 호출의 비용은 이 하한에 포함되지 않는다.
+- AI/provider generation 대부분은 약 `3m10`에 끝났고 나머지 약 `18m38`은 checkpoint retry와 cancellation 지연이었다. 이는 교정 후 5분 미만 가능성을 시사할 뿐 입증하지 않는다.
+- candidate 상세 profile은 236개였다. 직접 `selfhosted` 성공은 0개였고 rate-limit outcome 6개와 Instagram 요청을 보내지 않은 global-gate/circuit outcome 약 230개가 기록됐다. 정확히 unresolved인 계정만 Apify candidate fallback 대상으로 삼았으며 이 실행에서는 236개 모두 unresolved였다. Fallback은 227개 성공, 9개 incomplete/unavailable이었고, target을 포함한 aggregate는 228개 성공, 9개 incomplete였다. Cloud Run datacenter egress는 self-hosted-only profile 수집의 launch blocker로 남는다.
+- 요청이 upstream에서 실패했으므로 candidate liker stage는 실행되지 않았다.
 
 ## V2 E2E 측정 절차
 
