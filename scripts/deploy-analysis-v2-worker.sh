@@ -15,6 +15,7 @@ readonly DEFAULT_MAX_INSTANCES="1"
 readonly DEFAULT_TIMEOUT_SECONDS="300"
 readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 readonly SERVICE_JSON_NOT_FOUND_STATUS="44"
+readonly REVISION_OBSERVATION_MAX_ATTEMPTS="5"
 readonly -a APIFY_TOKEN_SLOTS=(
   primary
   secondary
@@ -815,12 +816,28 @@ bootstrap_revision_is_execution_disabled() {
 verify_revision_provenance() {
   local revision="$1"
   local expected_sha="${2:-}"
-  local config
-  config="$(revision_json "$revision")" \
-    || die "Cloud Run revision was not observable: $revision"
-  revision_is_ready_with_provenance "$config" "$revision" "$expected_sha" \
-    || die "Cloud Run revision is unready or missing exact commit provenance: $revision"
-  log "verified: ready Cloud Run revision provenance: $revision"
+  local attempt
+  local attempt_label="attempts"
+  local config=""
+  local max_attempts="1"
+  [[ "$mode" != "apply" ]] \
+    || max_attempts="$REVISION_OBSERVATION_MAX_ATTEMPTS"
+  verified_revision_config=""
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    config=""
+    if config="$(revision_json "$revision")" \
+      && revision_is_ready_with_provenance \
+        "$config" "$revision" "$expected_sha"; then
+      verified_revision_config="$config"
+      log "verified: ready Cloud Run revision provenance: $revision"
+      return 0
+    fi
+    if ((attempt < max_attempts)); then
+      sleep "$attempt"
+    fi
+  done
+  [[ "$max_attempts" != "1" ]] || attempt_label="attempt"
+  die "Cloud Run revision was unobservable, unready, or missing exact commit provenance after $max_attempts $attempt_label: $revision"
 }
 
 worker_endpoint_env_matches() {
@@ -930,8 +947,7 @@ ensure_worker_endpoint_env() {
         || die "staging changed live traffic before promotion"
     fi
     verify_revision_provenance "$staged_revision" "$source_commit_sha"
-    config="$(revision_json "$staged_revision")" \
-      || die "staged final Cloud Run revision was not observable"
+    config="$verified_revision_config"
     [[ "$(jq -er '.spec.containers[0].image' <<<"$config")" \
       == "$build_revision_image" ]] \
       || die "staged final revision does not use the verified source-build image digest"
@@ -1224,8 +1240,7 @@ deploy_or_verify_service() {
         || die "source deployment changed live traffic before promotion"
     fi
     verify_revision_provenance "$build_revision" "$source_commit_sha"
-    known_good_config="$(revision_json "$build_revision")" \
-      || die "source-build Cloud Run revision was not observable"
+    known_good_config="$verified_revision_config"
     build_revision_image="$(jq -er '.spec.containers[0].image' \
       <<<"$known_good_config")" \
       || die "source-build Cloud Run revision image was not observable"
@@ -1818,6 +1833,7 @@ initial_deployment="false"
 build_revision=""
 build_revision_image=""
 staged_revision=""
+verified_revision_config=""
 rollback_armed="false"
 deploy_lock_acquired="false"
 deploy_lock_generation=""

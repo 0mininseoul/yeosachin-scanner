@@ -864,6 +864,47 @@ case "$command_line" in
   "run revisions describe"*)
     revision="$4"
     source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
+    revision_ready='True'
+    observe_revision='false'
+    case "${FAKE_GCLOUD_REVISION_OBSERVATION_TARGET:-source-build}" in
+      source-build)
+        [[ "$revision" != analysis-worker-b* ]] || observe_revision='true'
+        ;;
+      all)
+        observe_revision='true'
+        ;;
+      *)
+        exit 98
+        ;;
+    esac
+    if [[ "$observe_revision" == "true" \
+      && -n "${FAKE_GCLOUD_REVISION_OBSERVATION_MODE:-}" ]]; then
+      [[ -n "${FAKE_GCLOUD_REVISION_OBSERVATION_COUNT_FILE:-}" ]] || exit 98
+      revision_observation_count='0'
+      if [[ -f "$FAKE_GCLOUD_REVISION_OBSERVATION_COUNT_FILE" ]]; then
+        revision_observation_count="$(<"$FAKE_GCLOUD_REVISION_OBSERVATION_COUNT_FILE")"
+      fi
+      [[ "$revision_observation_count" =~ ^[0-9]+$ ]] || exit 98
+      revision_observation_count=$((10#$revision_observation_count + 1))
+      printf '%s\n' "$revision_observation_count" \
+        >"$FAKE_GCLOUD_REVISION_OBSERVATION_COUNT_FILE"
+      case "$FAKE_GCLOUD_REVISION_OBSERVATION_MODE" in
+        transient)
+          if [[ "$revision_observation_count" == "1" ]]; then
+            exit 75
+          elif [[ "$revision_observation_count" == "2" ]]; then
+            source_commit='ffffffffffffffffffffffffffffffffffffffff'
+            revision_ready='False'
+          fi
+          ;;
+        permanent_mismatch)
+          source_commit='ffffffffffffffffffffffffffffffffffffffff'
+          ;;
+        *)
+          exit 98
+          ;;
+      esac
+    fi
     known_good_recovery="${FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED:-false}"
     active_runtime_slot="${FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT:-quinary}"
     active_apify_secret_slots="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS:-${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-quinary}}"
@@ -886,6 +927,7 @@ case "$command_line" in
       --arg active_identity_hmac_mode "$active_identity_hmac_mode" \
       --arg active_identity_hmac_version "$active_identity_hmac_version" \
       --arg revision_image "$revision_image" \
+      --arg revision_ready "$revision_ready" \
       --argjson bootstrap_revision "$bootstrap_revision" '{
       metadata: {
         name: $revision,
@@ -936,7 +978,7 @@ case "$command_line" in
              }] end))
         }]
       },
-      status: {conditions: [{type: "Ready", status: "True"}]}
+      status: {conditions: [{type: "Ready", status: $revision_ready}]}
     }'
     ;;
   "run services get-iam-policy"*)
@@ -1177,6 +1219,17 @@ case "$command_line" in
 esac
 EOF
 chmod +x "$temp_dir/bin/gcloud"
+
+cat >"$temp_dir/bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$#" == "1" && "$1" =~ ^[0-9]+$ ]] || exit 98
+if [[ -n "${FAKE_SLEEP_LOG:-}" ]]; then
+  printf '%s\n' "$1" >>"$FAKE_SLEEP_LOG"
+fi
+EOF
+chmod +x "$temp_dir/bin/sleep"
 
 if "$temp_dir/bin/gcloud" tasks queues add-iam-policy-binding analysis-v2-pipeline \
   --location=asia-northeast3 \
@@ -1620,12 +1673,17 @@ git -C "$deploy_source_repo" commit -qm initial
 deploy_source_commit="$(git -C "$deploy_source_repo" rev-parse --verify 'HEAD^{commit}')"
 printf 'UNTRACKED_DEPLOY_SECRET_SENTINEL\n' >"$deploy_source_repo/.env.local"
 printf 'prerequisites_ready\n' >"$temp_dir/deploy-state"
+printf '0\n' >"$temp_dir/transient-revision-observation-count"
+: >"$temp_dir/transient-revision-sleep.out"
 env "${common_env[@]}" \
   "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
   "FAKE_GCLOUD_STATE_FILE=$temp_dir/deploy-state" \
   "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_REVISION_OBSERVATION_MODE=transient' \
+  "FAKE_GCLOUD_REVISION_OBSERVATION_COUNT_FILE=$temp_dir/transient-revision-observation-count" \
+  "FAKE_SLEEP_LOG=$temp_dir/transient-revision-sleep.out" \
   'FAKE_GCLOUD_LOCK_BUCKET_ADMIN_READ_DENIED=true' \
   'FAKE_GCLOUD_LOCK_CP_AMBIGUOUS_SUCCESS=true' \
   'FAKE_GCLOUD_FIRST_DEPLOY=true' \
@@ -1640,6 +1698,10 @@ assert_contains "$temp_dir/worker-apply.out" \
   "verified: source deploy uses a clean tracked commit archive"
 assert_contains "$temp_dir/worker-apply.out" \
   "adopted this deployment's generation-bound lock after an ambiguous create response"
+[[ "$(<"$temp_dir/transient-revision-observation-count")" == "3" ]] \
+  || fail "apply did not retry transient source-build revision observations"
+[[ "$(wc -l <"$temp_dir/transient-revision-sleep.out" | tr -d ' ')" == "2" ]] \
+  || fail "apply did not back off between transient revision observations"
 [[ ! -e "$temp_dir/deploy-state.deploy-lock" ]] \
   || fail "an ambiguously successful self-owned deploy lock was not released"
 assert_contains "$temp_dir/deploy-command.out" "run deploy analysis-worker"
@@ -1672,6 +1734,52 @@ build_snapshot_path="$(grep -o -- '--build-env-vars-file=[^ ]*' \
 [[ -n "$runtime_snapshot_path" && -n "$build_snapshot_path" \
   && ! -e "$runtime_snapshot_path" && ! -e "$build_snapshot_path" ]] \
   || fail "validated env manifest snapshots were not removed after deployment"
+
+printf 'ready\n' >"$temp_dir/permanent-revision-mismatch-state"
+printf '0\n' >"$temp_dir/permanent-revision-observation-count"
+: >"$temp_dir/permanent-revision-sleep.out"
+: >"$temp_dir/permanent-revision-traffic.out"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/permanent-revision-mismatch-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_REVISION_OBSERVATION_MODE=permanent_mismatch' \
+  "FAKE_GCLOUD_REVISION_OBSERVATION_COUNT_FILE=$temp_dir/permanent-revision-observation-count" \
+  "FAKE_SLEEP_LOG=$temp_dir/permanent-revision-sleep.out" \
+  "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/permanent-revision-traffic.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/permanent-revision-mismatch.out" 2>&1; then
+  fail "apply accepted a permanent source-build revision provenance mismatch"
+fi
+[[ "$(<"$temp_dir/permanent-revision-observation-count")" == "5" ]] \
+  || fail "apply revision observation retries were not bounded to five attempts"
+[[ "$(wc -l <"$temp_dir/permanent-revision-sleep.out" | tr -d ' ')" == "4" ]] \
+  || fail "apply did not stop retrying after the bounded observation window"
+assert_contains "$temp_dir/permanent-revision-mismatch.out" \
+  "missing exact commit provenance after 5 attempts"
+[[ ! -s "$temp_dir/permanent-revision-traffic.out" ]] \
+  || fail "permanently mismatched revision received live traffic"
+
+printf '0\n' >"$temp_dir/check-revision-observation-count"
+: >"$temp_dir/check-revision-sleep.out"
+if env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_REVISION_OBSERVATION_MODE=permanent_mismatch' \
+  'FAKE_GCLOUD_REVISION_OBSERVATION_TARGET=all' \
+  "FAKE_GCLOUD_REVISION_OBSERVATION_COUNT_FILE=$temp_dir/check-revision-observation-count" \
+  "FAKE_SLEEP_LOG=$temp_dir/check-revision-sleep.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/check-revision-mismatch.out" 2>&1; then
+  fail "check accepted a revision provenance mismatch"
+fi
+[[ "$(<"$temp_dir/check-revision-observation-count")" == "2" ]] \
+  || fail "check did not use one immediate provenance observation"
+[[ ! -s "$temp_dir/check-revision-sleep.out" ]] \
+  || fail "check waited for revision provenance instead of failing immediately"
+assert_contains "$temp_dir/check-revision-mismatch.out" \
+  "missing exact commit provenance after 1 attempt"
 
 printf 'ready\n' >"$temp_dir/slot-staging-state"
 : >"$temp_dir/slot-staging-traffic.out"
