@@ -23,13 +23,21 @@ export interface PlanEligibilityOptions {
     catalog?: PlanEligibilityCatalog;
 }
 
-export const PLAN_PRICING_VERSION = 'deferred' as const;
+export const PLAN_PRICING_VERSION = 'earlybird-2026-07-v1' as const;
 
 export type DeferredKrwPrice = Readonly<{
     currency: 'KRW';
     status: 'deferred';
     amountKrw: null;
 }>;
+
+export type QuotedKrwPrice = Readonly<{
+    currency: 'KRW';
+    status: 'quoted';
+    amountKrw: number;
+}>;
+
+export type KrwPrice = DeferredKrwPrice | QuotedKrwPrice;
 
 export interface AnalysisPlan {
     id: PlanId;
@@ -40,7 +48,7 @@ export interface AnalysisPlan {
     }>;
     detailedMutualLimit: number;
     pricingVersion: typeof PLAN_PRICING_VERSION;
-    price: DeferredKrwPrice;
+    price: KrwPrice;
 }
 
 const DEFERRED_KRW_PRICE: DeferredKrwPrice = Object.freeze({
@@ -49,26 +57,30 @@ const DEFERRED_KRW_PRICE: DeferredKrwPrice = Object.freeze({
     amountKrw: null,
 });
 
+function quotedKrwPrice(amountKrw: number): QuotedKrwPrice {
+    return Object.freeze({ currency: 'KRW', status: 'quoted', amountKrw });
+}
+
 export const ANALYSIS_PLAN_CATALOG = Object.freeze({
     basic: Object.freeze({
         id: 'basic',
-        launchStatus: 'test_only',
+        launchStatus: 'production',
         relationshipCapacity: Object.freeze({ followers: 400, following: 400 }),
         detailedMutualLimit: 300,
         pricingVersion: PLAN_PRICING_VERSION,
-        price: DEFERRED_KRW_PRICE,
+        price: quotedKrwPrice(14_900),
     }),
     standard: Object.freeze({
         id: 'standard',
-        launchStatus: 'test_only',
+        launchStatus: 'production',
         relationshipCapacity: Object.freeze({ followers: 800, following: 800 }),
         detailedMutualLimit: 600,
         pricingVersion: PLAN_PRICING_VERSION,
-        price: DEFERRED_KRW_PRICE,
+        price: quotedKrwPrice(19_900),
     }),
     plus: Object.freeze({
         id: 'plus',
-        launchStatus: 'test_only',
+        launchStatus: 'production',
         relationshipCapacity: Object.freeze({ followers: 1_200, following: 1_200 }),
         detailedMutualLimit: 900,
         pricingVersion: PLAN_PRICING_VERSION,

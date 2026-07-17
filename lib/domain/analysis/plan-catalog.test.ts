@@ -13,7 +13,7 @@ import {
 const TEST_ENTITLEMENT = { accessMode: 'test_entitlement' } as const;
 
 describe('analysis plan catalog', () => {
-    it('keeps the server-owned plan capacities and deferred KRW pricing', () => {
+    it('keeps server-owned capacities and the earlybird pricing snapshot', () => {
         expect(ANALYSIS_PLAN_CATALOG.basic).toMatchObject({
             relationshipCapacity: { followers: 400, following: 400 },
             detailedMutualLimit: 300,
@@ -28,27 +28,22 @@ describe('analysis plan catalog', () => {
         });
 
         for (const plan of Object.values(ANALYSIS_PLAN_CATALOG)) {
-            expect(plan.launchStatus).toBe('test_only');
+            expect(plan.launchStatus).toBe('production');
             expect(plan.pricingVersion).toBe(PLAN_PRICING_VERSION);
-            expect(plan.price).toEqual({
-                currency: 'KRW',
-                status: 'deferred',
-                amountKrw: null,
-            });
         }
+        expect(ANALYSIS_PLAN_CATALOG.basic.price).toEqual({
+            currency: 'KRW', status: 'quoted', amountKrw: 14_900,
+        });
+        expect(ANALYSIS_PLAN_CATALOG.standard.price).toEqual({
+            currency: 'KRW', status: 'quoted', amountKrw: 19_900,
+        });
+        expect(ANALYSIS_PLAN_CATALOG.plus.price).toEqual({
+            currency: 'KRW', status: 'deferred', amountKrw: null,
+        });
     });
 
-    it('keeps the static catalog closed to production while test entitlement can execute it', () => {
-        expect(determinePlanEligibility({ followers: 100, following: 100 })).toEqual({
-            status: 'blocked',
-            reason: 'launch_gate',
-            capacityRequiredPlanId: 'basic',
-            counts: { followers: 100, following: 100 },
-        });
-        expect(determinePlanEligibility(
-            { followers: 100, following: 100 },
-            TEST_ENTITLEMENT
-        )).toMatchObject({
+    it('allows production preflight against the active earlybird catalog', () => {
+        expect(determinePlanEligibility({ followers: 100, following: 100 })).toMatchObject({
             status: 'eligible',
             capacityRequiredPlanId: 'basic',
             requiredPlanId: 'basic',
@@ -124,11 +119,11 @@ describe('analysis plan catalog', () => {
         ]);
     });
 
-    it('rejects a runtime override that promotes a plan beyond its catalog gate', () => {
-        expect(() => determinePlanEligibility(
+    it('allows only restrictive runtime launch overrides', () => {
+        expect(determinePlanEligibility(
             { followers: 100, following: 100 },
-            { launchStatusOverrides: { basic: 'production' } }
-        )).toThrow('cannot be promoted beyond the server catalog');
+            { launchStatusOverrides: { basic: 'disabled' } }
+        )).toMatchObject({ requiredPlanId: 'standard' });
     });
 
     it('keeps every card visible and disables a gated upper plan for test entitlement', () => {

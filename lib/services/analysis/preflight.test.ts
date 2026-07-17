@@ -203,15 +203,31 @@ describe('preflight persistence adapter', () => {
             p_idempotency_key: 'preflight-key-000000000000',
             p_access_mode: 'test_entitlement',
             p_launch_status_snapshot: {
-                basic: 'test_only',
-                standard: 'test_only',
-                plus: 'test_only',
+                basic: 'production',
+                standard: 'production',
+                plus: 'production',
             },
-            p_plan_catalog_snapshot: claim().catalogSnapshot.plans,
-            p_pricing_version: 'deferred',
+            p_plan_catalog_snapshot: {
+                basic: {
+                    launchStatus: 'production',
+                    relationshipCapacity: { followers: 400, following: 400 },
+                    detailedMutualLimit: 300,
+                },
+                standard: {
+                    launchStatus: 'production',
+                    relationshipCapacity: { followers: 800, following: 800 },
+                    detailedMutualLimit: 600,
+                },
+                plus: {
+                    launchStatus: 'production',
+                    relationshipCapacity: { followers: 1_200, following: 1_200 },
+                    detailedMutualLimit: 900,
+                },
+            },
+            p_pricing_version: 'earlybird-2026-07-v1',
             p_pricing_snapshot: {
-                basic: { status: 'deferred', currency: 'KRW', amountKrw: null },
-                standard: { status: 'deferred', currency: 'KRW', amountKrw: null },
+                basic: { status: 'quoted', currency: 'KRW', amountKrw: 14_900 },
+                standard: { status: 'quoted', currency: 'KRW', amountKrw: 19_900 },
                 plus: { status: 'deferred', currency: 'KRW', amountKrw: null },
             },
             p_policy_versions_snapshot: {
