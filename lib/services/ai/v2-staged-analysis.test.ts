@@ -12,6 +12,15 @@ vi.mock('./gemini', async importOriginal => ({
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import { parseSafePublicRiskNarrative } from '@/lib/services/analysis/narrative-privacy';
+import {
+    AnalysisV2AiResultRateLimitExhaustedError,
+    createAnalysisV2AiAuditAdapter,
+    type AnalysisV2AiResultStore,
+} from '@/lib/services/analysis/v2-ai-result-store';
+import type {
+    AnalysisV2AiAttemptRecord,
+    AnalysisV2AiAttemptStore,
+} from '@/lib/services/analysis/v2-ai-attempt-store';
 import { zodToGeminiResponseJsonSchema } from './gemini';
 import {
     createFeatureAnalysisResultIdentity,
@@ -1082,6 +1091,95 @@ describe('V2 staged AI services', () => {
         });
     });
 
+    it.each(['live', 'replay'] as const)(
+        'uses deterministic partner fallback for %s exhausted rate limiting',
+        async source => {
+            const input = {
+                feature: verifiedFeatureResult(),
+                contactSheet: contactSheet(),
+            };
+            const hooks = audit('partnerSafety', input);
+            const error = source === 'live'
+                ? new Error(
+                    'AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.'
+                )
+                : new AnalysisV2AiResultRateLimitExhaustedError();
+            if (source === 'live') {
+                mocks.analyzeWithGemini.mockRejectedValueOnce(error);
+            } else {
+                hooks.prepare = vi.fn().mockRejectedValue(error);
+            }
+
+            const result = await partnerSafetyAnalysis(input, hooks);
+
+            expect(result).toMatchObject({
+                source: 'safe_fallback',
+                hasStrongPartnerEvidence: false,
+                analyzedContactSheetSelectionId: null,
+            });
+            expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(source === 'live' ? 1 : 0);
+        }
+    );
+
+    it('carries actual four-attempt durable exhaustion through partner fallback', async () => {
+        const input = {
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+        };
+        const resultIdentity = createPartnerSafetyResultIdentity(input);
+        if (!resultIdentity) throw new Error('Test requires a partner result identity.');
+        const attempts: AnalysisV2AiAttemptRecord[] = [1, 2, 3, 4].map(attempt => ({
+            requestId,
+            jobKey: 'track:partner-safety:batch:0',
+            operationKey: resultIdentity.operationKey,
+            attempt,
+            retryCount: attempt - 1,
+            reservationToken: `33333333-3333-4333-8333-33333333333${attempt}`,
+            status: 'rate_limited',
+            modelName: resultIdentity.modelName,
+            location: 'global',
+            stage: resultIdentity.stage,
+            thinkingLevel: resultIdentity.thinkingLevel,
+            mediaCount: 1,
+            mediaResolution: resultIdentity.mediaResolution,
+            promptVersion: resultIdentity.promptVersion,
+            schemaVersion: resultIdentity.schemaVersion,
+            maxOutputTokens: resultIdentity.maxOutputTokens,
+            usageMetadataStatus: 'missing',
+            usageComplete: false,
+            tokenUsage: null,
+            latencyMs: 1,
+            estimatedCostUsd: null,
+            finishReason: null,
+            createdAt: '2026-07-17T08:00:00.000Z',
+            terminalizedAt: '2026-07-17T08:00:01.000Z',
+        }));
+        const reserve = vi.fn();
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey: 'track:partner-safety:batch:0',
+            claimToken: '22222222-2222-4222-8222-222222222222',
+            resultIdentity,
+            resultSchema: partnerSafetyModelResponseSchema,
+            attemptStore: {
+                reserve,
+                terminalize: vi.fn(),
+                loadOperation: vi.fn().mockResolvedValue(attempts),
+            } as unknown as AnalysisV2AiAttemptStore,
+            resultStore: {
+                loadRequest: vi.fn().mockResolvedValue(null),
+                checkpointGlobalHit: vi.fn(),
+                terminalizeSuccess: vi.fn(),
+            } as unknown as AnalysisV2AiResultStore,
+        });
+
+        const result = await partnerSafetyAnalysis(input, adapter);
+
+        expect(result.source).toBe('safe_fallback');
+        expect(reserve).not.toHaveBeenCalled();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
     it('reuses normalized media for the high-risk call and passes sanitized real comments with refs', async () => {
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,
@@ -1269,6 +1367,50 @@ describe('V2 staged AI services', () => {
         expect(result.evidenceRefs[1]).toContain('like:target-to-candidate');
         expect(result.evidenceRefs[1]).toContain('comment:1');
         expect(result.evidenceRefs[1]).toContain('coverage:target-interactions');
+    });
+
+    it.each(['live', 'replay'] as const)(
+        'uses deterministic narrative fallback for %s exhausted rate limiting',
+        async source => {
+            const input = narrativeInput();
+            const hooks = audit('highRiskNarrative', input);
+            const error = source === 'live'
+                ? new Error(
+                    'AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.'
+                )
+                : new AnalysisV2AiResultRateLimitExhaustedError();
+            if (source === 'live') {
+                mocks.analyzeWithGemini.mockRejectedValueOnce(error);
+            } else {
+                hooks.prepare = vi.fn().mockRejectedValue(error);
+            }
+
+            const result = await highRiskNarrative(input, hooks);
+
+            expect(result.source).toBe('safe_fallback');
+            expect(parseSafePublicRiskNarrative(result.lines)).toEqual(result.lines);
+            expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(source === 'live' ? 1 : 0);
+        }
+    );
+
+    it.each([
+        'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+        'AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.',
+        'ANALYSIS_V2_AI_RESULT_RATE_LIMIT_EXHAUSTED',
+    ])('keeps non-fallback staged AI failure fatal: %s', async message => {
+        const partnerInput = {
+            feature: verifiedFeatureResult(),
+            contactSheet: contactSheet(),
+        };
+        const partnerAudit = audit('partnerSafety', partnerInput);
+        partnerAudit.prepare = vi.fn().mockRejectedValue(new Error(message));
+        await expect(partnerSafetyAnalysis(partnerInput, partnerAudit)).rejects.toThrow(message);
+
+        const input = narrativeInput();
+        const narrativeAudit = audit('highRiskNarrative', input);
+        narrativeAudit.prepare = vi.fn().mockRejectedValue(new Error(message));
+        await expect(highRiskNarrative(input, narrativeAudit)).rejects.toThrow(message);
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
     it('propagates audit and ambiguous generation failures instead of hiding them as copy fallback', async () => {

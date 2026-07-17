@@ -19,8 +19,10 @@ import {
     type GeminiAttemptStartTelemetry,
     type GeminiAttemptTelemetry,
 } from './gemini';
-import { isRecoverableGeminiResponseError } from './gemini-generation-policy';
 import { getAiStagePolicy, type AiStageName } from './stage-policy';
+import {
+    isAnalysisV2AiDeterministicFallbackError,
+} from '@/lib/services/analysis/v2-ai-fallback-policy';
 import {
     analysisV2AiResultIdentitiesEqual,
     createAnalysisV2AiMediaSnapshotHashFromParts,
@@ -1325,7 +1327,10 @@ export async function partnerSafetyAnalysis(
                 }
             ));
     } catch (error) {
-        if (!isRecoverableGeminiResponseError(error) && !(error instanceof z.ZodError)) {
+        if (
+            !isAnalysisV2AiDeterministicFallbackError(error)
+            && !(error instanceof z.ZodError)
+        ) {
             throw error;
         }
         return buildPartnerSafetyResult({
@@ -1690,7 +1695,10 @@ export async function highRiskNarrative(
                 }
             ));
     } catch (error) {
-        if (!isRecoverableGeminiResponseError(error) && !(error instanceof z.ZodError)) {
+        if (
+            !isAnalysisV2AiDeterministicFallbackError(error)
+            && !(error instanceof z.ZodError)
+        ) {
             throw error;
         }
         const firstComment = sanitized.comments[0]?.text;

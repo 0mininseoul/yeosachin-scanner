@@ -28,6 +28,7 @@ import type { AnalysisV2StageExecutorContext, AnalysisV2StageId } from './v2-wor
 import type { AnalysisV2AiStageRuntime } from './v2-ai-stage-runtime';
 import type { AnalysisV2MediaArtifactStore } from './v2-media-artifact-store';
 import type { AnalysisV2DagState } from './v2-dag-planner';
+import { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-result-store';
 import {
     analysisV2CandidateBundleId,
     analysisV2CandidateId,
@@ -866,8 +867,100 @@ describe('V2 AI and scoring executors', () => {
     });
 
     it.each([
+        { stage: 'gender' as const, source: 'live' as const },
+        { stage: 'gender' as const, source: 'replay' as const },
+        { stage: 'features' as const, source: 'live' as const },
+        { stage: 'features' as const, source: 'replay' as const },
+    ])('isolates $source rate-limit exhaustion in $stage and checkpoints batch coverage', async ({
+        stage,
+        source,
+    }) => {
+        const memoryState = memory();
+        const usernames = ['rate.limit', 'first.sibling', 'second.sibling'];
+        const accounts = usernames.map(username => profile(username));
+        const deps = dependencies(memoryState, {
+            profileAiConcurrency: 1,
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: usernames,
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        const failure = () => source === 'live'
+            ? new Error(
+                'AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.'
+            )
+            : new AnalysisV2AiResultRateLimitExhaustedError();
+        const baseGender = deps.ai.gender;
+        const baseFeatures = deps.ai.features;
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0],
+            fence: Parameters<AnalysisV2AiStageRuntime['gender']>[1]
+        ) => {
+            if (
+                stage === 'gender'
+                && input.media.some(row => row.selectionId.includes('rate.limit'))
+            ) {
+                throw failure();
+            }
+            return baseGender(input, fence);
+        });
+        deps.ai.features = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['features']>[0],
+            fence: Parameters<AnalysisV2AiStageRuntime['features']>[1]
+        ) => {
+            if (
+                stage === 'features'
+                && input.media.some(row => row.selectionId.includes('rate.limit'))
+            ) {
+                throw failure();
+            }
+            return baseFeatures(input, fence);
+        });
+
+        const output = await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0 })
+        );
+
+        expect(output.checkpoint.manifest.itemCount).toBe(3);
+        expect(memoryState.outcomes.map(row => row.status)).toEqual([
+            'analysis_unavailable', 'verified_female', 'verified_female',
+        ]);
+        expect(memoryState.outcomes.filter(row => (
+            row.status === 'analysis_unavailable'
+        ))).toHaveLength(1);
+        expect(memoryState.outcomes[0]).toMatchObject({
+            instagramId: 'rate.limit',
+            unavailableReason: 'ai_response',
+            triage: null,
+            feature: null,
+            genderOperationKey: null,
+            featureOperationKey: null,
+        });
+        expect(deps.ai.gender).toHaveBeenCalledTimes(3);
+        expect(deps.ai.features).toHaveBeenCalledTimes(stage === 'gender' ? 2 : 3);
+        expect(deps.resultStore.checkpointFeatureBatch).toHaveBeenCalledOnce();
+        expect(vi.mocked(deps.resultStore.checkpointFeatureBatch).mock.calls[0]![0])
+            .toMatchObject({
+                analyzedCount: 3,
+                rows: [
+                    { instagramId: 'rate.limit', classification: 'unavailable' },
+                    { instagramId: 'first.sibling', classification: 'verified_female' },
+                    { instagramId: 'second.sibling', classification: 'verified_female' },
+                ],
+            });
+    });
+
+    it.each([
         'AI_AMBIGUOUS_GENERATION_ERROR: transport outcome is unknown.',
         'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt result was not durably stored.',
+        'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+        'ANALYSIS_V2_AI_RESULT_RATE_LIMIT_EXHAUSTED',
         'NONRECOVERABLE_PROFILE_AI_FAILURE',
     ])('still rejects the profile job for nonrecoverable AI failure: %s', async message => {
         const memoryState = memory();

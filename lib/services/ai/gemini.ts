@@ -21,6 +21,7 @@ import { prepareGoogleApplicationCredentials } from '@/lib/services/google/crede
 import {
     AI_AMBIGUOUS_GENERATION_ERROR_PREFIX,
     AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
+    AI_RATE_LIMIT_ERROR_PREFIX,
     classifyGeminiGenerationError,
 } from './gemini-generation-policy';
 import {
@@ -242,7 +243,7 @@ function sleep(ms: number): Promise<void> {
 
 class RetryableGeminiRateLimitError extends Error {
     constructor() {
-        super('AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.');
+        super(`${AI_RATE_LIMIT_ERROR_PREFIX} Gemini rejected the request due to rate limiting.`);
         this.name = 'RetryableGeminiRateLimitError';
     }
 }

@@ -5,9 +5,11 @@ import {
     type GeminiAttemptStartTelemetry,
     type GeminiAttemptTelemetry,
 } from './gemini';
-import { AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX } from './gemini-generation-policy';
 import { getVertexAIAnalysisConcurrency } from './pipeline-config';
 import { getAiStagePolicy } from './stage-policy';
+import {
+    isAnalysisV2AiDeterministicFallbackError,
+} from '@/lib/services/analysis/v2-ai-fallback-policy';
 import {
     analysisV2AiResultIdentitiesEqual,
     createAnalysisV2AiMediaSnapshotHashFromParts,
@@ -202,13 +204,7 @@ async function analyzePrivateNameChunk(
         // Preserve the strict boundary when analyzeWithGemini is replaced in tests or adapters.
         return schema.parse(results);
     } catch (error) {
-        if (
-            audit
-            && !(
-                error instanceof Error
-                && error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX)
-            )
-        ) {
+        if (audit && !isAnalysisV2AiDeterministicFallbackError(error)) {
             throw error;
         }
         console.warn('Private-name batch analysis failed; using neutral results for one chunk');

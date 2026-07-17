@@ -26,9 +26,9 @@ Additional required environment variable:
 The deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL alias remains
 accepted during migration. If both names are set, they must match exactly.
 
-Optional V2 queue capacity variables:
-  ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND      Defaults to 10.
-  ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES     Defaults to 12.
+Early-access V2 queue capacity variables:
+  ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND      Fixed at 8.
+  ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES     Fixed at 8.
 
 All queue, task identity, enqueuer, and Cloud Run settings use the
 ANALYSIS_V2_TASKS_* prefix.
@@ -67,6 +67,13 @@ for name in \
   [[ -n "${!name:-}" ]] || die "$name is required"
 done
 
+readonly v2_max_dispatches_per_second="${ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND:-8}"
+readonly v2_max_concurrent_dispatches="${ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES:-8}"
+[[ "$v2_max_dispatches_per_second" == "8" ]] \
+  || die "ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND must remain 8 during early access"
+[[ "$v2_max_concurrent_dispatches" == "8" ]] \
+  || die "ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES must remain 8 during early access"
+
 readonly email_pattern='^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$'
 [[ "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" =~ $email_pattern ]] \
   || die "ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL is invalid"
@@ -79,8 +86,8 @@ export ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL="$ANALYSIS_V2_TASKS_ENQUEUE
 export ANALYSIS_TASKS_CLOUD_RUN_SERVICE="$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE"
 export ANALYSIS_TASKS_CLOUD_RUN_REGION="$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION"
 export ANALYSIS_TASKS_MAX_RETRY_DURATION="3600s"
-export ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND="${ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND:-10}"
-export ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES="${ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES:-12}"
+export ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND="$v2_max_dispatches_per_second"
+export ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES="$v2_max_concurrent_dispatches"
 export ANALYSIS_TASKS_IAM_SCOPE="queue"
 export ANALYSIS_TASKS_EXACT_IAM="true"
 export ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL"

@@ -16,7 +16,6 @@ import {
     type AnalysisImagePreparationFailureDisposition,
     type AnalysisImagePreparationFailureReason,
 } from '@/lib/services/ai/image-preprocessing';
-import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import type {
     FeatureAnalysisResult,
     GenderTriageResult,
@@ -63,6 +62,7 @@ import type {
     AnalysisV2StageExecutorRegistry,
 } from './v2-worker';
 import type { AnalysisV2AiStageRuntime } from './v2-ai-stage-runtime';
+import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
 
 const PROFILE_BATCH_JOB_PREFIX = 'track:profiles:batch:';
 const MAX_PROFILE_AI_CONCURRENCY = 4;
@@ -1055,7 +1055,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             media: triageNormalized.media,
                         }, aiFence);
                     } catch (error) {
-                        if (isRecoverableGeminiResponseError(error)) {
+                        if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return analysisUnavailableOutcome(
                                 candidateId,
                                 item.username,
@@ -1139,7 +1139,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             captions,
                         }, aiFence);
                     } catch (error) {
-                        if (isRecoverableGeminiResponseError(error)) {
+                        if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return analysisUnavailableOutcome(
                                 candidateId,
                                 item.username,

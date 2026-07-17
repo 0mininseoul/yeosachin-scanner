@@ -13,7 +13,10 @@ import {
     type AnalysisV2AiAttemptReservation,
     type AnalysisV2AiAttemptStore,
 } from '@/lib/services/analysis/v2-ai-attempt-store';
+import { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-fallback-policy';
 import { z } from 'zod';
+
+export { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-fallback-policy';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -1065,9 +1068,19 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 if (attempts.some(attempt => (
                     !attemptMatchesResultIdentity(attempt, request.data.jobKey, resultIdentity)
                 ))) {
-                    throw new Error(
-                        'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: operation metadata drift.'
-                    );
+                    throw new AnalysisV2AiResultReplayBlockedError();
+                }
+                const firstAttempt = attempts[0];
+                if (firstAttempt && attempts.some(attempt => (
+                    attempt.location !== firstAttempt.location
+                    || attempt.mediaCount !== firstAttempt.mediaCount
+                ))) {
+                    throw new AnalysisV2AiResultReplayBlockedError();
+                }
+                if (attempts.some((attempt, index) => (
+                    attempt.attempt !== index + 1 || attempt.retryCount !== index
+                ))) {
+                    throw new AnalysisV2AiResultReplayBlockedError();
                 }
                 if (attempts.slice(0, -1).some(attempt => attempt.status !== 'rate_limited')) {
                     throw new AnalysisV2AiResultReplayBlockedError();
@@ -1078,6 +1091,16 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     throw new Error(
                         `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} durable response rejection.`
                     );
+                }
+                if (
+                    attempts.length === 4
+                    && attempts.every(attempt => attempt.status === 'rate_limited')
+                ) {
+                    terminal = true;
+                    throw new AnalysisV2AiResultRateLimitExhaustedError();
+                }
+                if (last && last.status !== 'rate_limited') {
+                    throw new AnalysisV2AiResultReplayBlockedError();
                 }
 
                 if (resultIdentity.cacheScope === 'global_ttl') {

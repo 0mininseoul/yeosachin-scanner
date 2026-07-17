@@ -761,7 +761,7 @@ describe('analysis V2 Gemini audit adapter', () => {
             const resultStore = {
                 terminalizeSuccess: vi.fn(),
                 loadRequest: vi.fn().mockResolvedValue(null),
-                checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+                checkpointGlobalHit: vi.fn().mockResolvedValue(cachedCheckpoint()),
             } as unknown as AnalysisV2AiResultStore;
             const adapter = createAnalysisV2AiAuditAdapter({
                 requestId,
@@ -776,6 +776,7 @@ describe('analysis V2 Gemini audit adapter', () => {
             await expect(adapter.prepare()).rejects.toThrow(
                 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED'
             );
+            expect(resultStore.checkpointGlobalHit).not.toHaveBeenCalled();
         }
     );
 
@@ -823,10 +824,10 @@ describe('analysis V2 Gemini audit adapter', () => {
         expect(attemptStore.terminalize).not.toHaveBeenCalled();
     });
 
-    it('blocks a fifth attempt and a history whose earlier outcome was not rate-limited', async () => {
+    it('reconstructs exhausted rate limiting after four contiguous durable attempts without reserving a fifth', async () => {
         const makeAttempt = (
             attempt: number,
-            status: AnalysisV2AiAttemptReservation['status']
+            status: AnalysisV2AiAttemptReservation['status'] = 'rate_limited'
         ) => reservation({
             attempt,
             retryCount: attempt - 1,
@@ -844,11 +845,74 @@ describe('analysis V2 Gemini audit adapter', () => {
             loadRequest: vi.fn().mockResolvedValue(null),
             checkpointGlobalHit: vi.fn().mockResolvedValue(null),
         } as unknown as AnalysisV2AiResultStore;
+        const reserve = vi.fn();
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            resultIdentity: identity(),
+            resultSchema,
+            attemptStore: {
+                reserve,
+                terminalize: vi.fn(),
+                loadOperation: vi.fn().mockResolvedValue(
+                    [1, 2, 3, 4].map(attempt => makeAttempt(attempt))
+                ),
+            },
+            resultStore,
+        });
+
+        await expect(adapter.prepare()).rejects.toMatchObject({
+            name: 'AnalysisV2AiResultRateLimitExhaustedError',
+            message: 'ANALYSIS_V2_AI_RESULT_RATE_LIMIT_EXHAUSTED',
+        });
+        expect(resultStore.checkpointGlobalHit).not.toHaveBeenCalled();
+        expect(reserve).not.toHaveBeenCalled();
+    });
+
+    it('keeps mixed, noncontiguous, and metadata-drift attempt histories replay-blocked', async () => {
+        const makeAttempt = (
+            attempt: number,
+            status: AnalysisV2AiAttemptReservation['status'] = 'rate_limited',
+            overrides: Partial<AnalysisV2AiAttemptReservation> = {}
+        ) => reservation({
+            attempt,
+            retryCount: attempt - 1,
+            status,
+            reservationToken: `123e4567-e89b-42d3-a456-42661417400${attempt}`,
+            usageMetadataStatus: 'missing',
+            usageComplete: false,
+            latencyMs: 800,
+            estimatedCostUsd: null,
+            finishReason: null,
+            terminalizedAt: '2026-07-14T03:00:01.000Z',
+            ...overrides,
+        });
+        const resultStore = {
+            terminalizeSuccess: vi.fn(),
+            loadRequest: vi.fn().mockResolvedValue(null),
+            checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+        } as unknown as AnalysisV2AiResultStore;
 
         for (const history of [
-            [1, 2, 3, 4].map(attempt => makeAttempt(attempt, 'rate_limited')),
-            [makeAttempt(1, 'ambiguous'), makeAttempt(2, 'rate_limited')],
+            [makeAttempt(1), makeAttempt(2, 'success'), makeAttempt(3), makeAttempt(4)],
+            [makeAttempt(1), makeAttempt(2, 'ambiguous'), makeAttempt(3), makeAttempt(4)],
+            [makeAttempt(1), makeAttempt(2), makeAttempt(3), makeAttempt(4, 'reserved')],
+            [makeAttempt(1), makeAttempt(2), makeAttempt(4)],
+            [
+                makeAttempt(1),
+                makeAttempt(2),
+                makeAttempt(3),
+                makeAttempt(4, 'rate_limited', { maxOutputTokens: 4_096 }),
+            ],
+            [
+                makeAttempt(1),
+                makeAttempt(2),
+                makeAttempt(3),
+                makeAttempt(4, 'rate_limited', { mediaCount: 6 }),
+            ],
         ]) {
+            const reserve = vi.fn();
             const adapter = createAnalysisV2AiAuditAdapter({
                 requestId,
                 jobKey,
@@ -856,7 +920,7 @@ describe('analysis V2 Gemini audit adapter', () => {
                 resultIdentity: identity(),
                 resultSchema,
                 attemptStore: {
-                    reserve: vi.fn(),
+                    reserve,
                     terminalize: vi.fn(),
                     loadOperation: vi.fn().mockResolvedValue(history),
                 },
@@ -865,6 +929,7 @@ describe('analysis V2 Gemini audit adapter', () => {
             await expect(adapter.prepare()).rejects.toThrow(
                 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED'
             );
+            expect(reserve).not.toHaveBeenCalled();
         }
     });
 

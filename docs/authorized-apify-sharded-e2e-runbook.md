@@ -51,14 +51,30 @@ run can be reused consistently after the request is created.
 
 ## Pre-run checks
 
-1. Apply migrations through `20260717120000_fix_analysis_v2_checkpoint_contracts.sql` using the normal ordered migration path. Do not use `--include-all`.
-2. Only after that migration succeeds, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
+1. Apply migrations through `20260717160000_allow_analysis_v2_rate_limit_exhaustion_fallback.sql` using the normal ordered migration path. Do not use `--include-all`.
+2. Only after those migrations succeed, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
 4. Confirm both intake and worker have effective normal selected slot `primary`, resolved through the current active primary secret reference without rotating to a numeric secret version.
 5. Confirm every credential slot referenced by the policy resolves to its intended physical account without displaying token values.
 6. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
 7. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
 8. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
+9. Confirm Cloud Run has no traffic-tagged revision and exactly one revision receives 100% traffic. The deploy script rejects even a zero-percent tagged revision while Gemini concurrency remains process-local.
+10. Immediately before deploying or starting this canary, confirm there are no processing V2 requests, no claimed/running V2 jobs, no active provider runs, and no queued task from an earlier request. Wait for any old revision request to finish before promotion.
+
+### Early-access Gemini concurrency boundary
+
+The launch worker uses one configured Cloud Run instance, container concurrency eight, and a V2
+queue capped at eight concurrent dispatches and eight dispatches per second. This reduces the
+observed fleet burst while retaining enough profile-AI parallelism for the five-minute canary.
+Cloud Run maximum instances is not a hard distributed semaphore and can be exceeded briefly during
+traffic spikes or revision rollout. Therefore this configuration is authorized only while public
+V2 admission is disabled, early-bird purchases do not create analysis tasks, and the operator runs
+one signed E2E or one manually controlled analysis at a time.
+
+Before automatic or concurrent paid analysis is enabled, add a fenced, expiring distributed Gemini
+lease shared by every worker revision. Do not treat `max instances=1` or process-local semaphores as
+that production gate.
 
 ### Free Actor API quota
 

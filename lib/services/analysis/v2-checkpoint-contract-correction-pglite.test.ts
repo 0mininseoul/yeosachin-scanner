@@ -23,6 +23,13 @@ const correctionUrl = new URL(
 const correctionMigration = existsSync(correctionUrl)
     ? readFileSync(correctionUrl, 'utf8')
     : '';
+const bioContractUrl = new URL(
+    '../../../supabase/migrations/20260717150000_allow_analysis_v2_multiline_bio.sql',
+    import.meta.url
+);
+const bioContractMigration = existsSync(bioContractUrl)
+    ? readFileSync(bioContractUrl, 'utf8')
+    : '';
 
 function functionDefinition(source: string, name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -33,13 +40,43 @@ function functionDefinition(source: string, name: string): string {
     return source.slice(start, end + 4);
 }
 
+function latestFunctionDefinition(source: string, name: string): string {
+    const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
+    const start = source.lastIndexOf(marker);
+    if (start < 0) throw new Error(`Missing function ${name}`);
+    const end = source.indexOf('\n$$;', start);
+    if (end < 0) throw new Error(`Unbounded function ${name}`);
+    return source.slice(start, end + 4);
+}
+
+function tableDefinition(source: string, name: string): string {
+    const marker = `CREATE TABLE public.${name} (`;
+    const start = source.indexOf(marker);
+    if (start < 0) throw new Error(`Missing table ${name}`);
+    const end = source.indexOf('\n);', start);
+    if (end < 0) throw new Error(`Unbounded table ${name}`);
+    return source.slice(start, end + 3);
+}
+
 const candidateCheckpoint = functionDefinition(
     candidateSource,
     'analysis_v2_checkpoint_candidate_features_complete'
 );
+const candidateCheckpointEntrypoint = latestFunctionDefinition(
+    resultSource,
+    'checkpoint_analysis_v2_candidate_features'
+);
 const privateCheckpoint = functionDefinition(
     resultSource,
     'checkpoint_analysis_v2_private_names'
+);
+const candidateFeatureTable = tableDefinition(
+    resultSource,
+    'analysis_v2_candidate_feature_rows'
+);
+const femaleResultTable = tableDefinition(
+    resultSource,
+    'analysis_v2_female_results'
 );
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
@@ -138,26 +175,6 @@ CREATE TABLE public.analysis_v2_candidate_feature_manifests (
     result_hash TEXT NOT NULL,
     PRIMARY KEY (request_id, batch)
 );
-CREATE TABLE public.analysis_v2_candidate_feature_rows (
-    request_id UUID NOT NULL,
-    batch INTEGER NOT NULL,
-    candidate_id TEXT NOT NULL,
-    instagram_id TEXT NOT NULL,
-    full_name TEXT,
-    profile_image_url TEXT,
-    bio TEXT,
-    terminal_classification TEXT NOT NULL,
-    media_context JSONB,
-    appearance_grade SMALLINT,
-    exposure_score SMALLINT,
-    is_business_account BOOLEAN,
-    feature_partner_evidence_strong BOOLEAN,
-    one_line_overview TEXT,
-    gender_operation_key TEXT,
-    gender_result_hash TEXT,
-    feature_operation_key TEXT,
-    feature_result_hash TEXT
-);
 CREATE TABLE public.analysis_v2_private_name_manifests (
     request_id UUID NOT NULL,
     batch INTEGER NOT NULL,
@@ -181,6 +198,9 @@ CREATE TABLE public.analysis_v2_private_name_rows (
     name_female_score NUMERIC NOT NULL,
     name_is_name BOOLEAN NOT NULL,
     name_confidence NUMERIC NOT NULL
+);
+CREATE TABLE public.analysis_v2_result_summaries (
+    request_id UUID PRIMARY KEY
 );
 
 CREATE OR REPLACE FUNCTION public.analysis_v2_assert_result_job_fence(
@@ -239,6 +259,10 @@ RETURNS JSONB LANGUAGE sql IMMUTABLE AS $$
         'resultHash', p_result_hash
     );
 $$;
+
+${candidateFeatureTable}
+
+${femaleResultTable}
 `;
 
 interface CandidateOptions {
@@ -258,13 +282,16 @@ function mediaContext(bundleId: string) {
     };
 }
 
-function candidateRows() {
+function candidateRows(input: {
+    femaleBio?: string | null;
+    femaleFullName?: string | null;
+} = {}) {
     return [{
         candidateId: 'candidate:female',
         instagramId: 'female.account',
-        fullName: null,
+        fullName: input.femaleFullName ?? null,
         profileImageUrl: null,
-        bio: null,
+        bio: input.femaleBio ?? null,
         classification: 'verified_female',
         mediaContext: mediaContext(FEMALE_BUNDLE_ID),
         genderOperationKey: FEMALE_GENDER_OPERATION,
@@ -387,12 +414,33 @@ async function seedCandidateBatch(options: CandidateOptions = {}): Promise<void>
     if (includeNonFemaleBundle) await insertMediaBundle(NON_FEMALE_BUNDLE_ID);
 }
 
-async function checkpointCandidates() {
+async function checkpointCandidates(rows = candidateRows()) {
     return db.query(
-        `SELECT public.analysis_v2_checkpoint_candidate_features_complete(
+        `SELECT public.checkpoint_analysis_v2_candidate_features(
             $1, 'track:profile-ai:batch:0', $2, $3, 0, 2, $4::JSONB
          )`,
-        [REQUEST_ID, CLAIM_TOKEN, JOB_INPUT_HASH, JSON.stringify(candidateRows())]
+        [REQUEST_ID, CLAIM_TOKEN, JOB_INPUT_HASH, JSON.stringify(rows)]
+    );
+}
+
+async function persistFemaleResultFromCandidate(): Promise<void> {
+    await db.query(
+        'INSERT INTO public.analysis_v2_result_summaries (request_id) VALUES ($1)',
+        [REQUEST_ID]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_female_results (
+            request_id, candidate_id, sort_ordinal, instagram_id, full_name,
+            profile_image_url, bio, display_score, risk_band, featured_rank,
+            recent_mutual_rank, analysis_depth, one_line_overview,
+            narrative_line_one, narrative_line_two
+         )
+         SELECT request_id, candidate_id, 1, instagram_id, full_name,
+            profile_image_url, bio, 5.0, 'caution', NULL,
+            NULL, 'features', one_line_overview, NULL, NULL
+         FROM public.analysis_v2_candidate_feature_rows
+         WHERE request_id = $1 AND terminal_classification = 'verified_female'`,
+        [REQUEST_ID]
     );
 }
 
@@ -456,13 +504,17 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
         db = await PGlite.create();
         await db.exec(bootstrap);
         await db.exec(candidateCheckpoint);
+        await db.exec(candidateCheckpointEntrypoint);
         await db.exec(privateCheckpoint);
         if (correctionMigration) await db.exec(correctionMigration);
+        if (bioContractMigration) await db.exec(bioContractMigration);
     }, 30_000);
 
     beforeEach(async () => {
         await db.exec(`
-            TRUNCATE public.analysis_v2_candidate_feature_rows,
+            TRUNCATE public.analysis_v2_female_results,
+                public.analysis_v2_result_summaries,
+                public.analysis_v2_candidate_feature_rows,
                 public.analysis_v2_candidate_feature_manifests,
                 public.analysis_v2_private_name_rows,
                 public.analysis_v2_private_name_manifests,
@@ -491,6 +543,58 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
             [REQUEST_ID]
         );
         await expect(checkpointCandidates()).rejects.toThrow(/ANALYSIS_V2_RESULT_NOT_READY/);
+    });
+
+    it.each([
+        ['LF', '\uCCAB \uC904\n\uB458\uC9F8 \uC904'],
+        ['CRLF', '\uCCAB \uC904\r\n\uB458\uC9F8 \uC904'],
+        ['CR', '\uCCAB \uC904\r\uB458\uC9F8 \uC904'],
+    ])('preserves a %s bio through the candidate checkpoint and final female row', async (
+        _lineBreak,
+        multilineBio
+    ) => {
+        await seedCandidateBatch();
+
+        await expect(checkpointCandidates(candidateRows({
+            femaleBio: multilineBio,
+        }))).resolves.toBeDefined();
+        await persistFemaleResultFromCandidate();
+
+        await expect(db.query<{ bio: string }>(
+            `SELECT bio FROM public.analysis_v2_female_results
+             WHERE request_id = $1 AND candidate_id = 'candidate:female'`,
+            [REQUEST_ID]
+        )).resolves.toMatchObject({ rows: [{ bio: multilineBio }] });
+    });
+
+    it('normalizes an empty full name to null at the candidate checkpoint', async () => {
+        await seedCandidateBatch();
+
+        await expect(checkpointCandidates(candidateRows({
+            femaleFullName: '',
+        }))).resolves.toBeDefined();
+
+        await expect(db.query<{ full_name: string | null }>(
+            `SELECT full_name FROM public.analysis_v2_candidate_feature_rows
+             WHERE request_id = $1 AND candidate_id = 'candidate:female'`,
+            [REQUEST_ID]
+        )).resolves.toMatchObject({ rows: [{ full_name: null }] });
+    });
+
+    it('rejects unsafe bio control characters at the RPC boundary', async () => {
+        await seedCandidateBatch();
+
+        await expect(checkpointCandidates(candidateRows({
+            femaleBio: 'ok\u0001bad',
+        }))).rejects.toThrow(/ANALYSIS_V2_RESULT_INVALID/);
+    });
+
+    it('rejects multiline full names at the RPC boundary', async () => {
+        await seedCandidateBatch();
+
+        await expect(checkpointCandidates(candidateRows({
+            femaleFullName: '\uD64D\n\uAE38\uB3D9',
+        }))).rejects.toThrow(/ANALYSIS_V2_RESULT_INVALID/);
     });
 
     it('still requires the non-female feature AI checkpoint when its lineage is present', async () => {

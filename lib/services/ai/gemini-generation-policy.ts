@@ -7,6 +7,7 @@ export const AI_AMBIGUOUS_GENERATION_ERROR_PREFIX =
     'AI_AMBIGUOUS_GENERATION_ERROR:';
 export const AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX =
     'AI_GENERATION_RESPONSE_REJECTED_ERROR:';
+export const AI_RATE_LIMIT_ERROR_PREFIX = 'AI_RATE_LIMIT_ERROR:';
 
 export function isAmbiguousGeminiGenerationError(error: unknown): boolean {
     return error instanceof Error
@@ -16,6 +17,11 @@ export function isAmbiguousGeminiGenerationError(error: unknown): boolean {
 export function isRecoverableGeminiResponseError(error: unknown): boolean {
     return error instanceof Error
         && error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX);
+}
+
+export function isGeminiRateLimitError(error: unknown): boolean {
+    return error instanceof Error
+        && error.message.startsWith(AI_RATE_LIMIT_ERROR_PREFIX);
 }
 
 const AMBIGUOUS_TRANSPORT_PATTERNS = [

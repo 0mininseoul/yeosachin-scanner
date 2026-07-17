@@ -10,8 +10,8 @@ readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
 readonly DEFAULT_CPU="2"
 readonly DEFAULT_MEMORY="2Gi"
-readonly DEFAULT_CONCURRENCY="2"
-readonly DEFAULT_MAX_INSTANCES="6"
+readonly DEFAULT_CONCURRENCY="8"
+readonly DEFAULT_MAX_INSTANCES="1"
 readonly DEFAULT_TIMEOUT_SECONDS="300"
 readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 readonly SERVICE_JSON_NOT_FOUND_STATUS="44"
@@ -80,8 +80,8 @@ Optional deployment environment variables:
   ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE     Optional only for --check source preflight validation.
   ANALYSIS_V2_WORKER_CPU                     Defaults to 2.
   ANALYSIS_V2_WORKER_MEMORY                  Defaults to 2Gi.
-  ANALYSIS_V2_WORKER_CONCURRENCY             Defaults to 2; allowed range 1..8.
-  ANALYSIS_V2_WORKER_MAX_INSTANCES           Defaults to 6; allowed range 1..24.
+  ANALYSIS_V2_WORKER_CONCURRENCY             Defaults to 8; allowed range 1..8.
+  ANALYSIS_V2_WORKER_MAX_INSTANCES           Fixed at 1 while Gemini concurrency is process-local.
   ANALYSIS_V2_WORKER_TIMEOUT_SECONDS         Fixed launch value: 300.
   ANALYSIS_V2_WORKER_ENABLED                 Enables authenticated worker drain; defaults false.
   ANALYSIS_V2_RECOVERY_ENABLED               Enables scheduled recovery; defaults false.
@@ -229,15 +229,18 @@ validate_runtime_tuning() {
     || die "ANALYSIS_V2_WORKER_MEMORY must use Mi or Gi units"
   validate_positive_integer_range "$worker_concurrency" 1 8 \
     "ANALYSIS_V2_WORKER_CONCURRENCY"
-  validate_positive_integer_range "$worker_max_instances" 1 24 \
-    "ANALYSIS_V2_WORKER_MAX_INSTANCES"
+  [[ "$worker_max_instances" == "$DEFAULT_MAX_INSTANCES" ]] \
+    || die "ANALYSIS_V2_WORKER_MAX_INSTANCES must remain 1 while Gemini concurrency is process-local"
   [[ "$worker_timeout_seconds" == "$DEFAULT_TIMEOUT_SECONDS" ]] \
     || die "ANALYSIS_V2_WORKER_TIMEOUT_SECONDS must remain 300 at launch"
 
   local capacity=$((10#$worker_concurrency * 10#$worker_max_instances))
-  local queue_concurrency="${ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES:-12}"
-  validate_positive_integer_range "$queue_concurrency" 1 100 \
-    "ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES"
+  local queue_rate="${ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND:-8}"
+  local queue_concurrency="${ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES:-8}"
+  [[ "$queue_rate" == "8" ]] \
+    || die "ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND must remain 8 during early access"
+  [[ "$queue_concurrency" == "8" ]] \
+    || die "ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES must remain 8 during early access"
   ((capacity >= 10#$queue_concurrency)) \
     || die "Cloud Run capacity must cover ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES"
 }
@@ -503,10 +506,22 @@ service_traffic_matches_revision() {
   local config="$1"
   local revision="$2"
   jq -e --arg revision "$revision" '
-    [.status.traffic[]? | select((.percent // 0) > 0)] as $traffic
-    | ($traffic | length) == 1
+    [.status.traffic[]?] as $all_traffic
+    | [$all_traffic[] | select(has("tag") and .tag != null and .tag != "")] as $tags
+    | [$all_traffic[] | select((.percent // 0) > 0)] as $traffic
+    | ($tags | length) == 0
+      and ($traffic | length) == 1
       and $traffic[0].revisionName == $revision
       and ($traffic[0].percent | tonumber) == 100
+  ' <<<"$config" >/dev/null
+}
+
+service_has_no_traffic_tags() {
+  local config="$1"
+  jq -e '
+    [.status.traffic[]?
+      | select(has("tag") and .tag != null and .tag != "")]
+    | length == 0
   ' <<<"$config" >/dev/null
 }
 
@@ -1140,6 +1155,8 @@ deploy_or_verify_service() {
   local lookup_status="0"
   if config="$(service_json)"; then
     existing="true"
+    service_has_no_traffic_tags "$config" \
+      || die "Cloud Run traffic tags are forbidden while Gemini concurrency is process-local"
     resolve_known_good_service_revision "$config"
     verify_existing_service_secret_identity "$config" "$known_good_config"
     prepare_apify_secret_assignments "$config"

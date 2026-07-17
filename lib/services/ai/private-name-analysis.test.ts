@@ -23,6 +23,7 @@ import {
     type PrivateNameAnalysisAuditSink,
     type PrivateNameAccountInput,
 } from './private-name-analysis';
+import { AnalysisV2AiResultRateLimitExhaustedError } from '@/lib/services/analysis/v2-ai-result-store';
 
 const requestId = '11111111-1111-4111-8111-111111111111';
 const promptMarker = '입력 JSON:\n';
@@ -263,6 +264,58 @@ describe('analyzePrivateAccountNames', () => {
         } finally {
             warning.mockRestore();
         }
+    });
+
+    it.each(['live', 'replay'] as const)(
+        'uses neutral durable chunk fallback for %s exhausted rate limiting',
+        async source => {
+            const input = accounts(1);
+            const audit = {
+                forChunk: vi.fn((identity: PrivateNameAnalysisChunkIdentity) => auditSink(
+                    identity,
+                    source === 'replay'
+                        ? {
+                            prepare: vi.fn().mockRejectedValue(
+                                new AnalysisV2AiResultRateLimitExhaustedError()
+                            ),
+                        }
+                        : {}
+                )),
+            };
+            if (source === 'live') {
+                mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+                    'AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.'
+                ));
+            }
+            const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+            try {
+                await expect(analyzePrivateAccountNames(input, requestId, audit)).resolves.toEqual([
+                    { id: input[0].id, femaleScore: 0.5, isName: false, confidence: 0 },
+                ]);
+                expect(mocks.analyzeWithGemini)
+                    .toHaveBeenCalledTimes(source === 'live' ? 1 : 0);
+                expect(warning).toHaveBeenCalledOnce();
+            } finally {
+                warning.mockRestore();
+            }
+        }
+    );
+
+    it.each([
+        'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+        'AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.',
+        'ANALYSIS_V2_AI_RESULT_RATE_LIMIT_EXHAUSTED',
+    ])('keeps non-fallback durable chunk failure fatal: %s', async message => {
+        const audit = {
+            forChunk: vi.fn((identity: PrivateNameAnalysisChunkIdentity) => auditSink(identity, {
+                prepare: vi.fn().mockRejectedValue(new Error(message)),
+            })),
+        };
+
+        await expect(analyzePrivateAccountNames(accounts(1), requestId, audit))
+            .rejects.toThrow(message);
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
     it('normalizes usernames and strips, compacts, and truncates full names in the prompt', async () => {

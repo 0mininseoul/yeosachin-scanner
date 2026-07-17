@@ -734,9 +734,10 @@ case "$command_line" in
         --argjson supabase_plaintext "$supabase_plaintext" \
         --argjson sidecar "$sidecar" \
         --argjson placement "$placement" \
-        --argjson duplicate_env "$duplicate_env" \
-        --argjson admission_env "$admission_env" \
-        --argjson legacy_gate_env "$legacy_gate_env" '
+      --argjson duplicate_env "$duplicate_env" \
+      --argjson admission_env "$admission_env" \
+      --argjson legacy_gate_env "$legacy_gate_env" \
+      --argjson traffic_tagged "${FAKE_GCLOUD_TRAFFIC_TAGGED:-false}" '
         {
           metadata: {
             name: "analysis-worker",
@@ -745,7 +746,7 @@ case "$command_line" in
               "run.googleapis.com/ingress": "all",
               "run.googleapis.com/invoker-iam-disabled": "false",
               "run.googleapis.com/minScale": "0",
-              "run.googleapis.com/maxScale": "6"
+              "run.googleapis.com/maxScale": "1"
             }
           },
           spec: {template: {
@@ -755,13 +756,13 @@ case "$command_line" in
                 "run.googleapis.com/execution-environment": "gen2",
                 "run.googleapis.com/cpu-throttling": "true",
                 "run.googleapis.com/startup-cpu-boost": "true",
-                "autoscaling.knative.dev/maxScale": "6"
+                "autoscaling.knative.dev/maxScale": "1"
               }
             },
             spec: {
               serviceAccountName: "analysis-recovery@test-project.iam.gserviceaccount.com",
               timeoutSeconds: 300,
-              containerConcurrency: 2,
+              containerConcurrency: 8,
               containers: ([{
                 resources: {limits: {cpu: "2", memory: "2Gi"}},
                 env: ([
@@ -846,7 +847,12 @@ case "$command_line" in
             latestCreatedRevisionName: $latest_created,
             latestReadyRevisionName: $latest_ready,
             conditions: [{type: "Ready", status: "True"}],
-            traffic: [{revisionName: $traffic_revision, percent: 100}]
+            traffic: ([{revisionName: $traffic_revision, percent: 100}]
+              + if $traffic_tagged then [{
+                  revisionName: "analysis-worker-tagged",
+                  percent: 0,
+                  tag: "debug"
+                }] else [] end)
           }
         }'
     elif [[ "$command_line" == *"serviceAccountName"* ]]; then
@@ -945,14 +951,17 @@ case "$command_line" in
     fi
     ;;
   "tasks queues list"*)
-    [[ "$infra_ready" == "true" ]] \
-      && printf '%s\n' \
-        'analysis-v2-pipeline' \
-        'analysis-preflight' \
-        'analysis-pipeline'
+    if [[ "$infra_ready" == "true" ]]; then
+      [[ "${FAKE_GCLOUD_V2_QUEUE_MISSING:-false}" == "true" ]] \
+        || printf '%s\n' 'analysis-v2-pipeline'
+      printf '%s\n' 'analysis-preflight' 'analysis-pipeline'
+    fi
     ;;
   "tasks queues describe"*)
     if [[ "$infra_ready" != "true" ]]; then
+      exit 1
+    elif [[ "${FAKE_GCLOUD_V2_QUEUE_MISSING:-false}" == "true" \
+      && "$command_line" == *" analysis-v2-pipeline "* ]]; then
       exit 1
     elif [[ "${FAKE_GCLOUD_CONCURRENT_PROMOTION_ON_FAILURE:-false}" == "true" \
       && "$state" == "promoted" ]]; then
@@ -965,7 +974,7 @@ case "$command_line" in
       if [[ "$command_line" == *" analysis-preflight "* ]]; then
         printf '2.0,2,8,1800s,40s,300s,4\n'
       else
-        printf '10.0,12,8,3600s,40s,300s,4\n'
+        printf '8.0,8,8,3600s,40s,300s,4\n'
       fi
     elif [[ "$command_line" == *"format=value(state)"* ]]; then
       printf 'RUNNING\n'
@@ -1547,8 +1556,8 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   >"$temp_dir/worker.out"
 assert_contains "$temp_dir/worker.out" "gcloud run deploy analysis-worker"
 assert_not_contains "$temp_dir/worker.out" "--ignore-file"
-assert_contains "$temp_dir/worker.out" "--concurrency=2"
-assert_contains "$temp_dir/worker.out" "--max=6"
+assert_contains "$temp_dir/worker.out" "--concurrency=8"
+assert_contains "$temp_dir/worker.out" "--max=1"
 assert_contains "$temp_dir/worker.out" "--cpu-throttling"
 assert_contains "$temp_dir/worker.out" "--clear-network"
 assert_contains "$temp_dir/worker.out" "--deploy-health-check"
@@ -2644,6 +2653,35 @@ assert_not_contains "$temp_dir/v2-queue-iam-dry-run.out" \
 assert_not_contains "$temp_dir/v2-queue-iam-dry-run.out" "--condition"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_V2_QUEUE_MISSING=true' \
+  bash "$script_dir/configure-analysis-v2-tasks-queue.sh" --dry-run \
+  >"$temp_dir/v2-queue-default-capacity.out"
+assert_contains "$temp_dir/v2-queue-default-capacity.out" \
+  "--max-dispatches-per-second=8"
+assert_contains "$temp_dir/v2-queue-default-capacity.out" \
+  "--max-concurrent-dispatches=8"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND=10' \
+  'ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES=12' \
+  bash "$script_dir/configure-analysis-v2-tasks-queue.sh" --dry-run \
+  >"$temp_dir/v2-queue-unsafe-capacity.out" 2>&1; then
+  fail "legacy V2 queue capacity overrides were accepted"
+fi
+assert_contains "$temp_dir/v2-queue-unsafe-capacity.out" \
+  "ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND must remain 8 during early access"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND=8' \
+  'ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES=12' \
+  bash "$script_dir/configure-analysis-v2-tasks-queue.sh" --dry-run \
+  >"$temp_dir/v2-queue-unsafe-concurrency.out" 2>&1; then
+  fail "legacy V2 queue concurrency override was accepted"
+fi
+assert_contains "$temp_dir/v2-queue-unsafe-concurrency.out" \
+  "ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES must remain 8 during early access"
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_QUEUE_IAM_MISSING=true' \
   'PREFLIGHT_TASKS_PROJECT=test-project' \
   'PREFLIGHT_TASKS_LOCATION=asia-northeast3' \
@@ -2728,6 +2766,15 @@ for drift_state in failed_latest old_traffic unpromoted_latest; do
   assert_contains "$temp_dir/worker-$drift_state.out" \
     "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
 done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_TRAFFIC_TAGGED=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-traffic-tagged.out" 2>&1; then
+  fail "a tagged zero-percent Cloud Run revision was accepted"
+fi
+assert_contains "$temp_dir/worker-traffic-tagged.out" \
+  "Cloud Run traffic tags are forbidden while Gemini concurrency is process-local"
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=runtime_sidecar' \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
@@ -2824,7 +2871,7 @@ done
 if env "${common_env[@]}" \
   'ANALYSIS_V2_WORKER_CONCURRENCY=2' \
   'ANALYSIS_V2_WORKER_MAX_INSTANCES=1' \
-  'ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES=12' \
+  'ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES=8' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/capacity.out" 2>&1; then
@@ -2832,6 +2879,29 @@ if env "${common_env[@]}" \
 fi
 assert_contains "$temp_dir/capacity.out" \
   "Cloud Run capacity must cover ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES"
+
+if env "${common_env[@]}" \
+  'ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND=10' \
+  'ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES=8' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-unsafe-queue-rate.out" 2>&1; then
+  fail "worker deploy accepted a queue rate above the early-access limit"
+fi
+assert_contains "$temp_dir/worker-unsafe-queue-rate.out" \
+  "ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND must remain 8 during early access"
+
+if env "${common_env[@]}" \
+  'ANALYSIS_V2_WORKER_CONCURRENCY=8' \
+  'ANALYSIS_V2_WORKER_MAX_INSTANCES=2' \
+  'ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPATCHES=8' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/process-local-gemini-limit.out" 2>&1; then
+  fail "multiple Cloud Run instances were accepted with a process-local Gemini limiter"
+fi
+assert_contains "$temp_dir/process-local-gemini-limit.out" \
+  "ANALYSIS_V2_WORKER_MAX_INSTANCES must remain 1 while Gemini concurrency is process-local"
 
 if env \
   'ANALYSIS_TASKS_PROJECT=test-project' \
