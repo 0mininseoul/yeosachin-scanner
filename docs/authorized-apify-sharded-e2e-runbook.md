@@ -14,31 +14,51 @@ This runbook applies only to the explicitly authorized `0_min._.00` E2E. It does
 
 ## Policy configuration
 
-Set these non-secret variables on the entitlement intake runtime for the authorized run:
+Set the authorized-test variables below on the entitlement intake runtime. Set the normal-slot
+variable shown in the same block on both the intake and worker so `primary` is effective before and
+after request dispatch:
 
 ```dotenv
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true
 ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET=0_min._.00
 ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID=974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd
-ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=primary
-ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=secondary
-ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=tertiary
-ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=quaternary
-ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=tertiary
-ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=quinary
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary
+ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=secondary
+ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary
+ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=primary
+ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=primary
+ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=secondary
+ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=secondary
 ```
 
-The worker must have Secret Manager references for every slot named by the policy. The normal selected slot and its single-slot behavior remain unchanged.
+This preferred next-run mapping preserves the current active secret identities: `secondary` is the
+physical Senary account, `quinary` is the physical Quinary account, and `primary` is the physical
+Septenary account. It is schema-valid because the two relationship sides differ, `target-profile`
+and `profile-fallback` share the profile fallback variable, and the target and candidate liker slots
+differ.
+
+Use this mapping only if immediate read-only balance checks, exact Actor daily item and run quota
+checks, and active/latest Secret Manager references all confirm the intended accounts have enough
+headroom. Both the intake and worker must resolve their effective normal selected slot to `primary`
+through the current active primary Secret Manager reference. Never rotate a numeric secret version
+to force this mapping or the normal-slot selection. The worker must have Secret Manager references
+for every slot named by the policy.
+
+Fresh-admission/preflight target-profile fallback occurs before request-bound sharding is bound and
+therefore uses the effective normal selected slot. That slot must be `primary`, matching the
+request-bound `target-profile` and `profile-fallback` entries, so the schema-v1 attested preflight
+run can be reused consistently after the request is created.
 
 ## Pre-run checks
 
-1. Apply migrations through `20260716143000_reuse_fresh_admission_target_profile.sql` using the normal ordered migration path. Do not use `--include-all`.
+1. Apply migrations through `20260717120000_fix_analysis_v2_checkpoint_contracts.sql` using the normal ordered migration path. Do not use `--include-all`.
 2. Only after that migration succeeds, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
-4. Confirm all five Apify slots resolve to distinct intended test accounts without displaying token values.
-5. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
-6. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
-7. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
+4. Confirm both intake and worker have effective normal selected slot `primary`, resolved through the current active primary secret reference without rotating to a numeric secret version.
+5. Confirm every credential slot referenced by the policy resolves to its intended physical account without displaying token values.
+6. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
+7. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
+8. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
 
 ### Free Actor API quota
 
@@ -69,7 +89,7 @@ paid account instead of rotating free accounts.
 1. Set `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false` on the intake runtime.
 2. Remove non-selected temporary Apify secret references from the worker after no policy-bound request remains active.
 3. Keep public admission disabled until the separate paid launch decision.
-4. Do not enable the deferred KRW 1,900 reservation, discounted early-access, or full-price payment flow as part of this run.
+4. Commercial display terms are defined only by the canonical ["Groble 얼리버드 표시안 (성공 E2E 후 확정)" block](./operations-cost-model.md). Payment integration is outside this E2E's scope and remains on a separate branch; do not implement or enable it as part of this run.
 
 ## 2026-07-16 canary evidence
 
@@ -140,3 +160,38 @@ defense in depth. Database/RPC errors and malformed reservation payloads fail cl
 retryable transport-style profile failures, allowing only the existing bounded fallback policy to
 decide the next step. This aggregate pacing reduces burst risk; it does not guarantee Instagram
 will accept logged-out requests, and a successful single egress probe is not production evidence.
+
+## 2026-07-17 Standard canary evidence (failed)
+
+Preflight `3d6759a9-948c-4de1-be7a-d02aa72ed8fd` created Standard request
+`b27bc417-5e45-41b1-aad3-af733fdbb954` for the exact target `0_min._.00`. The request failed and
+does not satisfy the success checks in this runbook.
+
+- Wall time was exactly `1,308,289ms` (`21m48.289s`): queue `978ms` and processing
+  `1,307,311ms`. Of 21 jobs, 11 completed, one failed, and nine were cancelled. `private-names`
+  batch 1 exhausted all seven attempts, then sibling AI checkpoint jobs were cancelled.
+- The first root cause was an incorrect comparison between the private-name topology content hash
+  and an independently scoped consumer job hash. The second was a candidate feature completion
+  contract that required a media bundle for non-`verified_female` classifications even though the
+  executor persisted that bundle only for `verified_female`. Forward migration
+  `20260717120000_fix_analysis_v2_checkpoint_contracts.sql` and its PGlite tests correct these
+  contracts. They are not yet recorded here as deployed or validated by a successful E2E.
+- All 12 request provider runs settled with exact actual cost `$2.1816`. The preflight actual
+  `$0.0052` is separate. Gemini recorded 400 attempts and estimated `$0.57216325`, but two
+  feature-analysis `response-rejected` attempts had missing or malformed usage. Therefore
+  `costComplete=false`: request cost is a lower bound of `$2.75376325`, and end-to-end cost including
+  preflight is a lower bound of `$2.75896325`. GCP infrastructure and the unknown cost of those two
+  malformed-usage calls are excluded.
+- Most provider and AI generation work had finished around `3m10`; the remaining approximately
+  `18m38` was checkpoint retry and cancellation delay. This suggests, but does not prove,
+  sub-five-minute feasibility after the checkpoint fix.
+- There were 236 candidate detailed profiles and zero direct `selfhosted` successes. Six outcomes
+  were rate limits, while roughly 230 were global-gate or circuit outcomes that sent no Instagram
+  request. Fallback targeted only the exact unresolved accounts; all 236 were unresolved in this
+  run. Apify candidate fallback produced 227 successes and nine incomplete/unavailable outcomes.
+  Aggregate profile coverage including the target was 228 successes and nine incomplete outcomes.
+  Cloud Run datacenter egress remains a launch blocker for self-hosted-only profile collection.
+- The candidate liker stage never ran because the request failed upstream.
+
+This failed canary is diagnostic and lower-bound cost evidence only. It is not a successful sample,
+p50/p95 evidence, a five-minute SLA result, or final sale-price evidence.
