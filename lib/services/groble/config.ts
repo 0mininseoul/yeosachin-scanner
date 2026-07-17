@@ -36,14 +36,33 @@ export function readGrobleConfig(env: Environment = process.env): GrobleConfig {
         ? requiredValue(env, 'GROBLE_WEBHOOK_PREVIOUS_SECRET', secretSchema)
         : null;
 
+    const basicProductId = requiredValue(env, 'GROBLE_BASIC_PRODUCT_ID', productIdSchema);
+    const standardProductId = requiredValue(env, 'GROBLE_STANDARD_PRODUCT_ID', productIdSchema);
+    if (basicProductId === standardProductId) {
+        throw new Error('GROBLE_PRODUCT_IDS_MUST_BE_DISTINCT');
+    }
+    const basicPaymentAddress = requiredValue(
+        env,
+        'GROBLE_BASIC_PAYMENT_ADDRESS',
+        productIdSchema
+    );
+    const standardPaymentAddress = requiredValue(
+        env,
+        'GROBLE_STANDARD_PAYMENT_ADDRESS',
+        productIdSchema
+    );
+    if (basicPaymentAddress === standardPaymentAddress) {
+        throw new Error('GROBLE_PAYMENT_ADDRESSES_MUST_BE_DISTINCT');
+    }
+
     return Object.freeze({
         productIds: Object.freeze({
-            basic: requiredValue(env, 'GROBLE_BASIC_PRODUCT_ID', productIdSchema),
-            standard: requiredValue(env, 'GROBLE_STANDARD_PRODUCT_ID', productIdSchema),
+            basic: basicProductId,
+            standard: standardProductId,
         }),
         paymentAddresses: Object.freeze({
-            basic: requiredValue(env, 'GROBLE_BASIC_PAYMENT_ADDRESS', productIdSchema),
-            standard: requiredValue(env, 'GROBLE_STANDARD_PAYMENT_ADDRESS', productIdSchema),
+            basic: basicPaymentAddress,
+            standard: standardPaymentAddress,
         }),
         webhookSecret: requiredValue(env, 'GROBLE_WEBHOOK_SECRET', secretSchema),
         webhookPreviousSecret: previousSecret,

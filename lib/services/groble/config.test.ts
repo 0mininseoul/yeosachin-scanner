@@ -30,6 +30,17 @@ describe('Groble server configuration', () => {
         })).toThrow('GROBLE_BASIC_PAYMENT_ADDRESS');
     });
 
+    it('requires distinct product IDs and payment addresses for the two paid plans', () => {
+        expect(() => readGrobleConfig({
+            ...VALID_ENV,
+            GROBLE_STANDARD_PRODUCT_ID: VALID_ENV.GROBLE_BASIC_PRODUCT_ID,
+        })).toThrow('GROBLE_PRODUCT_IDS_MUST_BE_DISTINCT');
+        expect(() => readGrobleConfig({
+            ...VALID_ENV,
+            GROBLE_STANDARD_PAYMENT_ADDRESS: VALID_ENV.GROBLE_BASIC_PAYMENT_ADDRESS,
+        })).toThrow('GROBLE_PAYMENT_ADDRESSES_MUST_BE_DISTINCT');
+    });
+
     it('builds only allowlisted Groble payment URLs for paid plans', () => {
         const config = readGrobleConfig(VALID_ENV);
 

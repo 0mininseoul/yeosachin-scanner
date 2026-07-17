@@ -401,6 +401,69 @@ describe('Groble earlybird database boundary', () => {
         )).rows[0].status).toBe('payment_pending');
     });
 
+    it('keeps a same-plan pending intent authoritative when a newer preflight cannot be distinguished', async () => {
+        const seed = await seedPreflight(94, 'basic');
+        const first = await createCheckout(seed, 'basic');
+        const nextPreflightId = await seedNewPreflightForUser(95, seed.userId, 'basic');
+
+        await expect(createCheckout({
+            userId: seed.userId,
+            preflightId: nextPreflightId,
+        }, 'basic')).rejects.toThrow(/EARLYBIRD_CHECKOUT_ALREADY_PENDING/);
+
+        const orders = (await db.query<{
+            id: string;
+            preflight_id: string;
+            target_instagram_id: string;
+            status: string;
+        }>(
+            `SELECT id, preflight_id, target_instagram_id, status
+             FROM public.earlybird_orders ORDER BY created_at`
+        )).rows;
+        expect(orders).toEqual([{
+            id: first.order_id,
+            preflight_id: seed.preflightId,
+            target_instagram_id: 'target_94',
+            status: 'payment_pending',
+        }]);
+
+        const completion = await finalize(seed, 'basic', 94);
+        expect(completion).toMatchObject({
+            disposition: 'accepted',
+            order_id: first.order_id,
+            status: 'paid',
+            plan_sequence: 1,
+        });
+    });
+
+    it('blocks returning to a product while its superseded intent remains payable', async () => {
+        const seed = await seedPreflight(96, 'basic');
+        const first = await createCheckout(seed, 'basic');
+        const standardPreflightId = await seedNewPreflightForUser(97, seed.userId, 'standard');
+        const second = await createCheckout({
+            userId: seed.userId,
+            preflightId: standardPreflightId,
+        }, 'standard');
+        const basicPreflightId = await seedNewPreflightForUser(98, seed.userId, 'basic');
+
+        await expect(createCheckout({
+            userId: seed.userId,
+            preflightId: basicPreflightId,
+        }, 'basic')).rejects.toThrow(/EARLYBIRD_CHECKOUT_ALREADY_PENDING/);
+
+        const lateFirstPayment = await finalize(seed, 'basic', 96);
+        expect(lateFirstPayment).toMatchObject({
+            disposition: 'late_cancelled_payment',
+            order_id: first.order_id,
+            status: 'refund_pending',
+            plan_sequence: null,
+        });
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1',
+            [second.order_id]
+        )).rows[0].status).toBe('payment_pending');
+    });
+
     it('makes duplicate event and payment deliveries idempotent', async () => {
         const seed = await seedPreflight(4, 'basic');
         await createCheckout(seed, 'basic');
@@ -419,6 +482,9 @@ describe('Groble earlybird database boundary', () => {
         expect((await db.query<{ sold_count: number }>(
             `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`
         )).rows[0].sold_count).toBe(1);
+
+        await expect(createCheckout(seed, 'basic'))
+            .rejects.toThrow(/EARLYBIRD_ORDER_CONFLICT/);
     });
 
     it('records cancellation requests and keeps final refund transitions service-only', async () => {

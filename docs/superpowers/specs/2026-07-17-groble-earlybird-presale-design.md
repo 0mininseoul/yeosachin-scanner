@@ -35,7 +35,7 @@ Basic과 Standard는 Groble에 이미 등록된 결제창으로 각각 10건만 
 5. 서버 전용 RPC가 preflight와 사용자를 잠그고 대상 계정, 제외 계정, 관계 수, 플랜, 가격 버전, 동의 문구와 동의 시각을 주문에 고정한다.
 6. Basic/Standard는 서버 환경변수의 기존 Groble 결제창 주소로 결제 URL을 만들고, 별도 상품 ID는 webhook 검증 기대값으로 주문에 고정한다. Plus는 별도 대기 신청 행만 생성한다.
 
-Groble의 공개 결제창 가이드에는 동적 주문 메타데이터 전달 계약이 없으므로, 웹훅의 정규화된 `buyer.email`을 기존 `users.email`과 대조해 사용자를 찾고 그 사용자의 해당 상품 `payment_pending` 주문을 확정한다. 구매자 이메일은 새 테이블이나 webhook 감사 로그에 복제 저장하지 않는다.
+Groble의 공개 결제창 가이드에는 동적 주문 메타데이터 전달 계약이 없으므로, 웹훅의 정규화된 `buyer.email`을 기존 `users.email`과 대조해 사용자를 찾고 그 사용자의 해당 상품 `payment_pending` 주문을 확정한다. 구매자 이메일은 새 테이블이나 webhook 감사 로그에 복제 저장하지 않는다. 같은 사용자·상품의 복수 주문은 이벤트만으로 식별할 수 없으므로, 기존 `payment_pending` 주문이나 해당 상품의 미해결 `cancelled` 주문이 있으면 같은 플랜의 새 snapshot 주문 생성을 차단한다.
 
 ## 데이터 모델
 

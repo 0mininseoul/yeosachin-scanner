@@ -321,11 +321,25 @@ BEGIN
         IF v_existing.user_id <> p_user_id
            OR v_existing.plan_id <> p_plan_id
            OR v_existing.expected_amount_krw <> p_expected_amount_krw
-           OR v_existing.expected_groble_product_id <> p_expected_product_id THEN
+           OR v_existing.expected_groble_product_id <> p_expected_product_id
+           OR v_existing.status <> 'payment_pending' THEN
             RAISE EXCEPTION 'EARLYBIRD_ORDER_CONFLICT';
         END IF;
         RETURN QUERY SELECT v_existing.id, FALSE;
         RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.earlybird_orders AS unresolved_order
+        WHERE unresolved_order.user_id = p_user_id
+          AND unresolved_order.expected_groble_product_id = p_expected_product_id
+          AND unresolved_order.status = 'cancelled'
+          AND unresolved_order.payment_id IS NULL
+    ) THEN
+        -- A superseded window for this product is still payable and Groble supplies no
+        -- application intent ID that could distinguish it from the requested snapshot.
+        RAISE EXCEPTION 'EARLYBIRD_CHECKOUT_ALREADY_PENDING';
     END IF;
 
     SELECT pending_order.*
@@ -335,6 +349,12 @@ BEGIN
       AND pending_order.status = 'payment_pending'
     FOR UPDATE;
     IF FOUND THEN
+        IF v_existing.expected_groble_product_id = p_expected_product_id THEN
+            -- Groble's completion event identifies the product and buyer, but carries no
+            -- application checkout-intent ID. Two live intents for the same buyer/product
+            -- therefore cannot be attributed without risking the immutable order snapshot.
+            RAISE EXCEPTION 'EARLYBIRD_CHECKOUT_ALREADY_PENDING';
+        END IF;
         UPDATE public.earlybird_orders AS superseded_order
         SET status = 'cancelled',
             updated_at = pg_catalog.clock_timestamp()

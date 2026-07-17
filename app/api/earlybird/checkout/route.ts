@@ -16,6 +16,13 @@ function errorResponse(status: number, code: string, error: string): NextRespons
 }
 
 function persistenceErrorResponse(error: EarlybirdPersistenceError): NextResponse {
+    if (error.code === 'EARLYBIRD_CHECKOUT_ALREADY_PENDING') {
+        return errorResponse(
+            409,
+            error.code,
+            '기존 결제창의 처리 상태를 먼저 확인해주세요.'
+        );
+    }
     if (error.code === 'PLAN_UPGRADE_REQUIRED'
         || error.code === 'PLAN_SELECTION_UNAVAILABLE'
         || error.code === 'EARLYBIRD_ORDER_CONFLICT') {

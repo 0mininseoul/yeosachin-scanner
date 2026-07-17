@@ -34,6 +34,7 @@ function boundedDatabaseCode(error: unknown): string {
         'EARLYBIRD_WAITLIST_REQUIRED',
         'EARLYBIRD_WAITLIST_NOT_ELIGIBLE',
         'EARLYBIRD_ORDER_CONFLICT',
+        'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
         'EARLYBIRD_PRICE_SNAPSHOT_INVALID',
     ].find(code => message.includes(code));
     return knownCode ?? 'EARLYBIRD_PERSISTENCE_FAILED';

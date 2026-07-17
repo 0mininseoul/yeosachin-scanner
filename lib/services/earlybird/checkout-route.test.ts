@@ -142,6 +142,24 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
+    it('returns a conflict when a same-plan checkout is already pending', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: null,
+            error: { message: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING' },
+        });
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+            error: '기존 결제창의 처리 상태를 먼저 확인해주세요.',
+        });
+    });
+
     it('creates only a Plus waitlist row through the service-only RPC', async () => {
         mocks.rpc.mockResolvedValue({
             data: [{ waitlist_id: WAITLIST_ID, created: true }],
