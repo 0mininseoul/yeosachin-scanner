@@ -9,9 +9,20 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const rateLimitFallbackMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260717160000_allow_analysis_v2_rate_limit_exhaustion_fallback.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const FINALIZE_REQUEST_ID = '22222222-2222-4222-8222-222222222222';
+const CLAIM_TOKEN = '33333333-3333-4333-8333-333333333333';
+const PRIVATE_OPERATION = `private-account-name:${'1'.repeat(64)}`;
+const NARRATIVE_OPERATION = `high-risk-narrative:${'2'.repeat(64)}`;
+const PARTNER_OPERATION = `partner-safety:${'3'.repeat(64)}`;
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -109,11 +120,27 @@ CREATE OR REPLACE FUNCTION public.analysis_v2_complete_result_and_purge_internal
 )
 RETURNS JSONB LANGUAGE sql AS $$ SELECT '{}'::JSONB; $$;
 
-CREATE TABLE public.analysis_v2_ai_attempts (
-    status TEXT NOT NULL,
-    CONSTRAINT analysis_v2_ai_attempt_status_check CHECK (
-        status IN ('reserved', 'success', 'rate_limited', 'ambiguous', 'rejected')
-    )
+    CREATE TABLE public.analysis_v2_ai_attempts (
+        request_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000000',
+        job_key TEXT NOT NULL DEFAULT 'track:test:batch:0',
+        operation_key TEXT NOT NULL DEFAULT 'private-account-name:0000000000000000000000000000000000000000000000000000000000000000',
+        attempt SMALLINT NOT NULL DEFAULT 1,
+        status TEXT NOT NULL,
+        model_name TEXT NOT NULL DEFAULT 'gemini-test',
+        location TEXT NOT NULL DEFAULT 'global',
+        stage TEXT NOT NULL DEFAULT 'privateAccountName',
+        thinking_level TEXT,
+        media_count SMALLINT NOT NULL DEFAULT 0,
+        media_resolution TEXT,
+        prompt_version TEXT NOT NULL DEFAULT 'test-v1',
+        schema_version SMALLINT NOT NULL DEFAULT 1,
+        max_output_tokens INTEGER NOT NULL DEFAULT 512,
+        retry_count SMALLINT NOT NULL DEFAULT 0,
+        terminalized_at TIMESTAMP WITH TIME ZONE,
+        PRIMARY KEY (request_id, operation_key, attempt),
+        CONSTRAINT analysis_v2_ai_attempt_status_check CHECK (
+            status IN ('reserved', 'success', 'rate_limited', 'ambiguous', 'rejected')
+        )
 );
 
 CREATE OR REPLACE FUNCTION public.analysis_v2_terminalize_ai_attempt_internal(
@@ -130,33 +157,61 @@ END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_private_names(
-    UUID, TEXT, UUID, TEXT, INTEGER, TEXT, TEXT, TEXT, JSONB
+    p_request_id UUID, p_job_key TEXT, p_claim_token UUID, p_job_input_hash TEXT,
+    p_batch INTEGER, p_source TEXT, p_operation_key TEXT, p_ai_result_hash TEXT,
+    p_rows JSONB
 )
 RETURNS JSONB LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM 1 FROM public.analysis_v2_ai_attempts AS ai_attempt
-    WHERE ai_attempt.status = 'rejected';
+    IF p_source = 'safe_fallback' AND NOT EXISTS (
+        SELECT 1 FROM public.analysis_v2_ai_attempts AS ai_attempt
+        WHERE ai_attempt.request_id = p_request_id
+          AND ai_attempt.job_key = p_job_key
+          AND ai_attempt.operation_key = p_operation_key
+          AND ai_attempt.stage = 'privateAccountName'
+          AND ai_attempt.status = 'rejected'
+    ) THEN
+        RAISE EXCEPTION 'ANALYSIS_V2_RESULT_NOT_READY';
+    END IF;
     RETURN '{}'::JSONB;
 END;
 $$;
 CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_narratives(
-    UUID, TEXT, UUID, TEXT, JSONB
+    p_request_id UUID, p_job_key TEXT, p_claim_token UUID, p_job_input_hash TEXT,
+    p_rows JSONB
 )
 RETURNS JSONB LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM 1 FROM public.analysis_v2_ai_attempts AS ai_attempt
-    WHERE ai_attempt.status = 'rejected';
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+        WHERE item.value->>'source' = 'safe_fallback'
+          AND NOT EXISTS (
+            SELECT 1 FROM public.analysis_v2_ai_attempts AS ai_attempt
+            WHERE ai_attempt.request_id = p_request_id
+              AND ai_attempt.job_key = p_job_key
+              AND ai_attempt.operation_key = item.value->>'operationKey'
+              AND ai_attempt.stage = 'highRiskNarrative'
+              AND ai_attempt.status = 'rejected'
+          )
+    ) THEN
+        RAISE EXCEPTION 'ANALYSIS_V2_RESULT_NOT_READY';
+    END IF;
     RETURN '{}'::JSONB;
 END;
 $$;
 CREATE OR REPLACE FUNCTION public.analysis_v2_result_partner_safety_row_matches(
-    UUID, TEXT, JSONB
+    p_request_id UUID, p_partner_job_key TEXT, p_value JSONB
 )
 RETURNS BOOLEAN LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM 1 FROM public.analysis_v2_ai_attempts AS ai_attempt
-    WHERE ai_attempt.status = 'rejected';
-    RETURN TRUE;
+    RETURN EXISTS (
+        SELECT 1 FROM public.analysis_v2_ai_attempts AS ai_attempt
+        WHERE ai_attempt.request_id = p_request_id
+          AND ai_attempt.job_key = p_partner_job_key
+          AND ai_attempt.operation_key = p_value->>'operationKey'
+          AND ai_attempt.stage = 'partnerSafety'
+          AND ai_attempt.status = 'rejected'
+    );
 END;
 $$;
 `;
@@ -168,11 +223,136 @@ interface ReasonRow {
 
 let db: PGlite;
 
+interface AttemptHistoryOptions {
+    count?: number;
+    driftAttempt?: number;
+    nonRateLimitedAttempt?: number;
+    unterminatedAttempt?: number;
+}
+
+async function seedRateLimitedHistory(input: {
+    jobKey: string;
+    operationKey: string;
+    stage: 'privateAccountName' | 'highRiskNarrative' | 'partnerSafety';
+    options?: AttemptHistoryOptions;
+}): Promise<void> {
+    const count = input.options?.count ?? 4;
+    for (let attempt = 1; attempt <= count; attempt += 1) {
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_attempts (
+                request_id, job_key, operation_key, attempt, status, model_name,
+                location, stage, thinking_level, media_count, media_resolution,
+                prompt_version, schema_version, max_output_tokens, retry_count,
+                terminalized_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, 'gemini-test', $6, $7,
+                'MINIMAL', 1, 'LOW', 'test-v1', 1, 512, $8, $9
+             )`,
+            [
+                REQUEST_ID,
+                input.jobKey,
+                input.operationKey,
+                attempt,
+                input.options?.nonRateLimitedAttempt === attempt
+                    ? 'ambiguous'
+                    : 'rate_limited',
+                input.options?.driftAttempt === attempt ? 'us-central1' : 'global',
+                input.stage,
+                attempt - 1,
+                input.options?.unterminatedAttempt === attempt
+                    ? null
+                    : '2026-07-17T10:00:00Z',
+            ]
+        );
+    }
+}
+
+async function seedAllFallbackHistories(options: AttemptHistoryOptions = {}): Promise<void> {
+    for (const input of [
+        {
+            jobKey: 'track:private-names:batch:0',
+            operationKey: PRIVATE_OPERATION,
+            stage: 'privateAccountName' as const,
+        },
+        {
+            jobKey: 'track:narratives:batch:0',
+            operationKey: NARRATIVE_OPERATION,
+            stage: 'highRiskNarrative' as const,
+        },
+        {
+            jobKey: 'track:partner-safety:batch:0',
+            operationKey: PARTNER_OPERATION,
+            stage: 'partnerSafety' as const,
+        },
+    ]) {
+        await seedRateLimitedHistory({ ...input, options });
+    }
+}
+
+async function seedAllResponseRejectedHistories(): Promise<void> {
+    for (const input of [
+        ['track:private-names:batch:0', PRIVATE_OPERATION, 'privateAccountName'],
+        ['track:narratives:batch:0', NARRATIVE_OPERATION, 'highRiskNarrative'],
+        ['track:partner-safety:batch:0', PARTNER_OPERATION, 'partnerSafety'],
+    ] as const) {
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_attempts (
+                request_id, job_key, operation_key, attempt, status, model_name,
+                location, stage, thinking_level, media_count, media_resolution,
+                prompt_version, schema_version, max_output_tokens, retry_count,
+                terminalized_at
+             ) VALUES (
+                $1, $2, $3, 1, 'response_rejected', 'gemini-test', 'global', $4,
+                'MINIMAL', 1, 'LOW', 'test-v1', 1, 512, 0,
+                '2026-07-17T10:00:00Z'
+             )`,
+            [REQUEST_ID, input[0], input[1], input[2]]
+        );
+    }
+}
+
+async function checkpointPrivateFallback() {
+    return db.query(
+        `SELECT public.checkpoint_analysis_v2_private_names(
+            $1, 'track:private-names:batch:0', $2, 'input-hash', 0,
+            'safe_fallback', $3, NULL, '[]'::JSONB
+         )`,
+        [REQUEST_ID, CLAIM_TOKEN, PRIVATE_OPERATION]
+    );
+}
+
+async function checkpointNarrativeFallback() {
+    return db.query(
+        `SELECT public.checkpoint_analysis_v2_narratives(
+            $1, 'track:narratives:batch:0', $2, 'input-hash', $3::JSONB
+         )`,
+        [
+            REQUEST_ID,
+            CLAIM_TOKEN,
+            JSON.stringify([{
+                source: 'safe_fallback',
+                operationKey: NARRATIVE_OPERATION,
+            }]),
+        ]
+    );
+}
+
+async function partnerFallbackMatches(): Promise<boolean> {
+    const result = await db.query<{ matches: boolean }>(
+        `SELECT public.analysis_v2_result_partner_safety_row_matches(
+            $1, 'track:partner-safety:batch:0', $2::JSONB
+         ) AS matches`,
+        [REQUEST_ID, JSON.stringify({ operationKey: PARTNER_OPERATION })]
+    );
+    return result.rows[0]?.matches ?? false;
+}
+
 describe('analysis V2 unavailable, replay, and policy PGlite migration', () => {
     beforeAll(async () => {
         db = await PGlite.create();
         await db.exec(bootstrap);
         await db.exec(migration);
+        await db.exec(rateLimitFallbackMigration);
     }, 30_000);
 
     afterAll(async () => {
@@ -224,19 +404,66 @@ describe('analysis V2 unavailable, replay, and policy PGlite migration', () => {
              WHERE namespace.nspname = 'public'
                AND routine.proname IN (
                     'analysis_v2_terminalize_ai_attempt_internal',
+                    'analysis_v2_ai_fallback_evidence_matches',
                     'checkpoint_analysis_v2_private_names',
                     'checkpoint_analysis_v2_narratives',
                     'analysis_v2_result_partner_safety_row_matches'
                )`
         );
-        expect(definitions.rows).toHaveLength(4);
+        expect(definitions.rows).toHaveLength(5);
         for (const row of definitions.rows) {
-            expect(row.definition, row.name).toContain('response_rejected');
+            if (row.name === 'analysis_v2_terminalize_ai_attempt_internal'
+                || row.name === 'analysis_v2_ai_fallback_evidence_matches') {
+                expect(row.definition, row.name).toContain('response_rejected');
+            } else {
+                expect(row.definition, row.name).toContain(
+                    'analysis_v2_ai_fallback_evidence_matches'
+                );
+            }
         }
         await expect(db.exec(
             "INSERT INTO public.analysis_v2_ai_attempts (status) VALUES ('response_rejected')"
         )).resolves.toBeDefined();
     });
+
+    it('preserves response-rejected evidence in every deterministic fallback gate', async () => {
+        await db.exec('DELETE FROM public.analysis_v2_ai_attempts');
+        await seedAllResponseRejectedHistories();
+
+        await expect(checkpointPrivateFallback()).resolves.toBeDefined();
+        await expect(checkpointNarrativeFallback()).resolves.toBeDefined();
+        await expect(partnerFallbackMatches()).resolves.toBe(true);
+    });
+
+    it('accepts four contiguous terminal rate limits in every deterministic fallback gate', async () => {
+        await db.exec('DELETE FROM public.analysis_v2_ai_attempts');
+        await seedAllFallbackHistories();
+
+        await expect(checkpointPrivateFallback()).resolves.toBeDefined();
+        await expect(checkpointNarrativeFallback()).resolves.toBeDefined();
+        await expect(partnerFallbackMatches()).resolves.toBe(true);
+    });
+
+    it.each([
+        ['only three attempts', { count: 3 }],
+        ['a mixed terminal status', { nonRateLimitedAttempt: 3 }],
+        ['metadata drift', { driftAttempt: 4 }],
+        ['an unterminated attempt', { unterminatedAttempt: 4 }],
+    ] satisfies Array<[string, AttemptHistoryOptions]>) (
+        'rejects %s in every deterministic fallback gate',
+        async (_label, options) => {
+            await db.exec('DELETE FROM public.analysis_v2_ai_attempts');
+            await seedAllFallbackHistories(options);
+
+            await expect(checkpointPrivateFallback()).rejects.toThrow(
+                /ANALYSIS_V2_RESULT_NOT_READY/
+            );
+            await expect(checkpointNarrativeFallback()).rejects.toThrow(
+                /ANALYSIS_V2_RESULT_NOT_READY/
+            );
+            await expect(partnerFallbackMatches()).resolves.toBe(false);
+        }
+    );
 
     it('rejects an AI-unavailable public row without its matching rich stage outcome', async () => {
         for (const statement of [
