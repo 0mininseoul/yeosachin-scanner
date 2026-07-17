@@ -5,8 +5,18 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
-import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
+import {
+    EARLYBIRD_DISCLOSURE_TEXT,
+    isPaidEarlybirdPlanId,
+} from '@/lib/domain/earlybird/catalog';
+import {
+    buildEarlybirdPlanPresentation,
+    canSubmitEarlybirdSelection,
+    isSafeGrobleCheckoutUrl,
+    parseEarlybirdPlanParam,
+    resolveAvailableEarlybirdPlan,
+} from '@/lib/services/earlybird/ui-state';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
@@ -28,6 +38,9 @@ export default function AnalyzePage() {
     const [instagramId, setInstagramId] = useState('');
     const [girlfriendInstagramId, setGirlfriendInstagramId] = useState('');
     const [selectedPlan, setSelectedPlan] = useState<PlanId | null>(null);
+    const [disclosureAccepted, setDisclosureAccepted] = useState(false);
+    const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
+    const [waitlistComplete, setWaitlistComplete] = useState(false);
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
     const initializedRef = useRef(false);
@@ -36,26 +49,31 @@ export default function AnalyzePage() {
         preflight,
         creating,
         exclusionState,
-        starting,
         error,
         setError,
         startPreflight,
         resumePreflight,
         submitExclusion,
-        hasTestEntitlement,
-        startAnalysis,
         reset,
     } = useAnalysisV2Preflight();
 
     const readyPreflight = preflight?.status === 'ready' ? preflight : null;
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
-    const effectiveSelectedPlan = selectedPlan ?? readyPreflight?.requiredPlan ?? null;
+    const effectiveSelectedPlan = readyPreflight
+        ? resolveAvailableEarlybirdPlan(
+            selectedPlan,
+            readyPreflight.plans,
+            readyPreflight.requiredPlan
+        )
+        : selectedPlan;
 
     useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
         initializedRef.current = true;
 
         const params = new URLSearchParams(window.location.search);
+        const linkedPlan = parseEarlybirdPlanParam(params.get('plan'));
+        if (linkedPlan) setSelectedPlan(linkedPlan);
         const resumablePreflightId = params.get('preflight');
         const resumableTarget = params.get('target') ?? undefined;
         if (resumablePreflightId && user) {
@@ -116,12 +134,64 @@ export default function AnalyzePage() {
         await submitExclusion(girlfriendInstagramId);
     };
 
-    const handleStartAnalysis = async () => {
-        if (!effectiveSelectedPlan) return;
-        const requestId = await startAnalysis(effectiveSelectedPlan);
-        if (!requestId) return;
-        trackEvent(EVENTS.ANALYSIS_START);
-        router.push(`/progress/${requestId}`);
+    const handleEarlybirdAction = async () => {
+        if (!effectiveSelectedPlan || !readyPreflight) return;
+        const selectedCard = readyPreflight.plans.find(
+            plan => plan.planId === effectiveSelectedPlan
+        );
+        const available = selectedCard?.selectionState !== 'unavailable';
+        if (!canSubmitEarlybirdSelection(
+            effectiveSelectedPlan,
+            disclosureAccepted,
+            available
+        )) return;
+
+        setPurchaseSubmitting(true);
+        setWaitlistComplete(false);
+        setError(null);
+        try {
+            const paidPlan = isPaidEarlybirdPlanId(effectiveSelectedPlan);
+            const response = await fetch(
+                paidPlan ? '/api/earlybird/checkout' : '/api/earlybird/waitlist',
+                {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify(paidPlan ? {
+                        preflightId: readyPreflight.preflightId,
+                        planId: effectiveSelectedPlan,
+                        disclosureAccepted,
+                    } : {
+                        preflightId: readyPreflight.preflightId,
+                        planId: 'plus',
+                    }),
+                }
+            );
+            const payload: unknown = await response.json().catch(() => null);
+            if (!response.ok) {
+                const message = payload && typeof payload === 'object' && 'error' in payload
+                    && typeof payload.error === 'string' && payload.error.length <= 200
+                    ? payload.error
+                    : '요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.';
+                setError(message);
+                return;
+            }
+            if (!paidPlan) {
+                setWaitlistComplete(true);
+                return;
+            }
+            if (!payload || typeof payload !== 'object'
+                || !('checkoutUrl' in payload)
+                || typeof payload.checkoutUrl !== 'string'
+                || !isSafeGrobleCheckoutUrl(payload.checkoutUrl)) {
+                setError('결제창 주소를 확인하지 못했습니다. 잠시 후 다시 시도해주세요.');
+                return;
+            }
+            window.location.assign(payload.checkoutUrl);
+        } catch {
+            setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');
+        } finally {
+            setPurchaseSubmitting(false);
+        }
     };
 
     const handleReset = () => {
@@ -129,6 +199,9 @@ export default function AnalyzePage() {
         setInstagramId('');
         setGirlfriendInstagramId('');
         setSelectedPlan(null);
+        setDisclosureAccepted(false);
+        setPurchaseSubmitting(false);
+        setWaitlistComplete(false);
         initializedRef.current = true;
         router.replace('/analyze');
     };
@@ -375,6 +448,7 @@ export default function AnalyzePage() {
                                         {readyPreflight.plans.map((plan) => {
                                             const available = plan.selectionState !== 'unavailable';
                                             const selected = effectiveSelectedPlan === plan.planId;
+                                            const presentation = buildEarlybirdPlanPresentation(plan.planId);
                                             return (
                                                 <label
                                                     key={plan.planId}
@@ -416,12 +490,27 @@ export default function AnalyzePage() {
                                                                 맞팔 최대 {plan.detailedMutualLimit.toLocaleString('ko-KR')}명 정밀 판독
                                                             </p>
                                                         </div>
-                                                        <span className={`mt-1 h-4 w-4 shrink-0 rounded-full border ${
-                                                            selected
-                                                                ? 'border-[5px] border-blood bg-white'
-                                                                : 'border-line-2'
-                                                        }`} />
+                                                        <div className="shrink-0 text-right">
+                                                            {presentation.referencePriceLabel && (
+                                                                <p className="text-[11px] text-fg-mute line-through">
+                                                                    {presentation.referencePriceLabel}
+                                                                </p>
+                                                            )}
+                                                            <p className="num mt-0.5 text-[16px] font-extrabold text-fg">
+                                                                {presentation.priceLabel}
+                                                            </p>
+                                                            <span className={`ml-auto mt-2 block h-4 w-4 rounded-full border ${
+                                                                selected
+                                                                    ? 'border-[5px] border-blood bg-white'
+                                                                    : 'border-line-2'
+                                                            }`} />
+                                                        </div>
                                                     </div>
+                                                    {presentation.availabilityLabel && available && (
+                                                        <p className="mt-3 border-t border-line pt-2.5 text-[11px] font-semibold text-amber">
+                                                            {presentation.availabilityLabel}
+                                                        </p>
+                                                    )}
                                                     {!available && (
                                                         <p className="mt-3 border-t border-line pt-2.5 text-[11px] font-medium text-fg-mute">
                                                             {plan.unavailableReason === 'below_required_plan'
@@ -434,25 +523,61 @@ export default function AnalyzePage() {
                                         })}
                                     </fieldset>
 
+                                    {effectiveSelectedPlan
+                                        && isPaidEarlybirdPlanId(effectiveSelectedPlan) && (
+                                        <div className="mt-5 border border-amber/35 bg-amber/[0.06] p-4">
+                                            <label className="flex cursor-pointer items-start gap-3">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={disclosureAccepted}
+                                                    onChange={(event) => setDisclosureAccepted(event.target.checked)}
+                                                    className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--color-blood)]"
+                                                />
+                                                <span className="text-[12px] leading-relaxed text-fg-dim">
+                                                    {EARLYBIRD_DISCLOSURE_TEXT}
+                                                </span>
+                                            </label>
+                                            <p className="mt-3 border-t border-amber/20 pt-3 text-[11px] leading-relaxed text-fg-mute">
+                                                Groble 결제창에는 현재 로그인한 계정과 같은 이메일을 사용해주세요.
+                                            </p>
+                                        </div>
+                                    )}
+
                                     {error && (
                                         <div className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood" role="alert">
                                             {error}
                                         </div>
                                     )}
+                                    {waitlistComplete && (
+                                        <div className="mt-4 border border-amber/45 bg-amber/10 px-3 py-2.5 text-[13px] text-amber" role="status">
+                                            Plus 대기 신청이 완료되었습니다.
+                                        </div>
+                                    )}
                                     <div className="mt-5">
                                         <PrimaryButton
-                                            onClick={handleStartAnalysis}
+                                            onClick={handleEarlybirdAction}
                                             disabled={
                                                 !effectiveSelectedPlan
-                                                || starting
-                                                || !hasTestEntitlement(effectiveSelectedPlan)
+                                                || purchaseSubmitting
+                                                || waitlistComplete
+                                                || !canSubmitEarlybirdSelection(
+                                                    effectiveSelectedPlan,
+                                                    disclosureAccepted,
+                                                    readyPreflight.plans.find(
+                                                        plan => plan.planId === effectiveSelectedPlan
+                                                    )?.selectionState !== 'unavailable'
+                                                )
                                             }
                                         >
-                                            {starting
-                                                ? '최신 계정 정보 확인 중…'
-                                                : effectiveSelectedPlan && hasTestEntitlement(effectiveSelectedPlan)
-                                                    ? '판독 시작하기'
-                                                    : '결제 접수 준비 중'}
+                                            {purchaseSubmitting
+                                                ? '요청 처리 중…'
+                                                : waitlistComplete
+                                                    ? '대기 신청 완료'
+                                                    : effectiveSelectedPlan
+                                                        ? buildEarlybirdPlanPresentation(
+                                                            effectiveSelectedPlan
+                                                        ).actionLabel
+                                                        : '플랜을 선택해주세요'}
                                         </PrimaryButton>
                                     </div>
                                 </section>

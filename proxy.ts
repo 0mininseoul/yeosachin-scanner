@@ -61,7 +61,7 @@ export async function proxy(request: NextRequest) {
     }
 
     // 보호된 경로 체크
-    const protectedPaths = ['/analyze', '/progress', '/result'];
+    const protectedPaths = ['/analyze', '/progress', '/result', '/earlybird'];
     const isProtectedPath = protectedPaths.some((path) =>
         request.nextUrl.pathname.startsWith(path)
     );

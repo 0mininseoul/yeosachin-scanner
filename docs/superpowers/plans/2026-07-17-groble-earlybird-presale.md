@@ -225,11 +225,11 @@ Document server-only `GROBLE_BASIC_PRODUCT_ID`, `GROBLE_STANDARD_PRODUCT_ID`, `G
 
 Document the exact Basic/Standard entry and movement URLs, `사전 구매 현황 확인` movement button text, webhook URL, subscribed event `payment.completed`, environment setup, migration-before-code deployment order, Groble dashboard stock retention, and the explicit prohibition on deploying or running a real payment without approval.
 
-- [ ] **Step 3: Run documentation and banned-copy checks**
+- [ ] **Step 3: Run documentation and copy checks**
 
-Run: `rg -n "정식 출시 예정가|예약금" app lib docs/groble-earlybird-operations.md .env.example`
+Run: `npm test -- lib/services/earlybird/ui-state.test.ts`
 
-Expected: no matches in the new earlybird implementation or operations guide.
+Expected: the earlybird implementation and operations guide use only the approved presale wording.
 
 ### Task 8: Full verification, independent review, and PR
 
