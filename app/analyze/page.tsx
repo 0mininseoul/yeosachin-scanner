@@ -13,6 +13,7 @@ import {
 import {
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
+    isEarlybirdPlanSelectable,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
     resolveAvailableEarlybirdPlan,
@@ -66,6 +67,12 @@ export default function AnalyzePage() {
             readyPreflight.requiredPlan
         )
         : selectedPlan;
+    const effectiveSelectedCard = readyPreflight && effectiveSelectedPlan
+        ? readyPreflight.plans.find(plan => plan.planId === effectiveSelectedPlan) ?? null
+        : null;
+    const selectedPlanAvailable = readyPreflight && effectiveSelectedCard
+        ? isEarlybirdPlanSelectable(effectiveSelectedCard, readyPreflight.requiredPlan)
+        : false;
 
     useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
@@ -136,14 +143,10 @@ export default function AnalyzePage() {
 
     const handleEarlybirdAction = async () => {
         if (!effectiveSelectedPlan || !readyPreflight) return;
-        const selectedCard = readyPreflight.plans.find(
-            plan => plan.planId === effectiveSelectedPlan
-        );
-        const available = selectedCard?.selectionState !== 'unavailable';
         if (!canSubmitEarlybirdSelection(
             effectiveSelectedPlan,
             disclosureAccepted,
-            available
+            selectedPlanAvailable
         )) return;
 
         setPurchaseSubmitting(true);
@@ -446,7 +449,10 @@ export default function AnalyzePage() {
                                     <fieldset className="mt-5 space-y-3">
                                         <legend className="sr-only">판독 플랜</legend>
                                         {readyPreflight.plans.map((plan) => {
-                                            const available = plan.selectionState !== 'unavailable';
+                                            const available = isEarlybirdPlanSelectable(
+                                                plan,
+                                                readyPreflight.requiredPlan
+                                            );
                                             const selected = effectiveSelectedPlan === plan.planId;
                                             const presentation = buildEarlybirdPlanPresentation(plan.planId);
                                             return (
@@ -563,9 +569,7 @@ export default function AnalyzePage() {
                                                 || !canSubmitEarlybirdSelection(
                                                     effectiveSelectedPlan,
                                                     disclosureAccepted,
-                                                    readyPreflight.plans.find(
-                                                        plan => plan.planId === effectiveSelectedPlan
-                                                    )?.selectionState !== 'unavailable'
+                                                    selectedPlanAvailable
                                                 )
                                             }
                                         >

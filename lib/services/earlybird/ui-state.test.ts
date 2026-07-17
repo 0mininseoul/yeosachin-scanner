@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
+    isEarlybirdPlanSelectable,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
     resolveAvailableEarlybirdPlan,
@@ -27,7 +28,12 @@ describe('earlybird analyze UI state', () => {
     it('falls back from unavailable Basic to the server-required Standard plan', () => {
         expect(resolveAvailableEarlybirdPlan('basic', planCards, 'standard')).toBe('standard');
         expect(resolveAvailableEarlybirdPlan('standard', planCards, 'standard')).toBe('standard');
-        expect(resolveAvailableEarlybirdPlan('plus', planCards, 'standard')).toBe('plus');
+        expect(resolveAvailableEarlybirdPlan('plus', planCards, 'standard')).toBe('standard');
+        expect(isEarlybirdPlanSelectable(planCards[2], 'standard')).toBe(false);
+        expect(isEarlybirdPlanSelectable(
+            { planId: 'plus', selectionState: 'required' },
+            'plus'
+        )).toBe(true);
     });
 
     it('requires the exact disclosure consent only for paid plans', () => {

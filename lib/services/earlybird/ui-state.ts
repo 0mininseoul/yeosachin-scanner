@@ -9,6 +9,14 @@ interface PlanCardAvailability {
     selectionState: 'required' | 'available_upgrade' | 'unavailable';
 }
 
+export function isEarlybirdPlanSelectable(
+    card: PlanCardAvailability,
+    requiredPlanId: PlanId
+): boolean {
+    if (card.selectionState === 'unavailable') return false;
+    return card.planId !== 'plus' || requiredPlanId === 'plus';
+}
+
 function formatKrw(amount: number): string {
     return `${amount.toLocaleString('ko-KR')}원`;
 }
@@ -23,7 +31,7 @@ export function resolveAvailableEarlybirdPlan(
     requiredPlanId: PlanId
 ): PlanId {
     const selected = planCards.find(card => card.planId === selectedPlanId);
-    return selected && selected.selectionState !== 'unavailable'
+    return selected && isEarlybirdPlanSelectable(selected, requiredPlanId)
         ? selected.planId
         : requiredPlanId;
 }
