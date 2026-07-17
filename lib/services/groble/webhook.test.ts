@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+    parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
     parseGroblePaymentCompletedEvent,
     verifyGrobleWebhookSignature,
@@ -10,6 +11,10 @@ const NOW_MS = Date.parse('2026-07-17T12:00:00.000Z');
 const TIMESTAMP = String(Math.floor(NOW_MS / 1_000));
 const SECRET = 'current-secret';
 const PREVIOUS_SECRET = 'previous-secret';
+const WHITESPACE_TEST_EVENT_IDS = [
+    ['leading', ' evt_test_a1b2c3d4e5f60718293a4b5c'],
+    ['trailing', 'evt_test_a1b2c3d4e5f60718293a4b5c\t'],
+] as const;
 
 function signature(secret: string, timestamp: string, rawBody: string): string {
     return createHmac('sha256', secret)
@@ -126,6 +131,18 @@ describe('Groble webhook signature verification', () => {
     });
 });
 
+describe('Groble event envelope parser', () => {
+    it.each(WHITESPACE_TEST_EVENT_IDS)(
+        'rejects a test-looking event ID with %s whitespace',
+        (_, eventId) => {
+            expect(() => parseGrobleEventEnvelope(JSON.stringify({
+                id: eventId,
+                type: 'payment.completed',
+            }))).toThrow();
+        }
+    );
+});
+
 describe('Groble payment.completed parser', () => {
     it('projects only the payment evidence needed by the server', () => {
         expect(parseGroblePaymentCompletedEvent(JSON.stringify(paymentPayload()))).toEqual({
@@ -159,6 +176,18 @@ describe('Groble payment.completed parser', () => {
                 content: { ...paymentPayload().data.object.content, inputMode },
             });
             event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
+
+            expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it.each(WHITESPACE_TEST_EVENT_IDS)(
+        'rejects a NORMAL test event ID with %s whitespace',
+        (_, eventId) => {
+            const event = paymentPayload({
+                content: { ...paymentPayload().data.object.content, inputMode: 'NORMAL' },
+            });
+            event.id = eventId;
 
             expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
         }
@@ -234,6 +263,18 @@ describe('Groble payment.cancel_requested parser', () => {
                 content: { ...paymentPayload().data.object.content, inputMode },
             });
             event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
+
+            expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
+        }
+    );
+
+    it.each(WHITESPACE_TEST_EVENT_IDS)(
+        'rejects a SIMPLE test event ID with %s whitespace',
+        (_, eventId) => {
+            const event = cancelRequestedPayload({
+                content: { ...paymentPayload().data.object.content, inputMode: 'SIMPLE' },
+            });
+            event.id = eventId;
 
             expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
         }
