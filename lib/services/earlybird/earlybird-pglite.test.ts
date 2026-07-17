@@ -9,7 +9,7 @@ import {
 
 const migration = readFileSync(
     new URL(
-        '../../../supabase/migrations/20260717085730_add_groble_earlybird_presale.sql',
+        '../../../supabase/migrations/20260717140000_add_groble_earlybird_presale.sql',
         import.meta.url
     ),
     'utf8'

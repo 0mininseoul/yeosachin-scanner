@@ -40,7 +40,7 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 
 1. Groble의 기존 두 상품 가격과 상품별 재고 10건을 대시보드에서 다시 확인한다.
 2. 운영 환경의 다섯 가지 필수 서버 전용 값과, 필요한 경우 이전 webhook secret을 비밀 관리 시스템에 설정한다.
-3. `20260717085730_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
+3. `20260717140000_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
 4. 애플리케이션 코드를 배포한다.
 5. Groble에 위 진입 페이지, 이동 페이지, 이동 버튼 문구, webhook URL과 이벤트를 설정한다.
 6. 승인된 별도 점검 창에서 서명 검증, 멱등 재전송, Basic/Standard 상태 복원을 확인한다.

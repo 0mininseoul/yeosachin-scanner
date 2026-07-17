@@ -55,7 +55,7 @@ Expected: PASS.
 ### Task 2: Forward migration, RLS, inventory, and atomic finalization
 
 **Files:**
-- Create with CLI: `supabase/migrations/20260717085730_add_groble_earlybird_presale.sql`
+- Create with CLI: `supabase/migrations/20260717140000_add_groble_earlybird_presale.sql`
 - Create: `lib/services/earlybird/earlybird-migration-contract.test.ts`
 - Create: `lib/services/earlybird/earlybird-pglite.test.ts`
 
@@ -63,7 +63,7 @@ Expected: PASS.
 
 Run: `npx supabase migration new add_groble_earlybird_presale`
 
-Result: created `supabase/migrations/20260717085730_add_groble_earlybird_presale.sql`.
+Result: created `supabase/migrations/20260717140000_add_groble_earlybird_presale.sql`.
 
 - [ ] **Step 2: Write failing migration contract tests**
 
