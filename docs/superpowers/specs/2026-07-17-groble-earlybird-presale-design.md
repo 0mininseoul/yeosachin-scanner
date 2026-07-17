@@ -9,7 +9,7 @@ Basic과 Standard는 Groble에 이미 등록된 결제창으로 각각 10건만 
 - 결제창 URL은 Groble 결제창 가이드의 `https://groble.im/payment/{결제창 주소}` 형식을 사용한다.
 - Groble의 진입 페이지는 결제창에서 뒤로 가거나 완료 화면을 닫을 때 돌아오는 판매 페이지다.
 - Groble의 이동 페이지는 완료 화면의 이동 버튼 목적지일 뿐 결제 증명이 아니다.
-- 일반 결제 확정은 `payment.completed` 이벤트만 인정한다.
+- 일반 결제 확정은 `payment.completed` 이벤트만 인정하고, `payment.cancel_requested`는 환불 검토 상태 전환에만 사용한다.
 - 웹훅은 JSON 파싱 전 원문에 대해 `HEX(HMAC-SHA256(secret, "{timestamp}.{raw_body}"))`를 검증한다.
 - `X-Groble-Timestamp`는 현재 시각 기준 ±5분만 허용하고, `X-Groble-Idempotency-Key`와 이벤트 ID를 중복 방지 키로 저장한다.
 - 상품 ID는 `content.id`, 실결제 금액은 `pricing.finalAmount`, 결제 ID는 `merchantUid`, 결제 확정 시각은 `payment.purchasedAt`에서 읽는다.
@@ -33,7 +33,7 @@ Basic과 Standard는 Groble에 이미 등록된 결제창으로 각각 10건만 
 3. 서버는 소유자에게 속하고, 만료되지 않았고, `ready`이며, 제외 결정이 완료된 preflight를 다시 읽는다.
 4. 서버는 preflight의 `required_plan_id`, `plan_cards_snapshot`, `pricing_version`, `pricing_snapshot`으로 선택 가능 여부와 금액을 검증한다. Standard 필요 계정의 Basic 구매와 Plus 결제 생성을 차단한다.
 5. 서버 전용 RPC가 preflight와 사용자를 잠그고 대상 계정, 제외 계정, 관계 수, 플랜, 가격 버전, 동의 문구와 동의 시각을 주문에 고정한다.
-6. Basic/Standard는 서버 환경변수의 기존 Groble 상품 ID로 결제 URL을 만들고 반환한다. Plus는 별도 대기 신청 행만 생성한다.
+6. Basic/Standard는 서버 환경변수의 기존 Groble 결제창 주소로 결제 URL을 만들고, 별도 상품 ID는 webhook 검증 기대값으로 주문에 고정한다. Plus는 별도 대기 신청 행만 생성한다.
 
 Groble의 공개 결제창 가이드에는 동적 주문 메타데이터 전달 계약이 없으므로, 웹훅의 정규화된 `buyer.email`을 기존 `users.email`과 대조해 사용자를 찾고 그 사용자의 해당 상품 `payment_pending` 주문을 확정한다. 구매자 이메일은 새 테이블이나 webhook 감사 로그에 복제 저장하지 않는다.
 

@@ -11,6 +11,7 @@ const secretSchema = z.string().min(1).max(1_024);
 
 export type GrobleConfig = Readonly<{
     productIds: Readonly<Record<PaidEarlybirdPlanId, string>>;
+    paymentAddresses: Readonly<Record<PaidEarlybirdPlanId, string>>;
     webhookSecret: string;
     webhookPreviousSecret: string | null;
 }>;
@@ -40,6 +41,10 @@ export function readGrobleConfig(env: Environment = process.env): GrobleConfig {
             basic: requiredValue(env, 'GROBLE_BASIC_PRODUCT_ID', productIdSchema),
             standard: requiredValue(env, 'GROBLE_STANDARD_PRODUCT_ID', productIdSchema),
         }),
+        paymentAddresses: Object.freeze({
+            basic: requiredValue(env, 'GROBLE_BASIC_PAYMENT_ADDRESS', productIdSchema),
+            standard: requiredValue(env, 'GROBLE_STANDARD_PAYMENT_ADDRESS', productIdSchema),
+        }),
         webhookSecret: requiredValue(env, 'GROBLE_WEBHOOK_SECRET', secretSchema),
         webhookPreviousSecret: previousSecret,
     });
@@ -49,5 +54,5 @@ export function getGrobleCheckoutUrl(
     planId: PaidEarlybirdPlanId,
     config: GrobleConfig
 ): string {
-    return `https://groble.im/payment/${encodeURIComponent(config.productIds[planId])}`;
+    return `https://groble.im/payment/${encodeURIComponent(config.paymentAddresses[planId])}`;
 }

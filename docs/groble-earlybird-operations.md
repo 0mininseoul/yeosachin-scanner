@@ -11,7 +11,7 @@
 | 이동 버튼 문구 | `사전 구매 현황 확인` | `사전 구매 현황 확인` |
 | Groble 상품 재고 | 10건 유지 | 10건 유지 |
 
-Webhook URL은 `https://yeosachin.vercel.app/api/webhooks/groble`이며 구독 이벤트는 `payment.completed` 하나다.
+Webhook URL은 `https://yeosachin.vercel.app/api/webhooks/groble`이며 `payment.completed`와 `payment.cancel_requested`를 구독한다.
 
 Groble의 현재 공식 가이드를 기준으로 결제창 주소는 `https://groble.im/payment/{결제창 주소}` 형식을 사용한다. 진입 페이지는 결제창을 닫거나 뒤로 갈 때 돌아오는 판매 페이지이고, 이동 페이지는 완료 화면 버튼의 목적지일 뿐 결제 증명이 아니다.
 
@@ -24,20 +24,22 @@ Groble의 현재 공식 가이드를 기준으로 결제창 주소는 `https://g
 다음 값은 모두 서버 전용이다. `NEXT_PUBLIC_` 접두사를 붙이거나 실제 값을 커밋하지 않는다.
 
 ```dotenv
-GROBLE_BASIC_PRODUCT_ID=<기존 Basic 결제창 주소>
-GROBLE_STANDARD_PRODUCT_ID=<기존 Standard 결제창 주소>
+GROBLE_BASIC_PRODUCT_ID=<Basic webhook content.id>
+GROBLE_STANDARD_PRODUCT_ID=<Standard webhook content.id>
+GROBLE_BASIC_PAYMENT_ADDRESS=<Basic 결제 URL의 payment/ 뒤 주소>
+GROBLE_STANDARD_PAYMENT_ADDRESS=<Standard 결제 URL의 payment/ 뒤 주소>
 GROBLE_WEBHOOK_SECRET=<Groble webhook secret>
 GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 ```
 
-상품 ID는 영문, 숫자, `_`, `-`만 허용한다. Webhook secret 교체 중에는 현재 서명과 이전 서명을 각각 공식 헤더로 검증하고, 교체가 끝나면 이전 secret을 제거한다.
+상품 ID와 결제창 주소는 서로 다른 값으로 관리하며 영문, 숫자, `_`, `-`만 허용한다. 상품 ID는 webhook `content.id` 검증에만 사용하고, 결제창 주소는 URL 생성에만 사용한다. Webhook secret 교체 중에는 현재 서명과 이전 서명을 각각 공식 헤더로 검증하고, 교체가 끝나면 이전 secret을 제거한다.
 
 ## 배포 순서
 
 이 문서는 순서만 정의한다. 사용자 승인 전에는 아래 배포와 실제 결제를 수행하지 않는다.
 
 1. Groble의 기존 두 상품 가격과 상품별 재고 10건을 대시보드에서 다시 확인한다.
-2. 운영 환경의 네 가지 서버 전용 변수를 비밀 관리 시스템에 설정한다.
+2. 운영 환경의 다섯 가지 필수 서버 전용 값과, 필요한 경우 이전 webhook secret을 비밀 관리 시스템에 설정한다.
 3. `20260717085730_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
 4. 애플리케이션 코드를 배포한다.
 5. Groble에 위 진입 페이지, 이동 페이지, 이동 버튼 문구, webhook URL과 이벤트를 설정한다.
@@ -48,11 +50,12 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 ## 결제 확정과 수량 운영
 
 - 성공 화면 진입이나 프론트 숫자로 접수 확정하지 않는다.
-- 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 서비스 역할 RPC로 전달한다.
+- 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 접수를 확정하며, `payment.cancel_requested`는 환불 검토 상태로만 전환한다.
 - 결제창 구매자 이메일은 현재 로그인 계정의 이메일과 같아야 한다. 이메일·전화번호·카드 정보와 원본 payload는 새 테이블이나 브라우저 응답에 저장하지 않는다.
 - Basic과 Standard는 각각 독립된 서버 한도 10건과 순번 1~10을 사용한다. 한 플랜의 남은 수량을 다른 플랜으로 옮기지 않는다.
 - Groble 상품 재고와 서버 inventory를 동시에 유지한다.
 - 이미 결제된 11번째 예외는 `overflow_refund_required`로 분리된다. 운영자는 이 상태를 환불 처리 대상으로 확인하고, 실제 조치는 승인된 Groble 운영 절차를 따른다.
+- 구매자 취소 요청은 `refund_pending`으로 표시한다. 최종 `cancelled`/`refunded` 전환은 서비스 역할 전용 RPC를 사용하는 운영 절차에서만 수행한다.
 - 결제 확정은 `analysis_requests`를 만들거나 Cloud Tasks/V2 자동 분석을 시작하지 않는다.
 
 ## 수동 결과 연결

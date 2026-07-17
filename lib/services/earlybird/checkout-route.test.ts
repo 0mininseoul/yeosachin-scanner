@@ -49,6 +49,8 @@ describe('earlybird checkout and waitlist routes', () => {
         authenticate();
         process.env.GROBLE_BASIC_PRODUCT_ID = 'basic_product-01';
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';
+        process.env.GROBLE_BASIC_PAYMENT_ADDRESS = 'basic-checkout-a1';
+        process.env.GROBLE_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-b2';
         process.env.GROBLE_WEBHOOK_SECRET = 'webhook-secret';
     });
 
@@ -91,7 +93,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic_product-01',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
         });
         expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout', expect.objectContaining({
             p_user_id: USER_ID,

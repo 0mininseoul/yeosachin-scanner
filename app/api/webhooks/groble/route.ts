@@ -5,6 +5,7 @@ import { isJsonRequest } from '@/lib/services/earlybird/contracts';
 import { readGrobleConfig } from '@/lib/services/groble/config';
 import {
     parseGrobleEventEnvelope,
+    parseGroblePaymentCancelRequestedEvent,
     parseGroblePaymentCompletedEvent,
     verifyGrobleWebhookSignature,
 } from '@/lib/services/groble/webhook';
@@ -21,6 +22,10 @@ const finalizationResultSchema = z.array(z.object({
         'ambiguous_buyer',
         'mismatch',
         'overflow_refund_required',
+        'cancel_requested',
+        'cancel_duplicate_event',
+        'cancel_unmatched',
+        'cancel_mismatch',
     ]),
     order_id: z.string().uuid().nullable(),
     status: z.string().nullable(),
@@ -80,28 +85,61 @@ export async function POST(request: Request): Promise<NextResponse> {
     } catch {
         return response(400, { received: false, code: 'INVALID_PAYLOAD' });
     }
-    if (envelope.type !== 'payment.completed') {
+    if (envelope.type !== 'payment.completed'
+        && envelope.type !== 'payment.cancel_requested') {
         return response(200, { received: true, disposition: 'ignored' });
     }
 
-    let payment;
-    try {
-        payment = parseGroblePaymentCompletedEvent(rawBody);
-    } catch {
-        return response(400, { received: false, code: 'INVALID_PAYMENT_PAYLOAD' });
+    let persistence;
+    if (envelope.type === 'payment.completed') {
+        let payment;
+        try {
+            payment = parseGroblePaymentCompletedEvent(rawBody);
+        } catch {
+            return response(400, { received: false, code: 'INVALID_PAYMENT_PAYLOAD' });
+        }
+        try {
+            persistence = await supabaseAdmin.rpc('finalize_earlybird_groble_payment', {
+                p_event_id: payment.eventId,
+                p_idempotency_key: idempotencyKey,
+                p_event_type: 'payment.completed',
+                p_occurred_at: payment.occurredAt,
+                p_payment_id: payment.paymentId,
+                p_buyer_email: payment.buyerEmail,
+                p_product_id: payment.productId,
+                p_amount_krw: payment.amountKrw,
+                p_paid_at: payment.paidAt,
+            });
+        } catch {
+            return response(500, { received: false, code: 'PERSISTENCE_FAILED' });
+        }
+    } else {
+        let cancellation;
+        try {
+            cancellation = parseGroblePaymentCancelRequestedEvent(rawBody);
+        } catch {
+            return response(400, { received: false, code: 'INVALID_PAYMENT_PAYLOAD' });
+        }
+        try {
+            persistence = await supabaseAdmin.rpc(
+                'finalize_earlybird_groble_cancel_request',
+                {
+                    p_event_id: cancellation.eventId,
+                    p_idempotency_key: idempotencyKey,
+                    p_event_type: 'payment.cancel_requested',
+                    p_occurred_at: cancellation.occurredAt,
+                    p_payment_id: cancellation.paymentId,
+                    p_product_id: cancellation.productId,
+                    p_amount_krw: cancellation.amountKrw,
+                    p_requested_at: cancellation.requestedAt,
+                }
+            );
+        } catch {
+            return response(500, { received: false, code: 'PERSISTENCE_FAILED' });
+        }
     }
 
-    const { data, error } = await supabaseAdmin.rpc('finalize_earlybird_groble_payment', {
-        p_event_id: payment.eventId,
-        p_idempotency_key: idempotencyKey,
-        p_event_type: 'payment.completed',
-        p_occurred_at: payment.occurredAt,
-        p_payment_id: payment.paymentId,
-        p_buyer_email: payment.buyerEmail,
-        p_product_id: payment.productId,
-        p_amount_krw: payment.amountKrw,
-        p_paid_at: payment.paidAt,
-    });
+    const { data, error } = persistence;
     if (error) {
         return response(500, { received: false, code: 'PERSISTENCE_FAILED' });
     }

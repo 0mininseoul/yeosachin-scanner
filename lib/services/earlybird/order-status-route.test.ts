@@ -128,6 +128,23 @@ describe('earlybird owner order status route', () => {
         ))).status).toBe(404);
     });
 
+    it('does not expose an acceptance timestamp before paid status is verified', async () => {
+        installQueries(orderRow({
+            status: 'payment_pending',
+            actual_amount_krw: null,
+            paid_at: null,
+            due_at: null,
+            plan_sequence: null,
+        }));
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                acceptedAt: null,
+                displayStatus: '결제 확인',
+            },
+        });
+    });
+
     it('rejects invalid plan filters instead of widening the query', async () => {
         const response = await GET(new Request(
             'https://example.com/api/earlybird/orders/latest?plan=plus'

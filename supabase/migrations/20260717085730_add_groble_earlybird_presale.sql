@@ -110,7 +110,7 @@ CREATE TABLE public.earlybird_webhook_events (
     order_id UUID REFERENCES public.earlybird_orders(id) ON DELETE SET NULL,
     processed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     CONSTRAINT earlybird_webhook_events_type_check CHECK (
-        event_type = 'payment.completed'
+        event_type IN ('payment.completed', 'payment.cancel_requested')
     ),
     CONSTRAINT earlybird_webhook_events_amount_check CHECK (amount_krw > 0),
     CONSTRAINT earlybird_webhook_events_disposition_check CHECK (disposition IN (
@@ -120,7 +120,11 @@ CREATE TABLE public.earlybird_webhook_events (
         'unmatched',
         'ambiguous_buyer',
         'mismatch',
-        'overflow_refund_required'
+        'overflow_refund_required',
+        'cancel_requested',
+        'cancel_duplicate_event',
+        'cancel_unmatched',
+        'cancel_mismatch'
     ))
 );
 
@@ -244,6 +248,10 @@ BEGIN
         RAISE EXCEPTION 'EARLYBIRD_PRICE_INVALID';
     END IF;
 
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(p_user_id::TEXT, 0)
+    );
+
     SELECT preflight.*
     INTO v_preflight
     FROM public.analysis_preflights AS preflight
@@ -315,6 +323,35 @@ BEGIN
             RAISE EXCEPTION 'EARLYBIRD_ORDER_CONFLICT';
         END IF;
         RETURN QUERY SELECT v_existing.id, FALSE;
+        RETURN;
+    END IF;
+
+    SELECT pending_order.*
+    INTO v_existing
+    FROM public.earlybird_orders AS pending_order
+    WHERE pending_order.user_id = p_user_id
+      AND pending_order.status = 'payment_pending'
+    FOR UPDATE;
+    IF FOUND THEN
+        UPDATE public.earlybird_orders AS superseded_order
+        SET preflight_id = p_preflight_id,
+            target_instagram_id = v_preflight.target_instagram_id,
+            target_followers_count = v_preflight.target_followers_count,
+            target_following_count = v_preflight.target_following_count,
+            exclusion_decision = v_preflight.exclusion_decision,
+            excluded_instagram_id = v_preflight.excluded_instagram_id,
+            plan_id = p_plan_id,
+            pricing_version = p_pricing_version,
+            expected_amount_krw = p_expected_amount_krw,
+            expected_groble_product_id = p_expected_product_id,
+            disclosure_version = p_disclosure_version,
+            disclosure_text = p_disclosure_text,
+            disclosure_accepted_at = p_disclosure_accepted_at,
+            updated_at = pg_catalog.clock_timestamp()
+        WHERE superseded_order.id = v_existing.id
+        RETURNING superseded_order.id INTO v_order_id;
+
+        RETURN QUERY SELECT v_order_id, FALSE;
         RETURN;
     END IF;
 
@@ -636,6 +673,171 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_cancel_request(
+    p_event_id TEXT,
+    p_idempotency_key TEXT,
+    p_event_type TEXT,
+    p_occurred_at TIMESTAMP WITH TIME ZONE,
+    p_payment_id TEXT,
+    p_product_id TEXT,
+    p_amount_krw INTEGER,
+    p_requested_at TIMESTAMP WITH TIME ZONE
+)
+RETURNS TABLE(disposition TEXT, order_id UUID, status TEXT, plan_sequence SMALLINT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_event public.earlybird_webhook_events%ROWTYPE;
+    v_order public.earlybird_orders%ROWTYPE;
+BEGIN
+    IF p_event_type <> 'payment.cancel_requested'
+       OR p_event_id IS NULL OR pg_catalog.char_length(p_event_id) NOT BETWEEN 1 AND 256
+       OR p_idempotency_key IS NULL
+          OR pg_catalog.char_length(p_idempotency_key) NOT BETWEEN 1 AND 256
+       OR p_payment_id IS NULL OR pg_catalog.char_length(p_payment_id) NOT BETWEEN 1 AND 256
+       OR p_product_id IS NULL OR p_product_id !~ '^[A-Za-z0-9_-]{1,128}$'
+       OR p_amount_krw IS NULL OR p_amount_krw <= 0
+       OR p_occurred_at IS NULL OR p_requested_at IS NULL THEN
+        RAISE EXCEPTION 'GROBLE_CANCEL_EVIDENCE_INVALID';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(p_payment_id, 0)
+    );
+
+    SELECT webhook_event.*
+    INTO v_event
+    FROM public.earlybird_webhook_events AS webhook_event
+    WHERE webhook_event.event_id = p_event_id
+       OR webhook_event.idempotency_key = p_idempotency_key
+    ORDER BY webhook_event.processed_at
+    LIMIT 1;
+    IF FOUND THEN
+        IF v_event.order_id IS NOT NULL THEN
+            SELECT existing_order.*
+            INTO v_order
+            FROM public.earlybird_orders AS existing_order
+            WHERE existing_order.id = v_event.order_id;
+        END IF;
+        RETURN QUERY SELECT
+            'cancel_duplicate_event'::TEXT,
+            v_order.id,
+            v_order.status,
+            v_order.plan_sequence;
+        RETURN;
+    END IF;
+
+    SELECT paid_order.*
+    INTO v_order
+    FROM public.earlybird_orders AS paid_order
+    WHERE paid_order.payment_id = p_payment_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        INSERT INTO public.earlybird_webhook_events (
+            event_id, idempotency_key, event_type, occurred_at,
+            payment_id, product_id, amount_krw, disposition
+        ) VALUES (
+            p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+            p_payment_id, p_product_id, p_amount_krw, 'cancel_unmatched'
+        );
+        RETURN QUERY SELECT
+            'cancel_unmatched'::TEXT,
+            NULL::UUID,
+            NULL::TEXT,
+            NULL::SMALLINT;
+        RETURN;
+    END IF;
+
+    IF v_order.actual_groble_product_id <> p_product_id
+       OR v_order.actual_amount_krw <> p_amount_krw THEN
+        INSERT INTO public.earlybird_webhook_events (
+            event_id, idempotency_key, event_type, occurred_at,
+            payment_id, product_id, amount_krw, disposition, order_id
+        ) VALUES (
+            p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+            p_payment_id, p_product_id, p_amount_krw, 'cancel_mismatch', v_order.id
+        );
+        RETURN QUERY SELECT
+            'cancel_mismatch'::TEXT,
+            v_order.id,
+            v_order.status,
+            v_order.plan_sequence;
+        RETURN;
+    END IF;
+
+    IF v_order.status IN ('paid', 'analysis_in_progress', 'completed') THEN
+        UPDATE public.earlybird_orders AS cancelled_order
+        SET status = 'refund_pending',
+            updated_at = pg_catalog.clock_timestamp()
+        WHERE cancelled_order.id = v_order.id
+        RETURNING cancelled_order.* INTO v_order;
+    END IF;
+
+    INSERT INTO public.earlybird_webhook_events (
+        event_id, idempotency_key, event_type, occurred_at,
+        payment_id, product_id, amount_krw, disposition, order_id
+    ) VALUES (
+        p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+        p_payment_id, p_product_id, p_amount_krw, 'cancel_requested', v_order.id
+    );
+
+    RETURN QUERY SELECT
+        'cancel_requested'::TEXT,
+        v_order.id,
+        v_order.status,
+        v_order.plan_sequence;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.set_earlybird_refund_status(
+    p_order_id UUID,
+    p_next_status TEXT
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_order public.earlybird_orders%ROWTYPE;
+BEGIN
+    SELECT earlybird_order.*
+    INTO v_order
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.id = p_order_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'EARLYBIRD_ORDER_NOT_FOUND';
+    END IF;
+
+    IF p_next_status = 'cancelled' AND v_order.status = 'payment_pending' THEN
+        NULL;
+    ELSIF p_next_status = 'refund_pending'
+       AND v_order.status IN (
+           'paid', 'analysis_in_progress', 'completed',
+           'payment_failed', 'overflow_refund_required'
+       ) THEN
+        NULL;
+    ELSIF p_next_status = 'refunded'
+       AND v_order.status IN (
+           'refund_pending', 'payment_failed', 'overflow_refund_required'
+       ) THEN
+        NULL;
+    ELSE
+        RAISE EXCEPTION 'EARLYBIRD_REFUND_TRANSITION_INVALID';
+    END IF;
+
+    UPDATE public.earlybird_orders AS transitioned_order
+    SET status = p_next_status,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE transitioned_order.id = p_order_id;
+
+    RETURN p_next_status;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.create_earlybird_checkout(
     UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated;
@@ -645,6 +847,12 @@ REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment(
     TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
     TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_cancel_request(
+    TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, INTEGER,
+    TIMESTAMP WITH TIME ZONE
+) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.set_earlybird_refund_status(UUID, TEXT)
+    FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.create_earlybird_checkout(
     UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
@@ -655,3 +863,9 @@ GRANT EXECUTE ON FUNCTION public.finalize_earlybird_groble_payment(
     TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
     TIMESTAMP WITH TIME ZONE
 ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.finalize_earlybird_groble_cancel_request(
+    TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, INTEGER,
+    TIMESTAMP WITH TIME ZONE
+) TO service_role;
+GRANT EXECUTE ON FUNCTION public.set_earlybird_refund_status(UUID, TEXT)
+    TO service_role;

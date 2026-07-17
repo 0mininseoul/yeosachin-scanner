@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+    parseGroblePaymentCancelRequestedEvent,
     parseGroblePaymentCompletedEvent,
     verifyGrobleWebhookSignature,
 } from './webhook';
@@ -137,5 +138,36 @@ describe('Groble payment.completed parser', () => {
             ...paymentPayload(),
             type: 'payment.cancel_requested',
         }))).toThrow();
+    });
+});
+
+describe('Groble payment.cancel_requested parser', () => {
+    it('projects only the original payment identity and request timestamp', () => {
+        const completed = paymentPayload();
+        const cancelRequested = {
+            ...completed,
+            id: 'evt_cancel_a1b2c3d4e5f60718293a4b5c',
+            type: 'payment.cancel_requested',
+            data: {
+                object: {
+                    ...completed.data.object,
+                    cancelRequest: {
+                        reason: { code: 'CHANGED_MIND', label: '마음이 바뀌었어요' },
+                        requestedBy: 'BUYER',
+                        requestedAt: '2026-07-18T09:00:00+09:00',
+                        detailReason: '브라우저에 노출하거나 저장하지 않을 사유',
+                    },
+                },
+            },
+        };
+
+        expect(parseGroblePaymentCancelRequestedEvent(JSON.stringify(cancelRequested))).toEqual({
+            eventId: 'evt_cancel_a1b2c3d4e5f60718293a4b5c',
+            occurredAt: '2026-07-17T21:00:00+09:00',
+            paymentId: 'merchant_0001',
+            productId: 'basic_product-01',
+            amountKrw: 14_900,
+            requestedAt: '2026-07-18T09:00:00+09:00',
+        });
     });
 });

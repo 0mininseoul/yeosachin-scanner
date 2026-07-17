@@ -55,7 +55,7 @@ export interface EarlybirdOrderStatusDto {
     planId: 'basic' | 'standard';
     planName: 'Basic' | 'Standard';
     actualAmountKrw: number | null;
-    acceptedAt: string;
+    acceptedAt: string | null;
     dueAt: string | null;
     planSequence: number | null;
     systemStatus: EarlybirdOrderSystemStatus;
@@ -114,7 +114,7 @@ export async function loadLatestEarlybirdOrder(
         planId: order.plan_id,
         planName: PLAN_NAMES[order.plan_id],
         actualAmountKrw: order.actual_amount_krw,
-        acceptedAt: order.paid_at ?? order.created_at,
+        acceptedAt: order.paid_at,
         dueAt: order.due_at,
         planSequence: order.plan_sequence,
         systemStatus: order.status,

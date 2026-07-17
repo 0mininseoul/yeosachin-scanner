@@ -4,7 +4,7 @@
 
 **Goal:** Complete a secure, owner-scoped Groble earlybird presale flow for Basic and Standard, with Plus waitlisting and no automatic analysis dispatch.
 
-**Architecture:** A server-owned earlybird catalog prices preflight snapshots and validates checkout requests. Groble redirects are preceded by a durable pending order; signed `payment.completed` webhooks are finalized by one service-role-only Postgres RPC that serializes payment IDs and plan inventory. Owner status reads and manual fulfillment remain isolated from `analysis_requests` and Cloud Tasks.
+**Architecture:** A server-owned earlybird catalog prices preflight snapshots and validates checkout requests. Groble redirects are preceded by a durable pending order; signed `payment.completed` webhooks are finalized by a service-role-only Postgres RPC that serializes payment IDs and plan inventory, while signed cancellation requests enter refund review through a separate RPC. Owner status reads and manual fulfillment remain isolated from `analysis_requests` and Cloud Tasks.
 
 **Tech Stack:** Next.js 16 App Router, TypeScript, Zod, Supabase/Postgres RLS and SECURITY DEFINER RPCs, Vitest, PGlite.
 
@@ -38,7 +38,7 @@ Export `EARLYBIRD_PRICING_VERSION`, `EARLYBIRD_DISCLOSURE_VERSION`, `EARLYBIRD_D
 
 - [ ] **Step 4: Write and run failing Groble configuration and signature tests**
 
-Cover missing product IDs/secrets, invalid IDs, URL generation, HMAC-SHA256 raw-body verification, previous-secret rotation, constant-time comparison, ±5 minute timestamp rejection, and strict `payment.completed` parsing.
+Cover missing product IDs/payment addresses/secrets, invalid values, URL generation, HMAC-SHA256 raw-body verification, previous-secret rotation, constant-time comparison, ±5 minute timestamp rejection, and strict `payment.completed` parsing.
 
 Run: `npm test -- lib/services/groble/config.test.ts lib/services/groble/webhook.test.ts`
 
@@ -46,7 +46,7 @@ Expected: FAIL because the Groble modules do not exist.
 
 - [ ] **Step 5: Implement Groble server modules and verify green**
 
-Build checkout URLs as `https://groble.im/payment/${encodeURIComponent(productId)}` from `GROBLE_BASIC_PRODUCT_ID` and `GROBLE_STANDARD_PRODUCT_ID`. Verify `X-Groble-Signature`, optional previous signature, timestamp, event ID, merchant UID, `PAYMENT_WINDOW`, `ONE_TIME`, product ID, buyer email, KRW final amount, and purchased timestamp.
+Build checkout URLs as `https://groble.im/payment/${encodeURIComponent(paymentAddress)}` from the plan-specific payment-address variables. Keep `GROBLE_BASIC_PRODUCT_ID` and `GROBLE_STANDARD_PRODUCT_ID` separate for webhook `content.id` validation. Verify `X-Groble-Signature`, optional previous signature, timestamp, event ID, merchant UID, `PAYMENT_WINDOW`, `ONE_TIME`, product ID, buyer email, KRW final amount, and purchased timestamp.
 
 Run: `npm test -- lib/domain/earlybird/catalog.test.ts lib/domain/analysis/plan-catalog.test.ts lib/services/groble/config.test.ts lib/services/groble/webhook.test.ts`
 
@@ -219,11 +219,11 @@ Expected: PASS.
 
 - [ ] **Step 1: Add environment contracts**
 
-Document server-only `GROBLE_BASIC_PRODUCT_ID`, `GROBLE_STANDARD_PRODUCT_ID`, `GROBLE_WEBHOOK_SECRET`, and optional `GROBLE_WEBHOOK_PREVIOUS_SECRET`. Do not commit real values and do not prefix them with `NEXT_PUBLIC_`.
+Document server-only product IDs, plan-specific payment addresses, `GROBLE_WEBHOOK_SECRET`, and optional `GROBLE_WEBHOOK_PREVIOUS_SECRET`. Do not commit real values and do not prefix them with `NEXT_PUBLIC_`.
 
 - [ ] **Step 2: Add operator URLs and rollout steps**
 
-Document the exact Basic/Standard entry and movement URLs, `사전 구매 현황 확인` movement button text, webhook URL, subscribed event `payment.completed`, environment setup, migration-before-code deployment order, Groble dashboard stock retention, and the explicit prohibition on deploying or running a real payment without approval.
+Document the exact Basic/Standard entry and movement URLs, `사전 구매 현황 확인` movement button text, webhook URL, subscribed payment and cancellation events, environment setup, migration-before-code deployment order, Groble dashboard stock retention, and the explicit prohibition on deploying or running a real payment without approval.
 
 - [ ] **Step 3: Run documentation and copy checks**
 

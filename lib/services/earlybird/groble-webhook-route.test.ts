@@ -80,6 +80,8 @@ describe('signed Groble webhook route', () => {
         vi.clearAllMocks();
         process.env.GROBLE_BASIC_PRODUCT_ID = 'basic_product-01';
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';
+        process.env.GROBLE_BASIC_PAYMENT_ADDRESS = 'basic-checkout-a1';
+        process.env.GROBLE_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-b2';
         process.env.GROBLE_WEBHOOK_SECRET = SECRET;
         delete process.env.GROBLE_WEBHOOK_PREVIOUS_SECRET;
         mocks.rpc.mockResolvedValue({
@@ -103,11 +105,54 @@ describe('signed Groble webhook route', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
-    it('acknowledges a signed unsupported event without mutating payment state', async () => {
+    it('moves a paid order to refund review for an official cancellation request', async () => {
+        const completed = payload();
         const body = JSON.stringify({
-            ...payload(),
+            ...completed,
             type: 'payment.cancel_requested',
+            data: {
+                object: {
+                    ...completed.data.object,
+                    cancelRequest: {
+                        reason: { code: 'CHANGED_MIND', label: '마음이 바뀌었어요' },
+                        requestedBy: 'BUYER',
+                        requestedAt: '2026-07-18T09:00:00+09:00',
+                    },
+                },
+            },
         });
+        mocks.rpc.mockResolvedValue({
+            data: [{
+                disposition: 'cancel_requested',
+                order_id: '123e4567-e89b-42d3-a456-426614174000',
+                status: 'refund_pending',
+                plan_sequence: 1,
+            }],
+            error: null,
+        });
+        const response = await POST(request(body));
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            received: true,
+            disposition: 'cancel_requested',
+        });
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_cancel_request',
+            {
+                p_event_id: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+                p_idempotency_key: 'delivery_0001',
+                p_event_type: 'payment.cancel_requested',
+                p_occurred_at: '2026-07-17T21:00:00+09:00',
+                p_payment_id: 'merchant_0001',
+                p_product_id: 'basic_product-01',
+                p_amount_krw: 14_900,
+                p_requested_at: '2026-07-18T09:00:00+09:00',
+            }
+        );
+    });
+
+    it('acknowledges a signed unsupported event without mutating payment state', async () => {
+        const body = JSON.stringify({ ...payload(), type: 'payment.purchased' });
         const response = await POST(request(body));
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({ received: true, disposition: 'ignored' });

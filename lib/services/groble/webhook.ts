@@ -38,6 +38,31 @@ const paymentCompletedSchema = z.object({
     }),
 });
 
+const paymentCancelRequestedSchema = z.object({
+    id: boundedIdentifier,
+    type: z.literal('payment.cancel_requested'),
+    version: z.string().trim().min(1).max(64),
+    occurredAt: isoTimestamp,
+    data: z.object({
+        object: z.object({
+            merchantUid: boundedIdentifier,
+            content: z.object({
+                id: boundedIdentifier,
+                paymentType: z.literal('ONE_TIME'),
+                inputMode: z.literal('PAYMENT_WINDOW'),
+            }),
+            pricing: z.object({
+                currency: z.literal('KRW'),
+                finalAmount: z.number().int().positive().max(1_000_000_000),
+            }),
+            cancelRequest: z.object({
+                requestedBy: z.literal('BUYER'),
+                requestedAt: isoTimestamp,
+            }),
+        }),
+    }),
+});
+
 const eventEnvelopeSchema = z.object({
     id: boundedIdentifier,
     type: z.string().trim().min(1).max(64),
@@ -61,6 +86,15 @@ export interface GroblePaymentCompletedEvent {
     productId: string;
     amountKrw: number;
     paidAt: string;
+}
+
+export interface GroblePaymentCancelRequestedEvent {
+    eventId: string;
+    occurredAt: string;
+    paymentId: string;
+    productId: string;
+    amountKrw: number;
+    requestedAt: string;
 }
 
 export interface GrobleEventEnvelope {
@@ -123,6 +157,23 @@ export function parseGroblePaymentCompletedEvent(
         productId: payment.content.id,
         amountKrw: payment.pricing.finalAmount,
         paidAt: payment.payment.purchasedAt,
+    });
+}
+
+export function parseGroblePaymentCancelRequestedEvent(
+    rawBody: string
+): GroblePaymentCancelRequestedEvent {
+    const parsedJson: unknown = JSON.parse(rawBody);
+    const event = paymentCancelRequestedSchema.parse(parsedJson);
+    const cancellation = event.data.object;
+
+    return Object.freeze({
+        eventId: event.id,
+        occurredAt: event.occurredAt,
+        paymentId: cancellation.merchantUid,
+        productId: cancellation.content.id,
+        amountKrw: cancellation.pricing.finalAmount,
+        requestedAt: cancellation.cancelRequest.requestedAt,
     });
 }
 

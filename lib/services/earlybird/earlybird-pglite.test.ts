@@ -164,6 +164,40 @@ async function seedPreflight(index: number, requiredPlanId: PlanId): Promise<{
     return { userId, preflightId, email };
 }
 
+async function seedNewPreflightForUser(
+    index: number,
+    userId: string,
+    requiredPlanId: PlanId
+): Promise<string> {
+    const preflightId = uuid(PREFLIGHT_NAMESPACE, index);
+    await db.query(
+        `INSERT INTO public.analysis_preflights (
+            id, user_id, target_instagram_id, status, exclusion_decision,
+            excluded_instagram_id, access_mode, plan_cards_snapshot,
+            pricing_version, pricing_snapshot, target_followers_count,
+            target_following_count, required_plan_id, created_at, expires_at
+        ) VALUES (
+            $1, $2, $3, 'ready', 'exclude', $4, 'production', $5,
+            $6, $7, $8, $9, $10,
+            pg_catalog.clock_timestamp() + INTERVAL '1 second',
+            pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+        )`,
+        [
+            preflightId,
+            userId,
+            `target_${index}`,
+            `excluded_${index}`,
+            planCards(requiredPlanId),
+            EARLYBIRD_PRICING_VERSION,
+            pricingSnapshot,
+            requiredPlanId === 'basic' ? 300 : requiredPlanId === 'standard' ? 700 : 1_000,
+            100,
+            requiredPlanId,
+        ]
+    );
+    return preflightId;
+}
+
 async function createCheckout(
     seed: { userId: string; preflightId: string },
     planId: 'basic' | 'standard'
@@ -209,6 +243,30 @@ async function finalize(
             overrides.productId ?? productId,
             overrides.amount ?? amount,
             '2026-07-17T21:00:00+09:00',
+        ]
+    );
+    return result.rows[0];
+}
+
+async function requestCancellation(
+    paymentId: string,
+    planId: 'basic' | 'standard',
+    index: number
+): Promise<FinalizeRow> {
+    const productId = planId === 'basic' ? BASIC_PRODUCT_ID : STANDARD_PRODUCT_ID;
+    const amount = planId === 'basic' ? 14_900 : 19_900;
+    const result = await asService<FinalizeRow>(
+        `SELECT * FROM public.finalize_earlybird_groble_cancel_request(
+            $1, $2, 'payment.cancel_requested', $3, $4, $5, $6, $7
+        )`,
+        [
+            `event_cancel_${index}`,
+            `idem_cancel_${index}`,
+            '2026-07-18T09:00:00+09:00',
+            paymentId,
+            productId,
+            amount,
+            '2026-07-18T09:00:00+09:00',
         ]
     );
     return result.rows[0];
@@ -291,6 +349,32 @@ describe('Groble earlybird database boundary', () => {
         )).rows[0].count).toBe(0);
     });
 
+    it('atomically supersedes an abandoned pending checkout with the latest preflight', async () => {
+        const seed = await seedPreflight(92, 'basic');
+        const first = await createCheckout(seed, 'basic');
+        const nextPreflightId = await seedNewPreflightForUser(93, seed.userId, 'standard');
+        const second = await createCheckout({
+            userId: seed.userId,
+            preflightId: nextPreflightId,
+        }, 'standard');
+
+        expect(second).toEqual({ order_id: first.order_id, created: false });
+        const order = (await db.query<{
+            preflight_id: string;
+            plan_id: string;
+            expected_groble_product_id: string;
+            status: string;
+        }>(
+            'SELECT preflight_id, plan_id, expected_groble_product_id, status FROM public.earlybird_orders'
+        )).rows[0];
+        expect(order).toEqual({
+            preflight_id: nextPreflightId,
+            plan_id: 'standard',
+            expected_groble_product_id: STANDARD_PRODUCT_ID,
+            status: 'payment_pending',
+        });
+    });
+
     it('makes duplicate event and payment deliveries idempotent', async () => {
         const seed = await seedPreflight(4, 'basic');
         await createCheckout(seed, 'basic');
@@ -306,6 +390,38 @@ describe('Groble earlybird database boundary', () => {
         expect((await db.query<{ count: number }>(
             'SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_orders'
         )).rows[0].count).toBe(1);
+        expect((await db.query<{ sold_count: number }>(
+            `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`
+        )).rows[0].sold_count).toBe(1);
+    });
+
+    it('records cancellation requests and keeps final refund transitions service-only', async () => {
+        const seed = await seedPreflight(5, 'basic');
+        await createCheckout(seed, 'basic');
+        const paid = await finalize(seed, 'basic', 5);
+        const cancellation = await requestCancellation('payment_basic_5', 'basic', 5);
+        const replay = await requestCancellation('payment_basic_5', 'basic', 5);
+
+        expect(cancellation).toMatchObject({
+            disposition: 'cancel_requested',
+            order_id: paid.order_id,
+            status: 'refund_pending',
+            plan_sequence: 1,
+        });
+        expect(replay).toMatchObject({
+            disposition: 'cancel_duplicate_event',
+            order_id: paid.order_id,
+            status: 'refund_pending',
+        });
+
+        await asService(
+            'SELECT public.set_earlybird_refund_status($1, $2)',
+            [paid.order_id, 'refunded']
+        );
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1',
+            [paid.order_id]
+        )).rows[0].status).toBe('refunded');
         expect((await db.query<{ sold_count: number }>(
             `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`
         )).rows[0].sold_count).toBe(1);
@@ -387,6 +503,9 @@ describe('Groble earlybird database boundary', () => {
                 'SELECT user_id FROM public.earlybird_orders'
             );
             expect(visible.rows).toEqual([{ user_id: owner.userId }]);
+            await expect(db.query(
+                'SELECT payment_id FROM public.earlybird_orders'
+            )).rejects.toThrow(/permission denied/i);
             await expect(db.query(
                 `SELECT * FROM public.join_earlybird_waitlist($1, $2)`,
                 [owner.userId, owner.preflightId]

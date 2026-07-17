@@ -13,6 +13,8 @@ const SERVICE_FUNCTIONS = [
     'create_earlybird_checkout',
     'join_earlybird_waitlist',
     'finalize_earlybird_groble_payment',
+    'finalize_earlybird_groble_cancel_request',
+    'set_earlybird_refund_status',
 ] as const;
 
 describe('Groble earlybird migration contract', () => {

@@ -44,7 +44,12 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                             ? '결제 확인 중'
                             : formatKrw(order.actualAmountKrw)}
                     />
-                    <DetailRow label="접수 시각" value={formatTimestamp(order.acceptedAt)} />
+                    <DetailRow
+                        label="접수 시각"
+                        value={order.acceptedAt
+                            ? formatTimestamp(order.acceptedAt)
+                            : '결제 확인 후 표시'}
+                    />
                     <DetailRow
                         label="전달 예정"
                         value={order.dueAt
