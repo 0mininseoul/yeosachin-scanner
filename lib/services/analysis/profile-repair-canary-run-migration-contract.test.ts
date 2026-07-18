@@ -9,6 +9,14 @@ const migration = readFileSync(
     'utf8'
 );
 
+const sourcePolicyFixMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260718130000_fix_profile_repair_canary_source_policy.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
 function tableDefinition(): string {
     const start = migration.indexOf(
         'CREATE TABLE public.analysis_v2_profile_repair_canary_runs ('
@@ -97,17 +105,32 @@ describe('profile repair canary journal migration contract', () => {
     });
 
     it('loads only the authorized failed V2 source and its ledger-owned profile runs', () => {
-        const source = migration.slice(
-            migration.indexOf(
-                'CREATE OR REPLACE FUNCTION public.load_analysis_v2_profile_repair_canary_source('
-            ),
-            migration.indexOf(
-                'CREATE OR REPLACE FUNCTION public.load_analysis_v2_profile_repair_canary_run('
-            )
-        );
+        const source = sourcePolicyFixMigration;
         expect(source).toContain("analysis_request.pipeline_version = 'v2'");
         expect(source).toContain("analysis_request.status = 'failed'");
-        expect(source).toContain("analysis_request.target_instagram_id = '0_min._.00'");
+        expect(source).toContain(
+            'JOIN public.analysis_v2_provider_execution_policies AS execution_policy'
+        );
+        expect(source).toContain("execution_policy.mode = 'test_operation_split'");
+        expect(source).toContain(
+            "execution_policy.policy_version = 'authorized-free-e2e-v1'"
+        );
+        expect(source).toContain("execution_policy.target_instagram_id = '0_min._.00'");
+        expect(source).toMatch(
+            /analysis_request\.test_entitlement_jti_hash\s*=\s*execution_policy\.entitlement_jti_hash/
+        );
+        expect(source).toContain(
+            'JOIN public.analysis_v2_test_entitlement_consumptions AS entitlement_consumption'
+        );
+        expect(source).toContain('JOIN public.analysis_preflights AS preflight');
+        expect(source).toContain("entitlement_consumption.selected_plan_id = 'standard'");
+        expect(source).toContain("preflight.status = 'consumed'");
+        expect(source).toContain('preflight.pii_scrubbed_at IS NOT NULL');
+        expect(source).toContain("analysis_request.plan_access_mode_snapshot = 'test_entitlement'");
+        expect(source).toContain("'targetInstagramId', v_authorized_target_instagram_id");
+        expect(source).not.toContain(
+            "analysis_request.target_instagram_id = '0_min._.00'"
+        );
         expect(source).toContain('analysis_request.user_id = p_owner_id');
         expect(source).toContain('pg_catalog.lower(owner.email) = pg_catalog.lower(p_owner_email)');
         expect(source).toContain('FROM public.analysis_v2_provider_runs AS provider_run');
@@ -116,6 +139,49 @@ describe('profile repair canary journal migration contract', () => {
         expect(source).not.toContain('provider_run.input_hash');
         expect(source).not.toContain('provider_run.job_claim_token');
         expect(source).not.toContain('provider_run.reservation_token');
+        expect(source).not.toContain('earlybird_');
+    });
+
+    it('repeats the scrubbed authorized lineage gate before any paid reservation', () => {
+        const reserve = sourcePolicyFixMigration.slice(
+            sourcePolicyFixMigration.indexOf(
+                'CREATE OR REPLACE FUNCTION public.reserve_analysis_v2_profile_repair_canary_run('
+            )
+        );
+        expect(reserve).toContain(
+            'JOIN public.analysis_v2_provider_execution_policies AS execution_policy'
+        );
+        expect(reserve).toContain(
+            'JOIN public.analysis_v2_test_entitlement_consumptions AS entitlement_consumption'
+        );
+        expect(reserve).toContain('JOIN public.analysis_preflights AS preflight');
+        expect(reserve).toContain("execution_policy.target_instagram_id = '0_min._.00'");
+        expect(reserve).toContain(
+            "execution_policy.operation_slot_map->>'profile-fallback' = p_credential_slot"
+        );
+        expect(reserve).toContain("preflight.status = 'consumed'");
+        expect(reserve).toContain('preflight.pii_scrubbed_at IS NOT NULL');
+        expect(reserve).not.toContain(
+            "v_source.target_instagram_id IS DISTINCT FROM '0_min._.00'"
+        );
+        expect(reserve).not.toContain('earlybird_');
+    });
+
+    it('keeps both corrected RPCs service-role-only', () => {
+        expect(sourcePolicyFixMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.load_analysis_v2_profile_repair_canary_source\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(sourcePolicyFixMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.load_analysis_v2_profile_repair_canary_source\([\s\S]*?TO service_role/
+        );
+        expect(sourcePolicyFixMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.reserve_analysis_v2_profile_repair_canary_run\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(sourcePolicyFixMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.reserve_analysis_v2_profile_repair_canary_run\([\s\S]*?TO service_role/
+        );
+        expect(sourcePolicyFixMigration).toContain('SECURITY DEFINER');
+        expect(sourcePolicyFixMigration).toContain("SET search_path = ''");
     });
 
     it('makes terminal counts and actual cost idempotent but conflict-detecting', () => {

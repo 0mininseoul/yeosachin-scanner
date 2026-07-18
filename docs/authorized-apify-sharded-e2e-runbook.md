@@ -71,6 +71,15 @@ owner UUID, and expected owner email as operator input only. Set the owner value
 the repository, command output, logs, screenshots, or evidence notes. Disable shell tracing before
 setting them.
 
+Failed V2 terminal cleanup replaces the request and consumed-preflight usernames with deterministic
+`retained.*` tombstones. The replay loader and paid reservation must not require, restore, or infer
+the scrubbed request field. They authorize this one-off source only through the immutable
+`authorized-free-e2e-v1` execution policy, the matching test-entitlement consumption, the reciprocal
+consumed preflight/request/owner lineage, and both exact terminal tombstones. The execution policy
+must contain the fixed authorized target and its `profile-fallback` slot must match the selected
+credential slot. A missing or conflicting policy, consumption, preflight link, or tombstone blocks
+both replay and journal reservation; early-bird orders and result heuristics are not substitutes.
+
 Before any paid invocation, review and apply
 `20260718123000_add_profile_repair_canary_journal.sql` through the ordered migration path and review
 the exact script SHA. First run the command without `--confirm-paid-api-call`, supplying exactly one
