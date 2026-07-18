@@ -14,13 +14,15 @@ const presaleMigration = readFileSync(
     ),
     'utf8'
 );
-const phoneMigration = readFileSync(
-    new URL(
-        '../../../supabase/migrations/20260718104053_add_groble_phone_matching.sql',
-        import.meta.url
-    ),
+const phoneMigrations = [
+    '20260718104053_add_groble_phone_matching.sql',
+    '20260718114650_backfill_groble_phone_matching.sql',
+    '20260718114658_validate_groble_phone_matching.sql',
+    '20260718114707_activate_groble_phone_matching.sql',
+].map(file => readFileSync(
+    new URL(`../../../supabase/migrations/${file}`, import.meta.url),
     'utf8'
-);
+));
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -153,6 +155,12 @@ async function createDatabaseBeforePhoneMigration(): Promise<PGlite> {
     await database.exec(bootstrap);
     await database.exec(presaleMigration);
     return database;
+}
+
+async function applyPhoneMigrations(database: PGlite): Promise<void> {
+    for (const migration of phoneMigrations) {
+        await database.exec(migration);
+    }
 }
 
 async function asServiceOn<T>(
@@ -346,7 +354,7 @@ describe('Groble phone migration upgrade behavior', () => {
                     uuid(USER_NAMESPACE, 903),
                 ]
             );
-            await database.exec(phoneMigration);
+            await applyPhoneMigrations(database);
 
             const rows = (await database.query<{
                 email: string;
@@ -378,9 +386,19 @@ describe('Groble phone migration upgrade behavior', () => {
                     ($2, 'duplicate-two@example.com', 'kakao', '+82 10 1234 5678')`,
                 [uuid(USER_NAMESPACE, 904), uuid(USER_NAMESPACE, 905)]
             );
-            await expect(database.exec(phoneMigration)).rejects.toThrow(
+            await expect(applyPhoneMigrations(database)).rejects.toThrow(
                 /DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW/
             );
+            expect((await database.query<{
+                phone_number_normalized: string | null;
+            }>(
+                `SELECT phone_number_normalized
+                 FROM public.users
+                 ORDER BY email`
+            )).rows).toEqual([
+                { phone_number_normalized: null },
+                { phone_number_normalized: null },
+            ]);
         } finally {
             await database.close();
         }
@@ -455,7 +473,7 @@ describe('Groble phone migration upgrade behavior', () => {
                     );
                 }
 
-                await database.exec(phoneMigration);
+                await applyPhoneMigrations(database);
                 const order = (await database.query<{
                     expected_buyer_phone_number_normalized: string | null;
                     status: string;
@@ -477,7 +495,7 @@ describe('Groble phone migration upgrade behavior', () => {
 describe('Groble phone checkout and finalizer behavior', () => {
     beforeAll(async () => {
         db = await createDatabaseBeforePhoneMigration();
-        await db.exec(phoneMigration);
+        await applyPhoneMigrations(db);
     }, 30_000);
 
     beforeEach(async () => {

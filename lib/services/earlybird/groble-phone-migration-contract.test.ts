@@ -2,12 +2,29 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
-const migrationFiles = readdirSync(migrationsDirectory).filter(file =>
-    file.endsWith('_add_groble_phone_matching.sql')
+const MIGRATION_SUFFIXES = [
+    'add_groble_phone_matching.sql',
+    'backfill_groble_phone_matching.sql',
+    'validate_groble_phone_matching.sql',
+    'activate_groble_phone_matching.sql',
+] as const;
+const migrationFiles = readdirSync(migrationsDirectory)
+    .filter(file => MIGRATION_SUFFIXES.some(suffix => file.endsWith(`_${suffix}`)))
+    .sort();
+const migrations = migrationFiles.map(file =>
+    readFileSync(new URL(file, migrationsDirectory), 'utf8')
 );
-const migration = migrationFiles.length === 1
-    ? readFileSync(new URL(migrationFiles[0], migrationsDirectory), 'utf8')
-    : '';
+
+function migrationFor(suffix: typeof MIGRATION_SUFFIXES[number]): string {
+    const index = migrationFiles.findIndex(file => file.endsWith(`_${suffix}`));
+    return index >= 0 ? migrations[index] : '';
+}
+
+const ddlMigration = migrationFor('add_groble_phone_matching.sql');
+const backfillMigration = migrationFor('backfill_groble_phone_matching.sql');
+const validationMigration = migrationFor('validate_groble_phone_matching.sql');
+const activationMigration = migrationFor('activate_groble_phone_matching.sql');
+const migration = migrations.join('\n');
 
 const AUTHENTICATED_ORDER_COLUMNS = [
     'id',
@@ -30,11 +47,66 @@ function functionDefinition(name: string): string {
 }
 
 describe('Groble phone matching migration contract', () => {
-    it('is one new forward migration after the applied presale migration', () => {
-        expect(migrationFiles).toHaveLength(1);
-        expect(migrationFiles[0].localeCompare(
-            '20260717140000_add_groble_earlybird_presale.sql'
-        )).toBeGreaterThan(0);
+    it('is four ordered forward migrations after the applied presale migration', () => {
+        expect(migrationFiles.map(file => file.replace(/^\d+_/, ''))).toEqual(
+            MIGRATION_SUFFIXES
+        );
+        for (const file of migrationFiles) {
+            expect(file.localeCompare(
+                '20260717140000_add_groble_earlybird_presale.sql'
+            )).toBeGreaterThan(0);
+        }
+    });
+
+    it('isolates access-exclusive DDL, backfills, validation/indexes, and RPC activation', () => {
+        for (const source of migrations) {
+            expect(source).toContain("SET LOCAL lock_timeout = '5s'");
+            expect(source).toContain("SET LOCAL statement_timeout = '2min'");
+
+            const addsColumnsOrConstraints = /^ALTER TABLE[\s\S]*?\bADD (?:COLUMN|CONSTRAINT)\b/m
+                .test(source);
+            const backfillsRows = /^UPDATE public\.(?:users|earlybird_orders)\b/m.test(source);
+            expect(addsColumnsOrConstraints && backfillsRows).toBe(false);
+        }
+
+        expect(ddlMigration).toContain('ADD COLUMN phone_number_normalized TEXT');
+        expect(ddlMigration.match(/NOT VALID/g)).toHaveLength(8);
+        expect(ddlMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.normalize_kr_mobile_e164'
+        );
+        expect(ddlMigration).not.toMatch(/^UPDATE public\./m);
+        expect(ddlMigration).not.toContain('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
+        expect(ddlMigration).not.toContain('VALIDATE CONSTRAINT');
+        expect(ddlMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
+        expect(ddlMigration).not.toContain('create_earlybird_checkout');
+
+        expect(backfillMigration.match(
+            /^UPDATE public\.(?:users|earlybird_orders)\b/gm
+        )).toHaveLength(2);
+        expect(backfillMigration).toContain('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
+        expect(backfillMigration).not.toMatch(/^ALTER TABLE/m);
+        expect(backfillMigration).not.toMatch(/^CREATE (?:OR REPLACE FUNCTION|(?:UNIQUE )?INDEX)/m);
+        expect(backfillMigration).not.toMatch(/^(?:GRANT|REVOKE)\b/m);
+
+        expect(validationMigration.match(/VALIDATE CONSTRAINT/g)).toHaveLength(8);
+        expect(validationMigration.match(/^CREATE (?:UNIQUE )?INDEX/gm)).toHaveLength(3);
+        expect(validationMigration).not.toContain('ADD COLUMN');
+        expect(validationMigration).not.toContain('NOT VALID');
+        expect(validationMigration).not.toMatch(/^UPDATE public\./m);
+        expect(validationMigration).not.toContain('CREATE OR REPLACE FUNCTION');
+        expect(validationMigration).not.toMatch(/^(?:GRANT|REVOKE)\b/m);
+
+        expect(activationMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_earlybird_checkout'
+        );
+        expect(activationMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment'
+        );
+        expect(activationMigration).toMatch(/^GRANT SELECT \(/m);
+        expect(activationMigration).not.toMatch(/^ALTER TABLE/m);
+        expect(activationMigration).not.toMatch(/^UPDATE public\./m);
+        expect(activationMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
+        expect(activationMigration).not.toContain('normalize_kr_mobile_e164');
     });
 
     it('normalizes and backfills users before rejecting duplicates and indexing', () => {
@@ -66,12 +138,8 @@ describe('Groble phone matching migration contract', () => {
     });
 
     it('bounds migration locks and defers table scans until constraint validation', () => {
-        expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
-        expect(migration).toContain("SET LOCAL statement_timeout = '2min'");
         expect(migration).not.toContain('LOCK TABLE public.users');
-        expect(migration.match(/NOT VALID/g)?.length).toBeGreaterThanOrEqual(8);
-        expect(migration.match(/VALIDATE CONSTRAINT/g)?.length).toBeGreaterThanOrEqual(8);
-        expect(migration).toMatch(/row-count[\s\S]*?maintenance window/i);
+        expect(validationMigration).toMatch(/row-count[\s\S]*?maintenance window/i);
         expect(migration).not.toContain('CREATE INDEX CONCURRENTLY');
     });
 

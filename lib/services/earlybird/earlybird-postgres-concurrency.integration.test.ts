@@ -17,13 +17,15 @@ const presaleMigration = readFileSync(
     ),
     'utf8'
 );
-const phoneMigration = readFileSync(
-    new URL(
-        '../../../supabase/migrations/20260718104053_add_groble_phone_matching.sql',
-        import.meta.url
-    ),
+const phoneMigrations = [
+    '20260718104053_add_groble_phone_matching.sql',
+    '20260718114650_backfill_groble_phone_matching.sql',
+    '20260718114658_validate_groble_phone_matching.sql',
+    '20260718114707_activate_groble_phone_matching.sql',
+].map(file => readFileSync(
+    new URL(`../../../supabase/migrations/${file}`, import.meta.url),
     'utf8'
-);
+));
 
 const bootstrap = `
 DROP SCHEMA IF EXISTS public CASCADE;
@@ -181,7 +183,9 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
         }
         await pool.query(bootstrap);
         await pool.query(presaleMigration);
-        await pool.query(phoneMigration);
+        for (const migration of phoneMigrations) {
+            await pool.query(migration);
+        }
     }, 30_000);
 
     beforeEach(async () => {

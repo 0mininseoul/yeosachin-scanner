@@ -4,7 +4,7 @@
 
 **Goal:** Match Groble payments to the correct earlybird order by the buyer's Kakao phone number even when the Groble and login emails differ, while retaining the existing email fallback and payment safety invariants.
 
-**Architecture:** Normalize Korean mobile numbers to E.164 in one shared server module and snapshot the normalized Kakao number into each checkout order. A forward-only Supabase migration makes phone-first matching and evidence persistence atomic inside the existing service-role RPC; the webhook parser supplies bounded buyer evidence, while authenticated DTOs and analytics never expose it. New auth UI shows Kakao only, but Google provider support and existing Google sessions remain intact and continue through the legacy email fallback.
+**Architecture:** Normalize Korean mobile numbers to E.164 in one shared server module and snapshot the normalized Kakao number into each checkout order. Four ordered forward-only Supabase migrations isolate fast schema DDL, data backfill, validation/index construction, and RPC activation while preserving atomicity inside each implicit CLI transaction. The activation phase keeps a service-only 9-argument compatibility wrapper during the rolling deploy and installs the canonical 12-argument evidence RPC. The webhook parser supplies bounded buyer evidence, while authenticated DTOs and analytics never expose it. New auth UI shows Kakao only, but Google provider support and existing Google sessions remain intact and continue through the legacy email fallback.
 
 **Tech Stack:** Next.js 16 App Router, TypeScript, `libphonenumber-js`, Zod, Supabase/Postgres RLS and SECURITY DEFINER RPCs, Vitest, PGlite.
 
@@ -160,10 +160,13 @@ git add components/auth-buttons.tsx app/auth/callback/route.ts app/api/user/me/r
 git commit -m "feat: sync Kakao phone identity for checkout"
 ```
 
-### Task 3: Forward-only database migration for phone snapshots and buyer evidence
+### Task 3: Ordered forward-only database migrations for phone snapshots and buyer evidence
 
 **Files:**
-- Create with CLI: `supabase/migrations/20260718*_add_groble_phone_matching.sql`
+- Create with CLI: `supabase/migrations/20260718104053_add_groble_phone_matching.sql`
+- Create with CLI: `supabase/migrations/20260718114650_backfill_groble_phone_matching.sql`
+- Create with CLI: `supabase/migrations/20260718114658_validate_groble_phone_matching.sql`
+- Create with CLI: `supabase/migrations/20260718114707_activate_groble_phone_matching.sql`
 - Create: `lib/services/earlybird/groble-phone-migration-contract.test.ts`
 - Create: `lib/services/earlybird/groble-phone-pglite.test.ts`
 - Modify: `lib/services/earlybird/earlybird-postgres-concurrency.integration.test.ts`
@@ -171,33 +174,36 @@ git commit -m "feat: sync Kakao phone identity for checkout"
 - Modify: `app/api/earlybird/checkout/route.ts`
 - Modify: `lib/services/earlybird/checkout-route.test.ts`
 
-- [ ] **Step 1: Generate the forward migration**
+- [ ] **Step 1: Generate the four forward migrations**
 
-Run: `npx supabase migration new add_groble_phone_matching`
+Run each command separately so the filenames have a strict timestamp order:
 
-Expected: one new empty migration after `20260717140000_add_groble_earlybird_presale.sql`; never edit the already-applied presale migration.
+```bash
+npx supabase migration new add_groble_phone_matching
+npx supabase migration new backfill_groble_phone_matching
+npx supabase migration new validate_groble_phone_matching
+npx supabase migration new activate_groble_phone_matching
+```
+
+Expected: four new empty migrations after `20260717140000_add_groble_earlybird_presale.sql`; never edit the already-applied presale migration. Supabase CLI v2.102.0 executes each file as one implicit transaction and does not support a no-transaction migration directive, so file boundaries are lock boundaries.
 
 - [ ] **Step 2: Write failing migration contract tests**
 
-Assert all of the following literal contracts:
+Read all four files in timestamp order. Assert both the combined feature contract and these per-file statement boundaries:
 
 ```ts
-expect(migration).toContain('ADD COLUMN phone_number_normalized TEXT');
-expect(migration).toContain('WHERE phone_number_normalized IS NOT NULL');
-expect(migration).toContain('expected_buyer_phone_number_normalized TEXT');
-expect(migration).toContain('groble_buyer_email TEXT');
-expect(migration).toContain('groble_buyer_phone_number TEXT');
-expect(migration).toContain('groble_buyer_display_name TEXT');
-expect(migration).toContain('SECURITY DEFINER');
-expect(migration).toContain("SET search_path = ''");
-expect(migration).not.toMatch(/GRANT SELECT \([^;]*(?:groble_buyer|expected_buyer_phone)/s);
+expect(ddlMigration).toContain('ADD COLUMN phone_number_normalized TEXT');
+expect(ddlMigration).not.toMatch(/^UPDATE public\./m);
+expect(backfillMigration).not.toMatch(/^ALTER TABLE/m);
+expect(validationMigration).not.toContain('CREATE OR REPLACE FUNCTION');
+expect(activationMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
 ```
 
-Also assert that authenticated field-level grants remain exactly the pre-existing safe columns, and that only `service_role` can execute the replaced checkout/payment RPCs.
+Also assert that no file contains both an `ALTER TABLE ... ADD` action and a top-level backfill, all checks are added `NOT VALID` and validated only in phase 3, authenticated field-level grants remain exactly the pre-existing safe columns, and only `service_role` can execute either finalizer signature and the replaced checkout/refund RPCs.
 
 Run: `npm test -- lib/services/earlybird/groble-phone-migration-contract.test.ts`
 
-Expected: FAIL against the empty migration.
+Expected: FAIL while the CLI-generated phase files are empty or the original migration is still monolithic.
 
 - [ ] **Step 3: Write failing PGlite behavioral tests**
 
@@ -215,111 +221,49 @@ it('rejects a Kakao checkout without a valid normalized phone');
 it('allows a legacy Google checkout without a phone snapshot');
 ```
 
-Run: `npm test -- lib/services/earlybird/groble-phone-pglite.test.ts`
+Apply all four migrations sequentially in separate `database.exec` calls, then run: `npm test -- lib/services/earlybird/groble-phone-pglite.test.ts`
 
 Expected: FAIL because the columns and replaced RPCs do not exist.
 
-- [ ] **Step 4: Implement columns, backfill, checks, and indexes**
+- [ ] **Step 4: Implement four bounded migration transactions**
 
-The migration must add nullable `users.phone_number_normalized`, backfill Korean mobile numbers using this bounded SQL normalizer, raise if any non-null normalized value is duplicated, then create a partial unique index. Nullable is required for old Google accounts and Kakao accounts whose consent response has no phone.
+Every file sets `lock_timeout = '5s'` and `statement_timeout = '2min'`. Keep these dependencies and statement classes exact:
 
-```sql
-CREATE OR REPLACE FUNCTION public.normalize_kr_mobile_e164(p_value TEXT)
-RETURNS TEXT
-LANGUAGE sql
-IMMUTABLE
-RETURNS NULL ON NULL INPUT
-SET search_path = ''
-AS $$
-    WITH normalized AS (
-        SELECT pg_catalog.regexp_replace(p_value, '[^0-9]', '', 'g') AS digits
-    )
-    SELECT CASE
-        WHEN digits ~ '^010[0-9]{8}$' THEN '+82' || pg_catalog.substring(digits FROM 2)
-        WHEN digits ~ '^8210[0-9]{8}$' THEN '+' || digits
-        ELSE NULL
-    END
-    FROM normalized
-$$;
+| Phase | Allowed work |
+|---|---|
+| 1, `add` | Add nullable user/order/webhook columns, add eight bounded checks as `NOT VALID`, create and revoke the strict normalization helper. Do not backfill, scan, validate, index, replace an application RPC, or grant browser access in this transaction. |
+| 2, `backfill` | Normalize `users`, abort on duplicate non-null normalized phones, and snapshot unresolved `payment_pending` and `cancelled` orders with no payment ID. Do not run `ALTER TABLE`, create indexes, or replace functions. |
+| 3, `validate` | Validate all eight checks and create the user unique index plus pending and cancelled phone lookup indexes. Normal indexes are intentional because the CLI cannot run a concurrent index outside its implicit transaction; use the measured-size deployment gate in `docs/groble-earlybird-operations.md`. |
+| 4, `activate` | Restate the safe authenticated projection, replace checkout/finalizer/refund RPCs, install the rolling compatibility wrapper, and apply service-role ACLs. Do not mix schema DDL, backfill, validation, or indexes into this transaction. |
 
-REVOKE ALL ON FUNCTION public.normalize_kr_mobile_e164(TEXT)
-FROM PUBLIC, anon, authenticated, service_role;
-
-ALTER TABLE public.users ADD COLUMN phone_number_normalized TEXT;
-UPDATE public.users
-SET phone_number_normalized = public.normalize_kr_mobile_e164(phone_number)
-WHERE phone_number IS NOT NULL;
-
-ALTER TABLE public.users ADD CONSTRAINT users_phone_number_normalized_check
-CHECK (
-    phone_number_normalized IS NULL
-    OR phone_number_normalized ~ '^\+8210[0-9]{8}$'
-);
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM public.users
-        WHERE phone_number_normalized IS NOT NULL
-        GROUP BY phone_number_normalized HAVING COUNT(*) > 1
-    ) THEN
-        RAISE EXCEPTION 'DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW';
-    END IF;
-END;
-$$;
-
-CREATE UNIQUE INDEX users_phone_number_normalized_unique
-ON public.users(phone_number_normalized)
-WHERE phone_number_normalized IS NOT NULL;
-```
-
-Add the four order evidence columns and three webhook buyer evidence columns (`groble_buyer_email`, `groble_buyer_phone_number`, `groble_buyer_display_name`). Add bounded length/E.164 checks and a pending lookup index on `(expected_buyer_phone_number_normalized, expected_groble_product_id)`.
+Nullable user phones remain required for old Google accounts and Kakao accounts whose consent response has no phone. A duplicate abort leaves phase 1 safely applied while phase 2 rolls back as a unit.
 
 - [ ] **Step 5: Replace checkout RPC with an immutable phone snapshot**
 
-Within `create_earlybird_checkout`, load the user's `auth_provider` and normalized phone under the existing user advisory lock. Enforce:
+Within `create_earlybird_checkout`, load the user's `provider` and normalized phone with `FOR UPDATE` after taking the existing user advisory lock. Enforce:
 
 ```sql
-IF v_user.auth_provider = 'kakao' AND v_user.phone_number_normalized IS NULL THEN
+IF v_user_provider = 'kakao' AND v_user_phone_number_normalized IS NULL THEN
     RAISE EXCEPTION 'CHECKOUT_PHONE_REQUIRED';
 END IF;
 ```
 
-Insert `v_user.phone_number_normalized` into `expected_buyer_phone_number_normalized`. Existing Google users may insert `NULL`, preserving email matching.
+Insert `v_user_phone_number_normalized` into `expected_buyer_phone_number_normalized`. Existing Google users may insert `NULL`, preserving email matching.
 
-- [ ] **Step 6: Replace finalization RPC with phone-first matching**
+- [ ] **Step 6: Activate canonical and rolling-compatible finalization RPCs**
 
-Extend the signature with `p_buyer_phone_normalized TEXT`, `p_buyer_phone_raw TEXT`, and `p_buyer_display_name TEXT`. Preserve the payment advisory lock and event/payment idempotency checks before candidate lookup. Candidate selection must be:
+Create the canonical 12-argument signature by adding `p_buyer_phone_normalized TEXT`, `p_buyer_phone_raw TEXT`, and `p_buyer_display_name TEXT`. Keep the existing 9-argument signature as a service-only SQL wrapper that delegates to the canonical function with the three evidence arguments set to typed `NULL`. Do not drop this wrapper in the activation migration; remove it only through a later post-drain migration after every old application instance has exited.
+
+Preserve the payment advisory lock and event/payment idempotency checks before candidate lookup. Determine every user reachable through the current phone, email, or an unresolved phone snapshot, lock those user IDs in text-sorted order, then run all authoritative counts. The query order is:
 
 ```sql
-IF p_buyer_phone_normalized IS NOT NULL THEN
-    SELECT COUNT(*)
-    INTO v_candidate_count
-    FROM public.earlybird_orders AS candidate
-    WHERE candidate.status = 'payment_pending'
-      AND candidate.expected_groble_product_id = p_product_id
-      AND candidate.expected_buyer_phone_number_normalized = p_buyer_phone_normalized;
-
-    IF v_candidate_count = 1 THEN
-        SELECT candidate.id
-        INTO v_candidate_order_id
-        FROM public.earlybird_orders AS candidate
-        WHERE candidate.status = 'payment_pending'
-          AND candidate.expected_groble_product_id = p_product_id
-          AND candidate.expected_buyer_phone_number_normalized = p_buyer_phone_normalized
-        FOR UPDATE;
-    END IF;
-END IF;
-
-IF p_buyer_phone_normalized IS NULL OR v_candidate_count = 0 THEN
-    SELECT buyer.id INTO v_user_id
-    FROM public.users AS buyer
-    WHERE lower(btrim(buyer.email)) = lower(btrim(p_buyer_email));
-    -- Count the same legacy email/product pending candidates as the existing RPC.
-END IF;
+-- 1. payment_pending by normalized phone + product
+-- 2. when count = 0, cancelled/payment_id IS NULL by phone + product + amount
+-- 3. only when both phone counts = 0, payment_pending by email + product
+-- 4. reselect the chosen row with the same predicates and FOR UPDATE
 ```
 
-If phone matching returns more than one row, emit `ambiguous_buyer` without email fallback. If it returns exactly one, email mismatch is irrelevant. Persist bounded raw buyer evidence on every webhook event and selected order before returning any terminal disposition. The later product/amount check, inventory lock/update, `due_at`, cancellation reconciliation, and all current dispositions remain unchanged.
+If pending phone matching returns more than one row, emit `ambiguous_buyer` without email fallback. If it returns exactly one, email mismatch is irrelevant. After zero pending phone candidates, check unresolved cancelled snapshots by phone, product, and amount before email fallback: one becomes `late_cancelled_payment`/`refund_pending`, multiple are ambiguous, and zero continues to the legacy email path. Lock every possible user in deterministic order, and make checkout and refund transitions use the same per-user advisory lock before their row lock. Persist bounded raw buyer evidence on every webhook event and selected order before returning any terminal disposition. The later product/amount check, inventory update, `due_at`, and all current dispositions remain unchanged.
 
 - [ ] **Step 7: Surface the checkout phone requirement without leaking a phone**
 
@@ -461,7 +405,7 @@ Expected: all commands exit 0.
 
 Run: `npx supabase db lint --linked`
 
-Expected: no new lint errors. Then inspect migration status with `npx supabase migration list --linked`. Do not run `db push` until preview code and database rollout order are reviewed.
+Expected: no new lint errors. Then inspect all four files in timestamp order with `npx supabase migration list --linked`, repeat the row-count/size query in `docs/groble-earlybird-operations.md`, and follow its lock-timeout abort/retry procedure. Do not run `db push` until preview code and the split database rollout order are reviewed.
 
 - [ ] **Step 4: Browser-check auth and checkout states**
 
