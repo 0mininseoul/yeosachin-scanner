@@ -12,6 +12,8 @@ import type {
 
 const MAX_OUTCOME_LATENCY_MS = 300_000;
 const HTTP_STATUS_PATTERN = /(?:HTTP|status=)\s*(\d{3})/i;
+const SELFHOSTED_PROFILE_CIRCUIT_OPEN_MESSAGE =
+    'SCRAPING_ERROR: SELFHOSTED PROFILE CIRCUIT IS OPEN.';
 
 export function isSuccessfulProfileAttempt(
     result: ProfileAttemptResult
@@ -127,6 +129,7 @@ export function profileAttemptFailureDetails(error: unknown): {
     if (upper.includes('SCHEMA')) return { failureCategory: 'schema', httpStatus };
     if (
         upper.includes('TRANSPORT')
+        || upper === SELFHOSTED_PROFILE_CIRCUIT_OPEN_MESSAGE
         || upper.includes('NETWORK')
         || upper.includes('ECONN')
         || upper.includes('FETCH FAILED')
