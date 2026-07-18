@@ -56,6 +56,9 @@ const ACCOUNT_ACCESS_ATTESTATION_MIN_AGE_MS = 60_000;
 const ACCOUNT_ACCESS_ATTESTATION_MAX_AGE_MS = 5 * 60_000;
 const FAIL_CLOSED_LATENCY_MS = 300_000;
 const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
+const APIFY_PRICING_TIERS = new Set([
+    'FREE', 'BRONZE', 'SILVER', 'GOLD', 'PLATINUM', 'DIAMOND',
+]);
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, '..');
@@ -94,7 +97,7 @@ interface RuntimeActorClient {
 interface RuntimeUserClient {
     get(): Promise<{
         isPaying?: unknown;
-        plan?: { monthlyUsageCreditsUsd?: unknown };
+        plan?: { monthlyUsageCreditsUsd?: unknown; tier?: unknown };
     }>;
     limits(): Promise<{
         limits?: {
@@ -448,7 +451,57 @@ async function defaultCommandRunner(input: {
     });
 }
 
-function currentPricingIsAllowed(value: unknown, nowMs: number): boolean {
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function priceFitsExactCanary(price: unknown): price is number {
+    return typeof price === 'number' && Number.isFinite(price) && price > 0
+        && price <= PROFILE_PROVIDER_CANARY_MAX_CHARGE_USD
+            / PROFILE_PROVIDER_CANARY_EXPECTED_INPUT_COUNT;
+}
+
+function payPerEventPriceIsAllowed(events: unknown, accountTier: unknown): boolean {
+    if (!isUnknownRecord(events) || Object.keys(events).length !== 1) return false;
+
+    if (Object.hasOwn(events, 'profile-result')) {
+        const profileResult = events['profile-result'];
+        if (!isUnknownRecord(profileResult)
+            || Object.hasOwn(profileResult, 'eventTieredPricingUsd')) return false;
+        return priceFitsExactCanary(profileResult.eventPriceUsd);
+    }
+
+    if (!Object.hasOwn(events, 'result')
+        || typeof accountTier !== 'string'
+        || !APIFY_PRICING_TIERS.has(accountTier)) return false;
+    const result = events.result;
+    if (!isUnknownRecord(result)
+        || result.isPrimaryEvent !== true
+        || result.isOneTimeEvent !== false
+        || Object.hasOwn(result, 'eventPriceUsd')) return false;
+    const tiered = result.eventTieredPricingUsd;
+    if (!isUnknownRecord(tiered)) return false;
+    const tiers = Object.keys(tiered);
+    if (tiers.length === 0
+        || !tiers.every(tier => APIFY_PRICING_TIERS.has(tier))) return false;
+    const prices = tiers.map(tier => {
+        const entry = tiered[tier];
+        return isUnknownRecord(entry) ? entry.tieredEventPriceUsd : undefined;
+    });
+    return Object.hasOwn(tiered, accountTier)
+        && prices.every(priceFitsExactCanary)
+        && priceFitsExactCanary(
+            isUnknownRecord(tiered[accountTier])
+                ? tiered[accountTier].tieredEventPriceUsd
+                : undefined
+        );
+}
+
+function currentPricingIsAllowed(
+    value: unknown,
+    nowMs: number,
+    accountTier: unknown
+): boolean {
     if (!Array.isArray(value) || value.length === 0) return false;
     const candidates = value.filter((item): item is Record<string, unknown> => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
@@ -461,10 +514,7 @@ function currentPricingIsAllowed(value: unknown, nowMs: number): boolean {
     const current = candidates[0];
     if (!current) return false;
     if (current.pricingModel === 'PRICE_PER_DATASET_ITEM') {
-        const price = current.pricePerUnitUsd;
-        return typeof price === 'number' && Number.isFinite(price) && price > 0
-            && price * PROFILE_PROVIDER_CANARY_EXPECTED_INPUT_COUNT
-                <= PROFILE_PROVIDER_CANARY_MAX_CHARGE_USD + Number.EPSILON;
+        return priceFitsExactCanary(current.pricePerUnitUsd);
     }
     if (current.pricingModel !== 'PAY_PER_EVENT') return false;
     const minimum = current.minimalMaxTotalChargeUsd;
@@ -473,15 +523,7 @@ function currentPricingIsAllowed(value: unknown, nowMs: number): boolean {
         || typeof minimum !== 'number' || !Number.isFinite(minimum)
         || minimum < 0 || minimum > PROFILE_PROVIDER_CANARY_MAX_CHARGE_USD) return false;
     const events = (pricingPerEvent as Record<string, unknown>).actorChargeEvents;
-    if (!events || typeof events !== 'object' || Array.isArray(events)) return false;
-    const profileResult = (events as Record<string, unknown>)['profile-result'];
-    if (!profileResult || typeof profileResult !== 'object' || Array.isArray(profileResult)) {
-        return false;
-    }
-    const price = (profileResult as Record<string, unknown>).eventPriceUsd;
-    return typeof price === 'number' && Number.isFinite(price) && price > 0
-        && price * PROFILE_PROVIDER_CANARY_EXPECTED_INPUT_COUNT
-            <= PROFILE_PROVIDER_CANARY_MAX_CHARGE_USD + Number.EPSILON;
+    return payPerEventPriceIsAllowed(events, accountTier);
 }
 
 export async function assertProfileProviderCanaryPaidReadiness(input: {
@@ -523,6 +565,7 @@ export async function assertProfileProviderCanaryPaidReadiness(input: {
         throw safeError('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
     }
     const actor = await input.client.actor(PROFILE_PROVIDER_CANARY_ACTOR.actorId).get();
+    const user = await input.client.user('me').get();
     const taggedBuilds = actor?.taggedBuilds;
     const exactBuildAvailable = taggedBuilds !== null && typeof taggedBuilds === 'object'
         && !Array.isArray(taggedBuilds)
@@ -534,10 +577,9 @@ export async function assertProfileProviderCanaryPaidReadiness(input: {
     if (!actor || actor.isPublic !== true || actor.isDeprecated === true
         || actor.actorPermissionLevel !== 'LIMITED_PERMISSIONS'
         || !exactBuildAvailable
-        || !currentPricingIsAllowed(actor.pricingInfos, nowMs)) {
+        || !currentPricingIsAllowed(actor.pricingInfos, nowMs, user.plan?.tier)) {
         throw safeError('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
     }
-    const user = await input.client.user('me').get();
     const limits = await input.client.user('me').limits();
     const maximum = limits?.limits?.maxConcurrentActorJobs;
     const active = limits?.current?.activeActorJobCount;

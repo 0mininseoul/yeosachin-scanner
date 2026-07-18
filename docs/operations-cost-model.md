@@ -66,6 +66,10 @@ FlashAPI, CoderX, Stable RapidAPI는 V2 production DAG에 포함하지 않는다
 원가가 아니라 별도 R&D 표본이다. Actor가 현재 표시하는 결과당 약 `$0.0027`은 계획값일
 뿐이며, 15개 입력의 예상액은 약 `$0.0405`다. 실행 직전 가격과 build를 다시 확인하고,
 코드에 고정된 최대 과금은 repetition당 `$0.05`, 두 repetition 합계 `$0.10`이다.
+현재 가격은 `PAY_PER_EVENT`의 단일 primary `result` 이벤트와 계정 `plan.tier`별
+`eventTieredPricingUsd`에서 읽는다. 실행기는 현재 tier뿐 아니라 선언된 모든 알려진 tier의
+15건 금액을 보수적으로 상한 검사하며 추가 이벤트, 알 수 없는 tier, flat/tiered 중복을
+모두 거부한다.
 
 - 각 repetition은 정확히 15개 공개 프로필만 받으며 15/15 strict 결과, critical 3/3,
   60초 이하, exact build, `RESTRICTED` run access, stable actual cost를 모두 통과해야 한다.

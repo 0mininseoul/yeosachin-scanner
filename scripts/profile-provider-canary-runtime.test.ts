@@ -126,7 +126,8 @@ function readyClient(pricingInfos: unknown = [{
     pricingModel: 'PRICE_PER_DATASET_ITEM',
     pricePerUnitUsd: 0.0027,
     startedAt: new Date('2026-01-01T00:00:00.000Z'),
-}]): ProfileProviderCanaryRuntimeClient {
+}], tier?: unknown): ProfileProviderCanaryRuntimeClient {
+    const accountTier = arguments.length >= 2 ? tier : 'FREE';
     return {
         actor: () => ({
             get: async () => ({
@@ -140,7 +141,7 @@ function readyClient(pricingInfos: unknown = [{
         user: () => ({
             get: async () => ({
                 isPaying: true,
-                plan: { monthlyUsageCreditsUsd: 5 },
+                plan: { monthlyUsageCreditsUsd: 5, tier: accountTier },
             }),
             limits: async () => ({
                 limits: { maxConcurrentActorJobs: 8, maxMonthlyUsageUsd: 100 },
@@ -148,6 +149,37 @@ function readyClient(pricingInfos: unknown = [{
             }),
         }),
     } as unknown as ProfileProviderCanaryRuntimeClient;
+}
+
+function tieredResultPricing(
+    tieredEventPriceUsd: unknown,
+    startedAt = '2026-01-01T00:00:00.000Z'
+) {
+    return {
+        pricingModel: 'PAY_PER_EVENT',
+        minimalMaxTotalChargeUsd: 0.0027,
+        pricingPerEvent: {
+            actorChargeEvents: {
+                result: {
+                    eventTitle: 'Result',
+                    eventDescription: 'A scraped profile result',
+                    isPrimaryEvent: true,
+                    isOneTimeEvent: false,
+                    eventTieredPricingUsd: {
+                        FREE: { tieredEventPriceUsd },
+                    },
+                },
+            },
+        },
+        startedAt: new Date(startedAt),
+    };
+}
+
+function nextUp(value: number): number {
+    const float = new Float64Array([value]);
+    const bits = new BigUint64Array(float.buffer);
+    bits[0] += BigInt(1);
+    return float[0];
 }
 
 function clientFixture(
@@ -270,6 +302,112 @@ describe('profile provider canary runtime source replay', () => {
         })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
     });
 
+    it.each([undefined, '', 'COPPER'])(
+        'rejects an unsupported account tier %s',
+        async tier => {
+            const client = readyClient([tieredResultPricing(0.0027)], tier);
+
+            await expect(assertProfileProviderCanaryPaidReadiness({
+                env: ENV,
+                client,
+                commandRunner: vi.fn(async () => undefined),
+                now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+            })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+        }
+    );
+
+    it.each([0, -0.001, Number.NaN, Number.POSITIVE_INFINITY])(
+        'rejects a non-positive or non-finite tier price %s',
+        async price => {
+            const client = readyClient([tieredResultPricing(price)]);
+
+            await expect(assertProfileProviderCanaryPaidReadiness({
+                env: ENV,
+                client,
+                commandRunner: vi.fn(async () => undefined),
+                now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+            })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+        }
+    );
+
+    it('accepts exactly $0.05 for 15 tiered results and rejects the next representable price', async () => {
+        const exactPrice = 0.05 / 15;
+        const abovePrice = nextUp(exactPrice);
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([tieredResultPricing(exactPrice)]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).resolves.toBeUndefined();
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([tieredResultPricing(abovePrice)]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
+    it('applies the strict exact-15 boundary to dataset-item pricing too', async () => {
+        const exactPrice = 0.05 / 15;
+        const pricing = (pricePerUnitUsd: number) => ({
+            pricingModel: 'PRICE_PER_DATASET_ITEM',
+            pricePerUnitUsd,
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        });
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([pricing(exactPrice)]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).resolves.toBeUndefined();
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([pricing(nextUp(exactPrice))]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
+    it('uses only the latest effective pricing record after a flat-to-tiered transition', async () => {
+        const unsafeOldFlat = {
+            pricingModel: 'PRICE_PER_DATASET_ITEM',
+            pricePerUnitUsd: 0.004,
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        };
+        const safeLatestTiered = tieredResultPricing(
+            0.0027,
+            '2026-06-01T00:00:00.000Z'
+        );
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([unsafeOldFlat, safeLatestTiered]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).resolves.toBeUndefined();
+    });
+
+    it('rejects the latest unsafe tiered record even when an older flat price was safe', async () => {
+        const safeOldFlat = {
+            pricingModel: 'PRICE_PER_DATASET_ITEM',
+            pricePerUnitUsd: 0.0027,
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        };
+        const unsafeLatestTiered = tieredResultPricing(
+            0.004,
+            '2026-06-01T00:00:00.000Z'
+        );
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([safeOldFlat, unsafeLatestTiered]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
     it('accepts the exact profile-result PAY_PER_EVENT price within the 15-result cap', async () => {
         const client = readyClient([{
             pricingModel: 'PAY_PER_EVENT',
@@ -291,6 +429,203 @@ describe('profile provider canary runtime source replay', () => {
             commandRunner: vi.fn(async () => undefined),
             now: () => Date.parse('2026-07-19T00:05:00.000Z'),
         })).resolves.toBeUndefined();
+    });
+
+    it('accepts the live primary result event tier price for the current account tier', async () => {
+        const client = readyClient([{
+            pricingModel: 'PAY_PER_EVENT',
+            minimalMaxTotalChargeUsd: 0.0027,
+            pricingPerEvent: {
+                actorChargeEvents: {
+                    result: {
+                        eventTitle: 'Result',
+                        eventDescription: 'A scraped profile result',
+                        isPrimaryEvent: true,
+                        isOneTimeEvent: false,
+                        eventTieredPricingUsd: {
+                            FREE: { tieredEventPriceUsd: 0.0027 },
+                            BRONZE: { tieredEventPriceUsd: 0.0023 },
+                            SILVER: { tieredEventPriceUsd: 0.0019 },
+                            GOLD: { tieredEventPriceUsd: 0.0015 },
+                            PLATINUM: { tieredEventPriceUsd: 0.0009 },
+                            DIAMOND: { tieredEventPriceUsd: 0.0005 },
+                        },
+                    },
+                },
+            },
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        }], 'FREE');
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client,
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).resolves.toBeUndefined();
+    });
+
+    it.each([
+        ['the current account tier is missing', 'SILVER', {
+            FREE: { tieredEventPriceUsd: 0.0027 },
+        }],
+        ['the current account tier exceeds the exact-15 cap', 'FREE', {
+            FREE: { tieredEventPriceUsd: 0.004 },
+            BRONZE: { tieredEventPriceUsd: 0.001 },
+        }],
+        ['the current account tier price is malformed', 'FREE', {
+            FREE: { tieredEventPriceUsd: '0.0027' },
+        }],
+        ['another recognized tier exceeds the exact-15 cap', 'FREE', {
+            FREE: { tieredEventPriceUsd: 0.0027 },
+            BRONZE: { tieredEventPriceUsd: 0.004 },
+        }],
+        ['an unknown tier is present', 'FREE', {
+            FREE: { tieredEventPriceUsd: 0.0027 },
+            UNKNOWN: { tieredEventPriceUsd: 0.001 },
+        }],
+    ])('rejects tiered result pricing when %s', async (_label, tier, tieredPricing) => {
+        const client = readyClient([{
+            pricingModel: 'PAY_PER_EVENT',
+            minimalMaxTotalChargeUsd: 0.0027,
+            pricingPerEvent: {
+                actorChargeEvents: {
+                    result: {
+                        eventTitle: 'Result',
+                        eventDescription: 'A scraped profile result',
+                        isPrimaryEvent: true,
+                        isOneTimeEvent: false,
+                        eventTieredPricingUsd: tieredPricing,
+                    },
+                },
+            },
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        }], tier);
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client,
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
+    it('rejects an additional charge event beside the tiered result event', async () => {
+        const client = readyClient([{
+            pricingModel: 'PAY_PER_EVENT',
+            minimalMaxTotalChargeUsd: 0.0027,
+            pricingPerEvent: {
+                actorChargeEvents: {
+                    result: {
+                        eventTitle: 'Result',
+                        eventDescription: 'A scraped profile result',
+                        isPrimaryEvent: true,
+                        isOneTimeEvent: false,
+                        eventTieredPricingUsd: {
+                            FREE: { tieredEventPriceUsd: 0.0027 },
+                        },
+                    },
+                    initialization: {
+                        eventPriceUsd: 0.001,
+                    },
+                },
+            },
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        }]);
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client,
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
+    it('rejects a result event with both flat and tiered prices', async () => {
+        const client = readyClient([{
+            pricingModel: 'PAY_PER_EVENT',
+            minimalMaxTotalChargeUsd: 0.0027,
+            pricingPerEvent: {
+                actorChargeEvents: {
+                    result: {
+                        eventTitle: 'Result',
+                        eventDescription: 'A scraped profile result',
+                        isPrimaryEvent: true,
+                        isOneTimeEvent: false,
+                        eventPriceUsd: 0.0027,
+                        eventTieredPricingUsd: {
+                            FREE: { tieredEventPriceUsd: 0.0027 },
+                        },
+                    },
+                },
+            },
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        }]);
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client,
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
+    it.each([
+        ['is not primary', { isPrimaryEvent: false, isOneTimeEvent: false }],
+        ['omits primary evidence', { isOneTimeEvent: false }],
+        ['is one-time', { isPrimaryEvent: true, isOneTimeEvent: true }],
+        ['omits one-time evidence', { isPrimaryEvent: true }],
+    ])('rejects a tiered result event that %s', async (_label, eventFlags) => {
+        const client = readyClient([{
+            pricingModel: 'PAY_PER_EVENT',
+            minimalMaxTotalChargeUsd: 0.0027,
+            pricingPerEvent: {
+                actorChargeEvents: {
+                    result: {
+                        eventTitle: 'Result',
+                        eventDescription: 'A scraped profile result',
+                        ...eventFlags,
+                        eventTieredPricingUsd: {
+                            FREE: { tieredEventPriceUsd: 0.0027 },
+                        },
+                    },
+                },
+            },
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        }]);
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client,
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
+    it('rejects tiered pricing on a non-result event', async () => {
+        const client = readyClient([{
+            pricingModel: 'PAY_PER_EVENT',
+            minimalMaxTotalChargeUsd: 0.0027,
+            pricingPerEvent: {
+                actorChargeEvents: {
+                    unrelated: {
+                        eventTitle: 'Unrelated',
+                        eventDescription: 'Not a profile result',
+                        isPrimaryEvent: true,
+                        eventTieredPricingUsd: {
+                            FREE: { tieredEventPriceUsd: 0.001 },
+                        },
+                    },
+                },
+            },
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        }]);
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client,
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
     });
 
     it.each([

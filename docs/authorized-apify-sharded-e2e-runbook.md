@@ -116,8 +116,14 @@ source cleanup, or HMAC purge. An observed amount above `$1.00` is an incident a
 ### Official profile-provider replacement canary
 
 This command validates pinned `apify/instagram-scraper` build `0.0.692`; it does not rewrite the
-historical profile-repair result. Disable shell tracing and keep the source request identity in a
-protected environment variable so it is not copied into shell history.
+historical profile-repair result. Its paid-readiness check accepts the Actor's exact single result
+charge contract in either the retained flat `profile-result.eventPriceUsd` form or the live tiered
+`result.eventTieredPricingUsd[plan.tier].tieredEventPriceUsd` form. The retained flat compatibility
+form predates the primary/one-time metadata. Tiered pricing must have no additional charge event,
+must mark `result` primary and non-one-time, and every declared known tier must keep the exact
+15-result total at or below `$0.05`; unknown or malformed tiers fail closed.
+Disable shell tracing and keep the source request identity in a protected environment variable so
+it is not copied into shell history.
 
 First run the read-only replay without the paid confirmation flag:
 
