@@ -179,6 +179,60 @@ const profileNotFoundEnvelopeSchema = z.object({
     || value.error === 'not_found'
 ), { message: 'explicit not-found evidence is required' });
 
+const profileActorErrorEnvelopeSchema = z.object({
+    inputUrl: z.string().url(),
+    url: z.string().url().nullable().optional(),
+    error: z.string().nullable().optional(),
+    errorDescription: z.string().nullable().optional(),
+    requestErrorMessages: z.array(z.string()).max(100).nullable().optional(),
+}).passthrough().refine(value => (
+    [
+        value.error,
+        value.errorDescription,
+        ...(value.requestErrorMessages ?? []),
+    ].some(message => Boolean(message?.trim()))
+), { message: 'explicit Actor error evidence is required' });
+
+function exactInstagramProfileUsername(value: string): string | null {
+    const exactMatch = /^https:\/\/(?:www\.)?instagram\.com\/([A-Za-z0-9._]{1,30})\/?$/i.exec(value);
+    if (!exactMatch || exactMatch[0] !== value) return null;
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        return null;
+    }
+    const hostname = url.hostname.toLowerCase();
+    if (
+        url.protocol !== 'https:'
+        || (hostname !== 'instagram.com' && hostname !== 'www.instagram.com')
+        || url.username
+        || url.password
+        || url.port
+        || url.search
+        || url.hash
+    ) {
+        return null;
+    }
+    const username = exactMatch[1];
+    if (!username || !INSTAGRAM_USERNAME_PATTERN.test(username)) {
+        return null;
+    }
+    return username.toLowerCase();
+}
+
+function attributedProfileActorErrorUsername(item: unknown): string | null {
+    const parsed = profileActorErrorEnvelopeSchema.safeParse(item);
+    if (!parsed.success) return null;
+    const inputUsername = exactInstagramProfileUsername(parsed.data.inputUrl);
+    if (!inputUsername) return null;
+    if (parsed.data.url) {
+        const resultUsername = exactInstagramProfileUsername(parsed.data.url);
+        if (resultUsername !== inputUsername) return null;
+    }
+    return inputUsername;
+}
+
 const latestPostSchema = z.object({
     id: z.union([z.string().min(1), z.number().int().nonnegative()]),
     shortCode: z.string().min(1),
@@ -840,9 +894,21 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const notFoundUsernames = new Set<string>();
         const seenDatasetUsernames = new Set<string>();
         let datasetContaminated = false;
+        const markDuplicate = (key: string) => {
+            profilesByUsername.delete(key);
+            notFoundUsernames.delete(key);
+            failuresByUsername.set(
+                key,
+                new Error(
+                    'SCRAPING_SCHEMA_ERROR: Apify profile dataset has duplicate attributed rows.'
+                )
+            );
+            datasetContaminated = true;
+        };
         const durableRun = hasDurableProfileRunCheckpoint(context);
         for (let i = 0; i < usernames.length; i += batchSize) {
             const batch = usernames.slice(i, i + batchSize);
+            const currentBatch = new Set(batch.map(username => username.toLowerCase()));
             const maximumChargeUsd = context?.maxChargeUsd
                 ?? profileMaximumChargeUsd(batch.length, settings);
             let run;
@@ -942,8 +1008,12 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 const explicitNotFound = profileNotFoundEnvelopeSchema.safeParse(item);
                 if (explicitNotFound.success) {
                     const key = explicitNotFound.data.username.toLowerCase();
-                    if (!requested.has(key) || seenDatasetUsernames.has(key)) {
+                    if (!requested.has(key)) {
                         datasetContaminated = true;
+                        continue;
+                    }
+                    if (seenDatasetUsernames.has(key)) {
+                        markDuplicate(key);
                         continue;
                     }
                     seenDatasetUsernames.add(key);
@@ -952,6 +1022,26 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 }
                 const envelope = profileUsernameEnvelopeSchema.safeParse(item);
                 if (!envelope.success) {
+                    const hasUsernameField = typeof item === 'object'
+                        && item !== null
+                        && Object.prototype.hasOwnProperty.call(item, 'username');
+                    const actorErrorUsername = hasUsernameField
+                        ? null
+                        : attributedProfileActorErrorUsername(item);
+                    if (actorErrorUsername && currentBatch.has(actorErrorUsername)) {
+                        if (seenDatasetUsernames.has(actorErrorUsername)) {
+                            markDuplicate(actorErrorUsername);
+                            continue;
+                        }
+                        seenDatasetUsernames.add(actorErrorUsername);
+                        failuresByUsername.set(
+                            actorErrorUsername,
+                            new Error(
+                                'SCRAPING_INCOMPLETE_ERROR: Apify profile Actor returned an attributed error row.'
+                            )
+                        );
+                        continue;
+                    }
                     datasetContaminated = true;
                     continue;
                 }
@@ -961,14 +1051,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                     continue;
                 }
                 if (seenDatasetUsernames.has(key)) {
-                    profilesByUsername.delete(key);
-                    failuresByUsername.set(
-                        key,
-                        new Error(
-                            'SCRAPING_SCHEMA_ERROR: Apify profile dataset에 중복 username이 있습니다.'
-                        )
-                    );
-                    datasetContaminated = true;
+                    markDuplicate(key);
                     continue;
                 }
                 seenDatasetUsernames.add(key);

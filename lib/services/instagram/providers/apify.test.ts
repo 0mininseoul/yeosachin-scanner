@@ -1167,6 +1167,201 @@ describe('apifyProvider', () => {
         ]);
     });
 
+    it('attributes an Actor error row by its exact profile input URL without poisoning omissions', async () => {
+        const privateSentinel = 'UPSTREAM_PRIVATE_ERROR_SENTINEL';
+        const { client } = mockClient([
+            profileItem('alice'),
+            {
+                inputUrl: 'https://www.instagram.com/bob/',
+                url: 'https://www.instagram.com/bob/',
+                error: privateSentinel,
+                errorDescription: 'The upstream response was incomplete.',
+                requestErrorMessages: ['Profile data was not returned.'],
+            },
+        ]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob', 'carol'], 3);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['alice', 'success', null],
+            ['bob', 'failed', 'incomplete'],
+            ['carol', 'failed', 'incomplete'],
+        ]);
+        expect(JSON.stringify(results)).not.toContain(privateSentinel);
+        expect(JSON.stringify(results)).not.toContain('instagram.com/bob');
+    });
+
+    it('replays the observed 30-account boundary as 27 success and 3 incomplete', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const { client } = mockClient([
+            ...usernames.slice(0, 27).map(profileItem),
+            { ...profileItem(usernames[27]!), postsCount: 1, latestPosts: [] },
+            {
+                inputUrl: `https://www.instagram.com/${usernames[28]}/`,
+                error: 'Failed to scrape this profile.',
+            },
+        ]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(usernames, 30);
+
+        const counts = results.reduce<Record<string, number>>((summary, result) => {
+            const key = result.outcome.status === 'success'
+                ? 'success'
+                : `${result.outcome.status}:${result.outcome.failureCategory}`;
+            summary[key] = (summary[key] ?? 0) + 1;
+            return summary;
+        }, {});
+        expect(counts).toEqual({ success: 27, 'failed:incomplete': 3 });
+    });
+
+    it('does not attribute an Actor error row to a username from another provider batch', async () => {
+        const runIds = ['RunBatch00000001', 'RunBatch00000002'];
+        let runIndex = 0;
+        const actor = vi.fn(() => ({
+            start: vi.fn(async () => ({ id: runIds[runIndex++] })),
+        }));
+        const run = vi.fn((runId: string) => ({
+            waitForFinish: vi.fn(async () => ({
+                status: 'SUCCEEDED',
+                defaultDatasetId: runId,
+            })),
+            abort: vi.fn(async () => undefined),
+        }));
+        const dataset = vi.fn((datasetId: string) => ({
+            listItems: vi.fn(async ({ offset = 0, limit = 1 } = {}) => {
+                const items = datasetId === runIds[0]
+                    ? [{
+                        inputUrl: 'https://www.instagram.com/bob/',
+                        error: 'Failed to scrape this profile.',
+                    }]
+                    : [];
+                return {
+                    items: items.slice(offset, offset + limit),
+                    total: items.length,
+                    offset,
+                    count: Math.min(limit, Math.max(0, items.length - offset)),
+                    limit,
+                };
+            }),
+        }));
+        const provider = makeApifyProvider({
+            client: { actor, run, dataset } as unknown as ApifyClientLike,
+            env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
+        });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob'], 1);
+
+        expect(results.map(result => result.outcome.failureCategory)).toEqual([
+            'schema',
+            'schema',
+        ]);
+    });
+
+    it.each([
+        {
+            label: 'non-Instagram input URL',
+            row: {
+                inputUrl: 'https://example.com/bob/',
+                error: 'Failed to scrape this profile.',
+            },
+        },
+        {
+            label: 'missing explicit error evidence',
+            row: {
+                inputUrl: 'https://www.instagram.com/bob/',
+                error: '   ',
+                requestErrorMessages: [],
+            },
+        },
+        {
+            label: 'mismatched result URL',
+            row: {
+                inputUrl: 'https://www.instagram.com/bob/',
+                url: 'https://www.instagram.com/carol/',
+                error: 'Failed to scrape this profile.',
+            },
+        },
+        {
+            label: 'malformed username field',
+            row: {
+                username: null,
+                inputUrl: 'https://www.instagram.com/bob/',
+                error: 'Failed to scrape this profile.',
+            },
+        },
+        {
+            label: 'non-canonical profile path',
+            row: {
+                inputUrl: 'https://www.instagram.com/bob//',
+                error: 'Failed to scrape this profile.',
+            },
+        },
+    ])('keeps an unsafe Actor error row fail-closed: $label', async ({ row }) => {
+        const { client } = mockClient([profileItem('alice'), row]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob'], 2);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['alice', 'success', null],
+            ['bob', 'failed', 'schema'],
+        ]);
+    });
+
+    it('keeps a duplicate profile and attributed Actor error row fail-closed', async () => {
+        const { client } = mockClient([
+            profileItem('bob'),
+            {
+                inputUrl: 'https://www.instagram.com/bob/',
+                error: 'Failed to scrape this profile.',
+            },
+        ]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(['bob', 'carol'], 2);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['bob', 'failed', 'schema'],
+            ['carol', 'failed', 'schema'],
+        ]);
+    });
+
+    it('keeps an attributed Actor error followed by explicit not-found fail-closed', async () => {
+        const { client } = mockClient([
+            {
+                inputUrl: 'https://www.instagram.com/bob/',
+                error: 'Failed to scrape this profile.',
+            },
+            { username: 'bob', statusCode: 404 },
+        ]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(['bob', 'carol'], 2);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['bob', 'failed', 'schema'],
+            ['carol', 'failed', 'schema'],
+        ]);
+    });
+
     it('classifies mass profile omissions as incomplete instead of account-not-found', async () => {
         const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
         const { client } = mockClient([profileItem('user0')]);
