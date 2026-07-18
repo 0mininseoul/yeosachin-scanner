@@ -285,4 +285,121 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         }
     );
+
+    it('waits for checkout user lock and observes the newly committed order', async () => {
+        const index = 301;
+        const userId = uuid('1', index);
+        const preflightId = uuid('2', index);
+        const email = 'postgres-lock-wait@example.com';
+        const phone = '+821000000301';
+        const rawPhone = '010-0000-0301';
+        const applicationName = 'earlybird-lock-wait-finalizer';
+
+        await pool.query(
+            `INSERT INTO public.users (
+                id, email, provider, phone_number, phone_number_normalized
+            ) VALUES ($1, $2, 'kakao', $3, $4)`,
+            [userId, email, rawPhone, phone]
+        );
+        await pool.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, target_instagram_id, status, exclusion_decision,
+                excluded_instagram_id, access_mode, plan_cards_snapshot,
+                pricing_version, pricing_snapshot, target_followers_count,
+                target_following_count, required_plan_id, expires_at
+            ) VALUES (
+                $1, $2, 'lock_wait_target', 'ready', 'skip', NULL, 'production', $3,
+                $4, $5, 300, 100, 'basic',
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+            )`,
+            [
+                preflightId,
+                userId,
+                planCards('basic'),
+                EARLYBIRD_PRICING_VERSION,
+                pricingSnapshot,
+            ]
+        );
+
+        const checkoutClient = await pool.connect();
+        const finalizerClient = await pool.connect();
+        try {
+            await checkoutClient.query('BEGIN');
+            await checkoutClient.query('SET LOCAL ROLE service_role');
+            await checkoutClient.query(
+                `SELECT pg_catalog.pg_advisory_xact_lock(
+                    pg_catalog.hashtextextended($1::TEXT, 0)
+                )`,
+                [userId]
+            );
+
+            await finalizerClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [applicationName]
+            );
+            const finalizerPromise = (async () => {
+                await finalizerClient.query('BEGIN');
+                await finalizerClient.query('SET LOCAL ROLE service_role');
+                const result = await finalizerClient.query<{
+                    disposition: string;
+                    order_id: string | null;
+                }>(
+                    `SELECT * FROM public.finalize_earlybird_groble_payment(
+                        'lock-wait-event', 'lock-wait-idem', 'payment.completed',
+                        '2026-07-18T21:00:00+09:00', 'lock-wait-payment',
+                        $1, $2, $3, 'Lock Wait Buyer', $4, 14900,
+                        '2026-07-18T21:00:00+09:00'
+                    )`,
+                    [email, phone, rawPhone, 'basic_product-01']
+                );
+                await finalizerClient.query('COMMIT');
+                return result.rows[0];
+            })();
+
+            let observedAdvisoryWait = false;
+            for (let attempt = 0; attempt < 500; attempt += 1) {
+                const activity = await pool.query<{ wait_event_type: string | null }>(
+                    `SELECT wait_event_type
+                     FROM pg_catalog.pg_stat_activity
+                     WHERE application_name = $1
+                       AND state = 'active'`,
+                    [applicationName]
+                );
+                if (activity.rows[0]?.wait_event_type === 'Lock') {
+                    observedAdvisoryWait = true;
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+
+            const checkout = await checkoutClient.query<{ order_id: string }>(
+                `SELECT * FROM public.create_earlybird_checkout(
+                    $1, $2, 'basic', 'basic_product-01', 14900, $3, $4, $5,
+                    pg_catalog.clock_timestamp()
+                )`,
+                [
+                    userId,
+                    preflightId,
+                    EARLYBIRD_PRICING_VERSION,
+                    EARLYBIRD_DISCLOSURE_VERSION,
+                    EARLYBIRD_DISCLOSURE_TEXT,
+                ]
+            );
+            await checkoutClient.query('COMMIT');
+            const finalized = await finalizerPromise;
+
+            expect(observedAdvisoryWait).toBe(true);
+            expect(finalized).toMatchObject({
+                disposition: 'accepted',
+                order_id: checkout.rows[0].order_id,
+            });
+        } catch (error) {
+            await checkoutClient.query('ROLLBACK').catch(() => undefined);
+            await finalizerClient.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            checkoutClient.release();
+            finalizerClient.release();
+        }
+    }, 15_000);
 });

@@ -545,6 +545,20 @@ describe('Groble phone checkout and finalizer behavior', () => {
         });
     });
 
+    it('falls back to email when a valid phone has no pending candidate', async () => {
+        const seed = await seedPreflight(105);
+        const checkout = await createCheckout(seed);
+        const result = await finalize(seed, 'basic', 105, {
+            normalizedPhone: normalizedPhone(905),
+            rawPhone: '010-0000-0905',
+        });
+        expect(result).toMatchObject({
+            disposition: 'accepted',
+            order_id: checkout.order_id,
+            status: 'paid',
+        });
+    });
+
     it('stores bounded buyer evidence on accepted orders and unmatched events', async () => {
         const acceptedSeed = await seedPreflight(6);
         const acceptedOrder = await createCheckout(acceptedSeed);

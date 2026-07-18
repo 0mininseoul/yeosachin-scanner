@@ -131,4 +131,17 @@ describe('Groble phone matching migration contract', () => {
             /GRANT EXECUTE ON FUNCTION public\.finalize_earlybird_groble_payment\([\s\S]*?TO service_role/
         );
     });
+
+    it('locks every potential user deterministically before authoritative matching', () => {
+        const definition = functionDefinition('finalize_earlybird_groble_payment');
+        const lockLoop = definition.indexOf('FOR v_lock_user_id IN');
+        const firstCandidateCount = definition.indexOf('INTO v_candidate_count');
+
+        expect(lockLoop).toBeGreaterThanOrEqual(0);
+        expect(definition).toContain('ORDER BY potential_user.user_id::TEXT');
+        expect(definition).toMatch(
+            /buyer\.phone_number_normalized = p_buyer_phone_normalized[\s\S]*?UNION[\s\S]*?lower\(pg_catalog\.btrim\(buyer\.email\)\)[\s\S]*?UNION[\s\S]*?expected_buyer_phone_number_normalized/
+        );
+        expect(firstCandidateCount).toBeGreaterThan(lockLoop);
+    });
 });

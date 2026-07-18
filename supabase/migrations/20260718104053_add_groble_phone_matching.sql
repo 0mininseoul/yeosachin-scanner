@@ -358,7 +358,7 @@ DECLARE
     v_candidate_order_id UUID;
     v_sequence SMALLINT;
     v_user_id UUID;
-    v_revalidated_user_id UUID;
+    v_lock_user_id UUID;
     v_email_user_count INTEGER;
     v_match_method TEXT;
 BEGIN
@@ -459,6 +459,42 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Lock every user that could gain or already own a matching snapshot. The order
+    -- is stable across competing payments, preventing multi-user advisory deadlocks.
+    FOR v_lock_user_id IN
+        SELECT potential_user.user_id
+        FROM (
+            SELECT buyer.id AS user_id
+            FROM public.users AS buyer
+            WHERE p_buyer_phone_normalized IS NOT NULL
+              AND buyer.phone_number_normalized = p_buyer_phone_normalized
+
+            UNION
+
+            SELECT buyer.id AS user_id
+            FROM public.users AS buyer
+            WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+
+            UNION
+
+            SELECT phone_order.user_id
+            FROM public.earlybird_orders AS phone_order
+            WHERE p_buyer_phone_normalized IS NOT NULL
+              AND phone_order.status = 'payment_pending'
+              AND phone_order.expected_groble_product_id = p_product_id
+              AND phone_order.expected_buyer_phone_number_normalized
+                    = p_buyer_phone_normalized
+        ) AS potential_user
+        ORDER BY potential_user.user_id::TEXT
+    LOOP
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
+        );
+    END LOOP;
+
+    -- Counts below are authoritative because checkout and payment finalization use
+    -- the same per-user advisory locks acquired above.
     IF p_buyer_phone_normalized IS NOT NULL THEN
         SELECT pg_catalog.count(*)::INTEGER
         INTO v_candidate_count
@@ -549,75 +585,6 @@ BEGIN
                 FROM public.users AS buyer
                 WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
                     = pg_catalog.lower(pg_catalog.btrim(p_buyer_email));
-            END IF;
-        END IF;
-    END IF;
-
-    IF v_user_id IS NOT NULL THEN
-        PERFORM pg_catalog.pg_advisory_xact_lock(
-            pg_catalog.hashtextextended(v_user_id::TEXT, 0)
-        );
-    END IF;
-
-    IF v_candidate_count = 1 THEN
-        IF v_match_method = 'phone' THEN
-            SELECT pg_catalog.count(*)::INTEGER
-            INTO v_candidate_count
-            FROM public.earlybird_orders AS candidate
-            WHERE candidate.status = 'payment_pending'
-              AND candidate.expected_groble_product_id = p_product_id
-              AND candidate.expected_buyer_phone_number_normalized
-                    = p_buyer_phone_normalized;
-        ELSE
-            SELECT pg_catalog.count(*)::INTEGER
-            INTO v_candidate_count
-            FROM public.earlybird_orders AS candidate
-            JOIN public.users AS buyer ON buyer.id = candidate.user_id
-            WHERE candidate.status = 'payment_pending'
-              AND candidate.expected_groble_product_id = p_product_id
-              AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
-                    = pg_catalog.lower(pg_catalog.btrim(p_buyer_email));
-        END IF;
-
-        IF v_candidate_count > 1 THEN
-            INSERT INTO public.earlybird_webhook_events (
-                event_id, idempotency_key, event_type, occurred_at,
-                payment_id, product_id, amount_krw, disposition,
-                groble_buyer_email, groble_buyer_phone_number,
-                groble_buyer_display_name
-            ) VALUES (
-                p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-                p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer',
-                p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
-            );
-            RETURN QUERY SELECT
-                'ambiguous_buyer'::TEXT,
-                NULL::UUID,
-                NULL::TEXT,
-                NULL::SMALLINT;
-            RETURN;
-        ELSIF v_candidate_count = 1 THEN
-            IF v_match_method = 'phone' THEN
-                SELECT candidate.id, candidate.user_id
-                INTO v_candidate_order_id, v_revalidated_user_id
-                FROM public.earlybird_orders AS candidate
-                WHERE candidate.status = 'payment_pending'
-                  AND candidate.expected_groble_product_id = p_product_id
-                  AND candidate.expected_buyer_phone_number_normalized
-                        = p_buyer_phone_normalized;
-            ELSE
-                SELECT candidate.id, candidate.user_id
-                INTO v_candidate_order_id, v_revalidated_user_id
-                FROM public.earlybird_orders AS candidate
-                JOIN public.users AS buyer ON buyer.id = candidate.user_id
-                WHERE candidate.status = 'payment_pending'
-                  AND candidate.expected_groble_product_id = p_product_id
-                  AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
-                        = pg_catalog.lower(pg_catalog.btrim(p_buyer_email));
-            END IF;
-            IF v_revalidated_user_id <> v_user_id THEN
-                v_candidate_count := 0;
-                v_candidate_order_id := NULL;
             END IF;
         END IF;
     END IF;
