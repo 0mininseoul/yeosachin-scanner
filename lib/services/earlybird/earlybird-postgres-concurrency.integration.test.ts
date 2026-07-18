@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { Pool, type PoolClient } from 'pg';
+import { Pool, type PoolClient, type QueryResult } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
     EARLYBIRD_DISCLOSURE_TEXT,
@@ -522,4 +522,132 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
             finalizerClient.release();
         }
     }, 15_000);
+
+    it('snapshots a legacy checkout that resumes after checkout activation and backfill', async () => {
+        await pool.query(bootstrap);
+        await pool.query(presaleMigration);
+        await pool.query(phoneMigrations[0]);
+
+        const index = 303;
+        const userId = uuid('1', index);
+        const preflightId = uuid('2', index);
+        const rawPhone = '010-4444-5555';
+        const normalizedPhoneValue = '+821044445555';
+        const applicationName = 'earlybird-straddling-legacy-checkout';
+
+        await pool.query(
+            `INSERT INTO public.users (id, email, provider, phone_number)
+             VALUES ($1, 'straddling-legacy@example.com', 'kakao', $2)`,
+            [userId, rawPhone]
+        );
+        await pool.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, target_instagram_id, status, exclusion_decision,
+                excluded_instagram_id, access_mode, plan_cards_snapshot,
+                pricing_version, pricing_snapshot, target_followers_count,
+                target_following_count, required_plan_id, expires_at
+            ) VALUES (
+                $1, $2, 'straddling_legacy_target', 'ready', 'skip', NULL,
+                'production', $3, $4, $5, 300, 100, 'basic',
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+            )`,
+            [
+                preflightId,
+                userId,
+                planCards('basic'),
+                EARLYBIRD_PRICING_VERSION,
+                pricingSnapshot,
+            ]
+        );
+
+        const blockerClient = await pool.connect();
+        const legacyClient = await pool.connect();
+        let legacyCheckoutPromise: Promise<QueryResult<{ order_id: string }>> | null = null;
+        try {
+            await blockerClient.query('BEGIN');
+            await blockerClient.query(
+                `SELECT pg_catalog.pg_advisory_xact_lock(
+                    pg_catalog.hashtextextended($1::TEXT, 0)
+                )`,
+                [userId]
+            );
+
+            await legacyClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [applicationName]
+            );
+            await legacyClient.query('BEGIN');
+            await legacyClient.query('SET LOCAL ROLE service_role');
+            legacyCheckoutPromise = legacyClient.query<{ order_id: string }>(
+                `SELECT * FROM public.create_earlybird_checkout(
+                    $1, $2, 'basic', 'basic_product-01', 14900, $3, $4, $5,
+                    pg_catalog.clock_timestamp()
+                )`,
+                [
+                    userId,
+                    preflightId,
+                    EARLYBIRD_PRICING_VERSION,
+                    EARLYBIRD_DISCLOSURE_VERSION,
+                    EARLYBIRD_DISCLOSURE_TEXT,
+                ]
+            );
+
+            expect(await waitForLockWait(pool, applicationName)).toBe(true);
+
+            await pool.query(phoneMigrations[1]);
+            await pool.query(phoneMigrations[2]);
+            expect((await pool.query<{ order_count: string }>(
+                `SELECT pg_catalog.count(*)::TEXT AS order_count
+                 FROM public.earlybird_orders
+                 WHERE user_id = $1`,
+                [userId]
+            )).rows[0].order_count).toBe('0');
+
+            await blockerClient.query('COMMIT');
+            const checkout = await legacyCheckoutPromise;
+            await legacyClient.query('COMMIT');
+
+            expect((await pool.query<{
+                expected_buyer_phone_number_normalized: string | null;
+            }>(
+                `SELECT expected_buyer_phone_number_normalized
+                 FROM public.earlybird_orders
+                 WHERE id = $1`,
+                [checkout.rows[0].order_id]
+            )).rows[0].expected_buyer_phone_number_normalized).toBe(
+                normalizedPhoneValue
+            );
+
+            await pool.query(phoneMigrations[3]);
+            await pool.query(phoneMigrations[4]);
+            const finalized = await asService(pool, client => client.query<{
+                disposition: string;
+                order_id: string | null;
+                status: string | null;
+            }>(
+                `SELECT * FROM public.finalize_earlybird_groble_payment(
+                    'straddling-native-event', 'straddling-native-idem',
+                    'payment.completed', '2026-07-18T21:00:00+09:00',
+                    'straddling-native-payment',
+                    'different-straddling-native@example.com', $1, $2,
+                    'Straddling Native Buyer', 'basic_product-01', 14900,
+                    '2026-07-18T21:00:00+09:00'
+                )`,
+                [normalizedPhoneValue, rawPhone]
+            ));
+            expect(finalized.rows[0]).toMatchObject({
+                disposition: 'accepted',
+                order_id: checkout.rows[0].order_id,
+                status: 'paid',
+            });
+        } catch (error) {
+            await blockerClient.query('ROLLBACK').catch(() => undefined);
+            await legacyClient.query('ROLLBACK').catch(() => undefined);
+            await legacyCheckoutPromise?.catch(() => undefined);
+            throw error;
+        } finally {
+            blockerClient.release();
+            legacyClient.release();
+        }
+    }, 30_000);
 });

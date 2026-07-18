@@ -1,5 +1,5 @@
--- Phase 1/5: add only nullable columns, unvalidated checks, and the backfill helper.
--- Supabase CLI executes this file as one transaction, so keep this lock phase short.
+-- Phase 1/5: add only nullable columns, unvalidated checks, the helper, and insert trigger.
+-- The trigger is short schema work under the existing ALTER transaction; keep this lock phase short.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
@@ -72,3 +72,41 @@ $$;
 
 REVOKE ALL ON FUNCTION public.normalize_kr_mobile_e164(TEXT)
     FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.set_earlybird_order_phone_snapshot()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_phone_number_normalized TEXT;
+BEGIN
+    IF NEW.expected_buyer_phone_number_normalized IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT COALESCE(
+        public.normalize_kr_mobile_e164(buyer.phone_number),
+        buyer.phone_number_normalized
+    )
+    INTO v_phone_number_normalized
+    FROM public.users AS buyer
+    WHERE buyer.id = NEW.user_id
+      AND buyer.provider = 'kakao';
+
+    IF FOUND THEN
+        NEW.expected_buyer_phone_number_normalized := v_phone_number_normalized;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.set_earlybird_order_phone_snapshot()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TRIGGER set_earlybird_order_phone_snapshot_before_insert
+BEFORE INSERT ON public.earlybird_orders
+FOR EACH ROW
+WHEN (NEW.expected_buyer_phone_number_normalized IS NULL)
+EXECUTE FUNCTION public.set_earlybird_order_phone_snapshot();

@@ -76,6 +76,12 @@ describe('Groble phone matching migration contract', () => {
         expect(ddlMigration).toContain(
             'CREATE OR REPLACE FUNCTION public.normalize_kr_mobile_e164'
         );
+        expect(ddlMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.set_earlybird_order_phone_snapshot'
+        );
+        expect(ddlMigration).toContain(
+            'CREATE TRIGGER set_earlybird_order_phone_snapshot_before_insert'
+        );
         expect(ddlMigration).not.toMatch(/^UPDATE public\./m);
         expect(ddlMigration).not.toContain('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
         expect(ddlMigration).not.toContain('VALIDATE CONSTRAINT');
@@ -160,6 +166,36 @@ describe('Groble phone matching migration contract', () => {
         expect(migration).toMatch(
             /CREATE UNIQUE INDEX users_phone_number_normalized_unique\s+ON public\.users\(phone_number_normalized\)\s+WHERE phone_number_normalized IS NOT NULL/
         );
+    });
+
+    it('installs a null-only Kakao phone snapshot trigger in the fast DDL phase', () => {
+        const triggerFunction = functionDefinition(
+            'set_earlybird_order_phone_snapshot'
+        );
+
+        expect(triggerFunction).toMatch(
+            /RETURNS TRIGGER[\s\S]*?LANGUAGE plpgsql[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = ''/
+        );
+        expect(triggerFunction).toMatch(
+            /IF NEW\.expected_buyer_phone_number_normalized IS NOT NULL THEN[\s\S]*?RETURN NEW/
+        );
+        expect(triggerFunction).toMatch(
+            /FROM public\.users AS buyer[\s\S]*?buyer\.id = NEW\.user_id[\s\S]*?buyer\.provider = 'kakao'/
+        );
+        expect(triggerFunction).toMatch(
+            /COALESCE\(\s*public\.normalize_kr_mobile_e164\(buyer\.phone_number\),\s*buyer\.phone_number_normalized\s*\)/
+        );
+        expect(ddlMigration).toMatch(
+            /CREATE TRIGGER set_earlybird_order_phone_snapshot_before_insert\s+BEFORE INSERT ON public\.earlybird_orders\s+FOR EACH ROW\s+WHEN \(NEW\.expected_buyer_phone_number_normalized IS NULL\)\s+EXECUTE FUNCTION public\.set_earlybird_order_phone_snapshot\(\)/
+        );
+        expect(ddlMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.set_earlybird_order_phone_snapshot\(\)\s+FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(ddlMigration).not.toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.set_earlybird_order_phone_snapshot/
+        );
+        expect(ddlMigration).not.toMatch(/CREATE TRIGGER[\s\S]*?\bUPDATE\b/);
+        expect(ddlMigration).not.toMatch(/CREATE TRIGGER[\s\S]*?ON public\.users/);
     });
 
     it('bounds migration locks and defers table scans until constraint validation', () => {

@@ -55,13 +55,13 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 
 | 순서 | migration | transaction 범위와 lock 의미 |
 |---|---|---|
-| 1 | `20260718104053_add_groble_phone_matching.sql` | nullable column과 `NOT VALID` check, 정규화 helper만 추가한다. `ALTER TABLE`의 ACCESS EXCLUSIVE lock이 스캔·인덱스·RPC 작업 동안 유지되지 않게 이 파일에서 종료한다. |
-| 2 | `20260718114650_activate_groble_phone_checkout.sql` | checkout RPC와 service-role ACL만 교체한다. 기존 callback이 raw `phone_number`만 갱신해도 checkout이 직접 정규화해 snapshot하므로 이 파일 후 새 null snapshot은 생기지 않는다. |
+| 1 | `20260718104053_add_groble_phone_matching.sql` | nullable column, `NOT VALID` check, 정규화 helper와 `earlybird_orders`의 null-only Kakao `BEFORE INSERT` snapshot trigger를 추가한다. trigger 생성은 기존 `ALTER TABLE` transaction 안에서 끝나는 짧은 schema 작업이며, ACCESS EXCLUSIVE lock을 스캔·인덱스·RPC 작업 동안 유지하지 않는다. |
+| 2 | `20260718114650_activate_groble_phone_checkout.sql` | checkout RPC와 service-role ACL만 교체한다. 새 RPC도 유효한 raw `phone_number`를 우선 snapshot하고 Kakao 전화번호가 없으면 INSERT 전에 거부한다. |
 | 3 | `20260718114658_backfill_groble_phone_matching.sql` | `users`와 미해결 주문을 DML로 백필한다. 유효한 raw 번호를 우선하되 raw 값이 무효하면 기존 trusted normalized 값을 보존하고, 정규화 중복이 있으면 전체 transaction을 중단한다. |
 | 4 | `20260718114707_validate_groble_phone_matching.sql` | check validation과 3개의 일반 index build만 수행한다. 인덱스의 write-blocking lock을 1번 ACCESS EXCLUSIVE transaction과 분리한다. |
 | 5 | `20260718120345_activate_groble_phone_finalization.sql` | 12개 인자 finalizer, 9개 인자 호환 wrapper, refund RPC와 grant만 교체한다. index build 실패와 finalization 계약 활성화를 분리한다. |
 
-다섯 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 1번과 2번 사이에 기존 checkout RPC가 만든 null snapshot은 3번이 백필한다. 2번이 커밋된 후에는 raw Kakao 전화번호를 유효할 때 우선 정규화하고, raw 값이 무효할 때만 저장된 normalized 값으로 fallback하므로 3번 후 스냅샷 공백이 없다. 이 불변식은 checkout 중단이나 maintenance-only workaround에 의존하지 않는다.
+다섯 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 1번이 커밋된 뒤 발생하는 모든 주문 INSERT는 RPC 버전과 무관하게 trigger를 통과한다. 따라서 2번 교체 전에 시작해 사용자 advisory lock에서 대기하다가 3번 백필 후 이전 함수 본문으로 INSERT하는 호출도, INSERT 순간 유효한 raw Kakao 번호를 우선 정규화하고 raw 값이 무효할 때만 저장된 normalized 값으로 fallback해 snapshot한다. 1번 전에 이미 존재한 null snapshot은 3번이 백필한다. trigger는 null인 Kakao INSERT에만 동작하고 UPDATE에는 동작하지 않으므로 기존 snapshot과 Google 이메일 fallback을 변경하지 않는다. 이 불변식은 checkout 중단이나 maintenance-only workaround에 의존하지 않는다.
 
 2026-07-18 원격 실측 기준은 `users` 약 0행/49KB, `earlybird_orders` 1행/128KB, `earlybird_webhook_events` 10행/72KB이다. push 직전 SQL editor에서 다음을 다시 실행한다.
 

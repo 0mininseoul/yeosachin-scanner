@@ -4,7 +4,7 @@
 
 **Goal:** Match Groble payments to the correct earlybird order by the buyer's Kakao phone number even when the Groble and login emails differ, while retaining the existing email fallback and payment safety invariants.
 
-**Architecture:** Normalize Korean mobile numbers to E.164 in one shared server module and snapshot the normalized Kakao number into each checkout order. Five ordered forward-only Supabase migrations isolate fast schema DDL, checkout snapshot activation, data backfill, validation/index construction, and finalization activation while preserving atomicity inside each implicit CLI transaction. Checkout activation precedes backfill and derives snapshots from a valid raw Kakao phone before falling back to the stored normalized value, closing the rolling-deploy write gap. The final activation keeps a service-only 9-argument compatibility wrapper and installs the canonical 12-argument evidence RPC. The webhook parser supplies bounded buyer evidence, while authenticated DTOs and analytics never expose it.
+**Architecture:** Normalize Korean mobile numbers to E.164 in one shared server module and snapshot the normalized Kakao number into each checkout order. Five ordered forward-only Supabase migrations isolate fast schema DDL, checkout snapshot activation, data backfill, validation/index construction, and finalization activation while preserving atomicity inside each implicit CLI transaction. Phase 1 installs a null-only Kakao `BEFORE INSERT` trigger so even a legacy checkout body already waiting on the user advisory lock snapshots at its eventual INSERT; phase 2 then activates the raw-first checkout contract before backfill. The final activation keeps a service-only 9-argument compatibility wrapper and installs the canonical 12-argument evidence RPC. The webhook parser supplies bounded buyer evidence, while authenticated DTOs and analytics never expose it.
 
 **Tech Stack:** Next.js 16 App Router, TypeScript, `libphonenumber-js`, Zod, Supabase/Postgres RLS and SECURITY DEFINER RPCs, Vitest, PGlite.
 
@@ -195,6 +195,7 @@ Read all five files in timestamp order. Assert both the combined feature contrac
 
 ```ts
 expect(ddlMigration).toContain('ADD COLUMN phone_number_normalized TEXT');
+expect(ddlMigration).toContain('BEFORE INSERT ON public.earlybird_orders');
 expect(ddlMigration).not.toMatch(/^UPDATE public\./m);
 expect(checkoutMigration).toContain('create_earlybird_checkout');
 expect(checkoutMigration).not.toContain('finalize_earlybird_groble_payment');
@@ -203,7 +204,7 @@ expect(validationMigration).not.toContain('CREATE OR REPLACE FUNCTION');
 expect(finalizationMigration).not.toContain('create_earlybird_checkout');
 ```
 
-Also assert that no file contains both an `ALTER TABLE ... ADD` action and a top-level backfill, all checks are added `NOT VALID` and validated only in phase 4, the checkout phase normalizes raw phone before falling back to stored normalized phone, authenticated field-level grants remain exactly the pre-existing safe columns, and only `service_role` can execute either finalizer signature and the replaced checkout/refund RPCs.
+Also assert that no file contains both an `ALTER TABLE ... ADD` action and a top-level backfill, all checks are added `NOT VALID` and validated only in phase 4, and phase 1 contains a `SECURITY DEFINER`/empty-search-path trigger function that is revoked from `PUBLIC`, `anon`, `authenticated`, and `service_role`. The trigger must be null-only, Kakao-only, `BEFORE INSERT` only, and raw-first with stored-normalized fallback. Assert that no trigger writes normalized user metadata, the checkout phase uses the same derivation, authenticated field-level grants remain exactly the pre-existing safe columns, and only `service_role` can execute either finalizer signature and the replaced checkout/refund RPCs.
 
 Run: `npm test -- lib/services/earlybird/groble-phone-migration-contract.test.ts`
 
@@ -223,9 +224,10 @@ it('preserves mismatch, duplicate event, duplicate payment and overflow behavior
 it('snapshots the current user phone and does not follow later profile changes');
 it('rejects a Kakao checkout without a valid normalized phone');
 it('allows a legacy Google checkout without a phone snapshot');
+it('snapshots an old checkout body that inserts after the backfill');
 ```
 
-Apply all five migrations sequentially in separate `database.exec` calls, then run: `npm test -- lib/services/earlybird/groble-phone-pglite.test.ts`
+Apply all five migrations sequentially in separate `database.exec` calls. Copy the presale checkout body under a test-only legacy name before phase 2, invoke it after phase 3, and prove the phase-1 trigger snapshots the phone even though `service_role` cannot execute the trigger function directly. Add an environment-gated native PostgreSQL test that holds the user advisory lock, starts the real legacy checkout until it reports a lock wait, commits phases 2 and 3, then releases the lock and verifies its eventual INSERT plus different-email finalization. Run: `npm test -- lib/services/earlybird/groble-phone-pglite.test.ts`
 
 Expected: FAIL because the columns and replaced RPCs do not exist.
 
@@ -235,13 +237,13 @@ Every file sets `lock_timeout = '5s'` and `statement_timeout = '2min'`. Keep the
 
 | Phase | Allowed work |
 |---|---|
-| 1, `add` | Add nullable user/order/webhook columns, add eight bounded checks as `NOT VALID`, create and revoke the strict normalization helper. Do not backfill, scan, validate, index, replace an application RPC, or grant browser access in this transaction. |
+| 1, `add` | Add nullable user/order/webhook columns, add eight bounded checks as `NOT VALID`, create and revoke the strict normalization helper, and install the service-internal null-only Kakao `BEFORE INSERT` order snapshot trigger. Trigger creation is short schema work inside the existing `ALTER TABLE` transaction. Do not backfill, scan, validate, index, replace an application RPC, or grant browser access in this transaction. |
 | 2, `activate checkout` | Replace only `create_earlybird_checkout` and its ACL. Snapshot `COALESCE(normalize(raw phone), stored normalized phone)` under the user advisory and row locks so legacy callbacks remain compatible before user backfill. |
 | 3, `backfill` | Normalize `users` from a valid raw phone while preserving an existing trusted normalized value when raw input is invalid, abort on duplicate non-null normalized phones, and snapshot unresolved `payment_pending` and `cancelled` orders with no payment ID. Do not run `ALTER TABLE`, create indexes, or replace functions. |
 | 4, `validate` | Validate all eight checks and create the user unique index plus pending and cancelled phone lookup indexes. Normal indexes are intentional because the CLI cannot run a concurrent index outside its implicit transaction; use the measured-size deployment gate in `docs/groble-earlybird-operations.md`. |
 | 5, `activate finalization` | Restate the safe authenticated projection, replace canonical finalizer/refund RPCs, install the rolling compatibility wrapper, and apply their service-role ACLs. Do not redefine checkout or mix schema DDL, backfill, validation, or indexes into this transaction. |
 
-Nullable user phones remain required for old Google accounts and Kakao accounts whose consent response has no phone. Orders created by the legacy checkout between phases 1 and 2 may have null snapshots and are repaired by phase 3. Once phase 2 commits, every new Kakao checkout receives a snapshot even while old app callbacks still update only raw phone, so phase 3 establishes a gap-free cutoff without stopping checkout traffic. A duplicate abort rolls phase 3 back as a unit while phases 1 and 2 remain compatible.
+Nullable user phones remain required for old Google accounts and Kakao accounts whose consent response has no phone. Once phase 1 commits, its order trigger derives every null Kakao snapshot at INSERT from `COALESCE(normalize(raw phone), stored normalized phone)`. This covers a legacy checkout statement that began before phase 2, waited on the user advisory lock through phase 3, and only then executed its old INSERT. Pre-phase-1 null snapshots are repaired by phase 3. Phase 2 additionally rejects new Kakao checkout calls that have no usable phone before INSERT. A duplicate abort rolls phase 3 back as a unit while phases 1 and 2 remain compatible.
 
 - [ ] **Step 5: Replace checkout RPC with an immutable phone snapshot**
 
@@ -257,7 +259,7 @@ IF v_user_provider = 'kakao' AND v_user_phone_number_normalized IS NULL THEN
 END IF;
 ```
 
-Insert `v_user_phone_number_normalized` into `expected_buyer_phone_number_normalized`. A valid current raw phone wins so legacy callbacks are covered; an invalid or absent raw phone falls back to the trusted normalized column. Existing Google users may insert `NULL`, preserving email matching. Do not add a trigger or derive phone from arbitrary auth metadata.
+Insert `v_user_phone_number_normalized` into `expected_buyer_phone_number_normalized`. A valid current raw phone wins so legacy callbacks are covered; an invalid or absent raw phone falls back to the trusted normalized column. Existing Google users may insert `NULL`, preserving email matching. The phase-1 order trigger applies the same derivation only when the inserted snapshot is null and the referenced user is Kakao; it never runs on UPDATE, so the snapshot remains immutable. Give its `SECURITY DEFINER` function an empty search path and revoke direct execution from every application role. Do not add a users trigger or derive normalized identity from arbitrary auth metadata.
 
 - [ ] **Step 6: Activate canonical and rolling-compatible finalization RPCs**
 

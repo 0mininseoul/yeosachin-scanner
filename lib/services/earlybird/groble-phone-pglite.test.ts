@@ -507,7 +507,10 @@ describe('Groble phone migration upgrade behavior', () => {
             const createTransitionCheckout = async (
                 index: number,
                 phone: string,
-                normalizedPhoneValue: string | null = null
+                normalizedPhoneValue: string | null = null,
+                functionName:
+                    | 'create_earlybird_checkout'
+                    | 'create_earlybird_checkout_legacy_test' = 'create_earlybird_checkout'
             ): Promise<CheckoutRow> => {
                 const userId = uuid(USER_NAMESPACE, index);
                 const preflightId = uuid(PREFLIGHT_NAMESPACE, index);
@@ -543,7 +546,7 @@ describe('Groble phone migration upgrade behavior', () => {
                 );
                 return (await asServiceOn<CheckoutRow>(
                     database,
-                    `SELECT * FROM public.create_earlybird_checkout(
+                    `SELECT * FROM public.${functionName}(
                         $1, $2, 'basic', $3, 14900, $4, $5, $6,
                         pg_catalog.clock_timestamp()
                     )`,
@@ -558,6 +561,33 @@ describe('Groble phone migration upgrade behavior', () => {
                 )).rows[0];
             };
 
+            expect((await database.query<{
+                anon_can_execute: boolean;
+                authenticated_can_execute: boolean;
+                service_can_execute: boolean;
+            }>(
+                `SELECT
+                    pg_catalog.has_function_privilege(
+                        'anon',
+                        'public.set_earlybird_order_phone_snapshot()',
+                        'EXECUTE'
+                    ) AS anon_can_execute,
+                    pg_catalog.has_function_privilege(
+                        'authenticated',
+                        'public.set_earlybird_order_phone_snapshot()',
+                        'EXECUTE'
+                    ) AS authenticated_can_execute,
+                    pg_catalog.has_function_privilege(
+                        'service_role',
+                        'public.set_earlybird_order_phone_snapshot()',
+                        'EXECUTE'
+                    ) AS service_can_execute`
+            )).rows[0]).toEqual({
+                anon_can_execute: false,
+                authenticated_can_execute: false,
+                service_can_execute: false,
+            });
+
             const legacyCheckout = await createTransitionCheckout(908, '010-5555-6666');
             expect((await database.query<{
                 expected_buyer_phone_number_normalized: string | null;
@@ -566,7 +596,14 @@ describe('Groble phone migration upgrade behavior', () => {
                  FROM public.earlybird_orders
                  WHERE id = $1`,
                 [legacyCheckout.order_id]
-            )).rows[0].expected_buyer_phone_number_normalized).toBeNull();
+            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821055556666');
+
+            await database.exec(`
+                ALTER FUNCTION public.create_earlybird_checkout(
+                    UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT,
+                    TIMESTAMP WITH TIME ZONE
+                ) RENAME TO create_earlybird_checkout_legacy_test
+            `);
 
             await database.exec(phoneCheckoutMigration);
             const transitionCheckout = await createTransitionCheckout(909, '010-7777-8888');
@@ -585,6 +622,57 @@ describe('Groble phone migration upgrade behavior', () => {
             );
 
             await database.exec(phoneBackfillMigration);
+            const straddlingLegacyCheckout = await createTransitionCheckout(
+                911,
+                '010-2222-3333',
+                null,
+                'create_earlybird_checkout_legacy_test'
+            );
+            expect((await database.query<{
+                expected_buyer_phone_number_normalized: string | null;
+            }>(
+                `SELECT expected_buyer_phone_number_normalized
+                 FROM public.earlybird_orders
+                 WHERE id = $1`,
+                [straddlingLegacyCheckout.order_id]
+            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821022223333');
+            const straddlingFallbackCheckout = await createTransitionCheckout(
+                912,
+                '02-123-4567',
+                '+821088887777',
+                'create_earlybird_checkout_legacy_test'
+            );
+            expect((await database.query<{
+                expected_buyer_phone_number_normalized: string | null;
+            }>(
+                `SELECT expected_buyer_phone_number_normalized
+                 FROM public.earlybird_orders
+                 WHERE id = $1`,
+                [straddlingFallbackCheckout.order_id]
+            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821088887777');
+
+            await database.query(
+                `UPDATE public.users
+                 SET phone_number = '010-9999-0000',
+                     phone_number_normalized = '+821099990000'
+                 WHERE id = $1`,
+                [uuid(USER_NAMESPACE, 911)]
+            );
+            await database.query(
+                `UPDATE public.earlybird_orders
+                 SET updated_at = pg_catalog.clock_timestamp()
+                 WHERE id = $1`,
+                [straddlingLegacyCheckout.order_id]
+            );
+            expect((await database.query<{
+                expected_buyer_phone_number_normalized: string | null;
+            }>(
+                `SELECT expected_buyer_phone_number_normalized
+                 FROM public.earlybird_orders
+                 WHERE id = $1`,
+                [straddlingLegacyCheckout.order_id]
+            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821022223333');
+
             await database.exec(phoneValidationMigration);
             await database.exec(phoneFinalizationMigration);
 
@@ -626,17 +714,17 @@ describe('Groble phone migration upgrade behavior', () => {
             const finalized = (await asServiceOn<FinalizeRow>(
                 database,
                 `SELECT * FROM public.finalize_earlybird_groble_payment(
-                    'transition-event', 'transition-idem', 'payment.completed',
-                    '2026-07-18T21:00:00+09:00', 'transition-payment',
-                    'different-transition-buyer@example.com', '+821077778888',
-                    '010-7777-8888', 'Transition Buyer', $1, 14900,
+                    'straddling-event', 'straddling-idem', 'payment.completed',
+                    '2026-07-18T21:00:00+09:00', 'straddling-payment',
+                    'different-straddling-buyer@example.com', '+821022223333',
+                    '010-2222-3333', 'Straddling Buyer', $1, 14900,
                     '2026-07-18T21:00:00+09:00'
                 )`,
                 [BASIC_PRODUCT_ID]
             )).rows[0];
             expect(finalized).toMatchObject({
                 disposition: 'accepted',
-                order_id: transitionCheckout.order_id,
+                order_id: straddlingLegacyCheckout.order_id,
                 status: 'paid',
             });
         } finally {

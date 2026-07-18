@@ -43,7 +43,7 @@
 
 - 카카오 사용자의 정규화 전화번호가 없으면 checkout 스냅샷을 생성하지 않고 재로그인 또는 고객 지원 안내를 표시한다.
 - checkout RPC는 현재 프로필에서 파생한 정규화 전화번호를 주문의 `expected_buyer_phone_number_normalized`로 스냅샷한다. webhook은 로그인 프로필의 사후 변경이 아니라 이 불변 checkout 증거와 매칭한다.
-- migration 전환 중 checkout RPC는 유효한 raw `phone_number`를 먼저 정규화하고, raw 값이 무효할 때만 저장된 normalized 값으로 fallback한다. 이 RPC를 백필보다 먼저 활성화해 이전 callback이 raw 값만 갱신하는 동안에도 새 주문의 snapshot 공백을 막는다.
+- migration 1번의 `earlybird_orders` `BEFORE INSERT` trigger는 snapshot이 null이고 사용자가 Kakao일 때만 유효한 raw `phone_number`를 먼저 정규화하고, raw 값이 무효할 때만 저장된 normalized 값으로 fallback한다. UPDATE에는 동작하지 않는다. 따라서 2번 RPC 교체 전에 시작해 사용자 advisory lock에서 대기하다가 3번 백필 후 이전 본문으로 INSERT하는 checkout도 snapshot 공백을 만들지 않는다. 2번 RPC도 같은 파생 규칙을 적용하고 전화번호 없는 새 Kakao 호출을 INSERT 전에 거부한다.
 - 기존 Google 사용자의 활성 세션은 기존 이메일 매칭 계약으로 checkout을 완료할 수 있다.
 - 새 Google 로그인 진입점은 UI에 노출하지 않는다.
 
@@ -74,7 +74,7 @@
 
 ### 데이터 모델
 
-`users`에 `phone_number_normalized`를 추가하고 널이 아닌 값에 대한 유일 인덱스를 둔다. 5개의 순차 migration이 nullable DDL, checkout snapshot RPC, 백필·중복 중단, check validation·index, finalization RPC를 각 implicit transaction으로 분리한다. 1번과 2번 사이의 기존 checkout이 만든 null snapshot은 3번이 채우고, 2번 커밋 후의 새 주문은 항상 snapshot을 기록한다. 백필은 유효한 raw 번호를 우선하되 raw 값이 무효하면 기존 trusted normalized 값을 지우지 않는다. 중복이 발견되면 자동으로 하나를 선택하지 않고 3번 transaction을 중단해 운영자가 계정 소유권을 확인하게 한다.
+`users`에 `phone_number_normalized`를 추가하고 널이 아닌 값에 대한 유일 인덱스를 둔다. 5개의 순차 migration이 nullable DDL·짧은 order INSERT trigger, checkout snapshot RPC, 백필·중복 중단, check validation·index, finalization RPC를 각 implicit transaction으로 분리한다. 1번 커밋 후의 null Kakao INSERT는 호출이 사용하는 RPC 본문 버전과 무관하게 trigger가 snapshot을 채우며, 1번 전에 존재한 null snapshot은 3번이 채운다. trigger function은 `SECURITY DEFINER`와 빈 search path를 사용하고 application role의 직접 실행 권한은 없으며, 임의 metadata를 `users`에 쓰는 trigger는 두지 않는다. 백필은 유효한 raw 번호를 우선하되 raw 값이 무효하면 기존 trusted normalized 값을 지우지 않는다. 중복이 발견되면 자동으로 하나를 선택하지 않고 3번 transaction을 중단해 운영자가 계정 소유권을 확인하게 한다.
 
 `earlybird_orders`에 다음 운영자 전용 컬럼을 추가한다.
 
@@ -275,11 +275,11 @@ Axiom 공식 Next.js SDK를 사용해 다음 경계를 만든다.
 
 ## 8. 배포 순서
 
-1. 통합 테스트가 가능한 5개의 순차 Supabase migration을 CLI로 생성한다. DDL, checkout 활성화, DML, validation/index, finalization/grant transaction 경계를 혼합하지 않는다.
+1. 통합 테스트가 가능한 5개의 순차 Supabase migration을 CLI로 생성한다. 1번의 nullable DDL·짧은 order INSERT trigger, checkout 활성화, DML, validation/index, finalization/grant transaction 경계를 혼합하지 않는다.
 2. `ascentum03`에 `yeosachin-logs` 데이터셋과 ingest 전용 runtime token을 생성한다.
 3. 관측 SDK, 인증 UI, Groble parser·RPC를 구현한다.
 4. 로컬 단위·DB·빌드 검증을 통과한다.
-5. push 직전 원격 row count·table size와 장기 transaction을 확인하고 5개 Supabase migration을 순서대로 반영한다. checkout을 백필보다 먼저 활성화하는 순서를 바꾸지 않는다. 이후 Vercel preview에 Amplitude key와 Axiom runtime 변수를 추가한다.
+5. push 직전 원격 row count·table size와 장기 transaction을 확인하고 5개 Supabase migration을 순서대로 반영한다. INSERT trigger가 포함된 1번, checkout 활성화 2번, 백필 3번의 순서를 바꾸지 않는다. 이후 Vercel preview에 Amplitude key와 Axiom runtime 변수를 추가한다.
 6. preview에서 대표 사용자 흐름, Groble 서명 테스트, Amplitude event, Axiom ingest를 검증한다.
 7. Amplitude와 Axiom 웹 UI에서 대시보드·세그먼트·모니터를 구성한다.
 8. 코드 리뷰와 회귀 검증 후 main에 merge한다.
