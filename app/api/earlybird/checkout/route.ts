@@ -74,7 +74,31 @@ function scheduleCheckoutEvent(input: {
     const amountKrw = isPaidEarlybirdPlanId(input.planId)
         ? EARLYBIRD_PLAN_CATALOG[input.planId].earlybirdAmountKrw
         : undefined;
-    after(async () => {
+    const success = Boolean(input.orderId);
+    let emitted = false;
+    const emitCheckoutEvent = (targetInstagramId?: string): void => {
+        if (emitted) return;
+        emitted = true;
+        operationalLogger.emit({
+            event: success ? 'earlybird.checkout_created' : 'earlybird.checkout_failed',
+            severity: success ? 'info' : (input.status ?? 500) >= 500 ? 'error' : 'warn',
+            fields: {
+                ...input.context,
+                user_id: input.userId,
+                preflight_id: input.preflightId,
+                ...(input.orderId ? { order_id: input.orderId } : {}),
+                ...(targetInstagramId ? { target_instagram_id: targetInstagramId } : {}),
+                plan_id: input.planId,
+                ...(amountKrw === undefined ? {} : { amount_krw: amountKrw }),
+                operation: 'checkout',
+                disposition: success
+                    ? input.created ? 'accepted' : 'exists'
+                    : 'rejected',
+                ...(input.errorCode ? { error_code: input.errorCode } : {}),
+            },
+        });
+    };
+    const emitBackgroundEvent = async (): Promise<void> => {
         let targetInstagramId: string | undefined;
         try {
             const preflight = await preflightStore.findForOwner(
@@ -87,29 +111,22 @@ function scheduleCheckoutEvent(input: {
         }
 
         try {
-            const success = Boolean(input.orderId);
-            operationalLogger.emit({
-                event: success ? 'earlybird.checkout_created' : 'earlybird.checkout_failed',
-                severity: success ? 'info' : (input.status ?? 500) >= 500 ? 'error' : 'warn',
-                fields: {
-                    ...input.context,
-                    user_id: input.userId,
-                    preflight_id: input.preflightId,
-                    ...(input.orderId ? { order_id: input.orderId } : {}),
-                    ...(targetInstagramId ? { target_instagram_id: targetInstagramId } : {}),
-                    plan_id: input.planId,
-                    ...(amountKrw === undefined ? {} : { amount_krw: amountKrw }),
-                    operation: 'checkout',
-                    disposition: success
-                        ? input.created ? 'accepted' : 'exists'
-                        : 'rejected',
-                    ...(input.errorCode ? { error_code: input.errorCode } : {}),
-                },
-            });
+            emitCheckoutEvent(targetInstagramId);
         } finally {
             await flushOperationalLogs();
         }
-    });
+    };
+
+    try {
+        after(emitBackgroundEvent);
+    } catch {
+        try {
+            // The route-level observer will flush this bounded event with the response.
+            emitCheckoutEvent();
+        } catch {
+            // Observability must never alter an already-decided checkout response.
+        }
+    }
 }
 
 async function handlePOST(

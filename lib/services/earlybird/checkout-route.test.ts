@@ -72,6 +72,7 @@ function authenticate(userId: string | null = USER_ID): void {
 describe('earlybird checkout and waitlist routes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.after.mockReset();
         authenticate();
         process.env.GROBLE_BASIC_PRODUCT_ID = 'basic_product-01';
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';
@@ -197,6 +198,9 @@ describe('earlybird checkout and waitlist routes', () => {
                 disposition: 'accepted',
             },
         });
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_created'
+        )).toHaveLength(1);
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
             /basic_product-01|basic-checkout-a1/
         );
@@ -235,7 +239,88 @@ describe('earlybird checkout and waitlist routes', () => {
                 disposition: 'exists',
             }),
         });
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_created'
+        )).toHaveLength(1);
         expect(mocks.flush).toHaveBeenCalledOnce();
+    });
+
+    it('preserves a newly-created checkout when background registration throws', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: [{ order_id: ORDER_ID, created: true }],
+            error: null,
+        });
+        mocks.after.mockImplementation(() => {
+            throw new Error('after registration unavailable');
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(201);
+        await expect(response.json()).resolves.toEqual({
+            orderId: ORDER_ID,
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
+        });
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
+        const createdEvents = mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_created'
+        );
+        expect(createdEvents).toEqual([[{
+            event: 'earlybird.checkout_created',
+            severity: 'info',
+            fields: expect.objectContaining({
+                user_id: USER_ID,
+                preflight_id: PREFLIGHT_ID,
+                order_id: ORDER_ID,
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                operation: 'checkout',
+                disposition: 'accepted',
+            }),
+        }]]);
+        expect(createdEvents[0][0].fields).not.toHaveProperty('target_instagram_id');
+        expect(mocks.flush).not.toHaveBeenCalled();
+    });
+
+    it('preserves an idempotent checkout replay when background registration throws', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: [{ order_id: ORDER_ID, created: false }],
+            error: null,
+        });
+        mocks.after.mockImplementation(() => {
+            throw new Error('after registration unavailable');
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'standard',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            orderId: ORDER_ID,
+            checkoutUrl: 'https://groble.im/payment/standard-checkout-b2',
+        });
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
+        const createdEvents = mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_created'
+        );
+        expect(createdEvents).toHaveLength(1);
+        expect(createdEvents[0][0]).toEqual({
+            event: 'earlybird.checkout_created',
+            severity: 'info',
+            fields: expect.objectContaining({
+                order_id: ORDER_ID,
+                plan_id: 'standard',
+                disposition: 'exists',
+            }),
+        });
+        expect(createdEvents[0][0].fields).not.toHaveProperty('target_instagram_id');
     });
 
     it('maps server plan validation failures and never creates a Plus payment object', async () => {
@@ -312,7 +397,48 @@ describe('earlybird checkout and waitlist routes', () => {
                 error_code: 'VALIDATION_ERROR',
             }),
         });
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_failed'
+        )).toHaveLength(1);
         expect(mocks.flush).toHaveBeenCalledOnce();
+    });
+
+    it('preserves a validated 409 when background registration throws', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: null,
+            error: { message: 'CHECKOUT_PHONE_REQUIRED' },
+        });
+        mocks.after.mockImplementation(() => {
+            throw new Error('after registration unavailable');
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+            code: 'CHECKOUT_PHONE_REQUIRED',
+            error: '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.',
+        });
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
+        const failedEvents = mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_failed'
+        );
+        expect(failedEvents).toHaveLength(1);
+        expect(failedEvents[0][0]).toEqual({
+            event: 'earlybird.checkout_failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                preflight_id: PREFLIGHT_ID,
+                plan_id: 'basic',
+                disposition: 'rejected',
+                error_code: 'VALIDATION_ERROR',
+            }),
+        });
+        expect(failedEvents[0][0].fields).not.toHaveProperty('target_instagram_id');
     });
 
     it('creates only a Plus waitlist row through the service-only RPC', async () => {
