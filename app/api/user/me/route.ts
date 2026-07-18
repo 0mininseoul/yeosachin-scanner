@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
 import type { User } from '@supabase/supabase-js';
+import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
 
 // 소셜 로그인(카카오/구글)이 내려준 프로필 정보를 users 테이블 컬럼으로 매핑.
 // 카카오 승인 항목: 이름·성별·출생연도·전화번호·닉네임·프로필사진·이메일.
@@ -9,16 +10,14 @@ import type { User } from '@supabase/supabase-js';
 //    실제 로그인 후 users 테이블에 값이 비어 있으면 키 매핑을 조정할 것.
 function extractProfile(user: User) {
     const m = (user.user_metadata ?? {}) as Record<string, unknown>;
-    const s = (v: unknown): string | null =>
-        typeof v === 'string' && v.trim() ? v.trim() : typeof v === 'number' ? String(v) : null;
-    return {
-        name: s(m.name) ?? s(m.full_name),
-        nickname: s(m.nickname) ?? s(m.preferred_username) ?? s(m.user_name) ?? s(m.name),
-        profile_image: s(m.avatar_url) ?? s(m.picture) ?? s(m.profile_image),
-        phone_number: s(user.phone) ?? s(m.phone_number) ?? s(m.phone),
-        gender: s(m.gender),
-        birthyear: s(m.birthyear) ?? s(m.birth_year),
-    };
+    return buildAuthProfilePatch({
+        name: [m.name, m.full_name],
+        nickname: [m.nickname, m.preferred_username, m.user_name, m.name],
+        profileImage: [m.avatar_url, m.picture, m.profile_image],
+        phoneNumber: [user.phone, m.phone_number, m.phone],
+        gender: [m.gender],
+        birthyear: [m.birthyear, m.birth_year],
+    });
 }
 
 export async function GET() {

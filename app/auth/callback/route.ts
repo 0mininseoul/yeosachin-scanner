@@ -6,10 +6,21 @@ import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
+import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
+
+function asRecord(value: unknown): Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+}
 
 // 카카오 성별·출생연도·전화번호 등은 OIDC ID 토큰에 없고 REST API(/v2/user/me)에만 있으므로,
 // 로그인 직후 확보한 provider_token(카카오 access token)으로 직접 조회해 users 테이블에 저장한다.
-async function syncKakaoProfile(userId: string, email: string | undefined, providerToken: string) {
+async function syncKakaoProfile(
+    userId: string,
+    email: string | undefined,
+    providerToken: string
+) {
     const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${providerToken}` },
         cache: 'no-store',
@@ -18,25 +29,27 @@ async function syncKakaoProfile(userId: string, email: string | undefined, provi
         console.error('Kakao /v2/user/me failed:', res.status);
         return;
     }
-    const data = await res.json();
-    const account = data?.kakao_account ?? {};
-    const profile = account?.profile ?? {};
-
-    const patch: Record<string, string> = { provider: 'kakao' };
-    if (email) patch.email = email;
-    const name = account.name ?? profile.nickname;
-    if (name) patch.name = name;
-    if (profile.nickname) patch.nickname = profile.nickname;
-    const image = profile.profile_image_url ?? profile.thumbnail_image_url;
-    if (image) patch.profile_image = image;
-    if (account.gender) patch.gender = account.gender; // 'male' | 'female'
-    if (account.birthyear) patch.birthyear = String(account.birthyear); // 'YYYY'
-    if (account.phone_number) patch.phone_number = account.phone_number;
+    const data: unknown = await res.json();
+    const account = asRecord(asRecord(data).kakao_account);
+    const profile = asRecord(account.profile);
+    const profilePatch = buildAuthProfilePatch({
+        name: [account.name, profile.nickname],
+        nickname: [profile.nickname],
+        profileImage: [profile.profile_image_url, profile.thumbnail_image_url],
+        gender: [account.gender],
+        birthyear: [account.birthyear],
+        phoneNumber: [account.phone_number],
+    });
 
     const { error } = await supabaseAdmin
         .from('users')
-        .upsert({ id: userId, ...patch }, { onConflict: 'id' });
-    if (error) console.error('users upsert (kakao profile) failed:', error.message);
+        .upsert({
+            id: userId,
+            ...(email ? { email } : {}),
+            provider: 'kakao',
+            ...profilePatch,
+        }, { onConflict: 'id' });
+    if (error) console.error('users upsert (kakao profile) failed:', error.code);
 }
 
 export async function GET(request: Request) {
@@ -92,8 +105,8 @@ export async function GET(request: Request) {
     ) {
         try {
             await syncKakaoProfile(authedUser.id, authedUser.email ?? undefined, session.provider_token);
-        } catch (e) {
-            console.error('Kakao profile sync error:', e);
+        } catch {
+            console.error('Kakao profile sync failed');
         }
     }
 
