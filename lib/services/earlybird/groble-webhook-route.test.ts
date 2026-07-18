@@ -220,8 +220,15 @@ describe('signed Groble webhook route', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
-    it('passes only normalized official payment evidence to the atomic finalizer', async () => {
-        const body = JSON.stringify(payload());
+    it('accepts a different Groble email through phone evidence and forwards exact buyer data', async () => {
+        const body = JSON.stringify(payload({
+            buyer: {
+                ...payload().data.object.buyer,
+                email: 'different-groble-buyer@example.net',
+                phoneNumber: '  010-1234-5678  ',
+                displayName: '  결제 구매자  ',
+            },
+        }));
         const response = await POST(request(body));
 
         expect(response.status).toBe(200);
@@ -231,20 +238,60 @@ describe('signed Groble webhook route', () => {
             p_event_type: 'payment.completed',
             p_occurred_at: '2026-07-17T21:00:00+09:00',
             p_payment_id: 'merchant_0001',
-            p_buyer_email: 'buyer@example.com',
+            p_buyer_email: 'different-groble-buyer@example.net',
+            p_buyer_phone_normalized: '+821012345678',
+            p_buyer_phone_raw: '010-1234-5678',
+            p_buyer_display_name: '결제 구매자',
             p_product_id: 'basic_product-01',
             p_amount_krw: 14_900,
             p_paid_at: '2026-07-17T21:00:00+09:00',
         });
         const responseText = await response.text();
         expect(responseText).toContain('accepted');
-        expect(responseText).not.toMatch(/buyer@example|01000000000|merchant_0001|basic_product-01/);
+        expect(responseText).not.toMatch(
+            /different-groble-buyer|010-1234-5678|결제 구매자|merchant_0001|basic_product-01/
+        );
     });
 
     it.each([
+        ['absent', undefined, null],
+        ['invalid', 'not-a-korean-mobile', 'not-a-korean-mobile'],
+    ])('forwards %s phone evidence with a null normalized phone', async (
+        _,
+        phoneNumber,
+        expectedRawPhone
+    ) => {
+        const buyer: Record<string, unknown> = {
+            type: 'MEMBER',
+            email: 'buyer@example.com',
+        };
+        if (phoneNumber !== undefined) buyer.phoneNumber = phoneNumber;
+
+        const response = await POST(request(JSON.stringify(payload({ buyer }))));
+
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment',
+            expect.objectContaining({
+                p_buyer_phone_normalized: null,
+                p_buyer_phone_raw: expectedRawPhone,
+                p_buyer_display_name: null,
+            })
+        );
+        const responseText = await response.text();
+        expect(responseText).not.toMatch(/buyer@example|not-a-korean-mobile/);
+    });
+
+    it.each([
+        ['unmatched', null],
+        ['ambiguous_buyer', null],
         ['mismatch', 'payment_failed'],
         ['duplicate_event', 'paid'],
+        ['duplicate_payment', 'payment_failed'],
         ['overflow_refund_required', 'overflow_refund_required'],
+        ['cancel_duplicate_event', 'refund_pending'],
+        ['cancel_unmatched', null],
+        ['cancel_mismatch', 'payment_failed'],
         ['cancel_before_payment', 'refund_pending'],
         ['late_cancelled_payment', 'refund_pending'],
     ])('acknowledges the %s disposition without asking Groble to retry', async (disposition, status) => {

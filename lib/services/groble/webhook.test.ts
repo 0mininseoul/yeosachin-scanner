@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
@@ -33,9 +33,9 @@ function paymentPayload(overrides: Record<string, unknown> = {}) {
                 merchantUid: 'merchant_0001',
                 buyer: {
                     type: 'MEMBER',
-                    displayName: '구매자',
+                    displayName: '  구매자  ',
                     email: 'BUYER@Example.com ',
-                    phoneNumber: '01000000000',
+                    phoneNumber: '  010-1234-5678  ',
                 },
                 content: {
                     id: 'basic_product-01',
@@ -150,10 +150,67 @@ describe('Groble payment.completed parser', () => {
             occurredAt: '2026-07-17T21:00:00+09:00',
             paymentId: 'merchant_0001',
             buyerEmail: 'buyer@example.com',
+            buyerPhoneNumber: '010-1234-5678',
+            buyerDisplayName: '구매자',
             productId: 'basic_product-01',
             amountKrw: 14_900,
             paidAt: '2026-07-17T21:00:00+09:00',
         });
+    });
+
+    it('returns null buyer phone and display name for legacy completed events', () => {
+        const event = paymentPayload({
+            buyer: {
+                type: 'MEMBER',
+                email: 'legacy-buyer@example.com',
+            },
+        });
+
+        expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
+            buyerEmail: 'legacy-buyer@example.com',
+            buyerPhoneNumber: null,
+            buyerDisplayName: null,
+        });
+    });
+
+    it.each([
+        ['phoneNumber', ''],
+        ['phoneNumber', '   '],
+        ['phoneNumber', '1'.repeat(65)],
+        ['phoneNumber', 10_1234_5678],
+        ['phoneNumber', null],
+        ['displayName', ''],
+        ['displayName', '   '],
+        ['displayName', 'a'.repeat(101)],
+        ['displayName', 1234],
+        ['displayName', null],
+    ])('rejects an invalid completed buyer %s value', (field, invalidValue) => {
+        const buyer = {
+            ...paymentPayload().data.object.buyer,
+            [field]: invalidValue,
+        };
+
+        expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(
+            paymentPayload({ buyer })
+        ))).toThrow();
+    });
+
+    it('does not return or log unprojected raw payment fields', () => {
+        const consoleSpies = [
+            vi.spyOn(console, 'log').mockImplementation(() => undefined),
+            vi.spyOn(console, 'info').mockImplementation(() => undefined),
+            vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+            vi.spyOn(console, 'error').mockImplementation(() => undefined),
+        ];
+
+        try {
+            const parsed = parseGroblePaymentCompletedEvent(JSON.stringify(paymentPayload()));
+
+            expect(JSON.stringify(parsed)).not.toMatch(/maskedCardNumber|1234-\*\*\*\*/);
+            for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled();
+        } finally {
+            for (const spy of consoleSpies) spy.mockRestore();
+        }
     });
 
     it.each(['NORMAL', 'SIMPLE'])(

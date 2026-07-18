@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isJsonRequest } from '@/lib/services/earlybird/contracts';
 import { readGrobleConfig } from '@/lib/services/groble/config';
+import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
@@ -118,6 +119,7 @@ export async function POST(request: Request): Promise<NextResponse> {
             }
             return response(400, { received: false, code: 'INVALID_PAYMENT_PAYLOAD' });
         }
+        const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
         try {
             persistence = await supabaseAdmin.rpc('finalize_earlybird_groble_payment', {
                 p_event_id: payment.eventId,
@@ -126,6 +128,9 @@ export async function POST(request: Request): Promise<NextResponse> {
                 p_occurred_at: payment.occurredAt,
                 p_payment_id: payment.paymentId,
                 p_buyer_email: payment.buyerEmail,
+                p_buyer_phone_normalized: buyerPhoneNormalized,
+                p_buyer_phone_raw: payment.buyerPhoneNumber,
+                p_buyer_display_name: payment.buyerDisplayName,
                 p_product_id: payment.productId,
                 p_amount_krw: payment.amountKrw,
                 p_paid_at: payment.paidAt,
