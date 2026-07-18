@@ -32,7 +32,7 @@ describe('AmplitudeProvider auth integration', () => {
         authMarkerMocks.completePendingAuthEvent.mockReset();
     });
 
-    it('waits for resolved auth, then initializes anonymous identity without reset semantics', async () => {
+    it('waits for resolved auth, then reconciles the first anonymous identity', async () => {
         const {
             createAuthAnalyticsState,
             syncAnalyticsAuth,
@@ -172,7 +172,7 @@ describe('AmplitudeProvider auth integration', () => {
         expect(analyticsMocks.markAnalyticsIdentityReady).toHaveBeenCalledTimes(1);
     });
 
-    it('retries a failed initialization for the current resolved identity', async () => {
+    it('opens readiness only after the current identity succeeds on its bounded retry', async () => {
         const {
             createAuthAnalyticsState,
             syncAnalyticsAuth,
@@ -196,6 +196,29 @@ describe('AmplitudeProvider auth integration', () => {
         expect(analyticsMocks.initAmplitude).toHaveBeenNthCalledWith(1, null);
         expect(analyticsMocks.initAmplitude).toHaveBeenNthCalledWith(2, null);
         expect(analyticsMocks.markAnalyticsIdentityReady).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.initAmplitude.mock.invocationCallOrder[1])
+            .toBeLessThan(analyticsMocks.markAnalyticsIdentityReady.mock.invocationCallOrder[0]);
+    });
+
+    it('keeps identity unresolved and readiness closed when both attempts fail', async () => {
+        const {
+            createAuthAnalyticsState,
+            syncAnalyticsAuth,
+        } = await import('../../components/amplitude-provider');
+        analyticsMocks.initAmplitude.mockResolvedValue(false);
+        const state = createAuthAnalyticsState();
+
+        await expect(syncAnalyticsAuth(state, {
+            loading: false,
+            provider: 'kakao',
+            userId: VALID_USER_ID,
+        })).resolves.toBe(state);
+
+        expect(analyticsMocks.initAmplitude).toHaveBeenCalledTimes(2);
+        expect(analyticsMocks.initAmplitude).toHaveBeenNthCalledWith(1, VALID_USER_ID);
+        expect(analyticsMocks.initAmplitude).toHaveBeenNthCalledWith(2, VALID_USER_ID);
+        expect(analyticsMocks.markAnalyticsIdentityReady).not.toHaveBeenCalled();
+        expect(authMarkerMocks.completePendingAuthEvent).not.toHaveBeenCalled();
     });
 
     it('keeps the SDK behind one client provider mounted once at the root', () => {

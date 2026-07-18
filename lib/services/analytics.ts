@@ -176,13 +176,13 @@ interface QueuedEvent {
 
 let identityReady = false;
 let initializationPromise: Promise<boolean> | null = null;
-let initializingSdk: UnifiedSdk | null = null;
 let initializedSdk: UnifiedSdk | null = null;
 let sdkLoadPromise: Promise<UnifiedSdk> | null = null;
 let desiredUserId: string | undefined;
 let hasResolvedIdentity = false;
 let identityDeliveryBlocked = false;
-let identityRevision = 0;
+let identityReconciled = false;
+let hasInspectedSdkIdentity = false;
 let pendingIdentityReset = false;
 const queuedEvents: QueuedEvent[] = [];
 
@@ -266,49 +266,67 @@ function resetSdkIdentity(sdk: UnifiedSdk): boolean {
     }
 }
 
-function applyPendingIdentityReset(sdk: UnifiedSdk): boolean {
-    if (!pendingIdentityReset) return false;
+function bootIdentityRequiresReset(sdk: UnifiedSdk): boolean {
+    try {
+        const storedUserId: unknown = sdk.getUserId();
+        const readable = storedUserId === undefined || typeof storedUserId === 'string';
+        return desiredUserId === undefined || !readable || storedUserId !== desiredUserId;
+    } catch {
+        return true;
+    }
+}
 
-    const resetSucceeded = resetSdkIdentity(sdk);
-    pendingIdentityReset = !resetSucceeded;
-    identityDeliveryBlocked = !resetSucceeded;
-    if (identityDeliveryBlocked) {
-        queuedEvents.length = 0;
+function reconcileInitializedIdentity(sdk: UnifiedSdk): boolean {
+    if (!hasInspectedSdkIdentity) {
+        const bootResetRequired = bootIdentityRequiresReset(sdk);
+        pendingIdentityReset = pendingIdentityReset || bootResetRequired;
+        hasInspectedSdkIdentity = true;
+    }
+
+    if (pendingIdentityReset) {
+        if (!resetSdkIdentity(sdk)) {
+            identityDeliveryBlocked = true;
+            queuedEvents.length = 0;
+            return false;
+        }
+
+        pendingIdentityReset = false;
+        identityDeliveryBlocked = false;
+        if (desiredUserId !== undefined) setSdkUserId(sdk, desiredUserId);
+        identityReconciled = true;
+        return true;
+    }
+
+    identityDeliveryBlocked = false;
+    if (!identityReconciled) {
+        identityReconciled = true;
         return true;
     }
     if (desiredUserId !== undefined) setSdkUserId(sdk, desiredUserId);
     return true;
 }
 
-function updateResolvedIdentity(userId: string | null): boolean {
-    if (userId !== null && !isCanonicalAnalyticsUserId(userId)) return false;
+type IdentityUpdateResult = 'changed' | 'invalid' | 'unchanged';
+
+function updateResolvedIdentity(userId: string | null): IdentityUpdateResult {
+    if (userId !== null && !isCanonicalAnalyticsUserId(userId)) return 'invalid';
 
     const nextUserId = userId ?? undefined;
-    if (hasResolvedIdentity && desiredUserId === nextUserId) {
-        if (initializedSdk && pendingIdentityReset) {
-            identityReady = false;
-            applyPendingIdentityReset(initializedSdk);
-        }
-        return true;
-    }
+    if (hasResolvedIdentity && desiredUserId === nextUserId) return 'unchanged';
 
-    const shouldReset = hasResolvedIdentity
-        && desiredUserId !== undefined
-        && nextUserId === undefined;
+    const previousUserId = desiredUserId;
+    const hadResolvedIdentity = hasResolvedIdentity;
     desiredUserId = nextUserId;
     hasResolvedIdentity = true;
-    identityRevision += 1;
     identityReady = false;
-    if (shouldReset) pendingIdentityReset = true;
-    if (initializingSdk && !pendingIdentityReset) {
-        setSdkUserId(initializingSdk, desiredUserId);
+    if (
+        hadResolvedIdentity
+        && previousUserId !== undefined
+        && previousUserId !== nextUserId
+    ) {
+        pendingIdentityReset = true;
     }
-    if (initializedSdk) {
-        if (!applyPendingIdentityReset(initializedSdk)) {
-            setSdkUserId(initializedSdk, desiredUserId);
-        }
-    }
-    return true;
+    return 'changed';
 }
 
 async function safeSessionReplayRemoteConfig(): Promise<Response> {
@@ -321,20 +339,28 @@ async function safeSessionReplayRemoteConfig(): Promise<Response> {
 export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
     const apiKey = configuredApiKey();
     if (!apiKey) return Promise.resolve(false);
-    if (!updateResolvedIdentity(resolvedUserId)) return Promise.resolve(false);
-    if (initializedSdk) return Promise.resolve(true);
+    const identityUpdate = updateResolvedIdentity(resolvedUserId);
+    if (identityUpdate === 'invalid') return Promise.resolve(false);
+    if (initializedSdk) {
+        if (
+            identityUpdate === 'unchanged'
+            && identityReconciled
+            && !identityDeliveryBlocked
+            && !pendingIdentityReset
+        ) {
+            return Promise.resolve(true);
+        }
+        return Promise.resolve(reconcileInitializedIdentity(initializedSdk));
+    }
     if (initializationPromise) return initializationPromise;
 
     initializationPromise = (async () => {
         try {
             const sdk = await loadUnifiedSdk();
-            initializingSdk = sdk;
-            const appliedIdentityRevision = identityRevision;
-            if (!pendingIdentityReset) setSdkUserId(sdk, desiredUserId);
             await sdk.initAll(apiKey, {
                 analytics: {
                     autocapture: {
-                        sessions: true,
+                        sessions: false,
                         attribution: false,
                         pageViews: false,
                         formInteractions: false,
@@ -364,15 +390,11 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
                 },
                 engagement: { skip: true },
             });
-            if (!applyPendingIdentityReset(sdk) && appliedIdentityRevision !== identityRevision) {
-                setSdkUserId(sdk, desiredUserId);
-            }
             initializedSdk = sdk;
-            initializingSdk = null;
-            flushQueue();
-            return true;
+            const reconciled = reconcileInitializedIdentity(sdk);
+            if (reconciled) flushQueue();
+            return reconciled;
         } catch {
-            initializingSdk = null;
             return false;
         } finally {
             initializationPromise = null;
