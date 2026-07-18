@@ -1,15 +1,27 @@
--- Phase 3/5: backfill after checkout snapshotting is active for every new order.
--- Duplicate normalized phones abort this DML transaction before index creation.
+-- Phase 3/5: invalidate unproven normalized identities without promoting legacy raw phones.
+-- Duplicate verified phones abort this DML transaction before index creation.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
 UPDATE public.users
-SET phone_number_normalized = COALESCE(
-    public.normalize_kr_mobile_e164(phone_number),
-    phone_number_normalized
-)
-WHERE phone_number IS NOT NULL;
+SET phone_number_normalized = NULL,
+    phone_number_verification_source = NULL,
+    phone_number_verified_at = NULL
+WHERE (
+        phone_number_normalized IS NOT NULL
+        OR phone_number_verification_source IS NOT NULL
+        OR phone_number_verified_at IS NOT NULL
+    )
+  AND NOT (
+      provider = 'kakao'
+      AND phone_number IS NOT NULL
+      AND phone_number_normalized IS NOT NULL
+      AND phone_number_verification_source = 'kakao_rest_api'
+      AND phone_number_verified_at IS NOT NULL
+      AND public.normalize_kr_mobile_e164(phone_number)
+            IS NOT DISTINCT FROM phone_number_normalized
+  );
 
 DO $$
 BEGIN
@@ -24,12 +36,3 @@ BEGIN
     END IF;
 END;
 $$;
-
-UPDATE public.earlybird_orders AS unresolved_order
-SET expected_buyer_phone_number_normalized = buyer.phone_number_normalized
-FROM public.users AS buyer
-WHERE unresolved_order.user_id = buyer.id
-  AND unresolved_order.status IN ('payment_pending', 'cancelled')
-  AND unresolved_order.payment_id IS NULL
-  AND unresolved_order.expected_buyer_phone_number_normalized IS NULL
-  AND buyer.phone_number_normalized IS NOT NULL;

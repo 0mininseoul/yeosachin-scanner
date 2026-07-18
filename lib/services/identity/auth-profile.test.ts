@@ -62,7 +62,7 @@ import { AuthButtons } from '@/components/auth-buttons';
 
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const USER_RESPONSE_COLUMNS = 'id, email, provider, analysis_count, is_paid_user, is_unlimited, created_at, updated_at';
-const USER_INTERNAL_COLUMNS = `${USER_RESPONSE_COLUMNS}, name, nickname, profile_image, gender, birthyear, phone_number, phone_number_normalized`;
+const USER_INTERNAL_COLUMNS = `${USER_RESPONSE_COLUMNS}, name, nickname, profile_image, gender, birthyear`;
 const SAFE_USER_DTO = {
     id: USER_ID,
     email: 'user@example.com',
@@ -191,6 +191,8 @@ describe('OAuth callback profile persistence', () => {
             birthyear: '1997',
             phone_number: '+82 10-1234-5678',
             phone_number_normalized: '+821012345678',
+            phone_number_verification_source: 'kakao_rest_api',
+            phone_number_verified_at: expect.any(String),
         };
         expect(routeMocks.exchangeCodeForSession).toHaveBeenNthCalledWith(1, 'first-code');
         expect(routeMocks.exchangeCodeForSession).toHaveBeenNthCalledWith(2, 'second-code');
@@ -219,13 +221,15 @@ describe('OAuth callback profile persistence', () => {
     it.each([
         ['withdrawn', { omitPhone: true }],
         ['invalid', { phoneNumber: 'not-a-phone' }],
-    ])('clears both stale Kakao phone fields when phone consent is %s', async (
+    ])('clears stale Kakao phone and provenance when phone consent is %s', async (
         _label,
         phoneOptions
     ) => {
         const storedPhone: Record<string, unknown> = {
             phone_number: PRIVATE_PHONE,
             phone_number_normalized: '+821099998888',
+            phone_number_verification_source: 'kakao_rest_api',
+            phone_number_verified_at: '2026-07-18T00:00:00.000Z',
         };
         installCallbackSession('kakao', 'kakao-provider-token');
         installCallbackProfileFetch(phoneOptions);
@@ -241,11 +245,15 @@ describe('OAuth callback profile persistence', () => {
         expect(storedPhone).toEqual(expect.objectContaining({
             phone_number: null,
             phone_number_normalized: null,
+            phone_number_verification_source: null,
+            phone_number_verified_at: null,
         }));
         expect(routeMocks.upsert).toHaveBeenCalledWith(
             expect.objectContaining({
                 phone_number: null,
                 phone_number_normalized: null,
+                phone_number_verification_source: null,
+                phone_number_verified_at: null,
             }),
             { onConflict: 'id' }
         );
@@ -366,6 +374,8 @@ async function expectSafeUserResponse(
     );
     expect(body.user).not.toHaveProperty('phone_number');
     expect(body.user).not.toHaveProperty('phone_number_normalized');
+    expect(body.user).not.toHaveProperty('phone_number_verification_source');
+    expect(body.user).not.toHaveProperty('phone_number_verified_at');
 }
 
 function expectNoPrivateLog(calls: readonly unknown[][]) {
@@ -386,7 +396,7 @@ describe('/api/user/me profile persistence', () => {
         vi.restoreAllMocks();
     });
 
-    it('inserts trusted user.phone as an atomic pair and returns only the safe DTO', async () => {
+    it('never persists Supabase user.phone or metadata phone from user-me inserts', async () => {
         installAuthenticatedUser({
             id: USER_ID,
             email: 'user@example.com',
@@ -425,11 +435,14 @@ describe('/api/user/me profile persistence', () => {
             name: 'Full Name',
             nickname: 'Preferred Nick',
             profile_image: 'https://example.com/social.jpg',
-            phone_number: '010-9876-5432',
-            phone_number_normalized: '+821098765432',
             gender: 'female',
             birthyear: '1994',
         });
+        const inserted = routeMocks.insert.mock.calls[0]?.[0];
+        expect(inserted).not.toHaveProperty('phone_number');
+        expect(inserted).not.toHaveProperty('phone_number_normalized');
+        expect(inserted).not.toHaveProperty('phone_number_verification_source');
+        expect(inserted).not.toHaveProperty('phone_number_verified_at');
         expect(routeMocks.select).toHaveBeenNthCalledWith(1, USER_INTERNAL_COLUMNS);
         expect(routeMocks.select).toHaveBeenNthCalledWith(2, USER_RESPONSE_COLUMNS);
         expect(routeMocks.update).not.toHaveBeenCalled();
@@ -467,6 +480,8 @@ describe('/api/user/me profile persistence', () => {
         }));
         expect(inserted).not.toHaveProperty('phone_number');
         expect(inserted).not.toHaveProperty('phone_number_normalized');
+        expect(inserted).not.toHaveProperty('phone_number_verification_source');
+        expect(inserted).not.toHaveProperty('phone_number_verified_at');
     });
 
     it('ignores forged Google metadata phones and preserves a partial stored pair', async () => {
@@ -502,9 +517,11 @@ describe('/api/user/me profile persistence', () => {
         const updated = routeMocks.update.mock.calls[0]?.[0];
         expect(updated).not.toHaveProperty('phone_number');
         expect(updated).not.toHaveProperty('phone_number_normalized');
+        expect(updated).not.toHaveProperty('phone_number_verification_source');
+        expect(updated).not.toHaveProperty('phone_number_verified_at');
     });
 
-    it('synchronizes both fields over a partially populated row when user.phone is present', async () => {
+    it('never synchronizes user.phone while backfilling non-phone profile fields', async () => {
         installAuthenticatedUser({
             id: USER_ID,
             email: 'user@example.com',
@@ -531,16 +548,19 @@ describe('/api/user/me profile persistence', () => {
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
         expect(routeMocks.update).toHaveBeenCalledWith({
-            phone_number: '010-1111-2222',
-            phone_number_normalized: '+821011112222',
             gender: 'male',
             birthyear: '1996',
         });
+        const updated = routeMocks.update.mock.calls[0]?.[0];
+        expect(updated).not.toHaveProperty('phone_number');
+        expect(updated).not.toHaveProperty('phone_number_normalized');
+        expect(updated).not.toHaveProperty('phone_number_verification_source');
+        expect(updated).not.toHaveProperty('phone_number_verified_at');
         expect(routeMocks.select).toHaveBeenNthCalledWith(2, USER_RESPONSE_COLUMNS);
         expect(routeMocks.insert).not.toHaveBeenCalled();
     });
 
-    it('clears both stored fields atomically for a present but invalid user.phone', async () => {
+    it('does not clear or update stored phone provenance for invalid user.phone', async () => {
         installAuthenticatedUser({
             id: USER_ID,
             email: 'user@example.com',
@@ -549,21 +569,13 @@ describe('/api/user/me profile persistence', () => {
             app_metadata: { provider: 'kakao' },
             user_metadata: {},
         });
-        installUserAdminResults(
-            { data: privateUserRow(), error: null },
-            { data: privateUserRow({
-                phone_number: null,
-                phone_number_normalized: null,
-            }), error: null }
-        );
+        installUserAdminResults({ data: privateUserRow(), error: null });
 
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
-        expect(routeMocks.update).toHaveBeenCalledWith({
-            phone_number: null,
-            phone_number_normalized: null,
-        });
+        expect(routeMocks.update).not.toHaveBeenCalled();
+        expect(routeMocks.insert).not.toHaveBeenCalled();
     });
 
     it('does not synchronize an unconfirmed user.phone value', async () => {
@@ -665,10 +677,10 @@ describe('/api/user/me profile persistence', () => {
             phone: '010-1111-2222',
             phone_confirmed_at: '2026-07-18T00:00:00.000Z',
             app_metadata: { provider: 'kakao' },
-            user_metadata: {},
+            user_metadata: { nickname: 'Backfill Nick' },
         });
         installUserAdminResults(
-            { data: privateUserRow(), error: null },
+            { data: privateUserRow({ nickname: null }), error: null },
             { data: null, error: privateDatabaseError('PGRST204') }
         );
 
@@ -844,8 +856,11 @@ describe('auth profile integration contract', () => {
         expect(meRouteSource).toMatch(
             /profileImage:\s*\[m\.avatar_url,\s*m\.picture,\s*m\.profile_image\]/
         );
-        expect(meRouteSource).toMatch(/value:\s*user\.phone/);
+        expect(meRouteSource).not.toMatch(/user\.phone|phone_confirmed_at/);
         expect(meRouteSource).not.toMatch(/m\.(?:phone_number|phone)\b/);
+        expect(meRouteSource).not.toMatch(
+            /phone_number_(?:normalized|verification_source|verified_at)/
+        );
         expect(meRouteSource).toMatch(
             /birthyear:\s*\[m\.birthyear,\s*m\.birth_year\]/
         );

@@ -72,15 +72,32 @@ describe('Groble phone matching migration contract', () => {
         }
 
         expect(ddlMigration).toContain('ADD COLUMN phone_number_normalized TEXT');
-        expect(ddlMigration.match(/NOT VALID/g)).toHaveLength(8);
+        expect(ddlMigration).toContain('ADD COLUMN phone_number_verification_source TEXT');
+        expect(ddlMigration).toContain('ADD COLUMN phone_number_verified_at TIMESTAMP WITH TIME ZONE');
+        expect(ddlMigration).toContain("ADD COLUMN buyer_match_policy TEXT DEFAULT 'legacy_email'");
+        expect(ddlMigration).toContain('ADD COLUMN expected_buyer_phone_verification_source TEXT');
+        expect(ddlMigration).toContain('ADD COLUMN expected_buyer_phone_verified_at TIMESTAMP WITH TIME ZONE');
+        expect(ddlMigration).toMatch(
+            /ALTER COLUMN buyer_match_policy DROP DEFAULT/
+        );
+        expect(ddlMigration.match(/NOT VALID/g)).toHaveLength(11);
         expect(ddlMigration).toContain(
             'CREATE OR REPLACE FUNCTION public.normalize_kr_mobile_e164'
+        );
+        expect(ddlMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.enforce_user_phone_verification_provenance'
+        );
+        expect(ddlMigration).toContain(
+            'CREATE TRIGGER enforce_user_phone_verification_provenance_before_write'
         );
         expect(ddlMigration).toContain(
             'CREATE OR REPLACE FUNCTION public.set_earlybird_order_phone_snapshot'
         );
         expect(ddlMigration).toContain(
             'CREATE TRIGGER set_earlybird_order_phone_snapshot_before_insert'
+        );
+        expect(ddlMigration).toContain(
+            'CREATE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update'
         );
         expect(ddlMigration).not.toMatch(/^UPDATE public\./m);
         expect(ddlMigration).not.toContain('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
@@ -92,10 +109,26 @@ describe('Groble phone matching migration contract', () => {
             'CREATE OR REPLACE FUNCTION public.create_earlybird_checkout'
         );
         expect(checkoutMigration).toMatch(
-            /SELECT buyer\.provider, buyer\.phone_number,[\s\S]*?buyer\.phone_number_normalized/
+            /SELECT buyer\.provider, buyer\.phone_number,[\s\S]*?buyer\.phone_number_normalized,[\s\S]*?buyer\.phone_number_verification_source,[\s\S]*?buyer\.phone_number_verified_at/
+        );
+        expect(checkoutMigration).not.toMatch(
+            /COALESCE\([\s\S]*?public\.normalize_kr_mobile_e164\(v_user_phone_number\)/
+        );
+        expect(checkoutMigration).toContain("v_user_provider <> 'kakao'");
+        expect(checkoutMigration).toContain(
+            "IS DISTINCT FROM 'kakao_rest_api'"
+        );
+        expect(checkoutMigration).toContain(
+            'v_user_phone_number_verified_at IS NULL'
+        );
+        expect(checkoutMigration).toContain(
+            "< pg_catalog.clock_timestamp() - INTERVAL '24 hours'"
+        );
+        expect(checkoutMigration).toContain(
+            'v_user_phone_number_normalized IS NULL'
         );
         expect(checkoutMigration).toMatch(
-            /COALESCE\([\s\S]*?public\.normalize_kr_mobile_e164\(v_user_phone_number\)[\s\S]*?v_user_phone_number_normalized[\s\S]*?\)/
+            /normalize_kr_mobile_e164\(v_user_phone_number\)[\s\S]*?IS DISTINCT FROM v_user_phone_number_normalized[\s\S]*?CHECKOUT_PHONE_REQUIRED/
         );
         expect(checkoutMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.create_earlybird_checkout\([\s\S]*?GRANT EXECUTE ON FUNCTION public\.create_earlybird_checkout\(/
@@ -107,13 +140,13 @@ describe('Groble phone matching migration contract', () => {
 
         expect(backfillMigration.match(
             /^UPDATE public\.(?:users|earlybird_orders)\b/gm
-        )).toHaveLength(2);
+        )).toHaveLength(1);
         expect(backfillMigration).toContain('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
         expect(backfillMigration).not.toMatch(/^ALTER TABLE/m);
         expect(backfillMigration).not.toMatch(/^CREATE (?:OR REPLACE FUNCTION|(?:UNIQUE )?INDEX)/m);
         expect(backfillMigration).not.toMatch(/^(?:GRANT|REVOKE)\b/m);
 
-        expect(validationMigration.match(/VALIDATE CONSTRAINT/g)).toHaveLength(8);
+        expect(validationMigration.match(/VALIDATE CONSTRAINT/g)).toHaveLength(11);
         expect(validationMigration.match(/^CREATE (?:UNIQUE )?INDEX/gm)).toHaveLength(3);
         expect(validationMigration).not.toContain('ADD COLUMN');
         expect(validationMigration).not.toContain('NOT VALID');
@@ -137,10 +170,18 @@ describe('Groble phone matching migration contract', () => {
         expect(finalizationMigration).not.toContain('normalize_kr_mobile_e164');
     });
 
-    it('normalizes and backfills users before rejecting duplicates and indexing', () => {
+    it('requires atomic Kakao REST provenance for every normalized user phone', () => {
         expect(migration).toContain('ADD COLUMN phone_number_normalized TEXT');
+        expect(migration).toContain('ADD COLUMN phone_number_verification_source TEXT');
+        expect(migration).toContain('ADD COLUMN phone_number_verified_at TIMESTAMP WITH TIME ZONE');
         expect(migration).toMatch(
             /phone_number_normalized IS NULL\s+OR phone_number_normalized ~ '\^\\\+8210\[0-9\]\{8\}\$'/
+        );
+        expect(ddlMigration).toMatch(
+            /phone_number_verification_source IS NULL\s+OR phone_number_verification_source = 'kakao_rest_api'/
+        );
+        expect(ddlMigration).toMatch(
+            /phone_number_normalized IS NULL[\s\S]*?phone_number_verification_source IS NULL[\s\S]*?phone_number_verified_at IS NULL[\s\S]*?OR[\s\S]*?provider = 'kakao'[\s\S]*?phone_number IS NOT NULL[\s\S]*?phone_number_normalized IS NOT NULL[\s\S]*?phone_number_verification_source = 'kakao_rest_api'[\s\S]*?phone_number_verified_at IS NOT NULL[\s\S]*?normalize_kr_mobile_e164\(phone_number\)[\s\S]*?IS NOT DISTINCT FROM phone_number_normalized/
         );
         expect(migration).toMatch(
             /CREATE OR REPLACE FUNCTION public\.normalize_kr_mobile_e164\(p_value TEXT\)[\s\S]*?IMMUTABLE[\s\S]*?(?:STRICT|RETURNS NULL ON NULL INPUT)[\s\S]*?SET search_path = ''/
@@ -152,14 +193,25 @@ describe('Groble phone matching migration contract', () => {
             /REVOKE ALL ON FUNCTION public\.normalize_kr_mobile_e164\(TEXT\)\s+FROM PUBLIC, anon, authenticated, service_role/
         );
 
-        const backfill = migration.indexOf(
-            'SET phone_number_normalized = COALESCE('
-        );
+        const backfill = migration.indexOf('SET phone_number_normalized = NULL');
         const duplicateGuard = migration.indexOf('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
         const uniqueIndex = migration.indexOf('CREATE UNIQUE INDEX users_phone_number_normalized_unique');
         expect(backfill).toBeGreaterThanOrEqual(0);
-        expect(backfillMigration).toMatch(
-            /SET phone_number_normalized = COALESCE\(\s*public\.normalize_kr_mobile_e164\(phone_number\),\s*phone_number_normalized\s*\)/
+        expect(backfillMigration).toContain(
+            'SET phone_number_normalized = NULL,'
+        );
+        expect(backfillMigration).toContain(
+            'phone_number_verification_source = NULL,'
+        );
+        expect(backfillMigration).toContain('phone_number_verified_at = NULL');
+        expect(backfillMigration).toContain(
+            'phone_number_normalized IS NOT NULL'
+        );
+        expect(backfillMigration).toContain(
+            "phone_number_verification_source = 'kakao_rest_api'"
+        );
+        expect(backfillMigration).not.toMatch(
+            /SET phone_number_normalized = COALESCE|normalize_kr_mobile_e164\(phone_number\),/
         );
         expect(duplicateGuard).toBeGreaterThan(backfill);
         expect(uniqueIndex).toBeGreaterThan(duplicateGuard);
@@ -168,7 +220,32 @@ describe('Groble phone matching migration contract', () => {
         );
     });
 
-    it('installs a null-only Kakao phone snapshot trigger in the fast DDL phase', () => {
+    it('uses the database clock and degrades stale provenance from old raw-phone writers', () => {
+        const definition = functionDefinition(
+            'enforce_user_phone_verification_provenance'
+        );
+
+        expect(definition).toContain('pg_catalog.clock_timestamp()');
+        expect(definition).toContain(
+            'NEW.phone_number IS DISTINCT FROM OLD.phone_number'
+        );
+        expect(definition).toMatch(
+            /NEW\.phone_number_verified_at[\s\S]*?IS NOT DISTINCT FROM OLD\.phone_number_verified_at/
+        );
+        expect(definition).toContain('NEW.phone_number_normalized := NULL');
+        expect(definition).toContain(
+            'NEW.phone_number_verification_source := NULL'
+        );
+        expect(definition).toContain('NEW.phone_number_verified_at := NULL');
+        expect(ddlMigration).toMatch(
+            /CREATE TRIGGER enforce_user_phone_verification_provenance_before_write\s+BEFORE INSERT OR UPDATE ON public\.users/
+        );
+        expect(ddlMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.enforce_user_phone_verification_provenance\(\)\s+FROM PUBLIC, anon, authenticated, service_role/
+        );
+    });
+
+    it('installs a mandatory verified Kakao phone snapshot trigger in the fast DDL phase', () => {
         const triggerFunction = functionDefinition(
             'set_earlybird_order_phone_snapshot'
         );
@@ -176,17 +253,33 @@ describe('Groble phone matching migration contract', () => {
         expect(triggerFunction).toMatch(
             /RETURNS TRIGGER[\s\S]*?LANGUAGE plpgsql[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = ''/
         );
-        expect(triggerFunction).toMatch(
-            /IF NEW\.expected_buyer_phone_number_normalized IS NOT NULL THEN[\s\S]*?RETURN NEW/
+        expect(triggerFunction).toContain('FROM public.users AS buyer');
+        expect(triggerFunction).toContain('buyer.id = NEW.user_id');
+        expect(triggerFunction).toContain("buyer.provider = 'kakao'");
+        expect(triggerFunction).toContain(
+            "buyer.phone_number_verification_source = 'kakao_rest_api'"
+        );
+        expect(triggerFunction).toContain(
+            'buyer.phone_number_verified_at IS NOT NULL'
         );
         expect(triggerFunction).toMatch(
-            /FROM public\.users AS buyer[\s\S]*?buyer\.id = NEW\.user_id[\s\S]*?buyer\.provider = 'kakao'/
+            /normalize_kr_mobile_e164\(buyer\.phone_number\)[\s\S]*?IS NOT DISTINCT FROM buyer\.phone_number_normalized/
         );
+        expect(triggerFunction).toContain('SELECT buyer.phone_number_normalized');
+        expect(triggerFunction).not.toContain('COALESCE(');
+        expect(triggerFunction).toContain("NEW.buyer_match_policy := 'verified_kakao_phone'");
+        expect(triggerFunction).toContain(
+            'NEW.expected_buyer_phone_verification_source := v_phone_verification_source'
+        );
+        expect(triggerFunction).toContain(
+            'NEW.expected_buyer_phone_verified_at := v_phone_verified_at'
+        );
+        expect(triggerFunction).toContain("RAISE EXCEPTION 'CHECKOUT_PHONE_REQUIRED'");
         expect(triggerFunction).toMatch(
-            /COALESCE\(\s*public\.normalize_kr_mobile_e164\(buyer\.phone_number\),\s*buyer\.phone_number_normalized\s*\)/
+            /buyer\.phone_number_verified_at\s+>= pg_catalog\.clock_timestamp\(\) - INTERVAL '24 hours'/
         );
         expect(ddlMigration).toMatch(
-            /CREATE TRIGGER set_earlybird_order_phone_snapshot_before_insert\s+BEFORE INSERT ON public\.earlybird_orders\s+FOR EACH ROW\s+WHEN \(NEW\.expected_buyer_phone_number_normalized IS NULL\)\s+EXECUTE FUNCTION public\.set_earlybird_order_phone_snapshot\(\)/
+            /CREATE TRIGGER set_earlybird_order_phone_snapshot_before_insert\s+BEFORE INSERT ON public\.earlybird_orders\s+FOR EACH ROW\s+EXECUTE FUNCTION public\.set_earlybird_order_phone_snapshot\(\)/
         );
         expect(ddlMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.set_earlybird_order_phone_snapshot\(\)\s+FROM PUBLIC, anon, authenticated, service_role/
@@ -194,8 +287,12 @@ describe('Groble phone matching migration contract', () => {
         expect(ddlMigration).not.toMatch(
             /GRANT EXECUTE ON FUNCTION public\.set_earlybird_order_phone_snapshot/
         );
-        expect(ddlMigration).not.toMatch(/CREATE TRIGGER[\s\S]*?\bUPDATE\b/);
-        expect(ddlMigration).not.toMatch(/CREATE TRIGGER[\s\S]*?ON public\.users/);
+        const immutableFunction = functionDefinition(
+            'protect_earlybird_order_buyer_match_snapshot'
+        );
+        expect(immutableFunction).toMatch(
+            /OLD\.buyer_match_policy[\s\S]*?NEW\.buyer_match_policy[\s\S]*?OLD\.expected_buyer_phone_number_normalized[\s\S]*?NEW\.expected_buyer_phone_number_normalized[\s\S]*?OLD\.expected_buyer_phone_verification_source[\s\S]*?NEW\.expected_buyer_phone_verification_source[\s\S]*?OLD\.expected_buyer_phone_verified_at[\s\S]*?NEW\.expected_buyer_phone_verified_at[\s\S]*?EARLYBIRD_BUYER_MATCH_SNAPSHOT_IMMUTABLE/
+        );
     });
 
     it('bounds migration locks and defers table scans until constraint validation', () => {
@@ -206,6 +303,11 @@ describe('Groble phone matching migration contract', () => {
 
     it('adds bounded service-only snapshots and rolling-deploy compatibility columns', () => {
         expect(migration).toContain('expected_buyer_phone_number_normalized TEXT');
+        expect(migration).toContain('buyer_match_policy TEXT');
+        expect(ddlMigration).toContain('buyer_match_policy IS NOT NULL');
+        expect(migration).toMatch(
+            /buyer_match_policy = 'legacy_email'[\s\S]*?expected_buyer_phone_number_normalized IS NULL[\s\S]*?expected_buyer_phone_verification_source IS NULL[\s\S]*?expected_buyer_phone_verified_at IS NULL[\s\S]*?OR[\s\S]*?buyer_match_policy = 'verified_kakao_phone'[\s\S]*?expected_buyer_phone_number_normalized IS NOT NULL[\s\S]*?expected_buyer_phone_verification_source = 'kakao_rest_api'[\s\S]*?expected_buyer_phone_verified_at IS NOT NULL/
+        );
         for (const column of [
             'groble_buyer_email TEXT',
             'groble_buyer_phone_number TEXT',
@@ -219,9 +321,7 @@ describe('Groble phone matching migration contract', () => {
         expect(migration).toMatch(
             /CREATE INDEX earlybird_orders_pending_phone_product_idx[\s\S]*?expected_buyer_phone_number_normalized, expected_groble_product_id[\s\S]*?WHERE status = 'payment_pending'/
         );
-        expect(migration).toMatch(
-            /UPDATE public\.earlybird_orders[\s\S]*?SET expected_buyer_phone_number_normalized = buyer\.phone_number_normalized[\s\S]*?status IN \('payment_pending', 'cancelled'\)[\s\S]*?payment_id IS NULL/
-        );
+        expect(backfillMigration).not.toMatch(/^UPDATE public\.earlybird_orders\b/m);
     });
 
     it('preserves the exact authenticated order grant and excludes service-only matching columns', () => {
@@ -234,9 +334,9 @@ describe('Groble phone matching migration contract', () => {
             .map(column => column.trim())
             .filter(Boolean);
         expect(grantedColumns).toEqual(AUTHENTICATED_ORDER_COLUMNS);
-        expect(grant).not.toMatch(/groble_buyer|expected_buyer_phone/);
+        expect(grant).not.toMatch(/groble_buyer|expected_buyer_phone|buyer_match_policy/);
         expect(migration).not.toMatch(
-            /GRANT SELECT[^;]*(?:groble_buyer|expected_buyer_phone)[^;]*;/
+            /GRANT SELECT[^;]*(?:groble_buyer|expected_buyer_phone|buyer_match_policy)[^;]*;/
         );
         expect(migration).not.toMatch(/GRANT SELECT ON TABLE public\.earlybird_webhook_events/i);
     });
@@ -259,7 +359,7 @@ describe('Groble phone matching migration contract', () => {
             /CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\([\s\S]*?p_buyer_email TEXT,[\s\S]*?p_buyer_phone_normalized TEXT,[\s\S]*?p_buyer_phone_raw TEXT,[\s\S]*?p_buyer_display_name TEXT,[\s\S]*?p_product_id TEXT/
         );
         expect(migration).toMatch(
-            /CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\(\s*p_event_id TEXT,[\s\S]*?p_buyer_email TEXT,[\s\S]*?p_product_id TEXT,[\s\S]*?p_paid_at TIMESTAMP WITH TIME ZONE\s*\)[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = ''[\s\S]*?p_buyer_phone_normalized => NULL::TEXT[\s\S]*?p_buyer_phone_raw => NULL::TEXT[\s\S]*?p_buyer_display_name => NULL::TEXT/
+            /CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\(\s*p_event_id TEXT,[\s\S]*?p_buyer_email TEXT,[\s\S]*?p_product_id TEXT,[\s\S]*?p_paid_at TIMESTAMP WITH TIME ZONE\s*\)[\s\S]*?LANGUAGE plpgsql[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = ''[\s\S]*?GROBLE_CANONICAL_PHONE_REQUIRED[\s\S]*?p_buyer_phone_normalized => NULL::TEXT[\s\S]*?p_buyer_phone_raw => NULL::TEXT[\s\S]*?p_buyer_display_name => NULL::TEXT/
         );
         expect(migration).toMatch(/post-drain migration/i);
         expect(migration).toMatch(
@@ -292,6 +392,59 @@ describe('Groble phone matching migration contract', () => {
         expect(definition).not.toContain('groble_buyer_display_name');
     });
 
+    it('uses immutable order policy snapshots and limits email fallback to legacy orders', () => {
+        const definition = functionDefinition('finalize_earlybird_groble_payment');
+
+        expect(definition).not.toMatch(
+            /buyer\.phone_number_normalized\s*=\s*p_buyer_phone_normalized/
+        );
+        expect(definition).toContain(
+            "candidate.buyer_match_policy = 'verified_kakao_phone'"
+        );
+        expect(definition).toMatch(
+            /candidate\.expected_buyer_phone_verification_source[\s\S]*?= 'kakao_rest_api'/
+        );
+        expect(definition).toContain(
+            'candidate.expected_buyer_phone_verified_at IS NOT NULL'
+        );
+        expect(definition).toMatch(
+            /candidate\.expected_buyer_phone_number_normalized[\s\S]*?= p_buyer_phone_normalized/
+        );
+        expect(definition).toContain(
+            "candidate.buyer_match_policy = 'legacy_email'"
+        );
+        expect(definition).toContain(
+            'pg_catalog.lower(pg_catalog.btrim(buyer.email))'
+        );
+        expect(definition).toContain(
+            'pg_catalog.lower(pg_catalog.btrim(p_buyer_email))'
+        );
+    });
+
+    it('makes the rolling wrapper rollback instead of poisoning verified-order idempotency', () => {
+        const wrapperStart = finalizationMigration.lastIndexOf(
+            'CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment('
+        );
+        const wrapperEnd = finalizationMigration.indexOf('\n$$;', wrapperStart);
+        const wrapper = finalizationMigration.slice(wrapperStart, wrapperEnd + 4);
+
+        expect(wrapper).toContain('LANGUAGE plpgsql');
+        expect(wrapper).toMatch(
+            /buyer_match_policy = 'verified_kakao_phone'[\s\S]*?GROBLE_CANONICAL_PHONE_REQUIRED/
+        );
+        const verifiedGuard = wrapper.slice(
+            wrapper.indexOf("buyer_match_policy = 'verified_kakao_phone'"),
+            wrapper.indexOf("RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED'")
+        );
+        expect(verifiedGuard).not.toContain('expected_amount_krw');
+        expect(wrapper).toMatch(
+            /buyer_match_policy = 'legacy_email'/
+        );
+        expect(wrapper.indexOf('GROBLE_CANONICAL_PHONE_REQUIRED')).toBeLessThan(
+            wrapper.indexOf('RETURN QUERY')
+        );
+    });
+
     it('locks every potential user deterministically before authoritative matching', () => {
         const definition = functionDefinition('finalize_earlybird_groble_payment');
         const lockLoop = definition.indexOf('FOR v_lock_user_id IN');
@@ -299,16 +452,36 @@ describe('Groble phone matching migration contract', () => {
 
         expect(lockLoop).toBeGreaterThanOrEqual(0);
         expect(definition).toContain('ORDER BY potential_user.user_id::TEXT');
-        expect(definition).toMatch(
-            /buyer\.phone_number_normalized = p_buyer_phone_normalized[\s\S]*?UNION[\s\S]*?lower\(pg_catalog\.btrim\(buyer\.email\)\)[\s\S]*?UNION[\s\S]*?status IN \('payment_pending', 'cancelled'\)[\s\S]*?expected_buyer_phone_number_normalized/
+        expect(definition).toContain(
+            "phone_order.buyer_match_policy = 'verified_kakao_phone'"
         );
+        expect(definition).toContain(
+            "phone_order.expected_buyer_phone_verification_source"
+        );
+        expect(definition).toContain(
+            'phone_order.expected_buyer_phone_verified_at IS NOT NULL'
+        );
+        expect(definition).toContain(
+            'phone_order.expected_buyer_phone_number_normalized'
+        );
+        expect(definition).toContain('UNION');
+        expect(definition).toContain(
+            'pg_catalog.lower(pg_catalog.btrim(buyer.email))'
+        );
+        expect(definition).not.toMatch(
+            /buyer\.phone_number_normalized = p_buyer_phone_normalized/
+        );
+        expect(definition.match(
+            /expected_buyer_phone_verification_source\s*= 'kakao_rest_api'/g
+        )?.length)
+            .toBeGreaterThanOrEqual(6);
         expect(firstCandidateCount).toBeGreaterThan(lockLoop);
     });
 
     it('serializes profile snapshots and refund transitions with the user lock', () => {
         const checkout = functionDefinition('create_earlybird_checkout');
         expect(checkout).toMatch(
-            /SELECT buyer\.provider, buyer\.phone_number, buyer\.phone_number_normalized[\s\S]*?WHERE buyer\.id = p_user_id\s+FOR UPDATE/
+            /SELECT buyer\.provider, buyer\.phone_number, buyer\.phone_number_normalized,[\s\S]*?buyer\.phone_number_verification_source,[\s\S]*?buyer\.phone_number_verified_at[\s\S]*?WHERE buyer\.id = p_user_id\s+FOR UPDATE/
         );
 
         const refund = functionDefinition('set_earlybird_refund_status');

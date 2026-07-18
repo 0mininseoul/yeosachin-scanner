@@ -1,5 +1,4 @@
--- Phase 2/5: activate snapshotting before any backfill can establish a cutoff.
--- Raw profile phones cover legacy callbacks until every app instance writes E.164.
+-- Phase 2/5: require a fresh Kakao REST verification for every checkout snapshot.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
@@ -30,6 +29,8 @@ DECLARE
     v_user_provider TEXT;
     v_user_phone_number TEXT;
     v_user_phone_number_normalized TEXT;
+    v_user_phone_number_verification_source TEXT;
+    v_user_phone_number_verified_at TIMESTAMP WITH TIME ZONE;
 BEGIN
     IF p_plan_id NOT IN ('basic', 'standard') THEN
         RAISE EXCEPTION 'EARLYBIRD_PAID_PLAN_REQUIRED';
@@ -53,8 +54,12 @@ BEGIN
         pg_catalog.hashtextextended(p_user_id::TEXT, 0)
     );
 
-    SELECT buyer.provider, buyer.phone_number, buyer.phone_number_normalized
-    INTO v_user_provider, v_user_phone_number, v_user_phone_number_normalized
+    SELECT buyer.provider, buyer.phone_number, buyer.phone_number_normalized,
+        buyer.phone_number_verification_source,
+        buyer.phone_number_verified_at
+    INTO v_user_provider, v_user_phone_number, v_user_phone_number_normalized,
+        v_user_phone_number_verification_source,
+        v_user_phone_number_verified_at
     FROM public.users AS buyer
     WHERE buyer.id = p_user_id
     FOR UPDATE;
@@ -62,11 +67,15 @@ BEGIN
         RAISE EXCEPTION 'PREFLIGHT_NOT_VALID';
     END IF;
 
-    v_user_phone_number_normalized := COALESCE(
-        public.normalize_kr_mobile_e164(v_user_phone_number),
-        v_user_phone_number_normalized
-    );
-    IF v_user_provider = 'kakao' AND v_user_phone_number_normalized IS NULL THEN
+    IF v_user_provider <> 'kakao'
+       OR v_user_phone_number_verification_source
+            IS DISTINCT FROM 'kakao_rest_api'
+       OR v_user_phone_number_verified_at IS NULL
+       OR v_user_phone_number_verified_at
+            < pg_catalog.clock_timestamp() - INTERVAL '24 hours'
+       OR v_user_phone_number_normalized IS NULL
+       OR public.normalize_kr_mobile_e164(v_user_phone_number)
+            IS DISTINCT FROM v_user_phone_number_normalized THEN
         RAISE EXCEPTION 'CHECKOUT_PHONE_REQUIRED';
     END IF;
 
@@ -138,8 +147,11 @@ BEGIN
            OR v_existing.plan_id <> p_plan_id
            OR v_existing.expected_amount_krw <> p_expected_amount_krw
            OR v_existing.expected_groble_product_id <> p_expected_product_id
+           OR v_existing.buyer_match_policy <> 'verified_kakao_phone'
            OR v_existing.expected_buyer_phone_number_normalized
                 IS DISTINCT FROM v_user_phone_number_normalized
+           OR v_existing.expected_buyer_phone_verification_source
+                IS DISTINCT FROM v_user_phone_number_verification_source
            OR v_existing.status <> 'payment_pending' THEN
             RAISE EXCEPTION 'EARLYBIRD_ORDER_CONFLICT';
         END IF;
@@ -186,7 +198,10 @@ BEGIN
         pricing_version,
         expected_amount_krw,
         expected_groble_product_id,
+        buyer_match_policy,
         expected_buyer_phone_number_normalized,
+        expected_buyer_phone_verification_source,
+        expected_buyer_phone_verified_at,
         disclosure_version,
         disclosure_text,
         disclosure_accepted_at
@@ -202,7 +217,10 @@ BEGIN
         p_pricing_version,
         p_expected_amount_krw,
         p_expected_product_id,
+        'verified_kakao_phone',
         v_user_phone_number_normalized,
+        v_user_phone_number_verification_source,
+        v_user_phone_number_verified_at,
         p_disclosure_version,
         p_disclosure_text,
         p_disclosure_accepted_at

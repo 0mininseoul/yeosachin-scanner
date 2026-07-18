@@ -48,6 +48,15 @@ async function syncKakaoProfile(
             value: account.phone_number,
         },
     });
+    const phoneProvenancePatch = profilePatch.phone_number_normalized
+        ? {
+            phone_number_verification_source: 'kakao_rest_api',
+            phone_number_verified_at: new Date().toISOString(),
+        }
+        : {
+            phone_number_verification_source: null,
+            phone_number_verified_at: null,
+        };
 
     const { error } = await supabaseAdmin
         .from('users')
@@ -56,6 +65,7 @@ async function syncKakaoProfile(
             ...(email ? { email } : {}),
             provider: 'kakao',
             ...profilePatch,
+            ...phoneProvenancePatch,
         }, { onConflict: 'id' });
     if (error) {
         console.error('users upsert (kakao profile) failed:', error.code);

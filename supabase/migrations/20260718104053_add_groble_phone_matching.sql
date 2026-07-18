@@ -1,24 +1,50 @@
--- Phase 1/5: add only nullable columns, unvalidated checks, the helper, and insert trigger.
--- The trigger is short schema work under the existing ALTER transaction; keep this lock phase short.
+-- Phase 1/5: add columns, unvalidated checks, the helper, and provenance/snapshot triggers.
+-- Trigger creation is short schema work under the existing ALTER transaction; keep this lock phase short.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
 ALTER TABLE public.users
     ADD COLUMN phone_number_normalized TEXT,
+    ADD COLUMN phone_number_verification_source TEXT,
+    ADD COLUMN phone_number_verified_at TIMESTAMP WITH TIME ZONE,
     ADD CONSTRAINT users_phone_number_normalized_check CHECK (
         phone_number_normalized IS NULL
         OR phone_number_normalized ~ '^\+8210[0-9]{8}$'
+    ) NOT VALID,
+    ADD CONSTRAINT users_phone_number_verification_source_check CHECK (
+        phone_number_verification_source IS NULL
+        OR phone_number_verification_source = 'kakao_rest_api'
     ) NOT VALID;
 
 ALTER TABLE public.earlybird_orders
     ADD COLUMN expected_buyer_phone_number_normalized TEXT,
+    ADD COLUMN buyer_match_policy TEXT DEFAULT 'legacy_email',
+    ADD COLUMN expected_buyer_phone_verification_source TEXT,
+    ADD COLUMN expected_buyer_phone_verified_at TIMESTAMP WITH TIME ZONE,
     ADD COLUMN groble_buyer_email TEXT,
     ADD COLUMN groble_buyer_phone_number TEXT,
     ADD COLUMN groble_buyer_display_name TEXT,
     ADD CONSTRAINT earlybird_orders_expected_buyer_phone_check CHECK (
         expected_buyer_phone_number_normalized IS NULL
         OR expected_buyer_phone_number_normalized ~ '^\+8210[0-9]{8}$'
+    ) NOT VALID,
+    ADD CONSTRAINT earlybird_orders_buyer_match_snapshot_check CHECK (
+        buyer_match_policy IS NOT NULL
+        AND (
+            (
+                buyer_match_policy = 'legacy_email'
+                AND expected_buyer_phone_number_normalized IS NULL
+                AND expected_buyer_phone_verification_source IS NULL
+                AND expected_buyer_phone_verified_at IS NULL
+            )
+            OR (
+                buyer_match_policy = 'verified_kakao_phone'
+                AND expected_buyer_phone_number_normalized IS NOT NULL
+                AND expected_buyer_phone_verification_source = 'kakao_rest_api'
+                AND expected_buyer_phone_verified_at IS NOT NULL
+            )
+        )
     ) NOT VALID,
     ADD CONSTRAINT earlybird_orders_groble_buyer_email_check CHECK (
         groble_buyer_email IS NULL
@@ -32,6 +58,11 @@ ALTER TABLE public.earlybird_orders
         groble_buyer_display_name IS NULL
         OR pg_catalog.char_length(groble_buyer_display_name) <= 100
     ) NOT VALID;
+
+-- The constant default classifies only rows that existed while this ALTER ran.
+-- New rolling-deploy INSERTs receive NULL and must pass the verified snapshot trigger.
+ALTER TABLE public.earlybird_orders
+    ALTER COLUMN buyer_match_policy DROP DEFAULT;
 
 ALTER TABLE public.earlybird_webhook_events
     ADD COLUMN groble_buyer_email TEXT,
@@ -73,6 +104,82 @@ $$;
 REVOKE ALL ON FUNCTION public.normalize_kr_mobile_e164(TEXT)
     FROM PUBLIC, anon, authenticated, service_role;
 
+ALTER TABLE public.users
+    ADD CONSTRAINT users_phone_number_provenance_check CHECK (
+        (
+            phone_number_normalized IS NULL
+            AND phone_number_verification_source IS NULL
+            AND phone_number_verified_at IS NULL
+        )
+        OR (
+            provider = 'kakao'
+            AND phone_number IS NOT NULL
+            AND phone_number_normalized IS NOT NULL
+            AND phone_number_verification_source = 'kakao_rest_api'
+            AND phone_number_verified_at IS NOT NULL
+            AND public.normalize_kr_mobile_e164(phone_number)
+                IS NOT DISTINCT FROM phone_number_normalized
+        )
+    ) NOT VALID;
+
+CREATE OR REPLACE FUNCTION public.enforce_user_phone_verification_provenance()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_identity_changed BOOLEAN := FALSE;
+    v_verification_changed BOOLEAN := FALSE;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        v_identity_changed := NEW.provider IS DISTINCT FROM OLD.provider
+            OR NEW.phone_number IS DISTINCT FROM OLD.phone_number
+            OR NEW.phone_number_normalized IS DISTINCT FROM OLD.phone_number_normalized
+            OR NEW.phone_number_verification_source
+                IS DISTINCT FROM OLD.phone_number_verification_source;
+        v_verification_changed := NEW.phone_number_verified_at
+            IS DISTINCT FROM OLD.phone_number_verified_at;
+
+        -- A rolling old writer changes raw/profile phone fields without presenting
+        -- a new verification timestamp. Degrade the row instead of retaining stale trust.
+        IF v_identity_changed
+           AND NEW.phone_number_verified_at
+                IS NOT DISTINCT FROM OLD.phone_number_verified_at THEN
+            NEW.phone_number_normalized := NULL;
+            NEW.phone_number_verification_source := NULL;
+            NEW.phone_number_verified_at := NULL;
+            RETURN NEW;
+        END IF;
+    END IF;
+
+    IF (
+           TG_OP = 'INSERT'
+           OR v_identity_changed
+           OR v_verification_changed
+       )
+       AND NEW.provider = 'kakao'
+       AND NEW.phone_number IS NOT NULL
+       AND NEW.phone_number_normalized IS NOT NULL
+       AND NEW.phone_number_verification_source = 'kakao_rest_api'
+       AND NEW.phone_number_verified_at IS NOT NULL
+       AND public.normalize_kr_mobile_e164(NEW.phone_number)
+            IS NOT DISTINCT FROM NEW.phone_number_normalized THEN
+        NEW.phone_number_verified_at := pg_catalog.clock_timestamp();
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.enforce_user_phone_verification_provenance()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TRIGGER enforce_user_phone_verification_provenance_before_write
+BEFORE INSERT OR UPDATE ON public.users
+FOR EACH ROW
+EXECUTE FUNCTION public.enforce_user_phone_verification_provenance();
+
 CREATE OR REPLACE FUNCTION public.set_earlybird_order_phone_snapshot()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -81,23 +188,35 @@ SET search_path = ''
 AS $$
 DECLARE
     v_phone_number_normalized TEXT;
+    v_phone_verification_source TEXT;
+    v_phone_verified_at TIMESTAMP WITH TIME ZONE;
 BEGIN
-    IF NEW.expected_buyer_phone_number_normalized IS NOT NULL THEN
-        RETURN NEW;
-    END IF;
-
-    SELECT COALESCE(
-        public.normalize_kr_mobile_e164(buyer.phone_number),
-        buyer.phone_number_normalized
-    )
-    INTO v_phone_number_normalized
+    SELECT buyer.phone_number_normalized,
+        buyer.phone_number_verification_source,
+        buyer.phone_number_verified_at
+    INTO v_phone_number_normalized,
+        v_phone_verification_source,
+        v_phone_verified_at
     FROM public.users AS buyer
     WHERE buyer.id = NEW.user_id
-      AND buyer.provider = 'kakao';
+      AND buyer.provider = 'kakao'
+      AND buyer.phone_number_verification_source = 'kakao_rest_api'
+      AND buyer.phone_number_verified_at IS NOT NULL
+      AND buyer.phone_number_verified_at
+            >= pg_catalog.clock_timestamp() - INTERVAL '24 hours'
+      AND buyer.phone_number_normalized IS NOT NULL
+      AND public.normalize_kr_mobile_e164(buyer.phone_number)
+            IS NOT DISTINCT FROM buyer.phone_number_normalized
+    FOR SHARE;
 
-    IF FOUND THEN
-        NEW.expected_buyer_phone_number_normalized := v_phone_number_normalized;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CHECKOUT_PHONE_REQUIRED';
     END IF;
+
+    NEW.buyer_match_policy := 'verified_kakao_phone';
+    NEW.expected_buyer_phone_number_normalized := v_phone_number_normalized;
+    NEW.expected_buyer_phone_verification_source := v_phone_verification_source;
+    NEW.expected_buyer_phone_verified_at := v_phone_verified_at;
     RETURN NEW;
 END;
 $$;
@@ -108,5 +227,36 @@ REVOKE ALL ON FUNCTION public.set_earlybird_order_phone_snapshot()
 CREATE TRIGGER set_earlybird_order_phone_snapshot_before_insert
 BEFORE INSERT ON public.earlybird_orders
 FOR EACH ROW
-WHEN (NEW.expected_buyer_phone_number_normalized IS NULL)
 EXECUTE FUNCTION public.set_earlybird_order_phone_snapshot();
+
+CREATE OR REPLACE FUNCTION public.protect_earlybird_order_buyer_match_snapshot()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF OLD.buyer_match_policy IS DISTINCT FROM NEW.buyer_match_policy
+       OR OLD.expected_buyer_phone_number_normalized
+            IS DISTINCT FROM NEW.expected_buyer_phone_number_normalized
+       OR OLD.expected_buyer_phone_verification_source
+            IS DISTINCT FROM NEW.expected_buyer_phone_verification_source
+       OR OLD.expected_buyer_phone_verified_at
+            IS DISTINCT FROM NEW.expected_buyer_phone_verified_at THEN
+        RAISE EXCEPTION 'EARLYBIRD_BUYER_MATCH_SNAPSHOT_IMMUTABLE';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.protect_earlybird_order_buyer_match_snapshot()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update
+BEFORE UPDATE OF buyer_match_policy,
+    expected_buyer_phone_number_normalized,
+    expected_buyer_phone_verification_source,
+    expected_buyer_phone_verified_at
+ON public.earlybird_orders
+FOR EACH ROW
+EXECUTE FUNCTION public.protect_earlybird_order_buyer_match_snapshot();

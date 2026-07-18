@@ -5,7 +5,7 @@ import type { User } from '@supabase/supabase-js';
 import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
 
 const USER_RESPONSE_COLUMNS = 'id, email, provider, analysis_count, is_paid_user, is_unlimited, created_at, updated_at';
-const USER_INTERNAL_COLUMNS = `${USER_RESPONSE_COLUMNS}, name, nickname, profile_image, gender, birthyear, phone_number, phone_number_normalized`;
+const USER_INTERNAL_COLUMNS = `${USER_RESPONSE_COLUMNS}, name, nickname, profile_image, gender, birthyear`;
 const SAFE_DATABASE_CODE = /^(?:[0-9A-Z]{5}|PGRST[0-9]{3})$/;
 
 interface UserResponseDto {
@@ -27,21 +27,12 @@ type DatabaseOperation = 'read' | 'insert' | 'update';
 //    실제 로그인 후 users 테이블에 값이 비어 있으면 키 매핑을 조정할 것.
 function extractProfile(user: User) {
     const m = (user.user_metadata ?? {}) as Record<string, unknown>;
-    const phone = (
-        typeof user.phone === 'string'
-        && user.phone.trim()
-        && typeof user.phone_confirmed_at === 'string'
-        && user.phone_confirmed_at.trim()
-    )
-        ? { mode: 'synchronize' as const, value: user.phone }
-        : { mode: 'preserve' as const };
     return buildAuthProfilePatch({
         name: [m.name, m.full_name],
         nickname: [m.nickname, m.preferred_username, m.user_name, m.name],
         profileImage: [m.avatar_url, m.picture, m.profile_image],
         gender: [m.gender],
         birthyear: [m.birthyear, m.birth_year],
-        phone,
     });
 }
 
@@ -134,19 +125,9 @@ export async function GET() {
         const existing = dbUser as Record<string, unknown>;
         const patch: Record<string, string | null> = {};
         for (const [key, value] of Object.entries(profile)) {
-            if (key === 'phone_number' || key === 'phone_number_normalized') {
-                continue;
-            }
             if (typeof value === 'string' && value && !existing[key]) {
                 patch[key] = value;
             }
-        }
-        if (
-            'phone_number' in profile
-            || 'phone_number_normalized' in profile
-        ) {
-            patch.phone_number = profile.phone_number ?? null;
-            patch.phone_number_normalized = profile.phone_number_normalized ?? null;
         }
         if (Object.keys(patch).length > 0) {
             const { data: updated, error: updateError } = await supabaseAdmin

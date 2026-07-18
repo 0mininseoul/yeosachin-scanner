@@ -5,9 +5,12 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
 ALTER TABLE public.users
-    VALIDATE CONSTRAINT users_phone_number_normalized_check;
+    VALIDATE CONSTRAINT users_phone_number_normalized_check,
+    VALIDATE CONSTRAINT users_phone_number_verification_source_check,
+    VALIDATE CONSTRAINT users_phone_number_provenance_check;
 ALTER TABLE public.earlybird_orders
     VALIDATE CONSTRAINT earlybird_orders_expected_buyer_phone_check,
+    VALIDATE CONSTRAINT earlybird_orders_buyer_match_snapshot_check,
     VALIDATE CONSTRAINT earlybird_orders_groble_buyer_email_check,
     VALIDATE CONSTRAINT earlybird_orders_groble_buyer_phone_check,
     VALIDATE CONSTRAINT earlybird_orders_groble_buyer_display_name_check;

@@ -198,6 +198,7 @@ async function seedPreflight(
         phone?: string | null;
         rawPhone?: string | null;
         email?: string;
+        verified?: boolean;
     } = {}
 ): Promise<Seed> {
     const provider = options.provider ?? 'kakao';
@@ -207,6 +208,10 @@ async function seedPreflight(
     const unnormalized = options.rawPhone === undefined
         ? (phone ? rawPhone(index) : null)
         : options.rawPhone;
+    const verified = options.verified !== false
+        && provider === 'kakao'
+        && phone !== null
+        && unnormalized !== null;
     const seed = {
         index,
         userId: uuid(USER_NAMESPACE, index),
@@ -217,9 +222,18 @@ async function seedPreflight(
     };
     await db.query(
         `INSERT INTO public.users (
-            id, email, provider, phone_number, phone_number_normalized
-        ) VALUES ($1, $2, $3, $4, $5)`,
-        [seed.userId, seed.email, provider, seed.rawPhone, seed.phone]
+            id, email, provider, phone_number, phone_number_normalized,
+            phone_number_verification_source, phone_number_verified_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+            seed.userId,
+            seed.email,
+            provider,
+            seed.rawPhone,
+            verified ? seed.phone : null,
+            verified ? 'kakao_rest_api' : null,
+            verified ? '2026-07-18T20:00:00+09:00' : null,
+        ]
     );
     await db.query(
         `INSERT INTO public.analysis_preflights (
@@ -360,8 +374,13 @@ describe('Groble phone migration upgrade behavior', () => {
             const preflightId = uuid(PREFLIGHT_NAMESPACE, 920);
             await database.query(
                 `INSERT INTO public.users (
-                    id, email, provider, phone_number, phone_number_normalized
-                ) VALUES ($1, 'purge@example.com', 'kakao', '010-0000-0920', '+821000000920')`,
+                    id, email, provider, phone_number, phone_number_normalized,
+                    phone_number_verification_source, phone_number_verified_at
+                ) VALUES (
+                    $1, 'purge@example.com', 'kakao', '010-0000-0920',
+                    '+821000000920', 'kakao_rest_api',
+                    '2026-07-18T20:00:00+09:00'
+                )`,
                 [userId]
             );
             await database.query(
@@ -448,44 +467,96 @@ describe('Groble phone migration upgrade behavior', () => {
         }
     }, 30_000);
 
-    it('backfills domestic and +82 mobile numbers while leaving invalid numbers null', async () => {
+    it('does not promote legacy raw phones and preserves newly verified rollout values', async () => {
         const database = await createDatabaseBeforePhoneMigration();
         try {
             await database.query(
                 `INSERT INTO public.users (id, email, provider, phone_number) VALUES
                     ($1, 'domestic@example.com', 'kakao', '010-1234-5678'),
                     ($2, 'international@example.com', 'kakao', '+82 10 8765 4321'),
-                    ($3, 'invalid@example.com', 'google', '02-123-4567')`,
+                    ($3, 'invalid@example.com', 'google', '02-123-4567'),
+                    ($4, 'forged@example.com', 'kakao', 'not-a-phone')`,
                 [
                     uuid(USER_NAMESPACE, 901),
                     uuid(USER_NAMESPACE, 902),
                     uuid(USER_NAMESPACE, 903),
+                    uuid(USER_NAMESPACE, 906),
                 ]
             );
-            await applyPhoneMigrations(database);
+            await database.exec(phoneDdlMigration);
+            await database.query(
+                `UPDATE public.users
+                 SET phone_number_normalized = '+821087654321',
+                     phone_number_verification_source = 'kakao_rest_api',
+                     phone_number_verified_at = '2026-07-18T20:00:00+09:00'
+                 WHERE email = 'international@example.com'`
+            );
+            await expect(database.query(
+                `UPDATE public.users
+                 SET phone_number_normalized = '+821011112222',
+                     phone_number_verification_source = 'kakao_rest_api',
+                     phone_number_verified_at = '2026-07-18T20:00:00+09:00'
+                 WHERE email = 'forged@example.com'`
+            )).rejects.toThrow(/users_phone_number_provenance_check/);
+            for (const migration of phoneMigrations.slice(1)) {
+                await database.exec(migration);
+            }
 
             const rows = (await database.query<{
                 email: string;
                 phone_number_normalized: string | null;
+                phone_number_verification_source: string | null;
             }>(
-                `SELECT email, phone_number_normalized
+                `SELECT email, phone_number_normalized, phone_number_verification_source
                  FROM public.users ORDER BY email`
             )).rows;
             expect(rows).toEqual([
-                { email: 'domestic@example.com', phone_number_normalized: '+821012345678' },
-                { email: 'international@example.com', phone_number_normalized: '+821087654321' },
-                { email: 'invalid@example.com', phone_number_normalized: null },
+                {
+                    email: 'domestic@example.com',
+                    phone_number_normalized: null,
+                    phone_number_verification_source: null,
+                },
+                {
+                    email: 'forged@example.com',
+                    phone_number_normalized: null,
+                    phone_number_verification_source: null,
+                },
+                {
+                    email: 'international@example.com',
+                    phone_number_normalized: '+821087654321',
+                    phone_number_verification_source: 'kakao_rest_api',
+                },
+                {
+                    email: 'invalid@example.com',
+                    phone_number_normalized: null,
+                    phone_number_verification_source: null,
+                },
             ]);
-            await expect(database.query(
-                `UPDATE public.users SET phone_number_normalized = '+8210123' WHERE email = $1`,
-                ['invalid@example.com']
-            )).rejects.toThrow(/users_phone_number_normalized_check/);
+            await database.query(
+                `UPDATE public.users
+                 SET phone_number_normalized = '+821012345678'
+                 WHERE email = 'domestic@example.com'`
+            );
+            expect((await database.query<{
+                phone_number_normalized: string | null;
+                phone_number_verification_source: string | null;
+                phone_number_verified_at: string | null;
+            }>(
+                `SELECT phone_number_normalized,
+                    phone_number_verification_source,
+                    phone_number_verified_at
+                 FROM public.users WHERE email = 'domestic@example.com'`
+            )).rows[0]).toEqual({
+                phone_number_normalized: null,
+                phone_number_verification_source: null,
+                phone_number_verified_at: null,
+            });
         } finally {
             await database.close();
         }
     }, 30_000);
 
-    it('aborts rather than choosing between duplicate normalized users', async () => {
+    it('aborts rather than choosing between duplicate verified Kakao phones', async () => {
         const database = await createDatabaseBeforePhoneMigration();
         try {
             await database.query(
@@ -494,7 +565,16 @@ describe('Groble phone migration upgrade behavior', () => {
                     ($2, 'duplicate-two@example.com', 'kakao', '+82 10 1234 5678')`,
                 [uuid(USER_NAMESPACE, 904), uuid(USER_NAMESPACE, 905)]
             );
-            await expect(applyPhoneMigrations(database)).rejects.toThrow(
+            await database.exec(phoneDdlMigration);
+            await database.query(
+                `UPDATE public.users
+                 SET phone_number_normalized = '+821012345678',
+                     phone_number_verification_source = 'kakao_rest_api',
+                     phone_number_verified_at = '2026-07-18T20:00:00+09:00'
+                 WHERE email IN ('duplicate-one@example.com', 'duplicate-two@example.com')`
+            );
+            await database.exec(phoneCheckoutMigration);
+            await expect(database.exec(phoneBackfillMigration)).rejects.toThrow(
                 /DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW/
             );
             expect((await database.query<{
@@ -504,27 +584,27 @@ describe('Groble phone migration upgrade behavior', () => {
                  FROM public.users
                  ORDER BY email`
             )).rows).toEqual([
-                { phone_number_normalized: null },
-                { phone_number_normalized: null },
+                { phone_number_normalized: '+821012345678' },
+                { phone_number_normalized: '+821012345678' },
             ]);
         } finally {
             await database.close();
         }
     }, 30_000);
 
-    it('backfills phone snapshots for existing pending and unresolved cancelled orders', async () => {
+    it('classifies only pre-migration pending and cancelled orders as legacy email', async () => {
         for (const scenario of [
             {
                 index: 906,
-                expectedPhone: '+821011112222',
                 rawPhone: '010-1111-2222',
                 status: 'payment_pending',
+                verified: true,
             },
             {
                 index: 907,
-                expectedPhone: '+821033334444',
                 rawPhone: '010-3333-4444',
                 status: 'cancelled',
+                verified: false,
             },
         ] as const) {
             const database = await createDatabaseBeforePhoneMigration();
@@ -581,16 +661,39 @@ describe('Groble phone migration upgrade behavior', () => {
                     );
                 }
 
-                await applyPhoneMigrations(database);
+                await database.exec(phoneDdlMigration);
+                if (scenario.verified) {
+                    await database.query(
+                        `UPDATE public.users
+                         SET phone_number_normalized = public.normalize_kr_mobile_e164(phone_number),
+                             phone_number_verification_source = 'kakao_rest_api',
+                             phone_number_verified_at = '2026-07-18T20:00:00+09:00'
+                         WHERE id = $1`,
+                        [userId]
+                    );
+                }
+                for (const migration of phoneMigrations.slice(1)) {
+                    await database.exec(migration);
+                }
                 const order = (await database.query<{
+                    buyer_match_policy: string;
                     expected_buyer_phone_number_normalized: string | null;
+                    expected_buyer_phone_verification_source: string | null;
+                    expected_buyer_phone_verified_at: string | null;
                     status: string;
                 }>(
-                    `SELECT expected_buyer_phone_number_normalized, status
+                    `SELECT buyer_match_policy,
+                        expected_buyer_phone_number_normalized,
+                        expected_buyer_phone_verification_source,
+                        expected_buyer_phone_verified_at,
+                        status
                      FROM public.earlybird_orders`
                 )).rows[0];
                 expect(order).toEqual({
-                    expected_buyer_phone_number_normalized: scenario.expectedPhone,
+                    buyer_match_policy: 'legacy_email',
+                    expected_buyer_phone_number_normalized: null,
+                    expected_buyer_phone_verification_source: null,
+                    expected_buyer_phone_verified_at: null,
                     status: scenario.status,
                 });
             } finally {
@@ -599,7 +702,7 @@ describe('Groble phone migration upgrade behavior', () => {
         }
     }, 30_000);
 
-    it('closes the legacy checkout gap before backfill and finalizer activation', async () => {
+    it('keeps rollout snapshots fail closed until Kakao REST provenance exists', async () => {
         const database = await createDatabaseBeforePhoneMigration();
         try {
             await database.exec(phoneDdlMigration);
@@ -610,19 +713,25 @@ describe('Groble phone migration upgrade behavior', () => {
                 normalizedPhoneValue: string | null = null,
                 functionName:
                     | 'create_earlybird_checkout'
-                    | 'create_earlybird_checkout_legacy_test' = 'create_earlybird_checkout'
+                    | 'create_earlybird_checkout_legacy_test' = 'create_earlybird_checkout',
+                verified = false,
+                provider: Provider = 'kakao'
             ): Promise<CheckoutRow> => {
                 const userId = uuid(USER_NAMESPACE, index);
                 const preflightId = uuid(PREFLIGHT_NAMESPACE, index);
                 await database.query(
                     `INSERT INTO public.users (
-                        id, email, provider, phone_number, phone_number_normalized
-                     ) VALUES ($1, $2, 'kakao', $3, $4)`,
+                        id, email, provider, phone_number, phone_number_normalized,
+                        phone_number_verification_source, phone_number_verified_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
                     [
                         userId,
                         `transition-${index}@example.com`,
+                        provider,
                         phone,
-                        normalizedPhoneValue,
+                        verified ? normalizedPhoneValue : null,
+                        verified ? 'kakao_rest_api' : null,
+                        verified ? '2026-07-18T20:00:00+09:00' : null,
                     ]
                 );
                 await database.query(
@@ -688,15 +797,45 @@ describe('Groble phone migration upgrade behavior', () => {
                 service_can_execute: false,
             });
 
-            const legacyCheckout = await createTransitionCheckout(908, '010-5555-6666');
+            await expect(createTransitionCheckout(
+                908,
+                '010-5555-6666'
+            )).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
+            expect((await database.query<{ count: number }>(
+                `SELECT pg_catalog.count(*)::INTEGER AS count
+                 FROM public.earlybird_orders`
+            )).rows[0].count).toBe(0);
+
+            const verifiedLegacyCheckout = await createTransitionCheckout(
+                909,
+                '010-7777-8888',
+                '+821077778888',
+                'create_earlybird_checkout',
+                true
+            );
             expect((await database.query<{
+                buyer_match_policy: string;
                 expected_buyer_phone_number_normalized: string | null;
+                expected_buyer_phone_verification_source: string | null;
+                expected_buyer_phone_verified_at: string | null;
             }>(
-                `SELECT expected_buyer_phone_number_normalized
+                `SELECT buyer_match_policy,
+                    expected_buyer_phone_number_normalized,
+                    expected_buyer_phone_verification_source,
+                    expected_buyer_phone_verified_at
                  FROM public.earlybird_orders
                  WHERE id = $1`,
-                [legacyCheckout.order_id]
-            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821055556666');
+                [verifiedLegacyCheckout.order_id]
+            )).rows[0]).toMatchObject({
+                buyer_match_policy: 'verified_kakao_phone',
+                expected_buyer_phone_number_normalized: '+821077778888',
+                expected_buyer_phone_verification_source: 'kakao_rest_api',
+            });
+            expect((await database.query<{ verified: boolean }>(
+                `SELECT expected_buyer_phone_verified_at IS NOT NULL AS verified
+                 FROM public.earlybird_orders WHERE id = $1`,
+                [verifiedLegacyCheckout.order_id]
+            )).rows[0].verified).toBe(true);
 
             await database.exec(`
                 ALTER FUNCTION public.create_earlybird_checkout(
@@ -706,72 +845,33 @@ describe('Groble phone migration upgrade behavior', () => {
             `);
 
             await database.exec(phoneCheckoutMigration);
-            const transitionCheckout = await createTransitionCheckout(909, '010-7777-8888');
-            expect((await database.query<{
-                expected_buyer_phone_number_normalized: string | null;
-            }>(
-                `SELECT expected_buyer_phone_number_normalized
-                 FROM public.earlybird_orders
-                 WHERE id = $1`,
-                [transitionCheckout.order_id]
-            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821077778888');
-            const normalizedFallbackCheckout = await createTransitionCheckout(
+            await expect(createTransitionCheckout(
                 910,
-                '02-123-4567',
-                '+821099991111'
+                '010-9999-1111'
+            )).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
+            await expect(createTransitionCheckout(
+                912,
+                '',
+                null,
+                'create_earlybird_checkout',
+                false,
+                'google'
+            )).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
+            const verifiedTransitionCheckout = await createTransitionCheckout(
+                911,
+                '010-2222-3333',
+                '+821022223333',
+                'create_earlybird_checkout',
+                true
             );
 
             await database.exec(phoneBackfillMigration);
-            const straddlingLegacyCheckout = await createTransitionCheckout(
-                911,
-                '010-2222-3333',
+            await expect(createTransitionCheckout(
+                914,
+                '010-4444-5555',
                 null,
                 'create_earlybird_checkout_legacy_test'
-            );
-            expect((await database.query<{
-                expected_buyer_phone_number_normalized: string | null;
-            }>(
-                `SELECT expected_buyer_phone_number_normalized
-                 FROM public.earlybird_orders
-                 WHERE id = $1`,
-                [straddlingLegacyCheckout.order_id]
-            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821022223333');
-            const straddlingFallbackCheckout = await createTransitionCheckout(
-                912,
-                '02-123-4567',
-                '+821088887777',
-                'create_earlybird_checkout_legacy_test'
-            );
-            expect((await database.query<{
-                expected_buyer_phone_number_normalized: string | null;
-            }>(
-                `SELECT expected_buyer_phone_number_normalized
-                 FROM public.earlybird_orders
-                 WHERE id = $1`,
-                [straddlingFallbackCheckout.order_id]
-            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821088887777');
-
-            await database.query(
-                `UPDATE public.users
-                 SET phone_number = '010-9999-0000',
-                     phone_number_normalized = '+821099990000'
-                 WHERE id = $1`,
-                [uuid(USER_NAMESPACE, 911)]
-            );
-            await database.query(
-                `UPDATE public.earlybird_orders
-                 SET updated_at = pg_catalog.clock_timestamp()
-                 WHERE id = $1`,
-                [straddlingLegacyCheckout.order_id]
-            );
-            expect((await database.query<{
-                expected_buyer_phone_number_normalized: string | null;
-            }>(
-                `SELECT expected_buyer_phone_number_normalized
-                 FROM public.earlybird_orders
-                 WHERE id = $1`,
-                [straddlingLegacyCheckout.order_id]
-            )).rows[0].expected_buyer_phone_number_normalized).toBe('+821022223333');
+            )).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
 
             await database.exec(phoneValidationMigration);
             await database.exec(phoneFinalizationMigration);
@@ -783,24 +883,19 @@ describe('Groble phone migration upgrade behavior', () => {
             }>(
                 `SELECT id, expected_buyer_phone_number_normalized
                  FROM public.earlybird_orders
-                 WHERE id IN ($1, $2, $3)`,
+                 WHERE id IN ($1, $2)`,
                 [
-                    legacyCheckout.order_id,
-                    transitionCheckout.order_id,
-                    normalizedFallbackCheckout.order_id,
+                    verifiedLegacyCheckout.order_id,
+                    verifiedTransitionCheckout.order_id,
                 ]
             )).rows).toEqual(expect.arrayContaining([
                 {
-                    id: legacyCheckout.order_id,
-                    expected_buyer_phone_number_normalized: '+821055556666',
-                },
-                {
-                    id: transitionCheckout.order_id,
+                    id: verifiedLegacyCheckout.order_id,
                     expected_buyer_phone_number_normalized: '+821077778888',
                 },
                 {
-                    id: normalizedFallbackCheckout.order_id,
-                    expected_buyer_phone_number_normalized: '+821099991111',
+                    id: verifiedTransitionCheckout.order_id,
+                    expected_buyer_phone_number_normalized: '+821022223333',
                 },
             ]));
             expect((await database.query<{
@@ -810,22 +905,38 @@ describe('Groble phone migration upgrade behavior', () => {
                  FROM public.users
                  WHERE id = $1`,
                 [uuid(USER_NAMESPACE, 910)]
-            )).rows[0].phone_number_normalized).toBe('+821099991111');
+            )).rows[0].phone_number_normalized).toBeNull();
 
-            const finalized = (await asServiceOn<FinalizeRow>(
+            const unverifiedFinalized = (await asServiceOn<FinalizeRow>(
                 database,
                 `SELECT * FROM public.finalize_earlybird_groble_payment(
                     'straddling-event', 'straddling-idem', 'payment.completed',
                     '2026-07-18T21:00:00+09:00', 'straddling-payment',
-                    'different-straddling-buyer@example.com', '+821022223333',
-                    '010-2222-3333', 'Straddling Buyer', $1, 14900,
+                    'different-straddling-buyer@example.com', '+821055556666',
+                    '010-5555-6666', 'Straddling Buyer', $1, 14900,
                     '2026-07-18T21:00:00+09:00'
                 )`,
                 [BASIC_PRODUCT_ID]
             )).rows[0];
-            expect(finalized).toMatchObject({
+            expect(unverifiedFinalized).toMatchObject({
+                disposition: 'unmatched',
+                order_id: null,
+            });
+
+            const verifiedFinalized = (await asServiceOn<FinalizeRow>(
+                database,
+                `SELECT * FROM public.finalize_earlybird_groble_payment(
+                    'verified-event', 'verified-idem', 'payment.completed',
+                    '2026-07-18T21:00:00+09:00', 'verified-payment',
+                    'different-verified-buyer@example.com', '+821077778888',
+                    '010-7777-8888', 'Verified Buyer', $1, 14900,
+                    '2026-07-18T21:00:00+09:00'
+                )`,
+                [BASIC_PRODUCT_ID]
+            )).rows[0];
+            expect(verifiedFinalized).toMatchObject({
                 disposition: 'accepted',
-                order_id: straddlingLegacyCheckout.order_id,
+                order_id: verifiedLegacyCheckout.order_id,
                 status: 'paid',
             });
         } finally {
@@ -882,66 +993,180 @@ describe('Groble phone checkout and finalizer behavior', () => {
         }
     });
 
-    it('prefers a valid raw Kakao phone and verifies it on idempotent replay', async () => {
+    it('snapshots verified Kakao provenance and enforces atomic user phone changes', async () => {
         const seed = await seedPreflight(1);
         const created = await createCheckout(seed);
         const replay = await createCheckout(seed);
         expect(created.created).toBe(true);
         expect(replay).toEqual({ order_id: created.order_id, created: false });
         expect((await db.query<{
+            buyer_match_policy: string;
             expected_buyer_phone_number_normalized: string | null;
+            expected_buyer_phone_verification_source: string | null;
+            verified: boolean;
         }>(
-            `SELECT expected_buyer_phone_number_normalized
+            `SELECT buyer_match_policy,
+                expected_buyer_phone_number_normalized,
+                expected_buyer_phone_verification_source,
+                expected_buyer_phone_verified_at IS NOT NULL AS verified
              FROM public.earlybird_orders WHERE id = $1`,
             [created.order_id]
-        )).rows[0].expected_buyer_phone_number_normalized).toBe(seed.phone);
+        )).rows[0]).toEqual({
+            buyer_match_policy: 'verified_kakao_phone',
+            expected_buyer_phone_number_normalized: seed.phone,
+            expected_buyer_phone_verification_source: 'kakao_rest_api',
+            verified: true,
+        });
 
         await db.query(
-            `UPDATE public.users SET phone_number_normalized = $1 WHERE id = $2`,
-            [normalizedPhone(101), seed.userId]
+            `UPDATE public.users
+             SET phone_number_verified_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [seed.userId]
         );
         expect(await createCheckout(seed)).toEqual({
             order_id: created.order_id,
             created: false,
         });
+
         await db.query(
-            `UPDATE public.users SET phone_number = $1 WHERE id = $2`,
-            [rawPhone(101), seed.userId]
+            `UPDATE public.users SET phone_number_normalized = $1 WHERE id = $2`,
+            [normalizedPhone(101), seed.userId]
+        );
+        expect((await db.query<{
+            phone_number_normalized: string | null;
+            phone_number_verification_source: string | null;
+            phone_number_verified_at: string | null;
+        }>(
+            `SELECT phone_number_normalized,
+                phone_number_verification_source,
+                phone_number_verified_at
+             FROM public.users WHERE id = $1`,
+            [seed.userId]
+        )).rows[0]).toEqual({
+            phone_number_normalized: null,
+            phone_number_verification_source: null,
+            phone_number_verified_at: null,
+        });
+        await db.query(
+            `UPDATE public.users
+             SET phone_number = $1,
+                 phone_number_normalized = $2,
+                 phone_number_verification_source = 'kakao_rest_api',
+                 phone_number_verified_at = '2026-07-18T21:00:00+09:00'
+             WHERE id = $3`,
+            [rawPhone(101), normalizedPhone(101), seed.userId]
         );
         await expect(createCheckout(seed)).rejects.toThrow(/EARLYBIRD_ORDER_CONFLICT/);
     });
 
-    it('rejects Kakao without a phone but allows a legacy Google null snapshot', async () => {
+    it('rejects missing, unverified, and Google checkout identities', async () => {
         const kakao = await seedPreflight(2, 'basic', { phone: null, rawPhone: null });
         await expect(createCheckout(kakao)).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
+
+        const unverified = await seedPreflight(102, 'basic', {
+            phone: null,
+            rawPhone: '010-0000-0102',
+            verified: false,
+        });
+        await expect(createCheckout(unverified)).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
 
         const google = await seedPreflight(3, 'basic', {
             provider: 'google',
             phone: null,
             rawPhone: null,
         });
-        const order = await createCheckout(google);
-        expect(order.created).toBe(true);
-        expect((await db.query<{
-            expected_buyer_phone_number_normalized: string | null;
-        }>(
-            `SELECT expected_buyer_phone_number_normalized
-             FROM public.earlybird_orders WHERE id = $1`,
-            [order.order_id]
-        )).rows[0].expected_buyer_phone_number_normalized).toBeNull();
+        await expect(createCheckout(google)).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
+    });
 
-        const normalizedFallback = await seedPreflight(103, 'basic', {
-            phone: normalizedPhone(103),
-            rawPhone: '02-123-4567',
-        });
-        const fallbackOrder = await createCheckout(normalizedFallback);
+    it('rejects forged provenance when the raw phone cannot normalize', async () => {
+        await expect(db.query(
+            `INSERT INTO public.users (
+                id, email, provider, phone_number, phone_number_normalized,
+                phone_number_verification_source, phone_number_verified_at
+            ) VALUES (
+                $1, 'forged-runtime@example.com', 'kakao', 'not-a-phone',
+                '+821011112222', 'kakao_rest_api', pg_catalog.clock_timestamp()
+            )`,
+            [uuid(USER_NAMESPACE, 999)]
+        )).rejects.toThrow(/users_phone_number_provenance_check/);
+    });
+
+    it('degrades provenance when an old writer changes only the raw phone', async () => {
+        const seed = await seedPreflight(202);
+
+        await db.query(
+            `UPDATE public.users SET phone_number = $1 WHERE id = $2`,
+            [rawPhone(302), seed.userId]
+        );
+
         expect((await db.query<{
-            expected_buyer_phone_number_normalized: string | null;
+            phone_number_normalized: string | null;
+            phone_number_verification_source: string | null;
+            phone_number_verified_at: string | null;
         }>(
-            `SELECT expected_buyer_phone_number_normalized
-             FROM public.earlybird_orders WHERE id = $1`,
-            [fallbackOrder.order_id]
-        )).rows[0].expected_buyer_phone_number_normalized).toBe(normalizedFallback.phone);
+            `SELECT phone_number_normalized, phone_number_verification_source,
+                phone_number_verified_at
+             FROM public.users WHERE id = $1`,
+            [seed.userId]
+        )).rows[0]).toEqual({
+            phone_number_normalized: null,
+            phone_number_verification_source: null,
+            phone_number_verified_at: null,
+        });
+        await expect(createCheckout(seed)).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
+    });
+
+    it('does not refresh phone verification during unrelated profile updates', async () => {
+        const seed = await seedPreflight(204);
+        await db.exec(
+            'ALTER TABLE public.users DISABLE TRIGGER enforce_user_phone_verification_provenance_before_write'
+        );
+        try {
+            await db.query(
+                `UPDATE public.users
+                 SET phone_number_verified_at = pg_catalog.clock_timestamp() - INTERVAL '25 hours'
+                 WHERE id = $1`,
+                [seed.userId]
+            );
+        } finally {
+            await db.exec(
+                'ALTER TABLE public.users ENABLE TRIGGER enforce_user_phone_verification_provenance_before_write'
+            );
+        }
+
+        await db.query(
+            `UPDATE public.users SET email = 'profile-repair@example.com' WHERE id = $1`,
+            [seed.userId]
+        );
+        expect((await db.query<{ remained_stale: boolean }>(
+            `SELECT phone_number_verified_at
+                    < pg_catalog.clock_timestamp() - INTERVAL '24 hours'
+                    AS remained_stale
+             FROM public.users WHERE id = $1`,
+            [seed.userId]
+        )).rows[0].remained_stale).toBe(true);
+    });
+
+    it('rejects verified Kakao provenance older than 24 hours', async () => {
+        const seed = await seedPreflight(203);
+        await db.exec(
+            'ALTER TABLE public.users DISABLE TRIGGER enforce_user_phone_verification_provenance_before_write'
+        );
+        try {
+            await db.query(
+                `UPDATE public.users
+                 SET phone_number_verified_at = pg_catalog.clock_timestamp() - INTERVAL '25 hours'
+                 WHERE id = $1`,
+                [seed.userId]
+            );
+        } finally {
+            await db.exec(
+                'ALTER TABLE public.users ENABLE TRIGGER enforce_user_phone_verification_provenance_before_write'
+            );
+        }
+
+        await expect(createCheckout(seed)).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
     });
 
     it('accepts a unique phone match even when the buyer email differs', async () => {
@@ -963,14 +1188,28 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rows[0].seconds).toBe(172_800);
     });
 
-    it('falls back to email when normalized phone is absent or invalid upstream', async () => {
-        const google = await seedPreflight(5, 'basic', {
-            provider: 'google',
-            phone: null,
-            rawPhone: null,
-        });
-        const checkout = await createCheckout(google);
-        const result = await finalize(google, 'basic', 5, {
+    it('keeps email fallback available for unresolved legacy-email orders', async () => {
+        const legacy = await seedPreflight(5);
+        const checkout = await createCheckout(legacy);
+        await db.exec(
+            'ALTER TABLE public.earlybird_orders DISABLE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update'
+        );
+        try {
+            await db.query(
+                `UPDATE public.earlybird_orders
+                 SET buyer_match_policy = 'legacy_email',
+                     expected_buyer_phone_number_normalized = NULL,
+                     expected_buyer_phone_verification_source = NULL,
+                     expected_buyer_phone_verified_at = NULL
+                 WHERE id = $1`,
+                [checkout.order_id]
+            );
+        } finally {
+            await db.exec(
+                'ALTER TABLE public.earlybird_orders ENABLE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update'
+            );
+        }
+        const result = await finalize(legacy, 'basic', 5, {
             normalizedPhone: null,
             rawPhone: 'not-a-mobile-number',
         });
@@ -981,17 +1220,33 @@ describe('Groble phone checkout and finalizer behavior', () => {
         });
     });
 
-    it('falls back to email when a valid phone has no pending candidate', async () => {
+    it('never falls back to email for a verified-phone order with a mismatched phone', async () => {
         const seed = await seedPreflight(105);
-        const checkout = await createCheckout(seed);
+        await createCheckout(seed);
         const result = await finalize(seed, 'basic', 105, {
             normalizedPhone: normalizedPhone(905),
             rawPhone: '010-0000-0905',
         });
         expect(result).toMatchObject({
-            disposition: 'accepted',
-            order_id: checkout.order_id,
-            status: 'paid',
+            disposition: 'unmatched',
+            order_id: null,
+            status: null,
+        });
+    });
+
+    it('never falls back to email for a verified-phone order when phone evidence is absent', async () => {
+        const seed = await seedPreflight(205);
+        await createCheckout(seed);
+
+        const result = await finalize(seed, 'basic', 205, {
+            normalizedPhone: null,
+            rawPhone: null,
+        });
+
+        expect(result).toMatchObject({
+            disposition: 'unmatched',
+            order_id: null,
+            status: null,
         });
     });
 
@@ -1068,27 +1323,30 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rows[0].sold_count).toBe(0);
     });
 
-    it('does not fall back to email or inventory for multiple phone candidates', async () => {
+    it('prevents a second order snapshot from being changed into a phone candidate', async () => {
         const first = await seedPreflight(9);
         const second = await seedPreflight(10);
-        await createCheckout(first);
+        const firstCheckout = await createCheckout(first);
         await createCheckout(second);
-        await db.query(
+        await expect(db.query(
             `UPDATE public.earlybird_orders
              SET expected_buyer_phone_number_normalized = $1
              WHERE user_id = $2`,
             [first.phone, second.userId]
-        );
+        )).rejects.toThrow(/EARLYBIRD_BUYER_MATCH_SNAPSHOT_IMMUTABLE/);
 
         const result = await finalize(first, 'basic', 9, { buyerEmail: first.email });
-        expect(result).toMatchObject({ disposition: 'ambiguous_buyer', order_id: null });
+        expect(result).toMatchObject({
+            disposition: 'accepted',
+            order_id: firstCheckout.order_id,
+        });
         expect((await db.query<{ sold_count: number }>(
             `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`
-        )).rows[0].sold_count).toBe(0);
+        )).rows[0].sold_count).toBe(1);
         expect((await db.query<{ count: number }>(
             `SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_orders
              WHERE status = 'payment_pending'`
-        )).rows[0].count).toBe(2);
+        )).rows[0].count).toBe(1);
     });
 
     it('never uses display name as a matching identity', async () => {
@@ -1108,8 +1366,12 @@ describe('Groble phone checkout and finalizer behavior', () => {
         const checkout = await createCheckout(seed);
         const changedPhone = normalizedPhone(112);
         await db.query(
-            `UPDATE public.users SET phone_number_normalized = $1 WHERE id = $2`,
-            [changedPhone, seed.userId]
+            `UPDATE public.users
+             SET phone_number = $1,
+                 phone_number_normalized = $2,
+                 phone_number_verified_at = '2026-07-18T22:00:00+09:00'
+             WHERE id = $3`,
+            [rawPhone(112), changedPhone, seed.userId]
         );
 
         const result = await finalize(seed, 'basic', 12, {
@@ -1258,7 +1520,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rows[0]).toEqual(expectedEvidence);
     });
 
-    it('rejects multiple unresolved cancelled phone snapshots as ambiguous', async () => {
+    it('keeps multiple unresolved cancelled phone snapshots ambiguous', async () => {
         const firstSeed = await seedPreflight(109);
         const secondSeed = await seedPreflight(110);
         const firstCheckout = await createCheckout(firstSeed);
@@ -1272,12 +1534,21 @@ describe('Groble phone checkout and finalizer behavior', () => {
             `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
             [secondCheckout.order_id]
         );
-        await db.query(
-            `UPDATE public.earlybird_orders
-             SET expected_buyer_phone_number_normalized = $1
-             WHERE id = $2`,
-            [firstSeed.phone, secondCheckout.order_id]
+        await db.exec(
+            'ALTER TABLE public.earlybird_orders DISABLE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update'
         );
+        try {
+            await db.query(
+                `UPDATE public.earlybird_orders
+                 SET expected_buyer_phone_number_normalized = $1
+                 WHERE id = $2`,
+                [firstSeed.phone, secondCheckout.order_id]
+            );
+        } finally {
+            await db.exec(
+                'ALTER TABLE public.earlybird_orders ENABLE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update'
+            );
+        }
 
         const result = await finalize(firstSeed, 'basic', 109, {
             buyerEmail: 'ambiguous-late-buyer@example.com',
@@ -1323,6 +1594,24 @@ describe('Groble phone checkout and finalizer behavior', () => {
 
         const compatibilitySeed = await seedPreflight(108);
         const compatibilityOrder = await createCheckout(compatibilitySeed);
+        await db.exec(
+            'ALTER TABLE public.earlybird_orders DISABLE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update'
+        );
+        try {
+            await db.query(
+                `UPDATE public.earlybird_orders
+                 SET buyer_match_policy = 'legacy_email',
+                     expected_buyer_phone_number_normalized = NULL,
+                     expected_buyer_phone_verification_source = NULL,
+                     expected_buyer_phone_verified_at = NULL
+                 WHERE id = $1`,
+                [compatibilityOrder.order_id]
+            );
+        } finally {
+            await db.exec(
+                'ALTER TABLE public.earlybird_orders ENABLE TRIGGER protect_earlybird_order_buyer_match_snapshot_before_update'
+            );
+        }
         const compatibility = await asService<FinalizeRow>(
             `SELECT * FROM public.finalize_earlybird_groble_payment(
                 p_event_id => 'compatibility-named-event',
@@ -1340,6 +1629,40 @@ describe('Groble phone checkout and finalizer behavior', () => {
         expect(compatibility.rows[0]).toMatchObject({
             disposition: 'accepted',
             order_id: compatibilityOrder.order_id,
+        });
+    });
+
+    it('rolls back a legacy wrapper call for verified-phone orders so canonical retry can win', async () => {
+        const seed = await seedPreflight(111);
+        const checkout = await createCheckout(seed);
+
+        await expect(asService<FinalizeRow>(
+            `SELECT * FROM public.finalize_earlybird_groble_payment(
+                'mixed-rollout-event', 'mixed-rollout-idem', 'payment.completed',
+                '2026-07-18T21:00:00+09:00', 'mixed-rollout-payment',
+                $1, $2, 14900, '2026-07-18T21:00:00+09:00'
+            )`,
+            [seed.email, BASIC_PRODUCT_ID]
+        )).rejects.toThrow(/GROBLE_CANONICAL_PHONE_REQUIRED/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_webhook_events
+             WHERE event_id = 'mixed-rollout-event'
+                OR idempotency_key = 'mixed-rollout-idem'`
+        )).rows[0].count).toBe(0);
+
+        const canonical = await asService<FinalizeRow>(
+            `SELECT * FROM public.finalize_earlybird_groble_payment(
+                'mixed-rollout-event', 'mixed-rollout-idem', 'payment.completed',
+                '2026-07-18T21:00:00+09:00', 'mixed-rollout-payment',
+                $1, $2, $3, 'Mixed Rollout Buyer', $4, 14900,
+                '2026-07-18T21:00:00+09:00'
+            )`,
+            [seed.email, seed.phone, seed.rawPhone, BASIC_PRODUCT_ID]
+        );
+        expect(canonical.rows[0]).toMatchObject({
+            disposition: 'accepted',
+            order_id: checkout.order_id,
         });
     });
 
@@ -1397,7 +1720,10 @@ describe('Groble phone checkout and finalizer behavior', () => {
                 `SELECT user_id FROM public.earlybird_orders`
             )).rows).toEqual([{ user_id: seed.userId }]);
             await expect(db.query(
-                `SELECT expected_buyer_phone_number_normalized,
+                `SELECT buyer_match_policy,
+                    expected_buyer_phone_number_normalized,
+                    expected_buyer_phone_verification_source,
+                    expected_buyer_phone_verified_at,
                     groble_buyer_email, groble_buyer_phone_number,
                     groble_buyer_display_name
                  FROM public.earlybird_orders`

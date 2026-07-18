@@ -143,10 +143,18 @@ BEGIN
     FOR v_lock_user_id IN
         SELECT potential_user.user_id
         FROM (
-            SELECT buyer.id AS user_id
-            FROM public.users AS buyer
+            SELECT phone_order.user_id
+            FROM public.earlybird_orders AS phone_order
             WHERE p_buyer_phone_normalized IS NOT NULL
-              AND buyer.phone_number_normalized = p_buyer_phone_normalized
+              AND phone_order.status IN ('payment_pending', 'cancelled')
+              AND phone_order.payment_id IS NULL
+              AND phone_order.buyer_match_policy = 'verified_kakao_phone'
+              AND phone_order.expected_buyer_phone_verification_source
+                    = 'kakao_rest_api'
+              AND phone_order.expected_buyer_phone_verified_at IS NOT NULL
+              AND phone_order.expected_groble_product_id = p_product_id
+              AND phone_order.expected_buyer_phone_number_normalized
+                    = p_buyer_phone_normalized
 
             UNION
 
@@ -154,17 +162,6 @@ BEGIN
             FROM public.users AS buyer
             WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
                 = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
-
-            UNION
-
-            SELECT phone_order.user_id
-            FROM public.earlybird_orders AS phone_order
-            WHERE p_buyer_phone_normalized IS NOT NULL
-              AND phone_order.status IN ('payment_pending', 'cancelled')
-              AND phone_order.payment_id IS NULL
-              AND phone_order.expected_groble_product_id = p_product_id
-              AND phone_order.expected_buyer_phone_number_normalized
-                    = p_buyer_phone_normalized
         ) AS potential_user
         ORDER BY potential_user.user_id::TEXT
     LOOP
@@ -180,6 +177,10 @@ BEGIN
         INTO v_candidate_count
         FROM public.earlybird_orders AS candidate
         WHERE candidate.status = 'payment_pending'
+          AND candidate.buyer_match_policy = 'verified_kakao_phone'
+          AND candidate.expected_buyer_phone_verification_source
+                = 'kakao_rest_api'
+          AND candidate.expected_buyer_phone_verified_at IS NOT NULL
           AND candidate.expected_groble_product_id = p_product_id
           AND candidate.expected_buyer_phone_number_normalized
                 = p_buyer_phone_normalized;
@@ -203,6 +204,10 @@ BEGIN
             INTO v_candidate_order_id, v_user_id
             FROM public.earlybird_orders AS candidate
             WHERE candidate.status = 'payment_pending'
+              AND candidate.buyer_match_policy = 'verified_kakao_phone'
+              AND candidate.expected_buyer_phone_verification_source
+                    = 'kakao_rest_api'
+              AND candidate.expected_buyer_phone_verified_at IS NOT NULL
               AND candidate.expected_groble_product_id = p_product_id
               AND candidate.expected_buyer_phone_number_normalized
                     = p_buyer_phone_normalized;
@@ -213,6 +218,10 @@ BEGIN
             FROM public.earlybird_orders AS cancelled_candidate
             WHERE cancelled_candidate.status = 'cancelled'
               AND cancelled_candidate.payment_id IS NULL
+              AND cancelled_candidate.buyer_match_policy = 'verified_kakao_phone'
+              AND cancelled_candidate.expected_buyer_phone_verification_source
+                    = 'kakao_rest_api'
+              AND cancelled_candidate.expected_buyer_phone_verified_at IS NOT NULL
               AND cancelled_candidate.expected_buyer_phone_number_normalized
                     = p_buyer_phone_normalized
               AND cancelled_candidate.expected_groble_product_id = p_product_id
@@ -238,6 +247,10 @@ BEGIN
                 FROM public.earlybird_orders AS cancelled_candidate
                 WHERE cancelled_candidate.status = 'cancelled'
                   AND cancelled_candidate.payment_id IS NULL
+                  AND cancelled_candidate.buyer_match_policy = 'verified_kakao_phone'
+                  AND cancelled_candidate.expected_buyer_phone_verification_source
+                        = 'kakao_rest_api'
+                  AND cancelled_candidate.expected_buyer_phone_verified_at IS NOT NULL
                   AND cancelled_candidate.expected_buyer_phone_number_normalized
                         = p_buyer_phone_normalized
                   AND cancelled_candidate.expected_groble_product_id = p_product_id
@@ -298,6 +311,7 @@ BEGIN
         FROM public.earlybird_orders AS candidate
         JOIN public.users AS buyer ON buyer.id = candidate.user_id
         WHERE candidate.status = 'payment_pending'
+          AND candidate.buyer_match_policy = 'legacy_email'
           AND candidate.expected_groble_product_id = p_product_id
           AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
                 = pg_catalog.lower(pg_catalog.btrim(p_buyer_email));
@@ -322,6 +336,7 @@ BEGIN
             FROM public.earlybird_orders AS candidate
             JOIN public.users AS buyer ON buyer.id = candidate.user_id
             WHERE candidate.status = 'payment_pending'
+              AND candidate.buyer_match_policy = 'legacy_email'
               AND candidate.expected_groble_product_id = p_product_id
               AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
                     = pg_catalog.lower(pg_catalog.btrim(p_buyer_email));
@@ -349,6 +364,7 @@ BEGIN
             WHERE cancelled_order.user_id = v_user_id
               AND cancelled_order.status = 'cancelled'
               AND cancelled_order.payment_id IS NULL
+              AND cancelled_order.buyer_match_policy = 'legacy_email'
               AND cancelled_order.expected_groble_product_id = p_product_id
               AND cancelled_order.expected_amount_krw = p_amount_krw
             ORDER BY cancelled_order.updated_at DESC
@@ -407,11 +423,16 @@ BEGIN
       AND (
           (
               v_match_method = 'phone'
+              AND candidate.buyer_match_policy = 'verified_kakao_phone'
+              AND candidate.expected_buyer_phone_verification_source
+                    = 'kakao_rest_api'
+              AND candidate.expected_buyer_phone_verified_at IS NOT NULL
               AND candidate.expected_buyer_phone_number_normalized
                     = p_buyer_phone_normalized
           )
           OR (
               v_match_method = 'email'
+              AND candidate.buyer_match_policy = 'legacy_email'
               AND EXISTS (
                   SELECT 1
                   FROM public.users AS buyer
@@ -571,25 +592,76 @@ CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment(
     p_paid_at TIMESTAMP WITH TIME ZONE
 )
 RETURNS TABLE(disposition TEXT, order_id UUID, status TEXT, plan_sequence SMALLINT)
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+    v_lock_user_id UUID;
+BEGIN
+    -- Serialize the rolling caller with checkout before deciding that email-only
+    -- attribution is safe. A verified-phone order must wait for a canonical retry.
+    FOR v_lock_user_id IN
+        SELECT buyer.id
+        FROM public.users AS buyer
+        WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
+            = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+        ORDER BY buyer.id::TEXT
+    LOOP
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
+        );
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.earlybird_orders AS candidate
+        JOIN public.users AS buyer ON buyer.id = candidate.user_id
+        WHERE candidate.buyer_match_policy = 'verified_kakao_phone'
+          AND candidate.status IN ('payment_pending', 'cancelled')
+          AND candidate.payment_id IS NULL
+          AND candidate.expected_groble_product_id = p_product_id
+          AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+    ) THEN
+        RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.earlybird_orders AS candidate
+        JOIN public.users AS buyer ON buyer.id = candidate.user_id
+        WHERE candidate.buyer_match_policy = 'legacy_email'
+          AND candidate.status IN ('payment_pending', 'cancelled')
+          AND candidate.payment_id IS NULL
+          AND candidate.expected_groble_product_id = p_product_id
+          AND (
+              candidate.status = 'payment_pending'
+              OR candidate.expected_amount_krw = p_amount_krw
+          )
+          AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+    ) THEN
+        RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
+    END IF;
+
+    RETURN QUERY
     SELECT *
     FROM public.finalize_earlybird_groble_payment(
-        p_event_id => $1,
-        p_idempotency_key => $2,
-        p_event_type => $3,
-        p_occurred_at => $4,
-        p_payment_id => $5,
-        p_buyer_email => $6,
+        p_event_id => p_event_id,
+        p_idempotency_key => p_idempotency_key,
+        p_event_type => p_event_type,
+        p_occurred_at => p_occurred_at,
+        p_payment_id => p_payment_id,
+        p_buyer_email => p_buyer_email,
         p_buyer_phone_normalized => NULL::TEXT,
         p_buyer_phone_raw => NULL::TEXT,
         p_buyer_display_name => NULL::TEXT,
-        p_product_id => $7,
-        p_amount_krw => $8,
-        p_paid_at => $9
-    )
+        p_product_id => p_product_id,
+        p_amount_krw => p_amount_krw,
+        p_paid_at => p_paid_at
+    );
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.set_earlybird_refund_status(

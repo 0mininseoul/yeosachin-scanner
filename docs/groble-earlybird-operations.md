@@ -55,14 +55,14 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 
 | 순서 | migration | transaction 범위와 lock 의미 |
 |---|---|---|
-| 1 | `20260718104053_add_groble_phone_matching.sql` | nullable column, `NOT VALID` check, 정규화 helper와 `earlybird_orders`의 null-only Kakao `BEFORE INSERT` snapshot trigger를 추가한다. trigger 생성은 기존 `ALTER TABLE` transaction 안에서 끝나는 짧은 schema 작업이며, ACCESS EXCLUSIVE lock을 스캔·인덱스·RPC 작업 동안 유지하지 않는다. |
-| 2 | `20260718114650_activate_groble_phone_checkout.sql` | checkout RPC와 service-role ACL만 교체한다. 새 RPC도 유효한 raw `phone_number`를 우선 snapshot하고 Kakao 전화번호가 없으면 INSERT 전에 거부한다. |
-| 3 | `20260718114658_backfill_groble_phone_matching.sql` | `users`와 미해결 주문을 DML로 백필한다. 유효한 raw 번호를 우선하되 raw 값이 무효하면 기존 trusted normalized 값을 보존하고, 정규화 중복이 있으면 전체 transaction을 중단한다. |
-| 4 | `20260718114707_validate_groble_phone_matching.sql` | check validation과 3개의 일반 index build만 수행한다. 인덱스의 write-blocking lock을 1번 ACCESS EXCLUSIVE transaction과 분리한다. |
-| 5 | `20260718120345_activate_groble_phone_finalization.sql` | 12개 인자 finalizer, 9개 인자 호환 wrapper, refund RPC와 grant만 교체한다. index build 실패와 finalization 계약 활성화를 분리한다. |
+| 1 | `20260718104053_add_groble_phone_matching.sql` | 사용자 전화번호의 Kakao REST 검증 출처와 DB 검증 시각, 주문의 매칭 정책과 불변 snapshot column, `NOT VALID` check, 정규화 helper와 trigger를 추가한다. 기존 주문만 `legacy_email`로 분류하고, 이후 모든 INSERT는 24시간 이내의 `kakao_rest_api` 검증을 `verified_kakao_phone` snapshot으로 강제한다. |
+| 2 | `20260718114650_activate_groble_phone_checkout.sql` | checkout RPC와 service-role ACL만 교체한다. 새 RPC는 24시간 이내에 Kakao REST로 검증된 전화번호만 snapshot하며 raw 전화번호나 이메일로 fallback하지 않는다. |
+| 3 | `20260718114658_backfill_groble_phone_matching.sql` | 출처가 완전하지 않은 normalized 전화번호를 제거하고 검증된 normalized 중복이 있으면 전체 transaction을 중단한다. legacy raw 전화번호를 승격하거나 주문에 전화번호를 백필하지 않는다. |
+| 4 | `20260718114707_validate_groble_phone_matching.sql` | 사용자 provenance와 주문 매칭 snapshot을 포함한 check validation, 3개의 일반 index build만 수행한다. 인덱스의 write-blocking lock을 1번 ACCESS EXCLUSIVE transaction과 분리한다. |
+| 5 | `20260718120345_activate_groble_phone_finalization.sql` | 12개 인자 finalizer, 9개 인자 호환 wrapper, refund RPC와 grant만 교체한다. finalizer는 주문의 불변 정책에 따라 검증 전화번호 또는 legacy 이메일만 사용하고, wrapper는 검증 전화번호 후보를 처리하지 않고 canonical 재시도를 요구한다. |
 | 6 | `20260719130000_stop_persisting_groble_buyer_contacts.sql` | 기존 구매자 연락처를 삭제하고 주문·웹훅 이벤트의 호환 컬럼을 old/new writer 모두에서 NULL로 강제하는 `BEFORE INSERT OR UPDATE` fence를 설치한다. 컬럼은 롤링 배포 호환성을 위해 즉시 drop하지 않는다. |
 
-여섯 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 1번이 커밋된 뒤 발생하는 모든 주문 INSERT는 RPC 버전과 무관하게 trigger를 통과한다. 따라서 2번 교체 전에 시작해 사용자 advisory lock에서 대기하다가 3번 백필 후 이전 함수 본문으로 INSERT하는 호출도, INSERT 순간 유효한 raw Kakao 번호를 우선 정규화하고 raw 값이 무효할 때만 저장된 normalized 값으로 fallback해 snapshot한다. 1번 전에 이미 존재한 null snapshot은 3번이 백필한다. trigger는 null인 Kakao INSERT에만 동작하고 UPDATE에는 동작하지 않으므로 기존 snapshot과 Google 이메일 fallback을 변경하지 않는다. 6번의 별도 fence는 연락처 호환 컬럼에만 INSERT·UPDATE 모두 적용된다. 이 불변식은 checkout 중단이나 maintenance-only workaround에 의존하지 않는다.
+여섯 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 1번이 커밋될 때 기존 주문만 `legacy_email`로 고정되고, 이후 모든 주문 INSERT는 RPC 버전과 무관하게 trigger를 통과한다. INSERT 순간 사용자의 Kakao REST 검증 시각이 24시간을 넘었거나 provenance가 불완전하면 `CHECKOUT_PHONE_REQUIRED`로 중단하며, caller가 제공한 주문 매칭 값을 신뢰하지 않는다. 이전 사용자 writer가 검증 시각 없이 raw 전화번호를 바꾸면 DB trigger가 normalized 값과 provenance를 제거한다. 3번은 legacy raw 전화번호나 기존 주문을 전화번호 후보로 승격하지 않는다. 생성된 주문의 정책, normalized 전화번호, 출처, 검증 시각은 UPDATE할 수 없다. 6번의 별도 fence는 연락처 호환 컬럼에만 INSERT·UPDATE 모두 적용된다.
 
 2026-07-18 원격 실측 기준은 `users` 약 0행/49KB, `earlybird_orders` 1행/128KB, `earlybird_webhook_events` 10행/72KB이다. push 직전 SQL editor에서 다음을 다시 실행한다.
 
@@ -84,15 +84,15 @@ ORDER BY xact_start;
 
 어느 테이블이든 10,000행 또는 10MB를 넘거나 30초 이상 진행 중인 transaction이 있으면 일반 push를 중단하고 쓰기 트래픽을 제한한 maintenance window에서 다시 검토한다. 작은 실측 규모가 유지되면 `npx supabase migration list --linked`로 순서를 확인한 뒤 push한다.
 
-`lock_timeout` 또는 `statement_timeout`으로 특정 파일이 실패하면 그 파일의 transaction은 전체 롤백된다. 자동 반복하거나 migration history를 수동 완료 처리하지 않는다. `migration list --linked`로 완료된 이전 파일과 실패한 파일을 확인하고, 대기 transaction을 제거하거나 maintenance window를 잡은 뒤 미적용 파일부터 재시도한다. `DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW`는 재시도 대상이 아니라 계정 소유권 확인 후 데이터를 해결해야 하는 중단 조건이다.
+`lock_timeout` 또는 `statement_timeout`으로 특정 파일이 실패하면 그 파일의 transaction은 전체 롤백된다. 자동 반복하거나 migration history를 수동 완료 처리하지 않는다. `migration list --linked`로 완료된 이전 파일과 실패한 파일을 확인하고, 대기 transaction을 제거하거나 maintenance window를 잡은 뒤 미적용 파일부터 재시도한다. `DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW`는 검증된 전화번호가 여러 사용자에게 연결된 상태이므로 재시도 대상이 아니라 계정 소유권 확인 후 데이터를 해결해야 하는 중단 조건이다.
 
-9개 인자 finalizer wrapper는 롤링 배포의 이전 인스턴스가 모두 drain된 후에도 즉시 삭제하지 않는다. 호출 현황을 확인한 후 별도 post-drain forward migration으로만 제거한다.
+9개 인자 finalizer wrapper는 같은 상품과 이메일의 검증 전화번호 후보가 있거나 처리 가능한 `legacy_email` 후보가 없으면, webhook event나 idempotency row를 쓰기 전에 `GROBLE_CANONICAL_PHONE_REQUIRED`로 롤백한다. 새 인스턴스의 12개 인자 canonical 호출이 같은 키로 재시도할 수 있어야 한다. 이전 인스턴스가 모두 drain된 후에도 wrapper를 즉시 삭제하지 않고, 호출 현황을 확인한 후 별도 post-drain forward migration으로만 제거한다.
 
 ## 결제 확정과 수량 운영
 
 - 성공 화면 진입이나 프론트 숫자로 접수 확정하지 않는다.
 - 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 접수를 확정하며, `payment.cancel_requested`는 환불 검토 상태로만 전환한다.
-- 결제 완료는 checkout 시점의 정규화 전화번호 snapshot을 이메일보다 먼저 매칭한다. 전화번호 후보가 없을 때만 기존 이메일 규칙으로 fallback한다.
+- `verified_kakao_phone` 주문의 결제 완료는 checkout 시점의 불변 정규화 전화번호 snapshot으로만 매칭한다. 사용자 프로필 전화번호가 이후 바뀌어도 주문 snapshot은 바뀌지 않으며 이메일로 fallback하지 않는다. 이메일 매칭은 migration 전에 생성된 `legacy_email` 주문에만 허용한다.
 - Groble 구매자의 정규화 전화번호와 소문자 이메일은 signed webhook transaction의 전화번호 우선·이메일 fallback 매칭 RPC 입력으로만 일시 처리한다. raw 전화번호·표시 이름은 RPC에 전달하지 않고, 이메일·전화번호·표시 이름을 주문·웹훅 이벤트에 영속 저장하지 않으며 브라우저 응답·Amplitude·Axiom에 전송하지 않는다. 카드 정보와 원본 payload도 저장하지 않는다.
 - 다른 플랜의 최신 사전 점검으로 다시 시도하면 이전 미처리 주문은 snapshot을 변경하지 않고 `cancelled`로 남기며, 새 snapshot으로 별도 주문을 만든다. 이전 결제창에서 뒤늦게 결제된 건은 새 주문에 붙이지 않고 환불 검토 대상으로 격리한다.
 - Groble 완료 이벤트에는 앱의 주문 식별자가 없으므로, 같은 구매자가 같은 플랜을 새 snapshot으로 다시 열면 이전 주문과 구분할 수 없다. 현재 `payment_pending` 주문이나 같은 상품의 미해결 `cancelled` 주문이 있으면 새 주문을 만들지 않고 `EARLYBIRD_CHECKOUT_ALREADY_PENDING`으로 차단하여 기존 snapshot을 보존한다. 이미 종료 상태인 동일 주문은 결제창 재진입 대상으로 반환하지 않는다.
