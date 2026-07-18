@@ -888,7 +888,6 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         }
         const settings = profileSettings();
         const apify = client(context?.credentialSlot);
-        const requested = new Set(usernames.map((username) => username.toLowerCase()));
         const profilesByUsername = new Map<string, InstagramProfile>();
         const failuresByUsername = new Map<string, Error>();
         const notFoundUsernames = new Set<string>();
@@ -1008,7 +1007,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 const explicitNotFound = profileNotFoundEnvelopeSchema.safeParse(item);
                 if (explicitNotFound.success) {
                     const key = explicitNotFound.data.username.toLowerCase();
-                    if (!requested.has(key)) {
+                    if (!currentBatch.has(key)) {
                         datasetContaminated = true;
                         continue;
                     }
@@ -1046,7 +1045,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                     continue;
                 }
                 const key = envelope.data.username.toLowerCase();
-                if (!requested.has(key)) {
+                if (!currentBatch.has(key)) {
                     datasetContaminated = true;
                     continue;
                 }

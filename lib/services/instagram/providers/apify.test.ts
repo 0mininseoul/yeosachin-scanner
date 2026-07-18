@@ -83,6 +83,35 @@ function mockClient(
     return { client, call, waitForFinish, abort, listItems };
 }
 
+function mockBatchedClient(batches: Array<Array<Record<string, unknown>>>) {
+    const runIds = batches.map((_, index) => `RunBatch${String(index).padStart(8, '0')}`);
+    let runIndex = 0;
+    const actor = vi.fn(() => ({
+        start: vi.fn(async () => ({ id: runIds[runIndex++] })),
+    }));
+    const run = vi.fn((runId: string) => ({
+        waitForFinish: vi.fn(async () => ({
+            status: 'SUCCEEDED',
+            defaultDatasetId: runId,
+        })),
+        abort: vi.fn(async () => undefined),
+    }));
+    const dataset = vi.fn((datasetId: string) => ({
+        listItems: vi.fn(async ({ offset = 0, limit = 1 } = {}) => {
+            const batchIndex = runIds.indexOf(datasetId);
+            const items = batchIndex >= 0 ? batches[batchIndex]! : [];
+            return {
+                items: items.slice(offset, offset + limit),
+                total: items.length,
+                offset,
+                count: Math.min(limit, Math.max(0, items.length - offset)),
+                limit,
+            };
+        }),
+    }));
+    return { actor, run, dataset } as unknown as ApifyClientLike;
+}
+
 describe('apifyProvider', () => {
     it('selects one explicit credential slot without automatic account pooling', () => {
         const env = {
@@ -1221,37 +1250,13 @@ describe('apifyProvider', () => {
     });
 
     it('does not attribute an Actor error row to a username from another provider batch', async () => {
-        const runIds = ['RunBatch00000001', 'RunBatch00000002'];
-        let runIndex = 0;
-        const actor = vi.fn(() => ({
-            start: vi.fn(async () => ({ id: runIds[runIndex++] })),
-        }));
-        const run = vi.fn((runId: string) => ({
-            waitForFinish: vi.fn(async () => ({
-                status: 'SUCCEEDED',
-                defaultDatasetId: runId,
-            })),
-            abort: vi.fn(async () => undefined),
-        }));
-        const dataset = vi.fn((datasetId: string) => ({
-            listItems: vi.fn(async ({ offset = 0, limit = 1 } = {}) => {
-                const items = datasetId === runIds[0]
-                    ? [{
-                        inputUrl: 'https://www.instagram.com/bob/',
-                        error: 'Failed to scrape this profile.',
-                    }]
-                    : [];
-                return {
-                    items: items.slice(offset, offset + limit),
-                    total: items.length,
-                    offset,
-                    count: Math.min(limit, Math.max(0, items.length - offset)),
-                    limit,
-                };
-            }),
-        }));
         const provider = makeApifyProvider({
-            client: { actor, run, dataset } as unknown as ApifyClientLike,
+            client: mockBatchedClient([[
+                {
+                    inputUrl: 'https://www.instagram.com/bob/',
+                    error: 'Failed to scrape this profile.',
+                },
+            ], []]),
             env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
         });
 
@@ -1260,6 +1265,26 @@ describe('apifyProvider', () => {
         expect(results.map(result => result.outcome.failureCategory)).toEqual([
             'schema',
             'schema',
+        ]);
+    });
+
+    it.each([
+        { label: 'profile row', row: profileItem('bob') },
+        { label: 'explicit not-found row', row: { username: 'bob', statusCode: 404 } },
+    ])('does not accept a $label from another provider batch', async ({ row }) => {
+        const provider = makeApifyProvider({
+            client: mockBatchedClient([[row], []]),
+            env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
+        });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob'], 1);
+
+        expect(results.map(result => [
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['failed', 'schema'],
+            ['failed', 'schema'],
         ]);
     });
 
