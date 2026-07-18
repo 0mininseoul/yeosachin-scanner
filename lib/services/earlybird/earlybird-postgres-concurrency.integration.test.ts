@@ -19,9 +19,10 @@ const presaleMigration = readFileSync(
 );
 const phoneMigrations = [
     '20260718104053_add_groble_phone_matching.sql',
-    '20260718114650_backfill_groble_phone_matching.sql',
-    '20260718114658_validate_groble_phone_matching.sql',
-    '20260718114707_activate_groble_phone_matching.sql',
+    '20260718114650_activate_groble_phone_checkout.sql',
+    '20260718114658_backfill_groble_phone_matching.sql',
+    '20260718114707_validate_groble_phone_matching.sql',
+    '20260718120345_activate_groble_phone_finalization.sql',
 ].map(file => readFileSync(
     new URL(`../../../supabase/migrations/${file}`, import.meta.url),
     'utf8'

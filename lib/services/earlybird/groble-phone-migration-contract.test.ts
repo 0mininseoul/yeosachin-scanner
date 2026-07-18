@@ -4,9 +4,10 @@ import { describe, expect, it } from 'vitest';
 const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
 const MIGRATION_SUFFIXES = [
     'add_groble_phone_matching.sql',
+    'activate_groble_phone_checkout.sql',
     'backfill_groble_phone_matching.sql',
     'validate_groble_phone_matching.sql',
-    'activate_groble_phone_matching.sql',
+    'activate_groble_phone_finalization.sql',
 ] as const;
 const migrationFiles = readdirSync(migrationsDirectory)
     .filter(file => MIGRATION_SUFFIXES.some(suffix => file.endsWith(`_${suffix}`)))
@@ -21,9 +22,10 @@ function migrationFor(suffix: typeof MIGRATION_SUFFIXES[number]): string {
 }
 
 const ddlMigration = migrationFor('add_groble_phone_matching.sql');
+const checkoutMigration = migrationFor('activate_groble_phone_checkout.sql');
 const backfillMigration = migrationFor('backfill_groble_phone_matching.sql');
 const validationMigration = migrationFor('validate_groble_phone_matching.sql');
-const activationMigration = migrationFor('activate_groble_phone_matching.sql');
+const finalizationMigration = migrationFor('activate_groble_phone_finalization.sql');
 const migration = migrations.join('\n');
 
 const AUTHENTICATED_ORDER_COLUMNS = [
@@ -47,7 +49,7 @@ function functionDefinition(name: string): string {
 }
 
 describe('Groble phone matching migration contract', () => {
-    it('is four ordered forward migrations after the applied presale migration', () => {
+    it('is five ordered forward migrations after the applied presale migration', () => {
         expect(migrationFiles.map(file => file.replace(/^\d+_/, ''))).toEqual(
             MIGRATION_SUFFIXES
         );
@@ -58,7 +60,7 @@ describe('Groble phone matching migration contract', () => {
         }
     });
 
-    it('isolates access-exclusive DDL, backfills, validation/indexes, and RPC activation', () => {
+    it('isolates DDL, checkout transition, backfill, validation/indexes, and finalization', () => {
         for (const source of migrations) {
             expect(source).toContain("SET LOCAL lock_timeout = '5s'");
             expect(source).toContain("SET LOCAL statement_timeout = '2min'");
@@ -80,6 +82,23 @@ describe('Groble phone matching migration contract', () => {
         expect(ddlMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
         expect(ddlMigration).not.toContain('create_earlybird_checkout');
 
+        expect(checkoutMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_earlybird_checkout'
+        );
+        expect(checkoutMigration).toMatch(
+            /SELECT buyer\.provider, buyer\.phone_number,[\s\S]*?buyer\.phone_number_normalized/
+        );
+        expect(checkoutMigration).toMatch(
+            /COALESCE\([\s\S]*?public\.normalize_kr_mobile_e164\(v_user_phone_number\)[\s\S]*?v_user_phone_number_normalized[\s\S]*?\)/
+        );
+        expect(checkoutMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.create_earlybird_checkout\([\s\S]*?GRANT EXECUTE ON FUNCTION public\.create_earlybird_checkout\(/
+        );
+        expect(checkoutMigration).not.toMatch(/^ALTER TABLE/m);
+        expect(checkoutMigration).not.toMatch(/^UPDATE public\./m);
+        expect(checkoutMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
+        expect(checkoutMigration).not.toContain('finalize_earlybird_groble_payment');
+
         expect(backfillMigration.match(
             /^UPDATE public\.(?:users|earlybird_orders)\b/gm
         )).toHaveLength(2);
@@ -96,17 +115,20 @@ describe('Groble phone matching migration contract', () => {
         expect(validationMigration).not.toContain('CREATE OR REPLACE FUNCTION');
         expect(validationMigration).not.toMatch(/^(?:GRANT|REVOKE)\b/m);
 
-        expect(activationMigration).toContain(
-            'CREATE OR REPLACE FUNCTION public.create_earlybird_checkout'
-        );
-        expect(activationMigration).toContain(
+        expect(finalizationMigration).toContain(
             'CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment'
         );
-        expect(activationMigration).toMatch(/^GRANT SELECT \(/m);
-        expect(activationMigration).not.toMatch(/^ALTER TABLE/m);
-        expect(activationMigration).not.toMatch(/^UPDATE public\./m);
-        expect(activationMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
-        expect(activationMigration).not.toContain('normalize_kr_mobile_e164');
+        expect(finalizationMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.set_earlybird_refund_status'
+        );
+        expect(finalizationMigration).toMatch(/^GRANT SELECT \(/m);
+        expect(finalizationMigration).not.toContain(
+            'CREATE OR REPLACE FUNCTION public.create_earlybird_checkout'
+        );
+        expect(finalizationMigration).not.toMatch(/^ALTER TABLE/m);
+        expect(finalizationMigration).not.toMatch(/^UPDATE public\./m);
+        expect(finalizationMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
+        expect(finalizationMigration).not.toContain('normalize_kr_mobile_e164');
     });
 
     it('normalizes and backfills users before rejecting duplicates and indexing', () => {
@@ -125,11 +147,14 @@ describe('Groble phone matching migration contract', () => {
         );
 
         const backfill = migration.indexOf(
-            'SET phone_number_normalized = public.normalize_kr_mobile_e164(phone_number)'
+            'SET phone_number_normalized = COALESCE('
         );
         const duplicateGuard = migration.indexOf('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
         const uniqueIndex = migration.indexOf('CREATE UNIQUE INDEX users_phone_number_normalized_unique');
         expect(backfill).toBeGreaterThanOrEqual(0);
+        expect(backfillMigration).toMatch(
+            /SET phone_number_normalized = COALESCE\(\s*public\.normalize_kr_mobile_e164\(phone_number\),\s*phone_number_normalized\s*\)/
+        );
         expect(duplicateGuard).toBeGreaterThan(backfill);
         expect(uniqueIndex).toBeGreaterThan(duplicateGuard);
         expect(migration).toMatch(
@@ -237,7 +262,7 @@ describe('Groble phone matching migration contract', () => {
     it('serializes profile snapshots and refund transitions with the user lock', () => {
         const checkout = functionDefinition('create_earlybird_checkout');
         expect(checkout).toMatch(
-            /SELECT buyer\.provider, buyer\.phone_number_normalized[\s\S]*?WHERE buyer\.id = p_user_id\s+FOR UPDATE/
+            /SELECT buyer\.provider, buyer\.phone_number, buyer\.phone_number_normalized[\s\S]*?WHERE buyer\.id = p_user_id\s+FOR UPDATE/
         );
 
         const refund = functionDefinition('set_earlybird_refund_status');

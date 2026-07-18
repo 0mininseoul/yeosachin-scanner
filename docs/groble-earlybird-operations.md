@@ -41,7 +41,7 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 1. Groble의 기존 두 상품 가격과 상품별 재고 10건을 대시보드에서 다시 확인한다.
 2. 운영 환경의 다섯 가지 필수 서버 전용 값과, 필요한 경우 이전 webhook secret을 비밀 관리 시스템에 설정한다.
 3. `20260717140000_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
-4. 아래 전화번호 매칭 migration 게이트를 통과한 뒤 4개 파일을 순서대로 적용한다.
+4. 아래 전화번호 매칭 migration 게이트를 통과한 뒤 5개 파일을 순서대로 적용한다.
 5. 12개 인자 finalizer와 9개 인자 호환 wrapper의 시그니처와 service-role ACL을 확인한다.
 6. 애플리케이션 코드를 배포한다. 롤링 배포 중 이전 인스턴스는 9개 인자 wrapper를 계속 사용한다.
 7. Groble에 위 진입 페이지, 이동 페이지, 이동 버튼 문구, webhook URL과 이벤트를 설정한다.
@@ -56,11 +56,14 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 | 순서 | migration | transaction 범위와 lock 의미 |
 |---|---|---|
 | 1 | `20260718104053_add_groble_phone_matching.sql` | nullable column과 `NOT VALID` check, 정규화 helper만 추가한다. `ALTER TABLE`의 ACCESS EXCLUSIVE lock이 스캔·인덱스·RPC 작업 동안 유지되지 않게 이 파일에서 종료한다. |
-| 2 | `20260718114650_backfill_groble_phone_matching.sql` | `users`와 미해결 주문을 DML로 백필하고 정규화 중복이 있으면 전체 transaction을 중단한다. |
-| 3 | `20260718114658_validate_groble_phone_matching.sql` | check validation과 3개의 일반 index build만 수행한다. 인덱스의 write-blocking lock을 1번 ACCESS EXCLUSIVE transaction과 분리한다. |
-| 4 | `20260718114707_activate_groble_phone_matching.sql` | checkout, 12개 인자 finalizer, 9개 인자 호환 wrapper, refund RPC와 grant만 교체한다. index build 실패와 애플리케이션 계약 활성화를 분리한다. |
+| 2 | `20260718114650_activate_groble_phone_checkout.sql` | checkout RPC와 service-role ACL만 교체한다. 기존 callback이 raw `phone_number`만 갱신해도 checkout이 직접 정규화해 snapshot하므로 이 파일 후 새 null snapshot은 생기지 않는다. |
+| 3 | `20260718114658_backfill_groble_phone_matching.sql` | `users`와 미해결 주문을 DML로 백필한다. 유효한 raw 번호를 우선하되 raw 값이 무효하면 기존 trusted normalized 값을 보존하고, 정규화 중복이 있으면 전체 transaction을 중단한다. |
+| 4 | `20260718114707_validate_groble_phone_matching.sql` | check validation과 3개의 일반 index build만 수행한다. 인덱스의 write-blocking lock을 1번 ACCESS EXCLUSIVE transaction과 분리한다. |
+| 5 | `20260718120345_activate_groble_phone_finalization.sql` | 12개 인자 finalizer, 9개 인자 호환 wrapper, refund RPC와 grant만 교체한다. index build 실패와 finalization 계약 활성화를 분리한다. |
 
-네 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 2026-07-18 원격 실측 기준은 `users` 약 0행/49KB, `earlybird_orders` 1행/128KB, `earlybird_webhook_events` 10행/72KB이다. push 직전 SQL editor에서 다음을 다시 실행한다.
+다섯 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 1번과 2번 사이에 기존 checkout RPC가 만든 null snapshot은 3번이 백필한다. 2번이 커밋된 후에는 raw Kakao 전화번호를 유효할 때 우선 정규화하고, raw 값이 무효할 때만 저장된 normalized 값으로 fallback하므로 3번 후 스냅샷 공백이 없다. 이 불변식은 checkout 중단이나 maintenance-only workaround에 의존하지 않는다.
+
+2026-07-18 원격 실측 기준은 `users` 약 0행/49KB, `earlybird_orders` 1행/128KB, `earlybird_webhook_events` 10행/72KB이다. push 직전 SQL editor에서 다음을 다시 실행한다.
 
 ```sql
 SELECT relname,

@@ -42,7 +42,8 @@
 ### 결제 시작 규칙
 
 - 카카오 사용자의 정규화 전화번호가 없으면 checkout 스냅샷을 생성하지 않고 재로그인 또는 고객 지원 안내를 표시한다.
-- checkout RPC는 현재 `users.phone_number_normalized`를 주문의 `expected_buyer_phone_number_normalized`로 스냅샷한다. webhook은 로그인 프로필의 사후 변경이 아니라 이 불변 checkout 증거와 매칭한다.
+- checkout RPC는 현재 프로필에서 파생한 정규화 전화번호를 주문의 `expected_buyer_phone_number_normalized`로 스냅샷한다. webhook은 로그인 프로필의 사후 변경이 아니라 이 불변 checkout 증거와 매칭한다.
+- migration 전환 중 checkout RPC는 유효한 raw `phone_number`를 먼저 정규화하고, raw 값이 무효할 때만 저장된 normalized 값으로 fallback한다. 이 RPC를 백필보다 먼저 활성화해 이전 callback이 raw 값만 갱신하는 동안에도 새 주문의 snapshot 공백을 막는다.
 - 기존 Google 사용자의 활성 세션은 기존 이메일 매칭 계약으로 checkout을 완료할 수 있다.
 - 새 Google 로그인 진입점은 UI에 노출하지 않는다.
 
@@ -73,7 +74,7 @@
 
 ### 데이터 모델
 
-`users`에 `phone_number_normalized`를 추가하고 널이 아닌 값에 대한 유일 인덱스를 둔다. 4개의 순차 migration이 nullable DDL, 백필·중복 중단, check validation·index, RPC 활성화를 각 implicit transaction으로 분리한다. 기존 전화번호를 정규화해 백필하고 중복이 발견되면 자동으로 하나를 선택하지 않고 2번 transaction을 중단해 운영자가 계정 소유권을 확인하게 한다.
+`users`에 `phone_number_normalized`를 추가하고 널이 아닌 값에 대한 유일 인덱스를 둔다. 5개의 순차 migration이 nullable DDL, checkout snapshot RPC, 백필·중복 중단, check validation·index, finalization RPC를 각 implicit transaction으로 분리한다. 1번과 2번 사이의 기존 checkout이 만든 null snapshot은 3번이 채우고, 2번 커밋 후의 새 주문은 항상 snapshot을 기록한다. 백필은 유효한 raw 번호를 우선하되 raw 값이 무효하면 기존 trusted normalized 값을 지우지 않는다. 중복이 발견되면 자동으로 하나를 선택하지 않고 3번 transaction을 중단해 운영자가 계정 소유권을 확인하게 한다.
 
 `earlybird_orders`에 다음 운영자 전용 컬럼을 추가한다.
 
@@ -84,7 +85,7 @@
 
 `earlybird_webhook_events`에도 일치하지 않은 결제를 후속 확인할 수 있게 같은 구매자 증거 컬럼을 추가한다. 이 컬럼들은 `anon`과 `authenticated`에 GRANT하지 않고, API DTO와 Axiom·Amplitude에 전달하지 않는다. 기존 필드별 authenticated SELECT grant 목록도 변경하지 않는다.
 
-Supabase RPC는 여전히 service role만 실행할 수 있고, 결제 ID 잠금·사용자 잠금·주문 잠금·재고 잠금 순서와 멱등성을 유지한다. 활성화 migration은 12개 인자 canonical finalizer와 함께, 전화번호 증거를 `NULL`로 위임하는 9개 인자 service-only wrapper를 유지한다. wrapper는 모든 이전 인스턴스가 drain된 후 별도 post-drain migration으로만 제거한다.
+Supabase RPC는 여전히 service role만 실행할 수 있고, 결제 ID 잠금·사용자 잠금·주문 잠금·재고 잠금 순서와 멱등성을 유지한다. 5번 활성화 migration은 12개 인자 canonical finalizer와 함께, 전화번호 증거를 `NULL`로 위임하는 9개 인자 service-only wrapper를 유지한다. wrapper는 모든 이전 인스턴스가 drain된 후 별도 post-drain migration으로만 제거한다.
 
 ## 3. Amplitude
 
@@ -274,11 +275,11 @@ Axiom 공식 Next.js SDK를 사용해 다음 경계를 만든다.
 
 ## 8. 배포 순서
 
-1. 통합 테스트가 가능한 4개의 순차 Supabase migration을 CLI로 생성한다. DDL, DML, validation/index, RPC/grant transaction 경계를 혼합하지 않는다.
+1. 통합 테스트가 가능한 5개의 순차 Supabase migration을 CLI로 생성한다. DDL, checkout 활성화, DML, validation/index, finalization/grant transaction 경계를 혼합하지 않는다.
 2. `ascentum03`에 `yeosachin-logs` 데이터셋과 ingest 전용 runtime token을 생성한다.
 3. 관측 SDK, 인증 UI, Groble parser·RPC를 구현한다.
 4. 로컬 단위·DB·빌드 검증을 통과한다.
-5. push 직전 원격 row count·table size와 장기 transaction을 확인하고 4개 Supabase migration을 순서대로 반영한다. 이후 Vercel preview에 Amplitude key와 Axiom runtime 변수를 추가한다.
+5. push 직전 원격 row count·table size와 장기 transaction을 확인하고 5개 Supabase migration을 순서대로 반영한다. checkout을 백필보다 먼저 활성화하는 순서를 바꾸지 않는다. 이후 Vercel preview에 Amplitude key와 Axiom runtime 변수를 추가한다.
 6. preview에서 대표 사용자 흐름, Groble 서명 테스트, Amplitude event, Axiom ingest를 검증한다.
 7. Amplitude와 Axiom 웹 UI에서 대시보드·세그먼트·모니터를 구성한다.
 8. 코드 리뷰와 회귀 검증 후 main에 merge한다.

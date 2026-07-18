@@ -1,4 +1,4 @@
--- Phase 3/4: validate phase-1 checks, then build lookup indexes over phase-2 data.
+-- Phase 4/5: validate phase-1 checks, then build lookup indexes over phase-3 data.
 -- This phase depends on a successful duplicate guard and is safe to retry as a unit.
 
 SET LOCAL lock_timeout = '5s';

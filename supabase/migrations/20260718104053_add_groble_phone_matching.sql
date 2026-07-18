@@ -1,4 +1,4 @@
--- Phase 1/4: add only nullable columns, unvalidated checks, and the backfill helper.
+-- Phase 1/5: add only nullable columns, unvalidated checks, and the backfill helper.
 -- Supabase CLI executes this file as one transaction, so keep this lock phase short.
 
 SET LOCAL lock_timeout = '5s';

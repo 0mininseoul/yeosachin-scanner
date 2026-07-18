@@ -1,11 +1,14 @@
--- Phase 2/4: backfill after phase 1 commits and releases ACCESS EXCLUSIVE locks.
+-- Phase 3/5: backfill after checkout snapshotting is active for every new order.
 -- Duplicate normalized phones abort this DML transaction before index creation.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
 UPDATE public.users
-SET phone_number_normalized = public.normalize_kr_mobile_e164(phone_number)
+SET phone_number_normalized = COALESCE(
+    public.normalize_kr_mobile_e164(phone_number),
+    phone_number_normalized
+)
 WHERE phone_number IS NOT NULL;
 
 DO $$
