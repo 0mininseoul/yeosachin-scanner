@@ -64,6 +64,8 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 
 원격에 적용된 head `20260719120000_add_profile_provider_canary_journal.sql` 다음의 일반(ordinary) migration push는 다음 release gate를 모두 통과해야 한다.
 
+이 exact-six 검사는 pre-rollout freeze gate이며 production에서 위 6개 migration이 모두 적용되었다고 확인되기 전까지 유지한다. 기준선 뒤에 다른 migration이 하나라도 merge되면 feature 앞·뒤 위치와 무관하게 drift로 중단한다. 여섯 파일의 production 적용 확인 뒤에만 현행 migration history에 맞게 이 contract와 gate를 reconcile하거나 retire한다.
+
 1. 읽기 전용 확인으로 `npx supabase migration list --linked`를 실행하고 local/remote history를 비교한다.
 2. 적용 전 일반 push 미리보기로 `npx supabase db push --dry-run`를 실행한다.
 3. dry-run 출력은 정확히 위 6개 migration만 표시하고 예상하지 않은 파일이 없어야 하며, 순서도 표와 일치해야 한다.

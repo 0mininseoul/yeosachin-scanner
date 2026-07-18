@@ -7,6 +7,8 @@ const operationsRunbook = readFileSync(
     'utf8'
 );
 const APPLIED_REMOTE_HEAD = '20260719120000';
+const APPLIED_REMOTE_HEAD_FILE =
+    '20260719120000_add_profile_provider_canary_journal.sql';
 const EXPECTED_MIGRATIONS = [
     '20260719131000_add_groble_phone_matching.sql',
     '20260719131100_activate_groble_phone_checkout.sql',
@@ -15,17 +17,67 @@ const EXPECTED_MIGRATIONS = [
     '20260719131400_activate_groble_phone_finalization.sql',
     '20260719131500_stop_persisting_groble_buyer_contacts.sql',
 ] as const;
-const FEATURE_SUFFIXES = EXPECTED_MIGRATIONS.map(file =>
-    file.replace(/^\d+_/, '')
-);
+const EXPECTED_MIGRATION_SET = new Set<string>(EXPECTED_MIGRATIONS);
+const INCLUDE_ALL_OPTION = '--include-all';
+
+function migrationVersion(file: string): string | null {
+    return file.match(/^(\d+)_.*\.sql$/)?.[1] ?? null;
+}
+
+function compareMigrationFiles(left: string, right: string): number {
+    const leftVersion = BigInt(migrationVersion(left) ?? '0');
+    const rightVersion = BigInt(migrationVersion(right) ?? '0');
+
+    if (leftVersion < rightVersion) return -1;
+    if (leftVersion > rightVersion) return 1;
+    return left.localeCompare(right);
+}
+
+function rolloutMigrationTail(files: readonly string[]): string[] {
+    return files
+        .filter(file => {
+            const version = migrationVersion(file);
+            return version !== null && BigInt(version) > BigInt(APPLIED_REMOTE_HEAD);
+        })
+        .sort(compareMigrationFiles);
+}
+
+function latestNonFeatureMigrationAtOrBeforeAppliedHead(
+    files: readonly string[]
+): string | undefined {
+    return files
+        .filter(file => {
+            const version = migrationVersion(file);
+            return !EXPECTED_MIGRATION_SET.has(file)
+                && version !== null
+                && BigInt(version) <= BigInt(APPLIED_REMOTE_HEAD);
+        })
+        .sort(compareMigrationFiles)
+        .at(-1);
+}
+
+function dbPushCommandSpans(source: string): string[] {
+    return Array.from(
+        source.matchAll(/`([^`\n]+)`/g),
+        match => match[1]
+    ).filter(span => /\bnpx\s+supabase\s+db\s+push(?:\s|$)/.test(span));
+}
+
+function containsForbiddenIncludeAllPush(source: string): boolean {
+    return dbPushCommandSpans(source).some(command =>
+        command.trim().split(/\s+/).includes(INCLUDE_ALL_OPTION)
+    );
+}
 
 describe('Groble phone migration rollout contract', () => {
-    it('keeps all six dependency migrations in their exact order after the applied remote head', () => {
-        const featureMigrations = readdirSync(migrationsDirectory)
-            .filter(file => FEATURE_SUFFIXES.some(suffix => file.endsWith(`_${suffix}`)))
-            .sort();
+    it('freezes the complete numeric migration tail to the six dependencies after the applied remote head', () => {
+        const allMigrationFiles = readdirSync(migrationsDirectory);
+        const featureMigrations = rolloutMigrationTail(allMigrationFiles);
 
         expect(featureMigrations).toEqual(EXPECTED_MIGRATIONS);
+        expect(
+            latestNonFeatureMigrationAtOrBeforeAppliedHead(allMigrationFiles)
+        ).toBe(APPLIED_REMOTE_HEAD_FILE);
 
         let previousVersion = APPLIED_REMOTE_HEAD;
         for (const migration of featureMigrations) {
@@ -34,6 +86,63 @@ describe('Groble phone migration rollout contract', () => {
             expect(version.localeCompare(previousVersion)).toBeGreaterThan(0);
             previousVersion = version;
         }
+    });
+
+    it.each([
+        {
+            extra: '20260719125000_other.sql',
+            position: 'between the applied head and the feature rollout',
+        },
+        {
+            extra: '20260719140000_other.sql',
+            position: 'after the feature rollout',
+        },
+    ])('rejects an extra migration $position', ({ extra }) => {
+        const migrationFiles = [
+            APPLIED_REMOTE_HEAD_FILE,
+            ...EXPECTED_MIGRATIONS,
+            extra,
+        ];
+
+        expect(rolloutMigrationTail(migrationFiles)).not.toEqual(
+            EXPECTED_MIGRATIONS
+        );
+    });
+
+    it.each([
+        {
+            command: `npx supabase db push --dry-run ${INCLUDE_ALL_OPTION}`,
+            forbidden: true,
+            name: 'include-all after dry-run',
+        },
+        {
+            command: `npx supabase db push ${INCLUDE_ALL_OPTION} --dry-run`,
+            forbidden: true,
+            name: 'include-all before dry-run',
+        },
+        {
+            command: `npx   supabase  db   push    ${INCLUDE_ALL_OPTION}`,
+            forbidden: true,
+            name: 'include-all with repeated whitespace',
+        },
+        {
+            command: 'npx supabase db push --dry-run',
+            forbidden: false,
+            name: 'the exact dry-run command',
+        },
+        {
+            command: 'npx supabase db push',
+            forbidden: false,
+            name: 'the exact apply command',
+        },
+    ])('classifies $name', ({ command, forbidden }) => {
+        const commandAndProhibition =
+            `\`${command}\` and standalone \`${INCLUDE_ALL_OPTION}\``;
+
+        expect(dbPushCommandSpans(commandAndProhibition)).toEqual([command]);
+        expect(containsForbiddenIncludeAllPush(commandAndProhibition)).toBe(
+            forbidden
+        );
     });
 
     it('documents an approved ordinary rollout of exactly those six files before app deployment', () => {
@@ -59,6 +168,12 @@ describe('Groble phone migration rollout contract', () => {
         );
         expect(operationsRunbook).toMatch(
             /(drift|불일치)[^\n]*(중단|abort)/i
+        );
+        expect(migrationGate).toMatch(
+            /pre-rollout freeze gate[^\n]*production[^\n]*(6개|여섯)[^\n]*적용/i
+        );
+        expect(migrationGate).toMatch(
+            /(reconcile|재조정)[^\n]*(retire|폐기)/i
         );
         const migrationListIndex = migrationGate.indexOf(
             '`npx supabase migration list --linked`'
@@ -92,11 +207,7 @@ describe('Groble phone migration rollout contract', () => {
         expect(operationsRunbook).toMatch(
             /`--include-all`[^\n]*(절대 사용하지 않|never use)/i
         );
-        const forbiddenIncludeAllPush = [
-            'npx supabase db push',
-            '--include-all',
-        ].join(' ');
-        expect(operationsRunbook).not.toContain(forbiddenIncludeAllPush);
+        expect(containsForbiddenIncludeAllPush(operationsRunbook)).toBe(false);
         const ordinaryApplyLine = migrationGate
             .split('\n')
             .find(line => line.includes('`npx supabase db push`')) ?? '';
