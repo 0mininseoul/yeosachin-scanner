@@ -166,8 +166,15 @@ export function parseProfileRepairCanarySourceInput(value: unknown): string[] {
         invalid('PROFILE_REPAIR_CANARY_SOURCE_INPUT_INVALID');
     }
     const input = value.value;
+    const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(input, key);
     if (
-        Object.keys(input).some(key => key !== 'usernames')
+        !hasOwn('usernames')
+        || !hasOwn('includeAboutSection')
+        || Object.keys(input).length !== 2
+        || Object.keys(input).some(
+            key => key !== 'usernames' && key !== 'includeAboutSection'
+        )
+        || input.includeAboutSection !== false
         || !Array.isArray(input.usernames)
         || input.usernames.length < 1
         || input.usernames.length > SOURCE_BATCH_MAX_USERNAMES

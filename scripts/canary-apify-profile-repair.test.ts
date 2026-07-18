@@ -21,6 +21,7 @@ import {
     type ProfileRepairCanaryDependencies,
     type ProfileRepairCanarySourceBundle,
 } from './canary-apify-profile-repair';
+import { parseProfileRepairCanarySourceInput } from './canary-apify-profile-repair-validation';
 
 const SOURCE_REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const OWNER_ID = '22222222-2222-4222-8222-222222222222';
@@ -228,6 +229,7 @@ function memoryStore(
 function dependencies(input: {
     source?: ProfileRepairCanarySourceBundle;
     inputs?: Map<string, string[]>;
+    sourceInputValue?: (runId: string, usernames: string[] | undefined) => unknown;
     store?: ProfileRepairCanaryRunStore;
     freshOutcomes?: (usernames: readonly string[], repetition: 1 | 2) => ProfileAttemptResult[];
     accounting?: (runId: string) => {
@@ -264,7 +266,10 @@ function dependencies(input: {
         keyValueStore: () => ({
             getRecord: vi.fn(async (key: string) => ({
                 key,
-                value: { usernames: sourceInputs.get(runId) },
+                value: input.sourceInputValue?.(runId, sourceInputs.get(runId)) ?? {
+                    usernames: sourceInputs.get(runId),
+                    includeAboutSection: false,
+                },
             })),
         }),
         get: vi.fn(() => accountingGet(runId, {
@@ -330,6 +335,15 @@ function dependencies(input: {
 }
 
 describe('profile repair canary source replay', () => {
+    it('accepts only the observed Actor INPUT shape and normalizes usernames', () => {
+        expect(parseProfileRepairCanarySourceInput({
+            value: {
+                includeAboutSection: false,
+                usernames: ['Candidate_1'],
+            },
+        })).toEqual(['candidate_1']);
+    });
+
     it('replays exactly eight ledger-owned runs with zero Actor starts or journal writes', async () => {
         const fixture = sourceFixture();
         const store = memoryStore();
@@ -424,6 +438,47 @@ describe('profile repair canary source replay', () => {
             options(),
             dependencies({ source: duplicate, inputs: fixture.inputs }).deps
         )).rejects.toThrow('SOURCE_LEDGER_INVALID');
+    });
+
+    it('rejects missing, enabled, mistyped, or unreviewed Actor input fields', async () => {
+        for (const sourceInputValue of [
+            (_runId: string, usernames: string[] | undefined) => ({
+                usernames,
+                includeAboutSection: true,
+            }),
+            (_runId: string, usernames: string[] | undefined) => ({ usernames }),
+            (_runId: string, usernames: string[] | undefined) => ({
+                usernames,
+                includeAboutSection: null,
+            }),
+            (_runId: string, usernames: string[] | undefined) => ({
+                usernames,
+                includeAboutSection: 0,
+            }),
+            (_runId: string, usernames: string[] | undefined) => ({
+                usernames,
+                includeAboutSection: 'false',
+            }),
+            (_runId: string, usernames: string[] | undefined) => ({
+                usernames,
+                includeAboutSection: undefined,
+            }),
+            (_runId: string, usernames: string[] | undefined) => ({
+                usernames,
+                includeAboutSection: false,
+                resultsLimit: 30,
+            }),
+        ]) {
+            const store = memoryStore();
+            const setup = dependencies({ sourceInputValue, store });
+            await expect(runProfileRepairCanary(options(), setup.deps))
+                .rejects.toThrow('SOURCE_INPUT_INVALID');
+            expect(setup.actorStart).not.toHaveBeenCalled();
+            expect(setup.getProfilesBatchOutcomes).not.toHaveBeenCalled();
+            expect(store.load).not.toHaveBeenCalled();
+            expect(store.reserve).not.toHaveBeenCalled();
+            expect(store.terminalize).not.toHaveBeenCalled();
+        }
     });
 
     it('rejects duplicate inputs, non-incomplete failures, and an incomplete union other than 15', async () => {
