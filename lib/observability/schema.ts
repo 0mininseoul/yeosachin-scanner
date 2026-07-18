@@ -1,3 +1,4 @@
+import { isAnalysisV2WorkerErrorCode } from '../services/analysis/v2-worker-error-codes';
 import { INSTAGRAM_USERNAME_PATTERN } from '../services/instagram/username';
 
 export type OperationalSeverity = 'debug' | 'info' | 'warn' | 'error';
@@ -196,6 +197,8 @@ function safeFiniteNumber(
 function safeErrorCode(value: unknown): string | undefined {
     const candidate = safeString(value, ERROR_CODE_PATTERN);
     if (!candidate) return undefined;
+    const exactRegistryCandidate: unknown = candidate;
+    if (isAnalysisV2WorkerErrorCode(exactRegistryCandidate)) return exactRegistryCandidate;
     const registered = REGISTERED_ERROR_CODES.has(candidate)
         || REGISTERED_ERROR_CODE_PREFIXES.some(prefix => candidate.startsWith(prefix));
     if (!registered) return undefined;

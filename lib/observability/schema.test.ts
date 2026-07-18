@@ -299,6 +299,37 @@ describe('sanitizeOperationalEvent', () => {
         }
     });
 
+    it('preserves exact registered V2 codes before applying sensitive segment denial', () => {
+        const registeredCodes = [
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_CONFIG_ERROR',
+            'ANALYSIS_V2_PRIVATE_NAME_COUNT_DRIFT',
+            'ANALYSIS_V2_PROFILE_MEDIA_STRUCTURAL_INCOMPLETE',
+        ];
+
+        for (const errorCode of registeredCodes) {
+            const explicit = sanitizeOperationalEvent({
+                event: 'operation.failed',
+                severity: 'error',
+                fields: { error_code: errorCode },
+            });
+            const property = sanitizeOperationalEvent({
+                event: 'operation.failed',
+                severity: 'error',
+                error: Object.assign(new Error('safe failure'), { code: errorCode }),
+            });
+            const messagePrefix = sanitizeOperationalEvent({
+                event: 'operation.failed',
+                severity: 'error',
+                error: new Error(`${errorCode}: raw failure detail`),
+            });
+
+            expect(explicit.fields.error_code).toBe(errorCode);
+            expect(property.fields.error_code).toBe(errorCode);
+            expect(messagePrefix.fields.error_code).toBe(errorCode);
+        }
+    });
+
     it('rejects sensitive exact error-code segments through every error input path', () => {
         const sensitiveCodes = [
             'AUTH_TOKEN_SECRET',
