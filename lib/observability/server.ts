@@ -133,8 +133,6 @@ interface AxiomRuntimeConfig {
 async function createAxiomRuntimeTransport(
     config: AxiomRuntimeConfig,
 ): Promise<OperationalTransport | undefined> {
-    const bigintToJson = Object.getOwnPropertyDescriptor(BigInt.prototype, 'toJSON');
-
     try {
         const { Axiom } = await import('@axiomhq/js');
         const { AxiomJSTransport, Logger } = await import('@axiomhq/logging');
@@ -157,12 +155,6 @@ async function createAxiomRuntimeTransport(
         };
     } catch {
         return undefined;
-    } finally {
-        if (bigintToJson) {
-            Object.defineProperty(BigInt.prototype, 'toJSON', bigintToJson);
-        } else {
-            Reflect.deleteProperty(BigInt.prototype, 'toJSON');
-        }
     }
 }
 

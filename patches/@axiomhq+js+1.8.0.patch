@@ -1,0 +1,82 @@
+diff --git a/node_modules/@axiomhq/js/dist/cjs/client.cjs b/node_modules/@axiomhq/js/dist/cjs/client.cjs
+index e1b21e4..19ebf3e 100644
+--- a/node_modules/@axiomhq/js/dist/cjs/client.cjs
++++ b/node_modules/@axiomhq/js/dist/cjs/client.cjs
+@@ -319,9 +319,6 @@ class Axiom extends BaseClient {
+         await Promise.all(promises).catch(this.onError);
+     };
+ }
+-BigInt.prototype.toJSON = function () {
+-    return this.toString();
+-};
+ exports.ContentType = void 0;
+ (function (ContentType) {
+     ContentType["JSON"] = "application/json";
+diff --git a/node_modules/@axiomhq/js/dist/cjs/types/client.d.ts b/node_modules/@axiomhq/js/dist/cjs/types/client.d.ts
+index d3ff2f7..5f3be78 100644
+--- a/node_modules/@axiomhq/js/dist/cjs/types/client.d.ts
++++ b/node_modules/@axiomhq/js/dist/cjs/types/client.d.ts
+@@ -160,11 +160,6 @@ export declare class Axiom extends BaseClient {
+      */
+     flush: () => Promise<void>;
+ }
+-declare global {
+-    interface BigInt {
+-        toJSON: () => string;
+-    }
+-}
+ export declare enum ContentType {
+     JSON = "application/json",
+     NDJSON = "application/x-ndjson",
+diff --git a/node_modules/@axiomhq/js/dist/esm/client.js b/node_modules/@axiomhq/js/dist/esm/client.js
+index ca6bc47..cd2688e 100644
+--- a/node_modules/@axiomhq/js/dist/esm/client.js
++++ b/node_modules/@axiomhq/js/dist/esm/client.js
+@@ -317,9 +317,6 @@ class Axiom extends BaseClient {
+         await Promise.all(promises).catch(this.onError);
+     };
+ }
+-BigInt.prototype.toJSON = function () {
+-    return this.toString();
+-};
+ var ContentType;
+ (function (ContentType) {
+     ContentType["JSON"] = "application/json";
+diff --git a/node_modules/@axiomhq/js/dist/esm/types/client.d.ts b/node_modules/@axiomhq/js/dist/esm/types/client.d.ts
+index d3ff2f7..5f3be78 100644
+--- a/node_modules/@axiomhq/js/dist/esm/types/client.d.ts
++++ b/node_modules/@axiomhq/js/dist/esm/types/client.d.ts
+@@ -160,11 +160,6 @@ export declare class Axiom extends BaseClient {
+      */
+     flush: () => Promise<void>;
+ }
+-declare global {
+-    interface BigInt {
+-        toJSON: () => string;
+-    }
+-}
+ export declare enum ContentType {
+     JSON = "application/json",
+     NDJSON = "application/x-ndjson",
+diff --git a/node_modules/@axiomhq/js/src/client.ts b/node_modules/@axiomhq/js/src/client.ts
+index 13cbf80..854b55d 100644
+--- a/node_modules/@axiomhq/js/src/client.ts
++++ b/node_modules/@axiomhq/js/src/client.ts
+@@ -431,17 +431,6 @@ export class Axiom extends BaseClient {
+     await Promise.all(promises).catch(this.onError);
+   };
+ }
+-
+-declare global {
+-  interface BigInt {
+-    toJSON: () => string;
+-  }
+-}
+-
+-BigInt.prototype.toJSON = function () {
+-  return this.toString();
+-};
+-
+ export enum ContentType {
+   JSON = 'application/json',
+   NDJSON = 'application/x-ndjson',

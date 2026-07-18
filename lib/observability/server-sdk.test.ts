@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('server-only', () => ({}));
@@ -7,6 +8,45 @@ const ORIGINAL_AXIOM_ENV = Object.fromEntries(
     AXIOM_ENV_NAMES.map(name => [name, process.env[name]]),
 );
 const ORIGINAL_BIGINT_TO_JSON = Object.getOwnPropertyDescriptor(BigInt.prototype, 'toJSON');
+
+function importAxiomSdkInFreshProcess(moduleKind: 'esm' | 'cjs') {
+    const loadSdk = moduleKind === 'esm'
+        ? "await import('@axiomhq/js');"
+        : "require('@axiomhq/js');";
+    const result = spawnSync(
+        process.execPath,
+        [
+            ...(moduleKind === 'esm' ? ['--input-type=module'] : []),
+            '-e',
+            `
+                delete BigInt.prototype.toJSON;
+                ${loadSdk}
+                const hasToJson = Object.prototype.hasOwnProperty.call(
+                    BigInt.prototype,
+                    'toJSON',
+                );
+                let stringifies = false;
+                try {
+                    JSON.stringify(1n);
+                    stringifies = true;
+                } catch (error) {
+                    if (!(error instanceof TypeError)) throw error;
+                }
+                process.stdout.write(JSON.stringify({ hasToJson, stringifies }));
+            `,
+        ],
+        {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+        },
+    );
+
+    return {
+        status: result.status,
+        stderr: result.stderr,
+        observation: result.stdout ? JSON.parse(result.stdout) : undefined,
+    };
+}
 
 function restoreBigIntToJson(): void {
     if (ORIGINAL_BIGINT_TO_JSON) {
@@ -40,16 +80,35 @@ describe('Axiom SDK runtime boundary', () => {
         expect(Object.getOwnPropertyDescriptor(BigInt.prototype, 'toJSON')).toBeUndefined();
     });
 
-    it('restores BigInt.prototype after configured SDK initialization', async () => {
+    it('never mutates BigInt JSON behavior during configured SDK initialization', async () => {
         process.env.AXIOM_TOKEN = 'test-token';
         process.env.AXIOM_DATASET = 'test-dataset';
         process.env.AXIOM_ORG_ID = 'test-org';
         const { flushOperationalLogs } = await import('./server');
 
-        await flushOperationalLogs();
+        const initialization = flushOperationalLogs();
+        await import('@axiomhq/js');
 
         expect(Object.getOwnPropertyDescriptor(BigInt.prototype, 'toJSON')).toBeUndefined();
+        expect(() => JSON.stringify(BigInt(1))).toThrow(TypeError);
+
+        await initialization;
+        expect(Object.getOwnPropertyDescriptor(BigInt.prototype, 'toJSON')).toBeUndefined();
+        expect(() => JSON.stringify(BigInt(1))).toThrow(TypeError);
     });
+
+    it.each(['esm', 'cjs'] as const)(
+        'keeps native BigInt JSON behavior through the %s package export',
+        moduleKind => {
+            const result = importAxiomSdkInFreshProcess(moduleKind);
+
+            expect(result.status, result.stderr).toBe(0);
+            expect(result.observation).toEqual({
+                hasToJson: false,
+                stringifies: false,
+            });
+        },
+    );
 
     it('uses the installed transport debug threshold semantics', async () => {
         const [{ Axiom }, { AxiomJSTransport }] = await Promise.all([
