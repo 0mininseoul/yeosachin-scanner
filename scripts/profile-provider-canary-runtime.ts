@@ -457,8 +457,8 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
 
 function priceFitsExactCanary(price: unknown): price is number {
     return typeof price === 'number' && Number.isFinite(price) && price > 0
-        && price * PROFILE_PROVIDER_CANARY_EXPECTED_INPUT_COUNT
-            <= PROFILE_PROVIDER_CANARY_MAX_CHARGE_USD + Number.EPSILON;
+        && price <= PROFILE_PROVIDER_CANARY_MAX_CHARGE_USD
+            / PROFILE_PROVIDER_CANARY_EXPECTED_INPUT_COUNT;
 }
 
 function payPerEventPriceIsAllowed(events: unknown, accountTier: unknown): boolean {
@@ -514,10 +514,7 @@ function currentPricingIsAllowed(
     const current = candidates[0];
     if (!current) return false;
     if (current.pricingModel === 'PRICE_PER_DATASET_ITEM') {
-        const price = current.pricePerUnitUsd;
-        return typeof price === 'number' && Number.isFinite(price) && price > 0
-            && price * PROFILE_PROVIDER_CANARY_EXPECTED_INPUT_COUNT
-                <= PROFILE_PROVIDER_CANARY_MAX_CHARGE_USD + Number.EPSILON;
+        return priceFitsExactCanary(current.pricePerUnitUsd);
     }
     if (current.pricingModel !== 'PAY_PER_EVENT') return false;
     const minimum = current.minimalMaxTotalChargeUsd;

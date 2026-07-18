@@ -175,6 +175,13 @@ function tieredResultPricing(
     };
 }
 
+function nextUp(value: number): number {
+    const float = new Float64Array([value]);
+    const bits = new BigUint64Array(float.buffer);
+    bits[0] += BigInt(1);
+    return float[0];
+}
+
 function clientFixture(
     inputs: Map<string, string[]>,
     snapshot?: Record<string, unknown>,
@@ -325,7 +332,7 @@ describe('profile provider canary runtime source replay', () => {
 
     it('accepts exactly $0.05 for 15 tiered results and rejects the next representable price', async () => {
         const exactPrice = 0.05 / 15;
-        const abovePrice = exactPrice + Number.EPSILON;
+        const abovePrice = nextUp(exactPrice);
 
         await expect(assertProfileProviderCanaryPaidReadiness({
             env: ENV,
@@ -336,6 +343,28 @@ describe('profile provider canary runtime source replay', () => {
         await expect(assertProfileProviderCanaryPaidReadiness({
             env: ENV,
             client: readyClient([tieredResultPricing(abovePrice)]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
+    });
+
+    it('applies the strict exact-15 boundary to dataset-item pricing too', async () => {
+        const exactPrice = 0.05 / 15;
+        const pricing = (pricePerUnitUsd: number) => ({
+            pricingModel: 'PRICE_PER_DATASET_ITEM',
+            pricePerUnitUsd,
+            startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        });
+
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([pricing(exactPrice)]),
+            commandRunner: vi.fn(async () => undefined),
+            now: () => Date.parse('2026-07-19T00:05:00.000Z'),
+        })).resolves.toBeUndefined();
+        await expect(assertProfileProviderCanaryPaidReadiness({
+            env: ENV,
+            client: readyClient([pricing(nextUp(exactPrice))]),
             commandRunner: vi.fn(async () => undefined),
             now: () => Date.parse('2026-07-19T00:05:00.000Z'),
         })).rejects.toThrow('PROFILE_PROVIDER_CANARY_PAID_READINESS_FAILED');
