@@ -181,7 +181,9 @@ let initializedSdk: UnifiedSdk | null = null;
 let sdkLoadPromise: Promise<UnifiedSdk> | null = null;
 let desiredUserId: string | undefined;
 let hasResolvedIdentity = false;
+let identityDeliveryBlocked = false;
 let identityRevision = 0;
+let pendingIdentityReset = false;
 const queuedEvents: QueuedEvent[] = [];
 
 const SAFE_SESSION_REPLAY_REMOTE_CONFIG = {
@@ -228,7 +230,7 @@ function validateProperties(
 }
 
 function flushQueue(): void {
-    if (!initializedSdk || !identityReady) return;
+    if (!initializedSdk || !identityReady || identityDeliveryBlocked) return;
 
     while (queuedEvents.length > 0) {
         const event = queuedEvents.shift();
@@ -254,17 +256,58 @@ function setSdkUserId(sdk: UnifiedSdk, userId: string | undefined): void {
     }
 }
 
+function resetSdkIdentity(sdk: UnifiedSdk): boolean {
+    try {
+        sdk.reset();
+        return true;
+    } catch {
+        setSdkUserId(sdk, undefined);
+        return false;
+    }
+}
+
+function applyPendingIdentityReset(sdk: UnifiedSdk): boolean {
+    if (!pendingIdentityReset) return false;
+
+    const resetSucceeded = resetSdkIdentity(sdk);
+    pendingIdentityReset = !resetSucceeded;
+    identityDeliveryBlocked = !resetSucceeded;
+    if (identityDeliveryBlocked) {
+        queuedEvents.length = 0;
+        return true;
+    }
+    if (desiredUserId !== undefined) setSdkUserId(sdk, desiredUserId);
+    return true;
+}
+
 function updateResolvedIdentity(userId: string | null): boolean {
     if (userId !== null && !isCanonicalAnalyticsUserId(userId)) return false;
 
     const nextUserId = userId ?? undefined;
-    if (hasResolvedIdentity && desiredUserId === nextUserId) return true;
+    if (hasResolvedIdentity && desiredUserId === nextUserId) {
+        if (initializedSdk && pendingIdentityReset) {
+            identityReady = false;
+            applyPendingIdentityReset(initializedSdk);
+        }
+        return true;
+    }
 
+    const shouldReset = hasResolvedIdentity
+        && desiredUserId !== undefined
+        && nextUserId === undefined;
     desiredUserId = nextUserId;
     hasResolvedIdentity = true;
     identityRevision += 1;
-    if (initializingSdk) setSdkUserId(initializingSdk, desiredUserId);
-    if (initializedSdk) setSdkUserId(initializedSdk, desiredUserId);
+    identityReady = false;
+    if (shouldReset) pendingIdentityReset = true;
+    if (initializingSdk && !pendingIdentityReset) {
+        setSdkUserId(initializingSdk, desiredUserId);
+    }
+    if (initializedSdk) {
+        if (!applyPendingIdentityReset(initializedSdk)) {
+            setSdkUserId(initializedSdk, desiredUserId);
+        }
+    }
     return true;
 }
 
@@ -287,7 +330,7 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
             const sdk = await loadUnifiedSdk();
             initializingSdk = sdk;
             const appliedIdentityRevision = identityRevision;
-            setSdkUserId(sdk, desiredUserId);
+            if (!pendingIdentityReset) setSdkUserId(sdk, desiredUserId);
             await sdk.initAll(apiKey, {
                 analytics: {
                     autocapture: {
@@ -321,7 +364,7 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
                 },
                 engagement: { skip: true },
             });
-            if (appliedIdentityRevision !== identityRevision) {
+            if (!applyPendingIdentityReset(sdk) && appliedIdentityRevision !== identityRevision) {
                 setSdkUserId(sdk, desiredUserId);
             }
             initializedSdk = sdk;
@@ -343,7 +386,7 @@ export function trackEvent(
     eventName: AnalyticsEvent,
     properties?: Record<string, unknown>,
 ): void {
-    if (!APPROVED_EVENTS.has(eventName) || !configuredApiKey()) return;
+    if (identityDeliveryBlocked || !APPROVED_EVENTS.has(eventName) || !configuredApiKey()) return;
 
     try {
         enqueue(eventName, validateProperties(eventName, properties));
@@ -360,6 +403,7 @@ export function markAnalyticsIdentityPending(): void {
 }
 
 export function markAnalyticsIdentityReady(): void {
+    if (identityDeliveryBlocked) return;
     identityReady = true;
     flushQueue();
 }
