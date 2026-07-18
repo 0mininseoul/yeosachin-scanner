@@ -470,7 +470,24 @@ describe('Amplitude analytics adapter', () => {
         ]);
     });
 
-    it('drops unresolved-revision events at the first anonymous reset boundary', async () => {
+    it('preserves a landing event queued before the first anonymous identity resolves', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, { source: 'direct' });
+
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+
+        expect(amplitudeMocks.reset).toHaveBeenCalledTimes(1);
+        expect(amplitudeMocks.track.mock.calls).toEqual([[
+            'landing_viewed',
+            { source: 'direct' },
+        ]]);
+        expect(amplitudeMocks.reset.mock.invocationCallOrder[0])
+            .toBeLessThan(amplitudeMocks.track.mock.invocationCallOrder[0]);
+    });
+
+    it('preserves pre-resolution events through the first anonymous reset boundary', async () => {
         enableBrowser();
         let resolveInitialization!: () => void;
         amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -489,11 +506,13 @@ describe('Amplitude analytics adapter', () => {
         await initialization;
         analytics.markAnalyticsIdentityReady();
 
-        expect(amplitudeMocks.track.mock.calls).toEqual([[
-            'target_submitted',
-            { stage: 'anonymous' },
-        ]]);
-        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(VALID_USER_ID);
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            [
+                'analysis_started',
+                { request_id: VALID_USER_ID, plan_id: 'standard' },
+            ],
+            ['target_submitted', { stage: 'anonymous' }],
+        ]);
         expect(amplitudeMocks.reset.mock.invocationCallOrder[0])
             .toBeLessThan(amplitudeMocks.track.mock.invocationCallOrder[0]);
     });

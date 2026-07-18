@@ -330,13 +330,13 @@ function updateResolvedIdentity(userId: string | null): IdentityUpdateResult {
     const hadResolvedIdentity = hasResolvedIdentity;
     desiredUserId = nextUserId;
     hasResolvedIdentity = true;
-    identityRevision += 1;
     identityReady = false;
     if (
         hadResolvedIdentity
         && previousUserId !== undefined
         && previousUserId !== nextUserId
     ) {
+        identityRevision += 1;
         pendingIdentityReset = true;
     }
     return 'changed';
