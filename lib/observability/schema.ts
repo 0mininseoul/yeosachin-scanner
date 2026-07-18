@@ -108,6 +108,27 @@ const REGISTERED_ERROR_CODE_PREFIXES = [
     'V2_',
 ] as const;
 
+const FORBIDDEN_ERROR_CODE_SEGMENTS = new Set([
+    'AUTHORIZATION',
+    'BIO',
+    'BODY',
+    'BUYER',
+    'CAPTION',
+    'COMMENT',
+    'COOKIE',
+    'EMAIL',
+    'IMAGE',
+    'MEDIA',
+    'NAME',
+    'PAYLOAD',
+    'PHONE',
+    'PROMPT',
+    'RESPONSE',
+    'SECRET',
+    'SIGNATURE',
+    'TOKEN',
+]);
+
 const METHODS = new Set([
     'CONNECT',
     'DELETE',
@@ -175,10 +196,13 @@ function safeFiniteNumber(
 function safeErrorCode(value: unknown): string | undefined {
     const candidate = safeString(value, ERROR_CODE_PATTERN);
     if (!candidate) return undefined;
-    if (REGISTERED_ERROR_CODES.has(candidate)) return candidate;
-    return REGISTERED_ERROR_CODE_PREFIXES.some(prefix => candidate.startsWith(prefix))
-        ? candidate
-        : undefined;
+    const registered = REGISTERED_ERROR_CODES.has(candidate)
+        || REGISTERED_ERROR_CODE_PREFIXES.some(prefix => candidate.startsWith(prefix));
+    if (!registered) return undefined;
+    if (candidate.split('_').some(segment => FORBIDDEN_ERROR_CODE_SEGMENTS.has(segment))) {
+        return undefined;
+    }
+    return candidate;
 }
 
 function safeErrorName(value: unknown): string | undefined {

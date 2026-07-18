@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const axiomMocks = vi.hoisted(() => {
@@ -38,6 +39,7 @@ const axiomMocks = vi.hoisted(() => {
     };
 });
 
+vi.mock('server-only', () => ({}));
 vi.mock('@axiomhq/js', () => ({ Axiom: axiomMocks.axiomConstructor }));
 vi.mock('@axiomhq/logging', () => ({
     AxiomJSTransport: axiomMocks.transportConstructor,
@@ -51,6 +53,7 @@ import {
     MAX_BATCH_EXCEPTION_EVENTS,
     createOperationalLogger,
     emitBatchOutcome,
+    type OperationalBatchItemOutcome,
     type OperationalLogger,
     type OperationalTransport,
 } from './server';
@@ -154,6 +157,22 @@ describe('createOperationalLogger', () => {
     });
 });
 
+describe('server-only module boundary', () => {
+    it('uses the compile-time Next marker before importing Axiom and pins its package', () => {
+        const source = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+        const packageJson = JSON.parse(
+            readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+        ) as { dependencies?: Record<string, string> };
+        const markerIndex = source.indexOf("import 'server-only';");
+        const axiomIndex = source.indexOf("from '@axiomhq/js';");
+
+        expect(markerIndex).toBeGreaterThanOrEqual(0);
+        expect(markerIndex).toBeLessThan(axiomIndex);
+        expect(source).not.toContain("typeof window !== 'undefined'");
+        expect(packageJson.dependencies?.['server-only']).toBe('0.0.1');
+    });
+});
+
 describe('emitBatchOutcome', () => {
     it('emits one aggregate and no individual records for 1,000 successful items', () => {
         const emit = vi.fn();
@@ -210,6 +229,43 @@ describe('emitBatchOutcome', () => {
         expect(emit).toHaveBeenNthCalledWith(3, expect.objectContaining({
             severity: 'warn',
             fields: expect.objectContaining({ disposition: 'retry' }),
+        }));
+    });
+
+    it('caps exceptional attempts even when every injected item emit throws', () => {
+        const emit = vi.fn(() => {
+            throw new Error('injected logger failure');
+        });
+        const logger: OperationalLogger = { emit, flush: async () => undefined };
+
+        emitBatchOutcome({
+            summary: { event: 'scraper.batch_failed', severity: 'error' },
+            items: Array.from({ length: 1_000 }, (_, index) => ({
+                event: 'scraper.candidate_failed',
+                disposition: 'failure' as const,
+                fields: { candidate_instagram_id: `failed_${index}` },
+            })),
+        }, logger);
+
+        expect(emit).toHaveBeenCalledTimes(1 + MAX_BATCH_EXCEPTION_EVENTS);
+    });
+
+    it('ignores unknown runtime dispositions', () => {
+        const emit = vi.fn();
+        const logger: OperationalLogger = { emit, flush: async () => undefined };
+
+        emitBatchOutcome({
+            summary: { event: 'scraper.batch_completed', severity: 'info' },
+            items: [{
+                event: 'scraper.candidate_failed',
+                disposition: 'cancelled',
+                fields: { candidate_instagram_id: 'must_not_emit' },
+            } as unknown as OperationalBatchItemOutcome],
+        }, logger);
+
+        expect(emit).toHaveBeenCalledTimes(1);
+        expect(emit).not.toHaveBeenCalledWith(expect.objectContaining({
+            event: 'scraper.candidate_failed',
         }));
     });
 });

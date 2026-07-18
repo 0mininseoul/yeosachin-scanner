@@ -299,6 +299,64 @@ describe('sanitizeOperationalEvent', () => {
         }
     });
 
+    it('rejects sensitive exact error-code segments through every error input path', () => {
+        const sensitiveCodes = [
+            'AUTH_TOKEN_SECRET',
+            'APIFY_TOKEN_PROVIDER_SECRET_ERROR',
+            'AUTH_BUYER_EMAIL',
+            'AUTH_BUYER_PHONE',
+            'AUTH_COOKIE_ERROR',
+            'AUTH_SIGNATURE_ERROR',
+            'AUTH_AUTHORIZATION_ERROR',
+            'AUTH_BODY_ERROR',
+            'AUTH_RESPONSE_ERROR',
+            'AUTH_PAYLOAD_ERROR',
+            'AUTH_COMMENT_ERROR',
+            'AUTH_BIO_ERROR',
+            'AUTH_CAPTION_ERROR',
+            'AUTH_PROMPT_ERROR',
+            'AUTH_IMAGE_ERROR',
+            'AUTH_MEDIA_ERROR',
+            'AUTH_NAME_ERROR',
+        ];
+
+        for (const errorCode of sensitiveCodes) {
+            const explicit = sanitizeOperationalEvent({
+                event: 'operation.failed',
+                severity: 'error',
+                fields: { error_code: errorCode },
+            });
+            const property = sanitizeOperationalEvent({
+                event: 'operation.failed',
+                severity: 'error',
+                error: Object.assign(new Error('safe failure'), { code: errorCode }),
+            });
+            const messagePrefix = sanitizeOperationalEvent({
+                event: 'operation.failed',
+                severity: 'error',
+                error: new Error(`${errorCode}: raw failure detail`),
+            });
+
+            expect(explicit.fields.error_code).toBeUndefined();
+            expect(property.fields.error_code).toBeUndefined();
+            expect(messagePrefix.fields.error_code).toBeUndefined();
+        }
+    });
+
+    it('matches forbidden error-code words as exact segments only', () => {
+        for (const errorCode of [
+            'AUTH_USERNAME_INVALID',
+            'PROFILE_FETCH_PERSISTENCE_ERROR',
+            'AI_RATE_LIMIT_ERROR',
+        ]) {
+            expect(sanitizeOperationalEvent({
+                event: 'operation.failed',
+                severity: 'error',
+                fields: { error_code: errorCode },
+            }).fields.error_code).toBe(errorCode);
+        }
+    });
+
     it('uses a safe runtime severity when untyped input bypasses TypeScript', () => {
         const input = {
             event: 'runtime.checked',

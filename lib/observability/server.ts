@@ -1,3 +1,5 @@
+import 'server-only';
+
 import { Axiom } from '@axiomhq/js';
 import {
     AxiomJSTransport,
@@ -12,10 +14,6 @@ import {
     type OperationalEvent,
     type OperationalSeverity,
 } from './schema';
-
-if (typeof window !== 'undefined') {
-    throw new Error('The operational logger is server-only.');
-}
 
 export interface OperationalTransport {
     log(
@@ -185,10 +183,18 @@ export function emitBatchOutcome(
         // Preserve batch processing even when an injected logger is faulty.
     }
 
-    let emitted = 0;
+    let attempted = 0;
     for (const item of input.items ?? []) {
         if (item.disposition === 'success') continue;
-        if (emitted === MAX_BATCH_EXCEPTION_EVENTS) break;
+        if (
+            item.disposition !== 'failure'
+            && item.disposition !== 'retry'
+            && item.disposition !== 'fallback'
+        ) {
+            continue;
+        }
+        if (attempted === MAX_BATCH_EXCEPTION_EVENTS) break;
+        attempted += 1;
 
         try {
             logger.emit({
@@ -200,7 +206,6 @@ export function emitBatchOutcome(
                 },
                 error: item.error,
             });
-            emitted += 1;
         } catch {
             // Preserve batch processing even when an injected logger is faulty.
         }
