@@ -19,8 +19,13 @@ import {
     resolveAvailableEarlybirdPlan,
 } from '@/lib/services/earlybird/ui-state';
 import {
+    availablePendingTargetStorage,
+    bindPendingAnalysisTarget,
     clearPendingAnalysisTarget,
-    readPendingAnalysisTarget,
+    clearPendingAnalysisTargetForTerminalState,
+    readPendingAnalysisTargetForAutostart,
+    readPendingAnalysisTargetForPreflight,
+    signOutAndClearPendingAnalysisTarget,
     storePendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
@@ -87,21 +92,40 @@ export default function AnalyzePage() {
         const linkedPlan = parseEarlybirdPlanParam(params.get('plan'));
         if (linkedPlan) setSelectedPlan(linkedPlan);
         const resumablePreflightId = params.get('preflight');
-        let pending: string | null = null;
-        try {
-            pending = readPendingAnalysisTarget(sessionStorage);
-        } catch {
-            pending = null;
-        }
+        const shouldAutostart = params.get('autostart') === '1';
+
         if (resumablePreflightId && user) {
-            void resumePreflight(resumablePreflightId, pending ?? undefined);
+            let boundTarget: string | null = null;
+            try {
+                boundTarget = readPendingAnalysisTargetForPreflight(sessionStorage, {
+                    ownerId: user.id,
+                    preflightId: resumablePreflightId,
+                });
+            } catch {
+                boundTarget = null;
+            }
+            void resumePreflight(resumablePreflightId, boundTarget ?? undefined).then((resumed) => {
+                const storage = availablePendingTargetStorage();
+                if (!resumed && storage) clearPendingAnalysisTarget(storage);
+            });
             return;
+        }
+
+        let pending: string | null = null;
+        if (shouldAutostart) {
+            try {
+                pending = readPendingAnalysisTargetForAutostart(sessionStorage);
+            } catch {
+                pending = null;
+            }
+        } else {
+            clearPendingAnalysisTarget(sessionStorage);
         }
         if (pending) {
             window.setTimeout(() => setInstagramId(pending), 0);
         }
 
-        if (params.get('autostart') !== '1' || !pending) return;
+        if (!shouldAutostart || !pending) return;
         if (!user) {
             router.replace('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');
             return;
@@ -109,12 +133,15 @@ export default function AnalyzePage() {
 
         void (async () => {
             const accepted = await startPreflight(pending);
-            if (!accepted) return;
-            try {
-                storePendingAnalysisTarget(sessionStorage, pending);
-            } catch {
-                /* ignore */
+            if (!accepted) {
+                clearPendingAnalysisTarget(sessionStorage);
+                return;
             }
+            bindPendingAnalysisTarget(sessionStorage, {
+                ownerId: user.id,
+                preflightId: accepted.preflightId,
+                target: pending,
+            });
             router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
         })();
     }, [authLoading, resumePreflight, router, startPreflight, user]);
@@ -130,12 +157,15 @@ export default function AnalyzePage() {
             return;
         }
         const accepted = await startPreflight(instagramId);
-        if (!accepted) return;
-        try {
-            storePendingAnalysisTarget(sessionStorage, instagramId);
-        } catch {
-            /* ignore */
+        if (!accepted) {
+            clearPendingAnalysisTarget(sessionStorage);
+            return;
         }
+        bindPendingAnalysisTarget(sessionStorage, {
+            ownerId: user.id,
+            preflightId: accepted.preflightId,
+            target: instagramId,
+        });
         router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
     };
 
@@ -216,10 +246,19 @@ export default function AnalyzePage() {
         router.replace('/analyze');
     };
 
+    useEffect(() => {
+        const storage = availablePendingTargetStorage();
+        if (storage) {
+            clearPendingAnalysisTargetForTerminalState(storage, preflight?.status);
+        }
+    }, [preflight?.status]);
+
     const handleLogout = async () => {
         try {
-            const response = await fetch('/api/auth/signout', { method: 'POST' });
-            if (response.ok) router.push('/');
+            const signedOut = await signOutAndClearPendingAnalysisTarget(
+                availablePendingTargetStorage(),
+            );
+            if (signedOut) router.push('/');
         } catch (cause) {
             console.error('Logout failed:', cause);
         }

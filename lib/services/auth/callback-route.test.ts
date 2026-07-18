@@ -51,6 +51,50 @@ describe('OAuth callback redirects', () => {
         );
     });
 
+    it('lands a missing-code callback on a bounded terminal error', async () => {
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?next=%2Fanalyze'
+        ));
+
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/login?error=no_code`
+        );
+        expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
+    });
+
+    it('lands an exchange failure on a bounded code without reflecting provider details', async () => {
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: null,
+            error: { message: 'private@example.com token=secret' },
+        });
+
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?code=bad-code&next=%2Fanalyze'
+        ));
+
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/login?error=exchange_failed`
+        );
+        expect(response.headers.get('location')).not.toContain('private');
+        expect(response.headers.get('location')).not.toContain('secret');
+    });
+
+    it('bounds a rejected exchange without reflecting thrown details', async () => {
+        mocks.exchangeCodeForSession.mockRejectedValue(
+            new Error('private@example.com token=secret'),
+        );
+
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?code=bad-code&next=%2Fanalyze'
+        ));
+
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/login?error=exchange_failed`
+        );
+        expect(response.headers.get('location')).not.toContain('private');
+        expect(response.headers.get('location')).not.toContain('secret');
+    });
+
     it.each([
         '%2F%2Fattacker.example%2Fpath',
         '%2F%5Cattacker.example%2Fpath',

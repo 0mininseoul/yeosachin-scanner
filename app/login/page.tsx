@@ -2,14 +2,20 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense } from 'react';
+import { Suspense, useEffect } from 'react';
 import { BrandMark, Eyebrow, CaseCard } from '@/components/case-ui';
 import { AuthButtons } from '@/components/auth-buttons';
+import { availableAnalyticsSessionStorage } from '@/lib/services/analytics-auth';
+import { clearLoginTerminalState } from '@/lib/services/auth/login-terminal-state';
 
 function LoginContent() {
     const searchParams = useSearchParams();
     const redirectTo = searchParams.get('redirectTo') || '/analyze';
     const error = searchParams.get('error');
+
+    useEffect(() => {
+        clearLoginTerminalState(Boolean(error), availableAnalyticsSessionStorage());
+    }, [error]);
 
     return (
         <div className="flex min-h-dvh flex-col items-center justify-center px-5 py-12">

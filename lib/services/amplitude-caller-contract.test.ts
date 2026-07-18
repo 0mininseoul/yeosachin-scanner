@@ -44,4 +44,50 @@ describe('Amplitude caller privacy contract', () => {
             expect(page).not.toMatch(/trackEvent\(EVENTS\.RESULT_SHARED[\s\S]*?await shareResult/);
         }
     });
+
+    it('deduplicates only mount lifecycle result views at their callers', () => {
+        for (const page of [
+            source('app/result/[requestId]/page.tsx'),
+            source('app/share/[token]/page.tsx'),
+        ]) {
+            expect(page).toContain('resultViewTrackedRef');
+            expect(page).toMatch(
+                /if \(!resultViewTrackedRef\.current\)[\s\S]*?resultViewTrackedRef\.current = true;[\s\S]*?trackEvent\(EVENTS\.RESULT_VIEWED/,
+            );
+        }
+    });
+
+    it('binds target handoff to matching owner and preflight, with terminal cleanup', () => {
+        const analyze = source('app/analyze/page.tsx');
+        const progress = source('app/progress/[requestId]/page.tsx');
+        const result = source('app/result/[requestId]/page.tsx');
+
+        expect(analyze).toContain('readPendingAnalysisTargetForPreflight');
+        expect(analyze).toContain('readPendingAnalysisTargetForAutostart');
+        expect(analyze).toContain('bindPendingAnalysisTarget');
+        expect(analyze).toMatch(/ownerId:\s*user\.id/);
+        expect(analyze).toMatch(/preflightId:\s*accepted\.preflightId/);
+        expect(analyze).not.toContain('readPendingAnalysisTarget(sessionStorage)');
+        for (const page of [analyze, progress, result]) {
+            expect(page).toContain('clearPendingAnalysisTargetForTerminalState');
+        }
+    });
+
+    it('uses pending-target cleanup for every real logout caller', () => {
+        for (const page of [
+            source('app/analyze/page.tsx'),
+            source('app/progress/[requestId]/page.tsx'),
+            source('app/result/[requestId]/page.tsx'),
+        ]) {
+            expect(page).toContain('signOutAndClearPendingAnalysisTarget');
+            expect(page).not.toContain("fetch('/api/auth/signout'");
+        }
+    });
+
+    it('clears terminal login state without sending the error to analytics', () => {
+        const login = source('app/login/page.tsx');
+
+        expect(login).toContain('clearLoginTerminalState(Boolean(error)');
+        expect(login).not.toContain('trackEvent');
+    });
 });

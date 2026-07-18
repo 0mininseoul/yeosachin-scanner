@@ -7,6 +7,11 @@ import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { shareResult } from '@/lib/services/result-share';
 import {
+    availablePendingTargetStorage,
+    clearPendingAnalysisTargetForTerminalState,
+    signOutAndClearPendingAnalysisTarget,
+} from '@/lib/services/pending-analysis-target';
+import {
     boundedOwnerResultPage,
     OWNER_RESULT_PAGE_SIZE,
     paginatedCountLabel,
@@ -320,6 +325,7 @@ export default function ResultPage({ params }: PageProps) {
     const [tab, setTab] = useState<'public' | 'private'>('public');
     const publicSectionRef = useRef<HTMLElement>(null);
     const privateSectionRef = useRef<HTMLElement>(null);
+    const resultViewTrackedRef = useRef(false);
     const router = useRouter();
     const requestedPipeline = useSearchParams().get('pipeline');
 
@@ -393,11 +399,16 @@ export default function ResultPage({ params }: PageProps) {
                 setPageAction(null);
                 setPageError(null);
                 setError(null);
-                trackEvent(EVENTS.RESULT_VIEWED, {
-                    request_id: requestId,
-                    result_count: displayResult.femaleAccounts.length + displayResult.privateAccounts.length,
-                    is_shared: false,
-                });
+                const storage = availablePendingTargetStorage();
+                if (storage) clearPendingAnalysisTargetForTerminalState(storage, 'completed');
+                if (!resultViewTrackedRef.current) {
+                    resultViewTrackedRef.current = true;
+                    trackEvent(EVENTS.RESULT_VIEWED, {
+                        request_id: requestId,
+                        result_count: displayResult.femaleAccounts.length + displayResult.privateAccounts.length,
+                        is_shared: false,
+                    });
+                }
             } catch (err) {
                 if (err instanceof Error && err.name === 'AbortError') return;
                 console.error('Failed to fetch analysis result:', err);
@@ -541,8 +552,10 @@ export default function ResultPage({ params }: PageProps) {
 
     const handleLogout = async () => {
         try {
-            const response = await fetch('/api/auth/signout', { method: 'POST' });
-            if (response.ok) router.push('/');
+            const signedOut = await signOutAndClearPendingAnalysisTarget(
+                availablePendingTargetStorage(),
+            );
+            if (signedOut) router.push('/');
         } catch (err) {
             console.error('Logout failed:', err);
         }

@@ -86,14 +86,15 @@ export async function GET(request: Request) {
     );
 
     // 코드 교환 실행
-    const { data: exchange, error } = await supabase.auth.exchangeCodeForSession(code);
+    const exchangeResult = await supabase.auth.exchangeCodeForSession(code).catch(() => null);
 
-    if (error) {
-        console.error('Auth callback error:', error);
+    if (!exchangeResult || exchangeResult.error) {
+        console.error('Auth callback exchange failed');
         const loginUrl = new URL('/login', appOrigin);
-        loginUrl.searchParams.set('error', error.message);
+        loginUrl.searchParams.set('error', 'exchange_failed');
         return NextResponse.redirect(loginUrl);
     }
+    const exchange = exchangeResult.data;
 
     // 세션 검증을 통해 쿠키 설정 강제 (setAll 트리거)
     await supabase.auth.getUser();

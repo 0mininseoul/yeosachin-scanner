@@ -57,8 +57,6 @@ type PropertyValidator = (value: unknown) => AnalyticsScalar | undefined;
 
 const API_KEY_PATTERN = /^[0-9a-f]{32}$/i;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/;
-const MARKETING_VALUE_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 const MAX_QUEUED_EVENTS = 50;
 
 const APPROVED_EVENTS = new Set<AnalyticsEvent>(Object.values(EVENTS));
@@ -78,30 +76,39 @@ function integerValidator(minimum: number, maximum: number): PropertyValidator {
         : undefined;
 }
 
-function marketingValidator(value: unknown): string | undefined {
-    if (typeof value !== 'string' || !MARKETING_VALUE_PATTERN.test(value)) return undefined;
-    if (/^\+?\d[\d\s()-]{6,}$/.test(value)) return undefined;
-    if (value.includes('@') || value.includes('.') || value.includes('://')) return undefined;
-    return value;
-}
-
 function uuidValidator(value: unknown): string | undefined {
     return typeof value === 'string' && CANONICAL_UUID.test(value) ? value : undefined;
 }
 
+const errorCodeValidator = enumValidator([
+    'INTERNAL_ERROR',
+    'NETWORK_ERROR',
+    'NOT_FOUND',
+    'PROVIDER_ERROR',
+    'RATE_LIMITED',
+    'TIMEOUT',
+    'UNAUTHORIZED',
+    'UNKNOWN',
+    'VALIDATION_ERROR',
+] as const);
+
+function registeredErrorCodeValidator(value: unknown): string | undefined {
+    if (value === undefined || value === null) return undefined;
+    const validated = errorCodeValidator(value);
+    return typeof validated === 'string' ? validated : 'UNKNOWN';
+}
+
 const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     amount_krw: integerValidator(0, 10_000_000),
-    campaign: marketingValidator,
-    content: marketingValidator,
+    campaign: enumValidator(['launch_2026']),
+    content: enumValidator(['hero-a']),
     decision: enumValidator(['exclude', 'skip']),
     duration_ms: integerValidator(0, 86_400_000),
-    error_code: (value) => typeof value === 'string' && ERROR_CODE_PATTERN.test(value)
-        ? value
-        : undefined,
+    error_code: registeredErrorCodeValidator,
     followers_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
     following_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
     is_shared: (value) => typeof value === 'boolean' ? value : undefined,
-    medium: marketingValidator,
+    medium: enumValidator(['direct', 'organic', 'paid_social', 'referral']),
     order_id: uuidValidator,
     plan_id: enumValidator(['basic', 'standard', 'plus']),
     preflight_id: uuidValidator,
@@ -110,7 +117,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     required_plan_id: enumValidator(['basic', 'standard', 'plus']),
     result_count: integerValidator(0, 10_000),
     share_channel: enumValidator(['clipboard', 'kakao', 'web_share']),
-    source: marketingValidator,
+    source: enumValidator(['direct', 'google', 'instagram', 'kakao']),
     stage: enumValidator([
         'analysis',
         'anonymous',
@@ -132,7 +139,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
         'refund_pending',
         'refunded',
     ]),
-    term: marketingValidator,
+    term: enumValidator(['detector']),
 };
 
 const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
@@ -164,16 +171,29 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
 
 interface QueuedEvent {
     eventName: AnalyticsEvent;
-    fingerprint: string;
     properties: AnalyticsProperties;
 }
 
 let identityReady = false;
 let initializationPromise: Promise<boolean> | null = null;
+let initializingSdk: UnifiedSdk | null = null;
 let initializedSdk: UnifiedSdk | null = null;
 let sdkLoadPromise: Promise<UnifiedSdk> | null = null;
-let desiredUserId: string | null | undefined;
+let desiredUserId: string | undefined;
+let hasResolvedIdentity = false;
+let identityRevision = 0;
 const queuedEvents: QueuedEvent[] = [];
+
+const SAFE_SESSION_REPLAY_REMOTE_CONFIG = {
+    configs: {
+        sessionReplay: {
+            sr_sampling_config: {
+                sample_rate: 1,
+                capture_enabled: true,
+            },
+        },
+    },
+} as const;
 
 function configuredApiKey(): string | null {
     if (typeof window === 'undefined') return null;
@@ -222,33 +242,52 @@ function flushQueue(): void {
 }
 
 function enqueue(eventName: AnalyticsEvent, properties: AnalyticsProperties): void {
-    const fingerprint = `${eventName}:${JSON.stringify(properties)}`;
-    if (queuedEvents.some((event) => event.fingerprint === fingerprint)) return;
     if (queuedEvents.length === MAX_QUEUED_EVENTS) queuedEvents.shift();
-    queuedEvents.push({ eventName, fingerprint, properties });
+    queuedEvents.push({ eventName, properties });
 }
 
-function applyDesiredIdentity(sdk: UnifiedSdk): void {
+function setSdkUserId(sdk: UnifiedSdk, userId: string | undefined): void {
     try {
-        if (desiredUserId === null) {
-            sdk.reset();
-        } else if (desiredUserId !== undefined) {
-            sdk.setUserId(desiredUserId);
-        }
+        sdk.setUserId(userId);
     } catch {
         // Identity updates are best-effort and must not affect analytics startup.
     }
 }
 
-export function initAmplitude(): Promise<boolean> {
+function updateResolvedIdentity(userId: string | null): boolean {
+    if (userId !== null && !isCanonicalAnalyticsUserId(userId)) return false;
+
+    const nextUserId = userId ?? undefined;
+    if (hasResolvedIdentity && desiredUserId === nextUserId) return true;
+
+    desiredUserId = nextUserId;
+    hasResolvedIdentity = true;
+    identityRevision += 1;
+    if (initializingSdk) setSdkUserId(initializingSdk, desiredUserId);
+    if (initializedSdk) setSdkUserId(initializedSdk, desiredUserId);
+    return true;
+}
+
+async function safeSessionReplayRemoteConfig(): Promise<Response> {
+    return new Response(JSON.stringify(SAFE_SESSION_REPLAY_REMOTE_CONFIG), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+    });
+}
+
+export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
     const apiKey = configuredApiKey();
     if (!apiKey) return Promise.resolve(false);
+    if (!updateResolvedIdentity(resolvedUserId)) return Promise.resolve(false);
     if (initializedSdk) return Promise.resolve(true);
     if (initializationPromise) return initializationPromise;
 
     initializationPromise = (async () => {
         try {
             const sdk = await loadUnifiedSdk();
+            initializingSdk = sdk;
+            const appliedIdentityRevision = identityRevision;
+            setSdkUserId(sdk, desiredUserId);
             await sdk.initAll(apiKey, {
                 analytics: {
                     autocapture: {
@@ -274,14 +313,23 @@ export function initAmplitude(): Promise<boolean> {
                         maskSelector: ['.amp-mask', '[data-amp-mask]'],
                         blockSelector: ['.amp-block', '[data-amp-block]'],
                     },
+                    interactionConfig: { enabled: false, batch: false },
+                    performanceConfig: { enabled: false },
+                    captureDocumentTitle: false,
+                    enableUrlChangePolling: false,
+                    handleFetchConfig: safeSessionReplayRemoteConfig,
                 },
                 engagement: { skip: true },
             });
+            if (appliedIdentityRevision !== identityRevision) {
+                setSdkUserId(sdk, desiredUserId);
+            }
             initializedSdk = sdk;
-            applyDesiredIdentity(sdk);
+            initializingSdk = null;
             flushQueue();
             return true;
         } catch {
+            initializingSdk = null;
             return false;
         } finally {
             initializationPromise = null;
@@ -301,8 +349,6 @@ export function trackEvent(
         enqueue(eventName, validateProperties(eventName, properties));
         if (initializedSdk) {
             flushQueue();
-        } else {
-            void initAmplitude();
         }
     } catch {
         // Validation and analytics must never interrupt the product flow.
@@ -320,13 +366,4 @@ export function markAnalyticsIdentityReady(): void {
 
 export function isCanonicalAnalyticsUserId(userId: string): boolean {
     return CANONICAL_UUID.test(userId);
-}
-
-export function identifyAnalyticsUser(userId: string | null): void {
-    if (userId !== null && !isCanonicalAnalyticsUserId(userId)) return;
-
-    desiredUserId = userId;
-    if (!initializedSdk) return;
-
-    applyDesiredIdentity(initializedSdk);
 }

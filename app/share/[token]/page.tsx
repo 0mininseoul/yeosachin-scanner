@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, use } from 'react';
+import { useEffect, useRef, useState, use } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
@@ -134,6 +134,7 @@ export default function ShareResultPage({ params }: PageProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [tab, setTab] = useState<'public' | 'private'>('public');
+    const resultViewTrackedRef = useRef(false);
 
     useEffect(() => {
         const fetchResult = async () => {
@@ -146,10 +147,13 @@ export default function ShareResultPage({ params }: PageProps) {
                 }
 
                 setData(result);
-                trackEvent(EVENTS.RESULT_VIEWED, {
-                    result_count: result.femaleAccounts.length + result.privateAccounts.length,
-                    is_shared: true,
-                });
+                if (!resultViewTrackedRef.current) {
+                    resultViewTrackedRef.current = true;
+                    trackEvent(EVENTS.RESULT_VIEWED, {
+                        result_count: result.femaleAccounts.length + result.privateAccounts.length,
+                        is_shared: true,
+                    });
+                }
             } catch (err) {
                 setError(err instanceof Error ? err.message : '결과를 불러오는데 실패했습니다.');
             } finally {
