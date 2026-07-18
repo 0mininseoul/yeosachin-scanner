@@ -14,6 +14,7 @@ import {
     safeAnalyticsErrorCode,
     tryClaimAnalyticsEvent,
 } from './analytics-funnel';
+import * as analyticsFunnel from './analytics-funnel';
 
 describe('Amplitude funnel helpers', () => {
     it.each([
@@ -132,5 +133,63 @@ describe('Amplitude funnel helpers', () => {
             requestId: otherRequestId,
             status: 'processing',
         }, 1_000)).toBe(false);
+    });
+
+    it('restores a persisted wall-clock preflight start after a simulated reload', () => {
+        const helpers = analyticsFunnel as typeof analyticsFunnel & {
+            persistPreflightStartedAt: (
+                storage: { getItem(key: string): string | null; setItem(key: string, value: string): void },
+                preflightId: string,
+                startedAt: number,
+            ) => boolean;
+            preflightStartedAtKey: (preflightId: string) => string;
+            readPreflightStartedAt: (
+                storage: { getItem(key: string): string | null; setItem(key: string, value: string): void },
+                preflightId: string,
+            ) => number | null;
+            trustedDurationMs: (startedAt: number | null, finishedAt: number) => number | undefined;
+        };
+        expect(typeof helpers.persistPreflightStartedAt).toBe('function');
+        expect(typeof helpers.preflightStartedAtKey).toBe('function');
+        expect(typeof helpers.readPreflightStartedAt).toBe('function');
+        expect(typeof helpers.trustedDurationMs).toBe('function');
+        if (
+            !helpers.persistPreflightStartedAt
+            || !helpers.preflightStartedAtKey
+            || !helpers.readPreflightStartedAt
+            || !helpers.trustedDurationMs
+        ) return;
+
+        const preflightId = '11111111-1111-4111-8111-111111111111';
+        const values = new Map<string, string>();
+        const firstPageStorage = {
+            getItem: (key: string) => values.get(key) ?? null,
+            setItem: (key: string, value: string) => void values.set(key, value),
+        };
+        expect(helpers.persistPreflightStartedAt(firstPageStorage, preflightId, 10_000))
+            .toBe(true);
+        expect(helpers.preflightStartedAtKey(preflightId))
+            .toBe(`amplitude:preflight_started_at:${preflightId}`);
+
+        const reloadedPageStorage = {
+            getItem: (key: string) => values.get(key) ?? null,
+            setItem: (key: string, value: string) => void values.set(key, value),
+        };
+        const restored = helpers.readPreflightStartedAt(reloadedPageStorage, preflightId);
+        expect(restored).toBe(10_000);
+        expect(helpers.trustedDurationMs(restored, 25_500)).toBe(15_500);
+    });
+
+    it('omits duration when no trustworthy analysis start is persisted', () => {
+        const helpers = analyticsFunnel as typeof analyticsFunnel & {
+            trustedDurationMs: (startedAt: number | null, finishedAt: number) => number | undefined;
+        };
+        expect(typeof helpers.trustedDurationMs).toBe('function');
+        if (!helpers.trustedDurationMs) return;
+
+        expect(helpers.trustedDurationMs(null, 25_500)).toBeUndefined();
+        expect(helpers.trustedDurationMs(Number.NaN, 25_500)).toBeUndefined();
+        expect(helpers.trustedDurationMs(30_000, 25_500)).toBeUndefined();
+        expect(helpers.trustedDurationMs(10_000, Number.POSITIVE_INFINITY)).toBeUndefined();
     });
 });

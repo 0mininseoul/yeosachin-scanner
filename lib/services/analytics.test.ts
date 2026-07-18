@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getPageUrl } from '@amplitude/session-replay-browser/lib/cjs/helpers.js';
+import { SessionReplayTrackDestination } from '@amplitude/session-replay-browser/lib/cjs/track-destination.js';
 
 const amplitudeMocks = vi.hoisted(() => ({
     initAll: vi.fn(),
@@ -140,11 +142,25 @@ describe('Amplitude analytics adapter', () => {
                     maskSelector: ['.amp-mask', '[data-amp-mask]'],
                     blockSelector: ['.amp-block', '[data-amp-block]'],
                 },
-                interactionConfig: { enabled: false, batch: false },
+                interactionConfig: {
+                    enabled: true,
+                    batch: false,
+                    ugcFilterRules: [
+                        {
+                            selector: 'https://*/**',
+                            replacement: 'https://yeosachin.vercel.app/',
+                        },
+                        {
+                            selector: 'http://*/**',
+                            replacement: 'http://localhost/',
+                        },
+                    ],
+                },
                 performanceConfig: { enabled: false },
                 captureDocumentTitle: false,
                 enableUrlChangePolling: false,
                 handleFetchConfig: expect.any(Function),
+                handleSendEvents: expect.any(Function),
             },
             engagement: { skip: true },
         });
@@ -180,6 +196,119 @@ describe('Amplitude analytics adapter', () => {
             expect(serialized).not.toContain(forbidden);
         }
         expect(hostileFetch).not.toHaveBeenCalled();
+    });
+
+    it('removes sensitive URLs from an installed-SDK replay upload and transport header', async () => {
+        const shareToken = 'a'.repeat(64);
+        const requestId = '11111111-1111-4111-8111-111111111111';
+        const preflightId = '22222222-2222-4222-8222-222222222222';
+        const sensitiveUrl = `https://yeosachin.vercel.app/share/${shareToken}`
+            + `?preflight=${preflightId}#result/${requestId}`;
+        const fetchCapture = vi.fn().mockResolvedValue(new Response('', { status: 200 }));
+        enableBrowser();
+        vi.stubGlobal('location', { href: sensitiveUrl });
+        vi.stubGlobal('fetch', fetchCapture);
+        const { initAmplitude } = await loadAnalytics();
+
+        await initAmplitude(null);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                interactionConfig: {
+                    enabled: boolean;
+                    ugcFilterRules: Array<{ selector: string; replacement: string }>;
+                };
+                handleSendEvents: (request: {
+                    url: string;
+                    method: 'POST';
+                    headers: Record<string, string>;
+                    body: string | Uint8Array;
+                    keepalive: boolean;
+                }) => Promise<Response>;
+            };
+        };
+        expect(options.sessionReplay.interactionConfig.enabled).toBe(true);
+
+        for (const pageUrl of [
+            sensitiveUrl,
+            `https://yeosachin.vercel.app/analyze?preflight=${preflightId}`,
+            `https://yeosachin.vercel.app/progress/${requestId}`,
+            `https://yeosachin.vercel.app/result/${requestId}?pipeline=v2`,
+        ]) {
+            expect(getPageUrl(
+                pageUrl,
+                options.sessionReplay.interactionConfig.ugcFilterRules,
+            )).toBe('https://yeosachin.vercel.app/');
+        }
+        expect(getPageUrl(
+            `http://127.0.0.1:3000/result/${requestId}?pipeline=v2`,
+            options.sessionReplay.interactionConfig.ugcFilterRules,
+        )).toBe('http://localhost/');
+
+        const sanitizedPageUrl = getPageUrl(
+            sensitiveUrl,
+            options.sessionReplay.interactionConfig.ugcFilterRules,
+        );
+        const replayEvent = JSON.stringify({
+            type: 4,
+            data: { href: sanitizedPageUrl },
+        });
+        const expectedBody = JSON.stringify({ version: 1, events: [replayEvent] });
+        const noop = vi.fn();
+        const destination = new SessionReplayTrackDestination({
+            loggerProvider: {
+                debug: noop,
+                disable: noop,
+                enable: noop,
+                error: noop,
+                log: noop,
+                warn: noop,
+            },
+            enableTransportCompression: false,
+            sendTimeoutMs: 0,
+            handleSendEvents: options.sessionReplay.handleSendEvents,
+        });
+
+        await destination.send({
+            events: [replayEvent],
+            sampleRate: 1,
+            type: 'replay',
+            sessionId: 1_721_234_567_890,
+            deviceId: 'test-device',
+            apiKey: API_KEY,
+            onComplete: async () => undefined,
+            attempts: 1,
+            timeout: 0,
+            flushMaxRetries: 2,
+        });
+
+        expect(fetchCapture).toHaveBeenCalledTimes(1);
+        const [uploadUrl, request] = fetchCapture.mock.calls[0] as [string, RequestInit];
+        expect(uploadUrl).toContain('session_id=1721234567890');
+        expect(request.method).toBe('POST');
+        expect(request.keepalive).toBe(true);
+        expect(request.body).toBe(expectedBody);
+        const uploadedHeaders = new Headers(request.headers);
+        expect(uploadedHeaders.get('X-Client-Url')).toBe('https://yeosachin.vercel.app/');
+        expect(uploadedHeaders.get('Authorization')).toBe(`Bearer ${API_KEY}`);
+        expect(uploadedHeaders.get('Content-Type')).toBe('application/json');
+
+        const wireImage = JSON.stringify({ uploadUrl, request: {
+            ...request,
+            body: typeof request.body === 'string' ? request.body : '<binary>',
+            headers: Object.fromEntries(new Headers(request.headers).entries()),
+        } });
+        expect(wireImage).toContain('https://yeosachin.vercel.app/');
+        for (const forbidden of [
+            shareToken,
+            requestId,
+            preflightId,
+            '/share/',
+            '?preflight=',
+            '#result/',
+        ]) {
+            expect(wireImage).not.toContain(forbidden);
+        }
     });
 
     it('does not load or initialize Unified from a child event before auth resolves', async () => {

@@ -85,4 +85,18 @@ describe('Amplitude product funnel caller contract', () => {
         expect(analyze).toContain("plan.planId === 'plus'");
         expect(analyze).not.toMatch(/EVENTS\.[A-Z_]*WAITLIST/);
     });
+
+    it('uses persisted wall-clock starts and never invents a duration on terminal direct-open', () => {
+        const preflight = source('hooks/useAnalysisV2Preflight.ts');
+        expect(preflight).not.toContain('performance.now()');
+        expect(preflight).toContain('persistPreflightStartedAt(');
+        expect(preflight).toContain('readPreflightStartedAt(');
+
+        const progress = source('hooks/useAnalysisProgress.ts');
+        expect(progress).not.toContain('observedStartedAtRef');
+        expect(progress).toContain('trustedDurationMs(');
+        expect(progress).toMatch(
+            /durationMs === undefined[\s\S]*?\{\}[\s\S]*?\{ duration_ms: durationMs \}/,
+        );
+    });
 });

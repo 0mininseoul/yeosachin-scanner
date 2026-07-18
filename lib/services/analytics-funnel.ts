@@ -135,6 +135,20 @@ export function boundedDurationMs(startedAt: number, finishedAt: number): number
     return Math.min(MAX_DURATION_MS, Math.max(0, Math.floor(finishedAt - startedAt)));
 }
 
+export function trustedDurationMs(
+    startedAt: number | null | undefined,
+    finishedAt: number,
+): number | undefined {
+    if (
+        typeof startedAt !== 'number'
+        || !Number.isFinite(startedAt)
+        || startedAt <= 0
+        || !Number.isFinite(finishedAt)
+        || finishedAt < startedAt
+    ) return undefined;
+    return boundedDurationMs(startedAt, finishedAt);
+}
+
 export function availableAnalyticsStorage(): AnalyticsStorage | null {
     if (typeof window === 'undefined') return null;
     try {
@@ -164,6 +178,50 @@ export function landingViewEventKey(): string {
 
 export function analysisStartedAtKey(requestId: string): string {
     return `amplitude:analysis_started_at:${requestId}`;
+}
+
+export function preflightStartedAtKey(preflightId: string): string {
+    return `amplitude:preflight_started_at:${preflightId}`;
+}
+
+function readPersistedStartedAt(
+    storage: AnalyticsStorage | null | undefined,
+    key: string,
+): number | null {
+    if (!storage) return null;
+    try {
+        const startedAt = Number(storage.getItem(key));
+        return Number.isFinite(startedAt) && startedAt > 0 ? startedAt : null;
+    } catch {
+        return null;
+    }
+}
+
+export function persistPreflightStartedAt(
+    storage: AnalyticsStorage | null | undefined,
+    preflightId: string,
+    startedAt: number,
+): boolean {
+    if (
+        !storage
+        || !CANONICAL_REQUEST_ID.test(preflightId)
+        || !Number.isFinite(startedAt)
+        || startedAt <= 0
+    ) return false;
+    try {
+        storage.setItem(preflightStartedAtKey(preflightId), String(Math.floor(startedAt)));
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export function readPreflightStartedAt(
+    storage: AnalyticsStorage | null | undefined,
+    preflightId: string,
+): number | null {
+    if (!CANONICAL_REQUEST_ID.test(preflightId)) return null;
+    return readPersistedStartedAt(storage, preflightStartedAtKey(preflightId));
 }
 
 export function analysisStartedEventKey(requestId: string): string {
@@ -210,13 +268,8 @@ export function readAnalysisStartedAt(
     storage: AnalyticsStorage | null | undefined,
     requestId: string,
 ): number | null {
-    if (!storage || !CANONICAL_REQUEST_ID.test(requestId)) return null;
-    try {
-        const startedAt = Number(storage.getItem(analysisStartedAtKey(requestId)));
-        return Number.isFinite(startedAt) && startedAt > 0 ? startedAt : null;
-    } catch {
-        return null;
-    }
+    if (!CANONICAL_REQUEST_ID.test(requestId)) return null;
+    return readPersistedStartedAt(storage, analysisStartedAtKey(requestId));
 }
 
 export function analysisCompletedEventKey(requestId: string): string {

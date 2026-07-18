@@ -17,9 +17,9 @@ import {
     analysisCompletedEventKey,
     analysisStartedEventKey,
     availableAnalyticsStorage,
-    boundedDurationMs,
     claimObservedAnalysisStart,
     readAnalysisStartedAt,
+    trustedDurationMs,
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
 
@@ -53,7 +53,6 @@ export function useAnalysisProgress(requestId: string) {
     const v2LastEventSeqRef = useRef(0);
     const v2RevisionRef = useRef(-1);
     const fetchQueuedRef = useRef(false);
-    const observedStartedAtRef = useRef(Date.now());
     const analysisStartedTrackedRef = useRef(new Set<string>());
     const completionTrackedRef = useRef(new Set<string>());
     const activeRequestIdRef = useRef<string | null>(null);
@@ -210,7 +209,6 @@ export function useAnalysisProgress(requestId: string) {
         v2LastEventSeqRef.current = 0;
         v2RevisionRef.current = -1;
         fetchQueuedRef.current = false;
-        observedStartedAtRef.current = Date.now();
         setData(null);
         setLoading(true);
         setError(null);
@@ -237,7 +235,6 @@ export function useAnalysisProgress(requestId: string) {
             requestId: data.id,
             status: data.status,
         }, startedAt)) return;
-        observedStartedAtRef.current = startedAt;
         trackEvent(EVENTS.ANALYSIS_STARTED, { request_id: requestId });
     }, [data?.id, data?.status, requestId]);
 
@@ -249,13 +246,13 @@ export function useAnalysisProgress(requestId: string) {
         const storage = availableAnalyticsStorage();
         if (!tryClaimAnalyticsEvent(storage, eventKey)) return;
 
-        const persisted = readAnalysisStartedAt(storage, requestId);
-        const startedAt = persisted && persisted <= Date.now()
-            ? persisted
-            : observedStartedAtRef.current;
+        const durationMs = trustedDurationMs(
+            readAnalysisStartedAt(storage, requestId),
+            Date.now(),
+        );
         trackEvent(EVENTS.ANALYSIS_COMPLETED, {
             request_id: requestId,
-            duration_ms: boundedDurationMs(startedAt, Date.now()),
+            ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         });
     }, [data?.id, data?.status, requestId]);
 

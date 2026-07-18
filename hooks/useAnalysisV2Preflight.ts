@@ -30,12 +30,14 @@ import {
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
-    boundedDurationMs,
     claimAnalysisStart,
+    persistPreflightStartedAt,
     preflightOutcomeEventKey,
+    readPreflightStartedAt,
     relationshipBucket,
     safeAnalyticsErrorCode,
     safeAnalyticsHttpErrorCode,
+    trustedDurationMs,
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
 
@@ -278,11 +280,11 @@ export function useAnalysisV2Preflight() {
             return;
         }
         preflightOutcomeTrackedRef.current.add(localKey);
-        const now = performance.now();
-        const durationMs = boundedDurationMs(preflightStartedAtRef.current ?? now, now);
+        const durationMs = trustedDurationMs(preflightStartedAtRef.current, Date.now());
+        const durationProperties = durationMs === undefined ? {} : { duration_ms: durationMs };
         if (status.status === 'ready') {
             trackEvent(EVENTS.PREFLIGHT_SUCCEEDED, {
-                duration_ms: durationMs,
+                ...durationProperties,
                 required_plan_id: status.requiredPlan,
                 followers_bucket: relationshipBucket(status.target.followersCount),
                 following_bucket: relationshipBucket(status.target.followingCount),
@@ -291,7 +293,7 @@ export function useAnalysisV2Preflight() {
             return;
         }
         trackEvent(EVENTS.PREFLIGHT_FAILED, {
-            duration_ms: durationMs,
+            ...durationProperties,
             error_code: safeAnalyticsErrorCode({ code: status.code }),
             stage: 'preflight',
             preflight_id: status.preflightId,
@@ -302,9 +304,9 @@ export function useAnalysisV2Preflight() {
         cause: unknown,
         preflightId?: string,
     ) => {
-        const now = performance.now();
+        const durationMs = trustedDurationMs(preflightStartedAtRef.current, Date.now());
         trackEvent(EVENTS.PREFLIGHT_FAILED, {
-            duration_ms: boundedDurationMs(preflightStartedAtRef.current ?? now, now),
+            ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
             error_code: safeAnalyticsErrorCode(cause),
             stage: 'preflight',
             ...(preflightId ? { preflight_id: preflightId } : {}),
@@ -373,7 +375,10 @@ export function useAnalysisV2Preflight() {
         setExclusionState('undecided');
         setCreating(true);
         setError(null);
-        preflightStartedAtRef.current = performance.now();
+        preflightStartedAtRef.current = readPreflightStartedAt(
+            availableAnalyticsStorage(),
+            preflightId,
+        );
         try {
             return await loadPreflight(preflightId, scope) !== null;
         } catch (cause) {
@@ -405,7 +410,7 @@ export function useAnalysisV2Preflight() {
         setTargetInstagramId(normalized);
         setPreflight(null);
         setExclusionState('undecided');
-        preflightStartedAtRef.current = performance.now();
+        preflightStartedAtRef.current = Date.now();
         trackEvent(EVENTS.PREFLIGHT_STARTED);
 
         try {
@@ -446,6 +451,13 @@ export function useAnalysisV2Preflight() {
             }
             if (!scope.isCurrent()) return null;
             if (!coordinator.attachPreflight(generation, accepted.data.preflightId)) return null;
+            if (preflightStartedAtRef.current !== null) {
+                persistPreflightStartedAt(
+                    availableAnalyticsStorage(),
+                    accepted.data.preflightId,
+                    preflightStartedAtRef.current,
+                );
+            }
             if (testAdmission) {
                 consumeTestAdmissionCredential(sessionStorage, normalized);
             }
