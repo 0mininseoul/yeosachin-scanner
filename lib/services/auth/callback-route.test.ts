@@ -168,6 +168,51 @@ describe('OAuth callback redirects', () => {
         );
     });
 
+    it('records exactly one profile-sync failure when Kakao omits its provider token', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: {
+                session: {},
+                user: {
+                    id: userId,
+                    email: 'private@example.com',
+                    app_metadata: { provider: 'kakao' },
+                },
+            },
+            error: null,
+        });
+
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?code=private-oauth-code'
+        ));
+
+        expect(response.status).toBe(307);
+        expect(mocks.emit.mock.calls.filter(([event]) => (
+            event as { event?: string }).event === 'auth.profile_sync_failed'
+        )).toEqual([[{
+            event: 'auth.profile_sync_failed',
+            severity: 'warn',
+            fields: {
+                request_id: '123e4567-e89b-42d3-a456-426614174010',
+                trace_id: null,
+                route: '/auth/callback',
+                method: 'GET',
+                user_id: userId,
+                provider: 'kakao',
+                operation: 'profile_sync',
+                disposition: 'failed',
+                error_code: 'PROVIDER_ERROR',
+            },
+        }]]);
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'auth.callback_completed',
+            severity: 'info',
+        }));
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /private-oauth-code|private@example/
+        );
+    });
+
     it('bounds a rejected exchange without reflecting thrown details', async () => {
         mocks.exchangeCodeForSession.mockRejectedValue(
             new Error('private@example.com token=secret'),

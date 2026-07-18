@@ -80,18 +80,46 @@ describe('preflight worker route', () => {
     });
 
     it('runs the claimed domain worker after OIDC verification', async () => {
+        const userId = '223e4567-e89b-42d3-a456-426614174000';
+        mocks.process.mockImplementation(async (_id, dependencies) => {
+            dependencies?.observer?.({
+                type: 'profile_collected',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 350,
+                followingCount: 300,
+            });
+            dependencies?.observer?.({
+                type: 'completed',
+                outcome: 'ready',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 350,
+                followingCount: 300,
+                requiredPlan: 'basic',
+            });
+            return 'ready';
+        });
         const response = await POST(request({ preflightId }));
         expect(response.status).toBe(200);
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
-        expect(mocks.process).toHaveBeenCalledWith(preflightId);
+        expect(mocks.process).toHaveBeenCalledWith(preflightId, {
+            observer: expect.any(Function),
+        });
         await expect(response.json()).resolves.toEqual({ status: 'ready' });
         expect(mocks.emit).toHaveBeenCalledWith({
             event: 'preflight.profile_collected',
             severity: 'info',
             fields: expect.objectContaining({
                 preflight_id: preflightId,
+                user_id: userId,
+                target_instagram_id: 'target.name',
+                input_count: 350,
+                output_count: 300,
                 operation: 'profile',
-                disposition: 'ready',
+                disposition: 'success',
             }),
         });
         expect(mocks.emit).toHaveBeenCalledWith({
@@ -99,6 +127,11 @@ describe('preflight worker route', () => {
             severity: 'info',
             fields: expect.objectContaining({
                 preflight_id: preflightId,
+                user_id: userId,
+                target_instagram_id: 'target.name',
+                input_count: 350,
+                output_count: 300,
+                plan_id: 'basic',
                 operation: 'profile',
                 disposition: 'ready',
             }),
@@ -140,11 +173,23 @@ describe('preflight worker route', () => {
 
     it('returns a retryable 500 when processing fails', async () => {
         const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-        mocks.process.mockRejectedValue(new PreflightWorkerRetryError({
-            category: 'rate_limit',
-            retryable: true,
-            httpStatus: 429,
-        }, 2, new Error('raw target.name bearer-secret')));
+        mocks.process.mockImplementation(async (_id, dependencies) => {
+            dependencies?.observer?.({
+                type: 'failed',
+                preflightId,
+                userId: '223e4567-e89b-42d3-a456-426614174000',
+                targetInstagramId: 'target.name',
+                category: 'rate_limit',
+                retryable: true,
+                httpStatus: 429,
+                workerAttemptCount: 2,
+            });
+            throw new PreflightWorkerRetryError({
+                category: 'rate_limit',
+                retryable: true,
+                httpStatus: 429,
+            }, 2, new Error('raw target.name bearer-secret'));
+        });
         const response = await POST(request({ preflightId }));
         expect(response.status).toBe(500);
         await expect(response.json()).resolves.toEqual({ code: 'ANALYSIS_FAILED' });
@@ -165,6 +210,8 @@ describe('preflight worker route', () => {
             severity: 'error',
             fields: expect.objectContaining({
                 preflight_id: preflightId,
+                user_id: '223e4567-e89b-42d3-a456-426614174000',
+                target_instagram_id: 'target.name',
                 operation: 'profile',
                 disposition: 'failed',
                 retryable: true,
@@ -173,8 +220,11 @@ describe('preflight worker route', () => {
                 error_code: 'RATE_LIMITED',
             }),
         });
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'preflight.failed'
+        )).toHaveLength(1);
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
-            /target.name|bearer-secret|Bearer signed/
+            /bearer-secret|Bearer signed/
         );
     });
 

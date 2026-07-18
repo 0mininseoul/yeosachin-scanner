@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import {
     earlybirdCheckoutRequestSchema,
@@ -15,11 +15,15 @@ import {
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
+import { preflightStore } from '@/lib/services/analysis/preflight';
 import {
     observeRoute,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
-import { operationalLogger } from '@/lib/observability/server';
+import {
+    flushOperationalLogs,
+    operationalLogger,
+} from '@/lib/observability/server';
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status });
@@ -55,6 +59,57 @@ function checkoutErrorCode(code: string): string {
     if (code === 'UNAUTHORIZED') return 'UNAUTHORIZED';
     if (code === 'EARLYBIRD_UNAVAILABLE') return 'INTERNAL_ERROR';
     return 'VALIDATION_ERROR';
+}
+
+function scheduleCheckoutEvent(input: {
+    context: OperationalRequestContext;
+    userId: string;
+    preflightId: string;
+    planId: PlanId;
+    orderId?: string;
+    created?: boolean;
+    status?: number;
+    errorCode?: string;
+}): void {
+    const amountKrw = isPaidEarlybirdPlanId(input.planId)
+        ? EARLYBIRD_PLAN_CATALOG[input.planId].earlybirdAmountKrw
+        : undefined;
+    after(async () => {
+        let targetInstagramId: string | undefined;
+        try {
+            const preflight = await preflightStore.findForOwner(
+                input.preflightId,
+                input.userId,
+            );
+            targetInstagramId = preflight?.readySnapshot?.target.username;
+        } catch {
+            // Checkout observability remains best-effort and must not affect the response.
+        }
+
+        try {
+            const success = Boolean(input.orderId);
+            operationalLogger.emit({
+                event: success ? 'earlybird.checkout_created' : 'earlybird.checkout_failed',
+                severity: success ? 'info' : (input.status ?? 500) >= 500 ? 'error' : 'warn',
+                fields: {
+                    ...input.context,
+                    user_id: input.userId,
+                    preflight_id: input.preflightId,
+                    ...(input.orderId ? { order_id: input.orderId } : {}),
+                    ...(targetInstagramId ? { target_instagram_id: targetInstagramId } : {}),
+                    plan_id: input.planId,
+                    ...(amountKrw === undefined ? {} : { amount_krw: amountKrw }),
+                    operation: 'checkout',
+                    disposition: success
+                        ? input.created ? 'accepted' : 'exists'
+                        : 'rejected',
+                    ...(input.errorCode ? { error_code: input.errorCode } : {}),
+                },
+            });
+        } finally {
+            await flushOperationalLogs();
+        }
+    });
 }
 
 async function handlePOST(
@@ -120,22 +175,13 @@ async function handlePOST(
             preflightId: parsed.data.preflightId,
             planId: parsed.data.planId,
         });
-        const amountKrw = isPaidEarlybirdPlanId(parsed.data.planId)
-            ? EARLYBIRD_PLAN_CATALOG[parsed.data.planId].earlybirdAmountKrw
-            : undefined;
-        operationalLogger.emit({
-            event: 'earlybird.checkout_created',
-            severity: 'info',
-            fields: {
-                ...context,
-                user_id: user.id,
-                preflight_id: parsed.data.preflightId,
-                order_id: result.orderId,
-                plan_id: parsed.data.planId,
-                ...(amountKrw === undefined ? {} : { amount_krw: amountKrw }),
-                operation: 'checkout',
-                disposition: result.created ? 'accepted' : 'exists',
-            },
+        scheduleCheckoutEvent({
+            context,
+            userId: user.id,
+            preflightId: parsed.data.preflightId,
+            planId: parsed.data.planId,
+            orderId: result.orderId,
+            created: result.created,
         });
         return NextResponse.json({
             orderId: result.orderId,
@@ -143,34 +189,43 @@ async function handlePOST(
         }, { status: result.created ? 201 : 200 });
     } catch (error) {
         if (error instanceof EarlybirdWaitlistRequiredError) {
-            return failed(409, error.message, 'Plus 플랜은 대기 신청으로 접수해주세요.');
+            scheduleCheckoutEvent({
+                context,
+                userId: user.id,
+                preflightId: parsed.data.preflightId,
+                planId: parsed.data.planId,
+                status: 409,
+                errorCode: 'VALIDATION_ERROR',
+            });
+            return errorResponse(409, error.message, 'Plus 플랜은 대기 신청으로 접수해주세요.');
         }
         if (error instanceof EarlybirdPersistenceError) {
             const response = persistenceErrorResponse(error);
-            operationalLogger.emit({
-                event: 'earlybird.checkout_failed',
-                severity: response.status >= 500 ? 'error' : 'warn',
-                fields: {
-                    ...context,
-                    user_id: user.id,
-                    preflight_id: parsed.data.preflightId,
-                    plan_id: parsed.data.planId,
-                    ...(isPaidEarlybirdPlanId(parsed.data.planId)
-                        ? {
-                            amount_krw:
-                                EARLYBIRD_PLAN_CATALOG[parsed.data.planId].earlybirdAmountKrw,
-                        }
-                        : {}),
-                    operation: 'checkout',
-                    disposition: 'rejected',
-                    error_code: response.status >= 500
-                        ? 'INTERNAL_ERROR'
-                        : 'VALIDATION_ERROR',
-                },
+            scheduleCheckoutEvent({
+                context,
+                userId: user.id,
+                preflightId: parsed.data.preflightId,
+                planId: parsed.data.planId,
+                status: response.status,
+                errorCode: response.status >= 500
+                    ? 'INTERNAL_ERROR'
+                    : 'VALIDATION_ERROR',
             });
             return response;
         }
-        return failed(503, 'EARLYBIRD_UNAVAILABLE', '사전 구매 접수를 잠시 후 다시 시도해주세요.');
+        scheduleCheckoutEvent({
+            context,
+            userId: user.id,
+            preflightId: parsed.data.preflightId,
+            planId: parsed.data.planId,
+            status: 503,
+            errorCode: 'INTERNAL_ERROR',
+        });
+        return errorResponse(
+            503,
+            'EARLYBIRD_UNAVAILABLE',
+            '사전 구매 접수를 잠시 후 다시 시도해주세요.',
+        );
     }
 }
 

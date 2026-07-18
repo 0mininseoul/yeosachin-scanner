@@ -14,6 +14,7 @@ import {
     processPreflight,
     trustedPreflightAccessMode,
     type PreflightAuthProvider,
+    type PreflightProcessObservation,
 } from '@/lib/services/analysis/preflight';
 import {
     PreflightTaskEnqueueError,
@@ -30,7 +31,11 @@ import {
     observeRoute,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
-import { operationalLogger } from '@/lib/observability/server';
+import {
+    flushOperationalLogs,
+    operationalLogger,
+} from '@/lib/observability/server';
+import { emitPreflightProcessObservation } from '@/lib/observability/preflight-events';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -232,10 +237,34 @@ async function handlePOST(
                 reservationToken: reservation.reservationToken!,
             });
             after(async () => {
+                let failureObserved = false;
                 try {
-                    await processPreflight(created.preflightId);
+                    await processPreflight(created.preflightId, {
+                        observer(observation: PreflightProcessObservation) {
+                            if (observation.type === 'failed') failureObserved = true;
+                            emitPreflightProcessObservation(context, observation);
+                        },
+                    });
                 } catch {
                     console.error('Local preflight worker failed.');
+                    if (!failureObserved) {
+                        operationalLogger.emit({
+                            event: 'preflight.failed',
+                            severity: 'error',
+                            fields: {
+                                ...context,
+                                user_id: user.id,
+                                preflight_id: created.preflightId,
+                                target_instagram_id: parsed.data.targetInstagramId,
+                                operation: 'profile',
+                                disposition: 'failed',
+                                retryable: true,
+                                error_code: 'UNKNOWN',
+                            },
+                        });
+                    }
+                } finally {
+                    await flushOperationalLogs();
                 }
             });
         }

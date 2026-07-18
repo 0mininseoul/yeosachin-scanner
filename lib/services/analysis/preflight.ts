@@ -117,6 +117,34 @@ export interface PreflightWorkerFailureClassification {
     workerAttemptCount: number | null;
 }
 
+interface PreflightProcessObservationBase {
+    preflightId: string;
+    userId: string;
+    targetInstagramId: string;
+    followersCount?: number;
+    followingCount?: number;
+}
+
+export type PreflightProcessObservation =
+    | (PreflightProcessObservationBase & {
+        type: 'profile_collected';
+    })
+    | (PreflightProcessObservationBase & {
+        type: 'completed';
+        outcome: 'ready' | 'blocked';
+        requiredPlan?: PlanId;
+        errorCode?: AnalysisV2ErrorCode;
+    })
+    | (PreflightProcessObservationBase & {
+        type: 'failed';
+        category: PreflightWorkerFailureClassification['category'];
+        retryable: boolean;
+        httpStatus: number | null;
+        workerAttemptCount: number;
+    });
+
+export type PreflightProcessObserver = (observation: PreflightProcessObservation) => void;
+
 export class PreflightWorkerRetryError extends Error {
     readonly classification: PreflightWorkerFailureClassification;
 
@@ -141,6 +169,17 @@ export function classifyPreflightWorkerFailure(
         httpStatus: null,
         workerAttemptCount: null,
     });
+}
+
+function notifyPreflightObserver(
+    observer: PreflightProcessObserver | undefined,
+    observation: PreflightProcessObservation,
+): void {
+    try {
+        observer?.(Object.freeze({ ...observation }));
+    } catch {
+        // Operational observation must never change preflight behavior.
+    }
 }
 
 export interface PreflightCatalogSnapshot {
@@ -1027,6 +1066,7 @@ export async function processPreflight(
         getFallbackProfile?: typeof getApifyProfileSummary;
         providerRunStore?: PreflightProviderRunStore;
         env?: Record<string, string | undefined>;
+        observer?: PreflightProcessObserver;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
@@ -1035,6 +1075,15 @@ export async function processPreflight(
     if (!claim) return 'noop';
     const workerStartedAt = Date.now();
     let terminalized = false;
+    const baseObservation = {
+        preflightId: claim.preflightId,
+        userId: claim.userId,
+        targetInstagramId: claim.targetInstagramId,
+    } as const;
+    let profileObservation: Pick<
+        PreflightProcessObservationBase,
+        'followersCount' | 'followingCount'
+    > = {};
     try {
         const inputHash = preflightTargetInputHash(
             claim.targetInstagramId,
@@ -1051,6 +1100,12 @@ export async function processPreflight(
             if (['starting', 'failed', 'aborted', 'timed_out'].includes(existingRun.status)) {
                 await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
                 terminalized = true;
+                notifyPreflightObserver(dependencies.observer, {
+                    type: 'completed',
+                    outcome: 'blocked',
+                    ...baseObservation,
+                    errorCode: 'ANALYSIS_FAILED',
+                });
                 return 'blocked';
             }
             const bound = await bindPreflightProviderRunCheckpoint({
@@ -1100,9 +1155,25 @@ export async function processPreflight(
         if (!profile) {
             await store.finalizeBlocked(claim, 'TARGET_NOT_FOUND');
             terminalized = true;
+            notifyPreflightObserver(dependencies.observer, {
+                type: 'completed',
+                outcome: 'blocked',
+                ...baseObservation,
+                errorCode: 'TARGET_NOT_FOUND',
+            });
             return 'blocked';
         }
         assertMatchingProfile(profile, claim.targetInstagramId);
+        assertProfileCounts(profile);
+        profileObservation = {
+            followersCount: profile.followersCount,
+            followingCount: profile.followingCount,
+        };
+        notifyPreflightObserver(dependencies.observer, {
+            type: 'profile_collected',
+            ...baseObservation,
+            ...profileObservation,
+        });
 
         const snapshot = buildReadyPreflightSnapshot(
             profile,
@@ -1112,10 +1183,24 @@ export async function processPreflight(
         if (typeof snapshot === 'string') {
             await store.finalizeBlocked(claim, snapshot);
             terminalized = true;
+            notifyPreflightObserver(dependencies.observer, {
+                type: 'completed',
+                outcome: 'blocked',
+                ...baseObservation,
+                ...profileObservation,
+                errorCode: snapshot,
+            });
             return 'blocked';
         }
         await store.finalizeReady(claim, snapshot);
         terminalized = true;
+        notifyPreflightObserver(dependencies.observer, {
+            type: 'completed',
+            outcome: 'ready',
+            ...baseObservation,
+            ...profileObservation,
+            requiredPlan: snapshot.requiredPlan,
+        });
         return 'ready';
     } catch (error) {
         const failure = classifyPreflightError(error);
@@ -1123,6 +1208,13 @@ export async function processPreflight(
             try {
                 await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
                 terminalized = true;
+                notifyPreflightObserver(dependencies.observer, {
+                    type: 'completed',
+                    outcome: 'blocked',
+                    ...baseObservation,
+                    ...profileObservation,
+                    errorCode: 'ANALYSIS_FAILED',
+                });
                 return 'blocked';
             } catch (blockError) {
                 error = blockError;
@@ -1136,6 +1228,15 @@ export async function processPreflight(
             }
         }
         const retryFailure = classifyPreflightError(error);
+        notifyPreflightObserver(dependencies.observer, {
+            type: 'failed',
+            ...baseObservation,
+            ...profileObservation,
+            category: retryFailure.category,
+            retryable: true,
+            httpStatus: retryFailure.httpStatus,
+            workerAttemptCount: claim.workerAttemptCount,
+        });
         throw new PreflightWorkerRetryError({
             category: retryFailure.category,
             retryable: true,

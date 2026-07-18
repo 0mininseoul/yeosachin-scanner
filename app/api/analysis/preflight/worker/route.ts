@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
     classifyPreflightWorkerFailure,
     processPreflight,
+    type PreflightProcessObservation,
 } from '@/lib/services/analysis/preflight';
 import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -15,6 +16,10 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import {
+    emitPreflightProcessObservation,
+    preflightWorkerErrorCode,
+} from '@/lib/observability/preflight-events';
 
 const workerRequestSchema = z.union([
     z.object({
@@ -28,15 +33,6 @@ const workerRequestSchema = z.union([
         dispatchToken: z.string().uuid(),
     }).strict(),
 ]);
-
-function workerErrorCode(category: string): string {
-    if (category === 'rate_limit') return 'RATE_LIMITED';
-    if (category === 'timeout') return 'TIMEOUT';
-    if (category === 'configuration') return 'JOB_DISPATCH_NOT_READY';
-    if (category === 'persistence') return 'INTERNAL_ERROR';
-    if (category === 'unknown') return 'UNKNOWN';
-    return 'PROVIDER_ERROR';
-}
 
 async function handlePOST(
     request: Request,
@@ -84,66 +80,69 @@ async function handlePOST(
         return reject(400, 'INVALID_REQUEST');
     }
 
+    const task = parsed.data;
+    const isFreshAdmission = 'kind' in task;
+    let profileFailureObserved = false;
     try {
-        const outcome = 'kind' in parsed.data
-            ? await processAnalysisV2FreshAdmission(supabaseAdmin, {
-                preflightId: parsed.data.preflightId,
-                generation: parsed.data.generation,
-                dispatchGeneration: parsed.data.dispatchGeneration,
-                dispatchToken: parsed.data.dispatchToken,
-            })
-            : await processPreflight(parsed.data.preflightId);
-        const operation = 'kind' in parsed.data ? 'fresh_admission' : 'profile';
+        let outcome: 'noop' | 'ready' | 'blocked';
+        if ('kind' in task) {
+            outcome = await processAnalysisV2FreshAdmission(supabaseAdmin, {
+                preflightId: task.preflightId,
+                generation: task.generation,
+                dispatchGeneration: task.dispatchGeneration,
+                dispatchToken: task.dispatchToken,
+            });
+        } else {
+            outcome = await processPreflight(task.preflightId, {
+                observer(observation: PreflightProcessObservation) {
+                    if (observation.type === 'failed') profileFailureObserved = true;
+                    emitPreflightProcessObservation(context, observation);
+                },
+            });
+        }
+        const operation = isFreshAdmission ? 'fresh_admission' : 'profile';
         const disposition = outcome === 'noop' ? 'exists' : outcome;
-        if (!('kind' in parsed.data) && outcome === 'ready') {
+        if (isFreshAdmission || outcome === 'noop') {
             operationalLogger.emit({
-                event: 'preflight.profile_collected',
-                severity: 'info',
+                event: 'preflight.completed',
+                severity: outcome === 'blocked' ? 'warn' : 'info',
                 fields: {
                     ...context,
-                    preflight_id: parsed.data.preflightId,
+                    preflight_id: task.preflightId,
                     operation,
                     disposition,
                 },
             });
         }
-        operationalLogger.emit({
-            event: 'preflight.completed',
-            severity: outcome === 'blocked' ? 'warn' : 'info',
-            fields: {
-                ...context,
-                preflight_id: parsed.data.preflightId,
-                operation,
-                disposition,
-            },
-        });
         return NextResponse.json({ status: outcome });
     } catch (error) {
         const failure = classifyPreflightWorkerFailure(error);
         console.error(JSON.stringify({
             event: 'preflight_worker_failed',
-            operation: 'kind' in parsed.data ? 'fresh_admission' : 'profile',
+            operation: isFreshAdmission ? 'fresh_admission' : 'profile',
             category: failure.category,
             retryable: failure.retryable,
             httpStatus: failure.httpStatus,
             workerAttemptCount: failure.workerAttemptCount,
         }));
-        operationalLogger.emit({
-            event: 'preflight.failed',
-            severity: 'error',
-            fields: {
-                ...context,
-                preflight_id: parsed.data.preflightId,
-                operation: 'kind' in parsed.data ? 'fresh_admission' : 'profile',
-                disposition: 'failed',
-                retryable: failure.retryable,
-                ...(failure.httpStatus === null ? {} : { status: failure.httpStatus }),
-                ...(failure.workerAttemptCount === null
-                    ? {}
-                    : { attempt: failure.workerAttemptCount }),
-                error_code: workerErrorCode(failure.category),
-            },
-        });
+        if (isFreshAdmission || !profileFailureObserved) {
+            operationalLogger.emit({
+                event: 'preflight.failed',
+                severity: 'error',
+                fields: {
+                    ...context,
+                    preflight_id: task.preflightId,
+                    operation: isFreshAdmission ? 'fresh_admission' : 'profile',
+                    disposition: 'failed',
+                    retryable: failure.retryable,
+                    ...(failure.httpStatus === null ? {} : { status: failure.httpStatus }),
+                    ...(failure.workerAttemptCount === null
+                        ? {}
+                        : { attempt: failure.workerAttemptCount }),
+                    error_code: preflightWorkerErrorCode(failure.category),
+                },
+            });
+        }
         return NextResponse.json({ code: 'ANALYSIS_FAILED' }, { status: 500 });
     }
 }

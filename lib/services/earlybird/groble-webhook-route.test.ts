@@ -120,6 +120,19 @@ describe('signed Groble webhook route', () => {
         }))).status).toBe(401);
         expect((await POST(request('{'))).status).toBe(400);
         expect(mocks.rpc).not.toHaveBeenCalled();
+        const rejected = mocks.emit.mock.calls
+            .map(([entry]) => entry as {
+                event?: string;
+                fields?: { error_code?: string };
+            })
+            .filter(entry => entry.event === 'groble.webhook_rejected');
+        expect(rejected).toHaveLength(4);
+        expect(rejected.map(entry => entry.fields?.error_code)).toEqual([
+            'VALIDATION_ERROR',
+            'UNAUTHORIZED',
+            'UNAUTHORIZED',
+            'VALIDATION_ERROR',
+        ]);
         expect(mocks.emit).toHaveBeenCalledWith({
             event: 'groble.webhook_rejected',
             severity: 'warn',
@@ -183,6 +196,16 @@ describe('signed Groble webhook route', () => {
             code: 'INVALID_PAYMENT_PAYLOAD',
         });
         expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                provider: 'groble',
+                operation: 'webhook',
+                disposition: 'rejected',
+                error_code: 'VALIDATION_ERROR',
+            }),
+        });
     });
 
     it('returns a retryable response when webhook server configuration is unavailable', async () => {
@@ -196,6 +219,16 @@ describe('signed Groble webhook route', () => {
             code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
         });
         expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'error',
+            fields: expect.objectContaining({
+                provider: 'groble',
+                operation: 'webhook',
+                disposition: 'rejected',
+                error_code: 'INTERNAL_ERROR',
+            }),
+        });
     });
 
     it('moves a paid order to refund review for an official cancellation request', async () => {
@@ -388,6 +421,20 @@ describe('signed Groble webhook route', () => {
         const response = await POST(request(JSON.stringify(payload())));
         expect(response.status).toBe(500);
         expect(await response.text()).not.toContain('buyer@example.com');
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'error',
+            fields: expect.objectContaining({
+                webhook_event_type: 'payment.completed',
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                disposition: 'rejected',
+                error_code: 'INTERNAL_ERROR',
+            }),
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /database detail|buyer@example|merchant_0001|basic_product-01|delivery_0001|evt_test_/
+        );
     });
 
     it('does not import or invoke automatic analysis dispatchers', () => {

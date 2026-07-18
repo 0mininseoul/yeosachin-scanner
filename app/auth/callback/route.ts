@@ -139,21 +139,21 @@ async function handleGET(
     const session = exchange?.session;
     const authedUser = exchange?.user;
     const provider = authProvider(authedUser?.app_metadata?.provider);
-    if (
-        authedUser &&
-        session?.provider_token &&
-        provider === 'kakao'
-    ) {
+    if (authedUser && provider === 'kakao') {
         let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
-        try {
-            errorCode = await syncKakaoProfile(
-                authedUser.id,
-                authedUser.email ?? undefined,
-                session.provider_token
-            );
-        } catch {
-            console.error('Kakao profile sync failed');
-            errorCode = 'INTERNAL_ERROR';
+        if (!session?.provider_token) {
+            errorCode = 'PROVIDER_ERROR';
+        } else {
+            try {
+                errorCode = await syncKakaoProfile(
+                    authedUser.id,
+                    authedUser.email ?? undefined,
+                    session.provider_token
+                );
+            } catch {
+                console.error('Kakao profile sync failed');
+                errorCode = 'INTERNAL_ERROR';
+            }
         }
         if (errorCode) {
             operationalLogger.emit({

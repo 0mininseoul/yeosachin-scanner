@@ -19,6 +19,17 @@ const routeMocks = vi.hoisted(() => ({
     single: vi.fn(),
     insert: vi.fn(),
     update: vi.fn(),
+    emit: vi.fn(),
+    observeRoute: vi.fn((
+        _request: Request,
+        _route: string,
+        operation: (context: Record<string, unknown>) => Promise<Response>,
+    ) => operation({
+        request_id: '423e4567-e89b-42d3-a456-426614174011',
+        trace_id: null,
+        route: '/auth/callback',
+        method: 'GET',
+    })),
 }));
 
 vi.mock('next/headers', () => ({ cookies: routeMocks.cookies }));
@@ -33,6 +44,12 @@ vi.mock('@/lib/supabase/client', () => ({
 }));
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { from: routeMocks.from },
+}));
+vi.mock('@/lib/observability/request', () => ({
+    observeRoute: routeMocks.observeRoute,
+}));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: routeMocks.emit },
 }));
 
 import {

@@ -4,6 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     rpc: vi.fn(),
+    after: vi.fn(),
+    flush: vi.fn(),
+    findForOwner: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
         _request: Request,
@@ -26,6 +29,14 @@ vi.mock('@/lib/supabase/admin', () => ({
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
+    flushOperationalLogs: mocks.flush,
+}));
+vi.mock('next/server', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('next/server')>();
+    return { ...actual, after: mocks.after };
+});
+vi.mock('@/lib/services/analysis/preflight', () => ({
+    preflightStore: { findForOwner: mocks.findForOwner },
 }));
 
 import { POST as checkout } from '@/app/api/earlybird/checkout/route';
@@ -67,6 +78,14 @@ describe('earlybird checkout and waitlist routes', () => {
         process.env.GROBLE_BASIC_PAYMENT_ADDRESS = 'basic-checkout-a1';
         process.env.GROBLE_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-b2';
         process.env.GROBLE_WEBHOOK_SECRET = 'webhook-secret';
+        mocks.flush.mockResolvedValue(undefined);
+        mocks.findForOwner.mockResolvedValue({
+            preflightId: PREFLIGHT_ID,
+            status: 'ready',
+            readySnapshot: {
+                target: { username: 'target.account' },
+            },
+        });
     });
 
     it('rejects unauthenticated, cross-origin, and missing-consent checkout requests', async () => {
@@ -76,18 +95,54 @@ describe('earlybird checkout and waitlist routes', () => {
             planId: 'basic',
             disclosureAccepted: true,
         }))).status).toBe(401);
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'earlybird.checkout_failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                operation: 'checkout',
+                disposition: 'rejected',
+                error_code: 'UNAUTHORIZED',
+            }),
+        });
 
+        mocks.emit.mockClear();
         authenticate();
         expect((await checkout(request('/api/earlybird/checkout', {
             preflightId: PREFLIGHT_ID,
             planId: 'basic',
             disclosureAccepted: true,
         }, 'https://attacker.example'))).status).toBe(403);
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'earlybird.checkout_failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                operation: 'checkout',
+                disposition: 'rejected',
+                error_code: 'VALIDATION_ERROR',
+            }),
+        });
+
+        mocks.emit.mockClear();
         expect((await checkout(request('/api/earlybird/checkout', {
             preflightId: PREFLIGHT_ID,
             planId: 'basic',
             disclosureAccepted: false,
+            buyerEmail: 'private@example.com',
+            signature: 'private-signature',
         }))).status).toBe(400);
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'earlybird.checkout_failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                user_id: USER_ID,
+                operation: 'checkout',
+                disposition: 'rejected',
+                error_code: 'VALIDATION_ERROR',
+            }),
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /private@example|private-signature/
+        );
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
@@ -119,6 +174,11 @@ describe('earlybird checkout and waitlist routes', () => {
             p_pricing_version: 'earlybird-2026-07-v1',
             p_disclosure_version: 'earlybird-48h-v1',
         }));
+        expect(mocks.emit.mock.calls.some(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_created'
+        )).toBe(false);
+        expect(mocks.after).toHaveBeenCalledOnce();
+        await mocks.after.mock.calls[0][0]();
         expect(mocks.emit).toHaveBeenCalledWith({
             event: 'earlybird.checkout_created',
             severity: 'info',
@@ -130,6 +190,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 user_id: USER_ID,
                 preflight_id: PREFLIGHT_ID,
                 order_id: ORDER_ID,
+                target_instagram_id: 'target.account',
                 plan_id: 'basic',
                 amount_krw: 14_900,
                 operation: 'checkout',
@@ -139,6 +200,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
             /basic_product-01|basic-checkout-a1/
         );
+        expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
     it('restores the same pending order on idempotent checkout replay', async () => {
@@ -153,6 +215,27 @@ describe('earlybird checkout and waitlist routes', () => {
         }));
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toMatchObject({ orderId: ORDER_ID });
+        expect(mocks.emit.mock.calls.some(([entry]) => (
+            entry as { event?: string }).event === 'earlybird.checkout_created'
+        )).toBe(false);
+        expect(mocks.after).toHaveBeenCalledOnce();
+        await mocks.after.mock.calls[0][0]();
+        expect(mocks.findForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'earlybird.checkout_created',
+            severity: 'info',
+            fields: expect.objectContaining({
+                user_id: USER_ID,
+                preflight_id: PREFLIGHT_ID,
+                order_id: ORDER_ID,
+                target_instagram_id: 'target.account',
+                plan_id: 'standard',
+                amount_krw: 19_900,
+                operation: 'checkout',
+                disposition: 'exists',
+            }),
+        });
+        expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
     it('maps server plan validation failures and never creates a Plus payment object', async () => {
@@ -213,12 +296,15 @@ describe('earlybird checkout and waitlist routes', () => {
             error: '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.',
         });
         expect(JSON.stringify(body)).not.toMatch(/\+?82?10[0-9-]+/);
+        expect(mocks.after).toHaveBeenCalledOnce();
+        await mocks.after.mock.calls[0][0]();
         expect(mocks.emit).toHaveBeenCalledWith({
             event: 'earlybird.checkout_failed',
             severity: 'warn',
             fields: expect.objectContaining({
                 user_id: USER_ID,
                 preflight_id: PREFLIGHT_ID,
+                target_instagram_id: 'target.account',
                 plan_id: 'basic',
                 amount_krw: 14_900,
                 operation: 'checkout',
@@ -226,6 +312,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 error_code: 'VALIDATION_ERROR',
             }),
         });
+        expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
     it('creates only a Plus waitlist row through the service-only RPC', async () => {

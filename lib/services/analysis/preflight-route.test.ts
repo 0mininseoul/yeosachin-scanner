@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     enqueue: vi.fn(),
     getUser: vi.fn(),
     emit: vi.fn(),
+    flush: vi.fn(),
     observeRoute: vi.fn((
         _request: Request,
         _route: string,
@@ -47,6 +48,7 @@ vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
+    flushOperationalLogs: mocks.flush,
 }));
 vi.mock('next/server', async (importOriginal) => {
     const actual = await importOriginal<typeof import('next/server')>();
@@ -362,12 +364,147 @@ describe('preflight owner routes', () => {
 
     it('uses after only for the explicit local runner', async () => {
         mocks.resolveDispatch.mockReturnValue({ mode: 'local_after' });
+        mocks.process.mockImplementation(async (_id, dependencies) => {
+            dependencies?.observer?.({
+                type: 'profile_collected',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 350,
+                followingCount: 300,
+            });
+            dependencies?.observer?.({
+                type: 'completed',
+                outcome: 'ready',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 350,
+                followingCount: 300,
+                requiredPlan: 'basic',
+            });
+            return 'ready';
+        });
         const response = await createPreflight(postRequest());
         expect(response.status).toBe(202);
         expect(mocks.enqueue).not.toHaveBeenCalled();
         expect(mocks.after).toHaveBeenCalledOnce();
         await mocks.after.mock.calls[0][0]();
-        expect(mocks.process).toHaveBeenCalledWith(preflightId);
+        expect(mocks.process).toHaveBeenCalledWith(preflightId, {
+            observer: expect.any(Function),
+        });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.profile_collected',
+            severity: 'info',
+            fields: expect.objectContaining({
+                user_id: userId,
+                preflight_id: preflightId,
+                target_instagram_id: 'target.name',
+                input_count: 350,
+                output_count: 300,
+                operation: 'profile',
+                disposition: 'success',
+            }),
+        });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.completed',
+            severity: 'info',
+            fields: expect.objectContaining({
+                user_id: userId,
+                preflight_id: preflightId,
+                target_instagram_id: 'target.name',
+                input_count: 350,
+                output_count: 300,
+                plan_id: 'basic',
+                operation: 'profile',
+                disposition: 'ready',
+            }),
+        });
+        expect(mocks.flush).toHaveBeenCalledOnce();
+    });
+
+    it('logs and flushes a blocked local profile outcome at the background boundary', async () => {
+        mocks.resolveDispatch.mockReturnValue({ mode: 'local_after' });
+        mocks.process.mockImplementation(async (_id, dependencies) => {
+            dependencies?.observer?.({
+                type: 'profile_collected',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 401,
+                followingCount: 302,
+            });
+            dependencies?.observer?.({
+                type: 'completed',
+                outcome: 'blocked',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 401,
+                followingCount: 302,
+                errorCode: 'TARGET_PRIVATE',
+            });
+            return 'blocked';
+        });
+
+        const response = await createPreflight(postRequest());
+
+        expect(response.status).toBe(202);
+        await mocks.after.mock.calls[0][0]();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.completed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                user_id: userId,
+                preflight_id: preflightId,
+                target_instagram_id: 'target.name',
+                input_count: 401,
+                output_count: 302,
+                disposition: 'blocked',
+                error_code: 'TARGET_PRIVATE',
+            }),
+        });
+        expect(mocks.flush).toHaveBeenCalledOnce();
+    });
+
+    it('logs and flushes a retrying local failure without leaking its cause', async () => {
+        const error = new Error('private provider response bearer-secret');
+        mocks.resolveDispatch.mockReturnValue({ mode: 'local_after' });
+        mocks.process.mockImplementation(async (_id, dependencies) => {
+            dependencies?.observer?.({
+                type: 'failed',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                category: 'rate_limit',
+                retryable: true,
+                httpStatus: 429,
+                workerAttemptCount: 2,
+            });
+            throw error;
+        });
+
+        const response = await createPreflight(postRequest());
+
+        expect(response.status).toBe(202);
+        await mocks.after.mock.calls[0][0]();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.failed',
+            severity: 'error',
+            fields: expect.objectContaining({
+                user_id: userId,
+                preflight_id: preflightId,
+                target_instagram_id: 'target.name',
+                retryable: true,
+                status: 429,
+                attempt: 2,
+                error_code: 'RATE_LIMITED',
+            }),
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /private provider response|bearer-secret/
+        );
+        expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
     it('owner-filters GET and maps expired rows to a bounded 410', async () => {
