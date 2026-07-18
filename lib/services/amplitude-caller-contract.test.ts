@@ -53,6 +53,18 @@ describe('Amplitude caller privacy contract', () => {
         }
     });
 
+    it('uses the shared result request UUID without exposing the share token', () => {
+        const shared = source('app/share/[token]/page.tsx');
+        expect(shared).toMatch(
+            /trackEvent\(EVENTS\.RESULT_VIEWED, \{[\s\S]*?request_id:\s*result\.requestId/,
+        );
+        expect(shared).toMatch(
+            /if \(shareChannel\)[\s\S]*?trackEvent\(EVENTS\.RESULT_SHARED, \{[\s\S]*?request_id:\s*data\.requestId/,
+        );
+        const trackingCalls = shared.match(/trackEvent\([\s\S]*?\);/g)?.join('\n') ?? '';
+        expect(trackingCalls).not.toMatch(/token\s*:/);
+    });
+
     it('deduplicates only mount lifecycle result views at their callers', () => {
         for (const page of [
             source('app/result/[requestId]/page.tsx'),

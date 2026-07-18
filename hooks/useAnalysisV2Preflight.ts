@@ -29,9 +29,9 @@ import {
 } from '@/lib/services/pending-analysis-target';
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
-    analysisStartedAtKey,
-    analysisStartedEventKey,
+    availableAnalyticsStorage,
     boundedDurationMs,
+    claimAnalysisStart,
     preflightOutcomeEventKey,
     relationshipBucket,
     safeAnalyticsErrorCode,
@@ -273,7 +273,7 @@ export function useAnalysisV2Preflight() {
         const localKey = `${outcome}:${status.preflightId}`;
         if (preflightOutcomeTrackedRef.current.has(localKey)) return;
         const eventKey = preflightOutcomeEventKey(outcome, status.preflightId);
-        if (!tryClaimAnalyticsEvent(sessionStorage, eventKey)) {
+        if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), eventKey)) {
             preflightOutcomeTrackedRef.current.add(localKey);
             return;
         }
@@ -623,24 +623,19 @@ export function useAnalysisV2Preflight() {
                         planId
                     );
                     const requestId = parsed.data.requestId;
-                    if (
-                        !analysisStartedTrackedRef.current.has(requestId)
-                        && tryClaimAnalyticsEvent(
-                            sessionStorage,
-                            analysisStartedEventKey(requestId),
-                        )
-                    ) {
+                    if (!analysisStartedTrackedRef.current.has(requestId)) {
                         analysisStartedTrackedRef.current.add(requestId);
-                        try {
-                            sessionStorage.setItem(analysisStartedAtKey(requestId), String(Date.now()));
-                        } catch {
-                            /* analytics timing is best-effort */
+                        if (claimAnalysisStart(
+                            availableAnalyticsStorage(),
+                            requestId,
+                            Date.now(),
+                        )) {
+                            trackEvent(EVENTS.ANALYSIS_STARTED, {
+                                request_id: requestId,
+                                plan_id: planId,
+                                preflight_id: preflight.preflightId,
+                            });
                         }
-                        trackEvent(EVENTS.ANALYSIS_STARTED, {
-                            request_id: requestId,
-                            plan_id: planId,
-                            preflight_id: preflight.preflightId,
-                        });
                     }
                     return requestId;
                 }

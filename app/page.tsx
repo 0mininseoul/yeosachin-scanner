@@ -14,6 +14,7 @@ import Link from 'next/link';
 import { motion, useReducedMotion, type Variants } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import {
+  availableAnalyticsStorage,
   landingViewEventKey,
   readAttribution,
   tryClaimAnalyticsEvent,
@@ -119,7 +120,7 @@ export default function LandingPage() {
   const [loginOpen, setLoginOpen] = useState(false);
 
   useEffect(() => {
-    if (!tryClaimAnalyticsEvent(sessionStorage, landingViewEventKey())) return;
+    if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), landingViewEventKey())) return;
     trackEvent(EVENTS.LANDING_VIEWED, readAttribution(window.location.search));
   }, []);
 

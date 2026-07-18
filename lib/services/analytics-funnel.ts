@@ -22,6 +22,7 @@ export interface AnalyticsStorage {
 }
 
 const MAX_DURATION_MS = 86_400_000;
+const CANONICAL_REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REGISTERED_ERROR_CODES = new Set<AnalyticsErrorCode>([
     'INTERNAL_ERROR',
     'NETWORK_ERROR',
@@ -134,7 +135,20 @@ export function boundedDurationMs(startedAt: number, finishedAt: number): number
     return Math.min(MAX_DURATION_MS, Math.max(0, Math.floor(finishedAt - startedAt)));
 }
 
-export function tryClaimAnalyticsEvent(storage: AnalyticsStorage, key: string): boolean {
+export function availableAnalyticsStorage(): AnalyticsStorage | null {
+    if (typeof window === 'undefined') return null;
+    try {
+        return window.sessionStorage;
+    } catch {
+        return null;
+    }
+}
+
+export function tryClaimAnalyticsEvent(
+    storage: AnalyticsStorage | null | undefined,
+    key: string,
+): boolean {
+    if (!storage) return true;
     try {
         if (storage.getItem(key) === '1') return false;
         storage.setItem(key, '1');
@@ -154,6 +168,55 @@ export function analysisStartedAtKey(requestId: string): string {
 
 export function analysisStartedEventKey(requestId: string): string {
     return `amplitude:analysis_started:${requestId}`;
+}
+
+export function claimAnalysisStart(
+    storage: AnalyticsStorage | null | undefined,
+    requestId: string,
+    startedAt: number,
+): boolean {
+    if (!CANONICAL_REQUEST_ID.test(requestId)) return false;
+    if (!tryClaimAnalyticsEvent(storage, analysisStartedEventKey(requestId))) return false;
+    if (storage) {
+        try {
+            const safeStartedAt = Number.isFinite(startedAt)
+                ? Math.max(0, Math.floor(startedAt))
+                : Date.now();
+            storage.setItem(analysisStartedAtKey(requestId), String(safeStartedAt));
+        } catch {
+            // Timing is best-effort and must not affect the product flow.
+        }
+    }
+    return true;
+}
+
+export function claimObservedAnalysisStart(
+    storage: AnalyticsStorage | null | undefined,
+    expectedRequestId: string,
+    observation: {
+        requestId: string;
+        status: 'pending' | 'processing' | 'completed' | 'failed';
+    },
+    startedAt: number,
+): boolean {
+    if (
+        observation.requestId !== expectedRequestId
+        || (observation.status !== 'pending' && observation.status !== 'processing')
+    ) return false;
+    return claimAnalysisStart(storage, expectedRequestId, startedAt);
+}
+
+export function readAnalysisStartedAt(
+    storage: AnalyticsStorage | null | undefined,
+    requestId: string,
+): number | null {
+    if (!storage || !CANONICAL_REQUEST_ID.test(requestId)) return null;
+    try {
+        const startedAt = Number(storage.getItem(analysisStartedAtKey(requestId)));
+        return Number.isFinite(startedAt) && startedAt > 0 ? startedAt : null;
+    } catch {
+        return null;
+    }
 }
 
 export function analysisCompletedEventKey(requestId: string): string {

@@ -4,10 +4,13 @@ import {
     analysisStartedAtKey,
     analysisStartedEventKey,
     boundedDurationMs,
+    claimAnalysisStart,
+    claimObservedAnalysisStart,
     landingViewEventKey,
     preflightOutcomeEventKey,
     readAttribution,
     relationshipBucket,
+    readAnalysisStartedAt,
     safeAnalyticsErrorCode,
     tryClaimAnalyticsEvent,
 } from './analytics-funnel';
@@ -84,5 +87,50 @@ describe('Amplitude funnel helpers', () => {
             getItem: () => { throw new Error('blocked'); },
             setItem: () => { throw new Error('blocked'); },
         }, 'amplitude:test')).toBe(true);
+    });
+
+    it('deduplicates analysis start between entitlement and progress fallback', () => {
+        const requestId = '11111111-1111-4111-8111-111111111111';
+        const values = new Map<string, string>();
+        const storage = {
+            getItem: (key: string) => values.get(key) ?? null,
+            setItem: (key: string, value: string) => void values.set(key, value),
+        };
+
+        expect(claimAnalysisStart(storage, requestId, 1_000)).toBe(true);
+        expect(claimObservedAnalysisStart(storage, requestId, {
+            requestId,
+            status: 'processing',
+        }, 2_000)).toBe(false);
+        expect(readAnalysisStartedAt(storage, requestId)).toBe(1_000);
+    });
+
+    it('lets progress claim a missing start marker without throwing on blocked storage', () => {
+        const requestId = '11111111-1111-4111-8111-111111111111';
+        expect(claimObservedAnalysisStart(null, requestId, {
+            requestId,
+            status: 'pending',
+        }, 1_000)).toBe(true);
+        expect(claimObservedAnalysisStart({
+            getItem: () => { throw new Error('blocked'); },
+            setItem: () => { throw new Error('blocked'); },
+        }, requestId, { requestId, status: 'processing' }, 1_000)).toBe(true);
+        expect(readAnalysisStartedAt(null, requestId)).toBeNull();
+        expect(claimAnalysisStart(null, 'not-a-request-id', 1_000)).toBe(false);
+    });
+
+    it('rejects terminal, failed, or mismatched progress observations', () => {
+        const requestId = '11111111-1111-4111-8111-111111111111';
+        const otherRequestId = '22222222-2222-4222-8222-222222222222';
+        for (const status of ['completed', 'failed'] as const) {
+            expect(claimObservedAnalysisStart(null, requestId, {
+                requestId,
+                status,
+            }, 1_000)).toBe(false);
+        }
+        expect(claimObservedAnalysisStart(null, requestId, {
+            requestId: otherRequestId,
+            status: 'processing',
+        }, 1_000)).toBe(false);
     });
 });

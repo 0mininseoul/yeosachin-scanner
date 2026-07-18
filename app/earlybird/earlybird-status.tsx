@@ -5,7 +5,10 @@ import { useEffect, useRef } from 'react';
 import { CaseCard, Eyebrow } from '@/components/case-ui';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
-import { tryClaimAnalyticsEvent } from '@/lib/services/analytics-funnel';
+import {
+    availableAnalyticsStorage,
+    tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
 import {
     earlybirdStatusEventKey,
     paymentConfirmationEventKey,
@@ -47,7 +50,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
         const statusKey = earlybirdStatusEventKey(order.orderId, order.systemStatus);
         if (!trackedRef.current.has(statusKey)) {
             trackedRef.current.add(statusKey);
-            if (tryClaimAnalyticsEvent(sessionStorage, statusKey)) {
+            if (tryClaimAnalyticsEvent(availableAnalyticsStorage(), statusKey)) {
                 trackEvent(EVENTS.EARLYBIRD_STATUS_VIEWED, properties);
             }
         }
@@ -55,7 +58,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
         const paymentKey = paymentConfirmationEventKey(order.orderId, order.systemStatus);
         if (paymentKey && !trackedRef.current.has(paymentKey)) {
             trackedRef.current.add(paymentKey);
-            if (tryClaimAnalyticsEvent(sessionStorage, paymentKey)) {
+            if (tryClaimAnalyticsEvent(availableAnalyticsStorage(), paymentKey)) {
                 trackEvent(EVENTS.PAYMENT_CONFIRMED_VIEWED, properties);
             }
         }

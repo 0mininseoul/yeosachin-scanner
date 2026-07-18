@@ -29,7 +29,10 @@ import {
     storePendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
-import { tryClaimAnalyticsEvent } from '@/lib/services/analytics-funnel';
+import {
+    availableAnalyticsStorage,
+    tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
 import {
     planSelectedEventKey,
     planViewEventKey,
@@ -107,7 +110,7 @@ export default function AnalyzePage() {
             );
             if (planViewsTrackedRef.current.has(key)) continue;
             planViewsTrackedRef.current.add(key);
-            if (!tryClaimAnalyticsEvent(sessionStorage, key)) continue;
+            if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), key)) continue;
             trackEvent(EVENTS.PLAN_VIEWED, {
                 plan_id: plan.planId,
                 required_plan_id: readyPreflight.requiredPlan,
@@ -217,7 +220,7 @@ export default function AnalyzePage() {
         );
         if (planSelectionsTrackedRef.current.has(key)) return;
         planSelectionsTrackedRef.current.add(key);
-        if (!tryClaimAnalyticsEvent(sessionStorage, key)) return;
+        if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), key)) return;
         trackEvent(EVENTS.PLAN_SELECTED, {
             plan_id: planId,
             required_plan_id: readyPreflight.requiredPlan,

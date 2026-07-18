@@ -64,8 +64,12 @@ describe('Amplitude product funnel caller contract', () => {
 
         const progress = source('hooks/useAnalysisProgress.ts');
         expect(progress).toMatch(
-            /data\?\.status !== 'completed'[\s\S]*?analysisCompletedEventKey\(requestId\)[\s\S]*?tryClaimAnalyticsEvent[\s\S]*?trackEvent\(EVENTS\.ANALYSIS_COMPLETED/,
+            /data\?\.status !== 'pending'[\s\S]*?data\?\.status !== 'processing'[\s\S]*?claimObservedAnalysisStart[\s\S]*?trackEvent\(EVENTS\.ANALYSIS_STARTED/,
         );
+        expect(progress).toMatch(
+            /data\?\.status !== 'completed'[\s\S]*?analysisCompletedEventKey\(requestId\)[\s\S]*?trackEvent\(EVENTS\.ANALYSIS_COMPLETED/,
+        );
+        expect(preflight).toContain('claimAnalysisStart(');
     });
 
     it('keeps order analytics free of target and buyer evidence', () => {

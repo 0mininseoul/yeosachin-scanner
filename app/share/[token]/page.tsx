@@ -150,6 +150,7 @@ export default function ShareResultPage({ params }: PageProps) {
                 if (!resultViewTrackedRef.current) {
                     resultViewTrackedRef.current = true;
                     trackEvent(EVENTS.RESULT_VIEWED, {
+                        request_id: result.requestId,
                         result_count: result.femaleAccounts.length + result.privateAccounts.length,
                         is_shared: true,
                     });
@@ -165,6 +166,7 @@ export default function ShareResultPage({ params }: PageProps) {
     }, [token]);
 
     const handleShare = async () => {
+        if (!data) return;
         const url = window.location.href;
         const shareData = {
             title: 'AI 위장 여사친 판독기 분석 결과',
@@ -181,7 +183,10 @@ export default function ShareResultPage({ params }: PageProps) {
                 : {}),
         }, shareData);
         if (shareChannel) {
-            trackEvent(EVENTS.RESULT_SHARED, { share_channel: shareChannel });
+            trackEvent(EVENTS.RESULT_SHARED, {
+                request_id: data.requestId,
+                share_channel: shareChannel,
+            });
             if (shareChannel === 'clipboard') {
                 alert('링크가 클립보드에 복사되었습니다!');
             }
