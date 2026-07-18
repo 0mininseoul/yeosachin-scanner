@@ -1,6 +1,6 @@
 # Amplitude, Axiom, Groble 전화번호 매칭 설계
 
-> 역사적 설계 문서의 보존본이며, 폐기된 연락처 보관 지시를 현행 보안 계약으로 정정했다. `20260719130000_stop_persisting_groble_buyer_contacts.sql`은 기존 연락처를 삭제하고 old/new writer의 저장을 막는다. 전화번호 신뢰는 Kakao REST callback이 원자적으로 기록한 provenance에만 기반하고, 주문은 checkout 시점의 불변 매칭 정책과 전화번호 증거를 사용한다. 이메일 fallback은 migration 전에 생성된 `legacy_email` 주문에만 허용한다. Groble 구매자 연락처는 signed webhook transaction 동안만 처리하며 보관하지 않는다. 배포 기준은 [Groble 얼리버드 운영 문서](../../groble-earlybird-operations.md)를 따른다.
+> 역사적 설계 문서의 보존본이며, 폐기된 연락처 보관 지시를 현행 보안 계약으로 정정했다. `20260719131500_stop_persisting_groble_buyer_contacts.sql`은 기존 연락처를 삭제하고 old/new writer의 저장을 막는다. 전화번호 신뢰는 Kakao REST callback이 원자적으로 기록한 provenance에만 기반하고, 주문은 checkout 시점의 불변 매칭 정책과 전화번호 증거를 사용한다. 이메일 fallback은 migration 전에 생성된 `legacy_email` 주문에만 허용한다. Groble 구매자 연락처는 signed webhook transaction 동안만 처리하며 보관하지 않는다. 배포 기준은 [Groble 얼리버드 운영 문서](../../groble-earlybird-operations.md)를 따른다.
 
 ## 목표
 
@@ -83,7 +83,7 @@
 - `expected_buyer_phone_verification_source`
 - `expected_buyer_phone_verified_at`
 
-주문 snapshot check는 `legacy_email`이면 전화번호 증거가 모두 NULL이고, `verified_kakao_phone`이면 normalized/source/verified-at이 모두 완전하도록 강제한다. 호환용 `groble_buyer_*` 컬럼은 주문과 webhook event에 남아 있지만 `20260719130000_stop_persisting_groble_buyer_contacts.sql`이 기존 값을 삭제하고 old/new writer의 INSERT·UPDATE를 모두 NULL로 만든다. 이 컬럼들은 `anon`과 `authenticated`에 GRANT하지 않고 API DTO와 Axiom·Amplitude에 전달하지 않는다.
+주문 snapshot check는 `legacy_email`이면 전화번호 증거가 모두 NULL이고, `verified_kakao_phone`이면 normalized/source/verified-at이 모두 완전하도록 강제한다. 호환용 `groble_buyer_*` 컬럼은 주문과 webhook event에 남아 있지만 `20260719131500_stop_persisting_groble_buyer_contacts.sql`이 기존 값을 삭제하고 old/new writer의 INSERT·UPDATE를 모두 NULL로 만든다. 이 컬럼들은 `anon`과 `authenticated`에 GRANT하지 않고 API DTO와 Axiom·Amplitude에 전달하지 않는다.
 
 Supabase RPC는 service role만 실행할 수 있고 멱등성을 유지한다. advisory lock 순서는 rolling wrapper의 `payment -> namespaced product -> user ID 오름차순`, checkout/trigger의 `product -> user`이며, canonical은 기존 `payment -> user`를 유지한다. 두 finalizer overload는 `NULL`을 포함한 event type을 bounded validation에서 fail closed한다. 9개 인자 rolling wrapper는 같은 상품의 verified owner·기존 payment ID 주문 owner·이메일 후보를 하나의 sorted user set으로 잠근 뒤 existing event/payment를 read-only로 확인해 canonical duplicate path를 보존한다. duplicate payment owner는 canonical 위임 전에 이미 잠겨 있어 cross-product wrapper 간 user lock 순서가 뒤집히지 않는다. product lock은 wrapper의 판정과 모든 verified order INSERT를 직렬화하므로 신규 event의 product-wide recheck 뒤 다른 사용자의 same-product snapshot이 끼어들 수 없다. unresolved verified 주문이 하나라도 남아 있으면 쓰기 전에 `GROBLE_CANONICAL_PHONE_REQUIRED`로 롤백하고, verified 후보가 없고 처리 가능한 legacy 후보가 있을 때만 이메일-only canonical 호출을 허용한다. 같은 payment ID의 old/new finalizer도 payment lock에서 먼저 직렬화되어 user/payment 역순 교착을 만들지 않는다.
 

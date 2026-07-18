@@ -107,7 +107,7 @@ describe('analytics and observability disclosure contract', () => {
         ]) {
             const historical = source(path);
             expect(historical).toMatch(/역사적[^\n]*(설계|계획)/);
-            expect(historical).toMatch(/20260719130000_stop_persisting_groble_buyer_contacts\.sql/);
+            expect(historical).toMatch(/20260719131500_stop_persisting_groble_buyer_contacts\.sql/);
             expect(historical).toMatch(/(보관하지 않|보관 금지|폐기)/);
         }
     });

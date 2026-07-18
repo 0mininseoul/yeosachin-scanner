@@ -42,7 +42,7 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 2. 운영 환경의 다섯 가지 필수 서버 전용 값과, 필요한 경우 이전 webhook secret을 비밀 관리 시스템에 설정한다.
 3. `20260717140000_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
 4. checkout 쓰기를 제한한 maintenance window에서 아래 전화번호 매칭 migration 게이트를 통과한 뒤 6개 파일을 순서대로 적용한다.
-5. 12개 인자 finalizer와 9개 인자 호환 wrapper의 시그니처와 service-role ACL을 확인한다.
+5. migration 적용 후 DB schema, 12개 인자 finalizer와 9개 인자 호환 wrapper의 signature, service-role ACL을 확인한다.
 6. 애플리케이션 코드를 배포한다. 롤링 배포 중 이전 인스턴스는 9개 인자 wrapper를 계속 사용한다.
 7. Groble에 위 진입 페이지, 이동 페이지, 이동 버튼 문구, webhook URL과 이벤트를 설정한다.
 8. 승인된 별도 점검 창에서 서명 검증, 멱등 재전송, Basic/Standard 상태 복원을 확인한다.
@@ -55,12 +55,21 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 
 | 순서 | migration | transaction 범위와 lock 의미 |
 |---|---|---|
-| 1 | `20260718104053_add_groble_phone_matching.sql` | 사용자 전화번호의 Kakao REST 검증 출처와 DB 검증 시각, 주문의 매칭 정책과 불변 snapshot column, `NOT VALID` check, 정규화 helper와 trigger를 추가한다. 기존 주문만 `legacy_email`로 분류하고, 이후 모든 INSERT는 24시간 이내의 `kakao_rest_api` 검증을 `verified_kakao_phone` snapshot으로 강제한다. 기존 checkout body는 application role에서 실행할 수 없는 내부 이름으로 바꾸고, bounded 상품 검증 후 product lock을 먼저 잡아 그 body로 위임하는 Phase 1 bridge를 설치한다. |
-| 2 | `20260718114650_activate_groble_phone_checkout.sql` | checkout RPC와 service-role ACL만 교체한다. 새 RPC는 bounded 입력 검증 뒤 namespaced product lock, user lock 순서로 획득하고, 24시간 이내에 Kakao REST로 검증된 전화번호만 snapshot하며 raw 전화번호나 이메일로 fallback하지 않는다. |
-| 3 | `20260718114658_backfill_groble_phone_matching.sql` | 출처가 완전하지 않은 normalized 전화번호를 제거하고 검증된 normalized 중복이 있으면 전체 transaction을 중단한다. legacy raw 전화번호를 승격하거나 주문에 전화번호를 백필하지 않는다. |
-| 4 | `20260718114707_validate_groble_phone_matching.sql` | 사용자 provenance와 주문 매칭 snapshot을 포함한 check validation, 3개의 일반 index build만 수행한다. 인덱스의 write-blocking lock을 1번 ACCESS EXCLUSIVE transaction과 분리한다. |
-| 5 | `20260718120345_activate_groble_phone_finalization.sql` | 12개 인자 finalizer, 9개 인자 호환 wrapper, refund RPC와 grant만 교체한다. finalizer는 주문의 불변 정책에 따라 검증 전화번호 또는 legacy 이메일만 사용한다. wrapper는 입력 검증 후 payment, namespaced product, 정렬된 user lock 순서로 직렬화하며 user set에 기존 payment ID 주문 owner, 같은 상품의 verified owner, 이메일 후보를 모두 포함한다. |
-| 6 | `20260719130000_stop_persisting_groble_buyer_contacts.sql` | 기존 구매자 연락처를 삭제하고 주문·웹훅 이벤트의 호환 컬럼을 old/new writer 모두에서 NULL로 강제하는 `BEFORE INSERT OR UPDATE` fence를 설치한다. 컬럼은 롤링 배포 호환성을 위해 즉시 drop하지 않는다. |
+| 1 | `20260719131000_add_groble_phone_matching.sql` | 사용자 전화번호의 Kakao REST 검증 출처와 DB 검증 시각, 주문의 매칭 정책과 불변 snapshot column, `NOT VALID` check, 정규화 helper와 trigger를 추가한다. 기존 주문만 `legacy_email`로 분류하고, 이후 모든 INSERT는 24시간 이내의 `kakao_rest_api` 검증을 `verified_kakao_phone` snapshot으로 강제한다. 기존 checkout body는 application role에서 실행할 수 없는 내부 이름으로 바꾸고, bounded 상품 검증 후 product lock을 먼저 잡아 그 body로 위임하는 Phase 1 bridge를 설치한다. |
+| 2 | `20260719131100_activate_groble_phone_checkout.sql` | checkout RPC와 service-role ACL만 교체한다. 새 RPC는 bounded 입력 검증 뒤 namespaced product lock, user lock 순서로 획득하고, 24시간 이내에 Kakao REST로 검증된 전화번호만 snapshot하며 raw 전화번호나 이메일로 fallback하지 않는다. |
+| 3 | `20260719131200_backfill_groble_phone_matching.sql` | 출처가 완전하지 않은 normalized 전화번호를 제거하고 검증된 normalized 중복이 있으면 전체 transaction을 중단한다. legacy raw 전화번호를 승격하거나 주문에 전화번호를 백필하지 않는다. |
+| 4 | `20260719131300_validate_groble_phone_matching.sql` | 사용자 provenance와 주문 매칭 snapshot을 포함한 check validation, 3개의 일반 index build만 수행한다. 인덱스의 write-blocking lock을 1번 ACCESS EXCLUSIVE transaction과 분리한다. |
+| 5 | `20260719131400_activate_groble_phone_finalization.sql` | 12개 인자 finalizer, 9개 인자 호환 wrapper, refund RPC와 grant만 교체한다. finalizer는 주문의 불변 정책에 따라 검증 전화번호 또는 legacy 이메일만 사용한다. wrapper는 입력 검증 후 payment, namespaced product, 정렬된 user lock 순서로 직렬화하며 user set에 기존 payment ID 주문 owner, 같은 상품의 verified owner, 이메일 후보를 모두 포함한다. |
+| 6 | `20260719131500_stop_persisting_groble_buyer_contacts.sql` | 기존 구매자 연락처를 삭제하고 주문·웹훅 이벤트의 호환 컬럼을 old/new writer 모두에서 NULL로 강제하는 `BEFORE INSERT OR UPDATE` fence를 설치한다. 컬럼은 롤링 배포 호환성을 위해 즉시 drop하지 않는다. |
+
+원격에 적용된 head `20260719120000_add_profile_provider_canary_journal.sql` 다음의 일반(ordinary) migration push는 다음 release gate를 모두 통과해야 한다.
+
+1. 읽기 전용 확인으로 `npx supabase migration list --linked`를 실행하고 local/remote history를 비교한다.
+2. 적용 전 일반 push 미리보기로 `npx supabase db push --dry-run`를 실행한다.
+3. dry-run 출력은 정확히 위 6개 migration만 표시하고 예상하지 않은 파일이 없어야 하며, 순서도 표와 일치해야 한다.
+4. history drift, 파일 불일치, 추가 파일, 순서 차이가 하나라도 있으면 중단하고 적용하지 않는다.
+
+`--include-all`은 절대 사용하지 않는다. DB migration은 application 배포 전에 먼저 적용한다. migration 적용 후 RPC signature, ACL, schema를 검증한 다음 application을 배포한다. 이 release gate에서는 원격 push를 실행하지 않는다.
 
 여섯 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 1번이 커밋될 때 기존 주문만 `legacy_email`로 고정되고, 이후 모든 주문 INSERT는 RPC 버전과 무관하게 trigger를 통과한다. INSERT 순간 사용자의 Kakao REST 검증 시각이 24시간을 넘었거나 provenance가 불완전하면 `CHECKOUT_PHONE_REQUIRED`로 중단하며, caller가 제공한 주문 매칭 값을 신뢰하지 않는다. 이전 사용자 writer가 검증 시각 없이 raw 전화번호를 바꾸면 DB trigger가 normalized 값과 provenance를 제거한다. 3번은 legacy raw 전화번호나 기존 주문을 전화번호 후보로 승격하지 않는다. 생성된 주문의 정책, normalized 전화번호, 출처, 검증 시각은 UPDATE할 수 없다. 6번의 별도 fence는 연락처 호환 컬럼에만 INSERT·UPDATE 모두 적용된다.
 

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const migrationUrl = new URL(
-    '../../../supabase/migrations/20260719130000_stop_persisting_groble_buyer_contacts.sql',
+    '../../../supabase/migrations/20260719131500_stop_persisting_groble_buyer_contacts.sql',
     import.meta.url
 );
 const migration = existsSync(migrationUrl) ? readFileSync(migrationUrl, 'utf8') : '';

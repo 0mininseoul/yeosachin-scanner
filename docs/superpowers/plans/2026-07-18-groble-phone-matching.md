@@ -1,7 +1,7 @@
 # Groble Phone Matching Implementation Plan
 
 > [!WARNING]
-> **SUPERSEDED - DO NOT EXECUTE.** 이 역사적 계획 문서는 구현 이력 보관용이며 아래 task, 명령, pseudocode는 실행 지침이 아니다. 현행 계약은 [Groble 전화번호 매칭 설계](../specs/2026-07-18-amplitude-axiom-groble-phone-design.md)와 [Groble 얼리버드 운영 문서](../../groble-earlybird-operations.md)가 정본이다. raw 전화번호 기반 신뢰, Google/이메일 기반 신규 checkout, 기존 주문 전화번호 backfill, Groble 구매자 연락처 영속 저장을 지시하는 문구는 폐기되었고 구현하면 안 된다. `20260719130000_stop_persisting_groble_buyer_contacts.sql`은 기존 연락처를 삭제하고 이후 연락처를 보관하지 않도록 old/new writer를 강제한다.
+> **SUPERSEDED - DO NOT EXECUTE.** 이 역사적 계획 문서는 구현 이력 보관용이며 아래 task, 명령, pseudocode는 실행 지침이 아니다. 현행 계약은 [Groble 전화번호 매칭 설계](../specs/2026-07-18-amplitude-axiom-groble-phone-design.md)와 [Groble 얼리버드 운영 문서](../../groble-earlybird-operations.md)가 정본이다. raw 전화번호 기반 신뢰, Google/이메일 기반 신규 checkout, 기존 주문 전화번호 backfill, Groble 구매자 연락처 영속 저장을 지시하는 문구는 폐기되었고 구현하면 안 된다. `20260719131500_stop_persisting_groble_buyer_contacts.sql`은 기존 연락처를 삭제하고 이후 연락처를 보관하지 않도록 old/new writer를 강제한다.
 
 > Archive only: task checkbox와 commit 예시는 당시 진행 기록을 설명할 뿐 현재 작업 목록이 아니다.
 
@@ -172,11 +172,11 @@ git commit -m "feat: sync Kakao phone identity for checkout"
 ### Task 3: Ordered forward-only database migrations for verified snapshots
 
 **Files:**
-- Create with CLI: `supabase/migrations/20260718104053_add_groble_phone_matching.sql`
-- Create with CLI: `supabase/migrations/20260718114650_activate_groble_phone_checkout.sql`
-- Create with CLI: `supabase/migrations/20260718114658_backfill_groble_phone_matching.sql`
-- Create with CLI: `supabase/migrations/20260718114707_validate_groble_phone_matching.sql`
-- Create with CLI: `supabase/migrations/20260718120345_activate_groble_phone_finalization.sql`
+- Create with CLI: `supabase/migrations/20260719131000_add_groble_phone_matching.sql`
+- Create with CLI: `supabase/migrations/20260719131100_activate_groble_phone_checkout.sql`
+- Create with CLI: `supabase/migrations/20260719131200_backfill_groble_phone_matching.sql`
+- Create with CLI: `supabase/migrations/20260719131300_validate_groble_phone_matching.sql`
+- Create with CLI: `supabase/migrations/20260719131400_activate_groble_phone_finalization.sql`
 - Create: `lib/services/earlybird/groble-phone-migration-contract.test.ts`
 - Create: `lib/services/earlybird/groble-phone-pglite.test.ts`
 - Modify: `lib/services/earlybird/earlybird-postgres-concurrency.integration.test.ts`
