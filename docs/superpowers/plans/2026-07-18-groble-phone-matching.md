@@ -105,7 +105,7 @@ Define a pure helper whose complete output contract is:
 export interface AuthProfilePatch {
     name?: string;
     nickname?: string;
-    profile_image_url?: string;
+    profile_image?: string;
     gender?: string;
     birthyear?: string;
     phone_number?: string;
@@ -132,7 +132,7 @@ const profile = buildAuthProfilePatch(kakaoProperties);
 await supabaseAdmin.from('users').upsert({
     id: user.id,
     email: user.email,
-    auth_provider: provider,
+    provider,
     ...profile,
 }, { onConflict: 'id' });
 ```
