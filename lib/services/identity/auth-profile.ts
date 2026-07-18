@@ -1,14 +1,32 @@
 import { normalizeKoreanMobileNumber } from './phone-number';
 
-export interface AuthProfilePatch {
+interface AuthProfileFields {
     name?: string;
     nickname?: string;
     profile_image?: string;
     gender?: string;
     birthyear?: string;
-    phone_number?: string;
-    phone_number_normalized?: string;
 }
+
+export type AuthPhonePatch =
+    | {
+        phone_number?: never;
+        phone_number_normalized?: never;
+    }
+    | {
+        phone_number: string;
+        phone_number_normalized: string;
+    }
+    | {
+        phone_number: null;
+        phone_number_normalized: null;
+    };
+
+export type AuthProfilePatch = AuthProfileFields & AuthPhonePatch;
+
+export type AuthPhoneSync =
+    | { mode: 'preserve' }
+    | { mode: 'synchronize'; value: unknown };
 
 export interface AuthProfileSource {
     name?: readonly unknown[];
@@ -16,7 +34,7 @@ export interface AuthProfileSource {
     profileImage?: readonly unknown[];
     gender?: readonly unknown[];
     birthyear?: readonly unknown[];
-    phoneNumber?: readonly unknown[];
+    phone?: AuthPhoneSync;
 }
 
 function firstTrimmedString(candidates: readonly unknown[] | undefined) {
@@ -41,37 +59,36 @@ function firstBirthyear(candidates: readonly unknown[] | undefined) {
     return undefined;
 }
 
-function firstValidPhone(candidates: readonly unknown[] | undefined) {
-    for (const candidate of candidates ?? []) {
-        if (typeof candidate !== 'string') continue;
-        const raw = candidate.trim();
-        if (!raw) continue;
-        const normalized = normalizeKoreanMobileNumber(raw);
-        if (normalized) return { raw, normalized };
-    }
-    return undefined;
+function buildPhonePatch(phone: AuthPhoneSync | undefined): AuthPhonePatch {
+    if (!phone || phone.mode === 'preserve') return {};
+
+    const raw = typeof phone.value === 'string' ? phone.value.trim() : '';
+    const normalized = normalizeKoreanMobileNumber(raw);
+    return raw && normalized
+        ? {
+            phone_number: raw,
+            phone_number_normalized: normalized,
+        }
+        : {
+            phone_number: null,
+            phone_number_normalized: null,
+        };
 }
 
 export function buildAuthProfilePatch(
     source: AuthProfileSource
 ): AuthProfilePatch {
-    const patch: AuthProfilePatch = {};
+    const patch: AuthProfileFields = {};
     const name = firstTrimmedString(source.name);
     const nickname = firstTrimmedString(source.nickname);
     const profileImage = firstTrimmedString(source.profileImage);
     const gender = firstTrimmedString(source.gender);
     const birthyear = firstBirthyear(source.birthyear);
-    const phone = firstValidPhone(source.phoneNumber);
 
     if (name) patch.name = name;
     if (nickname) patch.nickname = nickname;
     if (profileImage) patch.profile_image = profileImage;
     if (gender) patch.gender = gender;
     if (birthyear) patch.birthyear = birthyear;
-    if (phone) {
-        patch.phone_number = phone.raw;
-        patch.phone_number_normalized = phone.normalized;
-    }
-
-    return patch;
+    return { ...patch, ...buildPhonePatch(source.phone) };
 }

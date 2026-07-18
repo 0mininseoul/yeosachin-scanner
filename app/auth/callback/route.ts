@@ -38,7 +38,10 @@ async function syncKakaoProfile(
         profileImage: [profile.profile_image_url, profile.thumbnail_image_url],
         gender: [account.gender],
         birthyear: [account.birthyear],
-        phoneNumber: [account.phone_number],
+        phone: {
+            mode: 'synchronize',
+            value: account.phone_number,
+        },
     });
 
     const { error } = await supabaseAdmin
