@@ -55,6 +55,7 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 - 다른 플랜의 최신 사전 점검으로 다시 시도하면 이전 미처리 주문은 snapshot을 변경하지 않고 `cancelled`로 남기며, 새 snapshot으로 별도 주문을 만든다. 이전 결제창에서 뒤늦게 결제된 건은 새 주문에 붙이지 않고 환불 검토 대상으로 격리한다.
 - Groble 완료 이벤트에는 앱의 주문 식별자가 없으므로, 같은 구매자가 같은 플랜을 새 snapshot으로 다시 열면 이전 주문과 구분할 수 없다. 현재 `payment_pending` 주문이나 같은 상품의 미해결 `cancelled` 주문이 있으면 새 주문을 만들지 않고 `EARLYBIRD_CHECKOUT_ALREADY_PENDING`으로 차단하여 기존 snapshot을 보존한다. 이미 종료 상태인 동일 주문은 결제창 재진입 대상으로 반환하지 않는다.
 - Basic과 Standard는 각각 독립된 서버 한도 10건과 순번 1~10을 사용한다. 한 플랜의 남은 수량을 다른 플랜으로 옮기지 않는다.
+- 채널 표시 수량의 정본은 [운영 원가 문서의 Groble 얼리버드 표시안](./operations-cost-model.md#groble-얼리버드-표시안-성공-e2e-후-확정)과 함께 확인한다.
 - Groble 상품 재고와 서버 inventory를 동시에 유지한다.
 - 이미 결제된 11번째 예외는 `overflow_refund_required`로 분리된다. 운영자는 이 상태를 환불 처리 대상으로 확인하고, 실제 조치는 승인된 Groble 운영 절차를 따른다.
 - 구매자 취소 요청은 `refund_pending`으로 표시한다. 최종 `cancelled`/`refunded` 전환은 서비스 역할 전용 RPC를 사용하는 운영 절차에서만 수행한다.

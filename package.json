@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test-admission:issue": "tsx --env-file=.env.local scripts/issue-analysis-test-admission.ts",
     "test-entitlement:issue": "tsx --env-file=.env.local scripts/issue-analysis-test-entitlement.ts",
-    "canary:instagram": "tsx --env-file=.env.local scripts/canary-instagram-provider.ts"
+    "canary:instagram": "tsx --env-file=.env.local scripts/canary-instagram-provider.ts",
+    "canary:apify-profile-repair": "tsx --env-file=.env.local scripts/canary-apify-profile-repair.ts"
   },
   "dependencies": {
     "@amplitude/analytics-browser": "^2.33.5",

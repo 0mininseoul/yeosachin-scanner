@@ -62,6 +62,43 @@ run can be reused consistently after the request is created.
 9. Confirm Cloud Run has no traffic-tagged revision and exactly one revision receives 100% traffic. The deploy script rejects even a zero-percent tagged revision while Gemini concurrency remains process-local.
 10. Immediately before deploying or starting this canary, confirm there are no processing V2 requests, no claimed/running V2 jobs, no active provider runs, and no queued task from an earlier request. Wait for any old revision request to finish before promotion.
 
+### Profile-repair micro-canary
+
+Use `npm run canary:apify-profile-repair` only to measure the bounded repair of the failed V2
+profile-fallback batches from one reviewed source request. Keep the source request UUID, expected
+owner UUID, and expected owner email as operator input only. Set the owner values through
+`AUTHORIZED_E2E_OWNER_ID` and `AUTHORIZED_E2E_OWNER_EMAIL`; do not add any of these three values to
+the repository, command output, logs, screenshots, or evidence notes. Disable shell tracing before
+setting them.
+
+Before any paid invocation, review and apply
+`20260718123000_add_profile_repair_canary_journal.sql` through the ordered migration path and review
+the exact script SHA. First run the command without `--confirm-paid-api-call`, supplying exactly one
+`--source-request-id`, `--critical-job-key`, and explicit `--credential-slot`. This default replay
+must make zero new Actor starts and zero journal writes. It must reconstruct the inputs only from
+the eight succeeded source `profile-fallback` jobs, verify their stored Actor and credential slot,
+and report exactly 15 unique incomplete usernames including the critical batch member. Output is
+limited to bounded aggregate counts and cost/gate status; it must not contain usernames, owner or
+request identifiers, run or dataset identifiers, tokens, URLs, payloads, hashes, or provider
+messages.
+
+After that replay is reviewed, a human may separately approve one paid invocation by adding the
+exact valueless `--confirm-paid-api-call` flag. The limits are fixed in code: two repetitions,
+15 usernames per Actor run, `$0.05` maximum charge per run, and `$0.10` maximum total exposure.
+Do not accept command-line overrides. Repetition two may start only after repetition one is
+terminal, passes the quality gate, has stable reconciled actual cost at or below `$0.05`, and is
+recorded that way in the journal. A later retry after reconciliation requires a fresh human approval
+and must resume only the run ID already stored for that repetition.
+
+Stop without starting a replacement, rotating credentials, issuing another Actor start, manually
+aborting, or resurrecting a terminal run if source ownership, target, V2 failure status, job count,
+source input shape, Actor, slot, or exact 15-member union does not match; if a run start is ambiguous;
+if a terminal result has fewer than 14 successes, more than one unavailable result, any other
+failure, or no critical recovery; or if actual cost is unsettled or exceeds either cap. Audit an
+ambiguous start in Apify and the journal before any later approved invocation. A timed-out
+reconciliation remains conservative and blocks repetition two even if the provider later reports a
+terminal run.
+
 ### Early-access Gemini concurrency boundary
 
 The launch worker uses one configured Cloud Run instance, container concurrency eight, and a V2
