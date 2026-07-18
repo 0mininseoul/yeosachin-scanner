@@ -285,7 +285,7 @@ describe('signed Groble webhook route', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
-    it('accepts a different Groble email through phone evidence and forwards exact buyer data', async () => {
+    it('matches with normalized contact inputs without forwarding raw buyer evidence', async () => {
         const body = JSON.stringify(payload({
             buyer: {
                 ...payload().data.object.buyer,
@@ -305,8 +305,8 @@ describe('signed Groble webhook route', () => {
             p_payment_id: 'merchant_0001',
             p_buyer_email: 'different-groble-buyer@example.net',
             p_buyer_phone_normalized: '+821012345678',
-            p_buyer_phone_raw: '010-1234-5678',
-            p_buyer_display_name: '결제 구매자',
+            p_buyer_phone_raw: null,
+            p_buyer_display_name: null,
             p_product_id: 'basic_product-01',
             p_amount_krw: 14_900,
             p_paid_at: '2026-07-17T21:00:00+09:00',
@@ -355,7 +355,7 @@ describe('signed Groble webhook route', () => {
     it.each([
         ['absent', undefined, null],
         ['invalid', 'not-a-korean-mobile', 'not-a-korean-mobile'],
-    ])('forwards %s phone evidence with a null normalized phone', async (
+    ])('uses a null normalized phone for %s phone evidence without forwarding it', async (
         _,
         phoneNumber,
         expectedRawPhone
@@ -373,10 +373,13 @@ describe('signed Groble webhook route', () => {
             'finalize_earlybird_groble_payment',
             expect.objectContaining({
                 p_buyer_phone_normalized: null,
-                p_buyer_phone_raw: expectedRawPhone,
+                p_buyer_phone_raw: null,
                 p_buyer_display_name: null,
             })
         );
+        if (expectedRawPhone) {
+            expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain(expectedRawPhone);
+        }
         const responseText = await response.text();
         expect(responseText).not.toMatch(/buyer@example|not-a-korean-mobile/);
     });

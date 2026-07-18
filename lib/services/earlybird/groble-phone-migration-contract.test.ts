@@ -204,7 +204,7 @@ describe('Groble phone matching migration contract', () => {
         expect(migration).not.toContain('CREATE INDEX CONCURRENTLY');
     });
 
-    it('adds bounded service-only order snapshots and webhook evidence', () => {
+    it('adds bounded service-only snapshots and rolling-deploy compatibility columns', () => {
         expect(migration).toContain('expected_buyer_phone_number_normalized TEXT');
         for (const column of [
             'groble_buyer_email TEXT',
@@ -224,7 +224,7 @@ describe('Groble phone matching migration contract', () => {
         );
     });
 
-    it('preserves the exact authenticated order grant and excludes all new evidence', () => {
+    it('preserves the exact authenticated order grant and excludes service-only matching columns', () => {
         const grant = migration.match(
             /GRANT SELECT \(([\s\S]*?)\)\s+ON public\.earlybird_orders TO authenticated/
         )?.[1];
@@ -280,6 +280,16 @@ describe('Groble phone matching migration contract', () => {
         expect(migration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.finalize_earlybird_groble_payment\(\s*TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,\s*TIMESTAMP WITH TIME ZONE\s*\) TO service_role/
         );
+    });
+
+    it('keeps matching contacts transaction-local in the fresh canonical finalizer', () => {
+        const definition = functionDefinition('finalize_earlybird_groble_payment');
+
+        expect(definition).toContain('p_buyer_email');
+        expect(definition).toContain('p_buyer_phone_normalized');
+        expect(definition).not.toContain('groble_buyer_email');
+        expect(definition).not.toContain('groble_buyer_phone_number');
+        expect(definition).not.toContain('groble_buyer_display_name');
     });
 
     it('locks every potential user deterministically before authoritative matching', () => {

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
     EARLYBIRD_DISCLOSURE_TEXT,
     EARLYBIRD_DISCLOSURE_VERSION,
@@ -20,6 +20,7 @@ const phoneMigrations = [
     '20260718114658_backfill_groble_phone_matching.sql',
     '20260718114707_validate_groble_phone_matching.sql',
     '20260718120345_activate_groble_phone_finalization.sql',
+    '20260719130000_stop_persisting_groble_buyer_contacts.sql',
 ].map(file => readFileSync(
     new URL(`../../../supabase/migrations/${file}`, import.meta.url),
     'utf8'
@@ -30,6 +31,7 @@ const [
     phoneBackfillMigration,
     phoneValidationMigration,
     phoneFinalizationMigration,
+    contactRetentionMigration,
 ] = phoneMigrations;
 
 const bootstrap = `
@@ -348,6 +350,104 @@ async function requestCancellation(
 }
 
 describe('Groble phone migration upgrade behavior', () => {
+    it('purges historical buyer contacts and nulls contact writes from old instances', async () => {
+        const database = await createDatabaseBeforePhoneMigration();
+        try {
+            for (const migration of phoneMigrations.slice(0, -1)) {
+                await database.exec(migration);
+            }
+            const userId = uuid(USER_NAMESPACE, 920);
+            const preflightId = uuid(PREFLIGHT_NAMESPACE, 920);
+            await database.query(
+                `INSERT INTO public.users (
+                    id, email, provider, phone_number, phone_number_normalized
+                ) VALUES ($1, 'purge@example.com', 'kakao', '010-0000-0920', '+821000000920')`,
+                [userId]
+            );
+            await database.query(
+                `INSERT INTO public.analysis_preflights (
+                    id, user_id, target_instagram_id, status, exclusion_decision,
+                    access_mode, plan_cards_snapshot, pricing_version,
+                    pricing_snapshot, target_followers_count, target_following_count,
+                    required_plan_id, expires_at
+                ) VALUES (
+                    $1, $2, 'purge_target', 'ready', 'skip', 'production', $3,
+                    $4, $5, 100, 100, 'basic',
+                    pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+                )`,
+                [
+                    preflightId,
+                    userId,
+                    planCards('basic'),
+                    EARLYBIRD_PRICING_VERSION,
+                    pricingSnapshot,
+                ]
+            );
+            const checkout = (await asServiceOn<CheckoutRow>(
+                database,
+                `SELECT * FROM public.create_earlybird_checkout(
+                    $1, $2, 'basic', $3, 14900, $4, $5, $6,
+                    pg_catalog.clock_timestamp()
+                )`,
+                [
+                    userId,
+                    preflightId,
+                    BASIC_PRODUCT_ID,
+                    EARLYBIRD_PRICING_VERSION,
+                    EARLYBIRD_DISCLOSURE_VERSION,
+                    EARLYBIRD_DISCLOSURE_TEXT,
+                ]
+            )).rows[0];
+            await database.query(
+                `UPDATE public.earlybird_orders
+                 SET groble_buyer_email = 'historical@example.com',
+                     groble_buyer_phone_number = '010-1111-2222',
+                     groble_buyer_display_name = 'Historical Buyer'
+                 WHERE id = $1`,
+                [checkout.order_id]
+            );
+            await database.query(
+                `INSERT INTO public.earlybird_webhook_events (
+                    event_id, idempotency_key, event_type, occurred_at,
+                    payment_id, product_id, amount_krw, disposition,
+                    groble_buyer_email, groble_buyer_phone_number,
+                    groble_buyer_display_name
+                ) VALUES (
+                    'historical-event', 'historical-idem', 'payment.completed',
+                    pg_catalog.clock_timestamp(), 'historical-payment', $1,
+                    14900, 'unmatched', 'historical@example.com',
+                    '010-1111-2222', 'Historical Buyer'
+                )`,
+                [BASIC_PRODUCT_ID]
+            );
+
+            await database.exec(contactRetentionMigration);
+
+            for (const table of ['earlybird_orders', 'earlybird_webhook_events']) {
+                const rows = (await database.query<{
+                    groble_buyer_email: string | null;
+                    groble_buyer_phone_number: string | null;
+                    groble_buyer_display_name: string | null;
+                }>(`
+                    UPDATE public.${table}
+                    SET groble_buyer_email = 'old-writer@example.com',
+                        groble_buyer_phone_number = '010-3333-4444',
+                        groble_buyer_display_name = 'Old Writer'
+                    RETURNING groble_buyer_email, groble_buyer_phone_number,
+                        groble_buyer_display_name
+                `)).rows;
+                expect(rows.length).toBeGreaterThan(0);
+                expect(rows).toEqual(rows.map(() => ({
+                    groble_buyer_email: null,
+                    groble_buyer_phone_number: null,
+                    groble_buyer_display_name: null,
+                })));
+            }
+        } finally {
+            await database.close();
+        }
+    }, 30_000);
+
     it('backfills domestic and +82 mobile numbers while leaving invalid numbers null', async () => {
         const database = await createDatabaseBeforePhoneMigration();
         try {
@@ -675,6 +775,7 @@ describe('Groble phone migration upgrade behavior', () => {
 
             await database.exec(phoneValidationMigration);
             await database.exec(phoneFinalizationMigration);
+            await database.exec(contactRetentionMigration);
 
             expect((await database.query<{
                 id: string;
@@ -754,6 +855,31 @@ describe('Groble phone checkout and finalizer behavior', () => {
 
     afterAll(async () => {
         await db?.close();
+    });
+
+    afterEach(async () => {
+        const persistedContacts = (await db.query<{
+            source: string;
+            groble_buyer_email: string | null;
+            groble_buyer_phone_number: string | null;
+            groble_buyer_display_name: string | null;
+        }>(`
+            SELECT 'order' AS source, groble_buyer_email,
+                groble_buyer_phone_number, groble_buyer_display_name
+            FROM public.earlybird_orders
+            UNION ALL
+            SELECT 'event' AS source, groble_buyer_email,
+                groble_buyer_phone_number, groble_buyer_display_name
+            FROM public.earlybird_webhook_events
+        `)).rows;
+        for (const row of persistedContacts) {
+            expect(row).toEqual({
+                source: row.source,
+                groble_buyer_email: null,
+                groble_buyer_phone_number: null,
+                groble_buyer_display_name: null,
+            });
+        }
     });
 
     it('prefers a valid raw Kakao phone and verifies it on idempotent replay', async () => {
@@ -869,7 +995,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
         });
     });
 
-    it('stores bounded buyer evidence on accepted orders and unmatched events', async () => {
+    it('keeps buyer contacts transient for accepted orders and unmatched events', async () => {
         const acceptedSeed = await seedPreflight(6);
         const acceptedOrder = await createCheckout(acceptedSeed);
         await finalize(acceptedSeed, 'basic', 6, {
@@ -888,9 +1014,9 @@ describe('Groble phone checkout and finalizer behavior', () => {
             [acceptedOrder.order_id]
         )).rows[0];
         expect(orderEvidence).toEqual({
-            groble_buyer_email: 'groble-accepted@example.com',
-            groble_buyer_phone_number: '010-0000-0006',
-            groble_buyer_display_name: 'Accepted Buyer',
+            groble_buyer_email: null,
+            groble_buyer_phone_number: null,
+            groble_buyer_display_name: null,
         });
         expect((await db.query<{
             groble_buyer_email: string | null;
@@ -923,9 +1049,9 @@ describe('Groble phone checkout and finalizer behavior', () => {
              WHERE event_id = 'phone_event_7'`
         )).rows[0];
         expect(eventEvidence).toEqual({
-            groble_buyer_email: 'unknown@example.com',
-            groble_buyer_phone_number: '+82 10 0000 0707',
-            groble_buyer_display_name: 'Unknown Buyer',
+            groble_buyer_email: null,
+            groble_buyer_phone_number: null,
+            groble_buyer_display_name: null,
         });
     });
 
@@ -1018,7 +1144,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rows[0].sold_count).toBe(0);
     });
 
-    it('preserves duplicate event and duplicate payment idempotency with original evidence', async () => {
+    it('preserves duplicate event and duplicate payment idempotency without contacts', async () => {
         const seed = await seedPreflight(14);
         const checkout = await createCheckout(seed);
         const first = await finalize(seed, 'basic', 14, { displayName: 'Original Buyer' });
@@ -1052,10 +1178,10 @@ describe('Groble phone checkout and finalizer behavior', () => {
              FROM public.earlybird_webhook_events ORDER BY processed_at, event_id`
         )).rows;
         expect(events).toEqual([
-            { disposition: 'accepted', groble_buyer_display_name: 'Original Buyer' },
+            { disposition: 'accepted', groble_buyer_display_name: null },
             {
                 disposition: 'duplicate_payment',
-                groble_buyer_display_name: 'Duplicate Payment Buyer',
+                groble_buyer_display_name: null,
             },
         ]);
     });
@@ -1113,9 +1239,9 @@ describe('Groble phone checkout and finalizer behavior', () => {
             status: 'refund_pending',
         });
         const expectedEvidence = {
-            groble_buyer_email: 'different-late-buyer@example.com',
-            groble_buyer_phone_number: seed.rawPhone,
-            groble_buyer_display_name: 'Buyer 106',
+            groble_buyer_email: null,
+            groble_buyer_phone_number: null,
+            groble_buyer_display_name: null,
         };
         expect((await db.query(
             `SELECT groble_buyer_email, groble_buyer_phone_number,
@@ -1217,7 +1343,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
         });
     });
 
-    it('preserves overflow isolation and stores selected-order evidence', async () => {
+    it('preserves overflow isolation without storing selected-order contacts', async () => {
         const seed = await seedPreflight(17);
         const checkout = await createCheckout(seed);
         await db.query(
@@ -1240,7 +1366,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
         }>(
             `SELECT groble_buyer_display_name FROM public.earlybird_orders WHERE id = $1`,
             [checkout.order_id]
-        )).rows[0].groble_buyer_display_name).toBe('Overflow Buyer');
+        )).rows[0].groble_buyer_display_name).toBeNull();
     });
 
     it('keeps both replaced RPCs executable only by service_role', async () => {

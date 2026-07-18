@@ -1,5 +1,7 @@
 # Groble Phone Matching Implementation Plan
 
+> 역사적 계획 문서: 구매자 연락처 보관 단계는 그로블 판매자 약관 검토 후 폐기되었다. 현재 계약은 `20260719130000_stop_persisting_groble_buyer_contacts.sql`이 기존 값을 삭제하고 old/new writer 모두의 연락처 저장을 NULL로 강제하며, 전화번호·이메일은 signed webhook transaction의 매칭 입력으로만 일시 처리하고 보관하지 않는다. 아래 증거 보관 절차는 최종 계약이 아닌 구현 이력이다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Match Groble payments to the correct earlybird order by the buyer's Kakao phone number even when the Groble and login emails differ, while retaining the existing email fallback and payment safety invariants.

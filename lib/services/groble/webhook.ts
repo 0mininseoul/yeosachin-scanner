@@ -102,7 +102,6 @@ export interface GroblePaymentCompletedEvent {
     paymentId: string;
     buyerEmail: string;
     buyerPhoneNumber: string | null;
-    buyerDisplayName: string | null;
     productId: string;
     amountKrw: number;
     paidAt: string;
@@ -175,7 +174,6 @@ export function parseGroblePaymentCompletedEvent(
         paymentId: payment.merchantUid,
         buyerEmail: payment.buyer.email.trim().toLowerCase(),
         buyerPhoneNumber: payment.buyer.phoneNumber ?? null,
-        buyerDisplayName: payment.buyer.displayName ?? null,
         productId: payment.content.id,
         amountKrw: payment.pricing.finalAmount,
         paidAt: payment.payment.purchasedAt,

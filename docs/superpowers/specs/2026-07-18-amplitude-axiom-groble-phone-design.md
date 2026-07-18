@@ -1,5 +1,7 @@
 # Amplitude, Axiom, Groble 전화번호 매칭 설계
 
+> 역사적 설계 문서: 구매자 연락처 보관 계획은 그로블 판매자 약관 검토 후 폐기되었다. 현재 계약은 `20260719130000_stop_persisting_groble_buyer_contacts.sql`이 기존 값을 삭제하고 이후 쓰기를 NULL로 강제하며, 매칭에 필요한 연락처는 signed webhook transaction 동안만 일시 처리하고 보관하지 않는다. 아래 보관 서술은 구현 결정의 이력으로만 남겨둔다.
+
 ## 목표
 
 이 작업은 얼리버드 결제 매칭을 추가 입력 없이 안전하게 수행하고, 제품 전환과 운영 장애를 각각 Amplitude와 Axiom에서 관측 가능하게 만든다.

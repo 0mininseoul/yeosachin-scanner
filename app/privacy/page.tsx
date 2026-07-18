@@ -68,8 +68,8 @@ export default function PrivacyPage() {
                                 </tr>
                                 <tr>
                                     <Td>유료 결제</Td>
-                                    <Td>결제 내역, 구매·이용 기록, 그로블 결제 시 구매자가 제공한 이름(표시 이름)·이메일·전화번호</Td>
-                                    <Td>결제 과정에서 생성되거나 그로블에서 전달</Td>
+                                    <Td>결제 내역, 구매·이용 기록, 그로블 구매자 이메일·전화번호(결제 매칭 중 일시적 처리)</Td>
+                                    <Td>서명을 검증한 그로블 결제 이벤트 수신 시</Td>
                                 </tr>
                                 <tr>
                                     <Td>자동 수집</Td>
@@ -84,8 +84,9 @@ export default function PrivacyPage() {
                         인스타그램 계정의 정보는 &ldquo;공개된&rdquo; 정보에 한하며, 비공개 계정의 게시물은 수집·분석하지 않습니다.
                     </p>
                     <p className="mt-2 text-[12px] text-fg-mute">
-                        그로블 구매자 정보는 필요한 길이로 제한하여 결제 매칭, 판독 결과 제공, 분쟁·환불 지원을 위한 증거로 보관합니다. 서비스 로그인 이메일과 그로블
-                        이메일이 반드시 일치해야 하는 것은 아닙니다. 카드 등 결제수단 정보와 원문 웹훅 payload는 회사가 보관하지 않습니다.
+                        그로블 구매자 이메일·전화번호는 서명된 웹훅 처리 트랜잭션에서 결제 매칭, 이행·결과 제공, 분쟁·환불 지원을 위해 일시적으로 사용하고 서비스 DB의 구매자
+                        연락처 컬럼에 영속적으로 저장하지 않습니다. 서비스 로그인 이메일과 그로블 이메일은 일치하지 않아도 전화번호로 매칭할 수 있습니다. 카드 등
+                        결제수단 정보와 원문 웹훅 payload도 회사가 보관하지 않습니다.
                     </p>
 
                     <H>제3조 (개인정보의 보유 및 이용 기간)</H>
@@ -99,7 +100,7 @@ export default function PrivacyPage() {
                         <li>소비자의 불만 또는 분쟁처리에 관한 기록: 3년 (동법)</li>
                         <li>표시·광고에 관한 기록: 6개월 (동법)</li>
                         <li>접속에 관한 기록(로그인 기록 등): 3개월 (통신비밀보호법)</li>
-                        <li>그로블 구매자 연락처 등 결제 증거: 대금결제 기록 및 분쟁 처리에 적용되는 위 법정 보존기간</li>
+                        <li>결제 상품·금액·상태·주문 연결 기록: 대금결제 및 분쟁 처리에 적용되는 위 법정 보존기간(그로블 구매자 연락처는 포함하지 않음)</li>
                         <li>분석 대상 인스타그램 공개 데이터 및 중간 처리 데이터: 분석 완료 및 결과 제공 목적 달성 후 지체 없이 파기</li>
                     </ul>
 
@@ -118,37 +119,90 @@ export default function PrivacyPage() {
                                 <tr><Td>Vercel Inc.</Td><Td>서비스 호스팅·인프라 운영</Td></tr>
                                 <tr><Td>Google LLC</Td><Td>AI 분석 처리(Gemini/Vertex AI), 비동기 작업 처리(Cloud Tasks), 소셜 로그인 인증</Td></tr>
                                 <tr><Td>Kakao Corp.</Td><Td>카카오 소셜 로그인 인증</Td></tr>
-                                <tr><Td>Apify Technologies</Td><Td>인스타그램 공개 정보 수집 처리</Td></tr>
-                                <tr><Td>Resend, Inc.</Td><Td>이메일 발송</Td></tr>
+                                <tr><Td>Apify Technologies s.r.o.</Td><Td>인스타그램 공개 정보 수집 처리</Td></tr>
+                                <tr><Td>Plus Five Five, Inc. (Resend)</Td><Td>이메일 발송</Td></tr>
                                 <tr><Td>Amplitude, Inc.</Td><Td>서비스 이용 통계·분석</Td></tr>
                                 <tr><Td>Axiom, Inc.</Td><Td>서버 운영 로그의 수집·보관 및 장애 탐지·진단</Td></tr>
-                                <tr><Td>그로블(Groble) 등 결제대행사</Td><Td>유료 서비스 결제 처리</Td></tr>
                             </tbody>
                         </table>
                     </div>
                     <p className="mt-2 text-[12px] text-fg-mute">
+                        리에종(그로블)은 통신판매중개자이며, 그로블 결제창에서 고지되는 외부 전자지급결제대행(PG) 사업자와 함께 위 수탁자 표에 포함되지 않습니다. 구매자는 그로블 결제창에서 각
+                        사업자에게 정보를 직접 제공하며 각 사업자의 약관·개인정보 처리방침이 적용됩니다. 회사는 서명이 검증된 제한된 결제 이벤트만 수신합니다.
+                    </p>
+                    <p className="mt-2 text-[12px] text-fg-mute">
                         Axiom 운영 로그에는 장애 대응·진단에 필요한 인스타그램 계정 아이디가 포함될 수 있습니다. 구매자 이름·이메일·전화번호 등 연락처, 댓글, 소개글(bio),
                         캡션, 프로필·이미지·미디어 URL, OAuth·서비스 제공자 토큰, 쿠키, 서명, 요청·응답·외부 API 원문, AI 프롬프트·근거·총평 및 자격증명은 운영 로그에서
-                        제외합니다. 그로블 구매자 증거는 서비스 역할 권한으로만 접근하며 고객용 API 응답, Amplitude 및 Axiom으로 전달하지 않습니다.
+                        제외합니다. 그로블 구매자 연락처는 DB에 영속 저장하지 않고, 고객용 API 응답, Amplitude 및 Axiom에 전송하지 않습니다.
                     </p>
                     <p className="mt-2 text-[12px] text-fg-mute">
                         Amplitude는 허용된 서비스 이용 통계 이벤트와 속성만 처리하며, 인스타그램 계정 아이디, 이메일·전화번호, 프로필·소셜 콘텐츠 및 URL은 전송하지
                         않습니다. Amplitude Session Replay는 비활성화되어 화면 재생 데이터를 수집하지 않습니다.
                     </p>
 
-                    <H>제5조 (개인정보의 국외 이전)</H>
+                    <H>제5조 (개인정보의 국외 이전 및 해외 사업자 처리)</H>
                     <p className="mt-2">
-                        회사는 서비스 제공을 위해 아래와 같이 개인정보를 국외에 이전(위탁·보관)하고 있습니다. 정보주체는 국외 이전을 거부할 수 있으며, 거부 시
-                        일부 서비스 이용이 제한될 수 있습니다.
+                        해외 사업자를 이용하더라도 주 저장·런타임이 국내인 경우와 실제 국외 전송을 구분해 표시합니다. 국외 처리를 거부하려면 서비스 이용 전
+                        개인정보 보호책임자에게 요청할 수 있으며, 필수 제공자의 처리를 거부하면 해당 기능 또는 서비스 제공이 불가할 수 있습니다.
                     </p>
-                    <ul>
-                        <li>이전받는 자: Supabase(미국), Vercel(미국), Google(미국), Apify(체코/미국 등), Resend(미국), Amplitude(미국), Axiom(미국) 및 각 사의 클라우드 리전</li>
-                        <li>이전 항목: 제2조의 수집 항목 중 각 업무 수행에 필요한 정보</li>
-                        <li>이전 일시·방법: 서비스 이용 시점에 네트워크를 통한 전송</li>
-                        <li>이전 목적: 제1조의 처리 목적(인증·저장·AI 분석·호스팅·이메일·통계)</li>
-                        <li>보유·이용 기간: 위탁 계약 종료 시 또는 처리 목적 달성 시까지</li>
-                        <li>Axiom(미국) 운영 로그: 장애 탐지·진단을 위해 로그 생성 시 네트워크로 이전하며, 보유·이용 기간은 30일입니다.</li>
-                    </ul>
+                    <div className="mt-3 overflow-x-auto">
+                        <table className="min-w-[1180px] border-collapse text-[11px]">
+                            <thead className="bg-ink-2">
+                                <tr>
+                                    <Th>이전받는 자</Th><Th>국가·리전</Th><Th>이전 항목</Th><Th>일시·방법</Th>
+                                    <Th>목적</Th><Th>보유·이용 기간</Th><Th>거부 방법·영향</Th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <Td>Supabase Inc.</Td><Td>주 저장·처리: 대한민국 서울(ap-northeast-2)</Td>
+                                    <Td>회원·주문·분석 데이터</Td><Td>서비스 이용 중 암호화 네트워크 전송</Td>
+                                    <Td>인증·DB 저장</Td><Td>회원 탈퇴·목적 달성 시까지, 법정 보존 예외</Td>
+                                    <Td>처리정지 요청 가능, 거부 시 회원제 서비스 이용 불가</Td>
+                                </tr>
+                                <tr>
+                                    <Td>Vercel Inc.</Td><Td>주 런타임: 대한민국 서울(icn1), CDN 엣지는 요청 경로에 따라 달라짐</Td>
+                                    <Td>IP·기기/브라우저 정보, HTTP 요청·응답 메타데이터</Td><Td>사이트 접속 시 암호화 네트워크 전송</Td>
+                                    <Td>호스팅·보안·요청 처리</Td><Td>프로젝트·공급자 로그 설정 및 계약 기간</Td>
+                                    <Td>접속 전 처리정지 요청 가능, 거부 시 웹 서비스 이용 불가</Td>
+                                </tr>
+                                <tr>
+                                    <Td>Google LLC</Td><Td>global endpoint(특정 처리 위치를 보장하지 않음, 국외 처리 가능)</Td>
+                                    <Td>공개 프로필·피드 이미지·bio·캡션, AI 입력·출력, 비동기 작업 메타데이터, Google 로그인 정보</Td>
+                                    <Td>AI 분석·작업 실행·로그인 시 암호화 전송</Td><Td>Gemini/Vertex AI 분석, Cloud Tasks, 소셜 인증</Td>
+                                    <Td>회사 저장본은 목적 달성 후 파기, 공급자 처리는 계약·프로젝트 설정 기간</Td>
+                                    <Td>AI 분석 전 요청 가능, 거부 시 판독·Google 로그인 기능 제한</Td>
+                                </tr>
+                                <tr>
+                                    <Td>Apify Technologies s.r.o.</Td><Td>체코 및 공급자·서브처리자가 운영하는 미국 등 국가</Td>
+                                    <Td>대상·공개 인스타그램 아이디와 공개 프로필·게시물 정보</Td><Td>수집 작업 시 암호화 전송</Td>
+                                    <Td>공개 인스타그램 정보 수집</Td><Td>결과 제공 목적 달성 후 파기, 공급자 계약·법령상 필요 기간 예외</Td>
+                                    <Td>수집 전 요청 가능, 거부 시 외부 수집이 필요한 판독 불가</Td>
+                                </tr>
+                                <tr>
+                                    <Td>Plus Five Five, Inc. (Resend)</Td><Td>미국</Td><Td>수신 이메일, 메시지 본문·발송 메타데이터</Td>
+                                    <Td>결과·알림 이메일 발송 시 암호화 전송</Td><Td>트랜잭션 이메일 발송</Td>
+                                    <Td>계약 기간 및 계정 종료 후 90일 이내 삭제(Resend DPA 기준)</Td><Td>발송 전 요청 가능, 거부 시 이메일 알림 제한</Td>
+                                </tr>
+                                <tr>
+                                    <Td>Amplitude, Inc.</Td><Td>미국(US endpoint)</Td><Td>가명 Supabase UUID, 이용 이벤트·플랜·구간화된 수치</Td>
+                                    <Td>서비스 이용 이벤트 발생 시 암호화 전송</Td><Td>제품 이용 통계·전환 분석</Td>
+                                    <Td>Amplitude 프로젝트 보관 설정·계약 기간 및 삭제 요청 시까지</Td><Td>브라우저 차단·처리정지 요청 가능, 핵심 판독은 가능하나 통계에서 제외</Td>
+                                </tr>
+                                <tr>
+                                    <Td>Axiom, Inc.</Td><Td>미국 US East 1</Td><Td>운영 이벤트, 내부 UUID, 오류·성능 수치, 장애 진단용 인스타그램 계정 아이디</Td>
+                                    <Td>운영 로그 생성 시 암호화 전송</Td><Td>장애 탐지·진단·운영 보안</Td><Td>30일</Td>
+                                    <Td>처리정지 요청 가능, 거부 시 장애 진단·안정적 서비스 제공 제한</Td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p className="mt-2 text-[11px] text-fg-mute">
+                        리전 근거: <a href="https://supabase.com/docs/guides/platform/regions" target="_blank" rel="noreferrer">Supabase regions</a>,{' '}
+                        <a href="https://vercel.com/docs/regions" target="_blank" rel="noreferrer">Vercel regions</a>,{' '}
+                        <a href="https://cloud.google.com/blog/products/ai-machine-learning/global-endpoint-for-claude-models-generally-available-on-vertex-ai" target="_blank" rel="noreferrer">Google global endpoint</a>,{' '}
+                        <a href="https://axiom.co/docs/reference/edge-deployments" target="_blank" rel="noreferrer">Axiom edge deployments</a>.
+                    </p>
 
                     <H>제6조 (개인정보의 제3자 제공)</H>
                     <p className="mt-2">

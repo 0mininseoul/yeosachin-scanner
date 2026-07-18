@@ -250,8 +250,10 @@ async function handlePOST(
                 p_payment_id: payment.paymentId,
                 p_buyer_email: payment.buyerEmail,
                 p_buyer_phone_normalized: buyerPhoneNormalized,
-                p_buyer_phone_raw: payment.buyerPhoneNumber,
-                p_buyer_display_name: payment.buyerDisplayName,
+                // The canonical RPC keeps these compatibility arguments while old
+                // application instances drain. Raw buyer contacts are not retained.
+                p_buyer_phone_raw: null,
+                p_buyer_display_name: null,
                 p_product_id: payment.productId,
                 p_amount_krw: payment.amountKrw,
                 p_paid_at: payment.paidAt,

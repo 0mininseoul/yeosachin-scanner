@@ -123,22 +123,12 @@ BEGIN
         WHERE existing_order.id = v_order.id
         FOR UPDATE;
 
-        UPDATE public.earlybird_orders AS duplicate_order
-        SET groble_buyer_email = p_buyer_email,
-            groble_buyer_phone_number = p_buyer_phone_raw,
-            groble_buyer_display_name = p_buyer_display_name,
-            updated_at = pg_catalog.clock_timestamp()
-        WHERE duplicate_order.id = v_order.id
-        RETURNING duplicate_order.* INTO v_order;
-
         INSERT INTO public.earlybird_webhook_events (
             event_id, idempotency_key, event_type, occurred_at,
-            payment_id, product_id, amount_krw, disposition, order_id,
-            groble_buyer_email, groble_buyer_phone_number, groble_buyer_display_name
+            payment_id, product_id, amount_krw, disposition, order_id
         ) VALUES (
             p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-            p_payment_id, p_product_id, p_amount_krw, 'duplicate_payment', v_order.id,
-            p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+            p_payment_id, p_product_id, p_amount_krw, 'duplicate_payment', v_order.id
         );
         RETURN QUERY SELECT
             'duplicate_payment'::TEXT,
@@ -197,13 +187,10 @@ BEGIN
         IF v_candidate_count > 1 THEN
             INSERT INTO public.earlybird_webhook_events (
                 event_id, idempotency_key, event_type, occurred_at,
-                payment_id, product_id, amount_krw, disposition,
-                groble_buyer_email, groble_buyer_phone_number,
-                groble_buyer_display_name
+                payment_id, product_id, amount_krw, disposition
             ) VALUES (
                 p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-                p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer',
-                p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer'
             );
             RETURN QUERY SELECT
                 'ambiguous_buyer'::TEXT,
@@ -234,13 +221,10 @@ BEGIN
             IF v_candidate_count > 1 THEN
                 INSERT INTO public.earlybird_webhook_events (
                     event_id, idempotency_key, event_type, occurred_at,
-                    payment_id, product_id, amount_krw, disposition,
-                    groble_buyer_email, groble_buyer_phone_number,
-                    groble_buyer_display_name
+                    payment_id, product_id, amount_krw, disposition
                 ) VALUES (
                     p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-                    p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer',
-                    p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                    p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer'
                 );
                 RETURN QUERY SELECT
                     'ambiguous_buyer'::TEXT,
@@ -263,13 +247,10 @@ BEGIN
                 IF NOT FOUND THEN
                     INSERT INTO public.earlybird_webhook_events (
                         event_id, idempotency_key, event_type, occurred_at,
-                        payment_id, product_id, amount_krw, disposition,
-                        groble_buyer_email, groble_buyer_phone_number,
-                        groble_buyer_display_name
+                        payment_id, product_id, amount_krw, disposition
                     ) VALUES (
                         p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-                        p_payment_id, p_product_id, p_amount_krw, 'unmatched',
-                        p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                        p_payment_id, p_product_id, p_amount_krw, 'unmatched'
                     );
                     RETURN QUERY SELECT
                         'unmatched'::TEXT,
@@ -285,23 +266,17 @@ BEGIN
                     actual_groble_product_id = p_product_id,
                     actual_amount_krw = p_amount_krw,
                     paid_at = p_paid_at,
-                    groble_buyer_email = p_buyer_email,
-                    groble_buyer_phone_number = p_buyer_phone_raw,
-                    groble_buyer_display_name = p_buyer_display_name,
                     updated_at = pg_catalog.clock_timestamp()
                 WHERE late_order.id = v_order.id
                 RETURNING late_order.* INTO v_order;
 
                 INSERT INTO public.earlybird_webhook_events (
                     event_id, idempotency_key, event_type, occurred_at,
-                    payment_id, product_id, amount_krw, disposition, order_id,
-                    groble_buyer_email, groble_buyer_phone_number,
-                    groble_buyer_display_name
+                    payment_id, product_id, amount_krw, disposition, order_id
                 ) VALUES (
                     p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
                     p_payment_id, p_product_id, p_amount_krw,
-                    'late_cancelled_payment', v_order.id,
-                    p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                    'late_cancelled_payment', v_order.id
                 );
                 RETURN QUERY SELECT
                     'late_cancelled_payment'::TEXT,
@@ -330,13 +305,10 @@ BEGIN
         IF v_candidate_count > 1 THEN
             INSERT INTO public.earlybird_webhook_events (
                 event_id, idempotency_key, event_type, occurred_at,
-                payment_id, product_id, amount_krw, disposition,
-                groble_buyer_email, groble_buyer_phone_number,
-                groble_buyer_display_name
+                payment_id, product_id, amount_krw, disposition
             ) VALUES (
                 p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-                p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer',
-                p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer'
             );
             RETURN QUERY SELECT
                 'ambiguous_buyer'::TEXT,
@@ -389,23 +361,17 @@ BEGIN
                     actual_groble_product_id = p_product_id,
                     actual_amount_krw = p_amount_krw,
                     paid_at = p_paid_at,
-                    groble_buyer_email = p_buyer_email,
-                    groble_buyer_phone_number = p_buyer_phone_raw,
-                    groble_buyer_display_name = p_buyer_display_name,
                     updated_at = pg_catalog.clock_timestamp()
                 WHERE late_order.id = v_order.id
                 RETURNING late_order.* INTO v_order;
 
                 INSERT INTO public.earlybird_webhook_events (
                     event_id, idempotency_key, event_type, occurred_at,
-                    payment_id, product_id, amount_krw, disposition, order_id,
-                    groble_buyer_email, groble_buyer_phone_number,
-                    groble_buyer_display_name
+                    payment_id, product_id, amount_krw, disposition, order_id
                 ) VALUES (
                     p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
                     p_payment_id, p_product_id, p_amount_krw,
-                    'late_cancelled_payment', v_order.id,
-                    p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                    'late_cancelled_payment', v_order.id
                 );
                 RETURN QUERY SELECT
                     'late_cancelled_payment'::TEXT,
@@ -418,12 +384,10 @@ BEGIN
 
         INSERT INTO public.earlybird_webhook_events (
             event_id, idempotency_key, event_type, occurred_at,
-            payment_id, product_id, amount_krw, disposition,
-            groble_buyer_email, groble_buyer_phone_number, groble_buyer_display_name
+            payment_id, product_id, amount_krw, disposition
         ) VALUES (
             p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-            p_payment_id, p_product_id, p_amount_krw, 'unmatched',
-            p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+            p_payment_id, p_product_id, p_amount_krw, 'unmatched'
         );
         RETURN QUERY SELECT
             'unmatched'::TEXT,
@@ -461,12 +425,10 @@ BEGIN
     IF NOT FOUND THEN
         INSERT INTO public.earlybird_webhook_events (
             event_id, idempotency_key, event_type, occurred_at,
-            payment_id, product_id, amount_krw, disposition,
-            groble_buyer_email, groble_buyer_phone_number, groble_buyer_display_name
+            payment_id, product_id, amount_krw, disposition
         ) VALUES (
             p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-            p_payment_id, p_product_id, p_amount_krw, 'unmatched',
-            p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+            p_payment_id, p_product_id, p_amount_krw, 'unmatched'
         );
         RETURN QUERY SELECT
             'unmatched'::TEXT,
@@ -484,21 +446,16 @@ BEGIN
             actual_groble_product_id = p_product_id,
             actual_amount_krw = p_amount_krw,
             paid_at = p_paid_at,
-            groble_buyer_email = p_buyer_email,
-            groble_buyer_phone_number = p_buyer_phone_raw,
-            groble_buyer_display_name = p_buyer_display_name,
             updated_at = pg_catalog.clock_timestamp()
         WHERE mismatch_order.id = v_order.id
         RETURNING mismatch_order.* INTO v_order;
 
         INSERT INTO public.earlybird_webhook_events (
             event_id, idempotency_key, event_type, occurred_at,
-            payment_id, product_id, amount_krw, disposition, order_id,
-            groble_buyer_email, groble_buyer_phone_number, groble_buyer_display_name
+            payment_id, product_id, amount_krw, disposition, order_id
         ) VALUES (
             p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-            p_payment_id, p_product_id, p_amount_krw, 'mismatch', v_order.id,
-            p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+            p_payment_id, p_product_id, p_amount_krw, 'mismatch', v_order.id
         );
         RETURN QUERY SELECT 'mismatch'::TEXT, v_order.id, v_order.status, NULL::SMALLINT;
         RETURN;
@@ -516,9 +473,6 @@ BEGIN
             actual_groble_product_id = p_product_id,
             actual_amount_krw = p_amount_krw,
             paid_at = p_paid_at,
-            groble_buyer_email = p_buyer_email,
-            groble_buyer_phone_number = p_buyer_phone_raw,
-            groble_buyer_display_name = p_buyer_display_name,
             updated_at = pg_catalog.clock_timestamp()
         WHERE cancelled_before_confirmation.id = v_order.id
         RETURNING cancelled_before_confirmation.* INTO v_order;
@@ -531,13 +485,11 @@ BEGIN
 
         INSERT INTO public.earlybird_webhook_events (
             event_id, idempotency_key, event_type, occurred_at,
-            payment_id, product_id, amount_krw, disposition, order_id,
-            groble_buyer_email, groble_buyer_phone_number, groble_buyer_display_name
+            payment_id, product_id, amount_krw, disposition, order_id
         ) VALUES (
             p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
             p_payment_id, p_product_id, p_amount_krw,
-            'cancel_before_payment', v_order.id,
-            p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+            'cancel_before_payment', v_order.id
         );
         RETURN QUERY SELECT
             'cancel_before_payment'::TEXT,
@@ -561,22 +513,17 @@ BEGIN
             actual_groble_product_id = p_product_id,
             actual_amount_krw = p_amount_krw,
             paid_at = p_paid_at,
-            groble_buyer_email = p_buyer_email,
-            groble_buyer_phone_number = p_buyer_phone_raw,
-            groble_buyer_display_name = p_buyer_display_name,
             updated_at = pg_catalog.clock_timestamp()
         WHERE overflow_order.id = v_order.id
         RETURNING overflow_order.* INTO v_order;
 
         INSERT INTO public.earlybird_webhook_events (
             event_id, idempotency_key, event_type, occurred_at,
-            payment_id, product_id, amount_krw, disposition, order_id,
-            groble_buyer_email, groble_buyer_phone_number, groble_buyer_display_name
+            payment_id, product_id, amount_krw, disposition, order_id
         ) VALUES (
             p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
             p_payment_id, p_product_id, p_amount_krw,
-            'overflow_refund_required', v_order.id,
-            p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+            'overflow_refund_required', v_order.id
         );
         RETURN QUERY SELECT
             'overflow_refund_required'::TEXT,
@@ -594,21 +541,16 @@ BEGIN
         paid_at = p_paid_at,
         due_at = p_paid_at + INTERVAL '48 hours',
         plan_sequence = v_sequence,
-        groble_buyer_email = p_buyer_email,
-        groble_buyer_phone_number = p_buyer_phone_raw,
-        groble_buyer_display_name = p_buyer_display_name,
         updated_at = pg_catalog.clock_timestamp()
     WHERE accepted_order.id = v_order.id
     RETURNING accepted_order.* INTO v_order;
 
     INSERT INTO public.earlybird_webhook_events (
         event_id, idempotency_key, event_type, occurred_at,
-        payment_id, product_id, amount_krw, disposition, order_id,
-        groble_buyer_email, groble_buyer_phone_number, groble_buyer_display_name
+        payment_id, product_id, amount_krw, disposition, order_id
     ) VALUES (
         p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-        p_payment_id, p_product_id, p_amount_krw, 'accepted', v_order.id,
-        p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+        p_payment_id, p_product_id, p_amount_krw, 'accepted', v_order.id
     );
 
     RETURN QUERY SELECT 'accepted'::TEXT, v_order.id, v_order.status, v_order.plan_sequence;
@@ -616,7 +558,7 @@ END;
 $$;
 
 -- Keep the legacy overload through the rolling deploy. Remove it only in a later
--- post-drain migration after every caller uses the canonical evidence signature.
+-- post-drain migration after every caller uses the canonical matching signature.
 CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment(
     p_event_id TEXT,
     p_idempotency_key TEXT,

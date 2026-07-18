@@ -151,7 +151,6 @@ describe('Groble payment.completed parser', () => {
             paymentId: 'merchant_0001',
             buyerEmail: 'buyer@example.com',
             buyerPhoneNumber: '010-1234-5678',
-            buyerDisplayName: '구매자',
             productId: 'basic_product-01',
             amountKrw: 14_900,
             paidAt: '2026-07-17T21:00:00+09:00',
@@ -169,7 +168,6 @@ describe('Groble payment.completed parser', () => {
         expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
             buyerEmail: 'legacy-buyer@example.com',
             buyerPhoneNumber: null,
-            buyerDisplayName: null,
         });
     });
 

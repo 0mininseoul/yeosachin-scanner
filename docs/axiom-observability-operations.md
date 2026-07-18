@@ -83,7 +83,9 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 - Dataset Fields 검색에서 `email`, `phone`, `buyer`, `token`, `cookie`, `signature`, `comment`, `bio`, `caption`, `prompt`, `image`, `media`, `url`, `body`, `response`가 애플리케이션 필드로 존재하지 않는지 확인한다.
 - 위 대표 조회의 raw event JSON을 표본 검사해 값에도 연락처·콘텐츠·자격증명이 없는지 확인한다.
 - `target_instagram_id`, `candidate_instagram_id`, `excluded_instagram_id`는 허용된 장애 진단 목적에서만 보이는지 확인한다.
-- 금지 데이터가 발견되면 즉시 Production rollout을 중단한다. 문제 코드를 차단한 뒤 데이터셋 Trim으로 잘못 적재된 기간을 삭제하고 Fields vacuum을 수행한 다음 다시 검증한다.
+- 금지 데이터가 발견되면 즉시 Production rollout과 Axiom ingest를 중단하고 런타임 토큰을 폐기한다. 로거 allowlist와 영향범위를 확인한 뒤만 재개한다.
+- Axiom `Trim`은 지정 시각보다 오래된 데이터 **블록**을 비가역적으로 삭제하며, 새 이벤트와 같은 블록에 있는 이전 이벤트는 남을 수 있다. 따라서 특정 최신 이벤트의 삭제를 보장하지 않으며 대상 기간 삭제 도구로 사용하지 않는다.
+- 정확한 폐기가 필요하면 영향 범위를 동결하고 데이터셋 재생성 또는 Axiom 지원을 통한 폐기 방법을 검토한다. `Trim`, 데이터셋 삭제·재생성 같은 파괴적 조치는 영향·복구 불가성을 문서화하고 사업자의 명시적 승인을 받은 후에만 실행한다. 이벤트가 폐기된 뒤 Fields vacuum으로 남은 스키마를 정리한다.
 
 ## 5. 대시보드
 
@@ -94,7 +96,7 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `env
 - Provider: provider·operation별 요청·실패·fallback·quota/rate limit
 - Gemini: operation·model·thinking level별 지연, rate limit·재시도, prompt/completion/thinking token, 추정 비용
 - Cloud Tasks / V2 worker: enqueue 결과, retry·failure·timeout, job key·phase별 상태
-- Groble: accepted, unmatched, ambiguous, mismatch, cancel, overflow refund disposition과 webhook route 5xx
+- Groble: `accepted`, `duplicate_event`, `duplicate_payment`, `unmatched`, `ambiguous_buyer`, `mismatch`, `overflow_refund_required`, `cancel_requested`, `cancel_duplicate_event`, `cancel_unmatched`, `cancel_mismatch`, `cancel_before_payment`, `late_cancelled_payment` disposition과 webhook route 5xx
 - Analysis: 완료·실패 수, 총 지연, phase별 p50·p90 단계 지연
 
 성공 로그 수를 계정·이미지 수로 해석하지 않는다. 대시보드의 결제 금액은 운영 신호이며 매출 장부는 Supabase를 기준으로 한다.
@@ -103,7 +105,7 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `env
 
 Personal 요금제의 3개 모니터 제한 안에서 다음 세 개의 결합 모니터만 먼저 만든다. 모든 쿼리는 `environment == "production"`을 강제하고 테스트·Preview 이벤트를 제외한다.
 
-- `Launch / Payment health`: Groble route 5xx 또는 `unmatched`, `ambiguous`, `mismatch`, `overflow_refund_required`가 한 건 이상 발생
+- `Launch / Payment health`: Groble route 5xx 또는 `unmatched`, `ambiguous_buyer`, `mismatch`, `overflow_refund_required`, `cancel_requested`, `cancel_*`, `late_cancelled_payment` 조건이 한 건 이상 발생
 - `Launch / Analysis terminal health`: terminal analysis/V2 worker failure 또는 timeout이 한 건 이상 발생
 - `Launch / Provider access health`: provider 인증 실패, quota 초과 또는 rate limit 소진이 한 건 이상 발생
 
