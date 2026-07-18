@@ -19,6 +19,8 @@ const EXPECTED_MIGRATIONS = [
 ] as const;
 const EXPECTED_MIGRATION_SET = new Set<string>(EXPECTED_MIGRATIONS);
 const INCLUDE_ALL_OPTION = '--include-all';
+const STANDALONE_INCLUDE_ALL_PROHIBITION =
+    `\`${INCLUDE_ALL_OPTION}\` must never be used.`;
 
 function migrationVersion(file: string): string | null {
     return file.match(/^(\d+)_.*\.sql$/)?.[1] ?? null;
@@ -56,17 +58,14 @@ function latestNonFeatureMigrationAtOrBeforeAppliedHead(
         .at(-1);
 }
 
-function dbPushCommandSpans(source: string): string[] {
-    return Array.from(
-        source.matchAll(/`([^`\n]+)`/g),
-        match => match[1]
-    ).filter(span => /\bnpx\s+supabase\s+db\s+push(?:\s|$)/.test(span));
+function rawIncludeAllOccurrenceCount(source: string): number {
+    return source.split(INCLUDE_ALL_OPTION).length - 1;
 }
 
-function containsForbiddenIncludeAllPush(source: string): boolean {
-    return dbPushCommandSpans(source).some(command =>
-        command.trim().split(/\s+/).includes(INCLUDE_ALL_OPTION)
-    );
+function hasOnlyStandaloneIncludeAllProhibition(source: string): boolean {
+    return rawIncludeAllOccurrenceCount(source) === 1
+        && /`--include-all`[^\n]*(?:절대 사용하지 않|must never be used|never use)/i
+            .test(source);
 }
 
 describe('Groble phone migration rollout contract', () => {
@@ -111,37 +110,46 @@ describe('Groble phone migration rollout contract', () => {
 
     it.each([
         {
-            command: `npx supabase db push --dry-run ${INCLUDE_ALL_OPTION}`,
-            forbidden: true,
-            name: 'include-all after dry-run',
+            allowed: false,
+            name: 'inline include-all=true',
+            source: `\`npx supabase db push --dry-run ${INCLUDE_ALL_OPTION}=true\``,
         },
         {
-            command: `npx supabase db push ${INCLUDE_ALL_OPTION} --dry-run`,
-            forbidden: true,
-            name: 'include-all before dry-run',
+            allowed: false,
+            name: 'a fenced include-all command',
+            source: [
+                '```sh',
+                `npx supabase db push ${INCLUDE_ALL_OPTION}`,
+                '```',
+            ].join('\n'),
         },
         {
-            command: `npx   supabase  db   push    ${INCLUDE_ALL_OPTION}`,
-            forbidden: true,
+            allowed: false,
+            name: 'split command and include-all spans',
+            source: `\`npx supabase db push\` \`${INCLUDE_ALL_OPTION}\``,
+        },
+        {
+            allowed: false,
             name: 'include-all with repeated whitespace',
+            source: `\`npx   supabase  db   push    ${INCLUDE_ALL_OPTION}\``,
         },
         {
-            command: 'npx supabase db push --dry-run',
-            forbidden: false,
+            allowed: true,
             name: 'the exact dry-run command',
+            source: `\`npx supabase db push --dry-run\`\n${STANDALONE_INCLUDE_ALL_PROHIBITION}`,
         },
         {
-            command: 'npx supabase db push',
-            forbidden: false,
+            allowed: true,
             name: 'the exact apply command',
+            source: `\`npx supabase db push\`\n${STANDALONE_INCLUDE_ALL_PROHIBITION}`,
         },
-    ])('classifies $name', ({ command, forbidden }) => {
-        const commandAndProhibition =
-            `\`${command}\` and standalone \`${INCLUDE_ALL_OPTION}\``;
-
-        expect(dbPushCommandSpans(commandAndProhibition)).toEqual([command]);
-        expect(containsForbiddenIncludeAllPush(commandAndProhibition)).toBe(
-            forbidden
+    ])('enforces the single standalone prohibition for $name', ({
+        allowed,
+        source,
+    }) => {
+        expect(rawIncludeAllOccurrenceCount(source)).toBe(1);
+        expect(hasOnlyStandaloneIncludeAllProhibition(source)).toBe(
+            allowed
         );
     });
 
@@ -207,7 +215,10 @@ describe('Groble phone migration rollout contract', () => {
         expect(operationsRunbook).toMatch(
             /`--include-all`[^\n]*(절대 사용하지 않|never use)/i
         );
-        expect(containsForbiddenIncludeAllPush(operationsRunbook)).toBe(false);
+        expect(rawIncludeAllOccurrenceCount(operationsRunbook)).toBe(1);
+        expect(
+            hasOnlyStandaloneIncludeAllProhibition(operationsRunbook)
+        ).toBe(true);
         const ordinaryApplyLine = migrationGate
             .split('\n')
             .find(line => line.includes('`npx supabase db push`')) ?? '';
