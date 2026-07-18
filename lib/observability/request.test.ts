@@ -53,6 +53,68 @@ describe('requestContext', () => {
         expect(context.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
     });
 
+    it('accepts an opaque extension for a valid higher traceparent version', () => {
+        const context = requestContext(new Request('https://example.com', {
+            headers: {
+                traceparent: '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-future',
+            },
+        }), '/api/example');
+
+        expect(context.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
+        expect(JSON.stringify(context)).not.toContain('future');
+    });
+
+    it('accepts a valid higher-version base without an extension', () => {
+        const context = requestContext(new Request('https://example.com', {
+            headers: {
+                traceparent: 'fe-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+            },
+        }), '/api/example');
+
+        expect(context.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
+    });
+
+    it('accepts a higher-version extension at the conservative length limit', () => {
+        const traceparent = '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-'
+            .padEnd(512, 'x');
+        expect(traceparent).toHaveLength(512);
+
+        const context = requestContext(new Request('https://example.com', {
+            headers: { traceparent },
+        }), '/api/example');
+
+        expect(context.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
+    });
+
+    it('rejects an oversized higher-version traceparent extension', () => {
+        const traceparent = '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-'
+            .padEnd(513, 'x');
+        expect(traceparent).toHaveLength(513);
+
+        const context = requestContext(new Request('https://example.com', {
+            headers: { traceparent },
+        }), '/api/example');
+
+        expect(context.trace_id).toBeNull();
+    });
+
+    it('bounds the raw traceparent before trimming outer whitespace', () => {
+        const base = '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+        const request = {
+            method: 'GET',
+            headers: {
+                get(name: string) {
+                    if (name === 'x-request-id') {
+                        return '01234567-89ab-4def-8123-456789abcdef';
+                    }
+                    return name === 'traceparent' ? base.padEnd(513, ' ') : null;
+                },
+            },
+        } as unknown as Request;
+
+        expect(requestContext(request, '/api/example').trace_id).toBeNull();
+    });
+
     it('generates a UUID when the incoming request ID is invalid', () => {
         const generated = '11234567-89ab-4def-8123-456789abcdef';
         const randomUuid = vi.spyOn(crypto, 'randomUUID').mockReturnValue(generated);
@@ -73,6 +135,8 @@ describe('requestContext', () => {
         '00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01',
         '00-4bf92f3577b34da6a3ce929d0e0e4736-too-short-01',
         '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra',
+        '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01future',
+        '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-',
     ])('rejects an invalid traceparent value: %s', traceparent => {
         const context = requestContext(new Request('https://example.com', {
             headers: { traceparent },

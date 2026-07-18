@@ -5,7 +5,9 @@ import { after } from 'next/server';
 import { flushOperationalLogs, operationalLogger } from './server';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const TRACEPARENT_PATTERN = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+const TRACEPARENT_BASE_PATTERN = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+const TRACEPARENT_BASE_LENGTH = 55;
+const MAX_TRACEPARENT_LENGTH = 512;
 const ROUTE_PATTERN = /^\/[A-Za-z0-9_./:\[\]-]{0,255}$/;
 const ZERO_TRACE_ID = '0'.repeat(32);
 const ZERO_PARENT_ID = '0'.repeat(16);
@@ -35,9 +37,28 @@ function incomingRequestId(request: Request): string | undefined {
 }
 
 function incomingTraceId(request: Request): string | null {
-    const candidate = request.headers.get('traceparent')?.trim();
-    const match = candidate?.match(TRACEPARENT_PATTERN);
+    const rawTraceparent = request.headers.get('traceparent');
+    if (!rawTraceparent || rawTraceparent.length > MAX_TRACEPARENT_LENGTH) {
+        return null;
+    }
+    const candidate = rawTraceparent.trim();
+    if (candidate.length < TRACEPARENT_BASE_LENGTH) return null;
+
+    const match = candidate.slice(0, TRACEPARENT_BASE_LENGTH)
+        .match(TRACEPARENT_BASE_PATTERN);
     if (!match || match[1] === 'ff' || match[3] === ZERO_PARENT_ID) return null;
+
+    const version = match[1];
+    if (
+        candidate.length > TRACEPARENT_BASE_LENGTH
+        && (
+            version === '00'
+            || candidate[TRACEPARENT_BASE_LENGTH] !== '-'
+            || candidate.length === TRACEPARENT_BASE_LENGTH + 1
+        )
+    ) {
+        return null;
+    }
 
     const traceId = match[2];
     return traceId && traceId !== ZERO_TRACE_ID ? traceId : null;
