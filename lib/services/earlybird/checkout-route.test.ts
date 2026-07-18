@@ -160,6 +160,26 @@ describe('earlybird checkout and waitlist routes', () => {
         });
     });
 
+    it('requires a Kakao phone snapshot without returning phone evidence', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: null,
+            error: { message: 'CHECKOUT_PHONE_REQUIRED' },
+        });
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        const body = await response.json();
+        expect(body).toEqual({
+            code: 'CHECKOUT_PHONE_REQUIRED',
+            error: '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.',
+        });
+        expect(JSON.stringify(body)).not.toMatch(/\+?82?10[0-9-]+/);
+    });
+
     it('creates only a Plus waitlist row through the service-only RPC', async () => {
         mocks.rpc.mockResolvedValue({
             data: [{ waitlist_id: WAITLIST_ID, created: true }],

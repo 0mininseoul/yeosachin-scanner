@@ -16,6 +16,13 @@ function errorResponse(status: number, code: string, error: string): NextRespons
 }
 
 function persistenceErrorResponse(error: EarlybirdPersistenceError): NextResponse {
+    if (error.code === 'CHECKOUT_PHONE_REQUIRED') {
+        return errorResponse(
+            409,
+            error.code,
+            '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.'
+        );
+    }
     if (error.code === 'EARLYBIRD_CHECKOUT_ALREADY_PENDING') {
         return errorResponse(
             409,

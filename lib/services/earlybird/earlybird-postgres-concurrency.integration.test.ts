@@ -10,9 +10,16 @@ import {
 const databaseUrl = process.env.EARLYBIRD_POSTGRES_TEST_URL;
 const destructiveTestMarker = process.env.EARLYBIRD_POSTGRES_TEST_MARKER;
 const describePostgres = databaseUrl ? describe : describe.skip;
-const migration = readFileSync(
+const presaleMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260717140000_add_groble_earlybird_presale.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const phoneMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260718104053_add_groble_phone_matching.sql',
         import.meta.url
     ),
     'utf8'
@@ -41,7 +48,9 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO authenticated;
 
 CREATE TABLE public.users (
     id UUID PRIMARY KEY,
-    email VARCHAR(255) UNIQUE NOT NULL
+    email VARCHAR(255) UNIQUE NOT NULL,
+    provider VARCHAR(50) NOT NULL,
+    phone_number VARCHAR(50)
 );
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
@@ -156,7 +165,8 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
             throw new Error('Refusing destructive PostgreSQL test against an unexpected database.');
         }
         await pool.query(bootstrap);
-        await pool.query(migration);
+        await pool.query(presaleMigration);
+        await pool.query(phoneMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -192,8 +202,15 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
 
             for (const seed of seeds) {
                 await pool.query(
-                    'INSERT INTO public.users (id, email) VALUES ($1, $2)',
-                    [seed.userId, seed.email]
+                    `INSERT INTO public.users (
+                        id, email, provider, phone_number, phone_number_normalized
+                    ) VALUES ($1, $2, 'kakao', $3, $4)`,
+                    [
+                        seed.userId,
+                        seed.email,
+                        `010-0000-${String(seed.index).padStart(4, '0')}`,
+                        `+82100000${String(seed.index).padStart(4, '0')}`,
+                    ]
                 );
                 await pool.query(
                     `INSERT INTO public.analysis_preflights (
@@ -241,14 +258,18 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                     plan_sequence: number | null;
                 }>(
                     `SELECT * FROM public.finalize_earlybird_groble_payment(
-                        $1, $2, 'payment.completed', $3, $4, $5, $6, $7, $8
+                        $1, $2, 'payment.completed', $3, $4, $5, $6, $7,
+                        $8, $9, $10, $11
                     )`,
                     [
                         `event_${planId}_${seed.index}`,
                         `idem_${planId}_${seed.index}`,
                         '2026-07-17T21:00:00+09:00',
                         `payment_${planId}_${seed.index}`,
-                        seed.email,
+                        `groble-postgres-${planId}-${seed.index}@example.com`,
+                        `+82100000${String(seed.index).padStart(4, '0')}`,
+                        `010-0000-${String(seed.index).padStart(4, '0')}`,
+                        `Postgres Buyer ${seed.index}`,
                         productId,
                         amount,
                         '2026-07-17T21:00:00+09:00',
