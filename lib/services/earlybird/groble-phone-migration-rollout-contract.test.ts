@@ -36,7 +36,7 @@ describe('Groble phone migration rollout contract', () => {
         }
     });
 
-    it('documents an ordinary dry-run rollout of exactly those six files before app deployment', () => {
+    it('documents an approved ordinary rollout of exactly those six files before app deployment', () => {
         const migrationGate = operationsRunbook.slice(
             operationsRunbook.indexOf('## 전화번호 매칭 migration 게이트'),
             operationsRunbook.indexOf('## 결제 확정과 수량 운영')
@@ -60,14 +60,52 @@ describe('Groble phone migration rollout contract', () => {
         expect(operationsRunbook).toMatch(
             /(drift|불일치)[^\n]*(중단|abort)/i
         );
+        const migrationListIndex = migrationGate.indexOf(
+            '`npx supabase migration list --linked`'
+        );
+        const dryRunIndex = migrationGate.indexOf(
+            '`npx supabase db push --dry-run`'
+        );
+        const driftReviewIndex = migrationGate.indexOf('history drift');
+        const approvalIndex = migrationGate.indexOf('명시적 운영 승인');
+        const maintenanceGateIndex = migrationGate.indexOf('maintenance gate');
+        const applyIndex = migrationGate.indexOf('`npx supabase db push`');
+        const verificationIndex = migrationGate.indexOf(
+            'DB schema와 RPC signature, service-role ACL'
+        );
+        const appDeploymentIndex = migrationGate.indexOf(
+            'application을 배포'
+        );
+
+        expect(migrationListIndex).toBeGreaterThanOrEqual(0);
+        expect(dryRunIndex).toBeGreaterThan(migrationListIndex);
+        expect(driftReviewIndex).toBeGreaterThan(dryRunIndex);
+        expect(approvalIndex).toBeGreaterThan(driftReviewIndex);
+        expect(maintenanceGateIndex).toBeGreaterThan(dryRunIndex);
+        expect(applyIndex).toBeGreaterThan(approvalIndex);
+        expect(applyIndex).toBeGreaterThan(maintenanceGateIndex);
+        expect(verificationIndex).toBeGreaterThan(applyIndex);
+        expect(appDeploymentIndex).toBeGreaterThan(verificationIndex);
+        expect(migrationGate).toMatch(
+            /이 개발 작업[^\n]*`npx supabase db push`[^\n]*실행하지 않/
+        );
         expect(operationsRunbook).toMatch(
             /`--include-all`[^\n]*(절대 사용하지 않|never use)/i
         );
+        const forbiddenIncludeAllPush = [
+            'npx supabase db push',
+            '--include-all',
+        ].join(' ');
+        expect(operationsRunbook).not.toContain(forbiddenIncludeAllPush);
+        const ordinaryApplyLine = migrationGate
+            .split('\n')
+            .find(line => line.includes('`npx supabase db push`')) ?? '';
+        expect(ordinaryApplyLine).not.toContain('--include-all');
         expect(operationsRunbook).toMatch(
             /DB migration[^\n]*(application|애플리케이션)[^\n]*(배포 전|먼저)/i
         );
         expect(operationsRunbook).toMatch(
-            /RPC[^\n]*signature[^\n]*ACL[^\n]*schema[^\n]*(확인|검증)[^\n]*(후|다음)[^\n]*(application|애플리케이션)[^\n]*배포/i
+            /DB schema[^\n]*RPC signature[^\n]*service-role ACL[^\n]*(확인|검증)[^\n]*(후|다음)[^\n]*(application|애플리케이션)[^\n]*배포/i
         );
     });
 });
