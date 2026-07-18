@@ -15,6 +15,7 @@ import type {
 } from '../lib/services/analysis/profile-repair-canary-run-store';
 import { parseProfileRepairCanaryArgs } from './canary-apify-profile-repair-options';
 import {
+    fetchProfileRepairCanaryAccountingSnapshot,
     runProfileRepairCanary,
     runProfileRepairCanaryCli,
     type ProfileRepairCanaryDependencies,
@@ -549,6 +550,25 @@ describe('profile repair paid canary lifecycle', () => {
         );
     });
 
+    it('measures a resumed run from its durable provider start timestamp', async () => {
+        const resumedAt = Date.parse(NOW) - 120_000;
+        const existing = storedRun(1, 'running', {
+            runStartedAt: new Date(resumedAt).toISOString(),
+        });
+        const store = memoryStore([existing]);
+        const setup = dependencies({
+            store,
+            now: () => Date.parse(NOW),
+        });
+
+        await runProfileRepairCanary(options(true), setup.deps);
+
+        expect(store.terminalize).toHaveBeenCalledWith(expect.objectContaining({
+            repetition: 1,
+            latencyMs: 120_000,
+        }));
+    });
+
     it('keeps a checkpointed run resumable until a terminal status is observed', async () => {
         const store = memoryStore();
         const setup = dependencies({ store });
@@ -773,5 +793,31 @@ describe('profile repair paid canary lifecycle', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+
+    it('cancels a non-success accounting response body without exposing its token', async () => {
+        const cancel = vi.fn(async () => undefined);
+        const request = vi.fn(async () => ({
+            ok: false,
+            body: { cancel },
+        } as unknown as Response));
+        const signal = new AbortController().signal;
+
+        await expect(fetchProfileRepairCanaryAccountingSnapshot(
+            'FreshRun00000001',
+            { credentialSlot: SLOT, signal },
+            { APIFY_TERTIARY_API_TOKEN: 'test-token' },
+            request as unknown as typeof fetch
+        )).resolves.toBeUndefined();
+
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(request).toHaveBeenCalledWith(
+            'https://api.apify.com/v2/actor-runs/FreshRun00000001',
+            expect.objectContaining({
+                method: 'GET',
+                redirect: 'error',
+                signal,
+            })
+        );
     });
 });

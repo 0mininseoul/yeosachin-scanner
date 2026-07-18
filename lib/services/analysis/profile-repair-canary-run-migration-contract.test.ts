@@ -51,7 +51,9 @@ describe('profile repair canary journal migration contract', () => {
         );
         expect(table).toContain('critical_recovered_count IS NOT NULL');
         expect(table).toContain('gate_passed IS NOT NULL');
-        expect(table).toMatch(/REFERENCES public\.analysis_requests\(id\)/);
+        expect(table).toContain(
+            'REFERENCES public.analysis_requests(id) ON DELETE CASCADE'
+        );
         expect(table).toContain('UNIQUE (run_id)');
         expect(table).toContain('UNIQUE (reservation_token)');
 

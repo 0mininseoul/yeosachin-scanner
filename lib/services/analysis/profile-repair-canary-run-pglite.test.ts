@@ -28,14 +28,14 @@ CREATE TABLE public.users (
 
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES public.users(id),
+    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
     target_instagram_id TEXT NOT NULL,
     pipeline_version TEXT,
     status TEXT NOT NULL
 );
 
 CREATE TABLE public.analysis_v2_provider_runs (
-    request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
+    request_id UUID NOT NULL REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
     job_key TEXT NOT NULL,
     operation_key TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -340,5 +340,20 @@ describe('profile repair canary journal PGlite contract', () => {
         await expect(serviceQuery(
             'SELECT * FROM public.analysis_v2_profile_repair_canary_runs'
         )).rejects.toThrow(/permission denied/i);
+    });
+
+    it('preserves the owner deletion cascade after a canary row is journaled', async () => {
+        await seedSource();
+        await reserve();
+
+        await expect(db.query(
+            'DELETE FROM public.users WHERE id = $1',
+            [OWNER_ID]
+        )).resolves.toBeDefined();
+        const remaining = await db.query<{ count: number }>(`
+            SELECT count(*)::INTEGER AS count
+            FROM public.analysis_v2_profile_repair_canary_runs
+        `);
+        expect(remaining.rows[0].count).toBe(0);
     });
 });

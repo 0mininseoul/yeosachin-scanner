@@ -4,7 +4,7 @@
 
 CREATE TABLE public.analysis_v2_profile_repair_canary_runs (
     source_request_id UUID NOT NULL
-        REFERENCES public.analysis_requests(id) ON DELETE RESTRICT,
+        REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
     canary_version TEXT NOT NULL DEFAULT 'profile-repair-canary-v1',
     repetition INTEGER NOT NULL,
     actor_id TEXT NOT NULL DEFAULT 'apify/instagram-profile-scraper',

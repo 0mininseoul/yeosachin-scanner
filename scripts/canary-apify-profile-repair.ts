@@ -399,7 +399,13 @@ async function executeRepetition(
         return reconcileUsage(run, dependencies);
     }
 
-    const startedAt = dependencies.now();
+    const attemptStartedAt = dependencies.now();
+    const durableStartedAt = run.runStartedAt === null
+        ? Number.NaN
+        : Date.parse(run.runStartedAt);
+    const startedAt = Number.isFinite(durableStartedAt)
+        ? Math.min(attemptStartedAt, durableStartedAt)
+        : attemptStartedAt;
     let checkpointed = run;
     let terminalObserved = false;
     const fresh = created;
@@ -600,15 +606,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function defaultGetAccountingSnapshot(
+export async function fetchProfileRepairCanaryAccountingSnapshot(
     runId: string,
-    input: ProfileRepairCanaryAccountingLookup
+    input: ProfileRepairCanaryAccountingLookup,
+    env: Record<string, string | undefined> = process.env,
+    request: typeof fetch = fetch
 ): Promise<ProfileRepairCanaryAccountingSnapshot | undefined> {
     if (!/^[A-Za-z0-9]{8,64}$/.test(runId)) {
         throw safeError('PROFILE_REPAIR_CANARY_ACCOUNTING_INVALID');
     }
-    const token = selectApifyApiToken(process.env, input.credentialSlot);
-    const response = await fetch(
+    const token = selectApifyApiToken(env, input.credentialSlot);
+    const response = await request(
         `https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,
         {
             method: 'GET',
@@ -621,7 +629,14 @@ async function defaultGetAccountingSnapshot(
             signal: input.signal,
         }
     );
-    if (!response.ok) return undefined;
+    if (!response.ok) {
+        try {
+            await response.body?.cancel();
+        } catch {
+            // A failed accounting read stays conservative even if body cleanup also fails.
+        }
+        return undefined;
+    }
     const envelope: unknown = await response.json();
     if (!isRecord(envelope) || !isRecord(envelope.data)) return undefined;
     return {
@@ -636,7 +651,7 @@ function defaultDependencies(): ProfileRepairCanaryDependencies {
         env: process.env,
         loadSource: defaultLoadSource,
         getClient: slot => getApifyClient(process.env, slot) as ProfileRepairCanaryApifyClient,
-        getAccountingSnapshot: defaultGetAccountingSnapshot,
+        getAccountingSnapshot: fetchProfileRepairCanaryAccountingSnapshot,
         async getProfilesBatchOutcomes(usernames, context, client) {
             const provider = makeApifyProvider({
                 client: client as unknown as ApifyClientLike,
