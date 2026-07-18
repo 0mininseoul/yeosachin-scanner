@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getPageUrl } from '@amplitude/session-replay-browser/lib/cjs/helpers.js';
-import { SessionReplayTrackDestination } from '@amplitude/session-replay-browser/lib/cjs/track-destination.js';
+import { SessionReplayLocalConfig } from '@amplitude/session-replay-browser/lib/cjs/config/local-config.js';
+import { SessionReplayJoinedConfigGenerator } from '@amplitude/session-replay-browser/lib/cjs/config/joined-config.js';
+import { SessionReplay } from '@amplitude/session-replay-browser/lib/cjs/session-replay.js';
 
 const amplitudeMocks = vi.hoisted(() => ({
     initAll: vi.fn(),
@@ -136,31 +137,17 @@ describe('Amplitude analytics adapter', () => {
                 remoteConfig: { fetchRemoteConfig: false },
             },
             sessionReplay: {
-                sampleRate: 1,
+                sampleRate: 0,
                 privacyConfig: {
                     defaultMaskLevel: 'conservative',
                     maskSelector: ['.amp-mask', '[data-amp-mask]'],
                     blockSelector: ['.amp-block', '[data-amp-block]'],
                 },
-                interactionConfig: {
-                    enabled: true,
-                    batch: false,
-                    ugcFilterRules: [
-                        {
-                            selector: 'https://*/**',
-                            replacement: 'https://yeosachin.vercel.app/',
-                        },
-                        {
-                            selector: 'http://*/**',
-                            replacement: 'http://localhost/',
-                        },
-                    ],
-                },
+                interactionConfig: { enabled: false, batch: false },
                 performanceConfig: { enabled: false },
                 captureDocumentTitle: false,
                 enableUrlChangePolling: false,
                 handleFetchConfig: expect.any(Function),
-                handleSendEvents: expect.any(Function),
             },
             engagement: { skip: true },
         });
@@ -175,8 +162,8 @@ describe('Amplitude analytics adapter', () => {
             configs: {
                 sessionReplay: {
                     sr_sampling_config: {
-                        sample_rate: 1,
-                        capture_enabled: true,
+                        sample_rate: 0,
+                        capture_enabled: false,
                     },
                 },
             },
@@ -198,117 +185,90 @@ describe('Amplitude analytics adapter', () => {
         expect(hostileFetch).not.toHaveBeenCalled();
     });
 
-    it('removes sensitive URLs from an installed-SDK replay upload and transport header', async () => {
+    it('fails closed after the installed SDK joins deterministic replay remote config', async () => {
         const shareToken = 'a'.repeat(64);
         const requestId = '11111111-1111-4111-8111-111111111111';
         const preflightId = '22222222-2222-4222-8222-222222222222';
         const sensitiveUrl = `https://yeosachin.vercel.app/share/${shareToken}`
             + `?preflight=${preflightId}#result/${requestId}`;
-        const fetchCapture = vi.fn().mockResolvedValue(new Response('', { status: 200 }));
         enableBrowser();
         vi.stubGlobal('location', { href: sensitiveUrl });
-        vi.stubGlobal('fetch', fetchCapture);
         const { initAmplitude } = await loadAnalytics();
 
         await initAmplitude(null);
 
         const options = amplitudeMocks.initAll.mock.calls[0][1] as {
             sessionReplay: {
+                sampleRate: number;
                 interactionConfig: {
                     enabled: boolean;
-                    ugcFilterRules: Array<{ selector: string; replacement: string }>;
+                    batch: boolean;
                 };
-                handleSendEvents: (request: {
-                    url: string;
-                    method: 'POST';
-                    headers: Record<string, string>;
-                    body: string | Uint8Array;
-                    keepalive: boolean;
-                }) => Promise<Response>;
+                handleFetchConfig: (request: unknown) => Promise<Response>;
+                handleSendEvents?: unknown;
             };
         };
-        expect(options.sessionReplay.interactionConfig.enabled).toBe(true);
+        expect(options.sessionReplay).toMatchObject({
+            sampleRate: 0,
+            interactionConfig: { enabled: false, batch: false },
+        });
+        expect(options.sessionReplay.handleSendEvents).toBeUndefined();
 
-        for (const pageUrl of [
-            sensitiveUrl,
-            `https://yeosachin.vercel.app/analyze?preflight=${preflightId}`,
-            `https://yeosachin.vercel.app/progress/${requestId}`,
-            `https://yeosachin.vercel.app/result/${requestId}?pipeline=v2`,
-        ]) {
-            expect(getPageUrl(
-                pageUrl,
-                options.sessionReplay.interactionConfig.ugcFilterRules,
-            )).toBe('https://yeosachin.vercel.app/');
-        }
-        expect(getPageUrl(
-            `http://127.0.0.1:3000/result/${requestId}?pipeline=v2`,
-            options.sessionReplay.interactionConfig.ugcFilterRules,
-        )).toBe('http://localhost/');
-
-        const sanitizedPageUrl = getPageUrl(
-            sensitiveUrl,
-            options.sessionReplay.interactionConfig.ugcFilterRules,
+        const deterministicResponse = await options.sessionReplay.handleFetchConfig({
+            url: 'https://hostile.example/config',
+            method: 'GET',
+            headers: { authorization: 'secret' },
+        });
+        const deterministicConfig = await deterministicResponse.json() as {
+            configs: { sessionReplay: Record<string, unknown> };
+        };
+        const remoteClient = {
+            subscribe: vi.fn((
+                _key: string | undefined,
+                _deliveryMode: unknown,
+                callback: (
+                    config: Record<string, unknown>,
+                    source: 'remote',
+                    lastFetch: Date,
+                ) => void,
+            ) => {
+                callback(deterministicConfig.configs.sessionReplay, 'remote', new Date());
+                return 'safe-config-subscription';
+            }),
+            unsubscribe: vi.fn(() => true),
+            updateConfigs: vi.fn(),
+        };
+        const localConfig = new SessionReplayLocalConfig(
+            API_KEY,
+            options.sessionReplay as never,
         );
-        const replayEvent = JSON.stringify({
-            type: 4,
-            data: { href: sanitizedPageUrl },
-        });
-        const expectedBody = JSON.stringify({ version: 1, events: [replayEvent] });
-        const noop = vi.fn();
-        const destination = new SessionReplayTrackDestination({
-            loggerProvider: {
-                debug: noop,
-                disable: noop,
-                enable: noop,
-                error: noop,
-                log: noop,
-                warn: noop,
-            },
-            enableTransportCompression: false,
-            sendTimeoutMs: 0,
-            handleSendEvents: options.sessionReplay.handleSendEvents,
-        });
+        expect(localConfig.sampleRate).toBe(0);
+        const generator = new SessionReplayJoinedConfigGenerator(
+            remoteClient as never,
+            localConfig,
+        );
 
-        await destination.send({
-            events: [replayEvent],
-            sampleRate: 1,
-            type: 'replay',
+        const { joinedConfig, remoteConfig } = await generator.generateJoinedConfig();
+
+        expect(remoteConfig?.sr_sampling_config).toEqual({
+            sample_rate: 0,
+            capture_enabled: false,
+        });
+        expect(joinedConfig.captureEnabled).toBe(false);
+        expect(joinedConfig.sampleRate).toBe(0);
+        expect(joinedConfig.interactionConfig?.enabled).not.toBe(true);
+
+        const replay = new SessionReplay();
+        replay.config = joinedConfig;
+        replay.identifiers = {
             sessionId: 1_721_234_567_890,
             deviceId: 'test-device',
-            apiKey: API_KEY,
-            onComplete: async () => undefined,
-            attempts: 1,
-            timeout: 0,
-            flushMaxRetries: 2,
-        });
-
-        expect(fetchCapture).toHaveBeenCalledTimes(1);
-        const [uploadUrl, request] = fetchCapture.mock.calls[0] as [string, RequestInit];
-        expect(uploadUrl).toContain('session_id=1721234567890');
-        expect(request.method).toBe('POST');
-        expect(request.keepalive).toBe(true);
-        expect(request.body).toBe(expectedBody);
-        const uploadedHeaders = new Headers(request.headers);
-        expect(uploadedHeaders.get('X-Client-Url')).toBe('https://yeosachin.vercel.app/');
-        expect(uploadedHeaders.get('Authorization')).toBe(`Bearer ${API_KEY}`);
-        expect(uploadedHeaders.get('Content-Type')).toBe('application/json');
-
-        const wireImage = JSON.stringify({ uploadUrl, request: {
-            ...request,
-            body: typeof request.body === 'string' ? request.body : '<binary>',
-            headers: Object.fromEntries(new Headers(request.headers).entries()),
-        } });
-        expect(wireImage).toContain('https://yeosachin.vercel.app/');
-        for (const forbidden of [
-            shareToken,
-            requestId,
-            preflightId,
-            '/share/',
-            '?preflight=',
-            '#result/',
-        ]) {
-            expect(wireImage).not.toContain(forbidden);
-        }
+        };
+        expect(replay.getShouldRecord()).toBe(false);
+        expect(JSON.stringify({
+            currentUrl: sensitiveUrl,
+            shouldRecord: replay.getShouldRecord(),
+        })).toContain('"shouldRecord":false');
     });
 
     it('does not load or initialize Unified from a child event before auth resolves', async () => {

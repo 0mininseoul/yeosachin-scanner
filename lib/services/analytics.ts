@@ -58,21 +58,6 @@ type PropertyValidator = (value: unknown) => AnalyticsScalar | undefined;
 const API_KEY_PATTERN = /^[0-9a-f]{32}$/i;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_QUEUED_EVENTS = 50;
-const SAFE_REPLAY_HTTPS_URL = 'https://yeosachin.vercel.app/';
-const SAFE_REPLAY_HTTP_URL = 'http://localhost/';
-
-const SAFE_SESSION_REPLAY_URL_FILTER_RULES = [
-    { selector: 'https://*/**', replacement: SAFE_REPLAY_HTTPS_URL },
-    { selector: 'http://*/**', replacement: SAFE_REPLAY_HTTP_URL },
-];
-
-interface SessionReplaySendRequest {
-    url: string;
-    method: 'POST';
-    headers: Record<string, string>;
-    body: string | Uint8Array;
-    keepalive: boolean;
-}
 
 const APPROVED_EVENTS = new Set<AnalyticsEvent>(Object.values(EVENTS));
 
@@ -203,8 +188,8 @@ const SAFE_SESSION_REPLAY_REMOTE_CONFIG = {
     configs: {
         sessionReplay: {
             sr_sampling_config: {
-                sample_rate: 1,
-                capture_enabled: true,
+                sample_rate: 0,
+                capture_enabled: false,
             },
         },
     },
@@ -290,33 +275,6 @@ async function safeSessionReplayRemoteConfig(): Promise<Response> {
     });
 }
 
-function safeSessionReplayClientUrl(headers: Record<string, string>): string {
-    const clientUrl = Object.entries(headers).find(
-        ([name]) => name.toLowerCase() === 'x-client-url',
-    )?.[1];
-    return clientUrl?.startsWith('http://')
-        ? SAFE_REPLAY_HTTP_URL
-        : SAFE_REPLAY_HTTPS_URL;
-}
-
-async function safeSessionReplaySendEvents(
-    request: SessionReplaySendRequest,
-): Promise<Response> {
-    const headers = Object.fromEntries(
-        Object.entries(request.headers).filter(
-            ([name]) => name.toLowerCase() !== 'x-client-url',
-        ),
-    );
-    headers['X-Client-Url'] = safeSessionReplayClientUrl(request.headers);
-
-    return fetch(request.url, {
-        method: request.method,
-        headers,
-        body: request.body as BodyInit,
-        keepalive: request.keepalive,
-    });
-}
-
 export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
     const apiKey = configuredApiKey();
     if (!apiKey) return Promise.resolve(false);
@@ -349,22 +307,17 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
                     remoteConfig: { fetchRemoteConfig: false },
                 },
                 sessionReplay: {
-                    sampleRate: 1,
+                    sampleRate: 0,
                     privacyConfig: {
                         defaultMaskLevel: 'conservative',
                         maskSelector: ['.amp-mask', '[data-amp-mask]'],
                         blockSelector: ['.amp-block', '[data-amp-block]'],
                     },
-                    interactionConfig: {
-                        enabled: true,
-                        batch: false,
-                        ugcFilterRules: SAFE_SESSION_REPLAY_URL_FILTER_RULES,
-                    },
+                    interactionConfig: { enabled: false, batch: false },
                     performanceConfig: { enabled: false },
                     captureDocumentTitle: false,
                     enableUrlChangePolling: false,
                     handleFetchConfig: safeSessionReplayRemoteConfig,
-                    handleSendEvents: safeSessionReplaySendEvents,
                 },
                 engagement: { skip: true },
             });

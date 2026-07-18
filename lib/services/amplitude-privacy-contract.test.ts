@@ -28,6 +28,16 @@ describe('Amplitude replay privacy contract', () => {
         expect(analytics).not.toContain('unmaskSelector');
     });
 
+    it('keeps replay and interaction capture fail-closed until URL privacy is proven', () => {
+        const analytics = source('lib/services/analytics.ts');
+
+        expect(analytics).toContain('sampleRate: 0');
+        expect(analytics).toContain('capture_enabled: false');
+        expect(analytics).toContain('interactionConfig: { enabled: false, batch: false }');
+        expect(analytics).not.toContain('ugcFilterRules');
+        expect(analytics).not.toContain('handleSendEvents');
+    });
+
     it('masks target inputs and blocks every sensitive route container', () => {
         const landing = source('app/page.tsx');
         const analyze = source('app/analyze/page.tsx');
