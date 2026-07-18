@@ -11,7 +11,7 @@ const migration = readFileSync(
 
 const sourcePolicyFixMigration = readFileSync(
     new URL(
-        '../../../supabase/migrations/20260718130000_fix_profile_repair_canary_source_policy.sql',
+        '../../../supabase/migrations/20260718124500_fix_profile_repair_canary_source_policy.sql',
         import.meta.url
     ),
     'utf8'
@@ -105,7 +105,15 @@ describe('profile repair canary journal migration contract', () => {
     });
 
     it('loads only the authorized failed V2 source and its ledger-owned profile runs', () => {
-        const source = sourcePolicyFixMigration;
+        const source = sourcePolicyFixMigration.slice(
+            sourcePolicyFixMigration.indexOf(
+                'CREATE OR REPLACE FUNCTION public.load_analysis_v2_profile_repair_canary_source('
+            ),
+            sourcePolicyFixMigration.indexOf(
+                'CREATE OR REPLACE FUNCTION public.reserve_analysis_v2_profile_repair_canary_run('
+            )
+        );
+        expect(source).toContain('p_credential_slot TEXT');
         expect(source).toContain("analysis_request.pipeline_version = 'v2'");
         expect(source).toContain("analysis_request.status = 'failed'");
         expect(source).toContain(
@@ -116,6 +124,12 @@ describe('profile repair canary journal migration contract', () => {
             "execution_policy.policy_version = 'authorized-free-e2e-v1'"
         );
         expect(source).toContain("execution_policy.target_instagram_id = '0_min._.00'");
+        expect(source).toContain(
+            "execution_policy.operation_slot_map->>'profile-fallback' = p_credential_slot"
+        );
+        expect(source).toContain(
+            'provider_run.credential_slot = p_credential_slot'
+        );
         expect(source).toMatch(
             /analysis_request\.test_entitlement_jti_hash\s*=\s*execution_policy\.entitlement_jti_hash/
         );
@@ -124,6 +138,10 @@ describe('profile repair canary journal migration contract', () => {
         );
         expect(source).toContain('JOIN public.analysis_preflights AS preflight');
         expect(source).toContain("entitlement_consumption.selected_plan_id = 'standard'");
+        expect(source).toMatch(
+            /analysis_request\.selected_plan_id_snapshot\s*=\s*entitlement_consumption\.selected_plan_id/
+        );
+        expect(source).toContain('analysis_request.preflight_id = preflight.id');
         expect(source).toContain("preflight.status = 'consumed'");
         expect(source).toContain('preflight.pii_scrubbed_at IS NOT NULL');
         expect(source).toContain("analysis_request.plan_access_mode_snapshot = 'test_entitlement'");
@@ -159,6 +177,10 @@ describe('profile repair canary journal migration contract', () => {
         expect(reserve).toContain(
             "execution_policy.operation_slot_map->>'profile-fallback' = p_credential_slot"
         );
+        expect(reserve).toMatch(
+            /analysis_request\.selected_plan_id_snapshot\s*=\s*entitlement_consumption\.selected_plan_id/
+        );
+        expect(reserve).toContain('analysis_request.preflight_id = preflight.id');
         expect(reserve).toContain("preflight.status = 'consumed'");
         expect(reserve).toContain('preflight.pii_scrubbed_at IS NOT NULL');
         expect(reserve).not.toContain(
@@ -168,6 +190,9 @@ describe('profile repair canary journal migration contract', () => {
     });
 
     it('keeps both corrected RPCs service-role-only', () => {
+        expect(sourcePolicyFixMigration).toContain(
+            'DROP FUNCTION public.load_analysis_v2_profile_repair_canary_source(UUID, UUID, TEXT);'
+        );
         expect(sourcePolicyFixMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.load_analysis_v2_profile_repair_canary_source\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
         );

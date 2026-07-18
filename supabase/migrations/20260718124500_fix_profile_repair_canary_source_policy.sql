@@ -2,10 +2,13 @@
 -- tombstones. Authorize the one-off repair canary from the immutable, pre-dispatch test policy
 -- and its reciprocal entitlement lineage instead of retaining or restoring scrubbed PII.
 
+DROP FUNCTION public.load_analysis_v2_profile_repair_canary_source(UUID, UUID, TEXT);
+
 CREATE OR REPLACE FUNCTION public.load_analysis_v2_profile_repair_canary_source(
     p_source_request_id UUID,
     p_owner_id UUID,
-    p_owner_email TEXT
+    p_owner_email TEXT,
+    p_credential_slot TEXT
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -22,7 +25,10 @@ BEGIN
        OR p_owner_id IS NULL
        OR p_owner_email IS NULL
        OR pg_catalog.btrim(p_owner_email) = ''
-       OR pg_catalog.char_length(p_owner_email) > 255 THEN
+       OR pg_catalog.char_length(p_owner_email) > 255
+       OR p_credential_slot NOT IN (
+            'primary', 'secondary', 'tertiary', 'quaternary', 'quinary'
+       ) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'PROFILE_REPAIR_CANARY_SOURCE_INVALID',
             ERRCODE = 'P0001';
@@ -45,6 +51,9 @@ BEGIN
       AND analysis_request.pipeline_version = 'v2'
       AND analysis_request.status = 'failed'
       AND analysis_request.plan_access_mode_snapshot = 'test_entitlement'
+      AND analysis_request.selected_plan_id_snapshot =
+            entitlement_consumption.selected_plan_id
+      AND analysis_request.preflight_id = preflight.id
       AND analysis_request.test_entitlement_jti_hash =
             execution_policy.entitlement_jti_hash
       AND analysis_request.test_entitlement_jti_hash =
@@ -56,6 +65,7 @@ BEGIN
       AND execution_policy.mode = 'test_operation_split'
       AND execution_policy.policy_version = 'authorized-free-e2e-v1'
       AND execution_policy.target_instagram_id = '0_min._.00'
+      AND execution_policy.operation_slot_map->>'profile-fallback' = p_credential_slot
       AND entitlement_consumption.user_id = analysis_request.user_id
       AND entitlement_consumption.selected_plan_id = 'standard'
       AND preflight.user_id = analysis_request.user_id
@@ -66,7 +76,15 @@ BEGIN
       AND preflight.target_instagram_id =
             'retained.' || pg_catalog.substr(
                 pg_catalog.replace(preflight.id::TEXT, '-', ''), 1, 20
-            );
+            )
+      AND NOT EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_provider_runs AS provider_run
+            WHERE provider_run.request_id = analysis_request.id
+              AND provider_run.job_key ~ '^track:profiles:batch:(?:0|[1-9][0-9]{0,2})$'
+              AND provider_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$'
+              AND provider_run.credential_slot IS DISTINCT FROM p_credential_slot
+      );
     IF NOT FOUND THEN
         RAISE EXCEPTION USING
             MESSAGE = 'PROFILE_REPAIR_CANARY_SOURCE_NOT_FOUND',
@@ -96,7 +114,8 @@ BEGIN
     FROM public.analysis_v2_provider_runs AS provider_run
     WHERE provider_run.request_id = p_source_request_id
       AND provider_run.job_key ~ '^track:profiles:batch:(?:0|[1-9][0-9]{0,2})$'
-      AND provider_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$';
+      AND provider_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$'
+      AND provider_run.credential_slot = p_credential_slot;
 
     RETURN pg_catalog.jsonb_build_object(
         'request', pg_catalog.jsonb_build_object(
@@ -113,10 +132,10 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.load_analysis_v2_profile_repair_canary_source(
-    UUID, UUID, TEXT
+    UUID, UUID, TEXT, TEXT
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.load_analysis_v2_profile_repair_canary_source(
-    UUID, UUID, TEXT
+    UUID, UUID, TEXT, TEXT
 ) TO service_role;
 
 CREATE OR REPLACE FUNCTION public.reserve_analysis_v2_profile_repair_canary_run(
@@ -159,6 +178,9 @@ BEGIN
       AND analysis_request.pipeline_version = 'v2'
       AND analysis_request.status = 'failed'
       AND analysis_request.plan_access_mode_snapshot = 'test_entitlement'
+      AND analysis_request.selected_plan_id_snapshot =
+            entitlement_consumption.selected_plan_id
+      AND analysis_request.preflight_id = preflight.id
       AND analysis_request.test_entitlement_jti_hash =
             execution_policy.entitlement_jti_hash
       AND analysis_request.test_entitlement_jti_hash =
@@ -182,6 +204,14 @@ BEGIN
             'retained.' || pg_catalog.substr(
                 pg_catalog.replace(preflight.id::TEXT, '-', ''), 1, 20
             )
+      AND NOT EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_provider_runs AS provider_run
+            WHERE provider_run.request_id = analysis_request.id
+              AND provider_run.job_key ~ '^track:profiles:batch:(?:0|[1-9][0-9]{0,2})$'
+              AND provider_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$'
+              AND provider_run.credential_slot IS DISTINCT FROM p_credential_slot
+      )
     FOR UPDATE OF analysis_request;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING

@@ -80,10 +80,11 @@ must contain the fixed authorized target and its `profile-fallback` slot must ma
 credential slot. A missing or conflicting policy, consumption, preflight link, or tombstone blocks
 both replay and journal reservation; early-bird orders and result heuristics are not substitutes.
 
-Before any paid invocation, review and apply
-`20260718123000_add_profile_repair_canary_journal.sql` through the ordered migration path and review
-the exact script SHA. First run the command without `--confirm-paid-api-call`, supplying exactly one
-`--source-request-id`, `--critical-job-key`, and explicit `--credential-slot`. This default replay
+Before any replay or paid invocation, review and apply
+`20260718123000_add_profile_repair_canary_journal.sql` followed by
+`20260718124500_fix_profile_repair_canary_source_policy.sql` through the ordered migration path and
+review the exact script SHA. First run the command without `--confirm-paid-api-call`, supplying
+exactly one `--source-request-id`, `--critical-job-key`, and explicit `--credential-slot`. This default replay
 must make zero new Actor starts and zero journal writes. It must reconstruct the inputs only from
 the eight succeeded source `profile-fallback` jobs, verify their stored Actor and credential slot,
 and report exactly 15 unique incomplete usernames including the critical batch member. Output is

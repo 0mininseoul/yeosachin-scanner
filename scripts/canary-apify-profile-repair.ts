@@ -82,6 +82,7 @@ interface LoadSourceInput {
     sourceRequestId: string;
     ownerId: string;
     ownerEmail: string;
+    credentialSlot: ApifyCredentialSlot;
 }
 
 export interface ProfileRepairCanaryDependencies {
@@ -522,6 +523,7 @@ export async function runProfileRepairCanary(
             sourceRequestId: options.sourceRequestId,
             ownerId: operator.ownerId,
             ownerEmail: operator.ownerEmail,
+            credentialSlot: options.credentialSlot,
         }),
         options,
         operator.ownerId,
@@ -594,6 +596,7 @@ async function defaultLoadSource(input: LoadSourceInput): Promise<unknown> {
             p_source_request_id: input.sourceRequestId,
             p_owner_id: input.ownerId,
             p_owner_email: input.ownerEmail,
+            p_credential_slot: input.credentialSlot,
         }
     );
     if (error) {

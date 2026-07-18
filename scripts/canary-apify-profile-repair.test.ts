@@ -351,6 +351,12 @@ describe('profile repair canary source replay', () => {
             gate_passed: false,
         });
         expect(setup.actorStart).not.toHaveBeenCalled();
+        expect(setup.deps.loadSource).toHaveBeenCalledWith({
+            sourceRequestId: SOURCE_REQUEST_ID,
+            ownerId: OWNER_ID,
+            ownerEmail: OWNER_EMAIL,
+            credentialSlot: SLOT,
+        });
         expect(store.load).not.toHaveBeenCalled();
         expect(store.reserve).not.toHaveBeenCalled();
         expect(store.terminalize).not.toHaveBeenCalled();
