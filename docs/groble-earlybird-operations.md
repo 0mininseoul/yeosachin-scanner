@@ -68,6 +68,8 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 
 **2026-07-19 reconcile 완료.** 위 6개 migration이 production에 모두 적용된 것을 읽기 전용 history 비교로 확인했다. 따라서 exact-six freeze는 해제하고, contract는 여섯 파일이 기준선 직후에 표와 같은 순서로 연속해 존재하는지만 고정한다. 기준선 뒤에 추가되는 ordinary migration은 아래 1~8단계 release gate를 그대로 따르는 조건으로 허용한다. 이 reconcile 시점의 적용 head는 `20260719160000_add_landing_leads.sql`이다.
 
+이 reconcile 이후 2026-07-19 hotfix migration 1건이 추가되었다. 아래 1~8단계를 적용할 때는 이 절 마지막의 hotfix 항목을 함께 읽는다.
+
 1. 읽기 전용 확인으로 `npx supabase migration list --linked`를 실행하고 local/remote history를 비교한다.
 2. 적용 전 일반 push 미리보기로 `npx supabase db push --dry-run`를 실행한다.
 3. dry-run 출력은 정확히 위 6개 migration만 표시하고 예상하지 않은 파일이 없어야 하며, 순서도 표와 일치해야 한다.
@@ -80,6 +82,32 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 `--include-all`은 절대 사용하지 않는다. DB migration은 application 배포 전에 먼저 적용한다. migration 적용 후 DB schema, RPC signature, service-role ACL을 검증한 다음 application을 배포한다. 이 개발 작업에서는 승인된 운영 절차를 문서화만 하며 `npx supabase db push`를 실행하지 않는다.
 
 여섯 파일은 모두 `lock_timeout = '5s'`와 `statement_timeout = '2min'`으로 제한한다. 1번이 커밋될 때 기존 주문만 `legacy_email`로 고정되고, 이후 모든 주문 INSERT는 RPC 버전과 무관하게 trigger를 통과한다. INSERT 순간 사용자의 Kakao REST 검증 시각이 24시간을 넘었거나 provenance가 불완전하면 `CHECKOUT_PHONE_REQUIRED`로 중단하며, caller가 제공한 주문 매칭 값을 신뢰하지 않는다. 이전 사용자 writer가 검증 시각 없이 raw 전화번호를 바꾸면 DB trigger가 normalized 값과 provenance를 제거한다. 3번은 legacy raw 전화번호나 기존 주문을 전화번호 후보로 승격하지 않는다. 생성된 주문의 정책, normalized 전화번호, 출처, 검증 시각은 UPDATE할 수 없다. 6번의 별도 fence는 연락처 호환 컬럼에만 INSERT·UPDATE 모두 적용된다.
+
+### 2026-07-19 hotfix: 정규화 helper의 service_role EXECUTE 복구
+
+추가로 적용할 파일은 `20260719170000_restore_groble_phone_normalizer_service_role_execute.sql` 1개다.
+
+위 1번 migration이 `public.users`에 `users_phone_number_provenance_check`를 추가하면서, 같은 파일에서 정규화 helper의 EXECUTE를 `service_role`에서까지 회수했다. CHECK 제약은 SECURITY DEFINER 경계 없이 DML을 실행한 role로 평가되고 Postgres는 이 제약의 OR 분기를 단축 평가하지 않는다. 그 결과 `service_role`의 `public.users` 쓰기가 provider와 전화번호 유무를 가리지 않고 전부 42501로 실패했다. `/auth/callback`의 카카오 프로필 동기화뿐 아니라 `/api/user/me`의 사용자 행 생성·갱신도 함께 막혔고, 얼리버드 Basic 결제의 `CHECKOUT_PHONE_REQUIRED`는 그 2차 증상이다.
+
+위 3번 항목의 "정확히 6개"는 완료된 rollout에 대한 기준이다. 이 hotfix를 적용할 때 dry-run 출력은 위 1개 파일만 표시해야 하며, 그 밖의 파일이 보이면 중단한다. 나머지 단계는 그대로 따른다. 이 파일은 권한 부여 한 줄뿐이라 테이블을 잠그지 않지만 timeout 제한은 동일하게 둔다.
+
+7번 검증은 다음 읽기 전용 조회로 수행한다. 개인정보 값은 조회하지 않는다.
+
+```sql
+SELECT pg_catalog.has_function_privilege(
+           'service_role', 'public.normalize_kr_mobile_e164(text)', 'EXECUTE'
+       ) AS service_role,
+       pg_catalog.has_function_privilege(
+           'anon', 'public.normalize_kr_mobile_e164(text)', 'EXECUTE'
+       ) AS anon,
+       pg_catalog.has_function_privilege(
+           'authenticated', 'public.normalize_kr_mobile_e164(text)', 'EXECUTE'
+       ) AS authenticated;
+```
+
+`service_role`은 `true`, `anon`과 `authenticated`는 `false`여야 한다. 하나라도 다르면 배포를 중단한다.
+
+배포 후 확인은 카카오 로그인의 전화번호 저장과 구글 로그인의 사용자 행 생성을 모두 포함한다. 카카오 경로만 확인하면 `/api/user/me` 경로의 회복을 놓친다. 사용자 행 확인은 집계로만 하고 전화번호 원문과 이메일은 조회하거나 로그에 남기지 않는다.
 
 advisory lock의 전역 순서는 rolling wrapper의 `payment -> product -> user ID 오름차순`, checkout과 직접 INSERT trigger 경로의 `product -> user`이다. product key는 모든 경로에서 `earlybird:groble:product:<product_id>`를 같은 방식으로 hash한다. checkout RPC가 INSERT trigger에 진입할 때 같은 transaction의 product lock을 다시 얻는 것은 reentrant이며, service-role 직접 INSERT도 trigger가 snapshot 조회 전에 product lock을 얻으므로 wrapper의 product-wide 판정 사이에 verified 주문을 끼워 넣을 수 없다. canonical 12개 인자 호출은 기존 `payment -> user` 순서를 유지한다. wrapper는 duplicate payment의 기존 주문 owner도 초기 sorted user set에 포함하므로 canonical로 위임할 때 payment와 해당 user lock을 같은 transaction에서 재진입하며, 다른 상품 wrapper와도 user lock 순서가 뒤집히지 않는다.
 

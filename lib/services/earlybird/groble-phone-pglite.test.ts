@@ -74,6 +74,12 @@ CREATE TABLE public.users (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
 
+-- 운영 Supabase 는 public schema table 의 DML 을 service_role 에 부여하고,
+-- 20260714020318 은 PUBLIC/anon/authenticated 에서만 회수했다. 시드를 superuser 로
+-- 넣으면 invoker 권한으로 평가되는 CHECK 제약을 한 번도 밟지 않으므로 이 grant 를
+-- 재현해 두고, 사용자 시드는 service_role 로 쓴다.
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.users TO service_role;
+
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.users(id),
@@ -182,8 +188,9 @@ async function createDatabaseBeforePhoneMigration(): Promise<PGlite> {
     return database;
 }
 
+// 현행 production migration 집합 = 6개 rollout + normalizer EXECUTE 복구.
 async function applyPhoneMigrations(database: PGlite): Promise<void> {
-    for (const migration of phoneMigrations) {
+    for (const migration of [...phoneMigrations, normalizerGrantMigration]) {
         await database.exec(migration);
     }
 }
@@ -235,7 +242,9 @@ async function seedPreflight(
         phone,
         rawPhone: unnormalized,
     };
-    await db.query(
+    // 운영과 같은 service-role 경로로 쓴다. superuser 로 넣으면 users 의
+    // invoker-context CHECK 제약 회귀를 이 suite 가 다시 놓친다.
+    await asService(
         `INSERT INTO public.users (
             id, email, provider, phone_number, phone_number_normalized,
             phone_number_verification_source, phone_number_verified_at
@@ -2176,14 +2185,18 @@ describe('Groble phone normalizer service-role execute', () => {
         normalized_matches_raw: boolean | null;
     }
 
+    // 복구 migration 없이 6개 rollout 만 적용한, 장애 당시의 production 상태.
+    async function createDatabaseWithRolloutOnly(): Promise<PGlite> {
+        const database = await createDatabaseBeforePhoneMigration();
+        for (const migration of phoneMigrations) {
+            await database.exec(migration);
+        }
+        return database;
+    }
+
     async function createDatabaseAfterPhoneRollout(): Promise<PGlite> {
         const database = await createDatabaseBeforePhoneMigration();
         await applyPhoneMigrations(database);
-        // 운영 Supabase 는 public schema table 의 DML 을 service_role 에 부여한다.
-        // bootstrap 은 이를 재현하지 않으므로 여기서 명시적으로 맞춘다.
-        await database.exec(
-            'GRANT SELECT, INSERT, UPDATE ON public.users TO service_role'
-        );
         return database;
     }
 
@@ -2217,12 +2230,28 @@ describe('Groble phone normalizer service-role execute', () => {
         );
     }
 
-    it('leaves the service-role user write denied when only the rollout is applied', async () => {
-        const database = await createDatabaseAfterPhoneRollout();
+    // Postgres 는 이 CHECK 의 OR 분기를 단축 평가하지 않는다. 그래서 전화번호 필드가
+    // 전혀 없는 행까지, 즉 provider 와 무관한 모든 service-role users 쓰기가 막혔다.
+    it.each([
+        {
+            name: 'a Kakao phone upsert',
+            run: (database: PGlite) => upsertVerifiedKakaoPhoneAsService(database, 940),
+        },
+        {
+            name: 'a Google signup carrying no phone fields',
+            run: (database: PGlite) => asServiceOn(
+                database,
+                `INSERT INTO public.users (id, email, provider)
+                 VALUES ($1, 'rollout-only-941@example.com', 'google')`,
+                [uuid(USER_NAMESPACE, 941)]
+            ),
+        },
+    ])('leaves $name denied when only the rollout is applied', async ({ run }) => {
+        const database = await createDatabaseWithRolloutOnly();
         try {
-            await expect(
-                upsertVerifiedKakaoPhoneAsService(database, 940)
-            ).rejects.toMatchObject({ code: '42501' });
+            await expect(run(database)).rejects.toThrow(
+                /permission denied for function normalize_kr_mobile_e164/
+            );
         } finally {
             await database.close();
         }
@@ -2231,8 +2260,6 @@ describe('Groble phone normalizer service-role execute', () => {
     it('lets the service-role auth callback persist a verified Kakao phone', async () => {
         const database = await createDatabaseAfterPhoneRollout();
         try {
-            await database.exec(normalizerGrantMigration);
-
             await expect(
                 upsertVerifiedKakaoPhoneAsService(database, 941)
             ).resolves.toBeDefined();
@@ -2265,11 +2292,46 @@ describe('Groble phone normalizer service-role execute', () => {
         }
     });
 
+    // /api/user/me 의 사용자 행 생성·갱신도 같은 invoker-context 제약을 지나간다.
+    it('lets the service role create and update rows that carry no phone at all', async () => {
+        const database = await createDatabaseAfterPhoneRollout();
+        try {
+            const userId = uuid(USER_NAMESPACE, 943);
+
+            await expect(asServiceOn(
+                database,
+                `INSERT INTO public.users (id, email, provider)
+                 VALUES ($1, 'no-phone-943@example.com', 'google')`,
+                [userId]
+            )).resolves.toBeDefined();
+
+            await expect(asServiceOn(
+                database,
+                `UPDATE public.users SET email = $2 WHERE id = $1`,
+                [userId, 'no-phone-943-renamed@example.com']
+            )).resolves.toBeDefined();
+
+            const stored = (await database.query<{
+                provider: string;
+                phone_number_normalized: string | null;
+            }>(
+                `SELECT provider, phone_number_normalized
+                 FROM public.users WHERE id = $1`,
+                [userId]
+            )).rows[0];
+
+            expect(stored).toEqual({
+                provider: 'google',
+                phone_number_normalized: null,
+            });
+        } finally {
+            await database.close();
+        }
+    });
+
     it('grants execute to service_role without reaching anon or authenticated', async () => {
         const database = await createDatabaseAfterPhoneRollout();
         try {
-            await database.exec(normalizerGrantMigration);
-
             const privileges = (await database.query<Record<string, boolean>>(
                 `SELECT
                     pg_catalog.has_function_privilege(
@@ -2302,8 +2364,6 @@ describe('Groble phone normalizer service-role execute', () => {
     it('still refuses an unverified checkout after the grant', async () => {
         const database = await createDatabaseAfterPhoneRollout();
         try {
-            await database.exec(normalizerGrantMigration);
-
             const userId = uuid(USER_NAMESPACE, 942);
             const preflightId = uuid(PREFLIGHT_NAMESPACE, 942);
             // Kakao REST 검증 provenance 가 없는 사용자.

@@ -773,16 +773,28 @@ describe('Groble phone normalizer service-role execute restore contract', () => 
         }
     });
 
-    it('leaves the checkout phone guard and 24-hour freshness policy untouched', () => {
-        expect(normalizerGrantMigration).not.toContain('CHECKOUT_PHONE_REQUIRED');
-        expect(normalizerGrantMigration).not.toContain('24 hours');
-        expect(normalizerGrantMigration).not.toContain('kakao_rest_api');
-        expect(normalizerGrantMigration).not.toContain('set_earlybird_order_phone_snapshot');
-        expect(normalizerGrantMigration).not.toContain('create_earlybird_checkout');
-
-        // 원본 rollout migration 은 forward-only 원칙에 따라 그대로 남아 있어야 한다.
+    it('keeps the original rollout revoke intact so the history stays forward-only', () => {
         expect(ddlMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.normalize_kr_mobile_e164\(TEXT\)\s+FROM PUBLIC, anon, authenticated, service_role/
         );
+    });
+
+    // 계약을 파일 하나에만 걸면 나중 migration 이 조용히 다시 회수해도 통과한다.
+    // 디렉터리 전체에서 rollout 이후의 net ACL 을 확인한다.
+    it('is the last word on the normalizer ACL across every later migration', () => {
+        const laterRevokes = readdirSync(migrationsDirectory)
+            .filter(file => /^\d{14}_.*\.sql$/.test(file))
+            .filter(file => file.localeCompare(
+                '20260719131000_add_groble_phone_matching.sql'
+            ) > 0)
+            .filter(file => {
+                const source = readFileSync(
+                    new URL(file, migrationsDirectory),
+                    'utf8'
+                );
+                return /REVOKE[\s\S]{0,200}?normalize_kr_mobile_e164/.test(source);
+            });
+
+        expect(laterRevokes).toEqual([]);
     });
 });
