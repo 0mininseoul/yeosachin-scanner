@@ -563,7 +563,7 @@ export default function AnalyzePage() {
                                         계정 규모에 맞는 플랜이에요
                                     </h2>
                                     <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-                                        전체 플랜을 비교해보고, 계정에 맞는 적격 플랜으로 진행하세요.
+                                        전체 플랜을 비교해보고, 계정에 맞는 이용 가능한 플랜으로 진행하세요.
                                     </p>
 
                                     <fieldset className="mt-5 space-y-3">
@@ -603,7 +603,7 @@ export default function AnalyzePage() {
                                                                 </span>
                                                                 {plan.selectionState === 'required' && (
                                                                     <span className="border border-blood/50 bg-blood/10 px-1.5 py-0.5 text-[10px] font-bold text-blood">
-                                                                        적격 플랜
+                                                                        이용 가능
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -631,7 +631,7 @@ export default function AnalyzePage() {
                                                                 {presentation.priceLabel}
                                                             </span>
                                                             {presentation.discountLabel && (
-                                                                <span className="border border-blood bg-blood/10 px-2 py-1 text-[13px] font-extrabold text-blood">
+                                                                <span className="self-center border border-blood bg-blood/10 px-2 py-[3px] text-[13px] font-extrabold leading-none text-blood">
                                                                     {presentation.discountLabel}↓
                                                                 </span>
                                                             )}
@@ -654,7 +654,7 @@ export default function AnalyzePage() {
                                                     ) : !available ? (
                                                         <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-medium text-fg-mute">
                                                             {plan.unavailableReason === 'below_required_plan'
-                                                                ? '이 계정 규모의 적격 플랜이 아니에요.'
+                                                                ? '이 계정 규모에서는 이용 가능한 플랜이 아니에요.'
                                                                 : '아직 오픈 전인 플랜이에요.'}
                                                         </p>
                                                     ) : null}
@@ -694,6 +694,7 @@ export default function AnalyzePage() {
                                     <div className="mt-5">
                                         <PrimaryButton
                                             onClick={handleEarlybirdAction}
+                                            size="lg"
                                             disabled={
                                                 !effectiveSelectedPlan
                                                 || purchaseSubmitting
@@ -712,7 +713,7 @@ export default function AnalyzePage() {
                                                     : !effectiveSelectedPlan
                                                         ? '플랜을 선택해주세요'
                                                         : !selectedPlanAvailable
-                                                            ? '적격 플랜을 선택해주세요'
+                                                            ? '이용 가능한 플랜을 선택해주세요'
                                                             : buildEarlybirdPlanPresentation(
                                                                 effectiveSelectedPlan
                                                             ).actionLabel}

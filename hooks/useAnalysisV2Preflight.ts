@@ -601,7 +601,7 @@ export function useAnalysisV2Preflight() {
                             if (updated && scope.isCurrent()) {
                                 setPreflight(updated);
                                 setError(
-                                    '계정 규모가 변경되어 적격 플랜을 다시 계산했습니다. '
+                                    '계정 규모가 변경되어 이용 가능한 플랜을 다시 계산했습니다. '
                                     + '새 플랜을 선택해주세요.'
                                 );
                                 return null;
