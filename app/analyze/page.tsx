@@ -147,6 +147,8 @@ export default function AnalyzePage() {
             return;
         }
 
+        // PREFILL_ONLY_NO_AUTOSTART: 로그인 후 아이디를 입력창에 채우기만 하고, 유료 preflight
+        // 조회는 유저가 "대상 계정 확인하기"를 눌러 handleStartPreflight 가 실행될 때만 시작한다.
         let pending: string | null = null;
         if (shouldAutostart) {
             try {
@@ -164,23 +166,8 @@ export default function AnalyzePage() {
         if (!shouldAutostart || !pending) return;
         if (!user) {
             router.replace('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');
-            return;
         }
-
-        void (async () => {
-            const accepted = await startPreflight(pending);
-            if (!accepted) {
-                clearPendingAnalysisTarget(sessionStorage);
-                return;
-            }
-            bindPendingAnalysisTarget(sessionStorage, {
-                ownerId: user.id,
-                preflightId: accepted.preflightId,
-                target: pending,
-            });
-            router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
-        })();
-    }, [authLoading, resumePreflight, router, startPreflight, user]);
+    }, [authLoading, resumePreflight, router, user]);
 
     const handleStartPreflight = async () => {
         if (!user) {
