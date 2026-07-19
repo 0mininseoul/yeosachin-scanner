@@ -40,7 +40,7 @@ const paymentCompletedSchema = z.object({
             }),
             pricing: z.object({
                 currency: z.literal('KRW'),
-                finalAmount: z.number().int().positive().max(1_000_000_000),
+                finalAmount: z.number().int().min(0).max(1_000_000_000),
             }),
             payment: z.object({
                 purchasedAt: isoTimestamp,
@@ -67,7 +67,7 @@ const paymentCancelRequestedSchema = z.object({
             }),
             pricing: z.object({
                 currency: z.literal('KRW'),
-                finalAmount: z.number().int().positive().max(1_000_000_000),
+                finalAmount: z.number().int().min(0).max(1_000_000_000),
             }),
             cancelRequest: z.object({
                 requestedBy: z.literal('BUYER'),
