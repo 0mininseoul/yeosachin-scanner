@@ -210,6 +210,7 @@ export interface ReadyPreflightSnapshot {
         unavailableReason: 'below_required_plan' | 'launch_gate' | null;
         pricingVersion: string;
         price: PlanQuoteV1['price'];
+        remainingSlots?: number | null;
     }>;
     pricingVersion: string;
 }
@@ -881,7 +882,8 @@ function assertProfileCounts(profile: InstagramProfile): void {
 export function buildReadyPreflightSnapshot(
     profile: InstagramProfile,
     accessMode: PlanAccessMode,
-    catalogSnapshot: PreflightCatalogSnapshot = currentPreflightCatalogSnapshot()
+    catalogSnapshot: PreflightCatalogSnapshot = currentPreflightCatalogSnapshot(),
+    remainingSlotsByPlan: Partial<Record<PlanId, number>> = {}
 ): ReadyPreflightSnapshot | AnalysisV2ErrorCode {
     assertProfileCounts(profile);
     const username = profile.username.toLowerCase();
@@ -922,6 +924,7 @@ export function buildReadyPreflightSnapshot(
         plans: PLAN_IDS.map((planId, index) => {
             const plan = catalogSnapshot.plans[planId];
             const card = cards[index];
+            const remainingSlots = remainingSlotsByPlan[planId];
             return {
                 planId,
                 launchStatus: card.launchStatus,
@@ -931,6 +934,7 @@ export function buildReadyPreflightSnapshot(
                 unavailableReason: card.unavailableReason,
                 pricingVersion: catalogSnapshot.pricingVersion,
                 price: { ...catalogSnapshot.prices[planId] },
+                ...(planId !== 'plus' && remainingSlots !== undefined ? { remainingSlots } : {}),
             };
         }),
         pricingVersion: catalogSnapshot.pricingVersion,

@@ -1017,3 +1017,32 @@ describe('preflight public mapping', () => {
         })).toThrow('test entitlement mode is disabled');
     });
 });
+
+describe('buildReadyPreflightSnapshot remaining slots', () => {
+    it('applies injected remaining slot counts to basic and standard only', () => {
+        const snapshot = buildReadyPreflightSnapshot(
+            profile(),
+            'test_entitlement',
+            undefined,
+            { basic: 3, standard: 0, plus: 99 }
+        ) as ReadyPreflightSnapshot;
+
+        expect(snapshot.plans.find(plan => plan.planId === 'basic'))
+            .toMatchObject({ remainingSlots: 3 });
+        expect(snapshot.plans.find(plan => plan.planId === 'standard'))
+            .toMatchObject({ remainingSlots: 0 });
+        expect(snapshot.plans.find(plan => plan.planId === 'plus'))
+            .not.toHaveProperty('remainingSlots');
+    });
+
+    it('omits remaining slots entirely when none are supplied', () => {
+        const snapshot = buildReadyPreflightSnapshot(
+            profile(),
+            'test_entitlement'
+        ) as ReadyPreflightSnapshot;
+
+        snapshot.plans.forEach(plan => {
+            expect(plan).not.toHaveProperty('remainingSlots');
+        });
+    });
+});
