@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createAnalysisTestAdmission } from '@/lib/services/analysis/test-entitlement';
+import { parseConfirmedAnalysisTestIssuerArgs } from './analysis-test-issuer-options';
 
 interface Arguments {
     userId: string;
@@ -10,27 +11,21 @@ interface Arguments {
 function usage(): never {
     throw new Error(
         'Usage: npm run test-admission:issue -- '
-        + '--user <uuid> --target <instagram-id> --idempotency-key <16-128 safe chars>'
+        + '--user <uuid> --target <instagram-id> --idempotency-key <16-128 safe chars> '
+        + '--confirm-paid-api-call'
     );
 }
 
 function parseArguments(argv: string[]): Arguments {
-    const values = new Map<string, string>();
-    for (let index = 0; index < argv.length; index += 2) {
-        const key = argv[index];
-        const value = argv[index + 1];
-        if (!key?.startsWith('--') || !value || value.startsWith('--')) usage();
-        if (values.has(key)) usage();
-        values.set(key, value);
-    }
-    if (
-        values.size !== 3
-        || !values.has('--user')
-        || !values.has('--target')
-        || !values.has('--idempotency-key')
-    ) {
-        usage();
-    }
+    const values = (() => {
+        try {
+            return parseConfirmedAnalysisTestIssuerArgs(argv, [
+                '--user', '--target', '--idempotency-key',
+            ]);
+        } catch {
+            return usage();
+        }
+    })();
     return {
         userId: values.get('--user')!,
         targetInstagramId: values.get('--target')!,

@@ -47,11 +47,18 @@ describe('Vercel WIF operations guide contract', () => {
 
     it('documents the signed canary path without opening public admission', () => {
         const canary = guide.slice(guide.indexOf('### 공개 admission 전 signed canary'));
+        const commandBlock = (command: string): string => {
+            const start = canary.indexOf(command);
+            const end = canary.indexOf('```', start);
+            return canary.slice(start, end);
+        };
 
         expect(canary).toContain('npm run test-admission:issue');
         expect(canary).toContain('X-Analysis-Test-Admission');
         expect(canary).toContain('npm run test-entitlement:issue');
         expect(canary).toContain('X-Analysis-Test-Entitlement');
+        expect(commandBlock('npm run test-admission:issue')).toContain('--confirm-paid-api-call');
+        expect(commandBlock('npm run test-entitlement:issue')).toContain('--confirm-paid-api-call');
         expect(canary).toContain('ANALYSIS_V2_ADMISSION_ENABLED=false');
         expect(canary).toContain('서명 domain이 분리');
     });
