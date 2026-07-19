@@ -207,7 +207,8 @@ Cloud Run runtime/build env manifest는 문자열 검색이 아니라 Node ENV p
 npm run test-admission:issue -- \
   --user USER_UUID \
   --target TARGET_INSTAGRAM_ID \
-  --idempotency-key CANARY_IDEMPOTENCY_KEY
+  --idempotency-key CANARY_IDEMPOTENCY_KEY \
+  --confirm-paid-api-call
 ```
 
 3. 같은 사용자의 로그인 세션으로 `POST /api/analysis/preflight`를 호출하며,
@@ -221,14 +222,17 @@ npm run test-admission:issue -- \
 npm run test-entitlement:issue -- \
   --preflight PREFLIGHT_UUID \
   --user USER_UUID \
-  --plan basic
+  --plan basic \
+  --confirm-paid-api-call
 ```
 
 5. 같은 로그인 세션으로 `POST /api/analysis/preflight/PREFLIGHT_UUID/entitle`를
    호출하고 `X-Analysis-Test-Entitlement`에 두 번째 토큰을 넣는다. 이 route는
    유효한 user, preflight, plan 서명이 있을 때만 공개 admission gate를 바이패스한다.
 
-두 토큰은 서명 domain이 분리되어 서로 바꿔 사용할 수 없다. canary 중에도
+두 issuer 모두 정확히 한 번의 값 없는 `--confirm-paid-api-call`을 요구한다. 이 확인이
+없으면 usable token, preflight, request, provider start가 생기지 않는다. 두 토큰은 서명 domain이 분리되어
+서로 바꿔 사용할 수 없다. canary 중에도
 `ANALYSIS_V2_ADMISSION_ENABLED=false`이므로 서명 토큰이 없는 일반 로그인
 사용자의 preflight와 분석 시작은 계속 503으로 차단된다.
 

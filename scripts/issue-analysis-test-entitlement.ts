@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createAnalysisTestEntitlement } from '@/lib/services/analysis/test-entitlement';
+import { parseConfirmedAnalysisTestIssuerArgs } from './analysis-test-issuer-options';
 
 interface Arguments {
     preflightId: string;
@@ -9,27 +10,21 @@ interface Arguments {
 
 function usage(): never {
     throw new Error(
-        'Usage: npm run test-entitlement:issue -- --preflight <uuid> --user <uuid> --plan <basic|standard|plus>'
+        'Usage: npm run test-entitlement:issue -- --preflight <uuid> --user <uuid> '
+        + '--plan <basic|standard|plus> --confirm-paid-api-call'
     );
 }
 
 function parseArguments(argv: string[]): Arguments {
-    const values = new Map<string, string>();
-    for (let index = 0; index < argv.length; index += 2) {
-        const key = argv[index];
-        const value = argv[index + 1];
-        if (!key?.startsWith('--') || !value || value.startsWith('--')) usage();
-        if (values.has(key)) usage();
-        values.set(key, value);
-    }
-    if (
-        values.size !== 3
-        || !values.has('--preflight')
-        || !values.has('--user')
-        || !values.has('--plan')
-    ) {
-        usage();
-    }
+    const values = (() => {
+        try {
+            return parseConfirmedAnalysisTestIssuerArgs(argv, [
+                '--preflight', '--user', '--plan',
+            ]);
+        } catch {
+            return usage();
+        }
+    })();
     const planId = values.get('--plan');
     if (planId !== 'basic' && planId !== 'standard' && planId !== 'plus') usage();
     return {
