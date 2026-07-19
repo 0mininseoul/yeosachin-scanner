@@ -27,7 +27,6 @@ import {
     type PlanId,
 } from '@/lib/domain/analysis/plan-catalog';
 import {
-    PAID_EARLYBIRD_PLAN_IDS,
     isPaidEarlybirdPlanId,
     type PaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
@@ -432,26 +431,6 @@ function currentPreflightCatalogSnapshot(): PreflightCatalogSnapshot {
         pricingVersion: PLAN_PRICING_VERSION,
         prices: pricingSnapshot(),
     };
-}
-
-export async function fetchEarlybirdRemainingSlots(): Promise<Partial<Record<PlanId, number>>> {
-    try {
-        const { data, error } = await supabaseAdmin
-            .from('earlybird_plan_inventory')
-            .select('plan_id, sale_limit, sold_count')
-            .in('plan_id', PAID_EARLYBIRD_PLAN_IDS);
-        if (error || !data) return {};
-        return Object.fromEntries(
-            data
-                .filter((row): row is { plan_id: PaidEarlybirdPlanId; sale_limit: number; sold_count: number } =>
-                    PAID_EARLYBIRD_PLAN_IDS.some(planId => planId === row.plan_id)
-                    && Number.isSafeInteger(row.sale_limit)
-                    && Number.isSafeInteger(row.sold_count))
-                .map(row => [row.plan_id, Math.max(0, row.sale_limit - row.sold_count)])
-        );
-    } catch {
-        return {};
-    }
 }
 
 function planCardsSnapshot(
@@ -1282,7 +1261,7 @@ export function acceptedPreflightDto(created: CreatedPreflight): PreflightAccept
 
 export function publicPreflightStatusDto(
     stored: StoredPreflight,
-    remainingSlotsByPlan: Partial<Record<PlanId, number>> = {},
+    remainingSlotsByPlan: Partial<Record<PaidEarlybirdPlanId, number>> = {},
     imageProxyPath: typeof createImageProxyPath = createImageProxyPath,
     nowMs = Date.now()
 ): PreflightStatusV1 {
@@ -1328,8 +1307,9 @@ export function publicPreflightStatusDto(
         capacityRequiredPlan: snapshot.capacityRequiredPlan,
         requiredPlan: snapshot.requiredPlan,
         plans: snapshot.plans.map(plan => {
+            if (!isPaidEarlybirdPlanId(plan.planId)) return plan;
             const remainingSlots = remainingSlotsByPlan[plan.planId];
-            return isPaidEarlybirdPlanId(plan.planId) && remainingSlots !== undefined
+            return remainingSlots !== undefined
                 ? { ...plan, remainingSlots }
                 : plan;
         }),

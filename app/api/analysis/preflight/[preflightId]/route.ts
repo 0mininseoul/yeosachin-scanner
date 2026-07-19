@@ -10,10 +10,10 @@ import {
     PreflightExpiredError,
     PreflightImmutableError,
     PreflightNotFoundError,
-    fetchEarlybirdRemainingSlots,
     preflightStore,
     publicPreflightStatusDto,
 } from '@/lib/services/analysis/preflight';
+import { fetchEarlybirdRemainingSlots } from '@/lib/services/earlybird/inventory';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     observeRoute,
