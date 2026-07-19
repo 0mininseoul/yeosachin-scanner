@@ -541,6 +541,21 @@ export function useAnalysisV2Preflight() {
         }
     }, [coordinator, preflight]);
 
+    const refreshPreflight = useCallback(async (): Promise<void> => {
+        if (!preflight || preflight.status !== 'ready') return;
+        const generation = coordinator.currentGeneration;
+        const scope = coordinator.beginRequest(generation, preflight.preflightId);
+        if (!scope) return;
+        try {
+            await loadPreflight(preflight.preflightId, scope);
+        } catch {
+            // Best-effort refresh triggered by a checkout rejection; the caller
+            // owns surfacing its own error message regardless of this outcome.
+        } finally {
+            scope.finish();
+        }
+    }, [coordinator, loadPreflight, preflight]);
+
     const hasTestEntitlement = useCallback((planId: PlanId): boolean => {
         if (!preflight || preflight.status !== 'ready' || typeof window === 'undefined') {
             return false;
@@ -748,6 +763,7 @@ export function useAnalysisV2Preflight() {
         startPreflight,
         resumePreflight,
         submitExclusion,
+        refreshPreflight,
         hasTestEntitlement,
         startAnalysis,
         reset,

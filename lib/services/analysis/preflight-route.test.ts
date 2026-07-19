@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => ({
     adminQuery: {
         select: vi.fn(),
         eq: vi.fn(),
+        in: vi.fn(),
+        abortSignal: vi.fn(),
         maybeSingle: vi.fn(),
     },
     store: {
@@ -84,9 +86,12 @@ import {
     InvalidPreflightExclusionError,
     PreflightImmutableError,
     PreflightRateLimitedError,
+    buildReadyPreflightSnapshot,
+    type ReadyPreflightSnapshot,
 } from './preflight';
 import { PreflightTaskEnqueueError } from './preflight-tasks';
 import { createAnalysisTestAdmission } from './test-entitlement';
+import type { InstagramProfile } from '@/lib/types/instagram';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -100,6 +105,22 @@ const taskConfig = {
     oidcAudience: 'https://worker.example.com',
     serviceAccountEmail: 'preflight-task@example-project.iam.gserviceaccount.com',
 };
+const imageProxySigningSecret = Buffer.alloc(32, 15).toString('base64url');
+
+function targetProfile(overrides: Partial<InstagramProfile> = {}): InstagramProfile {
+    return {
+        username: 'target.name',
+        fullName: 'Target',
+        bio: 'bio',
+        profilePicUrl: 'https://scontent.cdninstagram.com/avatar.jpg',
+        followersCount: 350,
+        followingCount: 300,
+        postsCount: 10,
+        isPrivate: false,
+        isVerified: false,
+        ...overrides,
+    };
+}
 
 function postRequest(
     body: unknown = { targetInstagramId: 'Target.Name' },
@@ -167,6 +188,8 @@ describe('preflight owner routes', () => {
         mocks.admin.from.mockReturnValue(mocks.adminQuery);
         mocks.adminQuery.select.mockReturnValue(mocks.adminQuery);
         mocks.adminQuery.eq.mockReturnValue(mocks.adminQuery);
+        mocks.adminQuery.in.mockReturnValue(mocks.adminQuery);
+        mocks.adminQuery.abortSignal.mockResolvedValue({ data: [], error: null });
         mocks.adminQuery.maybeSingle.mockResolvedValue({
             data: {
                 id: consumedRequestId,
@@ -505,6 +528,48 @@ describe('preflight owner routes', () => {
             /private provider response|bearer-secret/
         );
         expect(mocks.flush).toHaveBeenCalledOnce();
+    });
+
+    it('carries earlybird remaining slots into a ready GET response', async () => {
+        vi.stubEnv('IMAGE_PROXY_SIGNING_SECRET', imageProxySigningSecret);
+        const snapshot = buildReadyPreflightSnapshot(
+            targetProfile(),
+            'test_entitlement'
+        ) as ReadyPreflightSnapshot;
+        mocks.store.findForOwner.mockResolvedValue({
+            preflightId,
+            status: 'ready',
+            expiresAt,
+            blockedCode: null,
+            readySnapshot: snapshot,
+            exclusionDecision: 'skip',
+        });
+        mocks.adminQuery.abortSignal.mockResolvedValue({
+            data: [
+                { plan_id: 'basic', sale_limit: 10, sold_count: 7 },
+                { plan_id: 'standard', sale_limit: 10, sold_count: 10 },
+            ],
+            error: null,
+        });
+
+        const response = await getPreflight(new Request('https://example.com'), context());
+
+        expect(response.status).toBe(200);
+        expect(mocks.admin.from).toHaveBeenCalledWith('earlybird_plan_inventory');
+        const body = await response.json() as {
+            plans: Array<{ planId: string; remainingSlots?: number }>;
+        };
+        const byPlan = Object.fromEntries(body.plans.map(plan => [plan.planId, plan]));
+        expect(byPlan.basic).toHaveProperty('remainingSlots', 3);
+        expect(byPlan.standard).toHaveProperty('remainingSlots', 0);
+        expect(byPlan.plus).not.toHaveProperty('remainingSlots');
+    });
+
+    it('never queries earlybird plan inventory for a pending GET', async () => {
+        const response = await getPreflight(new Request('https://example.com'), context());
+
+        expect(response.status).toBe(200);
+        expect(mocks.admin.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
     });
 
     it('owner-filters GET and maps expired rows to a bounded 410', async () => {

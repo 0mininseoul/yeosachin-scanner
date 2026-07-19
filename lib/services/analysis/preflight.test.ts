@@ -4,8 +4,6 @@ import type { ProviderCallContext } from '@/lib/services/instagram/providers/typ
 import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import { makeWebProfileFetcher } from '@/lib/services/instagram/providers/selfhosted/web-client';
 
-vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
-
 import {
     PREFLIGHT_DATABASE_NAMES,
     PreflightImmutableError,
@@ -33,12 +31,14 @@ const claimToken = '323e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- 
 const expiresAt = '2030-07-13T13:00:00.000Z';
 const entitlementSecret = Buffer.alloc(32, 13).toString('base64url');
 const preflightIdentitySecret = Buffer.alloc(32, 14).toString('base64url');
+const imageProxySigningSecret = Buffer.alloc(32, 15).toString('base64url');
 const preflightInputHash = preflightTargetInputHash('target.name', {
     ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
 });
 
 beforeAll(() => {
     vi.stubEnv('ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET', preflightIdentitySecret);
+    vi.stubEnv('IMAGE_PROXY_SIGNING_SECRET', imageProxySigningSecret);
 });
 
 afterAll(() => {
@@ -975,7 +975,7 @@ describe('preflight public mapping', () => {
             blockedCode: null,
             readySnapshot: snapshot,
             exclusionDecision: 'exclude',
-        }, () => '/api/image-proxy?token=signed');
+        }, {}, () => '/api/image-proxy?token=signed');
 
         expect(result).toMatchObject({
             status: 'ready',
@@ -999,7 +999,7 @@ describe('preflight public mapping', () => {
             blockedCode: null,
             readySnapshot: snapshot,
             exclusionDecision: 'skip',
-        }, () => undefined, Date.parse('2026-07-13T12:00:00.001Z'))).toThrow('PREFLIGHT_EXPIRED');
+        }, {}, () => undefined, Date.parse('2026-07-13T12:00:00.001Z'))).toThrow('PREFLIGHT_EXPIRED');
     });
 
     it('requires the explicit signed-test-entitlement feature gate in every environment', () => {
@@ -1015,5 +1015,49 @@ describe('preflight public mapping', () => {
             PREFLIGHT_ACCESS_MODE: 'test_entitlement',
             ANALYSIS_TEST_ENTITLEMENTS_ENABLED: 'false',
         })).toThrow('test entitlement mode is disabled');
+    });
+
+    it('applies injected remaining slots to paid plans and omits the key for plus', () => {
+        const snapshot = buildReadyPreflightSnapshot(
+            profile(),
+            'test_entitlement'
+        ) as ReadyPreflightSnapshot;
+
+        const result = publicPreflightStatusDto({
+            preflightId,
+            status: 'ready',
+            expiresAt,
+            blockedCode: null,
+            readySnapshot: snapshot,
+            exclusionDecision: 'skip',
+        }, { basic: 3, standard: 0 });
+
+        const byPlan = Object.fromEntries(
+            result.status === 'ready' ? result.plans.map(plan => [plan.planId, plan]) : []
+        );
+        expect(byPlan.basic).toHaveProperty('remainingSlots', 3);
+        expect(byPlan.standard).toHaveProperty('remainingSlots', 0);
+        expect(byPlan.plus).not.toHaveProperty('remainingSlots');
+    });
+
+    it('omits remaining slots entirely when the lookup returned nothing', () => {
+        const snapshot = buildReadyPreflightSnapshot(
+            profile(),
+            'test_entitlement'
+        ) as ReadyPreflightSnapshot;
+
+        const result = publicPreflightStatusDto({
+            preflightId,
+            status: 'ready',
+            expiresAt,
+            blockedCode: null,
+            readySnapshot: snapshot,
+            exclusionDecision: 'skip',
+        });
+
+        if (result.status !== 'ready') throw new Error('expected a ready status');
+        for (const plan of result.plans) {
+            expect(plan).not.toHaveProperty('remainingSlots');
+        }
     });
 });

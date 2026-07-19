@@ -26,6 +26,10 @@ import {
     type PlanEligibilityCatalog,
     type PlanId,
 } from '@/lib/domain/analysis/plan-catalog';
+import {
+    isPaidEarlybirdPlanId,
+    type PaidEarlybirdPlanId,
+} from '@/lib/domain/earlybird/catalog';
 import { CURRENT_ANALYSIS_PIPELINE_VERSION } from '@/lib/domain/analysis/pipeline-version';
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
 import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
@@ -1257,6 +1261,7 @@ export function acceptedPreflightDto(created: CreatedPreflight): PreflightAccept
 
 export function publicPreflightStatusDto(
     stored: StoredPreflight,
+    remainingSlotsByPlan: Partial<Record<PaidEarlybirdPlanId, number>> = {},
     imageProxyPath: typeof createImageProxyPath = createImageProxyPath,
     nowMs = Date.now()
 ): PreflightStatusV1 {
@@ -1301,7 +1306,13 @@ export function publicPreflightStatusDto(
         accessMode: snapshot.accessMode,
         capacityRequiredPlan: snapshot.capacityRequiredPlan,
         requiredPlan: snapshot.requiredPlan,
-        plans: snapshot.plans,
+        plans: snapshot.plans.map(plan => {
+            if (!isPaidEarlybirdPlanId(plan.planId)) return plan;
+            const remainingSlots = remainingSlotsByPlan[plan.planId];
+            return remainingSlots !== undefined
+                ? { ...plan, remainingSlots }
+                : plan;
+        }),
         pricingVersion: snapshot.pricingVersion,
     });
 }

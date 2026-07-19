@@ -7,6 +7,7 @@ import {
 } from '@/lib/services/earlybird/contracts';
 import {
     createEarlybirdCheckout,
+    EarlybirdSoldOutError,
     EarlybirdWaitlistRequiredError,
 } from '@/lib/services/earlybird/checkout';
 import { EarlybirdPersistenceError } from '@/lib/services/earlybird/store';
@@ -215,6 +216,21 @@ async function handlePOST(
                 errorCode: 'VALIDATION_ERROR',
             });
             return errorResponse(409, error.message, 'Plus 플랜은 대기 신청으로 접수해주세요.');
+        }
+        if (error instanceof EarlybirdSoldOutError) {
+            scheduleCheckoutEvent({
+                context,
+                userId: user.id,
+                preflightId: parsed.data.preflightId,
+                planId: parsed.data.planId,
+                status: 409,
+                errorCode: 'VALIDATION_ERROR',
+            });
+            return errorResponse(
+                409,
+                error.message,
+                '이 플랜의 얼리버드 물량이 모두 소진되었습니다.',
+            );
         }
         if (error instanceof EarlybirdPersistenceError) {
             const response = persistenceErrorResponse(error);

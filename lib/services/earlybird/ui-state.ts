@@ -7,6 +7,11 @@ import {
 interface PlanCardAvailability {
     planId: PlanId;
     selectionState: 'required' | 'available_upgrade' | 'unavailable';
+    remainingSlots?: number | null;
+}
+
+export function isEarlybirdPlanSoldOut(card: PlanCardAvailability): boolean {
+    return typeof card.remainingSlots === 'number' && card.remainingSlots <= 0;
 }
 
 export function isEarlybirdPlanSelectable(
@@ -14,6 +19,7 @@ export function isEarlybirdPlanSelectable(
     requiredPlanId: PlanId
 ): boolean {
     if (card.selectionState === 'unavailable') return false;
+    if (isEarlybirdPlanSoldOut(card)) return false;
     return card.planId !== 'plus' || requiredPlanId === 'plus';
 }
 
