@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
         select: vi.fn(),
         eq: vi.fn(),
         in: vi.fn(),
+        abortSignal: vi.fn(),
         maybeSingle: vi.fn(),
     },
     store: {
@@ -187,7 +188,8 @@ describe('preflight owner routes', () => {
         mocks.admin.from.mockReturnValue(mocks.adminQuery);
         mocks.adminQuery.select.mockReturnValue(mocks.adminQuery);
         mocks.adminQuery.eq.mockReturnValue(mocks.adminQuery);
-        mocks.adminQuery.in.mockResolvedValue({ data: [], error: null });
+        mocks.adminQuery.in.mockReturnValue(mocks.adminQuery);
+        mocks.adminQuery.abortSignal.mockResolvedValue({ data: [], error: null });
         mocks.adminQuery.maybeSingle.mockResolvedValue({
             data: {
                 id: consumedRequestId,
@@ -542,7 +544,7 @@ describe('preflight owner routes', () => {
             readySnapshot: snapshot,
             exclusionDecision: 'skip',
         });
-        mocks.adminQuery.in.mockResolvedValue({
+        mocks.adminQuery.abortSignal.mockResolvedValue({
             data: [
                 { plan_id: 'basic', sale_limit: 10, sold_count: 7 },
                 { plan_id: 'standard', sale_limit: 10, sold_count: 10 },

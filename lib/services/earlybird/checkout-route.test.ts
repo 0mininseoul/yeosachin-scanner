@@ -77,7 +77,9 @@ describe('earlybird checkout and waitlist routes', () => {
         mocks.from.mockReset();
         mocks.from.mockReturnValue({
             select: vi.fn(() => ({
-                in: vi.fn(async () => ({ data: [], error: null })),
+                in: vi.fn(() => ({
+                    abortSignal: vi.fn(async () => ({ data: [], error: null })),
+                })),
             })),
         });
         authenticate();
@@ -333,9 +335,11 @@ describe('earlybird checkout and waitlist routes', () => {
     it('rejects a sold-out plan checkout without creating the order', async () => {
         mocks.from.mockReturnValue({
             select: vi.fn(() => ({
-                in: vi.fn(async () => ({
-                    data: [{ plan_id: 'basic', sale_limit: 10, sold_count: 10 }],
-                    error: null,
+                in: vi.fn(() => ({
+                    abortSignal: vi.fn(async () => ({
+                        data: [{ plan_id: 'basic', sale_limit: 10, sold_count: 10 }],
+                        error: null,
+                    })),
                 })),
             })),
         });
@@ -357,9 +361,11 @@ describe('earlybird checkout and waitlist routes', () => {
     it('allows checkout when the plan still has remaining slots', async () => {
         mocks.from.mockReturnValue({
             select: vi.fn(() => ({
-                in: vi.fn(async () => ({
-                    data: [{ plan_id: 'basic', sale_limit: 10, sold_count: 9 }],
-                    error: null,
+                in: vi.fn(() => ({
+                    abortSignal: vi.fn(async () => ({
+                        data: [{ plan_id: 'basic', sale_limit: 10, sold_count: 9 }],
+                        error: null,
+                    })),
                 })),
             })),
         });
