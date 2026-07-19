@@ -284,6 +284,24 @@ describe('Groble payment.completed parser', () => {
             type: 'payment.cancel_requested',
         }))).toThrow();
     });
+
+    it('accepts a fully-discounted completed payment with a zero final amount', () => {
+        const event = paymentPayload({
+            pricing: { ...paymentPayload().data.object.pricing, finalAmount: 0 },
+        });
+
+        expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
+            amountKrw: 0,
+        });
+    });
+
+    it('rejects a negative completed final amount', () => {
+        const event = paymentPayload({
+            pricing: { ...paymentPayload().data.object.pricing, finalAmount: -1 },
+        });
+
+        expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
+    });
 });
 
 describe('Groble payment.cancel_requested parser', () => {
@@ -365,5 +383,23 @@ describe('Groble payment.cancel_requested parser', () => {
                 JSON.stringify(cancelRequestedPayload(invalidObject))
             )).toThrow();
         }
+    });
+
+    it('accepts a cancel request for a fully-discounted zero-amount payment', () => {
+        const event = cancelRequestedPayload({
+            pricing: { ...paymentPayload().data.object.pricing, finalAmount: 0 },
+        });
+
+        expect(parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toMatchObject({
+            amountKrw: 0,
+        });
+    });
+
+    it('rejects a negative cancel request final amount', () => {
+        const event = cancelRequestedPayload({
+            pricing: { ...paymentPayload().data.object.pricing, finalAmount: -1 },
+        });
+
+        expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
     });
 });

@@ -48,6 +48,18 @@ const normalizerGrantMigration = normalizerGrantMigrationFile
         'utf8'
     )
     : '';
+const discountAcceptanceMigrationFile = readdirSync(migrationsDirectory)
+    .filter(file => file.endsWith(
+        '_accept_groble_discounted_earlybird_payments.sql'
+    ))
+    .sort()
+    .at(-1);
+const discountAcceptanceMigration = discountAcceptanceMigrationFile
+    ? readFileSync(
+        new URL(discountAcceptanceMigrationFile, migrationsDirectory),
+        'utf8'
+    )
+    : '';
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -188,9 +200,13 @@ async function createDatabaseBeforePhoneMigration(): Promise<PGlite> {
     return database;
 }
 
-// 현행 production migration 집합 = 6개 rollout + normalizer EXECUTE 복구.
+// 현행 production migration 집합 = 6개 rollout + normalizer EXECUTE 복구 + 할인 결제 허용.
 async function applyPhoneMigrations(database: PGlite): Promise<void> {
-    for (const migration of [...phoneMigrations, normalizerGrantMigration]) {
+    for (const migration of [
+        ...phoneMigrations,
+        normalizerGrantMigration,
+        discountAcceptanceMigration,
+    ]) {
         await database.exec(migration);
     }
 }
@@ -414,7 +430,8 @@ async function forceLegacyOrder(orderId: string): Promise<void> {
 async function requestCancellation(
     paymentId: string,
     planId: PaidPlanId,
-    index: number
+    index: number,
+    amount?: number
 ): Promise<FinalizeRow> {
     const result = await asService<FinalizeRow>(
         `SELECT * FROM public.finalize_earlybird_groble_cancel_request(
@@ -426,7 +443,7 @@ async function requestCancellation(
             '2026-07-18T20:00:00+09:00',
             paymentId,
             planId === 'basic' ? BASIC_PRODUCT_ID : STANDARD_PRODUCT_ID,
-            planId === 'basic' ? 14_900 : 19_900,
+            amount ?? (planId === 'basic' ? 14_900 : 19_900),
             '2026-07-18T20:00:00+09:00',
         ]
     );
@@ -1621,6 +1638,53 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rows[0].sold_count).toBe(0);
     });
 
+    it('rejects a negative amount before any candidate lookup', async () => {
+        const seed = await seedPreflight(300);
+        await createCheckout(seed);
+        await expect(finalize(seed, 'basic', 300, { amount: -1 }))
+            .rejects.toThrow(/GROBLE_PAYMENT_EVIDENCE_INVALID/);
+    });
+
+    it('accepts a fully coupon-discounted zero-amount payment as paid', async () => {
+        const seed = await seedPreflight(301);
+        const checkout = await createCheckout(seed);
+        const result = await finalize(seed, 'basic', 301, { amount: 0 });
+        expect(result).toMatchObject({
+            disposition: 'accepted',
+            order_id: checkout.order_id,
+            status: 'paid',
+            plan_sequence: 1,
+        });
+        expect((await db.query<{
+            actual_amount_krw: number;
+            seconds: number;
+        }>(
+            `SELECT actual_amount_krw,
+                EXTRACT(EPOCH FROM (due_at - paid_at))::INTEGER AS seconds
+             FROM public.earlybird_orders WHERE id = $1`,
+            [checkout.order_id]
+        )).rows[0]).toMatchObject({
+            actual_amount_krw: 0,
+            seconds: 172_800,
+        });
+    });
+
+    it('accepts a partially coupon-discounted payment below the expected price as paid', async () => {
+        const seed = await seedPreflight(302);
+        const checkout = await createCheckout(seed);
+        const result = await finalize(seed, 'basic', 302, { amount: 9_900 });
+        expect(result).toMatchObject({
+            disposition: 'accepted',
+            order_id: checkout.order_id,
+            status: 'paid',
+            plan_sequence: 1,
+        });
+        expect((await db.query<{ actual_amount_krw: number }>(
+            `SELECT actual_amount_krw FROM public.earlybird_orders WHERE id = $1`,
+            [checkout.order_id]
+        )).rows[0].actual_amount_krw).toBe(9_900);
+    });
+
     it('preserves duplicate event and duplicate payment idempotency without contacts', async () => {
         const seed = await seedPreflight(14);
         const checkout = await createCheckout(seed);
@@ -1676,6 +1740,25 @@ describe('Groble phone checkout and finalizer behavior', () => {
         expect((await db.query<{ sold_count: number }>(
             `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`
         )).rows[0].sold_count).toBe(0);
+    });
+
+    it('accepts a cancel request for an already-paid zero-amount coupon order', async () => {
+        const seed = await seedPreflight(304);
+        const checkout = await createCheckout(seed);
+        const paid = await finalize(seed, 'basic', 304, { amount: 0 });
+        expect(paid).toMatchObject({ disposition: 'accepted', status: 'paid' });
+
+        const result = await requestCancellation('phone_payment_304', 'basic', 304, 0);
+        expect(result).toMatchObject({
+            disposition: 'cancel_requested',
+            order_id: checkout.order_id,
+            status: 'refund_pending',
+        });
+    });
+
+    it('rejects a negative amount cancel request before any order lookup', async () => {
+        await expect(requestCancellation('phone_payment_305', 'basic', 305, -1))
+            .rejects.toThrow(/GROBLE_CANCEL_EVIDENCE_INVALID/);
     });
 
     it('preserves late cancelled payments and leaves the replacement pending', async () => {
@@ -2064,6 +2147,28 @@ describe('Groble phone checkout and finalizer behavior', () => {
             `SELECT status FROM public.earlybird_orders WHERE id = $1`,
             [verifiedCheckout.order_id]
         )).rows[0].status).toBe('payment_pending');
+    });
+
+    it('accepts a zero-amount coupon payment through the rolling legacy overload', async () => {
+        const legacy = await seedPreflight(303);
+        const checkout = await createCheckout(legacy);
+        await forceLegacyOrder(checkout.order_id);
+        const result = await finalizeRolling({
+            eventId: 'rolling-zero-amount-event',
+            idempotencyKey: 'rolling-zero-amount-idem',
+            paymentId: 'rolling-zero-amount-payment',
+            buyerEmail: legacy.email,
+            amount: 0,
+        });
+        expect(result).toMatchObject({
+            disposition: 'accepted',
+            order_id: checkout.order_id,
+            status: 'paid',
+        });
+        expect((await db.query<{ actual_amount_krw: number }>(
+            `SELECT actual_amount_krw FROM public.earlybird_orders WHERE id = $1`,
+            [checkout.order_id]
+        )).rows[0].actual_amount_krw).toBe(0);
     });
 
     it('preserves overflow isolation without storing selected-order contacts', async () => {
