@@ -18,6 +18,25 @@ import {
     parseEarlybirdPlanParam,
     resolveAvailableEarlybirdPlan,
 } from '@/lib/services/earlybird/ui-state';
+import {
+    availablePendingTargetStorage,
+    bindPendingAnalysisTarget,
+    clearPendingAnalysisTarget,
+    clearPendingAnalysisTargetForTerminalState,
+    readPendingAnalysisTargetForAutostart,
+    readPendingAnalysisTargetForPreflight,
+    signOutAndClearPendingAnalysisTarget,
+    storePendingAnalysisTarget,
+} from '@/lib/services/pending-analysis-target';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import {
+    availableAnalyticsStorage,
+    tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
+import {
+    planSelectedEventKey,
+    planViewEventKey,
+} from '@/lib/services/earlybird/analytics-state';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
@@ -45,6 +64,8 @@ export default function AnalyzePage() {
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
     const initializedRef = useRef(false);
+    const planViewsTrackedRef = useRef(new Set<string>());
+    const planSelectionsTrackedRef = useRef(new Set<string>());
     const {
         targetInstagramId,
         preflight,
@@ -75,6 +96,31 @@ export default function AnalyzePage() {
         : false;
 
     useEffect(() => {
+        if (!readyPreflight || !exclusionDecided) return;
+        for (const plan of readyPreflight.plans) {
+            if (
+                plan.planId === 'plus'
+                || !isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
+                || plan.price.status !== 'quoted'
+            ) continue;
+            const key = planViewEventKey(
+                readyPreflight.preflightId,
+                readyPreflight.pricingVersion,
+                plan.planId,
+            );
+            if (planViewsTrackedRef.current.has(key)) continue;
+            planViewsTrackedRef.current.add(key);
+            if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), key)) continue;
+            trackEvent(EVENTS.PLAN_VIEWED, {
+                plan_id: plan.planId,
+                required_plan_id: readyPreflight.requiredPlan,
+                amount_krw: plan.price.amountKrw,
+                preflight_id: readyPreflight.preflightId,
+            });
+        }
+    }, [exclusionDecided, readyPreflight]);
+
+    useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
         initializedRef.current = true;
 
@@ -82,23 +128,40 @@ export default function AnalyzePage() {
         const linkedPlan = parseEarlybirdPlanParam(params.get('plan'));
         if (linkedPlan) setSelectedPlan(linkedPlan);
         const resumablePreflightId = params.get('preflight');
-        const resumableTarget = params.get('target') ?? undefined;
+        const shouldAutostart = params.get('autostart') === '1';
+
         if (resumablePreflightId && user) {
-            void resumePreflight(resumablePreflightId, resumableTarget);
+            let boundTarget: string | null = null;
+            try {
+                boundTarget = readPendingAnalysisTargetForPreflight(sessionStorage, {
+                    ownerId: user.id,
+                    preflightId: resumablePreflightId,
+                });
+            } catch {
+                boundTarget = null;
+            }
+            void resumePreflight(resumablePreflightId, boundTarget ?? undefined).then((resumed) => {
+                const storage = availablePendingTargetStorage();
+                if (!resumed && storage) clearPendingAnalysisTarget(storage);
+            });
             return;
         }
 
-        let pending = '';
-        try {
-            pending = sessionStorage.getItem('pending_ig') ?? '';
-        } catch {
-            pending = '';
+        let pending: string | null = null;
+        if (shouldAutostart) {
+            try {
+                pending = readPendingAnalysisTargetForAutostart(sessionStorage);
+            } catch {
+                pending = null;
+            }
+        } else {
+            clearPendingAnalysisTarget(sessionStorage);
         }
         if (pending) {
             window.setTimeout(() => setInstagramId(pending), 0);
         }
 
-        if (params.get('autostart') !== '1' || !pending) return;
+        if (!shouldAutostart || !pending) return;
         if (!user) {
             router.replace('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');
             return;
@@ -106,23 +169,23 @@ export default function AnalyzePage() {
 
         void (async () => {
             const accepted = await startPreflight(pending);
-            if (!accepted) return;
-            try {
-                sessionStorage.removeItem('pending_ig');
-            } catch {
-                /* ignore */
+            if (!accepted) {
+                clearPendingAnalysisTarget(sessionStorage);
+                return;
             }
-            router.replace(
-                `/analyze?preflight=${encodeURIComponent(accepted.preflightId)}`
-                + `&target=${encodeURIComponent(pending.replace(/^@+/, '').trim())}`
-            );
+            bindPendingAnalysisTarget(sessionStorage, {
+                ownerId: user.id,
+                preflightId: accepted.preflightId,
+                target: pending,
+            });
+            router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
         })();
     }, [authLoading, resumePreflight, router, startPreflight, user]);
 
     const handleStartPreflight = async () => {
         if (!user) {
             try {
-                sessionStorage.setItem('pending_ig', instagramId);
+                storePendingAnalysisTarget(sessionStorage, instagramId);
             } catch {
                 /* ignore */
             }
@@ -130,15 +193,45 @@ export default function AnalyzePage() {
             return;
         }
         const accepted = await startPreflight(instagramId);
-        if (!accepted) return;
-        router.replace(
-            `/analyze?preflight=${encodeURIComponent(accepted.preflightId)}`
-            + `&target=${encodeURIComponent(instagramId.replace(/^@+/, '').trim())}`
-        );
+        if (!accepted) {
+            clearPendingAnalysisTarget(sessionStorage);
+            return;
+        }
+        bindPendingAnalysisTarget(sessionStorage, {
+            ownerId: user.id,
+            preflightId: accepted.preflightId,
+            target: instagramId,
+        });
+        router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
     };
 
     const handleExclusion = async () => {
         await submitExclusion(girlfriendInstagramId);
+    };
+
+    const trackPlanSelection = (planId: PlanId) => {
+        if (!readyPreflight) return;
+        const plan = readyPreflight.plans.find(candidate => candidate.planId === planId);
+        if (!plan || !isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)) return;
+        const key = planSelectedEventKey(
+            readyPreflight.preflightId,
+            readyPreflight.pricingVersion,
+            planId,
+        );
+        if (planSelectionsTrackedRef.current.has(key)) return;
+        planSelectionsTrackedRef.current.add(key);
+        if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), key)) return;
+        trackEvent(EVENTS.PLAN_SELECTED, {
+            plan_id: planId,
+            required_plan_id: readyPreflight.requiredPlan,
+            ...(plan.price.status === 'quoted' ? { amount_krw: plan.price.amountKrw } : {}),
+            preflight_id: readyPreflight.preflightId,
+        });
+    };
+
+    const handlePlanSelection = (planId: PlanId) => {
+        setSelectedPlan(planId);
+        trackPlanSelection(planId);
     };
 
     const handleEarlybirdAction = async () => {
@@ -154,6 +247,17 @@ export default function AnalyzePage() {
         setError(null);
         try {
             const paidPlan = isPaidEarlybirdPlanId(effectiveSelectedPlan);
+            trackPlanSelection(effectiveSelectedPlan);
+            const analyticsProperties = {
+                plan_id: effectiveSelectedPlan,
+                ...(effectiveSelectedCard?.price.status === 'quoted'
+                    ? { amount_krw: effectiveSelectedCard.price.amountKrw }
+                    : {}),
+                preflight_id: readyPreflight.preflightId,
+            };
+            if (paidPlan) {
+                trackEvent(EVENTS.CHECKOUT_STARTED, analyticsProperties);
+            }
             const response = await fetch(
                 paidPlan ? '/api/earlybird/checkout' : '/api/earlybird/waitlist',
                 {
@@ -189,6 +293,7 @@ export default function AnalyzePage() {
                 setError('결제창 주소를 확인하지 못했습니다. 잠시 후 다시 시도해주세요.');
                 return;
             }
+            trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
             window.location.assign(payload.checkoutUrl);
         } catch {
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');
@@ -198,6 +303,11 @@ export default function AnalyzePage() {
     };
 
     const handleReset = () => {
+        try {
+            clearPendingAnalysisTarget(sessionStorage);
+        } catch {
+            /* ignore */
+        }
         reset();
         setInstagramId('');
         setGirlfriendInstagramId('');
@@ -209,10 +319,19 @@ export default function AnalyzePage() {
         router.replace('/analyze');
     };
 
+    useEffect(() => {
+        const storage = availablePendingTargetStorage();
+        if (storage) {
+            clearPendingAnalysisTargetForTerminalState(storage, preflight?.status);
+        }
+    }, [preflight?.status]);
+
     const handleLogout = async () => {
         try {
-            const response = await fetch('/api/auth/signout', { method: 'POST' });
-            if (response.ok) router.push('/');
+            const signedOut = await signOutAndClearPendingAnalysisTarget(
+                availablePendingTargetStorage(),
+            );
+            if (signedOut) router.push('/');
         } catch (cause) {
             console.error('Logout failed:', cause);
         }
@@ -254,7 +373,7 @@ export default function AnalyzePage() {
                             <label htmlFor="target-instagram" className="eyebrow mb-3 block">
                                 대상 인스타그램 아이디
                             </label>
-                            <div className="relative">
+                            <div className="relative" data-amp-mask>
                                 <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
                                 <input
                                     id="target-instagram"
@@ -332,7 +451,7 @@ export default function AnalyzePage() {
                                 <label htmlFor="girlfriend-instagram" className="eyebrow mb-3 mt-5 block">
                                     본인 인스타그램 아이디
                                 </label>
-                                <div className="relative">
+                                <div className="relative" data-amp-mask>
                                     <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
                                     <input
                                         id="girlfriend-instagram"
@@ -381,7 +500,7 @@ export default function AnalyzePage() {
                                 <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
                                     <BrandMark size={26} className="anim-blink text-blood" />
                                 </div>
-                                <h2 className="mt-5 text-[18px] font-extrabold text-fg">
+                                <h2 data-amp-block className="mt-5 text-[18px] font-extrabold text-fg">
                                     @{targetInstagramId ?? '대상 계정'} 조회 중
                                 </h2>
                                 <p className="mt-2 text-[13px] text-fg-dim" aria-live="polite">
@@ -393,7 +512,7 @@ export default function AnalyzePage() {
                         {exclusionDecided && readyPreflight && (
                             <>
                                 <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
-                                    <div className="flex items-center gap-4 p-5">
+                                    <div className="flex items-center gap-4 p-5" data-amp-block>
                                         <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel">
                                             {readyPreflight.target.profileImage ? (
                                                 <Image
@@ -473,7 +592,7 @@ export default function AnalyzePage() {
                                                         value={plan.planId}
                                                         checked={selected}
                                                         disabled={!available}
-                                                        onChange={() => setSelectedPlan(plan.planId)}
+                                                        onChange={() => handlePlanSelection(plan.planId)}
                                                         className="sr-only"
                                                     />
                                                     <div className="flex items-start justify-between gap-4">
@@ -545,7 +664,7 @@ export default function AnalyzePage() {
                                                 </span>
                                             </label>
                                             <p className="mt-3 border-t border-amber/20 pt-3 text-[11px] leading-relaxed text-fg-mute">
-                                                Groble 결제창에는 현재 로그인한 계정과 같은 이메일을 사용해주세요.
+                                                Groble 결제창에는 카카오 로그인 계정과 같은 전화번호를 입력해주세요. Groble 이메일은 로그인 이메일과 달라도 됩니다.
                                             </p>
                                         </div>
                                     )}

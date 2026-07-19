@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto';
 import type { CloudTasksClient } from '@google-cloud/tasks';
 import { GoogleAuth, type ClientOptions } from 'google-gax';
 import { OAuth2Client } from 'google-auth-library';
+import { operationalLogger } from '@/lib/observability/server';
+import {
+    OPERATIONAL_PHASES,
+    OPERATIONAL_QUEUE_NAMES,
+} from '@/lib/observability/schema';
 import { prepareGoogleApplicationCredentials } from '@/lib/services/google/credentials';
 import {
     GOOGLE_CLOUD_PLATFORM_SCOPE,
@@ -268,23 +273,142 @@ function isAlreadyExists(error: unknown): boolean {
         || (typeof value.message === 'string' && value.message.includes('ALREADY_EXISTS'));
 }
 
+function enqueueLogFields(
+    requestId: string,
+    state: AnalysisTaskState,
+    queue?: string,
+): Record<string, unknown> {
+    const phase = OPERATIONAL_PHASES.includes(
+        state.currentStep as typeof OPERATIONAL_PHASES[number]
+    ) ? state.currentStep : undefined;
+    const queueName = queue && OPERATIONAL_QUEUE_NAMES.includes(
+        queue as typeof OPERATIONAL_QUEUE_NAMES[number]
+    ) ? queue : undefined;
+    const progress = Number.isFinite(state.progress)
+        && state.progress >= 0
+        && state.progress <= 100
+        ? state.progress
+        : undefined;
+    return {
+        ...(UUID_PATTERN.test(requestId) ? { analysis_request_id: requestId.toLowerCase() } : {}),
+        operation: 'enqueue',
+        ...(phase ? { phase } : {}),
+        ...(progress !== undefined ? { progress } : {}),
+        ...(queueName ? { queue_name: queueName } : {}),
+    };
+}
+
+function emitEnqueueCompleted(
+    requestId: string,
+    state: AnalysisTaskState,
+    disposition: 'disabled' | 'enqueued' | 'exists',
+    queue?: string,
+): void {
+    try {
+        operationalLogger.emit({
+            event: 'cloud_task.enqueue_completed',
+            severity: 'info',
+            fields: {
+                ...enqueueLogFields(requestId, state, queue),
+                disposition,
+            },
+        });
+    } catch {
+        // Queue behavior must remain independent from observability delivery.
+    }
+}
+
+function emitEnqueueFailed(
+    requestId: string,
+    state: AnalysisTaskState,
+    input: {
+        errorCode: 'VALIDATION_ERROR' | 'PROVIDER_ERROR';
+        retryable: boolean;
+        queue?: string;
+    },
+): void {
+    try {
+        operationalLogger.emit({
+            event: 'cloud_task.enqueue_failed',
+            severity: 'error',
+            fields: {
+                ...enqueueLogFields(requestId, state, input.queue),
+                disposition: 'failure',
+                error_code: input.errorCode,
+                retryable: input.retryable,
+            },
+        });
+    } catch {
+        // Queue behavior must remain independent from observability delivery.
+    }
+}
+
 export async function enqueueAnalysisTask(
     requestId: string,
     state: AnalysisTaskState,
     options: AnalysisTaskEnqueueOptions = {}
 ): Promise<'disabled' | 'enqueued' | 'exists'> {
-    const config = options.config === undefined ? getAnalysisTasksConfig() : options.config;
-    if (!config) return 'disabled';
+    let config: AnalysisTasksConfig | null;
+    try {
+        config = options.config === undefined ? getAnalysisTasksConfig() : options.config;
+    } catch (error) {
+        emitEnqueueFailed(requestId, state, {
+            errorCode: 'VALIDATION_ERROR',
+            retryable: false,
+        });
+        throw error;
+    }
+    if (!config) {
+        emitEnqueueCompleted(requestId, state, 'disabled');
+        return 'disabled';
+    }
     const delaySeconds = options.delaySeconds ?? 0;
     if (!Number.isSafeInteger(delaySeconds) || delaySeconds < 0 || delaySeconds > 300) {
+        emitEnqueueFailed(requestId, state, {
+            errorCode: 'VALIDATION_ERROR',
+            retryable: false,
+            queue: config.queue,
+        });
         throw new Error('ANALYSIS_TASKS_CONFIG_ERROR: invalid task delay.');
     }
 
-    const client = options.client ?? await getSharedTasksClient();
-    const taskId = analysisTaskStateKey(requestId, state);
-    const parent = client.queuePath(config.project, config.location, config.queue);
+    let client: CloudTasksClientLike;
+    try {
+        client = options.client ?? await getSharedTasksClient();
+    } catch (error) {
+        emitEnqueueFailed(requestId, state, {
+            errorCode: 'PROVIDER_ERROR',
+            retryable: true,
+            queue: config.queue,
+        });
+        throw error;
+    }
+    let taskId: string;
+    try {
+        taskId = analysisTaskStateKey(requestId, state);
+    } catch (error) {
+        emitEnqueueFailed(requestId, state, {
+            errorCode: 'VALIDATION_ERROR',
+            retryable: false,
+            queue: config.queue,
+        });
+        throw error;
+    }
+    let parent: string;
+    let name: string;
+    try {
+        parent = client.queuePath(config.project, config.location, config.queue);
+        name = client.taskPath(config.project, config.location, config.queue, taskId);
+    } catch (error) {
+        emitEnqueueFailed(requestId, state, {
+            errorCode: 'PROVIDER_ERROR',
+            retryable: true,
+            queue: config.queue,
+        });
+        throw error;
+    }
     const task: Record<string, unknown> = {
-        name: client.taskPath(config.project, config.location, config.queue, taskId),
+        name,
         // Match the Vercel function ceiling so a terminated invocation enters the
         // queue's bounded retry path immediately instead of waiting another five minutes.
         dispatchDeadline: { seconds: 300 },
@@ -305,9 +429,18 @@ export async function enqueueAnalysisTask(
 
     try {
         await client.createTask({ parent, task });
+        emitEnqueueCompleted(requestId, state, 'enqueued', config.queue);
         return 'enqueued';
     } catch (error) {
-        if (isAlreadyExists(error)) return 'exists';
+        if (isAlreadyExists(error)) {
+            emitEnqueueCompleted(requestId, state, 'exists', config.queue);
+            return 'exists';
+        }
+        emitEnqueueFailed(requestId, state, {
+            errorCode: 'PROVIDER_ERROR',
+            retryable: true,
+            queue: config.queue,
+        });
         throw new Error('ANALYSIS_TASKS_ENQUEUE_ERROR: continuation task creation failed.');
     }
 }

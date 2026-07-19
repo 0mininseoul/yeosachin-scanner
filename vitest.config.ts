@@ -9,6 +9,10 @@ export default defineConfig({
         maxWorkers: 4,
     },
     resolve: {
-        alias: { '@': path.resolve(__dirname, '.') },
+        alias: {
+            '@': path.resolve(__dirname, '.'),
+            // Vitest is a Node runner, not a React Server Components resolver.
+            'server-only': path.resolve(__dirname, 'node_modules/server-only/empty.js'),
+        },
     },
 });

@@ -22,6 +22,24 @@ import {
     readTestAdmissionCredential,
     readTestEntitlementToken,
 } from '@/lib/services/analysis/v2-client-credentials';
+import {
+    availablePendingTargetStorage,
+    clearPendingAnalysisTargetForTerminalState,
+    type PendingTargetStorage,
+} from '@/lib/services/pending-analysis-target';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import {
+    availableAnalyticsStorage,
+    claimAnalysisStart,
+    persistPreflightStartedAt,
+    preflightOutcomeEventKey,
+    readPreflightStartedAt,
+    relationshipBucket,
+    safeAnalyticsErrorCode,
+    safeAnalyticsHttpErrorCode,
+    trustedDurationMs,
+    tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
 
 export type ExclusionState = 'undecided' | 'saving' | 'excluded' | 'skipped';
 
@@ -52,9 +70,34 @@ export function mergeLoadedPreflight(
     });
 }
 
+interface ConsumedPreflightRedirectDependencies {
+    replace: (href: string) => void;
+    storage: PendingTargetStorage | undefined;
+}
+
+export function redirectConsumedPreflight(
+    status: PreflightStatusV1,
+    { replace, storage }: ConsumedPreflightRedirectDependencies,
+): boolean {
+    if (status.status !== 'consumed') return false;
+    if (storage) clearPendingAnalysisTargetForTerminalState(storage, status.status);
+    replace(`/progress/${encodeURIComponent(status.requestId)}`);
+    return true;
+}
+
 interface ApiErrorPayload {
     code?: string;
     error?: string;
+}
+
+class AnalyticsRequestError extends Error {
+    readonly code: string;
+
+    constructor(message: string, code: string) {
+        super(message);
+        this.name = 'AnalyticsRequestError';
+        this.code = code;
+    }
 }
 
 const BLOCKED_PREFLIGHT_COPY: Readonly<Record<string, string>> = {
@@ -222,6 +265,53 @@ export function useAnalysisV2Preflight() {
     const [coordinator] = useState(() => new PreflightRequestCoordinator());
     const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
     const entitlementScopeRef = useRef<PreflightRequestScope | null>(null);
+    const preflightStartedAtRef = useRef<number | null>(null);
+    const preflightOutcomeTrackedRef = useRef(new Set<string>());
+    const analysisStartedTrackedRef = useRef(new Set<string>());
+
+    const trackPreflightOutcome = useCallback((status: PreflightStatusV1) => {
+        if (status.status !== 'ready' && status.status !== 'blocked') return;
+        const outcome = status.status === 'ready' ? 'succeeded' : 'failed';
+        const localKey = `${outcome}:${status.preflightId}`;
+        if (preflightOutcomeTrackedRef.current.has(localKey)) return;
+        const eventKey = preflightOutcomeEventKey(outcome, status.preflightId);
+        if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), eventKey)) {
+            preflightOutcomeTrackedRef.current.add(localKey);
+            return;
+        }
+        preflightOutcomeTrackedRef.current.add(localKey);
+        const durationMs = trustedDurationMs(preflightStartedAtRef.current, Date.now());
+        const durationProperties = durationMs === undefined ? {} : { duration_ms: durationMs };
+        if (status.status === 'ready') {
+            trackEvent(EVENTS.PREFLIGHT_SUCCEEDED, {
+                ...durationProperties,
+                required_plan_id: status.requiredPlan,
+                followers_bucket: relationshipBucket(status.target.followersCount),
+                following_bucket: relationshipBucket(status.target.followingCount),
+                preflight_id: status.preflightId,
+            });
+            return;
+        }
+        trackEvent(EVENTS.PREFLIGHT_FAILED, {
+            ...durationProperties,
+            error_code: safeAnalyticsErrorCode({ code: status.code }),
+            stage: 'preflight',
+            preflight_id: status.preflightId,
+        });
+    }, []);
+
+    const trackPreflightAttemptFailure = useCallback((
+        cause: unknown,
+        preflightId?: string,
+    ) => {
+        const durationMs = trustedDurationMs(preflightStartedAtRef.current, Date.now());
+        trackEvent(EVENTS.PREFLIGHT_FAILED, {
+            ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+            error_code: safeAnalyticsErrorCode(cause),
+            stage: 'preflight',
+            ...(preflightId ? { preflight_id: preflightId } : {}),
+        });
+    }, []);
 
     const loadPreflight = useCallback(async (
         preflightId: string,
@@ -233,17 +323,24 @@ export function useAnalysisV2Preflight() {
         );
         const payload = await readPayload(response);
         if (!response.ok) {
-            throw new Error(messageFromPayload(payload, '사전 점검 상태를 확인할 수 없습니다.'));
+            throw new AnalyticsRequestError(
+                messageFromPayload(payload, '사전 점검 상태를 확인할 수 없습니다.'),
+                safeAnalyticsHttpErrorCode(response.status, payload),
+            );
         }
         const parsed = preflightStatusV1Schema.safeParse(payload);
         if (!parsed.success) {
-            throw new Error('사전 점검 응답을 확인할 수 없습니다.');
+            throw new AnalyticsRequestError(
+                '사전 점검 응답을 확인할 수 없습니다.',
+                'VALIDATION_ERROR',
+            );
         }
         if (!scope.isCurrent()) return null;
-        if (parsed.data.status === 'consumed') {
-            window.location.replace(
-                `/progress/${encodeURIComponent(parsed.data.requestId)}`
-            );
+        trackPreflightOutcome(parsed.data);
+        if (redirectConsumedPreflight(parsed.data, {
+            storage: availablePendingTargetStorage(),
+            replace: href => window.location.replace(href),
+        })) {
             return parsed.data;
         }
         setPreflight(current => mergeLoadedPreflight(current, parsed.data));
@@ -260,7 +357,7 @@ export function useAnalysisV2Preflight() {
             setError(null);
         }
         return parsed.data;
-    }, []);
+    }, [trackPreflightOutcome]);
 
     const resumePreflight = useCallback(async (
         preflightId: string,
@@ -278,10 +375,15 @@ export function useAnalysisV2Preflight() {
         setExclusionState('undecided');
         setCreating(true);
         setError(null);
+        preflightStartedAtRef.current = readPreflightStartedAt(
+            availableAnalyticsStorage(),
+            preflightId,
+        );
         try {
             return await loadPreflight(preflightId, scope) !== null;
         } catch (cause) {
             if (scope.isCurrent()) {
+                trackPreflightAttemptFailure(cause, preflightId);
                 setError(cause instanceof Error
                     ? cause.message
                     : '사전 점검 상태를 확인할 수 없습니다.');
@@ -292,7 +394,7 @@ export function useAnalysisV2Preflight() {
             scope.finish();
             if (current) setCreating(false);
         }
-    }, [coordinator, loadPreflight]);
+    }, [coordinator, loadPreflight, trackPreflightAttemptFailure]);
 
     const startPreflight = useCallback(async (rawTargetInstagramId: string) => {
         const normalized = normalizeInstagramUsername(rawTargetInstagramId);
@@ -308,6 +410,8 @@ export function useAnalysisV2Preflight() {
         setTargetInstagramId(normalized);
         setPreflight(null);
         setExclusionState('undecided');
+        preflightStartedAtRef.current = Date.now();
+        trackEvent(EVENTS.PREFLIGHT_STARTED);
 
         try {
             const testAdmission = readTestAdmissionCredential(sessionStorage, normalized);
@@ -333,14 +437,27 @@ export function useAnalysisV2Preflight() {
             });
             const payload = await readPayload(response);
             if (!response.ok) {
-                throw new Error(messageFromPayload(payload, '사전 점검을 시작할 수 없습니다.'));
+                throw new AnalyticsRequestError(
+                    messageFromPayload(payload, '사전 점검을 시작할 수 없습니다.'),
+                    safeAnalyticsHttpErrorCode(response.status, payload),
+                );
             }
             const accepted = preflightAcceptedV1Schema.safeParse(payload);
             if (!accepted.success) {
-                throw new Error('사전 점검 응답을 확인할 수 없습니다.');
+                throw new AnalyticsRequestError(
+                    '사전 점검 응답을 확인할 수 없습니다.',
+                    'VALIDATION_ERROR',
+                );
             }
             if (!scope.isCurrent()) return null;
             if (!coordinator.attachPreflight(generation, accepted.data.preflightId)) return null;
+            if (preflightStartedAtRef.current !== null) {
+                persistPreflightStartedAt(
+                    availableAnalyticsStorage(),
+                    accepted.data.preflightId,
+                    preflightStartedAtRef.current,
+                );
+            }
             if (testAdmission) {
                 consumeTestAdmissionCredential(sessionStorage, normalized);
             }
@@ -348,6 +465,7 @@ export function useAnalysisV2Preflight() {
             return accepted.data;
         } catch (cause) {
             if (scope.isCurrent()) {
+                trackPreflightAttemptFailure(cause);
                 setError(cause instanceof Error
                     ? cause.message
                     : '사전 점검을 시작할 수 없습니다.');
@@ -358,7 +476,7 @@ export function useAnalysisV2Preflight() {
             scope.finish();
             if (current) setCreating(false);
         }
-    }, [coordinator]);
+    }, [coordinator, trackPreflightAttemptFailure]);
 
     const submitExclusion = useCallback(async (rawExcludedInstagramId?: string) => {
         if (!preflight || preflight.status === 'consumed') return false;
@@ -405,6 +523,10 @@ export function useAnalysisV2Preflight() {
                 ? { ...current, exclusionDecision }
                 : current);
             setExclusionState(exclusionDecision === 'exclude' ? 'excluded' : 'skipped');
+            trackEvent(EVENTS.EXCLUSION_DECIDED, {
+                preflight_id: preflight.preflightId,
+                decision: exclusionDecision,
+            });
             return true;
         } catch (cause) {
             if (scope.isCurrent()) {
@@ -512,7 +634,22 @@ export function useAnalysisV2Preflight() {
                         preflight.preflightId,
                         planId
                     );
-                    return parsed.data.requestId;
+                    const requestId = parsed.data.requestId;
+                    if (!analysisStartedTrackedRef.current.has(requestId)) {
+                        analysisStartedTrackedRef.current.add(requestId);
+                        if (claimAnalysisStart(
+                            availableAnalyticsStorage(),
+                            requestId,
+                            Date.now(),
+                        )) {
+                            trackEvent(EVENTS.ANALYSIS_STARTED, {
+                                request_id: requestId,
+                                plan_id: planId,
+                                preflight_id: preflight.preflightId,
+                            });
+                        }
+                    }
+                    return requestId;
                 }
                 await waitForRetry(parsed.data.retryAfterMs, scope.signal);
             }
@@ -539,6 +676,7 @@ export function useAnalysisV2Preflight() {
         coordinator.beginLifecycle();
         entitlementScopeRef.current = null;
         idempotencyRef.current = null;
+        preflightStartedAtRef.current = null;
         setTargetInstagramId(null);
         setPreflight(null);
         setCreating(false);

@@ -8,11 +8,21 @@
  * 변경이 꼭 필요하면 사용자에게 먼저 확인할 것. (과거 순화 덮어쓰기 사례 있음)
  * ============================================================================ */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion, useReducedMotion, type Variants } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import {
+  availableAnalyticsStorage,
+  landingViewEventKey,
+  readAttribution,
+  tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
+import {
+  clearPendingAnalysisTarget,
+  storePendingAnalysisTarget,
+} from '@/lib/services/pending-analysis-target';
 import { useAuth } from '@/hooks/useAuth';
 import { LoginModal } from '@/components/login-modal';
 import {
@@ -109,9 +119,14 @@ export default function LandingPage() {
   const [heroError, setHeroError] = useState<string | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
 
+  useEffect(() => {
+    if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), landingViewEventKey())) return;
+    trackEvent(EVENTS.LANDING_VIEWED, readAttribution(window.location.search));
+  }, []);
+
   const closeLogin = useCallback(() => {
     try {
-      sessionStorage.removeItem('pending_ig');
+      clearPendingAnalysisTarget(sessionStorage);
     } catch {
       /* ignore */
     }
@@ -125,20 +140,27 @@ export default function LandingPage() {
       inputRef.current?.focus();
       return;
     }
-    trackEvent(EVENTS.CLICK_CTA_START);
+    let targetStored = false;
+    try {
+      targetStored = storePendingAnalysisTarget(sessionStorage, id);
+    } catch {
+      targetStored = false;
+    }
+    if (!targetStored) {
+      setHeroError('판독 화면을 열 수 없습니다.');
+      return;
+    }
+
+    trackEvent(EVENTS.TARGET_SUBMITTED, {
+      stage: user ? 'authenticated' : 'anonymous',
+    });
 
     if (!user) {
-      try {
-        sessionStorage.setItem('pending_ig', id);
-      } catch {
-        /* ignore */
-      }
       setLoginOpen(true);
       return;
     }
 
     try {
-      sessionStorage.setItem('pending_ig', id);
       setStarting(true);
       setHeroError(null);
       router.push('/analyze?autostart=1');
@@ -226,7 +248,7 @@ export default function LandingPage() {
 
           {/* input + submit — 서브카피 바로 아래(액션 우선). 도감 카드는 그 아래에서 결과 미리보기 */}
           <div className="mt-7 space-y-2.5">
-            <div className="relative">
+            <div className="relative" data-amp-mask>
               <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
               <input
                 id="ig-hero"

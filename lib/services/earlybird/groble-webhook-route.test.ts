@@ -2,10 +2,27 @@ import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ rpc: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+    rpc: vi.fn(),
+    emit: vi.fn(),
+    observeRoute: vi.fn((
+        _request: Request,
+        _route: string,
+        operation: (context: Record<string, unknown>) => Promise<Response>,
+    ) => operation({
+        request_id: '423e4567-e89b-42d3-a456-426614174003',
+        trace_id: null,
+        route: '/api/webhooks/groble',
+        method: 'POST',
+    })),
+}));
 
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: mocks.rpc },
+}));
+vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.emit },
 }));
 
 import { POST } from '@/app/api/webhooks/groble/route';
@@ -103,6 +120,34 @@ describe('signed Groble webhook route', () => {
         }))).status).toBe(401);
         expect((await POST(request('{'))).status).toBe(400);
         expect(mocks.rpc).not.toHaveBeenCalled();
+        const rejected = mocks.emit.mock.calls
+            .map(([entry]) => entry as {
+                event?: string;
+                fields?: { error_code?: string };
+            })
+            .filter(entry => entry.event === 'groble.webhook_rejected');
+        expect(rejected).toHaveLength(4);
+        expect(rejected.map(entry => entry.fields?.error_code)).toEqual([
+            'VALIDATION_ERROR',
+            'UNAUTHORIZED',
+            'UNAUTHORIZED',
+            'VALIDATION_ERROR',
+        ]);
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'warn',
+            fields: {
+                request_id: '423e4567-e89b-42d3-a456-426614174003',
+                trace_id: null,
+                route: '/api/webhooks/groble',
+                method: 'POST',
+                provider: 'groble',
+                operation: 'webhook',
+                disposition: 'rejected',
+                error_code: 'UNAUTHORIZED',
+            },
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('delivery_0001');
     });
 
     it('returns only invalid field paths for a signed Groble test delivery', async () => {
@@ -151,6 +196,16 @@ describe('signed Groble webhook route', () => {
             code: 'INVALID_PAYMENT_PAYLOAD',
         });
         expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                provider: 'groble',
+                operation: 'webhook',
+                disposition: 'rejected',
+                error_code: 'VALIDATION_ERROR',
+            }),
+        });
     });
 
     it('returns a retryable response when webhook server configuration is unavailable', async () => {
@@ -164,6 +219,16 @@ describe('signed Groble webhook route', () => {
             code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
         });
         expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'error',
+            fields: expect.objectContaining({
+                provider: 'groble',
+                operation: 'webhook',
+                disposition: 'rejected',
+                error_code: 'INTERNAL_ERROR',
+            }),
+        });
     });
 
     it('moves a paid order to refund review for an official cancellation request', async () => {
@@ -220,8 +285,15 @@ describe('signed Groble webhook route', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
-    it('passes only normalized official payment evidence to the atomic finalizer', async () => {
-        const body = JSON.stringify(payload());
+    it('matches with normalized contact inputs without forwarding raw buyer evidence', async () => {
+        const body = JSON.stringify(payload({
+            buyer: {
+                ...payload().data.object.buyer,
+                email: 'different-groble-buyer@example.net',
+                phoneNumber: '  010-1234-5678  ',
+                displayName: '  결제 구매자  ',
+            },
+        }));
         const response = await POST(request(body));
 
         expect(response.status).toBe(200);
@@ -231,20 +303,128 @@ describe('signed Groble webhook route', () => {
             p_event_type: 'payment.completed',
             p_occurred_at: '2026-07-17T21:00:00+09:00',
             p_payment_id: 'merchant_0001',
-            p_buyer_email: 'buyer@example.com',
+            p_buyer_email: 'different-groble-buyer@example.net',
+            p_buyer_phone_normalized: '+821012345678',
+            p_buyer_phone_raw: null,
+            p_buyer_display_name: null,
             p_product_id: 'basic_product-01',
             p_amount_krw: 14_900,
             p_paid_at: '2026-07-17T21:00:00+09:00',
         });
         const responseText = await response.text();
         expect(responseText).toContain('accepted');
-        expect(responseText).not.toMatch(/buyer@example|01000000000|merchant_0001|basic_product-01/);
+        expect(responseText).not.toMatch(
+            /different-groble-buyer|010-1234-5678|결제 구매자|merchant_0001|basic_product-01/
+        );
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_received',
+            severity: 'info',
+            fields: {
+                request_id: '423e4567-e89b-42d3-a456-426614174003',
+                trace_id: null,
+                route: '/api/webhooks/groble',
+                method: 'POST',
+                provider: 'groble',
+                operation: 'webhook',
+                webhook_event_type: 'payment.completed',
+                disposition: 'accepted',
+            },
+        });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_finalized',
+            severity: 'info',
+            fields: {
+                request_id: '423e4567-e89b-42d3-a456-426614174003',
+                trace_id: null,
+                route: '/api/webhooks/groble',
+                method: 'POST',
+                provider: 'groble',
+                operation: 'webhook',
+                webhook_event_type: 'payment.completed',
+                order_id: '123e4567-e89b-42d3-a456-426614174000',
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                disposition: 'accepted',
+            },
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /different-groble-buyer|010-1234-5678|결제 구매자|merchant_0001|basic_product-01|delivery_0001|evt_test_/
+        );
     });
 
     it.each([
+        ['absent', undefined],
+        ['empty', ''],
+        ['long', `private-name-${'x'.repeat(101)}`],
+    ])('finalizes a signed payment with %s displayName without forwarding or logging it', async (
+        _,
+        displayName
+    ) => {
+        const buyer: Record<string, unknown> = {
+            ...payload().data.object.buyer,
+        };
+        if (displayName === undefined) delete buyer.displayName;
+        else buyer.displayName = displayName;
+
+        const response = await POST(request(JSON.stringify(payload({ buyer }))));
+
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment',
+            expect.objectContaining({ p_buyer_display_name: null })
+        );
+        const observedOutput = JSON.stringify({
+            rpc: mocks.rpc.mock.calls,
+            logs: mocks.emit.mock.calls,
+            response: await response.text(),
+        });
+        if (typeof displayName === 'string' && displayName.length > 0) {
+            expect(observedOutput).not.toContain(displayName);
+        }
+    });
+
+    it.each([
+        ['absent', undefined, null],
+        ['invalid', 'not-a-korean-mobile', 'not-a-korean-mobile'],
+    ])('uses a null normalized phone for %s phone evidence without forwarding it', async (
+        _,
+        phoneNumber,
+        expectedRawPhone
+    ) => {
+        const buyer: Record<string, unknown> = {
+            type: 'MEMBER',
+            email: 'buyer@example.com',
+        };
+        if (phoneNumber !== undefined) buyer.phoneNumber = phoneNumber;
+
+        const response = await POST(request(JSON.stringify(payload({ buyer }))));
+
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment',
+            expect.objectContaining({
+                p_buyer_phone_normalized: null,
+                p_buyer_phone_raw: null,
+                p_buyer_display_name: null,
+            })
+        );
+        if (expectedRawPhone) {
+            expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain(expectedRawPhone);
+        }
+        const responseText = await response.text();
+        expect(responseText).not.toMatch(/buyer@example|not-a-korean-mobile/);
+    });
+
+    it.each([
+        ['unmatched', null],
+        ['ambiguous_buyer', null],
         ['mismatch', 'payment_failed'],
         ['duplicate_event', 'paid'],
+        ['duplicate_payment', 'payment_failed'],
         ['overflow_refund_required', 'overflow_refund_required'],
+        ['cancel_duplicate_event', 'refund_pending'],
+        ['cancel_unmatched', null],
+        ['cancel_mismatch', 'payment_failed'],
         ['cancel_before_payment', 'refund_pending'],
         ['late_cancelled_payment', 'refund_pending'],
     ])('acknowledges the %s disposition without asking Groble to retry', async (disposition, status) => {
@@ -275,6 +455,20 @@ describe('signed Groble webhook route', () => {
         const response = await POST(request(JSON.stringify(payload())));
         expect(response.status).toBe(500);
         expect(await response.text()).not.toContain('buyer@example.com');
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'error',
+            fields: expect.objectContaining({
+                webhook_event_type: 'payment.completed',
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                disposition: 'rejected',
+                error_code: 'INTERNAL_ERROR',
+            }),
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /database detail|buyer@example|merchant_0001|basic_product-01|delivery_0001|evt_test_/
+        );
     });
 
     it('does not import or invoke automatic analysis dispatchers', () => {

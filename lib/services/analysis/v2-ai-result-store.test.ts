@@ -1,7 +1,16 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+const observabilityMocks = vi.hoisted(() => ({ emit: vi.fn() }));
+
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: observabilityMocks.emit },
+}));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+beforeEach(() => {
+    observabilityMocks.emit.mockReset();
+});
 
 import {
     ANALYSIS_V2_AI_RESULT_DATABASE_NAMES,
@@ -592,6 +601,30 @@ describe('analysis V2 Gemini audit adapter', () => {
             resultSchema
         );
         expect(terminalize).not.toHaveBeenCalled();
+        expect(observabilityMocks.emit).toHaveBeenCalledOnce();
+        expect(observabilityMocks.emit).toHaveBeenCalledWith({
+            event: 'gemini.stage_completed',
+            severity: 'info',
+            fields: {
+                analysis_request_id: requestId,
+                job_key: jobKey,
+                provider: 'gemini',
+                operation: 'genderTriage',
+                phase: 'terminalize',
+                model: 'gemini-3.1-flash-lite',
+                thinking_level: 'minimal',
+                attempt: 1,
+                duration_ms: 800,
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                thinking_tokens: 5,
+                estimated_cost_usd: 0.000001,
+                disposition: 'success',
+            },
+        });
+        expect(JSON.stringify(observabilityMocks.emit.mock.calls)).not.toMatch(
+            /female|confidence|asia-northeast3|gender-triage-v2|profile:sha|STOP/
+        );
     });
 
     it('terminalizes a 429 and resumes only the next contiguous attempt after restart', async () => {
@@ -639,6 +672,22 @@ describe('analysis V2 Gemini audit adapter', () => {
             tokenUsage: null,
             estimatedCostUsd: null,
         }));
+        expect(observabilityMocks.emit).toHaveBeenCalledOnce();
+        expect(observabilityMocks.emit).toHaveBeenCalledWith({
+            event: 'gemini.stage_rate_limited',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                analysis_request_id: requestId,
+                job_key: jobKey,
+                operation: 'genderTriage',
+                attempt: 1,
+                duration_ms: 800,
+                disposition: 'rate_limited',
+                error_code: 'RATE_LIMITED',
+            }),
+        });
+        expect(observabilityMocks.emit.mock.calls[0]?.[0].fields)
+            .not.toHaveProperty('prompt_tokens');
 
         const previous = reservation({
             created: undefined,
@@ -672,6 +721,74 @@ describe('analysis V2 Gemini audit adapter', () => {
             attempt: 2,
             retryCount: 1,
         }));
+    });
+
+    it.each([
+        {
+            disposition: 'ambiguous' as const,
+            usage: {
+                tokenUsage: null,
+                usageComplete: false,
+                usageMetadataStatus: 'missing' as const,
+                estimatedCostUsd: null,
+                finishReason: null,
+            },
+            errorCode: 'PROVIDER_ERROR',
+        },
+        {
+            disposition: 'rejected' as const,
+            usage: {},
+            errorCode: 'VALIDATION_ERROR',
+        },
+        {
+            disposition: 'response_rejected' as const,
+            usage: {},
+            errorCode: 'VALIDATION_ERROR',
+        },
+    ])('logs a durably terminalized $disposition attempt as a failed stage', async ({
+        disposition,
+        usage,
+        errorCode,
+    }) => {
+        const attemptStore = {
+            reserve: vi.fn().mockResolvedValue(reservation()),
+            terminalize: vi.fn().mockResolvedValue({}),
+            loadOperation: vi.fn().mockResolvedValue([]),
+        } as unknown as AnalysisV2AiAttemptStore;
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            resultIdentity: identity(),
+            resultSchema,
+            attemptStore,
+            resultStore: {
+                terminalizeSuccess: vi.fn(),
+                checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+                loadRequest: vi.fn().mockResolvedValue(null),
+            } as unknown as AnalysisV2AiResultStore,
+        });
+        await adapter.prepare();
+        await adapter.onBeforeAttempt(startTelemetry());
+
+        await adapter.onAttemptTelemetry(attemptTelemetry({
+            disposition,
+            ...usage,
+        }));
+
+        expect(attemptStore.terminalize).toHaveBeenCalledOnce();
+        expect(observabilityMocks.emit).toHaveBeenCalledOnce();
+        expect(observabilityMocks.emit).toHaveBeenCalledWith({
+            event: 'gemini.stage_failed',
+            severity: 'error',
+            fields: expect.objectContaining({
+                analysis_request_id: requestId,
+                job_key: jobKey,
+                operation: 'genderTriage',
+                disposition,
+                error_code: errorCode,
+            }),
+        });
     });
 
     it('checks a request checkpoint first and attempt history before a global cache hit', async () => {
@@ -995,5 +1112,41 @@ describe('analysis V2 Gemini audit adapter', () => {
             .rejects.toThrow('unexpected attempt reservation');
         expect(terminalizeSuccess).toHaveBeenCalledOnce();
         expect(attemptStore.terminalize).not.toHaveBeenCalled();
+        expect(observabilityMocks.emit).toHaveBeenCalledOnce();
+        expect(observabilityMocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'gemini.stage_completed',
+            fields: expect.objectContaining({ disposition: 'success' }),
+        }));
+    });
+
+    it('does not make a committed success fail when the operational logger throws', async () => {
+        observabilityMocks.emit.mockImplementation(() => {
+            throw new Error('Axiom unavailable');
+        });
+        const attemptStore = {
+            reserve: vi.fn().mockResolvedValue(reservation()),
+            terminalize: vi.fn(),
+            loadOperation: vi.fn().mockResolvedValue([]),
+        } as unknown as AnalysisV2AiAttemptStore;
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            resultIdentity: identity(),
+            resultSchema,
+            attemptStore,
+            resultStore: {
+                terminalizeSuccess: vi.fn().mockResolvedValue(generatedCheckpoint()),
+                checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+                loadRequest: vi.fn().mockResolvedValue(null),
+            } as unknown as AnalysisV2AiResultStore,
+        });
+        await adapter.prepare();
+        await adapter.onBeforeAttempt(startTelemetry());
+
+        await expect(adapter.onAttemptTelemetry(
+            attemptTelemetry(),
+            { value: 'female', confidence: 0.9 }
+        )).resolves.toBeUndefined();
     });
 });

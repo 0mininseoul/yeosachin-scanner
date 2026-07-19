@@ -6,6 +6,7 @@
     "node": "24.x"
   },
   "scripts": {
+    "postinstall": "patch-package --error-on-fail",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -20,7 +21,10 @@
     "canary:instagram-profile-provider:finalize": "tsx --env-file=.env.local scripts/finalize-profile-provider-canary.ts"
   },
   "dependencies": {
-    "@amplitude/analytics-browser": "^2.33.5",
+    "@amplitude/unified": "1.1.25",
+    "@axiomhq/js": "1.8.0",
+    "@axiomhq/logging": "0.3.0",
+    "@axiomhq/nextjs": "0.3.0",
     "@google-cloud/tasks": "6.2.3",
     "@google/genai": "^2.7.0",
     "@supabase/ssr": "^0.8.0",
@@ -31,10 +35,13 @@
     "google-auth-library": "10.9.0",
     "google-gax": "5.0.7",
     "js-yaml": "4.3.0",
+    "libphonenumber-js": "^1.13.9",
     "next": "16.2.6",
+    "patch-package": "8.0.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "resend": "^6.8.0",
+    "server-only": "0.0.1",
     "sharp": "^0.34.5",
     "zod": "^4.3.6"
   },

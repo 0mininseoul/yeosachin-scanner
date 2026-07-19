@@ -72,6 +72,7 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                 return (
                     <div
                         key={item.id}
+                        data-amp-block
                         onClick={() => handleCardClick(item.id, item.status)}
                         className="group relative cursor-pointer border border-line bg-ink-2 p-4 transition-colors hover:border-blood/50 active:scale-[0.99]"
                     >

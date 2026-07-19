@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
+
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: vi.fn() },
+}));
 import {
     createDurableAnalysisV2AiStageRuntime,
     type AnalysisV2AiStageRuntimeDependencies,

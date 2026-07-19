@@ -487,6 +487,126 @@ describe('preflight persistence adapter', () => {
 });
 
 describe('preflight worker domain', () => {
+    it('reports safe profile and ready metadata without profile content', async () => {
+        const observer = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store: workerStore(),
+            getProfile: vi.fn(async () => profile()),
+            providerRunStore: providerRunStore(),
+            observer,
+        })).resolves.toBe('ready');
+
+        expect(observer.mock.calls).toEqual([
+            [{
+                type: 'profile_collected',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 350,
+                followingCount: 300,
+            }],
+            [{
+                type: 'completed',
+                outcome: 'ready',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 350,
+                followingCount: 300,
+                requiredPlan: 'basic',
+            }],
+        ]);
+        expect(JSON.stringify(observer.mock.calls)).not.toMatch(
+            /bio|Target|cdninstagram|avatar/
+        );
+    });
+
+    it('keeps preflight processing fail-open when its optional observer throws', async () => {
+        const store = workerStore();
+        const observer = vi.fn(() => {
+            throw new Error('telemetry unavailable');
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(async () => profile()),
+            providerRunStore: providerRunStore(),
+            observer,
+        })).resolves.toBe('ready');
+
+        expect(observer).toHaveBeenCalledTimes(2);
+        expect(store.finalizeReady).toHaveBeenCalledOnce();
+    });
+
+    it('reports a fetched private profile before its blocked completion', async () => {
+        const observer = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store: workerStore(),
+            getProfile: vi.fn(async () => profile({
+                isPrivate: true,
+                followersCount: 401,
+                followingCount: 302,
+                bio: 'private profile content',
+            })),
+            providerRunStore: providerRunStore(),
+            observer,
+        })).resolves.toBe('blocked');
+
+        expect(observer.mock.calls).toEqual([
+            [{
+                type: 'profile_collected',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 401,
+                followingCount: 302,
+            }],
+            [{
+                type: 'completed',
+                outcome: 'blocked',
+                preflightId,
+                userId,
+                targetInstagramId: 'target.name',
+                followersCount: 401,
+                followingCount: 302,
+                errorCode: 'TARGET_PRIVATE',
+            }],
+        ]);
+        expect(JSON.stringify(observer.mock.calls)).not.toContain('private profile content');
+    });
+
+    it('reports retry metadata while preserving the public retry error', async () => {
+        const observer = vi.fn();
+        const store = workerStore(claim({ workerAttemptCount: 3 }));
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('running'));
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => {
+                throw new Error('SCRAPING_RUN_PENDING_ERROR: private-provider-body');
+            }),
+            providerRunStore: runs,
+            observer,
+        })).rejects.toMatchObject({ message: 'PREFLIGHT_WORKER_RETRY' });
+
+        expect(observer).toHaveBeenCalledOnce();
+        expect(observer).toHaveBeenCalledWith({
+            type: 'failed',
+            preflightId,
+            userId,
+            targetInstagramId: 'target.name',
+            category: 'run_pending',
+            retryable: true,
+            httpStatus: null,
+            workerAttemptCount: 3,
+        });
+        expect(JSON.stringify(observer.mock.calls)).not.toContain('private-provider-body');
+    });
+
     it('uses only the self-hosted profile provider without fallback and stores a ready quote', async () => {
         const store = workerStore();
         const getProfile = vi.fn<(

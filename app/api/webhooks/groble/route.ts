@@ -2,13 +2,23 @@ import { z } from 'zod';
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isJsonRequest } from '@/lib/services/earlybird/contracts';
-import { readGrobleConfig } from '@/lib/services/groble/config';
+import {
+    readGrobleConfig,
+    type GrobleConfig,
+} from '@/lib/services/groble/config';
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
+import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
     parseGroblePaymentCompletedEvent,
     verifyGrobleWebhookSignature,
 } from '@/lib/services/groble/webhook';
+import {
+    observeRoute,
+    type OperationalRequestContext,
+} from '@/lib/observability/request';
+import { operationalLogger } from '@/lib/observability/server';
 
 const MAX_WEBHOOK_BYTES = 256 * 1_024;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
@@ -41,34 +51,109 @@ function response(status: number, body: Record<string, unknown>): NextResponse {
     });
 }
 
-export async function POST(request: Request): Promise<NextResponse> {
+type WebhookEventType = 'payment.completed' | 'payment.cancel_requested' | 'other';
+
+interface WebhookLogState {
+    webhookEventType?: WebhookEventType;
+    orderId?: string | null;
+    planId?: PaidEarlybirdPlanId;
+    amountKrw?: number;
+}
+
+function safeWebhookEventType(value: string): WebhookEventType {
+    return value === 'payment.completed' || value === 'payment.cancel_requested'
+        ? value
+        : 'other';
+}
+
+function planForProduct(productId: string, config: GrobleConfig): PaidEarlybirdPlanId | undefined {
+    if (productId === config.productIds.basic) return 'basic';
+    if (productId === config.productIds.standard) return 'standard';
+    return undefined;
+}
+
+function webhookFields(
+    context: OperationalRequestContext,
+    state: WebhookLogState,
+): Record<string, unknown> {
+    return {
+        ...context,
+        provider: 'groble',
+        operation: 'webhook',
+        ...(state.webhookEventType
+            ? { webhook_event_type: state.webhookEventType }
+            : {}),
+        ...(state.orderId ? { order_id: state.orderId } : {}),
+        ...(state.planId ? { plan_id: state.planId } : {}),
+        ...(state.amountKrw === undefined ? {} : { amount_krw: state.amountKrw }),
+    };
+}
+
+async function handlePOST(
+    request: Request,
+    context: OperationalRequestContext,
+): Promise<NextResponse> {
+    const reject = (
+        status: number,
+        body: Record<string, unknown>,
+        errorCode: string,
+        state: WebhookLogState = {},
+    ): NextResponse => {
+        operationalLogger.emit({
+            event: 'groble.webhook_rejected',
+            severity: status >= 500 ? 'error' : 'warn',
+            fields: {
+                ...webhookFields(context, state),
+                disposition: 'rejected',
+                error_code: errorCode,
+            },
+        });
+        return response(status, body);
+    };
+
     if (!isJsonRequest(request)) {
-        return response(415, { received: false, code: 'UNSUPPORTED_MEDIA_TYPE' });
+        return reject(
+            415,
+            { received: false, code: 'UNSUPPORTED_MEDIA_TYPE' },
+            'VALIDATION_ERROR',
+        );
     }
 
     const declaredLength = Number(request.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_WEBHOOK_BYTES) {
-        return response(413, { received: false, code: 'PAYLOAD_TOO_LARGE' });
+        return reject(
+            413,
+            { received: false, code: 'PAYLOAD_TOO_LARGE' },
+            'VALIDATION_ERROR',
+        );
     }
 
     let rawBody: string;
     try {
         rawBody = await request.text();
     } catch {
-        return response(400, { received: false, code: 'INVALID_BODY' });
+        return reject(400, { received: false, code: 'INVALID_BODY' }, 'INVALID_REQUEST');
     }
     if (new TextEncoder().encode(rawBody).byteLength > MAX_WEBHOOK_BYTES) {
-        return response(413, { received: false, code: 'PAYLOAD_TOO_LARGE' });
+        return reject(
+            413,
+            { received: false, code: 'PAYLOAD_TOO_LARGE' },
+            'VALIDATION_ERROR',
+        );
     }
 
     let config;
     try {
         config = readGrobleConfig();
     } catch {
-        return response(503, {
-            received: false,
-            code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
-        });
+        return reject(
+            503,
+            {
+                received: false,
+                code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
+            },
+            'INTERNAL_ERROR',
+        );
     }
 
     try {
@@ -81,26 +166,48 @@ export async function POST(request: Request): Promise<NextResponse> {
             previousSecret: config.webhookPreviousSecret,
         });
     } catch {
-        return response(401, { received: false, code: 'INVALID_SIGNATURE' });
+        return reject(
+            401,
+            { received: false, code: 'INVALID_SIGNATURE' },
+            'UNAUTHORIZED',
+        );
     }
 
     const idempotencyKey = request.headers.get('x-groble-idempotency-key')?.trim();
     if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
-        return response(400, { received: false, code: 'INVALID_IDEMPOTENCY_KEY' });
+        return reject(
+            400,
+            { received: false, code: 'INVALID_IDEMPOTENCY_KEY' },
+            'VALIDATION_ERROR',
+        );
     }
 
     let envelope;
     try {
         envelope = parseGrobleEventEnvelope(rawBody);
     } catch {
-        return response(400, { received: false, code: 'INVALID_PAYLOAD' });
+        return reject(
+            400,
+            { received: false, code: 'INVALID_PAYLOAD' },
+            'VALIDATION_ERROR',
+        );
     }
+    const webhookEventType = safeWebhookEventType(envelope.type);
+    operationalLogger.emit({
+        event: 'groble.webhook_received',
+        severity: 'info',
+        fields: {
+            ...webhookFields(context, { webhookEventType }),
+            disposition: webhookEventType === 'other' ? 'ignored' : 'accepted',
+        },
+    });
     if (envelope.type !== 'payment.completed'
         && envelope.type !== 'payment.cancel_requested') {
         return response(200, { received: true, disposition: 'ignored' });
     }
 
     let persistence;
+    let state: WebhookLogState = { webhookEventType };
     if (envelope.type === 'payment.completed') {
         let payment;
         try {
@@ -110,14 +217,30 @@ export async function POST(request: Request): Promise<NextResponse> {
                 const invalidFields = Array.from(new Set(
                     error.issues.map(issue => issue.path.join('.')).filter(Boolean)
                 )).sort();
-                return response(400, {
-                    received: false,
-                    code: 'INVALID_PAYMENT_PAYLOAD',
-                    invalidFields,
-                });
+                return reject(
+                    400,
+                    {
+                        received: false,
+                        code: 'INVALID_PAYMENT_PAYLOAD',
+                        invalidFields,
+                    },
+                    'VALIDATION_ERROR',
+                    state,
+                );
             }
-            return response(400, { received: false, code: 'INVALID_PAYMENT_PAYLOAD' });
+            return reject(
+                400,
+                { received: false, code: 'INVALID_PAYMENT_PAYLOAD' },
+                'VALIDATION_ERROR',
+                state,
+            );
         }
+        state = {
+            ...state,
+            planId: planForProduct(payment.productId, config),
+            amountKrw: payment.amountKrw,
+        };
+        const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
         try {
             persistence = await supabaseAdmin.rpc('finalize_earlybird_groble_payment', {
                 p_event_id: payment.eventId,
@@ -126,20 +249,40 @@ export async function POST(request: Request): Promise<NextResponse> {
                 p_occurred_at: payment.occurredAt,
                 p_payment_id: payment.paymentId,
                 p_buyer_email: payment.buyerEmail,
+                p_buyer_phone_normalized: buyerPhoneNormalized,
+                // The canonical RPC keeps these compatibility arguments while old
+                // application instances drain. Raw buyer contacts are not retained.
+                p_buyer_phone_raw: null,
+                p_buyer_display_name: null,
                 p_product_id: payment.productId,
                 p_amount_krw: payment.amountKrw,
                 p_paid_at: payment.paidAt,
             });
         } catch {
-            return response(500, { received: false, code: 'PERSISTENCE_FAILED' });
+            return reject(
+                500,
+                { received: false, code: 'PERSISTENCE_FAILED' },
+                'INTERNAL_ERROR',
+                state,
+            );
         }
     } else {
         let cancellation;
         try {
             cancellation = parseGroblePaymentCancelRequestedEvent(rawBody);
         } catch {
-            return response(400, { received: false, code: 'INVALID_PAYMENT_PAYLOAD' });
+            return reject(
+                400,
+                { received: false, code: 'INVALID_PAYMENT_PAYLOAD' },
+                'VALIDATION_ERROR',
+                state,
+            );
         }
+        state = {
+            ...state,
+            planId: planForProduct(cancellation.productId, config),
+            amountKrw: cancellation.amountKrw,
+        };
         try {
             persistence = await supabaseAdmin.rpc(
                 'finalize_earlybird_groble_cancel_request',
@@ -155,21 +298,57 @@ export async function POST(request: Request): Promise<NextResponse> {
                 }
             );
         } catch {
-            return response(500, { received: false, code: 'PERSISTENCE_FAILED' });
+            return reject(
+                500,
+                { received: false, code: 'PERSISTENCE_FAILED' },
+                'INTERNAL_ERROR',
+                state,
+            );
         }
     }
 
     const { data, error } = persistence;
     if (error) {
-        return response(500, { received: false, code: 'PERSISTENCE_FAILED' });
+        return reject(
+            500,
+            { received: false, code: 'PERSISTENCE_FAILED' },
+            'INTERNAL_ERROR',
+            state,
+        );
     }
     const parsed = finalizationResultSchema.safeParse(data);
     if (!parsed.success) {
-        return response(500, { received: false, code: 'INVALID_PERSISTENCE_RESULT' });
+        return reject(
+            500,
+            { received: false, code: 'INVALID_PERSISTENCE_RESULT' },
+            'INTERNAL_ERROR',
+            state,
+        );
     }
+
+    const finalization = parsed.data[0];
+    operationalLogger.emit({
+        event: 'groble.webhook_finalized',
+        severity: finalization.disposition === 'accepted' ? 'info' : 'warn',
+        fields: {
+            ...webhookFields(context, {
+                ...state,
+                orderId: finalization.order_id,
+            }),
+            disposition: finalization.disposition,
+        },
+    });
 
     return response(200, {
         received: true,
-        disposition: parsed.data[0].disposition,
+        disposition: finalization.disposition,
     });
+}
+
+export async function POST(request: Request): Promise<NextResponse> {
+    return observeRoute(
+        request,
+        '/api/webhooks/groble',
+        context => handlePOST(request, context),
+    );
 }

@@ -1,4 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const observabilityMocks = vi.hoisted(() => ({ emit: vi.fn() }));
+
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: observabilityMocks.emit },
+}));
+
 import { GoogleAuth } from 'google-gax';
 import {
     analysisTaskStateFromRow,
@@ -22,6 +29,14 @@ const config: AnalysisTasksConfig = {
 };
 
 describe('analysis background tasks', () => {
+    beforeEach(() => {
+        observabilityMocks.emit.mockReset();
+    });
+
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
     it('prepares deployment ADC before constructing the Cloud Tasks client', async () => {
         const order: string[] = [];
         const client = {} as never;
@@ -193,6 +208,114 @@ describe('analysis background tasks', () => {
             currentStep: 'pending',
             progress: 0,
         }, { config, client })).resolves.toBe('exists');
+
+        expect(observabilityMocks.emit.mock.calls.map(call => call[0])).toEqual([
+            expect.objectContaining({
+                event: 'cloud_task.enqueue_completed',
+                severity: 'info',
+                fields: expect.objectContaining({
+                    analysis_request_id: requestId,
+                    queue_name: 'analysis-pipeline',
+                    operation: 'enqueue',
+                    phase: 'pending',
+                    progress: 0,
+                    disposition: 'enqueued',
+                }),
+            }),
+            expect.objectContaining({
+                event: 'cloud_task.enqueue_completed',
+                fields: expect.objectContaining({ disposition: 'exists' }),
+            }),
+        ]);
+        expect(JSON.stringify(observabilityMocks.emit.mock.calls)).not.toMatch(
+            /analysis-task@|example-project|worker\.example|eyJ|oidc/i
+        );
+    });
+
+    it('logs disabled queues as an intentional completion without validating the request', async () => {
+        await expect(enqueueAnalysisTask('not-a-uuid', {
+            currentStep: 'pending',
+            progress: 0,
+        }, { config: null })).resolves.toBe('disabled');
+
+        expect(observabilityMocks.emit).toHaveBeenCalledWith({
+            event: 'cloud_task.enqueue_completed',
+            severity: 'info',
+            fields: expect.objectContaining({
+                operation: 'enqueue',
+                phase: 'pending',
+                progress: 0,
+                disposition: 'disabled',
+            }),
+        });
+    });
+
+    it('logs config, client, and create failures without changing thrown behavior', async () => {
+        vi.stubEnv('ANALYSIS_TASKS_ENABLED', 'invalid-setting');
+        await expect(enqueueAnalysisTask(requestId, {
+            currentStep: 'pending',
+            progress: 0,
+        })).rejects.toThrow(
+            'ANALYSIS_TASKS_CONFIG_ERROR: ANALYSIS_TASKS_ENABLED must be boolean.'
+        );
+        vi.unstubAllEnvs();
+
+        const clientFailure = new Error('private service account and project');
+        const client = {
+            queuePath: vi.fn(() => { throw clientFailure; }),
+            taskPath: vi.fn(),
+            createTask: vi.fn(),
+        };
+        await expect(enqueueAnalysisTask(requestId, {
+            currentStep: 'collect',
+            progress: 5,
+        }, { config, client })).rejects.toBe(clientFailure);
+
+        const createTask = vi.fn().mockRejectedValue(
+            new Error('private payload target and credentials')
+        );
+        await expect(enqueueAnalysisTask(requestId, {
+            currentStep: 'collect',
+            progress: 5,
+        }, {
+            config,
+            client: {
+                queuePath: vi.fn(() => 'queue-path'),
+                taskPath: vi.fn(() => 'task-path'),
+                createTask,
+            },
+        })).rejects.toThrow(
+            'ANALYSIS_TASKS_ENQUEUE_ERROR: continuation task creation failed.'
+        );
+
+        const failures = observabilityMocks.emit.mock.calls
+            .map(call => call[0])
+            .filter(event => event.event === 'cloud_task.enqueue_failed');
+        expect(failures).toHaveLength(3);
+        expect(failures.map(event => event.fields)).toEqual([
+            expect.objectContaining({ error_code: 'VALIDATION_ERROR', retryable: false }),
+            expect.objectContaining({ error_code: 'PROVIDER_ERROR', retryable: true }),
+            expect.objectContaining({ error_code: 'PROVIDER_ERROR', retryable: true }),
+        ]);
+        expect(JSON.stringify(failures)).not.toMatch(
+            /private service account|private payload|credentials|target/
+        );
+    });
+
+    it('keeps a successful enqueue fail-open when the logger throws', async () => {
+        observabilityMocks.emit.mockImplementation(() => {
+            throw new Error('Axiom unavailable');
+        });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn(() => 'task-path'),
+            createTask: vi.fn().mockResolvedValue([{}]),
+        };
+
+        await expect(enqueueAnalysisTask(requestId, {
+            currentStep: 'pending',
+            progress: 0,
+        }, { config, client })).resolves.toBe('enqueued');
     });
 
     it('accepts only the configured verified service-account email', async () => {

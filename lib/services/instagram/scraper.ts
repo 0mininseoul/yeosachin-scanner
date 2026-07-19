@@ -1,5 +1,12 @@
 import type { InstagramProfile, InstagramFollower } from '@/lib/types/instagram';
-import { summarizeProfileFetchOutcomes } from '@/lib/domain/analysis/profile-fetch-outcome';
+import {
+    summarizeProfileFetchOutcomes,
+    type ProfileFetchFailureCategory,
+} from '@/lib/domain/analysis/profile-fetch-outcome';
+import {
+    MAX_BATCH_EXCEPTION_EVENTS,
+    operationalLogger,
+} from '@/lib/observability/server';
 import type {
     Capability,
     ProfileAttemptProvider,
@@ -11,6 +18,7 @@ import type {
     ScrapeRequestOptions,
     ScraperProvider,
     ScraperTelemetryEvent,
+    ScraperTelemetryHook,
 } from './providers/types';
 import {
     failedProfileAttempt,
@@ -36,6 +44,7 @@ import {
     minimumCompleteRelationshipCount,
     validateRelationshipCompleteness,
 } from './completeness';
+import { emitScraperOperationalTelemetry } from './supabase-telemetry';
 
 // ── 프로바이더 레지스트리 (테스트에서 주입 가능) ──
 let providers: Record<ProviderName, ScraperProvider> = {
@@ -232,6 +241,56 @@ async function emitTelemetry(
     } catch {
         console.warn('[scraper] telemetry hook failed');
     }
+}
+
+function candidateFailureCode(
+    category: ProfileFetchFailureCategory
+): 'NOT_FOUND' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'TIMEOUT' | 'VALIDATION_ERROR' | 'PROVIDER_ERROR' {
+    if (category === 'not_found' || category === 'empty_user') return 'NOT_FOUND';
+    if (category === 'auth') return 'UNAUTHORIZED';
+    if (category === 'rate_limit') return 'RATE_LIMITED';
+    if (category === 'timeout') return 'TIMEOUT';
+    if (category === 'incomplete' || category === 'schema') return 'VALIDATION_ERROR';
+    return 'PROVIDER_ERROR';
+}
+
+function emitV2CandidateFailures(
+    results: readonly ProfileAttemptResult[],
+    limit: number,
+): number {
+    let emitted = 0;
+    for (const result of results) {
+        if (result.outcome.status === 'success') continue;
+        if (emitted === limit) break;
+        emitted += 1;
+        try {
+            operationalLogger.emit({
+                event: 'scraper.candidate_failed',
+                severity: result.outcome.status === 'failed' ? 'error' : 'warn',
+                fields: {
+                    candidate_instagram_id: result.outcome.requestedUsername,
+                    provider: result.outcome.source,
+                    operation: 'profilesBatch',
+                    disposition: result.outcome.status === 'unavailable'
+                        ? 'unavailable'
+                        : 'failure',
+                    error_code: candidateFailureCode(result.outcome.failureCategory),
+                    attempt: result.outcome.requestCount,
+                    duration_ms: result.outcome.latencyMs,
+                },
+            });
+        } catch {
+            // Candidate processing is independent from observability delivery.
+        }
+    }
+    return emitted;
+}
+
+function v2TelemetryHook(options: ProfilesBatchV2Options): ScraperTelemetryHook {
+    return async event => {
+        emitScraperOperationalTelemetry(event);
+        if (options.onTelemetry) await options.onTelemetry(event);
+    };
 }
 
 function safeFailureCategory(error: unknown): ScraperFailureCategory {
@@ -745,6 +804,8 @@ export async function getProfilesBatchV2(
         throw new Error('SCRAPING_CONFIG_ERROR: V2 profile persistence callback is required.');
     }
     const requestedUsernames = Object.freeze(canonicalV2ProfileUsernames(usernames));
+    const onTelemetry = v2TelemetryHook(options);
+    let candidateFailureEvents = 0;
     const primary = providers.selfhosted;
     const fallback = providers.apify;
     if (
@@ -804,7 +865,7 @@ export async function getProfilesBatchV2(
             false,
             {
                 requestId: options.requestId,
-                onTelemetry: options.onTelemetry,
+                onTelemetry,
                 onProfileStart: options.onProfileStart,
                 onProfileResolved: options.onProfileResolved,
             }
@@ -817,6 +878,10 @@ export async function getProfilesBatchV2(
             requestedUsernames,
             results: primaryResults,
         }));
+        candidateFailureEvents += emitV2CandidateFailures(
+            primaryResults,
+            MAX_BATCH_EXCEPTION_EVENTS - candidateFailureEvents,
+        );
         frozenUnresolvedUsernames = Object.freeze(
             summarizeProfileFetchOutcomes(
                 requestedUsernames,
@@ -849,7 +914,7 @@ export async function getProfilesBatchV2(
             true,
             {
                 requestId: options.requestId,
-                onTelemetry: options.onTelemetry,
+                onTelemetry,
                 onProfileStart: options.onProfileStart,
                 providerRun: options.providerRun,
             }
@@ -865,6 +930,10 @@ export async function getProfilesBatchV2(
             requestedUsernames: frozenUnresolvedUsernames,
             results: fallbackResults,
         }));
+        emitV2CandidateFailures(
+            fallbackResults,
+            MAX_BATCH_EXCEPTION_EVENTS - candidateFailureEvents,
+        );
     }
 
     const fallbackByUsername = new Map(

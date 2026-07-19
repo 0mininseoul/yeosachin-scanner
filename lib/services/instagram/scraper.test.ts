@@ -1,4 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: vi.fn() },
+    MAX_BATCH_EXCEPTION_EVENTS: 25,
+}));
+
 import type { ScraperProvider, ScraperTelemetryEvent } from './providers/types';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import {

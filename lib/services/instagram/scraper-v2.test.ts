@@ -1,4 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const observabilityMocks = vi.hoisted(() => ({ emit: vi.fn() }));
+
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: observabilityMocks.emit },
+    MAX_BATCH_EXCEPTION_EVENTS: 25,
+}));
+
 import fixture from './providers/selfhosted/__fixtures__/web-profile-info.json';
 import { makeSelfHostedProvider } from './providers/selfhosted';
 import { APIFY_PROVIDER_QUOTA_ERROR_CODE } from './providers/apify-relationship';
@@ -58,7 +66,10 @@ function durablePaidStart() {
     };
 }
 
-afterEach(() => __resetProvidersForTest());
+afterEach(() => {
+    __resetProvidersForTest();
+    observabilityMocks.emit.mockReset();
+});
 
 describe('getProfilesBatchV2', () => {
     it('preserves reject, null, and schema failures then sends only unresolved usernames once', async () => {
@@ -125,6 +136,61 @@ describe('getProfilesBatchV2', () => {
             ['carol', 'failed', 'apify'],
             ['dave', 'success', 'apify'],
         ]);
+
+        const emitted = observabilityMocks.emit.mock.calls.map(call => call[0]);
+        expect(emitted.filter(event => event.event === 'scraper.fallback_selected'))
+            .toHaveLength(1);
+        const candidateFailures = emitted.filter(
+            event => event.event === 'scraper.candidate_failed'
+        );
+        expect(candidateFailures.map(event => event.fields.candidate_instagram_id))
+            .toEqual(['bob', 'carol', 'dave', 'carol']);
+        expect(JSON.stringify(candidateFailures)).not.toContain('alice');
+    });
+
+    it('caps exceptional candidate logs and never emits successful candidate usernames', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `candidate_${index}`);
+        const primary = vi.fn(async () => usernames.map(username => failedProfileAttempt({
+            requestedUsername: username,
+            source: 'selfhosted',
+            error: new Error('private provider response and caption'),
+            requestCount: 1,
+            latencyMs: 12,
+        })));
+        const fallback = vi.fn(async () => usernames.map(username => failedProfileAttempt({
+            requestedUsername: username,
+            source: 'apify',
+            error: new Error('second private provider response'),
+            requestCount: 1,
+            latencyMs: 15,
+        })));
+        __setProvidersForTest({}, {
+            selfhosted: provider({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatchOutcomes: primary,
+            }),
+            apify: provider({
+                name: 'apify',
+                paid: true,
+                getProfilesBatchOutcomes: fallback,
+            }),
+        });
+
+        await getProfilesBatchV2(usernames, {
+            providerRun: durablePaidStart(),
+            persistAttemptOutcomes: async () => undefined,
+        });
+
+        const emitted = observabilityMocks.emit.mock.calls.map(call => call[0]);
+        const candidateFailures = emitted.filter(
+            event => event.event === 'scraper.candidate_failed'
+        );
+        expect(candidateFailures).toHaveLength(25);
+        expect(emitted.filter(event => event.event === 'scraper.fallback_selected'))
+            .toHaveLength(1);
+        expect(JSON.stringify(emitted)).not.toMatch(/private provider response|caption/);
+        expect(JSON.stringify(emitted)).not.toContain('candidate_29');
     });
 
     it('turns a full primary transport failure into one failed outcome per username', async () => {

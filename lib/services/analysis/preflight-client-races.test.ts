@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
 import {
     freshPlanSnapshotV1Schema,
     preflightStatusV1Schema,
@@ -9,9 +10,38 @@ import {
     PreflightRequestCoordinator,
     restoreExclusionState,
 } from '@/hooks/useAnalysisV2Preflight';
+import * as preflightClient from '@/hooks/useAnalysisV2Preflight';
+import {
+    bindPendingAnalysisTarget,
+    readPendingAnalysisTargetForPreflight,
+} from '@/lib/services/pending-analysis-target';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const otherPreflightId = '223e4567-e89b-42d3-a456-426614174000';
+const ownerId = '550e8400-e29b-41d4-a716-446655440000';
+
+function createStorage() {
+    const values = new Map<string, string>();
+    return {
+        getItem: vi.fn((key: string) => values.get(key) ?? null),
+        removeItem: vi.fn((key: string) => values.delete(key)),
+        setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+    };
+}
+
+type RedirectConsumedPreflight = (
+    status: ReturnType<typeof preflightStatusV1Schema.parse>,
+    dependencies: {
+        replace: (href: string) => void;
+        storage: ReturnType<typeof createStorage>;
+    },
+) => boolean;
+
+function consumedRedirect(): RedirectConsumedPreflight | undefined {
+    return Reflect.get(preflightClient, 'redirectConsumedPreflight') as
+        | RedirectConsumedPreflight
+        | undefined;
+}
 
 const plans = [
     {
@@ -107,6 +137,78 @@ describe('analysis V2 preflight request coordinator', () => {
         expect(createRequest.isCurrent()).toBe(true);
         expect(coordinator.beginRequest(generation, otherPreflightId)).toBeNull();
         expect(coordinator.beginRequest(generation, preflightId)).not.toBeNull();
+    });
+});
+
+describe('consumed preflight client redirect', () => {
+    it('clears the matching bound target synchronously before redirecting', () => {
+        const redirectConsumedPreflight = consumedRedirect();
+        expect(redirectConsumedPreflight).toBeTypeOf('function');
+        if (!redirectConsumedPreflight) return;
+        const storage = createStorage();
+        bindPendingAnalysisTarget(storage, {
+            now: 1_750_000_000_000,
+            ownerId,
+            preflightId,
+            target: 'safe_target',
+        });
+        storage.removeItem.mockClear();
+        const replace = vi.fn();
+        const consumed = preflightStatusV1Schema.parse({
+            schemaVersion: 1,
+            preflightId,
+            status: 'consumed',
+            exclusionDecision: 'skip',
+            requestId: otherPreflightId,
+        });
+
+        expect(redirectConsumedPreflight(consumed, { replace, storage })).toBe(true);
+        expect(storage.getItem('pending_ig')).toBeNull();
+        expect(replace).toHaveBeenCalledWith(`/progress/${otherPreflightId}`);
+        expect(storage.removeItem.mock.invocationCallOrder[0])
+            .toBeLessThan(replace.mock.invocationCallOrder[0]);
+    });
+
+    it('does not clear a matching bound target for a nonterminal preflight', () => {
+        const redirectConsumedPreflight = consumedRedirect();
+        expect(redirectConsumedPreflight).toBeTypeOf('function');
+        if (!redirectConsumedPreflight) return;
+        const storage = createStorage();
+        bindPendingAnalysisTarget(storage, {
+            now: 1_750_000_000_000,
+            ownerId,
+            preflightId,
+            target: 'safe_target',
+        });
+        storage.removeItem.mockClear();
+        const replace = vi.fn();
+        const pending = preflightStatusV1Schema.parse({
+            schemaVersion: 1,
+            preflightId,
+            expiresAt: '2030-07-14T12:00:00.000Z',
+            status: 'pending',
+            exclusionDecision: 'pending',
+        });
+
+        expect(redirectConsumedPreflight(pending, { replace, storage })).toBe(false);
+        expect(readPendingAnalysisTargetForPreflight(storage, {
+            now: 1_750_000_000_001,
+            ownerId,
+            preflightId,
+        })).toBe('safe_target');
+        expect(storage.removeItem).not.toHaveBeenCalled();
+        expect(replace).not.toHaveBeenCalled();
+    });
+
+    it('routes loaded preflight responses through the consumed redirect guard', () => {
+        const hookSource = readFileSync(
+            new URL('../../../hooks/useAnalysisV2Preflight.ts', import.meta.url),
+            'utf8',
+        );
+
+        expect(hookSource).toMatch(
+            /redirectConsumedPreflight\(parsed\.data, \{[\s\S]*?storage: availablePendingTargetStorage\(\),[\s\S]*?replace:/,
+        );
     });
 });
 

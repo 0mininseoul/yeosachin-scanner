@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { TopBar, Eyebrow } from '@/components/case-ui';
+import { LogoutButton } from '@/components/logout-button';
 import { ownerAnalysisHistoryV1Schema } from '@/lib/services/analysis/owner-history';
 import AnalysisList from './analysis-list';
 
@@ -39,11 +40,7 @@ export default async function MyPage() {
                         <span className="hidden max-w-[140px] truncate text-[12px] text-fg-mute sm:inline">
                             {user.email}
                         </span>
-                        <form action="/api/auth/signout" method="post">
-                            <button className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg">
-                                로그아웃
-                            </button>
-                        </form>
+                        <LogoutButton />
                     </>
                 }
             />

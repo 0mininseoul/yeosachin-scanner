@@ -12,6 +12,11 @@ import {
     shouldClientDriveAnalysis,
 } from '@/lib/services/analysis/progress-retry';
 import { analysisV2EventCopy } from '@/lib/services/analysis/owner-view-presentation';
+import {
+    availablePendingTargetStorage,
+    clearPendingAnalysisTargetForTerminalState,
+    signOutAndClearPendingAnalysisTarget,
+} from '@/lib/services/pending-analysis-target';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
@@ -225,6 +230,10 @@ export default function ProgressPage({ params }: PageProps) {
 
     // 완료되면 결과 페이지로 이동
     useEffect(() => {
+        const storage = availablePendingTargetStorage();
+        if (storage) {
+            clearPendingAnalysisTargetForTerminalState(storage, data?.status);
+        }
         if (data?.status === 'completed') {
             const pipeline = data.pipelineVersion === 'v2' ? '?pipeline=v2' : '';
             router.push(`/result/${requestId}${pipeline}`);
@@ -233,8 +242,10 @@ export default function ProgressPage({ params }: PageProps) {
 
     const handleLogout = async () => {
         try {
-            const response = await fetch('/api/auth/signout', { method: 'POST' });
-            if (response.ok) {
+            const signedOut = await signOutAndClearPendingAnalysisTarget(
+                availablePendingTargetStorage(),
+            );
+            if (signedOut) {
                 router.push('/');
             }
         } catch (err) {
@@ -294,7 +305,7 @@ export default function ProgressPage({ params }: PageProps) {
                 }
             />
 
-            <main className="mx-auto flex max-w-[460px] flex-col items-center px-5 pt-12">
+            <main data-amp-block className="mx-auto flex max-w-[460px] flex-col items-center px-5 pt-12">
                 <Eyebrow>판독 진행 중</Eyebrow>
 
                 {/* radar scope focal */}

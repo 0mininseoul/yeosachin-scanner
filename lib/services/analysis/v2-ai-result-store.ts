@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { operationalLogger } from '@/lib/observability/server';
 import type {
     GeminiAttemptStartTelemetry,
     GeminiAttemptTelemetry,
@@ -1038,6 +1039,58 @@ export function createAnalysisV2AiAuditAdapter<T>(
     let preparation: Promise<AnalysisV2AiPreparedResult<T>> | null = null;
     let expectedAttempt: number | null = null;
     let terminal = false;
+    const emittedTerminalAttempts = new Set<number>();
+
+    const emitTerminalAttempt = (telemetry: GeminiAttemptTelemetry): void => {
+        if (emittedTerminalAttempts.has(telemetry.attempt)) return;
+        emittedTerminalAttempts.add(telemetry.attempt);
+        const tokenUsage = telemetry.usageComplete
+            ? completeTelemetryTokenUsage(telemetry)
+            : null;
+        const event = telemetry.disposition === 'success'
+            ? 'gemini.stage_completed' as const
+            : telemetry.disposition === 'rate_limited'
+                ? 'gemini.stage_rate_limited' as const
+                : 'gemini.stage_failed' as const;
+        const errorCode = telemetry.disposition === 'rate_limited'
+            ? 'RATE_LIMITED'
+            : telemetry.disposition === 'ambiguous'
+                ? 'PROVIDER_ERROR'
+                : telemetry.disposition === 'success' ? undefined : 'VALIDATION_ERROR';
+        try {
+            operationalLogger.emit({
+                event,
+                severity: event === 'gemini.stage_completed'
+                    ? 'info'
+                    : event === 'gemini.stage_rate_limited' ? 'warn' : 'error',
+                fields: {
+                    analysis_request_id: request.data.requestId,
+                    job_key: request.data.jobKey,
+                    provider: 'gemini',
+                    operation: resultIdentity.stage,
+                    phase: 'terminalize',
+                    model: resultIdentity.modelName,
+                    ...(resultIdentity.thinkingLevel
+                        ? { thinking_level: resultIdentity.thinkingLevel.toLowerCase() }
+                        : {}),
+                    attempt: telemetry.attempt,
+                    duration_ms: telemetry.latencyMs,
+                    ...(tokenUsage ? {
+                        prompt_tokens: tokenUsage.promptTokens,
+                        completion_tokens: tokenUsage.completionTokens,
+                        thinking_tokens: tokenUsage.thinkingTokens,
+                    } : {}),
+                    ...(telemetry.estimatedCostUsd !== null
+                        ? { estimated_cost_usd: telemetry.estimatedCostUsd }
+                        : {}),
+                    disposition: telemetry.disposition,
+                    ...(errorCode ? { error_code: errorCode } : {}),
+                },
+            });
+        } catch {
+            // A committed provider attempt must never be reclassified by telemetry failure.
+        }
+    };
 
     return {
         requestId: request.data.requestId.toLowerCase(),
@@ -1218,6 +1271,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                         result: strictResult,
                     }, options.resultSchema);
                     terminal = true;
+                    emitTerminalAttempt(telemetry);
                 } catch (error) {
                     if (
                         error instanceof AnalysisV2AiResultFenceError
@@ -1225,6 +1279,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     ) {
                         terminal = true;
                         reservations.delete(telemetry.attempt);
+                        emitTerminalAttempt(telemetry);
                     }
                     throw error;
                 }
@@ -1254,6 +1309,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     estimatedCostUsd: telemetry.estimatedCostUsd,
                     finishReason: telemetry.finishReason,
                 });
+                emitTerminalAttempt(telemetry);
                 if (telemetry.disposition === 'rate_limited' && telemetry.attempt < 4) {
                     expectedAttempt = telemetry.attempt + 1;
                 } else {

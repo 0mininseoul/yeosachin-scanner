@@ -14,6 +14,11 @@ import {
     publicPreflightStatusDto,
 } from '@/lib/services/analysis/preflight';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    observeRoute,
+    type OperationalRequestContext,
+} from '@/lib/observability/request';
+import { operationalLogger } from '@/lib/observability/server';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -65,7 +70,7 @@ async function consumedPreflightStatus(
     });
 }
 
-export async function GET(
+async function handleGET(
     _request: Request,
     { params }: { params: Promise<{ preflightId: string }> }
 ) {
@@ -101,9 +106,21 @@ export async function GET(
     }
 }
 
-export async function PATCH(
+export async function GET(
     request: Request,
-    { params }: { params: Promise<{ preflightId: string }> }
+    routeContext: { params: Promise<{ preflightId: string }> }
+): Promise<NextResponse> {
+    return observeRoute(
+        request,
+        '/api/analysis/preflight/[preflightId]',
+        () => handleGET(request, routeContext),
+    );
+}
+
+async function handlePATCH(
+    request: Request,
+    { params }: { params: Promise<{ preflightId: string }> },
+    context: OperationalRequestContext,
 ) {
     try {
         const user = await authenticatedUser();
@@ -132,6 +149,20 @@ export async function PATCH(
                 ? parsed.data.excludedInstagramId
                 : null,
         });
+        operationalLogger.emit({
+            event: 'preflight.exclusion_decided',
+            severity: 'info',
+            fields: {
+                ...context,
+                user_id: user.id,
+                preflight_id: preflightId,
+                ...(parsed.data.decision === 'exclude'
+                    ? { excluded_instagram_id: parsed.data.excludedInstagramId }
+                    : {}),
+                operation: 'exclusion',
+                disposition: 'accepted',
+            },
+        });
         return new NextResponse(null, { status: 204 });
     } catch (error) {
         if (error instanceof PreflightNotFoundError) {
@@ -146,4 +177,15 @@ export async function PATCH(
         console.error('Preflight exclusion update failed.');
         return errorResponse(500, 'ANALYSIS_FAILED', '제외 계정 저장에 실패했습니다.');
     }
+}
+
+export async function PATCH(
+    request: Request,
+    routeContext: { params: Promise<{ preflightId: string }> }
+): Promise<NextResponse> {
+    return observeRoute(
+        request,
+        '/api/analysis/preflight/[preflightId]',
+        context => handlePATCH(request, routeContext, context),
+    );
 }

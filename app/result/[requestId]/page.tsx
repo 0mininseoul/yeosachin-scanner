@@ -5,6 +5,12 @@ import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import { shareResult } from '@/lib/services/result-share';
+import {
+    availablePendingTargetStorage,
+    clearPendingAnalysisTargetForTerminalState,
+    signOutAndClearPendingAnalysisTarget,
+} from '@/lib/services/pending-analysis-target';
 import {
     boundedOwnerResultPage,
     OWNER_RESULT_PAGE_SIZE,
@@ -319,6 +325,7 @@ export default function ResultPage({ params }: PageProps) {
     const [tab, setTab] = useState<'public' | 'private'>('public');
     const publicSectionRef = useRef<HTMLElement>(null);
     const privateSectionRef = useRef<HTMLElement>(null);
+    const resultViewTrackedRef = useRef(false);
     const router = useRouter();
     const requestedPipeline = useSearchParams().get('pipeline');
 
@@ -392,7 +399,16 @@ export default function ResultPage({ params }: PageProps) {
                 setPageAction(null);
                 setPageError(null);
                 setError(null);
-                trackEvent(EVENTS.VIEW_RESULT, { femaleCount: result.femaleAccounts?.length });
+                const storage = availablePendingTargetStorage();
+                if (storage) clearPendingAnalysisTargetForTerminalState(storage, 'completed');
+                if (!resultViewTrackedRef.current) {
+                    resultViewTrackedRef.current = true;
+                    trackEvent(EVENTS.RESULT_VIEWED, {
+                        request_id: requestId,
+                        result_count: displayResult.femaleAccounts.length + displayResult.privateAccounts.length,
+                        is_shared: false,
+                    });
+                }
             } catch (err) {
                 if (err instanceof Error && err.name === 'AbortError') return;
                 console.error('Failed to fetch analysis result:', err);
@@ -485,8 +501,6 @@ export default function ResultPage({ params }: PageProps) {
     };
 
     const handleShare = async () => {
-        trackEvent(EVENTS.CLICK_SHARE_KAKAO);
-
         setShareLoading(true);
 
         try {
@@ -509,17 +523,25 @@ export default function ResultPage({ params }: PageProps) {
                 url: shareUrl,
             };
 
-            if (navigator.share) {
-                try {
-                    await navigator.share(shareData);
-                    return;
-                } catch {
-                    // fallback
+            const shareChannel = await shareResult({
+                ...(navigator.share
+                    ? { share: (payload) => navigator.share(payload) }
+                    : {}),
+                ...(navigator.clipboard?.writeText
+                    ? { writeText: (text) => navigator.clipboard.writeText(text) }
+                    : {}),
+            }, shareData);
+            if (shareChannel) {
+                trackEvent(EVENTS.RESULT_SHARED, {
+                    request_id: requestId,
+                    share_channel: shareChannel,
+                });
+                if (shareChannel === 'clipboard') {
+                    alert('공유 링크가 클립보드에 복사되었습니다!');
                 }
+                return;
             }
-
-            await navigator.clipboard.writeText(shareUrl);
-            alert('공유 링크가 클립보드에 복사되었습니다!');
+            throw new Error('공유하기에 실패했습니다.');
         } catch (err) {
             console.error('Share error:', err);
             alert('공유하기에 실패했습니다.');
@@ -530,8 +552,10 @@ export default function ResultPage({ params }: PageProps) {
 
     const handleLogout = async () => {
         try {
-            const response = await fetch('/api/auth/signout', { method: 'POST' });
-            if (response.ok) router.push('/');
+            const signedOut = await signOutAndClearPendingAnalysisTarget(
+                availablePendingTargetStorage(),
+            );
+            if (signedOut) router.push('/');
         } catch (err) {
             console.error('Logout failed:', err);
         }
@@ -604,7 +628,7 @@ export default function ResultPage({ params }: PageProps) {
                 }
             />
 
-            <main className="mx-auto max-w-[480px] px-5 pt-8">
+            <main data-amp-block className="mx-auto max-w-[480px] px-5 pt-8">
                 {/* case header */}
                 <div className="flex items-center justify-between gap-3">
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>

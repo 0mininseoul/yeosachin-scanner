@@ -31,6 +31,7 @@ const paymentCompletedSchema = z.object({
             merchantUid: boundedIdentifier,
             buyer: z.object({
                 email: z.string().trim().email().max(320),
+                phoneNumber: z.string().trim().min(1).max(64).optional(),
             }),
             content: z.object({
                 id: boundedIdentifier,
@@ -99,6 +100,7 @@ export interface GroblePaymentCompletedEvent {
     occurredAt: string;
     paymentId: string;
     buyerEmail: string;
+    buyerPhoneNumber: string | null;
     productId: string;
     amountKrw: number;
     paidAt: string;
@@ -170,6 +172,7 @@ export function parseGroblePaymentCompletedEvent(
         occurredAt: event.occurredAt,
         paymentId: payment.merchantUid,
         buyerEmail: payment.buyer.email.trim().toLowerCase(),
+        buyerPhoneNumber: payment.buyer.phoneNumber ?? null,
         productId: payment.content.id,
         amountKrw: payment.pricing.finalAmount,
         paidAt: payment.payment.purchasedAt,

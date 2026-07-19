@@ -13,20 +13,15 @@ import {
 } from '@/lib/services/analysis/v2-tasks';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { isAnalysisV2WorkerErrorCode } from '@/lib/services/analysis/v2-worker-error-codes';
+import {
+    observeRoute,
+    type OperationalRequestContext,
+} from '@/lib/observability/request';
+import { operationalLogger } from '@/lib/observability/server';
 
 export const maxDuration = 300;
 
 const OBSERVABLE_JOB_KEY_PATTERN = /^(?:coordinator:(?:bootstrap|candidate-screening|finalize|join:(?:primary-evidence|final-score))|track:(?:relationships:collect|target-evidence:collect|profiles:batch:[0-9]+|profile-ai:batch:[0-9]+|private-names:batch:[0-9]+|reverse-likes:collect|partner-safety:batch:0|narratives:batch:0))$/;
-
-type WorkerLogDisposition = 'success' | 'transient' | 'permanent' | 'fence';
-type WorkerLogOutcome =
-    | 'already_terminal'
-    | 'completed'
-    | 'error'
-    | 'failed'
-    | 'rejected'
-    | 'retry'
-    | 'stale_delivery';
 
 function safeErrorCode(value: unknown, fallback: string): string {
     return isAnalysisV2WorkerErrorCode(value)
@@ -40,43 +35,79 @@ function observableJobKey(value: unknown): string | null {
         : null;
 }
 
-function logWorkerOutcome(input: {
+function emitWorkerOutcome(input: {
+    context: OperationalRequestContext;
+    event: 'analysis_v2.worker_completed' | 'analysis_v2.worker_retry' | 'analysis_v2.worker_failed';
+    analysisRequestId?: string;
     jobKey: string | null;
-    outcome: WorkerLogOutcome;
-    disposition: WorkerLogDisposition;
+    disposition: string;
+    retryable?: boolean;
     errorCode?: string;
 }): void {
-    const line = JSON.stringify({
-        schemaVersion: 1,
-        event: 'analysis_v2_worker',
-        jobKey: input.jobKey,
-        outcome: input.outcome,
-        disposition: input.disposition,
-        ...(input.errorCode ? { errorCode: input.errorCode } : {}),
-    });
-    if (input.disposition === 'success') {
-        console.info(line);
-    } else if (input.disposition === 'transient') {
-        console.warn(line);
-    } else {
-        console.error(line);
+    try {
+        operationalLogger.emit({
+            event: input.event,
+            severity: input.event === 'analysis_v2.worker_completed'
+                ? 'info'
+                : input.event === 'analysis_v2.worker_retry' ? 'warn' : 'error',
+            fields: {
+                ...input.context,
+                ...(input.analysisRequestId
+                    ? { analysis_request_id: input.analysisRequestId }
+                    : {}),
+                ...(input.jobKey ? { job_key: input.jobKey } : {}),
+                operation: 'worker',
+                disposition: input.disposition,
+                ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
+                ...(input.errorCode ? { error_code: input.errorCode } : {}),
+            },
+        });
+    } catch {
+        // Worker acknowledgement and retry semantics must not depend on telemetry delivery.
     }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(
+    request: Request,
+    context: OperationalRequestContext,
+): Promise<NextResponse> {
     let config;
     try {
         config = getAnalysisV2TasksConfig();
     } catch {
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_failed',
+            jobKey: null,
+            disposition: 'failure',
+            retryable: false,
+            errorCode: 'JOB_DISPATCH_NOT_READY',
+        });
         return NextResponse.json({ code: 'QUEUE_UNAVAILABLE' }, { status: 503 });
     }
     if (!config || !await verifyAnalysisV2TaskAuthorization(
         request.headers.get('authorization'),
         { config }
     )) {
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_failed',
+            jobKey: null,
+            disposition: 'rejected',
+            retryable: false,
+            errorCode: 'UNAUTHORIZED',
+        });
         return NextResponse.json({ code: 'UNAUTHORIZED' }, { status: 401 });
     }
     if (!isAnalysisV2WorkerAvailable()) {
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_failed',
+            jobKey: null,
+            disposition: 'blocked',
+            retryable: true,
+            errorCode: 'JOB_DISPATCH_NOT_READY',
+        });
         return NextResponse.json({ code: 'V2_PIPELINE_UNAVAILABLE' }, { status: 503 });
     }
 
@@ -84,6 +115,14 @@ export async function POST(request: Request) {
     try {
         body = await request.json();
     } catch {
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_failed',
+            jobKey: null,
+            disposition: 'rejected',
+            retryable: false,
+            errorCode: 'INVALID_REQUEST',
+        });
         return NextResponse.json({ code: 'INVALID_REQUEST' }, { status: 400 });
     }
 
@@ -92,24 +131,29 @@ export async function POST(request: Request) {
         delivery = parseAnalysisV2TaskPayload(body);
     } catch (error) {
         if (error instanceof ZodError) {
-            logWorkerOutcome({
+            emitWorkerOutcome({
+                context,
+                event: 'analysis_v2.worker_failed',
                 jobKey: null,
-                outcome: 'rejected',
-                disposition: 'permanent',
+                disposition: 'rejected',
+                retryable: false,
                 errorCode: 'INVALID_REQUEST',
             });
             return NextResponse.json({ code: 'INVALID_REQUEST' }, { status: 400 });
         }
-        logWorkerOutcome({
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_retry',
             jobKey: null,
-            outcome: 'error',
             disposition: 'transient',
+            retryable: true,
             errorCode: 'ANALYSIS_V2_WORKER_UNHANDLED_ERROR',
         });
         return NextResponse.json({ code: 'ANALYSIS_FAILED' }, { status: 500 });
     }
 
     const jobKey = observableJobKey(delivery.jobKey);
+    const analysisRequestId = delivery.requestId;
     try {
         const outcome = await processAnalysisV2TaskDelivery(delivery);
         if (outcome.status === 'retry') {
@@ -117,7 +161,15 @@ export async function POST(request: Request) {
                 outcome.errorCode,
                 'ANALYSIS_V2_JOB_HANDLER_FAILED'
             );
-            logWorkerOutcome({ jobKey, outcome: 'retry', disposition: 'transient', errorCode });
+            emitWorkerOutcome({
+                context,
+                event: 'analysis_v2.worker_retry',
+                analysisRequestId,
+                jobKey,
+                disposition: 'transient',
+                retryable: true,
+                errorCode,
+            });
             return NextResponse.json({ code: errorCode }, { status: 500 });
         }
         if (outcome.status === 'failed') {
@@ -125,45 +177,78 @@ export async function POST(request: Request) {
                 outcome.errorCode,
                 'ANALYSIS_V2_JOB_HANDLER_FAILED'
             );
-            logWorkerOutcome({ jobKey, outcome: 'failed', disposition: 'permanent', errorCode });
+            emitWorkerOutcome({
+                context,
+                event: 'analysis_v2.worker_failed',
+                analysisRequestId,
+                jobKey,
+                disposition: 'permanent',
+                retryable: false,
+                errorCode,
+            });
             return NextResponse.json({ status: 'failed', errorCode });
         }
-        logWorkerOutcome({ jobKey, outcome: outcome.status, disposition: 'success' });
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_completed',
+            analysisRequestId,
+            jobKey,
+            disposition: outcome.status,
+        });
         return NextResponse.json(outcome);
     } catch (error) {
         if (error instanceof AnalysisV2JobFenceError) {
-            logWorkerOutcome({
+            emitWorkerOutcome({
+                context,
+                event: 'analysis_v2.worker_completed',
+                analysisRequestId,
                 jobKey,
-                outcome: 'stale_delivery',
-                disposition: 'fence',
+                disposition: 'stale_delivery',
                 errorCode: 'ANALYSIS_V2_JOB_FENCE_MISMATCH',
             });
             return NextResponse.json({ status: 'stale_delivery' });
         }
         if (error instanceof AnalysisV2JobDispatchNotReadyError) {
-            logWorkerOutcome({
+            emitWorkerOutcome({
+                context,
+                event: 'analysis_v2.worker_retry',
+                analysisRequestId,
                 jobKey,
-                outcome: 'retry',
                 disposition: 'transient',
+                retryable: true,
                 errorCode: 'JOB_DISPATCH_NOT_READY',
             });
             return NextResponse.json({ code: 'JOB_DISPATCH_NOT_READY' }, { status: 409 });
         }
         if (error instanceof AnalysisV2JobLeaseBusyError) {
-            logWorkerOutcome({
+            emitWorkerOutcome({
+                context,
+                event: 'analysis_v2.worker_retry',
+                analysisRequestId,
                 jobKey,
-                outcome: 'retry',
                 disposition: 'transient',
+                retryable: true,
                 errorCode: 'JOB_LEASE_BUSY',
             });
             return NextResponse.json({ code: 'JOB_LEASE_BUSY' }, { status: 409 });
         }
-        logWorkerOutcome({
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_retry',
+            analysisRequestId,
             jobKey,
-            outcome: 'error',
             disposition: 'transient',
+            retryable: true,
             errorCode: 'ANALYSIS_V2_WORKER_UNHANDLED_ERROR',
         });
         return NextResponse.json({ code: 'ANALYSIS_FAILED' }, { status: 500 });
     }
+}
+
+export async function POST(request: Request): Promise<NextResponse> {
+    return observeRoute(
+        request,
+        '/api/analysis/v2/worker',
+        context => handlePOST(request, context),
+    );
 }
