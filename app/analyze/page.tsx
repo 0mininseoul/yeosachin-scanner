@@ -345,7 +345,7 @@ export default function AnalyzePage() {
                 ) : undefined}
             />
 
-            <main className="mx-auto max-w-[500px] px-5 pb-16 pt-10">
+            <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
                 {!preflight ? (
                     <>
                         <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
@@ -413,29 +413,32 @@ export default function AnalyzePage() {
                     </CaseCard>
                 ) : (
                     <>
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-start justify-between gap-3">
                             <div>
-                                <Eyebrow>판독 의뢰서 · 본인 제외</Eyebrow>
+                                <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
                                 <h1 className="mt-3 text-[24px] font-extrabold leading-snug text-fg">
-                                    내 계정은 먼저 빼둘게요
+                                    {!exclusionDecided
+                                        ? '본인 계정은 먼저 제외해주세요'
+                                        : readyPreflight
+                                            ? '판독 대상을 확인했어요'
+                                            : '대상 계정을 확인하고 있어요'}
                                 </h1>
                             </div>
                             <button
                                 type="button"
                                 onClick={handleReset}
-                                className="text-[12px] font-medium text-fg-mute underline underline-offset-4 hover:text-fg"
+                                className="shrink-0 text-[12px] font-medium text-fg-mute underline underline-offset-4 hover:text-fg"
                             >
                                 대상 변경
                             </button>
                         </div>
 
                         {!exclusionDecided && (
-                            <CaseCard className="mt-7 p-5">
+                            <CaseCard className="mt-6 p-5">
                                 <p className="text-[13px] leading-relaxed text-fg-dim">
-                                    본인 계정을 입력하면 맞팔 후보에서 처음부터 제외합니다.
-                                    대상 계정 조회는 이미 백그라운드에서 진행 중입니다.
+                                    본인 계정은 위장여사친 후보에서 처음부터 제외합니다.
                                 </p>
-                                <label htmlFor="girlfriend-instagram" className="eyebrow mb-3 mt-5 block">
+                                <label htmlFor="girlfriend-instagram" className="eyebrow mb-3 mt-4 block">
                                     본인 인스타그램 아이디
                                 </label>
                                 <div className="relative" data-amp-mask>
@@ -499,7 +502,7 @@ export default function AnalyzePage() {
                         {exclusionDecided && readyPreflight && (
                             <>
                                 <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
-                                    <div className="flex items-center gap-4 p-5" data-amp-block>
+                                    <div className="flex items-start gap-4 p-5" data-amp-block>
                                         <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel">
                                             {readyPreflight.target.profileImage ? (
                                                 <Image
@@ -524,6 +527,11 @@ export default function AnalyzePage() {
                                             {readyPreflight.target.fullName && (
                                                 <p className="mt-0.5 truncate text-[13px] text-fg-dim">
                                                     {readyPreflight.target.fullName}
+                                                </p>
+                                            )}
+                                            {readyPreflight.target.bio && (
+                                                <p className="mt-1.5 line-clamp-2 whitespace-pre-line text-[12px] leading-relaxed text-fg-mute">
+                                                    {readyPreflight.target.bio}
                                                 </p>
                                             )}
                                         </div>
@@ -565,7 +573,7 @@ export default function AnalyzePage() {
                                             return (
                                                 <label
                                                     key={plan.planId}
-                                                    className={`block border p-4 transition-colors ${
+                                                    className={`block border p-3.5 transition-colors ${
                                                         selected
                                                             ? 'border-blood bg-blood/[0.08]'
                                                             : available
@@ -582,10 +590,10 @@ export default function AnalyzePage() {
                                                         onChange={() => handlePlanSelection(plan.planId)}
                                                         className="sr-only"
                                                     />
-                                                    <div className="flex items-start justify-between gap-4">
-                                                        <div>
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div className="min-w-0">
                                                             <div className="flex items-center gap-2">
-                                                                <span className="text-[17px] font-extrabold text-fg">
+                                                                <span className="text-[16px] font-extrabold text-fg">
                                                                     {PLAN_NAMES[plan.planId]}
                                                                 </span>
                                                                 {plan.selectionState === 'required' && (
@@ -599,38 +607,51 @@ export default function AnalyzePage() {
                                                                     plan.relationshipCapacity
                                                                 )}
                                                             </p>
-                                                            <p className="mt-0.5 text-[12px] text-fg-mute">
-                                                                맞팔 최대 {plan.detailedMutualLimit.toLocaleString('ko-KR')}명 정밀 판독
-                                                            </p>
                                                         </div>
-                                                        <div className="shrink-0 text-right">
-                                                            {presentation.referencePriceLabel && (
-                                                                <p className="text-[11px] text-fg-mute line-through">
-                                                                    {presentation.referencePriceLabel}
-                                                                </p>
-                                                            )}
-                                                            <p className="num mt-0.5 text-[16px] font-extrabold text-fg">
-                                                                {presentation.priceLabel}
-                                                            </p>
-                                                            <span className={`ml-auto mt-2 block h-4 w-4 rounded-full border ${
-                                                                selected
-                                                                    ? 'border-[5px] border-blood bg-white'
-                                                                    : 'border-line-2'
-                                                            }`} />
-                                                        </div>
+                                                        <span className={`mt-1 block h-[18px] w-[18px] shrink-0 rounded-full border ${
+                                                            selected
+                                                                ? 'border-[5px] border-blood bg-white'
+                                                                : 'border-line-2'
+                                                        }`} />
                                                     </div>
-                                                    {presentation.availabilityLabel && available && (
-                                                        <p className="mt-3 border-t border-line pt-2.5 text-[11px] font-semibold text-amber">
-                                                            {presentation.availabilityLabel}
+
+                                                    {presentation.referencePriceLabel ? (
+                                                        <div className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                                                            <span className="num text-[14px] text-fg-mute line-through">
+                                                                {presentation.referencePriceLabel}
+                                                            </span>
+                                                            <span className="text-[13px] text-fg-mute" aria-hidden>→</span>
+                                                            <span className="num text-[22px] font-black leading-none tracking-tight text-fg">
+                                                                {presentation.priceLabel}
+                                                            </span>
+                                                            {presentation.discountLabel && (
+                                                                <span className="border border-blood bg-blood/10 px-1.5 py-0.5 text-[11px] font-extrabold text-blood">
+                                                                    {presentation.discountLabel}↓
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <p className="num mt-2.5 text-[15px] font-bold text-fg-dim">
+                                                            {presentation.priceLabel}
                                                         </p>
                                                     )}
-                                                    {!available && (
-                                                        <p className="mt-3 border-t border-line pt-2.5 text-[11px] font-medium text-fg-mute">
+
+                                                    {available && typeof plan.remainingSlots === 'number' ? (
+                                                        <p className="mt-2.5 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11px] font-extrabold text-blood">
+                                                            <span aria-hidden>🔥</span>
+                                                            선착순 마감 임박 · {plan.remainingSlots.toLocaleString('ko-KR')}건 남음
+                                                        </p>
+                                                    ) : available && presentation.referencePriceLabel ? (
+                                                        <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-bold text-amber">
+                                                            얼리버드 선착순 한정
+                                                        </p>
+                                                    ) : !available ? (
+                                                        <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-medium text-fg-mute">
                                                             {plan.unavailableReason === 'below_required_plan'
                                                                 ? '이 계정 규모에서는 선택할 수 없어요.'
                                                                 : '현재 선택할 수 없는 플랜이에요.'}
                                                         </p>
-                                                    )}
+                                                    ) : null}
                                                 </label>
                                             );
                                         })}
@@ -650,9 +671,6 @@ export default function AnalyzePage() {
                                                     {EARLYBIRD_DISCLOSURE_TEXT}
                                                 </span>
                                             </label>
-                                            <p className="mt-3 border-t border-amber/20 pt-3 text-[11px] leading-relaxed text-fg-mute">
-                                                Groble 결제창에는 카카오 로그인 계정과 같은 전화번호를 입력해주세요. Groble 이메일은 로그인 이메일과 달라도 됩니다.
-                                            </p>
                                         </div>
                                     )}
 
@@ -696,10 +714,6 @@ export default function AnalyzePage() {
                         )}
                     </>
                 )}
-
-                <p className="mt-7 text-center text-[12px] leading-relaxed text-fg-mute">
-                    AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 이용해 주세요.
-                </p>
             </main>
         </div>
     );

@@ -50,17 +50,18 @@ describe('earlybird analyze UI state', () => {
         expect(buildEarlybirdPlanPresentation('basic')).toEqual({
             referencePriceLabel: '39,900원',
             priceLabel: '14,900원',
-            availabilityLabel: '플랜별 선착순 10건',
+            discountLabel: '63%',
             actionLabel: '얼리버드 사전 구매하기',
         });
         expect(buildEarlybirdPlanPresentation('standard')).toMatchObject({
             referencePriceLabel: '69,900원',
             priceLabel: '19,900원',
+            discountLabel: '72%',
         });
         expect(buildEarlybirdPlanPresentation('plus')).toEqual({
             referencePriceLabel: null,
             priceLabel: '대기 신청',
-            availabilityLabel: null,
+            discountLabel: null,
             actionLabel: 'Plus 대기 신청하기',
         });
     });
