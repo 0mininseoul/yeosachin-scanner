@@ -16,7 +16,6 @@ import {
     isEarlybirdPlanSelectable,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
-    resolveAvailableEarlybirdPlan,
 } from '@/lib/services/earlybird/ui-state';
 import {
     availablePendingTargetStorage,
@@ -45,13 +44,19 @@ const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     plus: 'Plus',
 };
 
-function relationshipCapacityLabel(capacity: { followers: number; following: number }): string {
+function relationshipCapacityLabel(
+    capacity: { followers: number; following: number },
+    lowerBound?: { followers: number; following: number } | null
+): string {
+    const fmt = (value: number) => value.toLocaleString('ko-KR');
     if (capacity.followers === capacity.following) {
-        return `팔로워·팔로잉 각 ${capacity.followers.toLocaleString('ko-KR')}명 이하`;
+        const upper = capacity.followers;
+        if (lowerBound && lowerBound.followers === lowerBound.following && lowerBound.followers > 0) {
+            return `팔로워·팔로잉 각 ${fmt(lowerBound.followers)}~${fmt(upper)}명`;
+        }
+        return `팔로워·팔로잉 각 ${fmt(upper)}명 이하`;
     }
-    return `팔로워 ${capacity.followers.toLocaleString('ko-KR')}명 · 팔로잉 ${
-        capacity.following.toLocaleString('ko-KR')
-    }명 이하`;
+    return `팔로워 ${fmt(capacity.followers)}명 · 팔로잉 ${fmt(capacity.following)}명 이하`;
 }
 
 export default function AnalyzePage() {
@@ -81,12 +86,10 @@ export default function AnalyzePage() {
 
     const readyPreflight = preflight?.status === 'ready' ? preflight : null;
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
+    // 모든 플랜을 선택(비교)할 수 있게 하되, 아무것도 안 고르면 적격 플랜을 기본 선택.
+    // 부적격 플랜을 골라도 선택 상태는 유지하고, 구매 버튼만 비활성화한다.
     const effectiveSelectedPlan = readyPreflight
-        ? resolveAvailableEarlybirdPlan(
-            selectedPlan,
-            readyPreflight.plans,
-            readyPreflight.requiredPlan
-        )
+        ? (selectedPlan ?? readyPreflight.requiredPlan)
         : selectedPlan;
     const effectiveSelectedCard = readyPreflight && effectiveSelectedPlan
         ? readyPreflight.plans.find(plan => plan.planId === effectiveSelectedPlan) ?? null
@@ -345,7 +348,9 @@ export default function AnalyzePage() {
                 ) : undefined}
             />
 
-            <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
+            <main className={`mx-auto max-w-[500px] px-5 pb-16 pt-7 ${
+                readyPreflight ? '' : 'flex min-h-[calc(100dvh-3.5rem)] flex-col justify-center'
+            }`}>
                 {!preflight ? (
                     <>
                         <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
@@ -558,27 +563,28 @@ export default function AnalyzePage() {
                                         계정 규모에 맞는 플랜이에요
                                     </h2>
                                     <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-                                        전체 플랜을 비교하고, 현재 계정에서 이용 가능한 플랜만 선택할 수 있습니다.
+                                        전체 플랜을 비교해보고, 계정에 맞는 적격 플랜으로 진행하세요.
                                     </p>
 
                                     <fieldset className="mt-5 space-y-3">
                                         <legend className="sr-only">판독 플랜</legend>
-                                        {readyPreflight.plans.map((plan) => {
+                                        {readyPreflight.plans.map((plan, index) => {
                                             const available = isEarlybirdPlanSelectable(
                                                 plan,
                                                 readyPreflight.requiredPlan
                                             );
                                             const selected = effectiveSelectedPlan === plan.planId;
                                             const presentation = buildEarlybirdPlanPresentation(plan.planId);
+                                            const lowerBound = index > 0
+                                                ? readyPreflight.plans[index - 1].relationshipCapacity
+                                                : null;
                                             return (
                                                 <label
                                                     key={plan.planId}
-                                                    className={`block border p-3.5 transition-colors ${
+                                                    className={`block cursor-pointer border p-3.5 transition-colors ${
                                                         selected
                                                             ? 'border-blood bg-blood/[0.08]'
-                                                            : available
-                                                              ? 'border-line-2 bg-ink-2 hover:border-fg-dim'
-                                                              : 'cursor-not-allowed border-line bg-ink-2 opacity-45'
+                                                            : 'border-line-2 bg-ink-2 hover:border-fg-dim'
                                                     }`}
                                                 >
                                                     <input
@@ -586,7 +592,6 @@ export default function AnalyzePage() {
                                                         name="analysis-plan"
                                                         value={plan.planId}
                                                         checked={selected}
-                                                        disabled={!available}
                                                         onChange={() => handlePlanSelection(plan.planId)}
                                                         className="sr-only"
                                                     />
@@ -604,7 +609,8 @@ export default function AnalyzePage() {
                                                             </div>
                                                             <p className="mt-1 text-[12px] text-fg-dim">
                                                                 {relationshipCapacityLabel(
-                                                                    plan.relationshipCapacity
+                                                                    plan.relationshipCapacity,
+                                                                    lowerBound
                                                                 )}
                                                             </p>
                                                         </div>
@@ -617,15 +623,15 @@ export default function AnalyzePage() {
 
                                                     {presentation.referencePriceLabel ? (
                                                         <div className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                                                            <span className="num text-[14px] text-fg-mute line-through">
+                                                            <span className="num text-[18px] text-fg-mute line-through">
                                                                 {presentation.referencePriceLabel}
                                                             </span>
-                                                            <span className="text-[13px] text-fg-mute" aria-hidden>→</span>
+                                                            <span className="text-[15px] text-fg-mute" aria-hidden>→</span>
                                                             <span className="num text-[22px] font-black leading-none tracking-tight text-fg">
                                                                 {presentation.priceLabel}
                                                             </span>
                                                             {presentation.discountLabel && (
-                                                                <span className="border border-blood bg-blood/10 px-1.5 py-0.5 text-[11px] font-extrabold text-blood">
+                                                                <span className="border border-blood bg-blood/10 px-2 py-1 text-[13px] font-extrabold text-blood">
                                                                     {presentation.discountLabel}↓
                                                                 </span>
                                                             )}
@@ -648,8 +654,8 @@ export default function AnalyzePage() {
                                                     ) : !available ? (
                                                         <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-medium text-fg-mute">
                                                             {plan.unavailableReason === 'below_required_plan'
-                                                                ? '이 계정 규모에서는 선택할 수 없어요.'
-                                                                : '현재 선택할 수 없는 플랜이에요.'}
+                                                                ? '이 계정 규모의 적격 플랜이 아니에요.'
+                                                                : '아직 오픈 전인 플랜이에요.'}
                                                         </p>
                                                     ) : null}
                                                 </label>
@@ -658,6 +664,7 @@ export default function AnalyzePage() {
                                     </fieldset>
 
                                     {effectiveSelectedPlan
+                                        && selectedPlanAvailable
                                         && isPaidEarlybirdPlanId(effectiveSelectedPlan) && (
                                         <div className="mt-5 border border-amber/35 bg-amber/[0.06] p-4">
                                             <label className="flex cursor-pointer items-start gap-3">
@@ -702,11 +709,13 @@ export default function AnalyzePage() {
                                                 ? '요청 처리 중…'
                                                 : waitlistComplete
                                                     ? '대기 신청 완료'
-                                                    : effectiveSelectedPlan
-                                                        ? buildEarlybirdPlanPresentation(
-                                                            effectiveSelectedPlan
-                                                        ).actionLabel
-                                                        : '플랜을 선택해주세요'}
+                                                    : !effectiveSelectedPlan
+                                                        ? '플랜을 선택해주세요'
+                                                        : !selectedPlanAvailable
+                                                            ? '적격 플랜을 선택해주세요'
+                                                            : buildEarlybirdPlanPresentation(
+                                                                effectiveSelectedPlan
+                                                            ).actionLabel}
                                         </PrimaryButton>
                                     </div>
                                 </section>
