@@ -44,6 +44,13 @@ function rolloutMigrationTail(files: readonly string[]): string[] {
         .sort(compareMigrationFiles);
 }
 
+// 2026-07-19 reconcile: 여섯 파일의 production 적용을 읽기 전용 history 비교로 확인했으므로
+// exact-six freeze 를 해제한다. 롤아웃의 순서와 기준선 직후 연속성은 계속 고정하되,
+// 기준선 뒤에 추가되는 ordinary migration 은 release gate 를 따르는 조건으로 허용한다.
+function rolloutMigrationPrefix(files: readonly string[]): string[] {
+    return rolloutMigrationTail(files).slice(0, EXPECTED_MIGRATIONS.length);
+}
+
 function latestNonFeatureMigrationAtOrBeforeAppliedHead(
     files: readonly string[]
 ): string | undefined {
@@ -69,9 +76,9 @@ function hasOnlyStandaloneIncludeAllProhibition(source: string): boolean {
 }
 
 describe('Groble phone migration rollout contract', () => {
-    it('freezes the complete numeric migration tail to the six dependencies after the applied remote head', () => {
+    it('pins the completed six-file rollout to the versions immediately after the applied remote head', () => {
         const allMigrationFiles = readdirSync(migrationsDirectory);
-        const featureMigrations = rolloutMigrationTail(allMigrationFiles);
+        const featureMigrations = rolloutMigrationPrefix(allMigrationFiles);
 
         expect(featureMigrations).toEqual(EXPECTED_MIGRATIONS);
         expect(
@@ -87,23 +94,26 @@ describe('Groble phone migration rollout contract', () => {
         }
     });
 
-    it.each([
-        {
-            extra: '20260719125000_other.sql',
-            position: 'between the applied head and the feature rollout',
-        },
-        {
-            extra: '20260719140000_other.sql',
-            position: 'after the feature rollout',
-        },
-    ])('rejects an extra migration $position', ({ extra }) => {
+    it('rejects an extra migration between the applied head and the feature rollout', () => {
         const migrationFiles = [
             APPLIED_REMOTE_HEAD_FILE,
             ...EXPECTED_MIGRATIONS,
-            extra,
+            '20260719125000_other.sql',
         ];
 
-        expect(rolloutMigrationTail(migrationFiles)).not.toEqual(
+        expect(rolloutMigrationPrefix(migrationFiles)).not.toEqual(
+            EXPECTED_MIGRATIONS
+        );
+    });
+
+    it('allows an ordinary migration after the completed feature rollout', () => {
+        const migrationFiles = [
+            APPLIED_REMOTE_HEAD_FILE,
+            ...EXPECTED_MIGRATIONS,
+            '20260719140000_other.sql',
+        ];
+
+        expect(rolloutMigrationPrefix(migrationFiles)).toEqual(
             EXPECTED_MIGRATIONS
         );
     });

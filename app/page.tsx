@@ -23,6 +23,7 @@ import {
   clearPendingAnalysisTarget,
   storePendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
+import { reportLandingLead } from '@/lib/services/landing-lead';
 import { useAuth } from '@/hooks/useAuth';
 import { LoginModal } from '@/components/login-modal';
 import {
@@ -156,6 +157,7 @@ export default function LandingPage() {
     });
 
     if (!user) {
+      reportLandingLead({ instagramId: id, rawInput: igId, search: window.location.search });
       setLoginOpen(true);
       return;
     }

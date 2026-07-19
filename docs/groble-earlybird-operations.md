@@ -66,6 +66,8 @@ Supabase CLI v2.102.0은 각 migration 파일 전체를 하나의 implicit trans
 
 이 exact-six 검사는 pre-rollout freeze gate이며 production에서 위 6개 migration이 모두 적용되었다고 확인되기 전까지 유지한다. 기준선 뒤에 다른 migration이 하나라도 merge되면 feature 앞·뒤 위치와 무관하게 drift로 중단한다. 여섯 파일의 production 적용 확인 뒤에만 현행 migration history에 맞게 이 contract와 gate를 reconcile하거나 retire한다.
 
+**2026-07-19 reconcile 완료.** 위 6개 migration이 production에 모두 적용된 것을 읽기 전용 history 비교로 확인했다. 따라서 exact-six freeze는 해제하고, contract는 여섯 파일이 기준선 직후에 표와 같은 순서로 연속해 존재하는지만 고정한다. 기준선 뒤에 추가되는 ordinary migration은 아래 1~8단계 release gate를 그대로 따르는 조건으로 허용한다. 이 reconcile 시점의 적용 head는 `20260719160000_add_landing_leads.sql`이다.
+
 1. 읽기 전용 확인으로 `npx supabase migration list --linked`를 실행하고 local/remote history를 비교한다.
 2. 적용 전 일반 push 미리보기로 `npx supabase db push --dry-run`를 실행한다.
 3. dry-run 출력은 정확히 위 6개 migration만 표시하고 예상하지 않은 파일이 없어야 하며, 순서도 표와 일치해야 한다.
