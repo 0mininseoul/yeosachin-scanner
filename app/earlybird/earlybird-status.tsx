@@ -78,9 +78,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
                 위장여사친 판독기를 이용해주셔서 감사합니다.
                 <br />
-                결제 확정 후 실제 48시간 이내에 판독 결과를 전달합니다.
-                <br />
-                완료되면 가입하신 이메일로도 결과 링크를 보내드립니다.
+                결제 확정 후 실제 48시간 이내에 이메일로 판독 결과를 전달합니다.
             </p>
 
             <CaseCard className="mt-8 p-5">
