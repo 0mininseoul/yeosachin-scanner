@@ -10,6 +10,7 @@ import {
     PreflightExpiredError,
     PreflightImmutableError,
     PreflightNotFoundError,
+    fetchEarlybirdRemainingSlots,
     preflightStore,
     publicPreflightStatusDto,
 } from '@/lib/services/analysis/preflight';
@@ -96,7 +97,10 @@ async function handleGET(
                 stored.exclusionDecision
             ));
         }
-        return NextResponse.json(publicPreflightStatusDto(stored));
+        const remainingSlotsByPlan = stored.status === 'ready'
+            ? await fetchEarlybirdRemainingSlots()
+            : {};
+        return NextResponse.json(publicPreflightStatusDto(stored, remainingSlotsByPlan));
     } catch (error) {
         if (error instanceof PreflightExpiredError) {
             return errorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.');

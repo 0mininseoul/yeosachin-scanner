@@ -26,7 +26,11 @@ import {
     type PlanEligibilityCatalog,
     type PlanId,
 } from '@/lib/domain/analysis/plan-catalog';
-import { PAID_EARLYBIRD_PLAN_IDS } from '@/lib/domain/earlybird/catalog';
+import {
+    PAID_EARLYBIRD_PLAN_IDS,
+    isPaidEarlybirdPlanId,
+    type PaidEarlybirdPlanId,
+} from '@/lib/domain/earlybird/catalog';
 import { CURRENT_ANALYSIS_PIPELINE_VERSION } from '@/lib/domain/analysis/pipeline-version';
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
 import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
@@ -211,7 +215,6 @@ export interface ReadyPreflightSnapshot {
         unavailableReason: 'below_required_plan' | 'launch_gate' | null;
         pricingVersion: string;
         price: PlanQuoteV1['price'];
-        remainingSlots?: number | null;
     }>;
     pricingVersion: string;
 }
@@ -440,8 +443,8 @@ export async function fetchEarlybirdRemainingSlots(): Promise<Partial<Record<Pla
         if (error || !data) return {};
         return Object.fromEntries(
             data
-                .filter((row): row is { plan_id: string; sale_limit: number; sold_count: number } =>
-                    (row.plan_id === 'basic' || row.plan_id === 'standard')
+                .filter((row): row is { plan_id: PaidEarlybirdPlanId; sale_limit: number; sold_count: number } =>
+                    PAID_EARLYBIRD_PLAN_IDS.some(planId => planId === row.plan_id)
                     && Number.isSafeInteger(row.sale_limit)
                     && Number.isSafeInteger(row.sold_count))
                 .map(row => [row.plan_id, Math.max(0, row.sale_limit - row.sold_count)])
@@ -463,7 +466,6 @@ function planCardsSnapshot(
         detailedMutualLimit: plan.detailedMutualLimit,
         selectionState: plan.selectionState,
         unavailableReason: plan.unavailableReason,
-        remainingSlots: plan.remainingSlots,
     }])) as Record<PlanId, Omit<
         ReadyPreflightSnapshot['plans'][number],
         'planId' | 'pricingVersion' | 'price'
@@ -904,8 +906,7 @@ function assertProfileCounts(profile: InstagramProfile): void {
 export function buildReadyPreflightSnapshot(
     profile: InstagramProfile,
     accessMode: PlanAccessMode,
-    catalogSnapshot: PreflightCatalogSnapshot = currentPreflightCatalogSnapshot(),
-    remainingSlotsByPlan: Partial<Record<PlanId, number>> = {}
+    catalogSnapshot: PreflightCatalogSnapshot = currentPreflightCatalogSnapshot()
 ): ReadyPreflightSnapshot | AnalysisV2ErrorCode {
     assertProfileCounts(profile);
     const username = profile.username.toLowerCase();
@@ -946,7 +947,6 @@ export function buildReadyPreflightSnapshot(
         plans: PLAN_IDS.map((planId, index) => {
             const plan = catalogSnapshot.plans[planId];
             const card = cards[index];
-            const remainingSlots = remainingSlotsByPlan[planId];
             return {
                 planId,
                 launchStatus: card.launchStatus,
@@ -956,7 +956,6 @@ export function buildReadyPreflightSnapshot(
                 unavailableReason: card.unavailableReason,
                 pricingVersion: catalogSnapshot.pricingVersion,
                 price: { ...catalogSnapshot.prices[planId] },
-                ...(planId !== 'plus' && remainingSlots !== undefined ? { remainingSlots } : {}),
             };
         }),
         pricingVersion: catalogSnapshot.pricingVersion,
@@ -1093,7 +1092,6 @@ export async function processPreflight(
         providerRunStore?: PreflightProviderRunStore;
         env?: Record<string, string | undefined>;
         observer?: PreflightProcessObserver;
-        getRemainingSlots?: typeof fetchEarlybirdRemainingSlots;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
@@ -1202,14 +1200,10 @@ export async function processPreflight(
             ...profileObservation,
         });
 
-        const remainingSlotsByPlan = await (
-            dependencies.getRemainingSlots ?? fetchEarlybirdRemainingSlots
-        )();
         const snapshot = buildReadyPreflightSnapshot(
             profile,
             claim.accessMode,
-            claim.catalogSnapshot,
-            remainingSlotsByPlan
+            claim.catalogSnapshot
         );
         if (typeof snapshot === 'string') {
             await store.finalizeBlocked(claim, snapshot);
@@ -1288,6 +1282,7 @@ export function acceptedPreflightDto(created: CreatedPreflight): PreflightAccept
 
 export function publicPreflightStatusDto(
     stored: StoredPreflight,
+    remainingSlotsByPlan: Partial<Record<PlanId, number>> = {},
     imageProxyPath: typeof createImageProxyPath = createImageProxyPath,
     nowMs = Date.now()
 ): PreflightStatusV1 {
@@ -1332,7 +1327,12 @@ export function publicPreflightStatusDto(
         accessMode: snapshot.accessMode,
         capacityRequiredPlan: snapshot.capacityRequiredPlan,
         requiredPlan: snapshot.requiredPlan,
-        plans: snapshot.plans,
+        plans: snapshot.plans.map(plan => {
+            const remainingSlots = remainingSlotsByPlan[plan.planId];
+            return isPaidEarlybirdPlanId(plan.planId) && remainingSlots !== undefined
+                ? { ...plan, remainingSlots }
+                : plan;
+        }),
         pricingVersion: snapshot.pricingVersion,
     });
 }
