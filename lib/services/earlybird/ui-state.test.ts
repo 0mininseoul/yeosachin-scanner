@@ -4,6 +4,7 @@ import {
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
     isEarlybirdPlanSelectable,
+    isEarlybirdPlanSoldOut,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
     resolveAvailableEarlybirdPlan,
@@ -34,6 +35,38 @@ describe('earlybird analyze UI state', () => {
             { planId: 'plus', selectionState: 'required' },
             'plus'
         )).toBe(true);
+    });
+
+    it('treats a plan with zero remaining slots as sold out, but not one with stock or unset slots', () => {
+        expect(isEarlybirdPlanSoldOut({ planId: 'standard', selectionState: 'required', remainingSlots: 0 })).toBe(true);
+        expect(isEarlybirdPlanSoldOut({ planId: 'standard', selectionState: 'required', remainingSlots: 1 })).toBe(false);
+        expect(isEarlybirdPlanSoldOut({ planId: 'standard', selectionState: 'required', remainingSlots: undefined })).toBe(false);
+        expect(isEarlybirdPlanSoldOut({ planId: 'standard', selectionState: 'required', remainingSlots: null })).toBe(false);
+        expect(isEarlybirdPlanSoldOut({ planId: 'standard', selectionState: 'required' })).toBe(false);
+    });
+
+    it('blocks selection of a sold-out plan even when its selectionState is required', () => {
+        expect(isEarlybirdPlanSelectable(
+            { planId: 'standard', selectionState: 'required', remainingSlots: 0 },
+            'standard'
+        )).toBe(false);
+        expect(isEarlybirdPlanSelectable(
+            { planId: 'standard', selectionState: 'required', remainingSlots: 1 },
+            'standard'
+        )).toBe(true);
+        expect(isEarlybirdPlanSelectable(
+            { planId: 'standard', selectionState: 'required' },
+            'standard'
+        )).toBe(true);
+    });
+
+    it('falls back from a sold-out selected upgrade plan to the server-required plan', () => {
+        const cardsWithSoldOutUpgrade = [
+            { planId: 'basic', selectionState: 'required' },
+            { planId: 'standard', selectionState: 'available_upgrade', remainingSlots: 0 },
+            { planId: 'plus', selectionState: 'available_upgrade' },
+        ] as const;
+        expect(resolveAvailableEarlybirdPlan('standard', cardsWithSoldOutUpgrade, 'basic')).toBe('basic');
     });
 
     it('requires the exact disclosure consent only for paid plans', () => {

@@ -14,6 +14,7 @@ import {
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
     isEarlybirdPlanSelectable,
+    isEarlybirdPlanSoldOut,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
 } from '@/lib/services/earlybird/ui-state';
@@ -646,7 +647,11 @@ export default function AnalyzePage() {
                                                         </p>
                                                     )}
 
-                                                    {available && typeof plan.remainingSlots === 'number' ? (
+                                                    {isEarlybirdPlanSoldOut(plan) ? (
+                                                        <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-bold text-fg-mute">
+                                                            얼리버드 물량이 모두 소진되었어요.
+                                                        </p>
+                                                    ) : available && typeof plan.remainingSlots === 'number' ? (
                                                         <p className="mt-2.5 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11px] font-extrabold text-blood">
                                                             <span aria-hidden>🔥</span>
                                                             선착순 마감 임박 · {plan.remainingSlots.toLocaleString('ko-KR')}건 남음
