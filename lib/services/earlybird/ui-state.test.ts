@@ -116,4 +116,13 @@ describe('earlybird analyze UI state', () => {
         expect(source).not.toContain(['예약', '금'].join(''));
         expect(source).toContain('EARLYBIRD_DISCLOSURE_TEXT');
     });
+
+    it('orders the plan card ternary so the sold-out copy branch precedes the not-yet-open branch', () => {
+        const source = readFileSync(new URL('../../../app/analyze/page.tsx', import.meta.url), 'utf8');
+        const soldOutCardCopyIndex = source.indexOf('얼리버드 물량이 모두 소진되었어요.');
+        const notYetOpenCopyIndex = source.indexOf('아직 오픈 전인 플랜이에요.');
+        expect(soldOutCardCopyIndex).toBeGreaterThan(-1);
+        expect(notYetOpenCopyIndex).toBeGreaterThan(-1);
+        expect(soldOutCardCopyIndex).toBeLessThan(notYetOpenCopyIndex);
+    });
 });

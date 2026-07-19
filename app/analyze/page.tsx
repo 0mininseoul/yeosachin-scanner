@@ -82,6 +82,7 @@ export default function AnalyzePage() {
         startPreflight,
         resumePreflight,
         submitExclusion,
+        refreshPreflight,
         reset,
     } = useAnalysisV2Preflight();
 
@@ -98,13 +99,18 @@ export default function AnalyzePage() {
     const selectedPlanAvailable = readyPreflight && effectiveSelectedCard
         ? isEarlybirdPlanSelectable(effectiveSelectedCard, readyPreflight.requiredPlan)
         : false;
+    const noPlanSelectable = readyPreflight
+        ? !readyPreflight.plans.some(
+            plan => isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
+        )
+        : false;
 
     useEffect(() => {
         if (!readyPreflight || !exclusionDecided) return;
         for (const plan of readyPreflight.plans) {
             if (
                 plan.planId === 'plus'
-                || !isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
+                || plan.selectionState === 'unavailable'
                 || plan.price.status !== 'quoted'
             ) continue;
             const key = planViewEventKey(
@@ -270,6 +276,14 @@ export default function AnalyzePage() {
                     && typeof payload.error === 'string' && payload.error.length <= 200
                     ? payload.error
                     : '요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.';
+                if (
+                    payload && typeof payload === 'object' && 'code' in payload
+                    && payload.code === 'EARLYBIRD_SOLD_OUT'
+                ) {
+                    // The one-shot preflight snapshot is now stale; refresh it so the
+                    // plan card flips to sold-out copy instead of contradicting this error.
+                    await refreshPreflight();
+                }
                 setError(message);
                 return;
             }
@@ -647,7 +661,7 @@ export default function AnalyzePage() {
                                                         </p>
                                                     )}
 
-                                                    {isEarlybirdPlanSoldOut(plan) ? (
+                                                    {plan.selectionState !== 'unavailable' && isEarlybirdPlanSoldOut(plan) ? (
                                                         <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-bold text-fg-mute">
                                                             얼리버드 물량이 모두 소진되었어요.
                                                         </p>
@@ -722,7 +736,9 @@ export default function AnalyzePage() {
                                                     : !effectiveSelectedPlan
                                                         ? '플랜을 선택해주세요'
                                                         : !selectedPlanAvailable
-                                                            ? '이용 가능한 플랜을 선택해주세요'
+                                                            ? (noPlanSelectable
+                                                                ? '얼리버드 물량이 모두 소진되었어요'
+                                                                : '이용 가능한 플랜을 선택해주세요')
                                                             : buildEarlybirdPlanPresentation(
                                                                 effectiveSelectedPlan
                                                             ).actionLabel}
