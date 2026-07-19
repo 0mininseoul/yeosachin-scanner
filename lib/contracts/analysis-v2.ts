@@ -145,6 +145,8 @@ export const planQuoteV1Schema = z.object({
     unavailableReason: z.enum(['below_required_plan', 'launch_gate']).nullable(),
     pricingVersion: z.string().min(1).max(64),
     price: priceSchema,
+    // 얼리버드 한정수량 실시간 잔여분. 백엔드가 채우면 UI에 'N건 남음'으로 노출된다(옵셔널).
+    remainingSlots: z.number().int().nonnegative().nullable().optional(),
 }).strict();
 
 const planQuotesV1Schema = z.array(planQuoteV1Schema)

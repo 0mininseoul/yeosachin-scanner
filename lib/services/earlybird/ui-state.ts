@@ -50,14 +50,17 @@ export function buildEarlybirdPlanPresentation(planId: PlanId) {
         return Object.freeze({
             referencePriceLabel: null,
             priceLabel: '대기 신청',
-            availabilityLabel: null,
+            discountLabel: null,
             actionLabel: 'Plus 대기 신청하기',
         });
     }
+    const discountRate = Math.round(
+        (1 - plan.earlybirdAmountKrw / plan.referenceAmountKrw) * 100
+    );
     return Object.freeze({
         referencePriceLabel: formatKrw(plan.referenceAmountKrw),
         priceLabel: formatKrw(plan.earlybirdAmountKrw),
-        availabilityLabel: '플랜별 선착순 10건',
+        discountLabel: `${discountRate}%`,
         actionLabel: '얼리버드 사전 구매하기',
     });
 }
