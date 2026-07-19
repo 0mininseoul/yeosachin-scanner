@@ -53,20 +53,18 @@ export async function performOAuthSignIn({
     }
 }
 
-// Kakao OAuth button, shared by the /login 페이지·로그인 모달·회원가입 페이지.
+// Kakao OAuth button, shared by the /login 페이지·로그인 모달.
 // 로그인 버튼만 필요하므로 full useAuth(유저 조회/구독) 대신 supabase를 직접 호출한다.
 export function AuthButtons({
     redirectTo = '/analyze',
     disabled = false,
-    label = 'login',
 }: {
     redirectTo?: string;
     disabled?: boolean;
-    label?: 'login' | 'signup';
 }) {
     const [pending, setPending] = useState<'kakao' | 'google' | null>(null);
     const busy = disabled || pending !== null;
-    const kakaoText = label === 'signup' ? '카카오로 회원가입' : '카카오로 3초 만에 시작하기';
+    const kakaoText = '카카오로 3초 만에 시작하기';
 
     const signIn = async (provider: OAuthProvider) => {
         setPending(provider);

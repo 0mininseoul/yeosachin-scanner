@@ -790,14 +790,11 @@ describe('auth button provider compatibility contract', () => {
         new URL('../../../components/auth-buttons.tsx', import.meta.url),
         'utf8'
     );
-    it.each([
-        ['login', '\uce74\uce74\uc624\ub85c 3\ucd08 \ub9cc\uc5d0 \uc2dc\uc791\ud558\uae30'],
-        ['signup', '\uce74\uce74\uc624\ub85c \ud68c\uc6d0\uac00\uc785'],
-    ] as const)('renders only the Kakao %s action and copy', (label, copy) => {
-        const markup = renderToStaticMarkup(createElement(AuthButtons, { label }));
+    it('renders only the Kakao login action and copy', () => {
+        const markup = renderToStaticMarkup(createElement(AuthButtons, {}));
 
         expect(markup.match(/<button\b/g)).toHaveLength(1);
-        expect(markup).toContain(copy);
+        expect(markup).toContain('\uce74\uce74\uc624\ub85c 3\ucd08 \ub9cc\uc5d0 \uc2dc\uc791\ud558\uae30');
         expect(markup).not.toMatch(/google|Google/);
     });
 
