@@ -26,11 +26,11 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "AI 위장 여사친 판독기 - 내 남친의 위험한 친구 찾기",
+  title: "위장여사친 판독기 - 내 남친의 위험한 여사친 찾기",
   description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",
   keywords: ["여사친", "위장여사친", "바람기", "AI분석", "인스타그램", "연애불안", "커플", "남사친"],
-  authors: [{ name: "AI 위장 여사친 판독기" }],
-  creator: "AI 위장 여사친 판독기",
+  authors: [{ name: "위장여사친 판독기" }],
+  creator: "위장여사친 판독기",
   metadataBase: new URL(CANONICAL_APP_ORIGIN),
   alternates: {
     canonical: "/",
@@ -39,8 +39,8 @@ export const metadata: Metadata = {
     type: "website",
     locale: "ko_KR",
     url: CANONICAL_APP_ORIGIN,
-    siteName: "AI 위장 여사친 판독기",
-    title: "AI 위장 여사친 판독기 - 내 남친의 위험한 친구 찾기",
+    siteName: "위장여사친 판독기",
+    title: "위장여사친 판독기 - 내 남친의 위험한 여사친 찾기",
     description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",
     images: [
       {
@@ -53,7 +53,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "AI 위장 여사친 판독기",
+    title: "위장여사친 판독기",
     description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까?",
     images: ["/og.png"],
   },

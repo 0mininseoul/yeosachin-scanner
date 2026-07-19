@@ -226,7 +226,7 @@ export default function LandingPage() {
 
       <main className="mx-auto max-w-[460px] px-5">
         {/* ---------- HERO ---------- */}
-        <section className="pb-14 pt-12">
+        <section className="pb-14 pt-7">
           <motion.div
             initial={reduce ? false : { opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
@@ -236,7 +236,7 @@ export default function LandingPage() {
               <Eyebrow>국내 유일 위장여사친 판독 서비스</Eyebrow>
             </div>
 
-            <h1 className="text-[26px] font-bold leading-[1.2] tracking-[-0.02em] text-fg sm:text-[34px] sm:leading-[1.14]">
+            <h1 className="text-[30px] font-bold leading-[1.18] tracking-[-0.02em] text-fg sm:text-[34px] sm:leading-[1.14]">
               내 남친이 맞팔 중인 여자들,
               <br />
               <span className="text-blood">누가 제일 위험할까?</span>
@@ -428,10 +428,10 @@ export default function LandingPage() {
         <section className="pb-16">
           <CaseCard bracket="var(--color-blood)" className="px-5 py-10 text-center">
             <Eyebrow className="justify-center">AI 정밀 판독</Eyebrow>
-            <h2 className="mt-4 text-[20px] font-extrabold leading-tight tracking-tight text-fg sm:text-[26px]">
+            <h2 className="mt-4 text-[23px] font-extrabold leading-tight tracking-tight text-fg sm:text-[28px]">
               남자친구가 알려주지 않는 진실
             </h2>
-            <p className="mt-3.5 text-[13px] leading-relaxed text-fg-dim">
+            <p className="mt-3.5 text-[14px] leading-relaxed text-fg-dim">
               불안해하며 시간 낭비하지 마세요.
               <br />
               AI가 5분 안에 진실을 파헤쳐 드립니다.
@@ -445,8 +445,8 @@ export default function LandingPage() {
         </section>
 
         {/* ---------- footer ---------- */}
-        <footer className="border-t border-line py-9">
-          <div className="mb-4">
+        <footer className="border-t border-line py-7">
+          <div className="mb-2.5">
             <span className="eyebrow">위장여사친 판독기</span>
           </div>
           <p className="text-[12px] leading-relaxed text-fg-mute">
