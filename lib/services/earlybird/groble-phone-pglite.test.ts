@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -33,6 +33,21 @@ const [
     phoneFinalizationMigration,
     contactRetentionMigration,
 ] = phoneMigrations;
+// rollout 이후에 추가되는 복구 migration 이라 파일이 없을 때도 모듈 로드는 성공해야 한다.
+// 그래야 누락이 suite crash 가 아니라 테스트 실패로 드러난다.
+const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
+const normalizerGrantMigrationFile = readdirSync(migrationsDirectory)
+    .filter(file => file.endsWith(
+        '_restore_groble_phone_normalizer_service_role_execute.sql'
+    ))
+    .sort()
+    .at(-1);
+const normalizerGrantMigration = normalizerGrantMigrationFile
+    ? readFileSync(
+        new URL(normalizerGrantMigrationFile, migrationsDirectory),
+        'utf8'
+    )
+    : '';
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -2141,6 +2156,199 @@ describe('Groble phone checkout and finalizer behavior', () => {
             )).rejects.toThrow(/permission denied/i);
         } finally {
             await db.exec('RESET ROLE');
+        }
+    });
+});
+
+// `users_phone_number_provenance_check` 는 normalize_kr_mobile_e164 를 호출하고,
+// CHECK 제약은 SECURITY DEFINER 가 아니라 DML 을 실행한 role 로 평가된다.
+// 기존 시드는 superuser 로 users 를 INSERT 해서 service-role 쓰기 경로를 밟은 적이 없고,
+// 그래서 rollout 의 service_role REVOKE 가 운영에서야 42501 로 드러났다.
+describe('Groble phone normalizer service-role execute', () => {
+    const VERIFIED_RAW_PHONE = '010-1234-5678';
+    const VERIFIED_NORMALIZED_PHONE = '+821012345678';
+
+    interface ProvenanceRow {
+        provider: string;
+        phone_number_normalized: string | null;
+        phone_number_verification_source: string | null;
+        verified_at_is_fresh: boolean | null;
+        normalized_matches_raw: boolean | null;
+    }
+
+    async function createDatabaseAfterPhoneRollout(): Promise<PGlite> {
+        const database = await createDatabaseBeforePhoneMigration();
+        await applyPhoneMigrations(database);
+        // 운영 Supabase 는 public schema table 의 DML 을 service_role 에 부여한다.
+        // bootstrap 은 이를 재현하지 않으므로 여기서 명시적으로 맞춘다.
+        await database.exec(
+            'GRANT SELECT, INSERT, UPDATE ON public.users TO service_role'
+        );
+        return database;
+    }
+
+    // /auth/callback 의 supabaseAdmin.from('users').upsert(...) 와 같은 형태다.
+    async function upsertVerifiedKakaoPhoneAsService(
+        database: PGlite,
+        index: number
+    ): Promise<Results<unknown>> {
+        return asServiceOn(
+            database,
+            `INSERT INTO public.users (
+                id, email, provider, phone_number, phone_number_normalized,
+                phone_number_verification_source, phone_number_verified_at
+            ) VALUES (
+                $1, $2, 'kakao', $3, $4, 'kakao_rest_api',
+                pg_catalog.clock_timestamp()
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                provider = EXCLUDED.provider,
+                phone_number = EXCLUDED.phone_number,
+                phone_number_normalized = EXCLUDED.phone_number_normalized,
+                phone_number_verification_source
+                    = EXCLUDED.phone_number_verification_source,
+                phone_number_verified_at = EXCLUDED.phone_number_verified_at`,
+            [
+                uuid(USER_NAMESPACE, index),
+                `normalizer-grant-${index}@example.com`,
+                VERIFIED_RAW_PHONE,
+                VERIFIED_NORMALIZED_PHONE,
+            ]
+        );
+    }
+
+    it('leaves the service-role user write denied when only the rollout is applied', async () => {
+        const database = await createDatabaseAfterPhoneRollout();
+        try {
+            await expect(
+                upsertVerifiedKakaoPhoneAsService(database, 940)
+            ).rejects.toMatchObject({ code: '42501' });
+        } finally {
+            await database.close();
+        }
+    });
+
+    it('lets the service-role auth callback persist a verified Kakao phone', async () => {
+        const database = await createDatabaseAfterPhoneRollout();
+        try {
+            await database.exec(normalizerGrantMigration);
+
+            await expect(
+                upsertVerifiedKakaoPhoneAsService(database, 941)
+            ).resolves.toBeDefined();
+
+            // 개인정보 원문 대신 provenance 상태만 확인한다.
+            const provenance = (await database.query<ProvenanceRow>(
+                `SELECT provider,
+                        phone_number_normalized,
+                        phone_number_verification_source,
+                        phone_number_verified_at
+                            >= pg_catalog.clock_timestamp() - INTERVAL '24 hours'
+                            AS verified_at_is_fresh,
+                        public.normalize_kr_mobile_e164(phone_number)
+                            IS NOT DISTINCT FROM phone_number_normalized
+                            AS normalized_matches_raw
+                 FROM public.users
+                 WHERE id = $1`,
+                [uuid(USER_NAMESPACE, 941)]
+            )).rows[0];
+
+            expect(provenance).toMatchObject({
+                provider: 'kakao',
+                phone_number_normalized: VERIFIED_NORMALIZED_PHONE,
+                phone_number_verification_source: 'kakao_rest_api',
+                verified_at_is_fresh: true,
+                normalized_matches_raw: true,
+            });
+        } finally {
+            await database.close();
+        }
+    });
+
+    it('grants execute to service_role without reaching anon or authenticated', async () => {
+        const database = await createDatabaseAfterPhoneRollout();
+        try {
+            await database.exec(normalizerGrantMigration);
+
+            const privileges = (await database.query<Record<string, boolean>>(
+                `SELECT
+                    pg_catalog.has_function_privilege(
+                        'service_role',
+                        'public.normalize_kr_mobile_e164(text)',
+                        'EXECUTE'
+                    ) AS service_role,
+                    pg_catalog.has_function_privilege(
+                        'anon',
+                        'public.normalize_kr_mobile_e164(text)',
+                        'EXECUTE'
+                    ) AS anon,
+                    pg_catalog.has_function_privilege(
+                        'authenticated',
+                        'public.normalize_kr_mobile_e164(text)',
+                        'EXECUTE'
+                    ) AS authenticated`
+            )).rows[0];
+
+            expect(privileges).toEqual({
+                service_role: true,
+                anon: false,
+                authenticated: false,
+            });
+        } finally {
+            await database.close();
+        }
+    });
+
+    it('still refuses an unverified checkout after the grant', async () => {
+        const database = await createDatabaseAfterPhoneRollout();
+        try {
+            await database.exec(normalizerGrantMigration);
+
+            const userId = uuid(USER_NAMESPACE, 942);
+            const preflightId = uuid(PREFLIGHT_NAMESPACE, 942);
+            // Kakao REST 검증 provenance 가 없는 사용자.
+            await database.query(
+                `INSERT INTO public.users (id, email, provider, phone_number)
+                 VALUES ($1, $2, 'kakao', $3)`,
+                [userId, 'normalizer-grant-942@example.com', VERIFIED_RAW_PHONE]
+            );
+            await database.query(
+                `INSERT INTO public.analysis_preflights (
+                    id, user_id, target_instagram_id, status, exclusion_decision,
+                    access_mode, plan_cards_snapshot, pricing_version,
+                    pricing_snapshot, target_followers_count, target_following_count,
+                    required_plan_id, expires_at
+                ) VALUES (
+                    $1, $2, 'guard_target', 'ready', 'skip', 'production', $3,
+                    $4, $5, 100, 100, 'basic',
+                    pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+                )`,
+                [
+                    preflightId,
+                    userId,
+                    planCards('basic'),
+                    EARLYBIRD_PRICING_VERSION,
+                    pricingSnapshot,
+                ]
+            );
+
+            await expect(asServiceOn(
+                database,
+                `SELECT * FROM public.create_earlybird_checkout(
+                    $1, $2, 'basic', $3, 14900, $4, $5, $6,
+                    pg_catalog.clock_timestamp()
+                )`,
+                [
+                    userId,
+                    preflightId,
+                    BASIC_PRODUCT_ID,
+                    EARLYBIRD_PRICING_VERSION,
+                    EARLYBIRD_DISCLOSURE_VERSION,
+                    EARLYBIRD_DISCLOSURE_TEXT,
+                ]
+            )).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
+        } finally {
+            await database.close();
         }
     });
 });

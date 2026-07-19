@@ -21,6 +21,17 @@ function migrationFor(suffix: typeof MIGRATION_SUFFIXES[number]): string {
     return index >= 0 ? migrations[index] : '';
 }
 
+// 위 5개 rollout 파일과 달리 이 복구 migration 은 rollout 이후에 추가되므로 따로 읽는다.
+const NORMALIZER_GRANT_SUFFIX =
+    'restore_groble_phone_normalizer_service_role_execute.sql';
+const normalizerGrantFile = readdirSync(migrationsDirectory)
+    .filter(file => file.endsWith(`_${NORMALIZER_GRANT_SUFFIX}`))
+    .sort()
+    .at(-1) ?? '';
+const normalizerGrantMigration = normalizerGrantFile
+    ? readFileSync(new URL(normalizerGrantFile, migrationsDirectory), 'utf8')
+    : '';
+
 const ddlMigration = migrationFor('add_groble_phone_matching.sql');
 const checkoutMigration = migrationFor('activate_groble_phone_checkout.sql');
 const backfillMigration = migrationFor('backfill_groble_phone_matching.sql');
@@ -687,6 +698,91 @@ describe('Groble phone matching migration contract', () => {
         );
         expect(migration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.set_earlybird_refund_status\(UUID, TEXT\)[\s\S]*?TO service_role/
+        );
+    });
+});
+
+// `users_phone_number_provenance_check` 는 normalize_kr_mobile_e164 를 호출한다.
+// CHECK 제약은 SECURITY DEFINER 가 아니라 DML 을 실행한 role 로 평가되므로,
+// service_role 에서 EXECUTE 를 회수하면 /auth/callback 의 service-role users upsert 가
+// 42501 로 실패한다. 이 복구 migration 은 그 EXECUTE 만 되돌린다.
+describe('Groble phone normalizer service-role execute restore contract', () => {
+    function executableStatements(source: string): string[] {
+        return source
+            .split('\n')
+            .map(line => line.replace(/--.*$/, '').trim())
+            .join(' ')
+            .split(';')
+            .map(statement => statement.replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+    }
+
+    it('adds one forward migration ordered after the completed phone rollout', () => {
+        expect(normalizerGrantFile).not.toBe('');
+        expect(normalizerGrantFile).toMatch(
+            new RegExp(`^\\d{14}_${NORMALIZER_GRANT_SUFFIX.replace(/\./g, '\\.')}$`)
+        );
+        expect(normalizerGrantFile.localeCompare(
+            '20260719131500_stop_persisting_groble_buyer_contacts.sql'
+        )).toBeGreaterThan(0);
+        expect(normalizerGrantFile.localeCompare(
+            '20260719160000_add_landing_leads.sql'
+        )).toBeGreaterThan(0);
+    });
+
+    it('bounds its locks like every other phone migration', () => {
+        expect(normalizerGrantMigration).toContain("SET LOCAL lock_timeout = '5s'");
+        expect(normalizerGrantMigration).toContain(
+            "SET LOCAL statement_timeout = '2min'"
+        );
+    });
+
+    it('restores execute to service_role and nothing else', () => {
+        expect(executableStatements(normalizerGrantMigration)).toEqual([
+            "SET LOCAL lock_timeout = '5s'",
+            "SET LOCAL statement_timeout = '2min'",
+            'GRANT EXECUTE ON FUNCTION public.normalize_kr_mobile_e164(TEXT) TO service_role',
+        ]);
+    });
+
+    it('never widens the normalizer to PUBLIC, anon, or authenticated', () => {
+        for (const grantee of ['PUBLIC', 'anon', 'authenticated']) {
+            expect(normalizerGrantMigration).not.toMatch(
+                new RegExp(`GRANT[\\s\\S]*?\\b${grantee}\\b`)
+            );
+        }
+    });
+
+    it('carries no schema change, backfill, or function redefinition', () => {
+        for (const forbidden of [
+            'ALTER TABLE',
+            'ALTER FUNCTION',
+            'UPDATE public.',
+            'INSERT INTO',
+            'DELETE FROM',
+            'CREATE OR REPLACE FUNCTION',
+            'DROP FUNCTION',
+            'CREATE TRIGGER',
+            'DROP TRIGGER',
+            'VALIDATE CONSTRAINT',
+            'CREATE INDEX',
+            'CREATE UNIQUE INDEX',
+            'REVOKE',
+        ]) {
+            expect(normalizerGrantMigration).not.toContain(forbidden);
+        }
+    });
+
+    it('leaves the checkout phone guard and 24-hour freshness policy untouched', () => {
+        expect(normalizerGrantMigration).not.toContain('CHECKOUT_PHONE_REQUIRED');
+        expect(normalizerGrantMigration).not.toContain('24 hours');
+        expect(normalizerGrantMigration).not.toContain('kakao_rest_api');
+        expect(normalizerGrantMigration).not.toContain('set_earlybird_order_phone_snapshot');
+        expect(normalizerGrantMigration).not.toContain('create_earlybird_checkout');
+
+        // 원본 rollout migration 은 forward-only 원칙에 따라 그대로 남아 있어야 한다.
+        expect(ddlMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.normalize_kr_mobile_e164\(TEXT\)\s+FROM PUBLIC, anon, authenticated, service_role/
         );
     });
 });
