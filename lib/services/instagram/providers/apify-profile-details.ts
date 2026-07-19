@@ -138,6 +138,7 @@ export async function runReplacementProfileDetails(
             logicalProvider: 'apify',
             credentialSlot: input.credentialSlot,
             actorBuild: REPLACEMENT_PROFILE_ACTOR.build,
+            requireExplicitRestrictedAccess: true,
             timeoutSecs: REPLACEMENT_PROFILE_TIMEOUT_SECS,
             invocationWaitLimitSecs: REPLACEMENT_PROFILE_TIMEOUT_SECS,
             maxItems: usernames.length,

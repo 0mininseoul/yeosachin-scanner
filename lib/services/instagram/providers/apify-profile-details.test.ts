@@ -28,7 +28,9 @@ function profileItem(username: string, overrides: Record<string, unknown> = {}) 
 function mockClient(input: {
     items?: Array<Record<string, unknown>>;
     run?: Record<string, unknown>;
+    updatedRun?: Record<string, unknown>;
     listItems?: ReturnType<typeof vi.fn>;
+    rejectRestrictionUpdate?: 'keyValueStore' | 'dataset' | 'requestQueue';
 } = {}) {
     const items = input.items ?? [];
     const start = vi.fn().mockResolvedValue({ id: 'ReplacementRun1234' });
@@ -40,6 +42,28 @@ function mockClient(input: {
         usageTotalUsd: 0.01,
         ...input.run,
     });
+    const update = vi.fn().mockResolvedValue({
+        generalAccess: 'RESTRICTED',
+        ...input.updatedRun,
+    });
+    const updateKeyValueStore = vi.fn().mockResolvedValue({
+        generalAccess: 'RESTRICTED',
+    });
+    const updateDataset = vi.fn().mockResolvedValue({
+        generalAccess: 'RESTRICTED',
+    });
+    const updateRequestQueue = vi.fn().mockResolvedValue({
+        generalAccess: 'RESTRICTED',
+    });
+    if (input.rejectRestrictionUpdate === 'keyValueStore') {
+        updateKeyValueStore.mockRejectedValueOnce(new Error('restriction update failed'));
+    }
+    if (input.rejectRestrictionUpdate === 'dataset') {
+        updateDataset.mockRejectedValueOnce(new Error('restriction update failed'));
+    }
+    if (input.rejectRestrictionUpdate === 'requestQueue') {
+        updateRequestQueue.mockRejectedValueOnce(new Error('restriction update failed'));
+    }
     const abort = vi.fn().mockResolvedValue(undefined);
     const listItems = input.listItems ?? vi.fn().mockResolvedValue({
         items,
@@ -50,10 +74,27 @@ function mockClient(input: {
     });
     const client = {
         actor: vi.fn(() => ({ start })),
-        run: vi.fn(() => ({ waitForFinish, abort })),
+        run: vi.fn(() => ({
+            waitForFinish,
+            update,
+            abort,
+            keyValueStore: () => ({ update: updateKeyValueStore }),
+            dataset: () => ({ update: updateDataset }),
+            requestQueue: () => ({ update: updateRequestQueue }),
+        })),
         dataset: vi.fn(() => ({ listItems })),
     } as unknown as ApifyClientLike;
-    return { client, start, waitForFinish, abort, listItems };
+    return {
+        client,
+        start,
+        waitForFinish,
+        update,
+        updateKeyValueStore,
+        updateDataset,
+        updateRequestQueue,
+        abort,
+        listItems,
+    };
 }
 
 function context(overrides: Partial<ProviderCallContext> = {}): ProviderCallContext {
@@ -123,10 +164,11 @@ describe('replacement Apify profile details adapter', () => {
         expect(results.map(result => result.outcome.status)).toEqual(['success', 'success']);
     });
 
-    it('rejects a non-restricted terminal run before reading its Dataset', async () => {
+    it('rejects a terminal run when explicit resource restriction cannot be verified', async () => {
         const { client, listItems } = mockClient({
             items: [profileItem('alice')],
-            run: { generalAccess: 'ANYONE_WITH_ID_CAN_READ' },
+            run: { generalAccess: 'FOLLOW_USER_SETTING' },
+            updatedRun: { generalAccess: 'ANYONE_WITH_ID_CAN_READ' },
         });
 
         await expect(runReplacementProfileDetails({
@@ -137,6 +179,88 @@ describe('replacement Apify profile details adapter', () => {
         })).rejects.toThrow('SCRAPING_ACCESS_ERROR');
         expect(listItems).not.toHaveBeenCalled();
     });
+
+    it('pins an inherited replacement run to restricted access before reading its Dataset', async () => {
+        const {
+            client,
+            update,
+            updateKeyValueStore,
+            updateDataset,
+            updateRequestQueue,
+            waitForFinish,
+            listItems,
+        } = mockClient({
+            items: [profileItem('alice')],
+            run: { generalAccess: 'FOLLOW_USER_SETTING' },
+            updatedRun: { generalAccess: 'RESTRICTED' },
+        });
+
+        await expect(runReplacementProfileDetails({
+            client,
+            usernames: ['alice'],
+            credentialSlot: 'primary',
+            maxTotalChargeUsd: 0.05,
+        })).resolves.toMatchObject([{
+            outcome: { requestedUsername: 'alice', status: 'success' },
+        }]);
+
+        expect(update).toHaveBeenCalledWith({ generalAccess: 'RESTRICTED' });
+        expect(updateKeyValueStore).toHaveBeenCalledWith({ generalAccess: 'RESTRICTED' });
+        expect(updateDataset).toHaveBeenCalledWith({ generalAccess: 'RESTRICTED' });
+        expect(updateRequestQueue).toHaveBeenCalledWith({ generalAccess: 'RESTRICTED' });
+        expect(update.mock.invocationCallOrder[0])
+            .toBeLessThan(waitForFinish.mock.invocationCallOrder[0]);
+        expect(update.mock.invocationCallOrder[0])
+            .toBeLessThan(listItems.mock.invocationCallOrder[0]);
+    });
+
+    it.each([
+        'keyValueStore',
+        'dataset',
+        'requestQueue',
+    ] as const)(
+        'does not wait or read when the %s restriction update fails, then resumes the checkpointed run',
+        async (rejectRestrictionUpdate) => {
+            const {
+                client,
+                start,
+                waitForFinish,
+                listItems,
+            } = mockClient({
+                items: [profileItem('alice')],
+                rejectRestrictionUpdate,
+            });
+            const onRunStarted = vi.fn().mockResolvedValue(undefined);
+
+            await expect(runReplacementProfileDetails({
+                client,
+                usernames: ['alice'],
+                credentialSlot: 'primary',
+                maxTotalChargeUsd: 0.05,
+                context: context({ onRunStarted }),
+            })).rejects.toThrow('SCRAPING_ACCESS_ERROR');
+
+            expect(onRunStarted).toHaveBeenCalledOnce();
+            expect(waitForFinish).not.toHaveBeenCalled();
+            expect(listItems).not.toHaveBeenCalled();
+
+            await expect(runReplacementProfileDetails({
+                client,
+                usernames: ['alice'],
+                credentialSlot: 'primary',
+                maxTotalChargeUsd: 0.05,
+                context: context({
+                    resumeRunId: 'ReplacementRun1234',
+                    credentialSlot: 'primary',
+                    maxChargeUsd: 0.05,
+                }),
+            })).resolves.toMatchObject([{
+                outcome: { requestedUsername: 'alice', status: 'success' },
+            }]);
+
+            expect(start).toHaveBeenCalledOnce();
+        }
+    );
 
     it('preserves requested order while attributing reverse-ordered rows', async () => {
         const { client } = mockClient({

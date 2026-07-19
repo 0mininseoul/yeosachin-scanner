@@ -114,6 +114,7 @@ export interface ApifyActorRunOptions {
     logicalProvider: 'apify' | 'coderx';
     credentialSlot: ApifyCredentialSlot;
     actorBuild?: string;
+    requireExplicitRestrictedAccess?: boolean;
     timeoutSecs: number;
     maxItems: number;
     maxTotalChargeUsd: number;
@@ -208,6 +209,40 @@ async function withinInvocationDeadline<T>(
         ]);
     } finally {
         if (timer !== undefined) clearTimeout(timer);
+    }
+}
+
+async function restrictApifyRunResources(
+    client: ApifyClientLike,
+    runId: string,
+    deadlineAtMs: number | undefined
+): Promise<void> {
+    const run = client.run(runId);
+    let resources: readonly { generalAccess?: unknown }[];
+    try {
+        resources = await Promise.all([
+            withinInvocationDeadline(
+                run.update({ generalAccess: 'RESTRICTED' }),
+                deadlineAtMs
+            ),
+            withinInvocationDeadline(
+                run.keyValueStore().update({ generalAccess: 'RESTRICTED' }),
+                deadlineAtMs
+            ),
+            withinInvocationDeadline(
+                run.dataset().update({ generalAccess: 'RESTRICTED' }),
+                deadlineAtMs
+            ),
+            withinInvocationDeadline(
+                run.requestQueue().update({ generalAccess: 'RESTRICTED' }),
+                deadlineAtMs
+            ),
+        ]);
+    } catch {
+        throw new Error('SCRAPING_ACCESS_ERROR: Apify run resources could not be restricted.');
+    }
+    if (resources.some(resource => resource.generalAccess !== 'RESTRICTED')) {
+        throw new Error('SCRAPING_ACCESS_ERROR: Apify run resources are not restricted.');
     }
 }
 
@@ -412,6 +447,16 @@ export async function startOrResumeApifyActor(
         );
     }
 
+    let explicitlyRestricted = false;
+    if (options.requireExplicitRestrictedAccess) {
+        await restrictApifyRunResources(
+            client,
+            runId,
+            context?.invocationDeadlineAtMs
+        );
+        explicitlyRestricted = true;
+    }
+
     let run;
     try {
         run = await withinInvocationDeadline(
@@ -467,7 +512,9 @@ export async function startOrResumeApifyActor(
             `SCRAPING_RUN_PENDING_ERROR: Apify run status=${run.status}; retry the checkpointed run.`
         );
     }
-    return run;
+    return explicitlyRestricted
+        ? { ...run, generalAccess: 'RESTRICTED' }
+        : run;
 }
 
 function hasDurableRunCheckpoint(context?: ProviderCallContext): boolean {
