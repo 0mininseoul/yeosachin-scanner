@@ -15,10 +15,6 @@ import {
     paymentConfirmationEventKey,
 } from '@/lib/services/earlybird/analytics-state';
 
-function formatKrw(amount: number): string {
-    return `${amount.toLocaleString('ko-KR')}원`;
-}
-
 function formatTimestamp(value: string): string {
     return new Intl.DateTimeFormat('ko-KR', {
         dateStyle: 'medium',
@@ -80,6 +76,8 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 {order.displayStatus}
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
+                위장여사친 판독기를 이용해주셔서 감사합니다.
+                <br />
                 결제 확정 후 실제 48시간 이내에 판독 결과를 전달합니다.
                 <br />
                 완료되면 가입하신 이메일로도 결과 링크를 보내드립니다.
@@ -89,12 +87,6 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 <dl data-amp-block>
                     <DetailRow label="대상 계정" value={`@${order.targetInstagramId}`} />
                     <DetailRow label="구매 플랜" value={order.planName} />
-                    <DetailRow
-                        label="실제 결제 금액"
-                        value={order.actualAmountKrw === null
-                            ? '결제 확인 중'
-                            : formatKrw(order.actualAmountKrw)}
-                    />
                     <DetailRow
                         label="접수 시각"
                         value={order.acceptedAt
@@ -106,12 +98,6 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                         value={order.dueAt
                             ? formatTimestamp(order.dueAt)
                             : '결제 확정 후 48시간 이내 전달 예정'}
-                    />
-                    <DetailRow
-                        label="플랜 내 접수 순번"
-                        value={order.planSequence === null
-                            ? '결제 확인 후 배정'
-                            : `${order.planSequence}번째 / 10건`}
                     />
                     <DetailRow label="현재 상태" value={order.displayStatus} />
                 </dl>

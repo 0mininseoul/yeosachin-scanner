@@ -64,6 +64,7 @@ export default function AnalyzePage() {
     const [girlfriendInstagramId, setGirlfriendInstagramId] = useState('');
     const [selectedPlan, setSelectedPlan] = useState<PlanId | null>(null);
     const [disclosureAccepted, setDisclosureAccepted] = useState(false);
+    const [disclosureModalOpen, setDisclosureModalOpen] = useState(false);
     const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
     const [waitlistComplete, setWaitlistComplete] = useState(false);
     const router = useRouter();
@@ -97,6 +98,20 @@ export default function AnalyzePage() {
     const selectedPlanAvailable = readyPreflight && effectiveSelectedCard
         ? isEarlybirdPlanSelectable(effectiveSelectedCard, readyPreflight.requiredPlan)
         : false;
+
+    useEffect(() => {
+        if (!disclosureModalOpen) return;
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setDisclosureModalOpen(false);
+        };
+        document.addEventListener('keydown', onKey);
+        const prevOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        return () => {
+            document.removeEventListener('keydown', onKey);
+            document.body.style.overflow = prevOverflow;
+        };
+    }, [disclosureModalOpen]);
 
     useEffect(() => {
         if (!readyPreflight || !exclusionDecided) return;
@@ -225,7 +240,11 @@ export default function AnalyzePage() {
     };
 
     const handleEarlybirdAction = async () => {
-        if (!effectiveSelectedPlan || !readyPreflight) return;
+        if (!effectiveSelectedPlan || !readyPreflight || !selectedPlanAvailable) return;
+        if (isPaidEarlybirdPlanId(effectiveSelectedPlan) && !disclosureAccepted) {
+            setDisclosureModalOpen(true);
+            return;
+        }
         if (!canSubmitEarlybirdSelection(
             effectiveSelectedPlan,
             disclosureAccepted,
@@ -703,11 +722,7 @@ export default function AnalyzePage() {
                                                 !effectiveSelectedPlan
                                                 || purchaseSubmitting
                                                 || waitlistComplete
-                                                || !canSubmitEarlybirdSelection(
-                                                    effectiveSelectedPlan,
-                                                    disclosureAccepted,
-                                                    selectedPlanAvailable
-                                                )
+                                                || !selectedPlanAvailable
                                             }
                                         >
                                             {purchaseSubmitting
@@ -729,6 +744,39 @@ export default function AnalyzePage() {
                     </>
                 )}
             </main>
+
+            {disclosureModalOpen && (
+                <div
+                    className="fixed inset-0 z-[100] flex items-center justify-center p-5"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="얼리버드 안내 확인 필요"
+                >
+                    <div
+                        className="absolute inset-0 bg-ink/80 backdrop-blur-sm"
+                        onClick={() => setDisclosureModalOpen(false)}
+                    />
+                    <div className="relative w-full max-w-[380px] border border-line bg-ink-2 px-6 py-8 text-center shadow-2xl">
+                        <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
+                            <BrandMark size={26} className="text-amber" />
+                        </div>
+                        <h2 className="mt-5 text-[19px] font-extrabold tracking-tight text-fg">
+                            안내 사항 확인이 필요해요
+                        </h2>
+                        <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
+                            {EARLYBIRD_DISCLOSURE_TEXT}
+                            <br />
+                            위 체크박스에 동의 표시를 해주셔야 구매를 진행할 수 있어요.
+                        </p>
+                        <button
+                            onClick={() => setDisclosureModalOpen(false)}
+                            className="mt-6 w-full bg-blood px-5 py-3 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
+                        >
+                            확인
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
