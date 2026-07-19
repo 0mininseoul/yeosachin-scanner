@@ -7,12 +7,20 @@ import {
 } from '@/lib/domain/earlybird/catalog';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
+import { fetchEarlybirdRemainingSlots } from './inventory';
 import { earlybirdStore } from './store';
 
 export class EarlybirdWaitlistRequiredError extends Error {
     constructor() {
         super('EARLYBIRD_WAITLIST_REQUIRED');
         this.name = 'EarlybirdWaitlistRequiredError';
+    }
+}
+
+export class EarlybirdSoldOutError extends Error {
+    constructor() {
+        super('EARLYBIRD_SOLD_OUT');
+        this.name = 'EarlybirdSoldOutError';
     }
 }
 
@@ -23,6 +31,10 @@ export async function createEarlybirdCheckout(input: {
 }) {
     if (!isPaidEarlybirdPlanId(input.planId)) {
         throw new EarlybirdWaitlistRequiredError();
+    }
+    const remainingSlots = (await fetchEarlybirdRemainingSlots())[input.planId];
+    if (remainingSlots !== undefined && remainingSlots <= 0) {
+        throw new EarlybirdSoldOutError();
     }
     const config = readGrobleConfig();
     const plan = EARLYBIRD_PLAN_CATALOG[input.planId];

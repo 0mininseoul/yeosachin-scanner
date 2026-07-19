@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     rpc: vi.fn(),
+    from: vi.fn(),
     after: vi.fn(),
     flush: vi.fn(),
     findForOwner: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock('@/lib/supabase/server', () => ({
     createClient: mocks.createServerClient,
 }));
 vi.mock('@/lib/supabase/admin', () => ({
-    supabaseAdmin: { rpc: mocks.rpc },
+    supabaseAdmin: { rpc: mocks.rpc, from: mocks.from },
 }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
@@ -73,6 +74,7 @@ describe('earlybird checkout and waitlist routes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.after.mockReset();
+        mocks.from.mockReset();
         authenticate();
         process.env.GROBLE_BASIC_PRODUCT_ID = 'basic_product-01';
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';
@@ -321,6 +323,79 @@ describe('earlybird checkout and waitlist routes', () => {
             }),
         });
         expect(createdEvents[0][0].fields).not.toHaveProperty('target_instagram_id');
+    });
+
+    it('rejects a sold-out plan checkout without creating the order', async () => {
+        mocks.from.mockReturnValue({
+            select: vi.fn(() => ({
+                in: vi.fn(async () => ({
+                    data: [{ plan_id: 'basic', sale_limit: 10, sold_count: 10 }],
+                    error: null,
+                })),
+            })),
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+            code: 'EARLYBIRD_SOLD_OUT',
+            error: '이 플랜의 얼리버드 물량이 모두 소진되었습니다.',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('allows checkout when the plan still has remaining slots', async () => {
+        mocks.from.mockReturnValue({
+            select: vi.fn(() => ({
+                in: vi.fn(async () => ({
+                    data: [{ plan_id: 'basic', sale_limit: 10, sold_count: 9 }],
+                    error: null,
+                })),
+            })),
+        });
+        mocks.rpc.mockResolvedValue({
+            data: [{ order_id: ORDER_ID, created: true }],
+            error: null,
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(201);
+        await expect(response.json()).resolves.toEqual({
+            orderId: ORDER_ID,
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
+        });
+    });
+
+    it('fails open and allows checkout when the inventory lookup throws', async () => {
+        mocks.from.mockImplementation(() => {
+            throw new Error('network down');
+        });
+        mocks.rpc.mockResolvedValue({
+            data: [{ order_id: ORDER_ID, created: true }],
+            error: null,
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(201);
+        await expect(response.json()).resolves.toEqual({
+            orderId: ORDER_ID,
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
+        });
     });
 
     it('maps server plan validation failures and never creates a Plus payment object', async () => {
