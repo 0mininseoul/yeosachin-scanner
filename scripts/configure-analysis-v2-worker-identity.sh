@@ -26,6 +26,7 @@ Required environment variables:
   ANALYSIS_V2_DEPLOYER_IAM_MEMBER
   ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL
   ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL
+    or ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true
 
 The deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL alias remains
 accepted during migration. If both names are set, they must match exactly.
@@ -66,6 +67,21 @@ normalize_worker_runtime_identity() {
     die "ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL and deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL must match when both are set"
   fi
   export ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL="${canonical:-$legacy}"
+}
+
+normalize_v1_enqueuer_identity() {
+  local legacy_identity="${ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL:-}"
+  local explicitly_unconfigured="${ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED:-}"
+  if [[ -n "$legacy_identity" && "$explicitly_unconfigured" == "true" ]]; then
+    die "ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL and ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED are mutually exclusive"
+  fi
+  if [[ -n "$legacy_identity" ]]; then
+    export ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=false
+    return 0
+  fi
+  [[ "$explicitly_unconfigured" == "true" ]] \
+    || die "ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL is required unless ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true"
+  export ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true
 }
 
 log() {
@@ -584,6 +600,7 @@ while (($# > 0)); do
 done
 
 normalize_worker_runtime_identity
+normalize_v1_enqueuer_identity
 
 for name in \
   ANALYSIS_V2_TASKS_PROJECT \
@@ -593,8 +610,7 @@ for name in \
   ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL \
   ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT \
   ANALYSIS_V2_DEPLOYER_IAM_MEMBER \
-  ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL \
-  ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL; do
+  ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL; do
   required_env "$name"
 done
 
@@ -606,7 +622,11 @@ validate_service_account_email "$ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAI
 validate_service_account_email "$ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT"
 validate_service_account_email "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
 validate_service_account_email "$ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL"
-validate_service_account_email "$ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL"
+if [[ "$ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED" != "true" ]]; then
+  validate_service_account_email "$ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL"
+else
+  log "V1 enqueuer service-account identity is explicitly unconfigured"
+fi
 validate_deployer_member "$ANALYSIS_V2_DEPLOYER_IAM_MEMBER"
 [[ "$(service_account_project "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL")" \
   == "$ANALYSIS_V2_TASKS_PROJECT" ]] \
@@ -631,14 +651,16 @@ v2_identities=(
   "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
   "$ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT"
 )
+legacy_identities=("$ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL")
+if [[ "$ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED" != "true" ]]; then
+  legacy_identities+=("$ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL")
+fi
 for ((i = 0; i < ${#v2_identities[@]}; i++)); do
   for ((j = i + 1; j < ${#v2_identities[@]}; j++)); do
     [[ "${v2_identities[$i]}" != "${v2_identities[$j]}" ]] \
       || die "all V2 task, enqueuer, runtime, maintenance, and build identities must be distinct"
   done
-  for legacy_identity in \
-    "$ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL" \
-    "$ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL"; do
+  for legacy_identity in "${legacy_identities[@]}"; do
     [[ "${v2_identities[$i]}" != "$legacy_identity" ]] \
       || die "V2 identities must not reuse a V1 task or enqueuer identity"
   done

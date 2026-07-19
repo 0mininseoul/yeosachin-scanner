@@ -1416,6 +1416,57 @@ fi
 assert_contains "$temp_dir/identity-v1-reuse.out" \
   "V2 identities must not reuse a V1 task or enqueuer identity"
 
+unconfigured_legacy_enqueuer_env=()
+for item in "${common_env[@]}"; do
+  [[ "$item" == ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL=* ]] \
+    || unconfigured_legacy_enqueuer_env+=("$item")
+done
+unconfigured_legacy_enqueuer_env+=(
+  'ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true'
+)
+env -u ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
+  "${unconfigured_legacy_enqueuer_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-worker-identity.sh" --dry-run \
+  >"$temp_dir/identity-v1-enqueuer-unconfigured.out"
+assert_contains "$temp_dir/identity-v1-enqueuer-unconfigured.out" \
+  "V1 enqueuer service-account identity is explicitly unconfigured"
+
+if env -u ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
+  "${unconfigured_legacy_enqueuer_env[@]}" \
+  'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=legacy-task@test-project.iam.gserviceaccount.com' \
+  bash "$script_dir/configure-analysis-v2-worker-identity.sh" --dry-run \
+  >"$temp_dir/identity-v1-task-reuse-with-unconfigured-enqueuer.out" 2>&1; then
+  fail "V1 task identity was reused by V2 when the V1 enqueuer is explicitly unconfigured"
+fi
+assert_contains "$temp_dir/identity-v1-task-reuse-with-unconfigured-enqueuer.out" \
+  "V2 identities must not reuse a V1 task or enqueuer identity"
+
+if env "${common_env[@]}" \
+  'ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true' \
+  bash "$script_dir/configure-analysis-v2-worker-identity.sh" --dry-run \
+  >"$temp_dir/identity-v1-enqueuer-mutually-exclusive.out" 2>&1; then
+  fail "V1 enqueuer identity and unconfigured declaration must be mutually exclusive"
+fi
+assert_contains "$temp_dir/identity-v1-enqueuer-mutually-exclusive.out" \
+  "ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL and ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED are mutually exclusive"
+
+missing_legacy_enqueuer_env=()
+for item in "${unconfigured_legacy_enqueuer_env[@]}"; do
+  [[ "$item" == ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=* ]] \
+    || missing_legacy_enqueuer_env+=("$item")
+done
+missing_legacy_enqueuer_env+=(
+  'ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=false'
+)
+if env -u ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
+  "${missing_legacy_enqueuer_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-worker-identity.sh" --dry-run \
+  >"$temp_dir/identity-v1-enqueuer-missing.out" 2>&1; then
+  fail "V1 enqueuer identity must be present without the explicit unconfigured declaration"
+fi
+assert_contains "$temp_dir/identity-v1-enqueuer-missing.out" \
+  "ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL is required unless ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true"
+
 if env "${common_env[@]}" \
   'ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=analysis-recovery@test-project.iam.gserviceaccount.com' \
   bash "$script_dir/configure-analysis-v2-worker-identity.sh" --dry-run \
@@ -1628,6 +1679,16 @@ assert_contains "$temp_dir/worker.out" \
   "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
 assert_contains "$temp_dir/worker.out" \
   "deploy-lock bucket metadata and IAM are audited separately by an admin"
+
+env -u ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
+  "${unconfigured_legacy_enqueuer_env[@]}" \
+  'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-v1-enqueuer-unconfigured.out"
+assert_contains "$temp_dir/worker-v1-enqueuer-unconfigured.out" \
+  "V1 enqueuer service-account identity is explicitly unconfigured"
 
 for lookup_failure_state in \
   service_list_failure \

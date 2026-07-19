@@ -53,6 +53,7 @@ Required environment variables:
   ANALYSIS_V2_DEPLOYER_IAM_MEMBER
   ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL
   ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL
+    or ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true
   ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE
   ANALYSIS_V2_TASKS_CLOUD_RUN_REGION
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
@@ -124,6 +125,21 @@ normalize_worker_runtime_identity() {
     die "ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL and deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL must match when both are set"
   fi
   export ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL="${canonical:-$legacy}"
+}
+
+normalize_v1_enqueuer_identity() {
+  local legacy_identity="${ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL:-}"
+  local explicitly_unconfigured="${ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED:-}"
+  if [[ -n "$legacy_identity" && "$explicitly_unconfigured" == "true" ]]; then
+    die "ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL and ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED are mutually exclusive"
+  fi
+  if [[ -n "$legacy_identity" ]]; then
+    export ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=false
+    return 0
+  fi
+  [[ "$explicitly_unconfigured" == "true" ]] \
+    || die "ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL is required unless ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true"
+  export ANALYSIS_V1_TASKS_ENQUEUER_UNCONFIGURED=true
 }
 
 log() {
@@ -1652,6 +1668,7 @@ while (($# > 0)); do
 done
 
 normalize_worker_runtime_identity
+normalize_v1_enqueuer_identity
 
 for name in \
   ANALYSIS_V2_TASKS_PROJECT \
@@ -1663,7 +1680,6 @@ for name in \
   ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL \
   ANALYSIS_V2_DEPLOYER_IAM_MEMBER \
   ANALYSIS_V1_TASKS_SERVICE_ACCOUNT_EMAIL \
-  ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
   ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE \
   ANALYSIS_V2_TASKS_CLOUD_RUN_REGION \
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET \
