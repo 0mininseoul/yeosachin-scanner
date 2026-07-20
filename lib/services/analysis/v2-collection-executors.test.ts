@@ -323,6 +323,11 @@ function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
             };
             return current;
         }),
+        // Task 8 wires the repair seam; until then nothing in these executors reaches it,
+        // and a fake that silently no-ops would hide that if it ever did.
+        checkpointRepair: vi.fn(async () => {
+            throw new Error('unexpected repair checkpoint');
+        }),
         purgeTerminal: vi.fn(async () => 0),
     };
     return { store, current: () => current };

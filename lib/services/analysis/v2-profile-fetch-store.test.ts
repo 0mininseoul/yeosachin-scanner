@@ -585,9 +585,13 @@ describe('analysis V2 profile fetch checkpoint store', () => {
     });
 
     it('rejects a repair set that admits a merged unavailable username', () => {
+        // carol merged to `unavailable`, bob to `failed`, so the derived set is ['bob'].
+        // Claiming both is the only shape that isolates the exclusion: a set of ['carol']
+        // alone would be rejected for not matching ['bob'] even if `unavailable` were
+        // wrongly admitted, which would make this test pass for the wrong reason.
         expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
-            repairResults: [apifyFailure('carol')],
-            repairUsernames: ['carol'],
+            repairResults: [apifyFailure('bob'), apifyFailure('carol')],
+            repairUsernames: ['bob', 'carol'],
             repairCapturedAt,
         })).success).toBe(false);
     });
@@ -618,12 +622,56 @@ describe('analysis V2 profile fetch checkpoint store', () => {
     });
 
     it('rejects repair outcomes on a checkpoint that never completed a fallback', () => {
+        // Regression guard for the empty-fallback bypass: repair validation must still run
+        // when `fallbackResults` is empty. Here the derived set is ['bob','carol'] while the
+        // claimed set is ['bob'], so a skipped repair validator lets this through.
         expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
             fallbackResults: [],
             fallbackCapturedAt: null,
             repairResults: [apifySuccess('bob')],
             repairUsernames: ['bob'],
             repairCapturedAt,
+        })).success).toBe(false);
+    });
+
+    it('rejects a repair attempt that overtakes an incomplete fallback', () => {
+        // Isolates the "repair needs a completed fallback" invariant on its own. Only bob is
+        // frozen and he merges to `failed`, so the derived set is exactly the claimed ['bob']
+        // and every other repair check is satisfied — the fallback gate is the only thing
+        // left that can reject this.
+        expect(analysisV2ProfileFetchResumeSchema.safeParse({
+            requestId,
+            jobKey,
+            requestedUsernames: ['alice', 'bob'],
+            frozenUnresolvedUsernames: ['bob'],
+            primaryResults: [
+                {
+                    outcome: outcome({ username: 'alice', source: 'cache', status: 'success' }),
+                    profile: profile('alice', 8),
+                },
+                {
+                    outcome: outcome({
+                        username: 'bob',
+                        status: 'failed',
+                        failureCategory: 'timeout',
+                        httpStatus: 504,
+                    }),
+                },
+            ],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+            repairResults: [apifySuccess('bob')],
+            repairUsernames: ['bob'],
+            repairCapturedAt,
+        }).success).toBe(false);
+    });
+
+    it('rejects a repair username set with no repair outcome behind it', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            repairResults: [],
+            repairUsernames: ['bob'],
+            repairCapturedAt: null,
         })).success).toBe(false);
     });
 
@@ -704,14 +752,34 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         });
         const store = createAnalysisV2ProfileFetchCheckpointStore(settled.client);
 
-        // Same code the RPC raises for an empty server-derived set, so a stale snapshot
-        // cannot change the failure disposition (20260720130000:376-389).
+        // Paying for a repair the merge never asked for is a caller bug, not a checkpoint
+        // state to record, so the outcome is rejected rather than silently discarded.
         await expect(store.checkpointRepair({
             ...checkpointIdentity,
             results: [apifySuccess('bob')],
-        })).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
+        })).rejects.toThrow('unexpected outcome username');
         expect(settled.rpc).toHaveBeenCalledOnce();
     });
+
+    it('settles a merge with nothing left to repair without writing a checkpoint',
+        async () => {
+            const settled = clientWith({
+                data: mergedResume({
+                    fallbackResults: [apifyUnavailable('bob'), apifyUnavailable('carol')],
+                }),
+                error: null,
+            });
+            const store = createAnalysisV2ProfileFetchCheckpointStore(settled.client);
+
+            // Both inputs to the repair set are write-once and final by now, so an empty set
+            // can never become non-empty. Failing here — transiently or otherwise — would
+            // burn the job's retry budget on a settled state, so hand the checkpoint back.
+            await expect(store.checkpointRepair({
+                ...checkpointIdentity,
+                results: [],
+            })).resolves.toMatchObject({ repairResults: [], repairCapturedAt: null });
+            expect(settled.rpc).toHaveBeenCalledOnce();
+        });
 
     it('rejects a repair success without profile evidence before any repair RPC call',
         async () => {

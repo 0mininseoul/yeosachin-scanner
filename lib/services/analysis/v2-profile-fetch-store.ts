@@ -575,14 +575,15 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
                 throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
             }
             const repairUsernames = deriveRepairUsernames(current);
-            // The RPC re-derives this set under lock and raises NOT_READY on an empty one
-            // (20260720130000:376-389). This short-circuit must stay a pure optimisation of
-            // that behaviour: the loaded snapshot can legitimately be staler than the
-            // server's view, so the same condition must not surface a different code — and
-            // therefore a different retry disposition — depending on which side notices it.
-            if (repairUsernames.length === 0) {
-                throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
-            }
+            // Nothing left to repair is a terminal state of the repair stage, not a failure:
+            // the loaded checkpoint already carries the final outcome, so hand it back. This
+            // set is a pure function of the primary and fallback outcomes, both of which are
+            // write-once and both of which are final by the time control reaches here, so an
+            // empty set is deterministic — the RPC's NOT_READY (20260720130000:376-389) is
+            // transient and would spin the job to its attempt limit on a condition that
+            // cannot change. A caller that nonetheless paid for results is a real bug, so
+            // fall through and let canonicalResults reject it rather than discard them.
+            if (repairUsernames.length === 0 && input.results.length === 0) return current;
             const results = canonicalResults(repairUsernames, input.results, ['apify']);
             const { data, error } = await client.rpc(
                 ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.repairRpc,
