@@ -63,4 +63,14 @@ describe('analysis V2 worker error codes', () => {
             retryable,
         });
     });
+
+    it('recognizes a divergent profile repair replay as a permanent conflict', () => {
+        const code = 'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT';
+        expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+            code,
+            disposition: 'permanent',
+            retryable: false,
+        });
+    });
 });

@@ -156,8 +156,16 @@ export const analysisV2ProfileFetchResumeSchema = z.object({
         .max(MAX_PROFILE_BATCH_SIZE),
     fallbackResults: z.array(analysisV2CheckpointResultSchema)
         .max(MAX_PROFILE_BATCH_SIZE),
+    repairResults: z.array(analysisV2CheckpointResultSchema)
+        .max(MAX_PROFILE_BATCH_SIZE)
+        .default([]),
     primaryCapturedAt: z.string().datetime({ offset: true }),
     fallbackCapturedAt: z.string().datetime({ offset: true }).nullable(),
+    repairUsernames: z.array(usernameSchema)
+        .max(MAX_PROFILE_BATCH_SIZE)
+        .nullable()
+        .default(null),
+    repairCapturedAt: z.string().datetime({ offset: true }).nullable().default(null),
 }).strict().superRefine((value, context) => {
     try {
         validateResumeSets(value);
@@ -193,6 +201,9 @@ export interface AnalysisV2ProfileFetchCheckpointStore {
     checkpointFallback(input: AnalysisV2ProfileFetchCheckpointIdentity & {
         results: readonly AnalysisV2ProfileAttemptResultInput[];
     }): Promise<AnalysisV2ProfileFetchResume>;
+    checkpointRepair(input: AnalysisV2ProfileFetchCheckpointIdentity & {
+        results: readonly AnalysisV2ProfileAttemptResultInput[];
+    }): Promise<AnalysisV2ProfileFetchResume>;
     load(input: AnalysisV2ProfileFetchCheckpointIdentity):
         Promise<AnalysisV2ProfileFetchResume | null>;
     purgeTerminal(requestId: string): Promise<number>;
@@ -217,6 +228,7 @@ export const ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES = Object.freeze({
     outcomeTable: 'analysis_v2_profile_fetch_outcomes',
     primaryRpc: 'checkpoint_analysis_v2_profile_primary',
     fallbackRpc: 'checkpoint_analysis_v2_profile_fallback',
+    repairRpc: 'checkpoint_analysis_v2_profile_repair',
     loadRpc: 'load_analysis_v2_profile_fetch_checkpoint',
     purgeRpc: 'purge_analysis_v2_profile_fetch_checkpoints',
 });
@@ -327,13 +339,41 @@ function sameOrderedSet(left: readonly string[], right: readonly string[]): bool
         && left.every((username, index) => username === right[index]);
 }
 
-function validateResumeSets(value: {
+interface AnalysisV2ProfileResumeSets {
     requestedUsernames: readonly string[];
     frozenUnresolvedUsernames: readonly string[];
     primaryResults: readonly AnalysisV2CheckpointResult[];
     fallbackResults: readonly AnalysisV2CheckpointResult[];
+    repairResults: readonly AnalysisV2CheckpointResult[];
     fallbackCapturedAt: string | null;
-}): void {
+    repairUsernames: readonly string[] | null;
+    repairCapturedAt: string | null;
+}
+
+/**
+ * Client mirror of `analysis_v2_profile_repair_username_set`: the frozen unresolved
+ * usernames whose merged outcome (fallback over primary) is still `failed`, kept in the
+ * frozen order the server derives from the primary ordinal. A merged `unavailable` outcome
+ * is deliberately never repaired, so the repair set can only ever shrink the frozen set.
+ */
+function deriveRepairUsernames(value: {
+    frozenUnresolvedUsernames: readonly string[];
+    primaryResults: readonly AnalysisV2CheckpointResult[];
+    fallbackResults: readonly AnalysisV2CheckpointResult[];
+}): string[] {
+    const mergedByUsername = new Map(value.primaryResults.map(result => [
+        result.outcome.requestedUsername,
+        result.outcome,
+    ]));
+    for (const result of value.fallbackResults) {
+        mergedByUsername.set(result.outcome.requestedUsername, result.outcome);
+    }
+    return value.frozenUnresolvedUsernames.filter(
+        username => mergedByUsername.get(username)?.status === 'failed'
+    );
+}
+
+function validatePrimaryResumeSet(value: AnalysisV2ProfileResumeSets): void {
     const summary = summarizeProfileFetchOutcomes(
         value.requestedUsernames,
         value.primaryResults.map(result => result.outcome)
@@ -350,6 +390,9 @@ function validateResumeSets(value: {
     if (value.primaryResults.some(result => result.outcome.source === 'apify')) {
         throw new Error('Primary checkpoint contains a paid fallback outcome.');
     }
+}
+
+function validateFallbackResumeSet(value: AnalysisV2ProfileResumeSets): void {
     if (value.fallbackResults.length === 0) {
         if (value.fallbackCapturedAt !== null) {
             throw new Error('Empty fallback checkpoint has a completion timestamp.');
@@ -374,6 +417,52 @@ function validateResumeSets(value: {
     }
 }
 
+function validateRepairResumeSet(value: AnalysisV2ProfileResumeSets): void {
+    const repairUsernames = value.repairUsernames ?? [];
+    if (value.repairResults.length === 0) {
+        if (value.repairCapturedAt !== null) {
+            throw new Error('Empty repair checkpoint has a completion timestamp.');
+        }
+        if (repairUsernames.length !== 0) {
+            throw new Error('Empty repair checkpoint has a repair username set.');
+        }
+        return;
+    }
+    if (value.repairCapturedAt === null) {
+        throw new Error('Repair checkpoint is missing its completion timestamp.');
+    }
+    if (value.fallbackCapturedAt === null) {
+        throw new Error('Repair checkpoint has no completed fallback attempt to follow.');
+    }
+    if (!sameOrderedSet(repairUsernames, deriveRepairUsernames(value))) {
+        throw new Error('Repair usernames do not match the merged failed username set.');
+    }
+    summarizeProfileFetchOutcomes(
+        repairUsernames,
+        value.repairResults.map(result => result.outcome)
+    );
+    if (!sameOrderedSet(
+        value.repairResults.map(result => result.outcome.requestedUsername),
+        repairUsernames
+    )) {
+        throw new Error('Repair outcomes do not match repair username order.');
+    }
+    if (value.repairResults.some(result => result.outcome.source !== 'apify')) {
+        throw new Error('Repair checkpoint contains a non-Apify outcome.');
+    }
+}
+
+/**
+ * Every attempt is validated on its own terms: an empty attempt returns from its own
+ * validator, never from this one, so a later attempt can never be skipped by an earlier
+ * empty one.
+ */
+function validateResumeSets(value: AnalysisV2ProfileResumeSets): void {
+    validatePrimaryResumeSet(value);
+    validateFallbackResumeSet(value);
+    validateRepairResumeSet(value);
+}
+
 function safeRpcCode(error: RpcError): string {
     return typeof error.code === 'string' && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
         ? error.code
@@ -384,6 +473,7 @@ function throwRpcError(error: RpcError, operation: string): never {
     const knownConflict = [
         'ANALYSIS_V2_PROFILE_PRIMARY_CONFLICT',
         'ANALYSIS_V2_PROFILE_FALLBACK_CONFLICT',
+        'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_INVALID',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
@@ -476,6 +566,36 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
             );
             if (error) throwRpcError(error, 'fallback checkpoint');
             return parseResume(data, 'fallback checkpoint');
+        },
+
+        async checkpointRepair(input) {
+            validateIdentity(input);
+            const current = await loadCheckpoint(input);
+            if (!current || current.fallbackCapturedAt === null) {
+                throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
+            }
+            const repairUsernames = deriveRepairUsernames(current);
+            // The RPC re-derives this set under lock and raises NOT_READY on an empty one
+            // (20260720130000:376-389). This short-circuit must stay a pure optimisation of
+            // that behaviour: the loaded snapshot can legitimately be staler than the
+            // server's view, so the same condition must not surface a different code — and
+            // therefore a different retry disposition — depending on which side notices it.
+            if (repairUsernames.length === 0) {
+                throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
+            }
+            const results = canonicalResults(repairUsernames, input.results, ['apify']);
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.repairRpc,
+                {
+                    p_request_id: input.requestId,
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken,
+                    p_job_input_hash: input.jobInputHash,
+                    p_outcomes: databaseOutcomes(results),
+                }
+            );
+            if (error) throwRpcError(error, 'repair checkpoint');
+            return parseResume(data, 'repair checkpoint');
         },
 
         async load(input) {

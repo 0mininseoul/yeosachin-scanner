@@ -246,6 +246,11 @@ function unavailable(username: string) {
     };
 }
 
+/** No repair attempt was made, which is the shape every snapshot below still has. */
+function unrepaired() {
+    return { repairResults: [], repairUsernames: null, repairCapturedAt: null };
+}
+
 function completedResume(
     usernames: readonly string[],
     profiles: AnalysisV2ProfileFetchResume['primaryResults'] =
@@ -260,6 +265,7 @@ function completedResume(
         fallbackResults: [],
         primaryCapturedAt: capturedAt,
         fallbackCapturedAt: null,
+        ...unrepaired(),
     };
 }
 
@@ -302,6 +308,7 @@ function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
                 fallbackResults: [],
                 primaryCapturedAt: capturedAt,
                 fallbackCapturedAt: null,
+                ...unrepaired(),
             };
             return current;
         }),
@@ -1304,6 +1311,7 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackResults: [],
             primaryCapturedAt: capturedAt,
             fallbackCapturedAt: null,
+            ...unrepaired(),
         });
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore();
@@ -1385,6 +1393,7 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackResults: [],
             primaryCapturedAt: capturedAt,
             fallbackCapturedAt: null,
+            ...unrepaired(),
         });
         const reusable = reusableTargetProfileRunStore();
         const fallback = [success('alice', 'apify')] as ProfileAttemptResult[];
@@ -1442,6 +1451,7 @@ describe('analysis V2 concrete collection executors', () => {
                 fallbackResults: [],
                 primaryCapturedAt: capturedAt,
                 fallbackCapturedAt: null,
+                ...unrepaired(),
             };
             const replacement = inMemoryProfileStore(next);
             vi.mocked(profileStore.store.load).mockImplementation(replacement.store.load);
@@ -1549,6 +1559,7 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackResults: [],
             primaryCapturedAt: capturedAt,
             fallbackCapturedAt: null,
+            ...unrepaired(),
         });
         const reportActiveProfile = vi.fn(async () => undefined);
         const fetcher = vi.fn(async (

@@ -118,6 +118,79 @@ function resume(overrides: Record<string, unknown> = {}) {
     };
 }
 
+const fallbackCapturedAt = '2026-07-13T07:31:00.000Z';
+const repairCapturedAt = '2026-07-13T07:32:00.000Z';
+
+function apifyFailure(username: string) {
+    return {
+        outcome: outcome({
+            username,
+            source: 'apify',
+            status: 'failed',
+            failureCategory: 'timeout',
+            httpStatus: 504,
+        }),
+    };
+}
+
+function apifyUnavailable(username: string) {
+    return {
+        outcome: outcome({
+            username,
+            source: 'apify',
+            status: 'unavailable',
+            failureCategory: 'not_found',
+            httpStatus: 404,
+        }),
+    };
+}
+
+function apifySuccess(username: string) {
+    return {
+        outcome: outcome({ username, source: 'apify', status: 'success' }),
+        profile: profile(username),
+    };
+}
+
+/**
+ * Alice resolved on the primary attempt, bob is still failed after the paid fallback and
+ * carol merged to unavailable — so the server-derived repair set is exactly ['bob'].
+ */
+function mergedResume(overrides: Record<string, unknown> = {}) {
+    return {
+        requestId,
+        jobKey,
+        requestedUsernames: ['alice', 'bob', 'carol'],
+        frozenUnresolvedUsernames: ['bob', 'carol'],
+        primaryResults: [
+            {
+                outcome: outcome({ username: 'alice', source: 'cache', status: 'success' }),
+                profile: profile('alice', 8),
+            },
+            {
+                outcome: outcome({
+                    username: 'bob',
+                    status: 'failed',
+                    failureCategory: 'timeout',
+                    httpStatus: 504,
+                }),
+            },
+            {
+                outcome: outcome({
+                    username: 'carol',
+                    status: 'failed',
+                    failureCategory: 'timeout',
+                    httpStatus: 504,
+                }),
+            },
+        ],
+        fallbackResults: [apifyFailure('bob'), apifyUnavailable('carol')],
+        primaryCapturedAt: capturedAt,
+        fallbackCapturedAt,
+        ...overrides,
+    };
+}
+
 function clientWith(...responses: Array<{ data: unknown; error: null | {
     code?: string;
     message?: string;
@@ -466,6 +539,211 @@ describe('analysis V2 profile fetch checkpoint store', () => {
             p_claim_token: claimToken,
             p_job_input_hash: jobInputHash,
         });
+    });
+
+    it('accepts a snapshot carrying the server-derived repair attempt', () => {
+        const parsed = analysisV2ProfileFetchResumeSchema.parse(mergedResume({
+            repairResults: [apifySuccess('bob')],
+            repairUsernames: ['bob'],
+            repairCapturedAt,
+        }));
+
+        expect(parsed.repairUsernames).toEqual(['bob']);
+        expect(parsed.repairCapturedAt).toBe(repairCapturedAt);
+        expect(parsed.repairResults).toHaveLength(1);
+    });
+
+    it('reads an unrepaired snapshot as an empty repair attempt', () => {
+        const parsed = analysisV2ProfileFetchResumeSchema.parse(mergedResume({
+            repairResults: [],
+            repairUsernames: null,
+            repairCapturedAt: null,
+        }));
+
+        expect(parsed.repairResults).toEqual([]);
+        expect(parsed.repairUsernames).toBeNull();
+        expect(parsed.repairCapturedAt).toBeNull();
+    });
+
+    it('rejects a repair outcome that was not sourced from the paid provider', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            repairResults: [{
+                outcome: outcome({ username: 'bob', source: 'selfhosted', status: 'success' }),
+                profile: profile('bob'),
+            }],
+            repairUsernames: ['bob'],
+            repairCapturedAt,
+        })).success).toBe(false);
+    });
+
+    it('rejects a repair set that is not a subset of the frozen unresolved set', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            repairResults: [apifySuccess('alice')],
+            repairUsernames: ['alice'],
+            repairCapturedAt,
+        })).success).toBe(false);
+    });
+
+    it('rejects a repair set that admits a merged unavailable username', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            repairResults: [apifyFailure('carol')],
+            repairUsernames: ['carol'],
+            repairCapturedAt,
+        })).success).toBe(false);
+    });
+
+    it('rejects repair outcomes that do not follow the repair username order', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            fallbackResults: [apifyFailure('bob'), apifyFailure('carol')],
+            repairResults: [apifyFailure('carol'), apifyFailure('bob')],
+            repairUsernames: ['bob', 'carol'],
+            repairCapturedAt,
+        })).success).toBe(false);
+    });
+
+    it('rejects a repair completion timestamp without any repair outcome', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            repairResults: [],
+            repairUsernames: null,
+            repairCapturedAt,
+        })).success).toBe(false);
+    });
+
+    it('rejects repair outcomes without a repair completion timestamp', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            repairResults: [apifySuccess('bob')],
+            repairUsernames: ['bob'],
+            repairCapturedAt: null,
+        })).success).toBe(false);
+    });
+
+    it('rejects repair outcomes on a checkpoint that never completed a fallback', () => {
+        expect(analysisV2ProfileFetchResumeSchema.safeParse(mergedResume({
+            fallbackResults: [],
+            fallbackCapturedAt: null,
+            repairResults: [apifySuccess('bob')],
+            repairUsernames: ['bob'],
+            repairCapturedAt,
+        })).success).toBe(false);
+    });
+
+    it('loads the merged failed set before sending exactly that set to the repair RPC',
+        async () => {
+            const repaired = mergedResume({
+                repairResults: [apifySuccess('bob')],
+                repairUsernames: ['bob'],
+                repairCapturedAt,
+            });
+            const fake = clientWith(
+                { data: mergedResume(), error: null },
+                { data: repaired, error: null }
+            );
+            const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+            const result = await store.checkpointRepair({
+                ...checkpointIdentity,
+                results: [apifySuccess('bob')],
+            });
+
+            expect(result.repairUsernames).toEqual(['bob']);
+            expect(fake.rpc.mock.calls.map(call => call[0])).toEqual([
+                ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.loadRpc,
+                ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.repairRpc,
+            ]);
+            expect(fake.rpc.mock.calls[1]![1].p_outcomes).toEqual([
+                expect.objectContaining({ username: 'bob', source: 'apify', status: 'success' }),
+            ]);
+        });
+
+    it('refuses repair work for a username the merge already settled', async () => {
+        const fake = clientWith(
+            { data: mergedResume(), error: null },
+            { data: mergedResume(), error: null }
+        );
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await expect(store.checkpointRepair({
+            ...checkpointIdentity,
+            results: [apifySuccess('carol')],
+        })).rejects.toThrow('unexpected outcome username');
+        await expect(store.checkpointRepair({
+            ...checkpointIdentity,
+            results: [{
+                outcome: outcome({ username: 'bob', source: 'selfhosted', status: 'success' }),
+                profile: profile('bob'),
+            }],
+        })).rejects.toThrow('invalid attempt source');
+        expect(fake.rpc.mock.calls.every(call => (
+            call[0] === ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.loadRpc
+        ))).toBe(true);
+    });
+
+    it('never repairs without a durable checkpoint or a completed fallback', async () => {
+        const missing = clientWith({ data: null, error: null });
+        await expect(createAnalysisV2ProfileFetchCheckpointStore(missing.client)
+            .checkpointRepair({
+                ...checkpointIdentity,
+                results: [apifySuccess('bob')],
+            })).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
+
+        const unfallen = clientWith({ data: resume(), error: null });
+        await expect(createAnalysisV2ProfileFetchCheckpointStore(unfallen.client)
+            .checkpointRepair({
+                ...checkpointIdentity,
+                results: [apifySuccess('bob')],
+            })).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
+        expect(unfallen.rpc).toHaveBeenCalledOnce();
+    });
+
+    it('never repairs a merge that left nothing failed', async () => {
+        const settled = clientWith({
+            data: mergedResume({
+                fallbackResults: [apifyUnavailable('bob'), apifyUnavailable('carol')],
+            }),
+            error: null,
+        });
+        const store = createAnalysisV2ProfileFetchCheckpointStore(settled.client);
+
+        // Same code the RPC raises for an empty server-derived set, so a stale snapshot
+        // cannot change the failure disposition (20260720130000:376-389).
+        await expect(store.checkpointRepair({
+            ...checkpointIdentity,
+            results: [apifySuccess('bob')],
+        })).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
+        expect(settled.rpc).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a repair success without profile evidence before any repair RPC call',
+        async () => {
+            const fake = clientWith({ data: mergedResume(), error: null });
+            const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+            await expect(store.checkpointRepair({
+                ...checkpointIdentity,
+                results: [{
+                    outcome: outcome({ username: 'bob', source: 'apify', status: 'success' }),
+                }],
+            })).rejects.toThrow('success needs a profile');
+            expect(fake.rpc).toHaveBeenCalledOnce();
+            expect(fake.rpc.mock.calls[0]![0]).toBe(
+                ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.loadRpc
+            );
+        });
+
+    it('surfaces a divergent repair replay conflict verbatim', async () => {
+        const fake = clientWith(
+            { data: mergedResume(), error: null },
+            {
+                data: null,
+                error: { code: 'P0001', message: 'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT' },
+            }
+        );
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await expect(store.checkpointRepair({
+            ...checkpointIdentity,
+            results: [apifySuccess('bob')],
+        })).rejects.toThrow('ANALYSIS_V2_PROFILE_REPAIR_CONFLICT');
     });
 
     it('purges only through the terminal purge RPC and validates its result', async () => {
