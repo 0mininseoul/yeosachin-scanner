@@ -1,12 +1,15 @@
 -- 얼리버드 판독 결과 제공 기한을 48시간에서 24시간으로 단축한다(사용자 확정).
 --
--- 1) 이미 결제 완료되어 48시간 기준으로 due_at 이 저장된 기존 주문(예: 수동 정산된
+-- 1) 기존 CHECK 제약을 먼저 DROP 한다. 48시간 제약이 걸린 채로 due_at 을
+--    paid_at + 24시간으로 UPDATE 하면 그 자체가 (아직 살아있는) 48시간 제약을
+--    위반해 UPDATE 문이 즉시 실패한다 — 실제로 첫 배포 시도에서 이 순서 버그로
+--    프로덕션 push 가 실패했다(문장 단위 원자성 덕분에 부분 반영 없이 롤백됨).
+-- 2) 이미 결제 완료되어 48시간 기준으로 due_at 이 저장된 기존 주문(예: 수동 정산된
 --    64115d4d-ae82-48ed-9a0d-0480c100a6c2)도 24시간 기준으로 재계산한다(사용자 확정 —
 --    과거 주문을 원래 48시간 약속대로 유지하지 않고 전부 24시간으로 앞당긴다).
---    이 백필을 CHECK 제약 교체보다 먼저 실행해야, 기존 48시간 기준 행 때문에
---    ADD CONSTRAINT 가 제약 위반으로 실패하는 상황을 피할 수 있다.
--- 2) earlybird_orders_due_check CHECK 제약을 24시간 기준으로 재정의한다.
--- 3) create_earlybird_checkout / finalize_earlybird_groble_payment 는 시그니처를
+-- 3) 24시간 기준 CHECK 제약을 다시 추가한다. 위 백필이 먼저 끝났으므로 이 시점에는
+--    모든 행이 이미 새 규칙을 만족해 ADD CONSTRAINT 가 안전하게 통과한다.
+-- 4) create_earlybird_checkout / finalize_earlybird_groble_payment 는 시그니처를
 --    바꾸지 않으므로 CREATE OR REPLACE 가 기존 REVOKE ALL / GRANT EXECUTE TO
 --    service_role ACL 을 그대로 유지한다(finalize 는 20260719180000 과 동일한 패턴).
 --    disclosure 버전 식별자도 이름 자체를 earlybird-24h-v1 로 바꾼다(사용자 확정 —
@@ -15,12 +18,13 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
+ALTER TABLE public.earlybird_orders
+    DROP CONSTRAINT earlybird_orders_due_check;
+
 UPDATE public.earlybird_orders
 SET due_at = paid_at + INTERVAL '24 hours'
 WHERE due_at IS NOT NULL;
 
-ALTER TABLE public.earlybird_orders
-    DROP CONSTRAINT earlybird_orders_due_check;
 ALTER TABLE public.earlybird_orders
     ADD CONSTRAINT earlybird_orders_due_check CHECK (
         due_at IS NULL OR (paid_at IS NOT NULL AND due_at = paid_at + INTERVAL '24 hours')
