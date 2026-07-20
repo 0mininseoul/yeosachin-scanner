@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import {
-    EARLYBIRD_DISCLOSURE_TEXT,
-    EARLYBIRD_DISCLOSURE_VERSION,
-    EARLYBIRD_PRICING_VERSION,
-} from '@/lib/domain/earlybird/catalog';
+import { EARLYBIRD_PRICING_VERSION } from '@/lib/domain/earlybird/catalog';
+
+// 이 파일은 원본 마이그레이션(20260717140000)만 단독 적용하는 고립된 스냅샷 테스트라,
+// 이후 24시간으로 단축된 현재 disclosure 상수(catalog.ts)를 그대로 쓰면 안 된다. 원본
+// 마이그레이션이 하드코딩한 48시간 고지를 그대로 리터럴로 고정한다.
+const LEGACY_DISCLOSURE_VERSION = 'earlybird-48h-v1';
+const LEGACY_DISCLOSURE_TEXT =
+    '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 48시간 이내 판독 결과를 제공합니다.';
 
 const migration = readFileSync(
     new URL(
@@ -215,8 +218,8 @@ async function createCheckout(
             productId,
             amount,
             EARLYBIRD_PRICING_VERSION,
-            EARLYBIRD_DISCLOSURE_VERSION,
-            EARLYBIRD_DISCLOSURE_TEXT,
+            LEGACY_DISCLOSURE_VERSION,
+            LEGACY_DISCLOSURE_TEXT,
         ]
     );
     return result.rows[0];

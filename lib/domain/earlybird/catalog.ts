@@ -1,9 +1,9 @@
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 
 export const EARLYBIRD_PRICING_VERSION = 'earlybird-2026-07-v1' as const;
-export const EARLYBIRD_DISCLOSURE_VERSION = 'earlybird-48h-v1' as const;
+export const EARLYBIRD_DISCLOSURE_VERSION = 'earlybird-24h-v1' as const;
 export const EARLYBIRD_DISCLOSURE_TEXT =
-    '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 48시간 이내 판독 결과를 제공합니다.' as const;
+    '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.' as const;
 
 export const PAID_EARLYBIRD_PLAN_IDS = ['basic', 'standard'] as const;
 export type PaidEarlybirdPlanId = (typeof PAID_EARLYBIRD_PLAN_IDS)[number];

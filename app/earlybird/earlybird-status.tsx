@@ -78,7 +78,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
                 위장여사친 판독기를 이용해주셔서 감사합니다.
                 <br />
-                결제 확정 후 실제 48시간 이내에 이메일로 판독 결과를 전달합니다.
+                결제 확정 후 실제 24시간 이내에 이메일로 판독 결과를 전달합니다.
             </p>
 
             <CaseCard className="mt-8 p-5">
@@ -95,7 +95,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                         label="전달 예정"
                         value={order.dueAt
                             ? formatTimestamp(order.dueAt)
-                            : '결제 확정 후 48시간 이내 전달 예정'}
+                            : '결제 확정 후 24시간 이내 전달 예정'}
                     />
                     <DetailRow label="현재 상태" value={order.displayStatus} />
                 </dl>

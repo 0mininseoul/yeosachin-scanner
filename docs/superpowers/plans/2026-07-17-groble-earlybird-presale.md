@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **[중요: 폐기된 기한 안내]** 이 계획서는 판독 결과 제공 기한을 결제 완료 후 **48시간**
+> (`earlybird-48h-v1` 고지 버전, `due_at = paid_at + interval '48 hours'`)으로 지시하고 있으나,
+> 이후 **폐기(superseded)** 되었다. 현재는 결제 완료 후 **24시간**이며, 고지 버전도
+> `earlybird-24h-v1`로 이름이 바뀌었다 —
+> `supabase/migrations/20260720100000_shorten_earlybird_delivery_window.sql` 기준. 아래
+> 본문의 48시간 관련 지시는 폐기된 설계이므로 그대로 따르지 말 것.
+
 **Goal:** Complete a secure, owner-scoped Groble earlybird presale flow for Basic and Standard, with Plus waitlisting and no automatic analysis dispatch.
 
 **Architecture:** A server-owned earlybird catalog prices preflight snapshots and validates checkout requests. Groble redirects are preceded by a durable pending order; signed `payment.completed` webhooks are finalized by a service-role-only Postgres RPC that serializes payment IDs and plan inventory, while signed cancellation requests enter refund review through a separate RPC. Owner status reads and manual fulfillment remain isolated from `analysis_requests` and Cloud Tasks.

@@ -182,7 +182,7 @@ describe('earlybird checkout and waitlist routes', () => {
             p_expected_product_id: 'basic_product-01',
             p_expected_amount_krw: 14_900,
             p_pricing_version: 'earlybird-2026-07-v1',
-            p_disclosure_version: 'earlybird-48h-v1',
+            p_disclosure_version: 'earlybird-24h-v1',
         }));
         expect(mocks.emit.mock.calls.some(([entry]) => (
             entry as { event?: string }).event === 'earlybird.checkout_created'

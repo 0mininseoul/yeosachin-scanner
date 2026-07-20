@@ -7,6 +7,14 @@ import {
     EARLYBIRD_PRICING_VERSION,
 } from '@/lib/domain/earlybird/catalog';
 
+// 아래 두 상수는 createDatabaseBeforePhoneMigration() 스냅샷(할인/딜리버리-윈도우
+// 마이그레이션이 적용되기 전, phone 마이그레이션 롤아웃 도중의 create_earlybird_checkout)
+// 전용이다. 그 시점의 라이브 함수는 여전히 48시간 고지를 요구하므로, 24시간으로 바뀐
+// 현재 EARLYBIRD_DISCLOSURE_VERSION/TEXT 를 쓰면 안 된다.
+const LEGACY_DISCLOSURE_VERSION = 'earlybird-48h-v1';
+const LEGACY_DISCLOSURE_TEXT =
+    '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 48시간 이내 판독 결과를 제공합니다.';
+
 const presaleMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260717140000_add_groble_earlybird_presale.sql',
@@ -57,6 +65,18 @@ const discountAcceptanceMigrationFile = readdirSync(migrationsDirectory)
 const discountAcceptanceMigration = discountAcceptanceMigrationFile
     ? readFileSync(
         new URL(discountAcceptanceMigrationFile, migrationsDirectory),
+        'utf8'
+    )
+    : '';
+const deliveryWindowMigrationFile = readdirSync(migrationsDirectory)
+    .filter(file => file.endsWith(
+        '_shorten_earlybird_delivery_window.sql'
+    ))
+    .sort()
+    .at(-1);
+const deliveryWindowMigration = deliveryWindowMigrationFile
+    ? readFileSync(
+        new URL(deliveryWindowMigrationFile, migrationsDirectory),
         'utf8'
     )
     : '';
@@ -200,12 +220,14 @@ async function createDatabaseBeforePhoneMigration(): Promise<PGlite> {
     return database;
 }
 
-// 현행 production migration 집합 = 6개 rollout + normalizer EXECUTE 복구 + 할인 결제 허용.
+// 현행 production migration 집합 = 6개 rollout + normalizer EXECUTE 복구 + 할인 결제 허용
+// + 얼리버드 제공 기한 24시간 단축.
 async function applyPhoneMigrations(database: PGlite): Promise<void> {
     for (const migration of [
         ...phoneMigrations,
         normalizerGrantMigration,
         discountAcceptanceMigration,
+        deliveryWindowMigration,
     ]) {
         await database.exec(migration);
     }
@@ -500,8 +522,8 @@ describe('Groble phone migration upgrade behavior', () => {
                     preflightId,
                     BASIC_PRODUCT_ID,
                     EARLYBIRD_PRICING_VERSION,
-                    EARLYBIRD_DISCLOSURE_VERSION,
-                    EARLYBIRD_DISCLOSURE_TEXT,
+                    LEGACY_DISCLOSURE_VERSION,
+                    LEGACY_DISCLOSURE_TEXT,
                 ]
             )).rows[0];
             await database.query(
@@ -799,8 +821,8 @@ describe('Groble phone migration upgrade behavior', () => {
                         preflightId,
                         BASIC_PRODUCT_ID,
                         EARLYBIRD_PRICING_VERSION,
-                        EARLYBIRD_DISCLOSURE_VERSION,
-                        EARLYBIRD_DISCLOSURE_TEXT,
+                        LEGACY_DISCLOSURE_VERSION,
+                        LEGACY_DISCLOSURE_TEXT,
                     ]
                 );
                 if (scenario.status === 'cancelled') {
@@ -917,8 +939,8 @@ describe('Groble phone migration upgrade behavior', () => {
                         preflightId,
                         BASIC_PRODUCT_ID,
                         EARLYBIRD_PRICING_VERSION,
-                        EARLYBIRD_DISCLOSURE_VERSION,
-                        EARLYBIRD_DISCLOSURE_TEXT,
+                        LEGACY_DISCLOSURE_VERSION,
+                        LEGACY_DISCLOSURE_TEXT,
                     ]
                 )).rows[0];
             };
@@ -1417,7 +1439,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
             `SELECT EXTRACT(EPOCH FROM (due_at - paid_at))::INTEGER AS seconds
              FROM public.earlybird_orders WHERE id = $1`,
             [checkout.order_id]
-        )).rows[0].seconds).toBe(172_800);
+        )).rows[0].seconds).toBe(86_400);
     });
 
     it('keeps email fallback available for unresolved legacy-email orders', async () => {
@@ -1665,7 +1687,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
             [checkout.order_id]
         )).rows[0]).toMatchObject({
             actual_amount_krw: 0,
-            seconds: 172_800,
+            seconds: 86_400,
         });
     });
 

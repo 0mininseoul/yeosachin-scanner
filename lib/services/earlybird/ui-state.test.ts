@@ -71,7 +71,7 @@ describe('earlybird analyze UI state', () => {
 
     it('requires the exact disclosure consent only for paid plans', () => {
         expect(EARLYBIRD_DISCLOSURE_TEXT).toBe(
-            '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 48시간 이내 판독 결과를 제공합니다.'
+            '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.'
         );
         expect(canSubmitEarlybirdSelection('basic', false, true)).toBe(false);
         expect(canSubmitEarlybirdSelection('basic', true, true)).toBe(true);

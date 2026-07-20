@@ -1,5 +1,12 @@
 # Groble 얼리버드 사전 구매 설계
 
+> **[중요: 폐기된 기한 안내]** 이 문서는 판독 결과 제공 기한을 결제 완료 후 **48시간**
+> (`earlybird-48h-v1` 고지 버전, `due_at = paid_at + interval '48 hours'`)으로 설계하고 있으나,
+> 이후 **폐기(superseded)** 되었다. 현재는 결제 완료 후 **24시간**이며, 고지 버전도
+> `earlybird-24h-v1`로 이름이 바뀌었다 —
+> `supabase/migrations/20260720100000_shorten_earlybird_delivery_window.sql` 기준. 아래
+> 본문의 48시간 관련 서술은 폐기된 설계 기록이므로 그대로 따르지 말 것.
+
 ## 목표
 
 Basic과 Standard는 Groble에 이미 등록된 결제창으로 각각 10건만 얼리버드 사전 구매를 받고, Plus는 결제 없이 대기 신청만 받는다. 결제 확정은 브라우저 복귀가 아니라 검증된 Groble `payment.completed` 웹훅으로만 수행한다. 결제 확정은 자동 V2 분석이나 Cloud Tasks를 시작하지 않으며, 수동 판독 상태와 결과 연결은 별도 얼리버드 주문 상태 머신에서 관리한다.
