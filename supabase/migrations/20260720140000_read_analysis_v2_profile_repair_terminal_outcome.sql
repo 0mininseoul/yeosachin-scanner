@@ -9,6 +9,13 @@
 -- 1. Telemetry must accept the third attempt or the repair outcome INSERT aborts the whole
 --    repair checkpoint transaction on the source CHECK. The new predicate is a strict
 --    superset of the current one, so every existing row satisfies it.
+--    Note this table is PERMANENT ("request/job profile outcome counters", 20260714033000:83-84)
+--    and is not purged at terminalization the way the per-request staging tables are, so
+--    ADD CONSTRAINT seq-scans the whole history under ACCESS EXCLUSIVE. That is the right
+--    trade at the current row count (low hundreds: one row per distinct
+--    request/job/source/status/failure_category/http_status). If this table ever grows large,
+--    split this into ADD CONSTRAINT ... NOT VALID followed by a separate VALIDATE CONSTRAINT,
+--    which does the same scan under the weaker SHARE UPDATE EXCLUSIVE lock.
 ALTER TABLE public.analysis_v2_profile_fetch_telemetry
     DROP CONSTRAINT analysis_v2_profile_fetch_telemetry_source_check;
 ALTER TABLE public.analysis_v2_profile_fetch_telemetry
