@@ -360,6 +360,27 @@ function canonicalRelationshipIdentity(input: {
     ]);
 }
 
+function relationshipIncompleteReplacementIdentity(canonicalInput: string): string {
+    return canonicalProviderInput([
+        'relationship-incomplete-replacement-v1',
+        canonicalInput,
+    ]);
+}
+
+function isRelationshipIncompleteError(error: unknown): error is Error {
+    return error instanceof Error
+        && error.message.startsWith('SCRAPING_INCOMPLETE_ERROR:');
+}
+
+function isReconciledSucceededRun(
+    run: StoredAnalysisV2ProviderRun | null
+): run is StoredAnalysisV2ProviderRun & { runId: string; status: 'succeeded' } {
+    return run?.status === 'succeeded'
+        && run.runId !== null
+        && run.actualUsageUsd !== null
+        && run.usageReconciledAt !== null;
+}
+
 export function createAnalysisV2RelationshipsExecutor(
     input: AnalysisV2CollectionExecutorDependencies = {}
 ): AnalysisV2StageExecutor<'relationships'> {
@@ -394,50 +415,77 @@ export function createAnalysisV2RelationshipsExecutor(
                 declaredCount,
                 planId: request.planId,
             });
-            const operationKey = createAnalysisV2ProviderOperationKey(
-                side === 'followers' ? 'relationship-followers' : 'relationship-following',
-                canonicalInput
-            );
-            const inputHash = createAnalysisV2ProviderInputHash(canonicalInput);
-            const binding = await bindApifyRun({
-                dependencies,
-                claim,
-                request,
-                operation: side === 'followers'
-                    ? 'relationship-followers'
-                    : 'relationship-following',
-                operationKey,
-                inputHash,
-                actorId: APIFY_RELATIONSHIP_ACTOR_ID,
-                maxChargeUsd: relationshipMaximumCharge(declaredCount, dependencies.env),
-            });
+            const operation = side === 'followers'
+                ? 'relationship-followers'
+                : 'relationship-following';
             const getter = side === 'followers'
                 ? dependencies.getFollowers
                 : dependencies.getFollowing;
-            const rows = await getter(request.targetUsername, declaredCount, {
-                provider: 'apify',
-                fallback: false,
-                expectedResultCount: declaredCount,
-                requestId: claim.requestId,
-                providerRun: { ...binding.checkpoint, startCancellationSignal },
-            });
-            const run = await requireSucceededRun(dependencies.providerRunStore, {
-                requestId: claim.requestId,
-                jobKey: claim.jobKey,
-                operationKey,
-            });
+            const execute = async (providerInput: string) => {
+                const operationKey = createAnalysisV2ProviderOperationKey(
+                    operation,
+                    providerInput
+                );
+                const inputHash = createAnalysisV2ProviderInputHash(providerInput);
+                const binding = await bindApifyRun({
+                    dependencies,
+                    claim,
+                    request,
+                    operation,
+                    operationKey,
+                    inputHash,
+                    actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+                    maxChargeUsd: relationshipMaximumCharge(declaredCount, dependencies.env),
+                });
+                const rows = await getter(request.targetUsername, declaredCount, {
+                    provider: 'apify',
+                    fallback: false,
+                    expectedResultCount: declaredCount,
+                    requestId: claim.requestId,
+                    providerRun: { ...binding.checkpoint, startCancellationSignal },
+                });
+                const run = await requireSucceededRun(dependencies.providerRunStore, {
+                    requestId: claim.requestId,
+                    jobKey: claim.jobKey,
+                    operationKey,
+                });
+                return { inputHash, operationKey, rows, run };
+            };
+
+            const initialOperationKey = createAnalysisV2ProviderOperationKey(
+                operation,
+                canonicalInput
+            );
+            let completed: Awaited<ReturnType<typeof execute>>;
+            try {
+                completed = await execute(canonicalInput);
+            } catch (error) {
+                if (!isRelationshipIncompleteError(error)) throw error;
+                // Some Actors report SUCCEEDED while publishing a partial Dataset. Prove the
+                // first charge is terminal and reconciled before opening one fixed replacement
+                // identity; worker retries then reuse these two rows instead of buying a third.
+                const initialRun = await dependencies.providerRunStore.load({
+                    requestId: claim.requestId,
+                    jobKey: claim.jobKey,
+                    operationKey: initialOperationKey,
+                });
+                if (!isReconciledSucceededRun(initialRun)) throw error;
+                completed = await execute(
+                    relationshipIncompleteReplacementIdentity(canonicalInput)
+                );
+            }
             return dependencies.evidenceStore.checkpointRelationshipSide({
                 ...claim,
                 side,
                 declaredCount,
                 source: {
                     status: 'collected',
-                    inputHash,
+                    inputHash: completed.inputHash,
                     provider: 'apify',
-                    providerRunId: run.runId,
-                    providerOperationKey: operationKey,
+                    providerRunId: completed.run.runId,
+                    providerOperationKey: completed.operationKey,
                 },
-                rows: relationshipRows(rows),
+                rows: relationshipRows(completed.rows),
             });
         };
 
