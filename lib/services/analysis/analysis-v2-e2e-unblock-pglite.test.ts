@@ -25,16 +25,20 @@ function functionDefinition(source: string, name: string): string {
     return source.slice(start, end + '\n$$;'.length);
 }
 
-const legacyBootstrap = `
+function legacyBootstrap(includeLegacyPlanConstraint = true): string {
+    const planConstraint = includeLegacyPlanConstraint
+        ? `,
+    CONSTRAINT analysis_requests_plan_type_check
+        CHECK (plan_type IN ('basic', 'standard'))`
+        : '';
+    return `
 CREATE ROLE anon NOLOGIN;
 CREATE ROLE authenticated NOLOGIN;
 CREATE ROLE service_role NOLOGIN;
 
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
-    plan_type TEXT,
-    CONSTRAINT analysis_requests_plan_type_check
-        CHECK (plan_type IN ('basic', 'standard'))
+    plan_type TEXT${planConstraint}
 );
 
 CREATE TABLE public.analysis_preflights (
@@ -82,10 +86,11 @@ CREATE TABLE public.earlybird_waitlist (
         REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT
 );
 `;
+}
 
-async function createLegacyDatabase(): Promise<PGlite> {
+async function createLegacyDatabase(includeLegacyPlanConstraint = true): Promise<PGlite> {
     const db = await PGlite.create();
-    await db.exec(legacyBootstrap);
+    await db.exec(legacyBootstrap(includeLegacyPlanConstraint));
     await db.exec(functionDefinition(
         providerRunMigration,
         'purge_expired_analysis_v2_preflights'
@@ -112,6 +117,20 @@ describe('analysis V2 E2E unblock migration PGlite regression', () => {
                 'SELECT plan_type FROM public.analysis_requests'
             );
             expect(stored.rows).toEqual([{ plan_type: 'plus' }]);
+        } finally {
+            await db.close();
+        }
+    }, 30_000);
+
+    it('replays cleanly when the legacy plan constraint is absent from a fresh schema', async () => {
+        const db = await createLegacyDatabase(false);
+        try {
+            await db.exec(forwardMigration);
+
+            await expect(db.query(
+                `INSERT INTO public.analysis_requests (id, plan_type)
+                 VALUES ('10000000-0000-4000-8000-000000000002', 'plus')`
+            )).resolves.toBeDefined();
         } finally {
             await db.close();
         }

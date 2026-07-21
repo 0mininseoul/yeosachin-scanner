@@ -204,7 +204,7 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
 ALTER TABLE public.analysis_requests
-    DROP CONSTRAINT analysis_requests_plan_type_check;
+    DROP CONSTRAINT IF EXISTS analysis_requests_plan_type_check;
 ALTER TABLE public.analysis_requests
     ADD CONSTRAINT analysis_requests_plan_type_check
     CHECK (plan_type IN ('basic', 'standard', 'plus')) NOT VALID;

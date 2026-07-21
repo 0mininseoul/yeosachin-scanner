@@ -59,6 +59,9 @@ describe('analysis V2 E2E unblock migration contracts', () => {
             /CHECK\s*\(plan_type IN \('basic', 'standard', 'plus'\)\)/
         );
         expect(forwardMigration).toContain(
+            'DROP CONSTRAINT IF EXISTS analysis_requests_plan_type_check'
+        );
+        expect(forwardMigration).toContain(
             'VALIDATE CONSTRAINT analysis_requests_plan_type_check'
         );
         expect(forwardMigration).not.toContain(
