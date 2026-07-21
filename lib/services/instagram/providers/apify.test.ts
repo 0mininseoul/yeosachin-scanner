@@ -1137,6 +1137,13 @@ describe('apifyProvider', () => {
             ['bob', 'failed', 'incomplete'],
         ]);
         expect(call).toHaveBeenCalledOnce();
+        expect(call).toHaveBeenCalledWith(
+            { usernames: ['alice', 'bob'] },
+            expect.objectContaining({
+                maxItems: 3,
+                maxTotalChargeUsd: 0.0052,
+            })
+        );
     });
 
     it('rejects canonical duplicate profile requests before any cross-batch Actor start', async () => {
@@ -1868,14 +1875,14 @@ describe('apifyProvider', () => {
             { usernames: ['target'] },
             expect.objectContaining({
                 timeout: 300,
-                maxItems: 1,
+                maxItems: 2,
                 maxTotalChargeUsd: 0.0026,
                 restartOnError: false,
             })
         );
     });
 
-    it('uses a one-item 75-second bounded Actor run for a timeline-independent summary', async () => {
+    it('keeps one-item billing while leaving one platform item of termination headroom', async () => {
         const { client, call, waitForFinish } = mockClient([{
             ...profileItem('target'),
             postsCount: 20,
@@ -1900,7 +1907,7 @@ describe('apifyProvider', () => {
         expect(call).toHaveBeenCalledWith(
             { usernames: ['target'] },
             expect.objectContaining({
-                maxItems: 1,
+                maxItems: 2,
                 maxTotalChargeUsd: 0.0026,
                 restartOnError: false,
             })

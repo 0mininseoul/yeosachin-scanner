@@ -937,7 +937,10 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                             logicalProvider: 'apify',
                             credentialSlot: settings.credentialSlot,
                             timeoutSecs: settings.timeoutSecs,
-                            maxItems: 1,
+                            // Apify aborts a run as soon as maxItems is reached. Keep one
+                            // termination-headroom item while maxTotalChargeUsd still caps
+                            // the operation at exactly one requested profile result.
+                            maxItems: 2,
                             maxTotalChargeUsd: maximumChargeUsd,
                             ...(effectiveInvocationWaitLimitSecs === undefined
                                 ? {}
@@ -1104,7 +1107,10 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                                 logicalProvider: 'apify',
                                 credentialSlot: settings.credentialSlot,
                                 timeoutSecs: settings.timeoutSecs,
-                                maxItems: batch.length,
+                                // Avoid turning an exactly complete batch into ABORTED at
+                                // the platform boundary. Billing remains capped to the
+                                // requested batch and the dataset parser rejects extras.
+                                maxItems: batch.length + 1,
                                 maxTotalChargeUsd: maximumChargeUsd,
                             },
                             context
