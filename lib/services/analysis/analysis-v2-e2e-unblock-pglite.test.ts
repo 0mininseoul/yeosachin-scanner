@@ -117,25 +117,41 @@ describe('analysis V2 E2E unblock migration PGlite regression', () => {
         }
     }, 30_000);
 
-    it('retains order and waitlist tombstones without poisoning the purge batch', async () => {
+    it('scrubs and retains commercial or unreconciled tombstones without poisoning purge', async () => {
         const db = await createLegacyDatabase();
         try {
             const orderPreflight = '20000000-0000-4000-8000-000000000001';
             const waitlistPreflight = '20000000-0000-4000-8000-000000000002';
             const unreferencedPreflight = '20000000-0000-4000-8000-000000000003';
+            const unreconciledPreflight = '20000000-0000-4000-8000-000000000004';
             await db.query(
                 `INSERT INTO public.analysis_preflights (
-                    id, status, expires_at, pii_scrubbed_at,
-                    target_instagram_id, exclusion_decision, created_at, updated_at
+                    id, status, expires_at, pii_scrubbed_at, target_instagram_id,
+                    target_full_name, target_bio, target_profile_image_url,
+                    target_followers_count, target_following_count, target_is_private,
+                    capacity_required_plan_id, required_plan_id, plan_cards_snapshot,
+                    error_code, blocked_at, ready_at, exclusion_decision,
+                    excluded_instagram_id, lease_token, lease_expires_at,
+                    created_at, updated_at
                 )
-                SELECT value::UUID, 'expired',
+                SELECT value::UUID, 'blocked',
                        pg_catalog.clock_timestamp() - INTERVAL '2 hours',
+                       NULL, 'private.fixture', 'Private Fixture', 'private bio',
+                       'https://private.example/avatar.jpg', 123, 456, FALSE,
+                       'basic', 'standard', '{"standard": {"price": 1}}'::JSONB,
+                       'PRIVATE_FAILURE', pg_catalog.clock_timestamp() - INTERVAL '2 hours',
+                       pg_catalog.clock_timestamp() - INTERVAL '2 hours', 'exclude',
+                       'excluded.fixture', '50000000-0000-4000-8000-000000000001'::UUID,
                        pg_catalog.clock_timestamp() - INTERVAL '90 minutes',
-                       'retained.fixture', 'skip',
                        pg_catalog.clock_timestamp() - INTERVAL '2 hours',
                        pg_catalog.clock_timestamp() - INTERVAL '90 minutes'
                 FROM pg_catalog.unnest($1::TEXT[]) AS value`,
-                [[orderPreflight, waitlistPreflight, unreferencedPreflight]]
+                [[
+                    orderPreflight,
+                    waitlistPreflight,
+                    unreferencedPreflight,
+                    unreconciledPreflight,
+                ]]
             );
             await db.query(
                 `INSERT INTO public.earlybird_orders (id, preflight_id)
@@ -147,26 +163,86 @@ describe('analysis V2 E2E unblock migration PGlite regression', () => {
                  VALUES ('40000000-0000-4000-8000-000000000001', $1)`,
                 [waitlistPreflight]
             );
+            await db.query(
+                `INSERT INTO public.analysis_preflight_provider_runs (
+                    preflight_id, status, actual_usage_usd, usage_reconciled_at
+                ) VALUES ($1, 'running', NULL, NULL)`,
+                [unreconciledPreflight]
+            );
 
             await expect(db.query(
                 'SELECT public.purge_expired_analysis_v2_preflights(10) AS result'
             )).rejects.toThrow(/foreign key constraint/);
+
+            const rolledBackScrub = await db.query<{ pii_scrubbed: boolean }>(
+                `SELECT pii_scrubbed_at IS NOT NULL AS pii_scrubbed
+                 FROM public.analysis_preflights
+                 WHERE id = $1`,
+                [orderPreflight]
+            );
+            expect(rolledBackScrub.rows).toEqual([{ pii_scrubbed: false }]);
 
             await db.exec(forwardMigration);
 
             const purged = await db.query<{ result: number }>(
                 'SELECT public.purge_expired_analysis_v2_preflights(10) AS result'
             );
-            expect(purged.rows).toEqual([{ result: 1 }]);
-            const remaining = await db.query<{ id: string; pii_scrubbed: boolean }>(
-                `SELECT id, pii_scrubbed_at IS NOT NULL AS pii_scrubbed
+            expect(purged.rows).toEqual([{ result: 5 }]);
+            const remaining = await db.query<{
+                id: string;
+                status: string;
+                target_instagram_id: string;
+                pii_scrubbed: boolean;
+                scrubbed_fields: boolean;
+            }>(
+                `SELECT id, status, target_instagram_id,
+                        pii_scrubbed_at IS NOT NULL AS pii_scrubbed,
+                        target_full_name IS NULL
+                            AND target_bio IS NULL
+                            AND target_profile_image_url IS NULL
+                            AND target_followers_count IS NULL
+                            AND target_following_count IS NULL
+                            AND target_is_private IS NULL
+                            AND capacity_required_plan_id IS NULL
+                            AND required_plan_id IS NULL
+                            AND plan_cards_snapshot IS NULL
+                            AND error_code IS NULL
+                            AND blocked_at IS NULL
+                            AND ready_at IS NULL
+                            AND exclusion_decision = 'skip'
+                            AND excluded_instagram_id IS NULL
+                            AND lease_token IS NULL
+                            AND lease_expires_at IS NULL AS scrubbed_fields
                  FROM public.analysis_preflights
                  ORDER BY id`
             );
             expect(remaining.rows).toEqual([
-                { id: orderPreflight, pii_scrubbed: true },
-                { id: waitlistPreflight, pii_scrubbed: true },
+                {
+                    id: orderPreflight,
+                    status: 'expired',
+                    target_instagram_id: 'retained.20000000000040008000',
+                    pii_scrubbed: true,
+                    scrubbed_fields: true,
+                },
+                {
+                    id: waitlistPreflight,
+                    status: 'expired',
+                    target_instagram_id: 'retained.20000000000040008000',
+                    pii_scrubbed: true,
+                    scrubbed_fields: true,
+                },
+                {
+                    id: unreconciledPreflight,
+                    status: 'expired',
+                    target_instagram_id: 'retained.20000000000040008000',
+                    pii_scrubbed: true,
+                    scrubbed_fields: true,
+                },
             ]);
+            const providerRuns = await db.query<{ preflight_id: string }>(
+                'SELECT preflight_id FROM public.analysis_preflight_provider_runs'
+            );
+            expect(providerRuns.rows).toEqual([{ preflight_id: unreconciledPreflight }]);
         } finally {
             await db.close();
         }

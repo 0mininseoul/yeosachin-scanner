@@ -299,7 +299,7 @@ git status --short --branch
 
 Confirm the manual reconciliation SQL is unchanged, the new migration sorts after `20260721000000`, and no secret/PII/marketing-copy file changed.
 
-- [ ] **Step 4: Commit the implementation**
+- [x] **Step 4: Commit the implementation**
 
 ```bash
 git add app/api/analysis/preflight/route.ts \
