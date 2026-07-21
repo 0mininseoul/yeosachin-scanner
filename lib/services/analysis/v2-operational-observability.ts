@@ -23,7 +23,7 @@ const profileFailureCategorySchema = z.enum([
 
 const profileOutcomeSchema = z.object({
     jobKey: z.string().regex(JOB_KEY_PATTERN),
-    source: z.enum(['cache', 'selfhosted', 'fallback']),
+    source: z.enum(['cache', 'selfhosted', 'fallback', 'repair']),
     status: z.enum(['success', 'unavailable', 'failed']),
     failureCategory: profileFailureCategorySchema.nullable(),
     httpStatus: z.number().int().min(400).max(599).nullable(),

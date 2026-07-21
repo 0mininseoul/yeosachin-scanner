@@ -92,3 +92,38 @@ The original provider row remains `starting`; unknown usage continues to be repo
 conservatively at its maximum charge. The next recovery or worker retry completes the original
 terminal failure and request purge only after every confirmed run is terminal and every other
 ambiguous start has its own valid audit marker.
+
+## Profile-batch repair (third attempt)
+
+A profile batch resolves in up to three attempts per username: `primary` (cache or the
+self-hosted crawler), `fallback` (`apify/instagram-profile-scraper`), and `repair`
+(`apify/instagram-scraper`, build `0.0.692`). Repair exists because the fallback actor
+intermittently omits a few usernames from a batch, leaving it below the fail-closed 90%
+per-batch completeness gate. Repair re-runs the still-failed subset through a different actor.
+
+- **At most once per batch.** Repair runs only when the merged primary+fallback evidence fails
+  the 90% gate and only over the frozen-unresolved usernames still `failed` after the merge.
+  `unavailable` accounts are never repaired. Once `repair_completed_at` is set the batch never
+  starts a second repair run, even a repair that resolved nothing — a completed-but-insufficient
+  repair fails the batch terminally rather than spending again.
+- **Own ledger row, shared slot.** A repair run reserves its own `analysis_v2_provider_runs` row
+  under the `profile-repair:<sha256>` operation key, so it coexists with the batch's
+  `profile-fallback:<sha256>` row. Its credential slot resolves through the `profile-fallback`
+  slot of the authorized-test policy — no eighth slot is added to the seven-key slot map.
+- **Cost.** The pinned rate is 0.0027 USD per result with a hard 0.09 USD cap enforced twice
+  (before the run and after, against the actor's reported usage). A full 30-username repair is at
+  most 0.081 USD; the observed shortfall of three usernames is 0.0081 USD.
+- **Repair adds a route to success, never budget.** A failed repair is the batch's most recent
+  terminal evidence and is still counted against the 90% gate. The gate predicate is unchanged;
+  repair can only move a username from `failed` to `success`, never widen the failure budget.
+- **RESTRICTED pinning is preserved.** The repair actor's run, key-value store, dataset, and
+  request queue are pinned to `RESTRICTED` before the dataset is read; a run that cannot be
+  pinned raises `SCRAPING_ACCESS_ERROR` and no repair is checkpointed.
+- **Failure semantics reuse the fallback path.** `SCRAPING_RUN_PENDING_ERROR` retries the same
+  checkpointed repair run (never a replacement); a terminal actor failure or an ambiguous start
+  is handled by the same cleanup-intent and reconciliation machinery described above. A repair
+  is checkpointed only on a durable terminal outcome set, so a transport or run barrier is never
+  sealed as synthetic failures.
+- **Observability.** Repair outcomes are counted in `analysis_v2_profile_fetch_telemetry` under
+  `source = 'repair'`, separable from `fallback`, so repair volume, failure categories, and
+  latency are visible at the operational read boundary.
