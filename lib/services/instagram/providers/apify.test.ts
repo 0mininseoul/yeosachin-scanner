@@ -871,7 +871,7 @@ describe('apifyProvider', () => {
     });
 
     it('uses the documented Scraping Solutions input and strict following mapping', async () => {
-        const { client, call } = mockClient([
+        const { client, call, waitForFinish } = mockClient([
             relationshipItem('alice', { type: 'Followings' }),
             relationshipItem('bob', { type: 'followings' }),
         ]);
@@ -887,10 +887,11 @@ describe('apifyProvider', () => {
                 build: '0.0.71',
                 maxItems: 25,
                 maxTotalChargeUsd: 0.02125,
-                timeout: 300,
+                timeout: 900,
                 restartOnError: false,
             })
         );
+        expect(waitForFinish).toHaveBeenCalledWith({ waitSecs: 240 });
     });
 
     it('reports the credential slot and charge cap actually selected by the provider', async () => {

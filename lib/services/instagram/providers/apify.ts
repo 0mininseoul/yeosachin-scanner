@@ -822,7 +822,9 @@ function relationshipDefinition(
             0,
             1
         ),
-        timeoutSecs: integerSetting(env, 'APIFY_RELATIONSHIP_TIMEOUT_SECS', 300, 30, 3_600),
+        // Apify counts READY scheduler time against the Actor timeout. Keep the
+        // platform run alive across the worker's bounded 240-second retries.
+        timeoutSecs: integerSetting(env, 'APIFY_RELATIONSHIP_TIMEOUT_SECS', 900, 30, 3_600),
         estimatedCostPerResultUsd: numberSetting(
             env,
             'APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD',
