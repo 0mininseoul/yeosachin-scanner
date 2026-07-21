@@ -14,6 +14,7 @@ import {
     numberSetting,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
+import { REPLACEMENT_PROFILE_ACTOR } from '@/lib/services/instagram/providers/apify-profile-details';
 import {
     getFollowers,
     getFollowing,
@@ -36,6 +37,7 @@ import {
 } from './v2-evidence-store';
 import {
     analysisV2ProfileFetchCheckpointStore,
+    deriveRepairUsernames,
     type AnalysisV2CheckpointProfile,
     type AnalysisV2CheckpointResult,
     type AnalysisV2ProfileAttemptResultInput,
@@ -43,6 +45,11 @@ import {
     type AnalysisV2ProfileFetchCheckpointStore,
     type AnalysisV2ProfileFetchResume,
 } from './v2-profile-fetch-store';
+import {
+    runAnalysisV2ProfileRepair,
+    profileRepairIdentity,
+    profileRepairMaximumCharge,
+} from './v2-profile-repair';
 import {
     analysisV2ProviderRunStore,
     createAnalysisV2ProviderInputHash,
@@ -83,6 +90,7 @@ const TARGET_COMMENT_POST_LIMIT = 6;
 
 type RelationshipGetter = typeof getFollowers;
 type ProfileBatchFetcher = typeof getProfilesBatchV2;
+type ProfileRepairRunner = typeof runAnalysisV2ProfileRepair;
 
 export interface AnalysisV2CollectionExecutorDependencies {
     requestContextStore?: AnalysisV2CollectionRequestContextStore;
@@ -93,6 +101,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     getFollowers?: RelationshipGetter;
     getFollowing?: RelationshipGetter;
     getProfilesBatchV2?: ProfileBatchFetcher;
+    runProfileRepair?: ProfileRepairRunner;
     interactionAdapter?: ApifyInteractionAdapter;
     env?: Record<string, string | undefined>;
 }
@@ -106,6 +115,7 @@ interface ResolvedDependencies {
     getFollowers: RelationshipGetter;
     getFollowing: RelationshipGetter;
     getProfilesBatchV2: ProfileBatchFetcher;
+    runProfileRepair: ProfileRepairRunner;
     interactionAdapter: ApifyInteractionAdapter;
     env: Record<string, string | undefined>;
 }
@@ -122,6 +132,7 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         getFollowers: input.getFollowers ?? getFollowers,
         getFollowing: input.getFollowing ?? getFollowing,
         getProfilesBatchV2: input.getProfilesBatchV2 ?? getProfilesBatchV2,
+        runProfileRepair: input.runProfileRepair ?? runAnalysisV2ProfileRepair,
         interactionAdapter: input.interactionAdapter ?? apifyInteractionAdapter,
         env: input.env ?? process.env,
     };
@@ -621,6 +632,69 @@ async function durableProfiles(input: {
     return stored;
 }
 
+/**
+ * One at-most-once repair pass over a profile batch that the primary+fallback merge left short of
+ * the 90% gate. It runs the pinned replacement Actor over only the still-failed frozen-unresolved
+ * subset, checkpoints those outcomes as the third `repair` attempt, and returns the merged resume
+ * for the gate to re-evaluate. Every non-repair path is a no-op that returns `resume` untouched and
+ * spends nothing.
+ */
+async function repairProfileBatch(input: {
+    dependencies: ResolvedDependencies;
+    claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
+    usernames: readonly string[];
+    resume: AnalysisV2ProfileFetchResume;
+}): Promise<AnalysisV2ProfileFetchResume> {
+    const { dependencies, claim, request, usernames, resume } = input;
+    // A completed repair is terminal for the batch. This short-circuit mirrors durableProfiles'
+    // fallback guard so a retried job never starts a second paid repair run.
+    if (resume.repairCapturedAt !== null) return resume;
+    // Repair is triggered by the single shared 90% predicate only: if the merged primary+fallback
+    // evidence already clears the gate there is nothing to repair and nothing to spend.
+    if (evaluateProfileBatchCompleteness(finalCheckpointResults(resume), usernames).satisfied) {
+        return resume;
+    }
+    // The still-failed frozen-unresolved subset. `unavailable` is never admitted, so a shortfall
+    // made entirely of settled-unavailable accounts yields an empty set and no run.
+    const repairUsernames = deriveRepairUsernames(resume);
+    if (repairUsernames.length === 0) return resume;
+
+    const identity = profileIdentity(claim);
+    const canonicalInput = profileRepairIdentity(repairUsernames);
+    const mutableProviderRun: ProviderRunCheckpoint = {};
+    const binding = await bindApifyRun({
+        dependencies,
+        claim,
+        request,
+        // The repair run gets its OWN ledger row under the profile-repair operation key, but
+        // resolves its credential slot through the profile-fallback slot: no eighth slot is added
+        // to the persisted seven-key policy.
+        operation: 'profile-fallback',
+        operationKey: createAnalysisV2ProviderOperationKey('profile-repair', canonicalInput),
+        inputHash: createAnalysisV2ProviderInputHash(canonicalInput),
+        actorId: REPLACEMENT_PROFILE_ACTOR.actorId,
+        maxChargeUsd: profileRepairMaximumCharge(repairUsernames.length),
+    });
+    Object.assign(mutableProviderRun, binding.checkpoint);
+    const credentialSlot = binding.checkpoint.credentialSlot;
+    if (!credentialSlot) throw new Error('ANALYSIS_V2_PROFILE_REPAIR_SLOT_UNRESOLVED');
+
+    // The adapter throws on a RESTRICTED-pin failure or a still-pending run, so the checkpoint
+    // write below is reached only with a durable, terminal outcome set — never sealing a barrier
+    // as synthetic failures.
+    const outcomes = await dependencies.runProfileRepair({
+        usernames: repairUsernames,
+        credentialSlot,
+        providerRunCheckpoint: mutableProviderRun,
+        env: dependencies.env,
+    });
+    return dependencies.profileCheckpointStore.checkpointRepair({
+        ...identity,
+        results: checkpointAttemptResults(outcomes),
+    });
+}
+
 function durableSuccessfulProfiles(
     resume: AnalysisV2ProfileFetchResume,
     requestedUsernames: readonly string[]
@@ -928,7 +1002,14 @@ export function createAnalysisV2ProfileFetchExecutor(
             usernames,
             onProfileStart: context.reportActiveProfile,
         });
-        const results = durableTerminalProfileResults(resume, usernames);
+        const repaired = await repairProfileBatch({
+            dependencies,
+            claim,
+            request,
+            usernames,
+            resume,
+        });
+        const results = durableTerminalProfileResults(repaired, usernames);
         return Object.freeze({
             checkpoint: Object.freeze({
                 kind: 'profile_fetch_batch' as const,

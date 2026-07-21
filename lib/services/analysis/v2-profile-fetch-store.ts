@@ -356,7 +356,7 @@ interface AnalysisV2ProfileResumeSets {
  * frozen order the server derives from the primary ordinal. A merged `unavailable` outcome
  * is deliberately never repaired, so the repair set can only ever shrink the frozen set.
  */
-function deriveRepairUsernames(value: {
+export function deriveRepairUsernames(value: {
     frozenUnresolvedUsernames: readonly string[];
     primaryResults: readonly AnalysisV2CheckpointResult[];
     fallbackResults: readonly AnalysisV2CheckpointResult[];
