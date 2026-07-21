@@ -11,6 +11,14 @@ const migration = readFileSync(
     'utf8'
 );
 
+const profileRepairPolicyMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260722100000_fix_authorized_profile_repair_slot_policy.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const OTHER_USER_ID = '10000000-0000-4000-8000-000000000002';
 const REQUEST_ID = '20000000-0000-4000-8000-000000000001';
@@ -335,6 +343,7 @@ describe('authorized test provider policy migration PGlite contract', () => {
         db = await PGlite.create({ extensions: { pgcrypto } });
         await db.exec(bootstrap);
         await db.exec(migration);
+        await db.exec(profileRepairPolicyMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -497,5 +506,17 @@ describe('authorized test provider policy migration PGlite contract', () => {
         expect(await reserve('tertiary', 'target-profile')).toMatchObject({
             credentialSlot: 'tertiary',
         });
+    });
+
+    it('binds profile-repair to the immutable profile-fallback slot', async () => {
+        await consumeAuthorized();
+
+        expect(await reserve('tertiary', 'profile-repair')).toMatchObject({
+            operationKey: `profile-repair:${OPERATION_DIGEST}`,
+            credentialSlot: 'tertiary',
+        });
+        await expect(reserve('primary', 'profile-repair')).rejects.toThrow(
+            /ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH/
+        );
     });
 });
