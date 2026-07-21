@@ -571,6 +571,146 @@ describe('analysis V2 concrete collection executors', () => {
         expect(followerOptions).not.toHaveProperty('session');
     });
 
+    it('starts one ledgered replacement only after a succeeded relationship run is incomplete', async () => {
+        const rows = [{ username: 'alice', isPrivate: false, isVerified: false }];
+        const providers = providerStore();
+        const getFollowersMock = vi.fn()
+            .mockRejectedValueOnce(new Error(
+                'SCRAPING_INCOMPLETE_ERROR: terminal Actor dataset is incomplete.'
+            ))
+            .mockResolvedValueOnce(rows);
+        const getFollowingMock = vi.fn(async () => rows);
+        const checkpointRelationshipSide = vi.fn(async (input) => ({
+            side: input.side,
+            sourceStatus: input.source.status,
+            revision: 1,
+            declaredCount: input.declaredCount,
+            collectedCount: input.rows.length,
+            coverageBps: 10_000,
+            inputHash: input.source.inputHash,
+            resultHash,
+        }));
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                followersDeclaredCount: 1,
+                followingDeclaredCount: 1,
+            })),
+            providerRunStore: providers.value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 1,
+                    publicCount: 1,
+                    privateCount: 0,
+                    detailedPublicCount: 1,
+                    unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: ['alice'],
+                    privateMutualUsernames: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await executor(stageContext('relationships', state()));
+
+        expect(getFollowersMock).toHaveBeenCalledTimes(2);
+        expect(getFollowingMock).toHaveBeenCalledOnce();
+        const followerBindings = providers.bindAdapterCheckpoint.mock.calls
+            .map(([binding]) => binding)
+            .filter(binding => binding.operationKey.startsWith('relationship-followers:'));
+        expect(followerBindings).toHaveLength(2);
+        expect(new Set(followerBindings.map(binding => binding.operationKey)).size).toBe(2);
+        expect(new Set(followerBindings.map(binding => binding.inputHash)).size).toBe(2);
+        expect(followerBindings[1]).toMatchObject({
+            credentialSlot: followerBindings[0]?.credentialSlot,
+            maxChargeUsd: followerBindings[0]?.maxChargeUsd,
+        });
+        expect(checkpointRelationshipSide).toHaveBeenCalledWith(expect.objectContaining({
+            side: 'followers',
+            source: expect.objectContaining({
+                providerOperationKey: followerBindings[1]?.operationKey,
+            }),
+        }));
+    });
+
+    it('does not replace an incomplete relationship call without a reconciled succeeded run', async () => {
+        const providers = providerStore();
+        providers.load.mockResolvedValue(null);
+        const incomplete = new Error(
+            'SCRAPING_INCOMPLETE_ERROR: provider result is not terminally complete.'
+        );
+        const getFollowersMock = vi.fn(async (): Promise<InstagramFollower[]> => {
+            throw incomplete;
+        });
+        const getFollowingMock = vi.fn(async (): Promise<InstagramFollower[]> => {
+            throw incomplete;
+        });
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(),
+                freezeRelationships: vi.fn(),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toBe(incomplete);
+
+        expect(getFollowersMock).toHaveBeenCalledOnce();
+        expect(getFollowingMock).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
+    });
+
+    it('bounds repeated incomplete relationship retries to the same two operation identities', async () => {
+        const rows = [{ username: 'alice', isPrivate: false, isVerified: false }];
+        const providers = providerStore();
+        const incomplete = new Error(
+            'SCRAPING_INCOMPLETE_ERROR: replacement dataset is still incomplete.'
+        );
+        const getFollowersMock = vi.fn(async (): Promise<InstagramFollower[]> => {
+            throw incomplete;
+        });
+        const getFollowingMock = vi.fn(async () => rows);
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                followersDeclaredCount: 1,
+                followingDeclaredCount: 1,
+            })),
+            providerRunStore: providers.value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(async (input) => input),
+                freezeRelationships: vi.fn(),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toBe(incomplete);
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toBe(incomplete);
+
+        const followerBindings = providers.bindAdapterCheckpoint.mock.calls
+            .map(([binding]) => binding)
+            .filter(binding => binding.operationKey.startsWith('relationship-followers:'));
+        expect(getFollowersMock).toHaveBeenCalledTimes(4);
+        expect(followerBindings).toHaveLength(4);
+        expect(new Set(followerBindings.map(binding => binding.operationKey)).size).toBe(2);
+        expect(new Set(followerBindings.map(binding => binding.inputHash)).size).toBe(2);
+    });
+
     it('waits for both relationship branches and rethrows the first failure by input order', async () => {
         const followerFailure = new Error('followers failed after following');
         const followingFailure = new Error('following failed first');
