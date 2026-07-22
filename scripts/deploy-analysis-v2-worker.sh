@@ -1308,7 +1308,7 @@ deploy_or_verify_service() {
       log "manual rollback step 2: gcloud run services update-traffic $ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE --project=$ANALYSIS_V2_TASKS_PROJECT --region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION --to-revisions=$known_good_revision=100"
     else
       log "manual rollback step 1: gcloud run services update-traffic $ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE --project=$ANALYSIS_V2_TASKS_PROJECT --region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION --to-revisions=$known_good_revision=100"
-      log "manual rollback step 2: resume the recovery Scheduler job"
+      log "manual rollback step 2: restore the pre-deploy recovery Scheduler state"
     fi
   else
     log "first deployment has no prior traffic revision; both execution gates remain closed"
@@ -1525,6 +1525,24 @@ recovery_scheduler_config_is_exact() {
     ' <<<"$config" >/dev/null
 }
 
+observe_known_good_scheduler_gate() {
+  local config
+  local current_state
+  local job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
+  local location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION}"
+  known_good_scheduler_enabled="false"
+  config="$(gcloud scheduler jobs describe "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$location" \
+    --format=json 2>/dev/null)" || return 0
+  current_state="$(jq -r '.state // "ENABLED"' <<<"$config")"
+  if [[ "$current_state" == "ENABLED" ]]; then
+    known_good_scheduler_enabled="true"
+  elif [[ "$current_state" != "PAUSED" ]]; then
+    die "recovery Scheduler has an unsupported state before deployment"
+  fi
+}
+
 restore_recovery_scheduler_gate() {
   local action
   local config
@@ -1532,7 +1550,10 @@ restore_recovery_scheduler_gate() {
   local desired_state="PAUSED"
   local job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
   local location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION}"
-  [[ "$known_good_recovery_enabled" != "true" ]] || desired_state="ENABLED"
+  if [[ "$known_good_recovery_enabled" == "true" \
+    && "$known_good_scheduler_enabled" == "true" ]]; then
+    desired_state="ENABLED"
+  fi
   config="$(gcloud scheduler jobs describe "$job" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     "--location=$location" \
@@ -1641,7 +1662,8 @@ rollback_live_traffic() {
       printf 'critical: maintenance Schedulers could not be paused before bootstrap traffic rollback\n' >&2
       return 1
     fi
-  elif [[ "$known_good_recovery_enabled" == "false" ]]; then
+  elif [[ "$known_good_recovery_enabled" == "false" \
+    || "$known_good_scheduler_enabled" == "false" ]]; then
     printf 'rollback: pausing recovery Scheduler before restoring the recovery-disabled revision\n' >&2
     if ! restore_recovery_scheduler_gate; then
       printf 'critical: recovery Scheduler could not be paused before traffic rollback\n' >&2
@@ -1661,7 +1683,8 @@ rollback_live_traffic() {
   service_traffic_matches_revision "$config" "$known_good_revision" \
     || return 1
   if [[ "$known_good_is_bootstrap" != "true" \
-    && "$known_good_recovery_enabled" == "true" ]] \
+    && "$known_good_recovery_enabled" == "true" \
+    && "$known_good_scheduler_enabled" == "true" ]] \
     && ! restore_recovery_scheduler_gate; then
     printf 'critical: traffic rollback succeeded but recovery Scheduler could not be resumed\n' >&2
     return 1
@@ -1929,6 +1952,7 @@ source_archive_dir=""
 known_good_revision=""
 known_good_config=""
 known_good_recovery_enabled="false"
+known_good_scheduler_enabled="false"
 known_good_is_bootstrap="false"
 initial_deployment="false"
 build_revision=""
@@ -2060,10 +2084,16 @@ deploy_or_verify_service
 ensure_worker_endpoint_env
 configure_queue_and_oidc "$mode"
 ensure_exact_invoker
+if [[ "$mode" == "apply" && -n "$known_good_revision" \
+  && "$known_good_is_bootstrap" != "true" ]]; then
+  observe_known_good_scheduler_gate
+fi
 prepromotion_recovery_enabled="$recovery_enabled"
 if [[ "$mode" == "apply" ]]; then
   prepromotion_recovery_enabled="false"
-  if [[ "$recovery_enabled" == "true" && -n "$known_good_revision" ]]; then
+  if [[ "$recovery_enabled" == "true" \
+    && -n "$known_good_revision" \
+    && "$known_good_scheduler_enabled" == "true" ]]; then
     prepromotion_recovery_enabled="$known_good_recovery_enabled"
   fi
 fi
