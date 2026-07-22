@@ -236,6 +236,13 @@ job_args() {
   local schedule="$2"
   local uri="$3"
   local deadline="$4"
+  local operation="$5"
+  local headers_arg='--headers=Content-Type=application/json'
+  [[ "$operation" == "create" || "$operation" == "update" ]] \
+    || die "invalid Scheduler mutation operation"
+  if [[ "$operation" == "update" ]]; then
+    headers_arg='--update-headers=Content-Type=application/json'
+  fi
   scheduler_args=(
     "$job"
     "--project=$ANALYSIS_V2_TASKS_PROJECT"
@@ -244,7 +251,7 @@ job_args() {
     "--time-zone=$TIME_ZONE"
     "--uri=$uri"
     '--http-method=POST'
-    '--headers=Content-Type=application/json'
+    "$headers_arg"
     '--message-body={}'
     "--oidc-service-account-email=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
     "--oidc-token-audience=$service_origin"
@@ -279,7 +286,7 @@ ensure_job() {
       [[ "$mode" != "check" ]] || die "scheduler job has drifted: $job"
       [[ "$reconcile_jobs" == "true" ]] \
         || die "scheduler job has drifted; inspect or use --reconcile-jobs: $job"
-      job_args "$job" "$schedule" "$uri" "$deadline"
+      job_args "$job" "$schedule" "$uri" "$deadline" update
       run_mutation gcloud scheduler jobs update http "${scheduler_args[@]}"
       if [[ "$mode" == "apply" ]]; then
         config="$(job_json "$job")" || die "scheduler job was not observable: $job"
@@ -289,7 +296,7 @@ ensure_job() {
     fi
   else
     [[ "$mode" != "check" ]] || die "scheduler job does not exist: $job"
-    job_args "$job" "$schedule" "$uri" "$deadline"
+    job_args "$job" "$schedule" "$uri" "$deadline" create
     run_mutation gcloud scheduler jobs create http "${scheduler_args[@]}"
     if [[ "$mode" == "apply" ]]; then
       config="$(job_json "$job")" || die "scheduler job was not observable: $job"

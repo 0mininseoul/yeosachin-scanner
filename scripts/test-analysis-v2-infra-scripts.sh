@@ -2832,6 +2832,18 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
 fi
 assert_contains "$temp_dir/scheduler-drift-check.out" "scheduler job has drifted"
 
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_SCHEDULER_DRIFT=true' \
+  bash "$script_dir/configure-analysis-v2-maintenance.sh" \
+    --dry-run --reconcile-jobs \
+  >"$temp_dir/scheduler-drift-reconcile-dry-run.out"
+assert_contains "$temp_dir/scheduler-drift-reconcile-dry-run.out" \
+  "gcloud scheduler jobs update http analysis-v2-recovery"
+assert_contains "$temp_dir/scheduler-drift-reconcile-dry-run.out" \
+  "--update-headers=Content-Type=application/json"
+assert_not_contains "$temp_dir/scheduler-drift-reconcile-dry-run.out" \
+  "--headers=Content-Type=application/json"
+
 printf 'ENABLED\n' >"$temp_dir/recovery-scheduler-state"
 : >"$temp_dir/recovery-scheduler-mutations.out"
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
@@ -2873,6 +2885,10 @@ assert_contains "$temp_dir/scheduler-create-dry-run.out" \
   "gcloud scheduler jobs create http analysis-v2-recovery"
 assert_contains "$temp_dir/scheduler-create-dry-run.out" \
   "gcloud scheduler jobs create http analysis-v2-preflight-retention"
+assert_contains "$temp_dir/scheduler-create-dry-run.out" \
+  "--headers=Content-Type=application/json"
+assert_not_contains "$temp_dir/scheduler-create-dry-run.out" \
+  "--update-headers=Content-Type=application/json"
 assert_contains "$temp_dir/scheduler-create-dry-run.out" \
   "gcloud scheduler jobs pause analysis-v2-recovery"
 
