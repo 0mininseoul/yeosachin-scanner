@@ -27,6 +27,7 @@ export const PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_preflight_provider_run',
     reserveRpc: 'reserve_analysis_preflight_provider_run',
     checkpointStartedRpc: 'checkpoint_analysis_preflight_provider_run_started',
+    checkpointRejectedRpc: 'reject_analysis_preflight_provider_run_start',
     checkpointTerminalRpc: 'checkpoint_analysis_preflight_provider_run_terminal',
     listUnreconciledRpc: 'list_analysis_preflight_unreconciled_provider_runs',
     reconcileUsageRpc: 'reconcile_analysis_preflight_provider_run_usage',
@@ -36,6 +37,7 @@ export const FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_v2_fresh_admission_provider_run',
     reserveRpc: 'reserve_analysis_v2_fresh_admission_provider_run',
     checkpointStartedRpc: 'checkpoint_analysis_v2_fresh_admission_provider_run_started',
+    checkpointRejectedRpc: 'reject_analysis_v2_fresh_admission_provider_run_start',
     checkpointTerminalRpc: 'checkpoint_analysis_v2_fresh_admission_provider_run_terminal',
     markReusableProfileSchemaV1Rpc:
         'mark_analysis_v2_fresh_admission_profile_run_reusable_v1',
@@ -54,6 +56,7 @@ const PREFLIGHT_PROVIDER_RECONCILIATION_CONCURRENCY = 4;
 export type PreflightProviderRunStatus =
     | 'starting'
     | 'running'
+    | 'rejected'
     | 'succeeded'
     | 'failed'
     | 'aborted'
@@ -73,6 +76,7 @@ export interface StoredPreflightProviderRun {
     reservedAt: string;
     runStartedAt: string | null;
     terminalizedAt: string | null;
+    usageReconciledAt: string | null;
 }
 
 interface RpcResult {
@@ -100,9 +104,11 @@ export interface PreflightProviderRunStore {
     checkpointStarted(input: RunClaimInput & ProviderIdentity & {
         runId: string;
     }): Promise<StoredPreflightProviderRun>;
+    checkpointRejected(input: RunClaimInput & ProviderIdentity):
+        Promise<StoredPreflightProviderRun>;
     checkpointTerminal(input: RunClaimInput & ProviderIdentity & {
         runId: string;
-        status: Exclude<PreflightProviderRunStatus, 'starting' | 'running'>;
+        status: ProviderCostTerminalStatus;
         actualUsageUsd: number | null;
     }): Promise<StoredPreflightProviderRun>;
 }
@@ -242,15 +248,18 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
         || row.actorId !== APIFY_PROFILE_ACTOR_ID
         || !['primary', 'secondary', 'tertiary', 'quaternary', 'quinary']
             .includes(String(credentialSlot))
-        || !['starting', 'running', 'succeeded', 'failed', 'aborted', 'timed_out']
+        || !['starting', 'running', 'rejected', 'succeeded', 'failed', 'aborted', 'timed_out']
             .includes(String(status))
     ) {
         throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid run identity.');
     }
     const runId = row.runId;
     if (
-        (status === 'starting' && runId !== null)
-        || (status !== 'starting' && (typeof runId !== 'string' || !RUN_ID_PATTERN.test(runId)))
+        (['starting', 'rejected'].includes(String(status)) && runId !== null)
+        || (
+            !['starting', 'rejected'].includes(String(status))
+            && (typeof runId !== 'string' || !RUN_ID_PATTERN.test(runId))
+        )
     ) {
         throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid run state.');
     }
@@ -261,12 +270,34 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
     const reservedAt = parseTimestamp(row.reservedAt, false)!;
     const runStartedAt = parseTimestamp(row.runStartedAt, true);
     const terminalizedAt = parseTimestamp(row.terminalizedAt, true);
+    const actualUsageUsd = parseMoney(row.actualUsageUsd, true);
+    const usageReconciledAt = parseTimestamp(row.usageReconciledAt, true);
     if (
-        (status === 'starting' && (runStartedAt !== null || terminalizedAt !== null))
-        || (status === 'running' && (runStartedAt === null || terminalizedAt !== null))
+        (status === 'starting' && (
+            runStartedAt !== null
+            || terminalizedAt !== null
+            || actualUsageUsd !== null
+            || usageReconciledAt !== null
+        ))
+        || (status === 'running' && (
+            runStartedAt === null
+            || terminalizedAt !== null
+            || actualUsageUsd !== null
+            || usageReconciledAt !== null
+        ))
+        || (status === 'rejected' && (
+            runStartedAt !== null
+            || terminalizedAt === null
+            || actualUsageUsd !== 0
+            || usageReconciledAt === null
+        ))
         || (
             ['succeeded', 'failed', 'aborted', 'timed_out'].includes(String(status))
-            && (runStartedAt === null || terminalizedAt === null)
+            && (
+                runStartedAt === null
+                || terminalizedAt === null
+                || ((actualUsageUsd === null) !== (usageReconciledAt === null))
+            )
         )
     ) {
         throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid timestamps.');
@@ -281,10 +312,11 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
         maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
         status: status as PreflightProviderRunStatus,
         runId: runId as string | null,
-        actualUsageUsd: parseMoney(row.actualUsageUsd, true),
+        actualUsageUsd,
         reservedAt,
         runStartedAt,
         terminalizedAt,
+        usageReconciledAt,
     });
 }
 
@@ -443,6 +475,25 @@ export function createPreflightProviderRunStore(
             }
             return run;
         },
+        async checkpointRejected(input) {
+            assertClaimInput(input);
+            const run = parseRun(await rpc(
+                PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointRejectedRpc,
+                identityParams(input),
+                'start rejection checkpoint failed'
+            ));
+            assertRunClaim(run, input);
+            assertIdentity(run, input);
+            if (
+                run.status !== 'rejected'
+                || run.runId !== null
+                || run.actualUsageUsd !== 0
+                || run.usageReconciledAt === null
+            ) {
+                throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
+            }
+            return run;
+        },
         async checkpointTerminal(input) {
             assertClaimInput(input);
             if (!RUN_ID_PATTERN.test(input.runId)) {
@@ -554,6 +605,8 @@ export function createFreshAdmissionProviderRunStore(
             FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.reserveRpc],
         [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointStartedRpc,
             FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.checkpointStartedRpc],
+        [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointRejectedRpc,
+            FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.checkpointRejectedRpc],
         [PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointTerminalRpc,
             FRESH_ADMISSION_PROVIDER_RUN_DATABASE_NAMES.checkpointTerminalRpc],
     ]);
@@ -589,6 +642,9 @@ export function createFreshAdmissionProviderRunStore(
         },
         async checkpointStarted(input) {
             return assertOperation(await store.checkpointStarted(input));
+        },
+        async checkpointRejected(input) {
+            return assertOperation(await store.checkpointRejected(input));
         },
         async checkpointTerminal(input) {
             return assertOperation(await store.checkpointTerminal(input));
@@ -828,6 +884,17 @@ export async function bindPreflightProviderRunCheckpoint(input: {
                     ...claimInput,
                     ...input.identity,
                     runId,
+                });
+            },
+            onRunStartRejected: async event => {
+                const reserved = requireCurrent();
+                assertIdentity(event, input.identity);
+                if (reserved.runId !== null || reserved.status !== 'starting') {
+                    throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
+                }
+                current = await input.store.checkpointRejected({
+                    ...claimInput,
+                    ...input.identity,
                 });
             },
         },

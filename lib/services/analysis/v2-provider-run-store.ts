@@ -39,6 +39,7 @@ export const OPERATION_KEY_PATTERN = new RegExp(
 export const ANALYSIS_V2_PROVIDER_RUN_STATUSES = [
     'starting',
     'running',
+    'rejected',
     'succeeded',
     'failed',
     'aborted',
@@ -138,6 +139,9 @@ export interface AnalysisV2ProviderRunStore {
         reservationToken: string;
         runId: string;
     }): Promise<StoredAnalysisV2ProviderRun>;
+    rejectStart(input: AnalysisV2ProviderRunReservationInput & {
+        reservationToken: string;
+    }): Promise<StoredAnalysisV2ProviderRun>;
     checkpointTerminal(input: AnalysisV2ProviderRunIdentity & {
         reservationToken: string;
         runId: string;
@@ -180,6 +184,7 @@ export const ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     table: 'analysis_v2_provider_runs',
     reserveRpc: 'reserve_analysis_v2_provider_run',
     startedRpc: 'checkpoint_analysis_v2_provider_run_started',
+    rejectedRpc: 'reject_analysis_v2_provider_run_start',
     terminalRpc: 'checkpoint_analysis_v2_provider_run_terminal',
     loadRpc: 'load_analysis_v2_provider_run',
     listUnreconciledRpc: 'list_analysis_v2_unreconciled_provider_runs',
@@ -360,7 +365,14 @@ function parseStoredRun(data: unknown, operation: string): StoredAnalysisV2Provi
             || actualUsageUsd !== null
             || usageReconciledAt !== null
         ))
-        || (!['starting', 'running'].includes(status) && (
+        || (status === 'rejected' && (
+            runId !== null
+            || runStartedAt !== null
+            || terminalizedAt === null
+            || actualUsageUsd !== 0
+            || usageReconciledAt === null
+        ))
+        || (!['starting', 'running', 'rejected'].includes(status) && (
             runId === null
             || runStartedAt === null
             || terminalizedAt === null
@@ -747,6 +759,45 @@ export function createAnalysisV2ProviderRunStore(
             return stored;
         },
 
+        async rejectStart(input) {
+            validateClaimedIdentity(input);
+            const provider = canonicalProviderIdentity(input);
+            const reservationToken = requiredUuid(
+                input.reservationToken,
+                'reservation token'
+            );
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
+                {
+                    p_request_id: input.requestId.toLowerCase(),
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken.toLowerCase(),
+                    p_operation_key: input.operationKey,
+                    p_input_hash: input.inputHash,
+                    p_reservation_token: reservationToken,
+                    p_logical_provider: provider.logicalProvider,
+                    p_actor_id: provider.actorId,
+                    p_credential_slot: provider.credentialSlot,
+                    p_max_charge_usd: provider.maxChargeUsd,
+                }
+            );
+            if (error) throwRpcError(error, 'start rejection checkpoint');
+            const stored = parseStoredRun(data, 'start rejection checkpoint');
+            assertStoredIdentity(stored, { ...input, ...provider });
+            if (
+                stored.reservationToken !== reservationToken
+                || stored.status !== 'rejected'
+                || stored.runId !== null
+                || stored.actualUsageUsd !== 0
+                || stored.usageReconciledAt === null
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid start rejection checkpoint.'
+                );
+            }
+            return stored;
+        },
+
         async checkpointTerminal(input) {
             validateClaimedIdentity(input);
             if (!['succeeded', 'failed', 'aborted', 'timed_out'].includes(input.status)) {
@@ -1066,6 +1117,25 @@ export function createAnalysisV2ProviderRunStore(
                             ...input,
                             reservationToken: current.reservationToken,
                             runId,
+                        });
+                    },
+                    onRunStartRejected: async (event) => {
+                        const current = requireReserved();
+                        const actual = canonicalProviderIdentity(event);
+                        if (
+                            current.status !== 'starting'
+                            || current.runId !== null
+                            || actual.logicalProvider !== expectedProvider.logicalProvider
+                            || actual.actorId !== expectedProvider.actorId
+                            || actual.credentialSlot !== expectedProvider.credentialSlot
+                            || actual.maxChargeUsd !== expectedProvider.maxChargeUsd
+                        ) {
+                            throw new AnalysisV2ProviderRunConflictError();
+                        }
+                        reserved = await store.rejectStart({
+                            ...input,
+                            ...expectedProvider,
+                            reservationToken: current.reservationToken,
                         });
                     },
                 },

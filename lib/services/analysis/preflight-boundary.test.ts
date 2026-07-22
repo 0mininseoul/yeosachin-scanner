@@ -62,6 +62,7 @@ function providerRunStore(): PreflightProviderRunStore {
         load: vi.fn(async () => null),
         reserve: vi.fn(),
         checkpointStarted: vi.fn(),
+        checkpointRejected: vi.fn(),
         checkpointTerminal: vi.fn(),
     };
 }

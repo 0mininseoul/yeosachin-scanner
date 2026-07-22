@@ -9,6 +9,7 @@ import {
     PreflightImmutableError,
     PreflightLeaseBusyError,
     buildReadyPreflightSnapshot,
+    classifyPreflightError,
     createSupabasePreflightStore,
     processPreflight,
     publicPreflightStatusDto,
@@ -43,6 +44,28 @@ beforeAll(() => {
 
 afterAll(() => {
     vi.unstubAllEnvs();
+});
+
+it('classifies a definite provider start rejection as non-retryable', () => {
+    expect(classifyPreflightError(
+        new Error('SCRAPING_PROVIDER_START_REJECTED_ERROR')
+    )).toEqual({
+        category: 'provider',
+        retryable: false,
+        httpStatus: null,
+        paidFallbackEligible: false,
+    });
+});
+
+it('classifies rejection checkpoint failure as retryable persistence', () => {
+    expect(classifyPreflightError(
+        new Error('ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR')
+    )).toEqual({
+        category: 'persistence',
+        retryable: true,
+        httpStatus: null,
+        paidFallbackEligible: false,
+    });
 });
 
 function profile(overrides: Partial<InstagramProfile> = {}): InstagramProfile {
@@ -102,13 +125,15 @@ function providerRunStore(): PreflightProviderRunStore {
         load: vi.fn(async () => null),
         reserve: vi.fn(),
         checkpointStarted: vi.fn(),
+        checkpointRejected: vi.fn(),
         checkpointTerminal: vi.fn(),
     };
 }
 
 function storedRun(
-    status: 'starting' | 'running' | 'succeeded' = 'running'
+    status: StoredPreflightProviderRun['status'] = 'running'
 ): StoredPreflightProviderRun {
+    const rejected = status === 'rejected';
     return {
         preflightId,
         operationKey: 'target-profile-fallback',
@@ -118,11 +143,16 @@ function storedRun(
         credentialSlot: 'quinary' as const,
         maxChargeUsd: 0.0026 as const,
         status,
-        runId: status === 'starting' ? null : 'StoredRun12345678',
-        actualUsageUsd: null,
+        runId: status === 'starting' || rejected ? null : 'StoredRun12345678',
+        actualUsageUsd: rejected ? 0 : null,
         reservedAt: '2026-07-14T17:59:00.000Z',
-        runStartedAt: status === 'starting' ? null : '2026-07-14T17:59:30.000Z',
-        terminalizedAt: status === 'succeeded' ? '2026-07-14T18:05:00.000Z' : null,
+        runStartedAt: status === 'starting' || rejected
+            ? null
+            : '2026-07-14T17:59:30.000Z',
+        terminalizedAt: status === 'succeeded' || rejected
+            ? '2026-07-14T18:05:00.000Z'
+            : null,
+        usageReconciledAt: rejected ? '2026-07-14T18:05:00.000Z' : null,
     };
 }
 
@@ -947,6 +977,24 @@ describe('preflight worker domain', () => {
         const store = workerStore(claim({ workerAttemptCount: 2 }));
         const runs = providerRunStore();
         vi.mocked(runs.load).mockResolvedValue(storedRun('starting'));
+        const fallback = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+        })).resolves.toBe('blocked');
+
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'ANALYSIS_FAILED');
+    });
+
+    it('blocks a replayed definite start rejection without re-entering the paid provider', async () => {
+        const store = workerStore(claim({ workerAttemptCount: 2 }));
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('rejected'));
         const fallback = vi.fn();
 
         await expect(processPreflight(preflightId, {

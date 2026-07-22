@@ -44,6 +44,10 @@ function row(
         reservedAt,
         runStartedAt,
         terminalizedAt,
+        usageReconciledAt: overrides.actualUsageUsd === undefined
+            || overrides.actualUsageUsd === null
+            ? null
+            : '2026-07-14T18:05:00.000Z',
         ...overrides,
     };
 }
@@ -148,6 +152,7 @@ describe('preflight provider-run adapter', () => {
             load: vi.fn(async () => row('starting') as StoredPreflightProviderRun),
             reserve: vi.fn(),
             checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
             checkpointTerminal: vi.fn(),
         };
         const result = await bindPreflightProviderRunCheckpoint({
@@ -163,11 +168,55 @@ describe('preflight provider-run adapter', () => {
         expect(store.reserve).not.toHaveBeenCalled();
     });
 
+    it('persists a definite start rejection against the exact reserved identity', async () => {
+        const rejected = row('rejected', {
+            actualUsageUsd: 0,
+            runId: null,
+            runStartedAt: null,
+            usageReconciledAt: '2026-07-14T18:00:00.000Z',
+        }) as StoredPreflightProviderRun;
+        const store = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(async () => ({
+                created: true,
+                run: row('starting') as StoredPreflightProviderRun,
+            })),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(async () => rejected),
+            checkpointTerminal: vi.fn(),
+        };
+        const identity = preflightProviderIdentity('secondary');
+        const result = await bindPreflightProviderRunCheckpoint({
+            store,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity,
+        });
+
+        await result.checkpoint.onBeforeRunStart?.(identity);
+        await result.checkpoint.onRunStartRejected?.({
+            ...identity,
+            statusCode: 402,
+            errorType: 'usage-limit-exceeded',
+        });
+
+        expect(store.checkpointRejected).toHaveBeenCalledOnce();
+        expect(store.checkpointRejected).toHaveBeenCalledWith({
+            preflightId,
+            claimToken,
+            inputHash,
+            ...identity,
+        });
+        expect(store.checkpointStarted).not.toHaveBeenCalled();
+        expect(store.checkpointTerminal).not.toHaveBeenCalled();
+    });
+
     it('resumes a terminal success by the same run for a bounded dataset reread', async () => {
         const store = {
             load: vi.fn(async () => row('succeeded') as StoredPreflightProviderRun),
             reserve: vi.fn(),
             checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
             checkpointTerminal: vi.fn(),
         };
         const result = await bindPreflightProviderRunCheckpoint({

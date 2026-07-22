@@ -1,60 +1,58 @@
-# Authorized Apify operation-split E2E runbook
+# 승인된 Apify 작업 분리 E2E 런북
 
-This runbook applies only to the explicitly authorized `0_min._.00` E2E. It does not define a beta, early-access, or production credential strategy.
+이 런북은 명시적으로 승인된 `0_min._.00` E2E 한 건에만 적용한다. 베타·얼리 액세스·일반 운영 요청의 credential 전략을 정의하지 않는다.
 
-## Invariants
+## 불변 조건
 
-1. The live public preflight/sale admission state is not changed for this canary. A valid signed admission selects `test_entitlement` for only that request; an invalid supplied header is rejected instead of falling through to production.
-2. The request uses a signed `test_entitlement` and is created while authenticated as `ym1113@kakao.com`. `PREFLIGHT_ACCESS_MODE` remains `production` for requests without that header.
-3. The exact target allowlist is `0_min._.00`, and the exact owner UUID is `974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd` (`ym1113@kakao.com`).
-4. The request-bound operation map is written in the same transaction that consumes the entitlement, before the initial job is dispatched.
-5. A relationship side uses one slot. Followers and following may use different slots because they are independent Actor operations.
-6. Normal requests continue to use `ANALYSIS_V2_APIFY_API_TOKEN_SLOT` only.
-7. No provider token is stored in PostgreSQL or printed in logs.
+1. 이 canary를 위해 공개 preflight/판매 admission 상태를 바꾸지 않는다. 유효한 서명 admission은 해당 요청에만 `test_entitlement`를 선택하고, 잘못된 header는 production으로 통과시키지 않고 거절한다.
+2. 요청은 서명된 `test_entitlement`를 사용하며 승인된 사용자로 인증된 상태에서 생성한다. header가 없는 요청의 `PREFLIGHT_ACCESS_MODE`는 계속 `production`이다.
+3. 정확한 target allowlist와 owner UUID는 승인된 값 하나로 고정한다.
+4. 요청별 operation map은 entitlement를 소비하는 같은 transaction에서 최초 job dispatch 전에 기록한다.
+5. followers와 following은 독립 Actor 작업이므로 서로 다른 slot을 사용할 수 있지만 각 방향은 하나의 slot만 사용한다.
+6. 일반 요청은 계속 `ANALYSIS_V2_APIFY_API_TOKEN_SLOT` 하나만 사용한다.
+7. provider token은 PostgreSQL에 저장하거나 로그에 출력하지 않는다.
 
-## Policy configuration
+## 정책 설정
 
-Set the authorized-test variables below on the entitlement intake runtime. Set the normal-slot
-variable shown in the same block on both the intake and worker so `primary` is effective before and
-after request dispatch:
+아래 승인 테스트 변수는 entitlement intake runtime에 설정한다. 같은 블록의 normal slot은
+intake와 worker 모두에 설정해 요청 dispatch 전후에 `secondary`가 동일하게 적용되게 한다.
 
 ```dotenv
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true
 ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET=0_min._.00
 ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID=974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd
-ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary
-ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=secondary
-ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary
-ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=primary
-ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=primary
-ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=secondary
-ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=secondary
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary
+ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=tertiary
+ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quaternary
+ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=secondary
+ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=secondary
+ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=quinary
+ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=quinary
 ```
 
-This preferred next-run mapping preserves the current active secret identities: `secondary` is the
-physical Senary account, `quinary` is the physical Quinary account, and `primary` is the physical
-Septenary account. It is schema-valid because the two relationship sides differ, `target-profile`
-and `profile-fallback` share the profile fallback variable, and the target and candidate liker slots
-differ.
+이 mapping에서 normal/profile/target-likers는 실제 판매에 사용할 `secondary:1` 계정을,
+relationship 두 방향은 각각 `tertiary:1`과 `quaternary:1`을, target-comments와
+candidate-likers는 `quinary:1`을 사용한다. 두 relationship 방향이 다르고 target/candidate
+liker slot도 다르며, preflight와 request profile은 같은 normal slot을 사용하므로 schema에
+맞는다.
 
-Use this mapping only if immediate read-only balance checks, exact Actor daily item and run quota
-checks, and active/latest Secret Manager references all confirm the intended accounts have enough
-headroom. Both the intake and worker must resolve their effective normal selected slot to `primary`
-through the current active primary Secret Manager reference. Never rotate a numeric secret version
-to force this mapping or the normal-slot selection. The worker must have Secret Manager references
-for every slot named by the policy.
+실행 직전 read-only 잔액, 정확한 Actor 일일 item/run quota, active job, Secret Manager numeric
+reference를 다시 확인해 모든 계정에 충분한 여유가 있을 때만 이 mapping을 사용한다. intake와
+worker의 effective normal slot은 모두 현재 `secondary:1` reference로 해석되어야 한다. 이
+mapping을 만들기 위해 기존 numeric secret version을 덮어쓰지 않는다. worker에는 정책에
+등장하는 각 slot의 정확한 numeric reference만 제공한다.
 
-Fresh-admission/preflight target-profile fallback occurs before request-bound sharding is bound and
-therefore uses the effective normal selected slot. That slot must be `primary`, matching the
-request-bound `target-profile` and `profile-fallback` entries, so the schema-v1 attested preflight
-run can be reused consistently after the request is created.
+Fresh-admission/preflight target-profile fallback은 request-bound sharding보다 먼저 실행되므로
+effective normal slot을 사용한다. 따라서 이 slot은 request의 `target-profile`과
+`profile-fallback`과 같은 `secondary`여야 하며, schema-v1로 증명된 preflight run을 요청 생성
+후에도 일관되게 재사용한다.
 
 ## Pre-run checks
 
-1. Apply migrations through `20260721143000_fix_analysis_v2_e2e_admission_and_retention.sql` using the normal ordered migration path. Do not use `--include-all`. Version `20260719190000` was already applied as the one-order manual reconciliation and must be present in git/history without being executed again.
+1. 정상 순서로 `20260722110000_record_definite_apify_start_rejections.sql`까지 migration을 적용한다. `--include-all`은 사용하지 않는다. `20260719190000`은 이미 수동 reconciliation으로 적용됐으므로 다시 실행하지 않고 git/history에만 정확히 존재해야 한다.
 2. Only after those migrations succeed, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
-4. Confirm both intake and worker have effective normal selected slot `primary`, resolved through the current active primary secret reference without rotating to a numeric secret version.
+4. intake와 worker의 effective normal selected slot이 모두 `secondary`이고 현재 `secondary:1` secret reference로 해석되는지 확인한다. numeric secret version은 교체하지 않는다.
 5. Confirm every credential slot referenced by the policy resolves to its intended physical account without displaying token values.
 6. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
 7. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.

@@ -41,6 +41,19 @@ interface ProviderCostRunCallbacks {
     onCostRunFinished?(input: ProviderCostRunFinished): void | Promise<void>;
 }
 
+export interface ProviderRunStartRejected {
+    logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
+    actorId: string;
+    credentialSlot: ApifyCredentialSlot;
+    maxChargeUsd: number;
+    statusCode: number;
+    errorType: string | null;
+}
+
+interface ProviderRunStartCallbacks {
+    onRunStartRejected?(input: ProviderRunStartRejected): void | Promise<void>;
+}
+
 export type ScraperTelemetryStatus = 'success' | 'error';
 export type ScraperFailureCategory =
     | 'configuration'
@@ -90,7 +103,8 @@ export interface ScrapeRequestOptions {
 }
 
 /** Durable hand-off for paid provider runs that may outlive one serverless invocation. */
-export interface ProviderRunCheckpoint extends ProviderCostRunCallbacks {
+export interface ProviderRunCheckpoint
+    extends ProviderCostRunCallbacks, ProviderRunStartCallbacks {
     resumeRunId?: string;
     logicalProvider?: Extract<ProviderName, 'apify' | 'coderx'>;
     actorId?: string;
@@ -133,7 +147,8 @@ export interface ProviderUsageDelta {
     rate_limit_remaining?: number;
 }
 
-export interface ProviderCallContext extends ProviderCostRunCallbacks {
+export interface ProviderCallContext
+    extends ProviderCostRunCallbacks, ProviderRunStartCallbacks {
     requestId?: string;
     resumeRunId?: string;
     logicalProvider?: Extract<ProviderName, 'apify' | 'coderx'>;

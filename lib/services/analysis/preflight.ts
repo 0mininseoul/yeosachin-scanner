@@ -115,7 +115,12 @@ export interface ClaimedPreflight {
 }
 
 export interface PreflightWorkerFailureClassification {
-    category: WebProfileFailureKind | 'configuration' | 'persistence' | 'run_pending' | 'unknown';
+    category: WebProfileFailureKind
+        | 'configuration'
+        | 'persistence'
+        | 'provider'
+        | 'run_pending'
+        | 'unknown';
     retryable: boolean;
     httpStatus: number | null;
     workerAttemptCount: number | null;
@@ -959,6 +964,14 @@ export function classifyPreflightError(error: unknown): ClassifiedPreflightError
         paidFallbackEligible: true,
     };
     const message = error instanceof Error ? error.message : '';
+    if (message === 'SCRAPING_PROVIDER_START_REJECTED_ERROR') {
+        return {
+            category: 'provider',
+            retryable: false,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
     if (message.startsWith('SCRAPING_RUN_PENDING_ERROR:')) {
         return {
             category: 'run_pending',
@@ -998,6 +1011,7 @@ export function classifyPreflightError(error: unknown): ClassifiedPreflightError
         message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
         || message.startsWith('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR:')
         || message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+        || message === 'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR'
     ) {
         return {
             category: 'persistence',
@@ -1101,7 +1115,10 @@ export async function processPreflight(
 
         let profile: InstagramProfile | null;
         if (existingRun) {
-            if (['starting', 'failed', 'aborted', 'timed_out'].includes(existingRun.status)) {
+            if (
+                ['starting', 'rejected', 'failed', 'aborted', 'timed_out']
+                    .includes(existingRun.status)
+            ) {
                 await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
                 terminalized = true;
                 notifyPreflightObserver(dependencies.observer, {

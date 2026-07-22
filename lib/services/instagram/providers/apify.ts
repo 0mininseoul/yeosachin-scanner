@@ -20,6 +20,7 @@ import { INSTAGRAM_USERNAME_PATTERN, mergeInstagramMentions } from '../username'
 import { normalizeInstagramTimestamp } from '../timestamp';
 import {
     APIFY_PROVIDER_QUOTA_ERROR_CODE,
+    APIFY_PROVIDER_START_REJECTED_ERROR_CODE,
     getApifyClient,
     integerSetting,
     isApifyProviderLifecycleError,
@@ -957,6 +958,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 error instanceof Error
                 && (
                     error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
+                    || error.message === APIFY_PROVIDER_START_REJECTED_ERROR_CODE
                     || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
@@ -1123,6 +1125,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 if (isTypedScrapingError(
                     error,
                     'SCRAPING_AMBIGUOUS_START_ERROR:',
+                    APIFY_PROVIDER_START_REJECTED_ERROR_CODE,
                     'SCRAPING_RUN_CHECKPOINT_ERROR:',
                     'SCRAPING_RUN_PENDING_ERROR:',
                     APIFY_PROVIDER_QUOTA_ERROR_CODE,

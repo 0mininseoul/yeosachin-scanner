@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { ApifyApiError } from 'apify-client';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -25,6 +26,17 @@ import {
     type AnalysisV2ProviderRunSupabaseClient,
 } from '@/lib/services/analysis/v2-provider-run-store';
 import type { InstagramProfile } from '@/lib/types/instagram';
+
+function rejectedStartError(
+    statusCode = 402,
+    type = 'usage-limit-exceeded'
+): ApifyApiError {
+    return new ApifyApiError({
+        status: statusCode,
+        data: { error: { message: 'suppressed in production', type } },
+        config: { method: 'post', url: '/v2/acts/example/runs' },
+    } as never, 1);
+}
 
 function relationshipItem(username: string, overrides: Record<string, unknown> = {}) {
     return {
@@ -241,6 +253,75 @@ describe('apifyProvider', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+
+    it('records a definite Actor start rejection without checkpointing or waiting', async () => {
+        const { client, call, waitForFinish } = mockClient([]);
+        call.mockRejectedValueOnce(rejectedStartError());
+        const onBeforeRunStart = vi.fn().mockResolvedValue(undefined);
+        const onRunStartRejected = vi.fn().mockResolvedValue(undefined);
+        const onRunStarted = vi.fn();
+
+        await expect(startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            { Account: ['target'] },
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'secondary',
+                timeoutSecs: 300,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onBeforeRunStart,
+                onRunStartRejected,
+                onRunStarted,
+                recordUsage: vi.fn(),
+            }
+        )).rejects.toThrow('SCRAPING_PROVIDER_START_REJECTED_ERROR');
+
+        expect(onBeforeRunStart).toHaveBeenCalledOnce();
+        expect(call).toHaveBeenCalledOnce();
+        expect(onRunStartRejected).toHaveBeenCalledWith({
+            logicalProvider: 'apify',
+            actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.1,
+            statusCode: 402,
+            errorType: 'usage-limit-exceeded',
+        });
+        expect(onRunStarted).not.toHaveBeenCalled();
+        expect(waitForFinish).not.toHaveBeenCalled();
+    });
+
+    it('never starts a replacement when rejection persistence fails', async () => {
+        const { client, call, waitForFinish } = mockClient([]);
+        call.mockRejectedValueOnce(rejectedStartError());
+
+        await expect(startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'secondary',
+                timeoutSecs: 300,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            {
+                onRunStartRejected: vi.fn().mockRejectedValue(
+                    new Error('database detail that must be suppressed')
+                ),
+                recordUsage: vi.fn(),
+            }
+        )).rejects.toEqual(new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR'
+        ));
+
+        expect(call).toHaveBeenCalledOnce();
+        expect(waitForFinish).not.toHaveBeenCalled();
     });
 
     it('resumes a checkpointed Actor without starting or checkpointing another run', async () => {
@@ -477,6 +558,28 @@ describe('apifyProvider', () => {
         await expect(makeApifyProvider({ client, env: {} }).getFollowers!('target', 1))
             .rejects.toThrow('SCRAPING_PROVIDER_QUOTA_ERROR');
         expect(listItems).not.toHaveBeenCalled();
+    });
+
+    it('preserves a definite start rejection through relationship and profile wrappers', async () => {
+        const relationship = mockClient([]);
+        relationship.call.mockRejectedValueOnce(rejectedStartError());
+        await expect(makeApifyProvider({
+            client: relationship.client,
+            env: {},
+        }).getFollowers!('target', 1, {
+            onRunStartRejected: vi.fn(),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_PROVIDER_START_REJECTED_ERROR');
+
+        const profile = mockClient([]);
+        profile.call.mockRejectedValueOnce(rejectedStartError(403, 'forbidden'));
+        await expect(makeApifyProvider({
+            client: profile.client,
+            env: {},
+        }).getProfileSummary!('target', {
+            onRunStartRejected: vi.fn(),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_PROVIDER_START_REJECTED_ERROR');
     });
 
     it('preserves a checkpointed run for retry when the cost-start write fails', async () => {

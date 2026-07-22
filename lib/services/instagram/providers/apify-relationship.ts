@@ -1,4 +1,4 @@
-import { ApifyClient } from 'apify-client';
+import { ApifyApiError, ApifyClient } from 'apify-client';
 import type { InstagramFollower } from '@/lib/types/instagram';
 import type {
     ApifyCredentialSlot,
@@ -15,6 +15,8 @@ export type ApifyRelationshipKind = 'followers' | 'following';
 const APIFY_RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
 const MAX_INVOCATION_WAIT_SECS = 240;
 export const APIFY_PROVIDER_QUOTA_ERROR_CODE = 'SCRAPING_PROVIDER_QUOTA_ERROR';
+export const APIFY_PROVIDER_START_REJECTED_ERROR_CODE =
+    'SCRAPING_PROVIDER_START_REJECTED_ERROR';
 export const APIFY_QUEUED_START_CANCELLED_ERROR_CODE = 'SCRAPING_QUEUED_START_CANCELLED';
 const PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR =
     'ANALYSIS_V2_PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR';
@@ -22,6 +24,8 @@ const PROVIDER_RUN_COST_START_PERSISTENCE_ERROR =
     'ANALYSIS_V2_PROVIDER_RUN_COST_START_PERSISTENCE_ERROR';
 const PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR =
     'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR';
+const PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR =
+    'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR';
 const PROVIDER_RUN_PERSISTENCE_ERROR = 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR';
 const SCRAPING_RUN_CHECKPOINT_ERROR =
     'SCRAPING_RUN_CHECKPOINT_ERROR: Apify run id could not be persisted.';
@@ -48,6 +52,7 @@ export const APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES = Object.freeze([
     PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR,
     PROVIDER_RUN_COST_START_PERSISTENCE_ERROR,
     PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR,
+    PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR,
     'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT',
     'ANALYSIS_V2_PROVIDER_RUN_STATE_CONFLICT',
     'ANALYSIS_V2_PROVIDER_RUN_TERMINAL_CONFLICT',
@@ -407,7 +412,34 @@ export async function startOrResumeApifyActor(
                 }),
                 context?.invocationDeadlineAtMs
             );
-        } catch {
+        } catch (error) {
+            if (error instanceof ApifyApiError) {
+                const statusCode = Number.isInteger(error.statusCode)
+                    && error.statusCode >= 400
+                    && error.statusCode <= 599
+                    ? error.statusCode
+                    : 500;
+                const errorType = typeof error.type === 'string'
+                    && /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(error.type)
+                    ? error.type.toLowerCase()
+                    : null;
+                try {
+                    await context?.onRunStartRejected?.({
+                        logicalProvider: options.logicalProvider,
+                        actorId,
+                        credentialSlot,
+                        maxChargeUsd: maxTotalChargeUsd,
+                        statusCode,
+                        errorType,
+                    });
+                } catch (callbackError) {
+                    throw sanitizedProviderCallbackError(
+                        callbackError,
+                        PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR
+                    );
+                }
+                throw new Error(APIFY_PROVIDER_START_REJECTED_ERROR_CODE);
+            }
             // Apify does not expose an idempotency key for Actor starts. Retrying an
             // ambiguous POST can double-charge, so this error is intentionally terminal.
             throw new Error(
@@ -632,6 +664,7 @@ export async function runApifyRelationshipActor(
                 error instanceof Error
                 && (
                     error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
+                    || error.message === APIFY_PROVIDER_START_REJECTED_ERROR_CODE
                     || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
                     || error.message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
                     || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE

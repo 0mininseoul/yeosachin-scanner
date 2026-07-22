@@ -11,6 +11,7 @@ const PROVIDER_LIFECYCLE_PERSISTENCE_CODES = [
     'ANALYSIS_V2_PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR',
     'ANALYSIS_V2_PROVIDER_RUN_COST_START_PERSISTENCE_ERROR',
     'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR',
 ] as const;
 
 describe('analysis V2 worker error codes', () => {
@@ -43,6 +44,16 @@ describe('analysis V2 worker error codes', () => {
     it('preserves an authorized test credential-policy mismatch as permanent', () => {
         const code = 'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH';
         expect(APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES).toContain(code);
+        expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+            code,
+            disposition: 'permanent',
+            retryable: false,
+        });
+    });
+
+    it('classifies a definite provider start rejection as permanent', () => {
+        const code = 'SCRAPING_PROVIDER_START_REJECTED_ERROR';
         expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
         expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
             code,

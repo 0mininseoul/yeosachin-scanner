@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ApifyApiError } from 'apify-client';
 import {
     APIFY_COMMENTS_ACTOR_ID,
     APIFY_LIKERS_ACTOR_ID,
@@ -11,6 +12,19 @@ const BASE_ENV = {
     APIFY_DATASET_READ_RETRIES: '0',
     APIFY_DATASET_RETRY_BASE_DELAY_MS: '0',
 };
+
+function rejectedStartError(): ApifyApiError {
+    return new ApifyApiError({
+        status: 402,
+        data: {
+            error: {
+                message: 'suppressed in production',
+                type: 'usage-limit-exceeded',
+            },
+        },
+        config: { method: 'post', url: '/v2/acts/example/runs' },
+    } as never, 1);
+}
 
 function liker(username: string, postUrl: string, id = '123') {
     return {
@@ -245,6 +259,19 @@ describe('Apify interaction adapter', () => {
 
         await expect(adapter.getPostLikers([post], 1))
             .rejects.toThrow('SCRAPING_PROVIDER_QUOTA_ERROR');
+        expect(listItems).not.toHaveBeenCalled();
+    });
+
+    it('preserves a definite start rejection before reading interaction results', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client, call, listItems } = mockClient([]);
+        call.mockRejectedValueOnce(rejectedStartError());
+        const adapter = makeApifyInteractionAdapter({ client, env: BASE_ENV });
+
+        await expect(adapter.getPostLikers([post], 1, {
+            onRunStartRejected: vi.fn(),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_PROVIDER_START_REJECTED_ERROR');
         expect(listItems).not.toHaveBeenCalled();
     });
 

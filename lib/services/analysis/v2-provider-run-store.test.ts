@@ -41,10 +41,10 @@ const identity: AnalysisV2ProviderRunReservationInput = {
 };
 
 function storedRow(
-    status: 'starting' | 'running' | 'succeeded' | 'failed' | 'aborted' | 'timed_out',
+    status: 'starting' | 'running' | 'rejected' | 'succeeded' | 'failed' | 'aborted' | 'timed_out',
     overrides: Record<string, unknown> = {}
 ): Record<string, unknown> {
-    const hasRun = status !== 'starting';
+    const hasRun = !['starting', 'rejected'].includes(status);
     const terminal = !['starting', 'running'].includes(status);
     return {
         requestId,
@@ -58,11 +58,13 @@ function storedRow(
         maxChargeUsd: 0.40205,
         status,
         runId: hasRun ? runId : null,
-        actualUsageUsd: null,
+        actualUsageUsd: status === 'rejected' ? 0 : null,
         reservedAt: '2026-07-13T17:20:00.000Z',
         runStartedAt: hasRun ? '2026-07-13T17:20:01.000Z' : null,
         terminalizedAt: terminal ? '2026-07-13T17:20:30.000Z' : null,
-        usageReconciledAt: null,
+        usageReconciledAt: status === 'rejected'
+            ? '2026-07-13T17:20:30.000Z'
+            : null,
         ...overrides,
     };
 }
@@ -309,6 +311,56 @@ describe('analysis V2 provider run store', () => {
             p_status: 'succeeded',
             p_actual_usage_usd: 0.401,
         }));
+    });
+
+    it('persists a definite start rejection against the exact reservation fence', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc
+            .mockResolvedValueOnce({ data: null, error: null })
+            .mockImplementationOnce((_name, params) => createdReservationFromParams(params))
+            .mockImplementationOnce((_name, params) => Promise.resolve({
+                data: storedRow('rejected', {
+                    reservationToken: params.p_reservation_token,
+                }),
+                error: null,
+            }));
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity);
+
+        await binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        });
+        await binding.checkpoint.onRunStartRejected?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+            statusCode: 402,
+            errorType: 'usage-limit-exceeded',
+        });
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
+        ]);
+        expect(rpc.mock.calls[2]?.[1]).toEqual({
+            p_request_id: requestId,
+            p_job_key: jobKey,
+            p_claim_token: claimToken,
+            p_operation_key: operationKey,
+            p_input_hash: inputHash,
+            p_reservation_token: expect.stringMatching(
+                /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+            ),
+            p_logical_provider: 'apify',
+            p_actor_id: identity.actorId,
+            p_credential_slot: 'primary',
+            p_max_charge_usd: 0.40205,
+        });
     });
 
     it('rebinds a stored running run and resumes the exact run ID', async () => {

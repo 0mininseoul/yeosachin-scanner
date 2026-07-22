@@ -59,6 +59,7 @@ describe('preflight retention maintenance', () => {
                 reservedAt: '2026-07-14T23:59:00.000Z',
                 runStartedAt: '2026-07-14T23:59:30.000Z',
                 terminalizedAt: null,
+                usageReconciledAt: null,
             }]),
             reconcileUsage: vi.fn(),
         };

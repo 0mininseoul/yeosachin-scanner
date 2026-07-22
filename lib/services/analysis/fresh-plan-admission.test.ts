@@ -141,6 +141,7 @@ function workerInput() {
 function storedProviderRun(
     status: StoredPreflightProviderRun['status'] = 'succeeded'
 ): StoredPreflightProviderRun {
+    const rejected = status === 'rejected';
     return {
         preflightId: PREFLIGHT_ID,
         operationKey: 'target-profile-fresh-admission:g4',
@@ -150,13 +151,18 @@ function storedProviderRun(
         credentialSlot: 'quinary',
         maxChargeUsd: 0.0026,
         status,
-        runId: status === 'starting' ? null : 'FreshAdmissionRun123',
-        actualUsageUsd: status === 'succeeded' ? 0.0026 : null,
+        runId: status === 'starting' || rejected ? null : 'FreshAdmissionRun123',
+        actualUsageUsd: status === 'succeeded' ? 0.0026 : rejected ? 0 : null,
         reservedAt: '2026-07-14T01:00:00.000Z',
-        runStartedAt: status === 'starting' ? null : '2026-07-14T01:00:01.000Z',
+        runStartedAt: status === 'starting' || rejected
+            ? null
+            : '2026-07-14T01:00:01.000Z',
         terminalizedAt: ['starting', 'running'].includes(status)
             ? null
             : '2026-07-14T01:00:02.000Z',
+        usageReconciledAt: status === 'succeeded' || rejected
+            ? '2026-07-14T01:00:02.000Z'
+            : null,
     };
 }
 
@@ -182,6 +188,14 @@ function providerRunStore(
                 inputHash: input.inputHash,
                 credentialSlot: input.credentialSlot,
                 runId: input.runId,
+            };
+            return current;
+        }),
+        checkpointRejected: vi.fn(async input => {
+            current = {
+                ...storedProviderRun('rejected'),
+                inputHash: input.inputHash,
+                credentialSlot: input.credentialSlot,
             };
             return current;
         }),
@@ -630,6 +644,60 @@ describe('durable fresh V2 admission worker', () => {
             expect.anything()
         );
         info.mockRestore();
+    });
+
+    it('keeps a replayed definite start rejection out of the paid provider path', async () => {
+        const { client, rpc } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc) {
+                return {
+                    data: [{
+                        admission_status: 'pending',
+                        failure_count: 1,
+                        admission_error_code: null,
+                    }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore(storedProviderRun('rejected'));
+        const fallback = vi.fn().mockRejectedValue(
+            new Error('paid provider must not be re-entered')
+        );
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockRejectedValue(
+                new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
+            ),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'provider',
+                retryable: true,
+                workerAttemptCount: 1,
+            },
+        });
+
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc,
+            expect.objectContaining({ p_claim_token: CLAIM_TOKEN })
+        );
     });
 
     it('releases a transient provider-run persistence failure without consuming the budget', async () => {

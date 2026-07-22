@@ -676,6 +676,9 @@ export async function processAnalysisV2FreshAdmission(
                     claimToken: claim.claimToken,
                     inputHash,
                 });
+                if (existingRun?.status === 'rejected') {
+                    throw new Error('SCRAPING_PROVIDER_START_REJECTED_ERROR');
+                }
                 logPreflightProfileFallbackEntry({
                     operation: 'fresh_admission',
                     failure: primaryFailure,
