@@ -32,6 +32,7 @@ import { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-result-store'
 import {
     analysisV2CandidateBundleId,
     analysisV2CandidateId,
+    analysisV2PartnerSafetyBundleId,
     createAnalysisV2AiScoringExecutorRegistry,
     type AnalysisV2AiScoringExecutorDependencies,
     type AnalysisV2AiScoringStageStore,
@@ -1949,6 +1950,29 @@ describe('V2 AI and scoring executors', () => {
             height: 960,
         }));
         const deps = dependencies(memoryState, { createContactSheet });
+        deps.ai.partnerSafety = vi.fn(async input => {
+            const contactSheet = input.contactSheet!;
+            return {
+                result: {
+                    assessment: {
+                        companionPattern: 'single_two_person' as const,
+                        partnerEvidence: 'weak' as const,
+                        exclusionContext: 'none' as const,
+                        confidence: 'medium' as const,
+                        evidenceSourceSelectionIds: [contactSheet.sourceSelectionIds[0]!],
+                    },
+                    hasWeakNonExcludedMalePairEvidence: true,
+                    hasStrongPartnerEvidence: false,
+                    strongEvidenceBasis: 'none' as const,
+                    weakAdjustmentStatus: 'applied_policy_v2_2' as const,
+                    source: 'gemini' as const,
+                    analyzedContactSheetSelectionId: contactSheet.selectionId,
+                },
+                operationKey: `partner-safety:${digest('carousel-partner')}`,
+                resultHash: digest('carousel-partner-result'),
+                source: 'checkpoint' as const,
+            };
+        });
 
         await createAnalysisV2AiScoringExecutorRegistry(deps).partner_safety!(
             context('partner_safety')
@@ -1966,6 +1990,18 @@ describe('V2 AI and scoring executors', () => {
             (total, row) => total + row.text.length,
             0
         )).toBeLessThanOrEqual(2_000);
+        expect(deps.mediaStore.persistBundle).toHaveBeenCalledWith(expect.objectContaining({
+            bundleId: analysisV2PartnerSafetyBundleId(candidate.candidateId),
+            media: expect.arrayContaining(partnerInput.contactSheet!.sourceSelectionIds.map(
+                selectionId => expect.objectContaining({ selectionId })
+            )),
+        }));
+        expect(vi.mocked(deps.resultStore.checkpointPartnerSafety).mock.calls[0]![0].rows[0])
+            .toMatchObject({
+                source: 'gemini',
+                bundleId: analysisV2PartnerSafetyBundleId(candidate.candidateId),
+                evidenceSelectionIds: [partnerInput.contactSheet!.sourceSelectionIds[0]],
+            });
     });
 
     it('never treats a partially prepared carousel contact sheet as partner absence', async () => {

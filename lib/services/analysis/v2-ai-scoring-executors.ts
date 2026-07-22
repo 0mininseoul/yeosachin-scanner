@@ -426,6 +426,13 @@ export function analysisV2CandidateBundleId(candidateId: string): string {
     ).digest('hex')}`;
 }
 
+export function analysisV2PartnerSafetyBundleId(candidateId: string): string {
+    return `bundle:${createHash('sha256').update(
+        `analysis-v2-partner-safety-bundle:v1\n${candidateId}`,
+        'utf8'
+    ).digest('hex')}`;
+}
+
 function normalizeUsername(value: string): string {
     const normalized = value.trim().replace(/^@/, '').toLowerCase();
     if (!/^[a-z0-9._]{1,30}$/.test(normalized)) {
@@ -1546,6 +1553,21 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         normalizedJpegBase64: media.normalizedJpegBase64,
                     })))
                     : null;
+                if (contactSheet) {
+                    await dependencies.mediaStore.persistBundle({
+                        requestId: context.claim.requestId,
+                        jobKey: context.claim.jobKey,
+                        claimToken: context.claim.claimToken,
+                        bundleId: analysisV2PartnerSafetyBundleId(candidate.candidateId),
+                        media: contactSheet.sourceSelectionIds.map(selectionId => {
+                            const normalizedJpeg = normalized.bytes.get(selectionId);
+                            if (!normalizedJpeg) {
+                                throw new Error('ANALYSIS_V2_PARTNER_MEDIA_SELECTION_DRIFT');
+                            }
+                            return { selectionId, normalizedJpeg };
+                        }),
+                    });
+                }
                 const normalizedSelectionIds = new Set(
                     normalized.media.map(media => media.selectionId)
                 );
@@ -1593,7 +1615,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             ),
                             bundleId: row.result.source === 'gemini'
                                 || row.result.source === 'safe_fallback'
-                                ? analysisV2CandidateBundleId(row.candidateId)
+                                ? analysisV2PartnerSafetyBundleId(row.candidateId)
                                 : null,
                             operationKey: row.operationKey,
                             aiResultHash: row.resultHash,
