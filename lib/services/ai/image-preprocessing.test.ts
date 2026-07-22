@@ -3,6 +3,7 @@ import sharp from 'sharp';
 import {
     AnalysisImagePreparationError,
     downloadImageBytes,
+    downloadImageBytesViaTrustedProxy,
     COST_OPTIMIZED_MAX_ANALYSIS_IMAGE_DIMENSION,
     DEFAULT_MAX_ANALYSIS_IMAGE_DIMENSION,
     getAnalysisImagePolicy,
@@ -270,6 +271,41 @@ describe('image preprocessing', () => {
             reason: 'response_too_large',
             disposition: 'permanent',
         });
+    });
+
+    it('validates the Instagram source before downloading it through the trusted proxy', async () => {
+        const originalUrl = 'https://cdninstagram.com/image.jpg?signature=secret';
+        const requestedUrls: URL[] = [];
+        const requestImpl = vi.fn(async (url: URL) => {
+            requestedUrls.push(url);
+            return new Response(
+                new Uint8Array([1, 2, 3]),
+                { status: 200, headers: { 'content-type': 'image/jpeg' } }
+            );
+        });
+
+        await expect(downloadImageBytesViaTrustedProxy(originalUrl, {
+            requestImpl,
+            resolveHostname: publicResolver,
+        })).resolves.toEqual(Buffer.from([1, 2, 3]));
+
+        expect(requestImpl).toHaveBeenCalledOnce();
+        const requestedUrl = requestedUrls[0];
+        expect(requestedUrl.hostname).toBe('images.weserv.nl');
+        expect(requestedUrl.searchParams.get('url')).toBe(originalUrl);
+    });
+
+    it('rejects a non-Instagram source before contacting the trusted proxy', async () => {
+        const requestImpl = vi.fn();
+
+        await expect(downloadImageBytesViaTrustedProxy('https://example.com/image.jpg', {
+            requestImpl,
+            resolveHostname: publicResolver,
+        })).rejects.toMatchObject({
+            reason: 'blocked_source',
+            disposition: 'permanent',
+        });
+        expect(requestImpl).not.toHaveBeenCalled();
     });
 
     it('classifies corrupt image bytes as a permanent decode failure without source details', async () => {

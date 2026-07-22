@@ -1708,6 +1708,7 @@ describe('V2 AI and scoring executors', () => {
     it('retries transient media preparation once and escalates an all-transient batch', async () => {
         const memoryState = memory();
         const account = profile('media.timeout');
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const normalizeMedia = vi.fn(async () => {
             throw new AnalysisImagePreparationError('timeout', 'transient');
         });
@@ -1725,32 +1726,42 @@ describe('V2 AI and scoring executors', () => {
         const base = state();
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
 
-        await expect(registry.profile_ai!(context('profile_ai', {
-            jobKey: 'track:profile-ai:batch:0',
-            batch: 0,
-            state: state({
-                relationships: {
-                    ...base.relationships!,
-                    profileBatches: [{
-                        batch: 0, itemCount: 1, inputHash: digest('topology-timeout'),
+        try {
+            await expect(registry.profile_ai!(context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0, itemCount: 1, inputHash: digest('topology-timeout'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1,
+                        producerInputHash: digest('producer-timeout'),
+                        revision: 1, resultHash: digest('result-timeout'),
                     }],
-                },
-                profileFetchBatches: [{
-                    batch: 0, itemCount: 1,
-                    producerInputHash: digest('producer-timeout'),
-                    revision: 1, resultHash: digest('result-timeout'),
-                }],
-            }),
-        }))).rejects.toThrow('ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT');
+                }),
+            }))).rejects.toThrow('ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT');
 
-        expect(normalizeMedia).toHaveBeenCalledTimes(6);
-        expect(deps.ai.gender).not.toHaveBeenCalled();
-        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+            expect(normalizeMedia).toHaveBeenCalledTimes(6);
+            expect(deps.ai.gender).not.toHaveBeenCalled();
+            expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+            expect(warning).toHaveBeenCalledWith(
+                'Analysis V2 media preparation has transient failures',
+                { selectedCount: 3, failureReasons: { timeout: 3 } }
+            );
+            expect(JSON.stringify(warning.mock.calls)).not.toContain('media.timeout');
+        } finally {
+            warning.mockRestore();
+        }
     });
 
     it('retries the exact job when even one required media item remains transient', async () => {
         const memoryState = memory();
         const account = profile('media.partial_timeout');
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const normalizeMedia = vi.fn(async (media: { selectionId: string }) => {
             if (media.selectionId.startsWith('profile:')) return Buffer.from(media.selectionId);
             throw new AnalysisImagePreparationError('timeout', 'transient');
@@ -1771,26 +1782,31 @@ describe('V2 AI and scoring executors', () => {
         const base = state();
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
 
-        await expect(registry.profile_ai!(context('profile_ai', {
-            jobKey: 'track:profile-ai:batch:0',
-            batch: 0,
-            state: state({
-                relationships: {
-                    ...base.relationships!,
-                    profileBatches: [{
-                        batch: 0, itemCount: 1, inputHash: digest('topology-partial-timeout'),
+        try {
+            await expect(registry.profile_ai!(context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0, itemCount: 1,
+                            inputHash: digest('topology-partial-timeout'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1,
+                        producerInputHash: digest('producer-partial-timeout'),
+                        revision: 1, resultHash: digest('result-partial-timeout'),
                     }],
-                },
-                profileFetchBatches: [{
-                    batch: 0, itemCount: 1,
-                    producerInputHash: digest('producer-partial-timeout'),
-                    revision: 1, resultHash: digest('result-partial-timeout'),
-                }],
-            }),
-        }))).rejects.toThrow('ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT');
+                }),
+            }))).rejects.toThrow('ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT');
 
-        expect(deps.ai.gender).not.toHaveBeenCalled();
-        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+            expect(deps.ai.gender).not.toHaveBeenCalled();
+            expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        } finally {
+            warning.mockRestore();
+        }
     });
 
     it('records permanent partial media as unavailable without running gender or feature AI', async () => {

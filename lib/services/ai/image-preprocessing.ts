@@ -264,6 +264,34 @@ export async function downloadImageBytes(
     }
 }
 
+/** Download an allowlisted Instagram image through the existing trusted proxy fallback. */
+export async function downloadImageBytesViaTrustedProxy(
+    url: string,
+    options: DownloadImageOptions = {}
+): Promise<Buffer> {
+    const {
+        requestImpl,
+        resolveHostname,
+        maxBytes = MAX_IMAGE_DOWNLOAD_BYTES,
+        timeoutMs = IMAGE_DOWNLOAD_TIMEOUT_MS,
+    } = options;
+    await validateAllowedRemoteImageUrl(
+        url,
+        INSTAGRAM_MEDIA_HOST_SUFFIXES,
+        resolveHostname
+    );
+    const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
+    const downloaded = await downloadSecureImage(proxyUrl, {
+        allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
+        ...(requestImpl ? { requestImpl } : {}),
+        ...(resolveHostname ? { resolveHostname } : {}),
+        maxBytes,
+        timeoutMs,
+        headers: { Accept: 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8' },
+    });
+    return downloaded.bytes;
+}
+
 /** Strip metadata, orient, resize, and encode every input identically as JPEG. */
 export async function normalizeImageToJpeg(
     imageBytes: Buffer,
@@ -315,16 +343,9 @@ export async function imageUrlToNormalizedBase64(
     try {
         return await downloadAndNormalizeImage(url, policy);
     } catch (directError) {
-        const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
-
         try {
-            const downloaded = await downloadSecureImage(proxyUrl, {
-                allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
-                maxBytes: MAX_IMAGE_DOWNLOAD_BYTES,
-                timeoutMs: IMAGE_DOWNLOAD_TIMEOUT_MS,
-                headers: { Accept: 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8' },
-            });
-            const jpeg = await normalizeImageToJpeg(downloaded.bytes, policy);
+            const proxyBytes = await downloadImageBytesViaTrustedProxy(url);
+            const jpeg = await normalizeImageToJpeg(proxyBytes, policy);
             return jpeg.toString('base64');
         } catch (proxyError) {
             const classified = classifyAnalysisImagePreparationError(proxyError, 'download');

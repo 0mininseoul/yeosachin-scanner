@@ -4,6 +4,7 @@ import {
     AnalysisImagePreparationError,
     classifyAnalysisImagePreparationError,
     downloadImageBytes,
+    downloadImageBytesViaTrustedProxy,
     normalizeImageToJpeg,
     runWithImagePreparationSlot,
 } from '@/lib/services/ai/image-preprocessing';
@@ -495,6 +496,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
 
 export interface AnalysisV2MediaNormalizerDependencies {
     download?: (url: string) => Promise<Buffer>;
+    downloadFallback?: (url: string) => Promise<Buffer>;
     normalize?: (bytes: Buffer) => Promise<Buffer>;
     withSlot?: <T>(task: () => Promise<T>) => Promise<T>;
 }
@@ -504,6 +506,8 @@ export function createAnalysisV2MediaNormalizer(
     input: AnalysisV2MediaNormalizerDependencies = {}
 ): (media: SelectedAnalysisMedia) => Promise<Buffer> {
     const download = input.download ?? (url => downloadImageBytes(url));
+    const downloadFallback = input.downloadFallback
+        ?? (input.download ? null : (url: string) => downloadImageBytesViaTrustedProxy(url));
     const normalize = input.normalize ?? (bytes => normalizeImageToJpeg(bytes));
     const withSlot = input.withSlot ?? runWithImagePreparationSlot;
     return async (media) => withSlot(async () => {
@@ -516,8 +520,22 @@ export function createAnalysisV2MediaNormalizer(
         let downloaded: Buffer;
         try {
             downloaded = await download(media.imageUrl);
-        } catch (error) {
-            throw classifyAnalysisImagePreparationError(error, 'download');
+        } catch (directError) {
+            if (!downloadFallback) {
+                throw classifyAnalysisImagePreparationError(directError, 'download');
+            }
+            try {
+                downloaded = await downloadFallback(media.imageUrl);
+            } catch (fallbackError) {
+                const classifiedFallback = classifyAnalysisImagePreparationError(
+                    fallbackError,
+                    'download'
+                );
+                if (classifiedFallback.disposition === 'transient') {
+                    throw classifiedFallback;
+                }
+                throw classifyAnalysisImagePreparationError(directError, 'download');
+            }
         }
         let normalized: Buffer;
         try {
