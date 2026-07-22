@@ -531,6 +531,14 @@ async function normalizedSelections(
     const successful = prepared.filter(item => item.status === 'success');
     const failures = prepared.flatMap(item => item.status === 'failure' ? [item.failure] : []);
     if (failures.some(failure => failure.disposition === 'transient')) {
+        const failureReasons = failures.reduce<Record<string, number>>((counts, failure) => {
+            counts[failure.reason] = (counts[failure.reason] ?? 0) + 1;
+            return counts;
+        }, {});
+        console.warn('Analysis V2 media preparation has transient failures', {
+            selectedCount: selected.length,
+            failureReasons,
+        });
         throw new AnalysisV2TransientMediaPreparationError();
     }
     const media: NormalizedAiMediaSelection[] = successful.map(({ item, bytes }) => ({

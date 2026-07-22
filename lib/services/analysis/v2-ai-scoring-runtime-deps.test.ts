@@ -4,6 +4,7 @@ import {
     type AnalysisV2ProfileFetchResume,
 } from './v2-profile-fetch-store';
 import type { AnalysisV2ProviderRunStore } from './v2-provider-run-store';
+import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import {
     ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES,
     createAnalysisV2MediaNormalizer,
@@ -213,6 +214,37 @@ describe('analysis V2 production profile consumer', () => {
             expectedItemCount: 2,
             expectedProducerInputHash: producerInputHash,
         })).rejects.toThrow('ANALYSIS_V2_PROFILE_CONSUMER_RETRYABLE_OUTCOME');
+    });
+
+    it('projects a successful repair ahead of the failed fallback outcome', async () => {
+        const repaired = analysisV2ProfileFetchResumeSchema.parse({
+            ...resume('failed'),
+            repairResults: [{
+                outcome: outcome('terminal.one', 'apify', 'success'),
+                profile: profile('terminal.one'),
+            }],
+            repairUsernames: ['terminal.one'],
+            repairCapturedAt: capturedAt,
+        });
+        const reader = createAnalysisV2ProfileBatchReadModel(
+            profileClient(repaired).client
+        );
+
+        const loaded = await reader.loadExactBatch({
+            requestId,
+            consumerJobKey: 'track:profile-ai:batch:0',
+            consumerClaimToken: claimToken,
+            consumerInputHash,
+            producerJobKey: 'track:profiles:batch:0',
+            batch: 0,
+            expectedItemCount: 2,
+            expectedProducerInputHash: producerInputHash,
+        });
+
+        expect(loaded?.results).toEqual([
+            expect.objectContaining({ username: 'success.one', status: 'success' }),
+            expect.objectContaining({ username: 'terminal.one', status: 'success' }),
+        ]);
     });
 
     it('rejects mismatched batch producer and consumer identities before RPC access', async () => {
@@ -529,6 +561,65 @@ describe('analysis V2 media normalizer', () => {
             'normalize:source',
             'slot:end',
         ]);
+    });
+
+    it('uses the trusted proxy download when the direct CDN download is transient', async () => {
+        const download = vi.fn(async () => {
+            throw new Error('upstream unavailable');
+        });
+        const downloadFallback = vi.fn(async () => Buffer.from('proxy-source'));
+        const normalize = vi.fn(async () => Buffer.from('jpeg'));
+        const normalizeMedia = createAnalysisV2MediaNormalizer({
+            withSlot: task => task(),
+            download,
+            downloadFallback,
+            normalize,
+        });
+
+        await expect(normalizeMedia({
+            selectionId: 'profile:proxy',
+            imageUrl: 'https://cdninstagram.com/profile.jpg',
+            role: 'profile',
+        })).resolves.toEqual(Buffer.from('jpeg'));
+        expect(download).toHaveBeenCalledOnce();
+        expect(downloadFallback).toHaveBeenCalledOnce();
+        expect(normalize).toHaveBeenCalledWith(Buffer.from('proxy-source'));
+    });
+
+    it('uses a transient proxy failure when the direct source was permanently rejected', async () => {
+        const normalizeMedia = createAnalysisV2MediaNormalizer({
+            withSlot: task => task(),
+            download: async () => {
+                throw new AnalysisImagePreparationError('source_rejected', 'permanent');
+            },
+            downloadFallback: async () => {
+                throw new AnalysisImagePreparationError('timeout', 'transient');
+            },
+        });
+
+        await expect(normalizeMedia({
+            selectionId: 'profile:proxy-timeout',
+            imageUrl: 'https://cdninstagram.com/profile.jpg',
+            role: 'profile',
+        })).rejects.toMatchObject({ reason: 'timeout', disposition: 'transient' });
+    });
+
+    it('preserves a transient direct failure when the proxy rejects permanently', async () => {
+        const normalizeMedia = createAnalysisV2MediaNormalizer({
+            withSlot: task => task(),
+            download: async () => {
+                throw new AnalysisImagePreparationError('timeout', 'transient');
+            },
+            downloadFallback: async () => {
+                throw new AnalysisImagePreparationError('blocked_source', 'permanent');
+            },
+        });
+
+        await expect(normalizeMedia({
+            selectionId: 'profile:proxy-rejected',
+            imageUrl: 'https://cdninstagram.com/profile.jpg',
+            role: 'profile',
+        })).rejects.toMatchObject({ reason: 'timeout', disposition: 'transient' });
     });
 
     it('sanitizes transport and decode failures into bounded retry dispositions', async () => {
