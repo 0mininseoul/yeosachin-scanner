@@ -2077,6 +2077,33 @@ assert_contains "$temp_dir/stale-rollback.out" \
 assert_not_contains "$temp_dir/stale-rollback-traffic.out" \
   "--to-revisions=analysis-worker-00002=100"
 
+printf 'ready\n' >"$temp_dir/paused-recovery-deploy-state"
+printf 'PAUSED\n' >"$temp_dir/paused-recovery-deploy-scheduler-state"
+: >"$temp_dir/paused-recovery-deploy-events.out"
+env "${common_env[@]}" \
+  'ANALYSIS_V2_RECOVERY_ENABLED=true' \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/paused-recovery-deploy-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/paused-recovery-deploy-scheduler-state" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/paused-recovery-deploy-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/paused-recovery-deploy.out"
+paused_recovery_traffic_line="$(grep -n -- \
+  "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100" \
+  "$temp_dir/paused-recovery-deploy-events.out" | tail -n 1 | cut -d: -f1)"
+paused_recovery_resume_line="$(grep -n \
+  'scheduler jobs resume analysis-v2-recovery' \
+  "$temp_dir/paused-recovery-deploy-events.out" | tail -n 1 | cut -d: -f1)"
+[[ -n "$paused_recovery_traffic_line" && -n "$paused_recovery_resume_line" \
+  && "$paused_recovery_traffic_line" -lt "$paused_recovery_resume_line" ]] \
+  || fail "manually paused recovery was resumed before verified traffic promotion"
+[[ "$(<"$temp_dir/paused-recovery-deploy-scheduler-state")" == "ENABLED" ]] \
+  || fail "successful promotion did not apply the requested recovery gate"
+
 printf 'ready\n' >"$temp_dir/prepromotion-failure-state"
 printf 'ENABLED\n' >"$temp_dir/prepromotion-failure-scheduler-state"
 printf 'ENABLED\n' >"$temp_dir/prepromotion-failure-retention-state"
@@ -2134,7 +2161,7 @@ fi
 [[ "$(<"$temp_dir/drifted-recovery-scheduler-state")" == "PAUSED" ]] \
   || fail "rollback resumed a structurally drifted recovery Scheduler job"
 assert_contains "$temp_dir/drifted-recovery-rollback.out" \
-  "refusing to resume a structurally drifted recovery Scheduler job"
+  "scheduler job has drifted; inspect or use --reconcile-jobs: analysis-v2-recovery"
 assert_not_contains "$temp_dir/drifted-recovery-events.out" \
   "scheduler jobs resume analysis-v2-recovery"
 
