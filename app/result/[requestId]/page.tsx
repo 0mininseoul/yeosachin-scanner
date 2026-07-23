@@ -14,6 +14,7 @@ import {
 import {
     boundedOwnerResultPage,
     genderBreakdownFromStats,
+    OWNER_GENDER_LABELS,
     OWNER_RESULT_PAGE_SIZE,
     paginatedCountLabel,
     paginatedRangeLabel,
@@ -204,9 +205,9 @@ function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
 
             <div className="mt-4 grid grid-cols-3 gap-3">
                 {[
-                    { label: '남성', c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
-                    { label: '여성', c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
-                    { label: '미상', c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
+                    { label: OWNER_GENDER_LABELS.male, c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
+                    { label: OWNER_GENDER_LABELS.female, c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
+                    { label: OWNER_GENDER_LABELS.unknown, c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
                 ].map((row) => (
                     <div key={row.label} className="border-l border-line pl-3">
                         <div className="flex items-center gap-1.5">
