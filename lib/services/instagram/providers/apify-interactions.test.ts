@@ -433,6 +433,105 @@ describe('Apify interaction adapter', () => {
         ]);
     });
 
+    it('preserves comments when another requested post has an exact attributed no-items response', async () => {
+        const postA = 'https://www.instagram.com/p/PostA/';
+        const postB = 'https://www.instagram.com/reel/PostB/';
+        const { client } = mockClient([
+            comment('1', postA),
+            {
+                inputUrl: postB,
+                url: postB,
+                error: 'no_items',
+                errorDescription: 'Empty or private data for provided input',
+                requestErrorMessages: ['HTTP 404 Not found'],
+            },
+        ]);
+
+        await expect(makeApifyInteractionAdapter({
+            client,
+            env: BASE_ENV,
+        }).getPostComments([postA, postB], 15)).resolves.toEqual([
+            expect.objectContaining({ id: '1', postUrl: postA }),
+        ]);
+    });
+
+    it('rejects contradictory comments and no-items evidence for the same post', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client } = mockClient([
+            comment('1', post),
+            {
+                inputUrl: post,
+                url: post,
+                error: 'no_items',
+                errorDescription: 'Empty or private data for provided input',
+                requestErrorMessages: ['HTTP 404 Not found'],
+            },
+        ]);
+
+        await expect(makeApifyInteractionAdapter({
+            client,
+            env: BASE_ENV,
+        }).getPostComments([post], 15)).rejects.toThrow(
+            'APIFY_COMMENT_POST_OUTCOME_CONFLICT'
+        );
+    });
+
+    it('rejects a single row that mixes comment data with no-items metadata', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client } = mockClient([{
+            ...comment('1', post),
+            inputUrl: post,
+            url: post,
+            error: 'no_items',
+            errorDescription: 'Empty or private data for provided input',
+            requestErrorMessages: ['HTTP 404 Not found'],
+        }]);
+
+        await expect(makeApifyInteractionAdapter({
+            client,
+            env: BASE_ENV,
+        }).getPostComments([post], 15)).rejects.toThrow(
+            'APIFY_COMMENT_POST_OUTCOME_CONFLICT'
+        );
+    });
+
+    it('rejects no-items attribution with a decorated input URL', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client } = mockClient([{
+            inputUrl: `${post}?unexpected=true`,
+            url: post,
+            error: 'no_items',
+            errorDescription: 'Empty or private data for provided input',
+            requestErrorMessages: ['HTTP 404 Not found'],
+        }]);
+
+        await expect(makeApifyInteractionAdapter({
+            client,
+            env: BASE_ENV,
+        }).getPostComments([post], 15)).rejects.toThrow(
+            'APIFY_COMMENT_ACTOR_ERROR'
+        );
+    });
+
+    it('rejects no-items rows with unexpected payload fields', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client } = mockClient([{
+            inputUrl: post,
+            url: post,
+            error: 'no_items',
+            errorDescription: 'Empty or private data for provided input',
+            requestErrorMessages: ['HTTP 404 Not found'],
+            unexpected: true,
+        }]);
+
+        await expect(makeApifyInteractionAdapter({
+            client,
+            env: BASE_ENV,
+        }).getPostComments([post], 15)).rejects.toThrow(
+            'APIFY_COMMENT_ACTOR_ERROR'
+        );
+    });
+
     it('rejects comment error rows, nested replies, schema drift, and wrong post attribution', async () => {
         const post = 'https://www.instagram.com/p/PostA/';
         const cases: Array<[Record<string, unknown>, string]> = [

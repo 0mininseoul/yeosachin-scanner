@@ -68,6 +68,10 @@ interface PostIdentity {
     shortCode: string;
 }
 
+type ProjectedComment =
+    | { kind: 'comment'; value: ApifyPostComment }
+    | { kind: 'unavailable'; postUrl: string };
+
 interface ActorDefinition {
     actorId: string;
     actorBuild: string;
@@ -102,6 +106,8 @@ const likerCoreSchema = z.strictObject({
 });
 
 const commentErrorSchema = z.strictObject({
+    inputUrl: z.string().url().nullable().optional(),
+    url: z.string().url().nullable().optional(),
     error: z.string().nullable().optional(),
     errorDescription: z.string().nullable().optional(),
     requestErrorMessages: z.array(z.string()).nullable().optional(),
@@ -554,8 +560,10 @@ function projectComment(
     item: Record<string, unknown>,
     index: number,
     expectedPosts: Map<string, PostIdentity>
-): ApifyPostComment {
+): ProjectedComment {
     const actorError = commentErrorSchema.safeParse({
+        inputUrl: item.inputUrl,
+        url: item.url,
         error: item.error,
         errorDescription: item.errorDescription,
         requestErrorMessages: item.requestErrorMessages,
@@ -571,6 +579,62 @@ function projectComment(
         ...(actorError.data.requestErrorMessages ?? []),
     ].filter((message): message is string => Boolean(message));
     if (errorMessages.length > 0) {
+        const hasCommentPayload = [
+            'postUrl',
+            'commentUrl',
+            'parentCommentUrl',
+            'id',
+            'text',
+            'owner',
+            'ownerUsername',
+            'ownerProfilePicUrl',
+            'timestamp',
+            'likesCount',
+            'replies',
+            'repliesCount',
+        ].some(key => Object.prototype.hasOwnProperty.call(item, key));
+        if (hasCommentPayload) {
+            throw new Error(
+                'SCRAPING_SCHEMA_ERROR: APIFY_COMMENT_POST_OUTCOME_CONFLICT.'
+            );
+        }
+        const inputUrl = actorError.data.inputUrl;
+        const resultUrl = actorError.data.url;
+        const rawKeys = Object.keys(item).sort();
+        const exactNoItemsKeys = [
+            'error',
+            'errorDescription',
+            'inputUrl',
+            'requestErrorMessages',
+            'url',
+        ];
+        if (
+            rawKeys.length === exactNoItemsKeys.length
+            && rawKeys.every((key, index) => key === exactNoItemsKeys[index])
+            && actorError.data.error === 'no_items'
+            && actorError.data.errorDescription === 'Empty or private data for provided input'
+            && actorError.data.requestErrorMessages?.length === 1
+            && actorError.data.requestErrorMessages[0] === 'HTTP 404 Not found'
+            && inputUrl
+            && resultUrl
+        ) {
+            try {
+                const inputPost = parsePostIdentity(inputUrl);
+                const resultPost = parsePostIdentity(resultUrl);
+                const expectedPost = expectedPosts.get(inputPost.shortCode);
+                if (
+                    expectedPost
+                    && inputUrl === expectedPost.canonicalUrl
+                    && resultUrl === expectedPost.canonicalUrl
+                    && inputPost.canonicalUrl === expectedPost.canonicalUrl
+                    && resultPost.canonicalUrl === expectedPost.canonicalUrl
+                ) {
+                    return { kind: 'unavailable', postUrl: expectedPost.canonicalUrl };
+                }
+            } catch {
+                // Unsafe or unattributed Actor error rows remain terminal below.
+            }
+        }
         throw new Error(
             'SCRAPING_ERROR: APIFY_COMMENT_ACTOR_ERROR Comment actor returned an error row.'
         );
@@ -603,7 +667,7 @@ function projectComment(
     const returnedPostUrl = parsed.data.postUrl ?? parsed.data.url;
     if (returnedPostUrl) {
         const expectedPost = attributedPost(returnedPostUrl, expectedPosts, 'comment');
-        return {
+        return { kind: 'comment', value: {
             postUrl: expectedPost.canonicalUrl,
             commentUrl: parsed.data.commentUrl ?? undefined,
             parentCommentUrl: parsed.data.parentCommentUrl ?? undefined,
@@ -613,7 +677,7 @@ function projectComment(
             ownerProfilePicUrl: parsed.data.ownerProfilePicUrl ?? undefined,
             timestamp: parsed.data.timestamp,
             likesCount: parsed.data.likesCount ?? undefined,
-        };
+        } };
     }
     if (expectedPosts.size !== 1) {
         throw new Error(
@@ -624,7 +688,7 @@ function projectComment(
     if (!expectedPost) {
         throw new Error('SCRAPING_SCHEMA_ERROR: APIFY_COMMENT_POST_URL_MISSING.');
     }
-    return {
+    return { kind: 'comment', value: {
         postUrl: expectedPost.canonicalUrl,
         commentUrl: parsed.data.commentUrl ?? undefined,
         parentCommentUrl: parsed.data.parentCommentUrl ?? undefined,
@@ -634,7 +698,7 @@ function projectComment(
         ownerProfilePicUrl: parsed.data.ownerProfilePicUrl ?? undefined,
         timestamp: parsed.data.timestamp,
         likesCount: parsed.data.likesCount ?? undefined,
-    };
+    } };
 }
 
 function dedupeAndRecord<T>(
@@ -730,7 +794,18 @@ export function makeApifyInteractionAdapter(
                 limitPerPost,
                 context
             );
-            const comments = items.map((item, index) => projectComment(item, index, posts));
+            const projected = items.map((item, index) => projectComment(item, index, posts));
+            const unavailablePosts = new Set(projected.flatMap(item => (
+                item.kind === 'unavailable' ? [item.postUrl] : []
+            )));
+            const comments = projected.flatMap(item => (
+                item.kind === 'comment' ? [item.value] : []
+            ));
+            if (comments.some(comment => unavailablePosts.has(comment.postUrl))) {
+                throw new Error(
+                    'SCRAPING_SCHEMA_ERROR: APIFY_COMMENT_POST_OUTCOME_CONFLICT.'
+                );
+            }
             assertPerPostLimit(comments, limitPerPost);
             return dedupeAndRecord(
                 comments,
