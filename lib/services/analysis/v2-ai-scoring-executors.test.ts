@@ -453,6 +453,7 @@ function dependencies(
                     detectedMutuals: 0,
                     publicMutuals: 0,
                     screenedMutuals: 0,
+                    genderStats: { male: 0, female: 0, unknown: 0 },
                     successfullyScreenedMutuals: 0,
                     fetchUnavailableMutuals: 0,
                     mediaUnavailableMutuals: 0,

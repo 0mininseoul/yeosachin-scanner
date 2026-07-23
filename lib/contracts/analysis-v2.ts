@@ -652,6 +652,11 @@ export const analysisResultSummaryV1Schema = z.object({
     publicMutuals: z.number().int().nonnegative(),
     privateMutuals: z.number().int().nonnegative(),
     screenedMutuals: z.number().int().nonnegative(),
+    genderStats: z.object({
+        male: z.number().int().nonnegative(),
+        female: z.number().int().nonnegative(),
+        unknown: z.number().int().nonnegative(),
+    }).strict(),
     successfullyScreenedMutuals: z.number().int().nonnegative(),
     fetchUnavailableMutuals: z.number().int().nonnegative(),
     mediaUnavailableMutuals: z.number().int().nonnegative(),
@@ -719,6 +724,18 @@ export const analysisResultSummaryV1Schema = z.object({
             code: 'custom',
             message: 'Screening scope must equal the public mutual count.',
             path: ['screenedMutuals'],
+        });
+    }
+    if (
+        value.genderStats.male
+            + value.genderStats.female
+            + value.genderStats.unknown
+        !== value.screenedMutuals
+    ) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Gender totals must equal the screened public mutual count.',
+            path: ['genderStats'],
         });
     }
     if (

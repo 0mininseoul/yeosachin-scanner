@@ -121,6 +121,7 @@ function rawSummary(count = 0) {
         publicMutuals: count,
         privateMutuals: 0,
         screenedMutuals: count,
+        genderStats: { male: 0, female: count, unknown: 0 },
         successfullyScreenedMutuals: count,
         fetchUnavailableMutuals: 0,
         mediaUnavailableMutuals: 0,
@@ -425,8 +426,32 @@ describe('analysis V2 result finalization and loading', () => {
         expect(first?.femaleAccounts.map(entry => entry.row.profileImage)).toEqual([
             '/api/image-proxy?signature=1', '/api/image-proxy?signature=2',
         ]);
+        expect(first?.summary.genderStats).toEqual({
+            male: 0,
+            female: 2,
+            unknown: 0,
+        });
         expect(second?.summary.targetProfileImage).toBe('/api/image-proxy?signature=6');
         expect(JSON.stringify(first)).not.toContain('cdninstagram.com');
+    });
+
+    it('normalizes a pre-migration summary while keeping the public contract complete', async () => {
+        const snapshot = rawSnapshot(2);
+        const legacySummary: Partial<typeof snapshot.summary> = { ...snapshot.summary };
+        delete legacySummary.genderStats;
+        const fake = rpcClient({
+            data: { ...snapshot, summary: legacySummary },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client, {
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+        });
+
+        await expect(store.loadSnapshot({ requestId, userId })).resolves.toMatchObject({
+            summary: {
+                genderStats: { male: 0, female: 0, unknown: 2 },
+            },
+        });
     });
 
     it('rejects unbounded or structurally invalid database snapshots', async () => {

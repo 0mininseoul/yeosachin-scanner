@@ -61,6 +61,7 @@ function page() {
             publicMutuals: 80,
             privateMutuals: 20,
             screenedMutuals: 80,
+            genderStats: { male: 40, female: 30, unknown: 10 },
             successfullyScreenedMutuals: 78,
             fetchUnavailableMutuals: 1,
             mediaUnavailableMutuals: 1,
