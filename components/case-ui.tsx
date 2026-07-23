@@ -1,6 +1,9 @@
 import Link from "next/link";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { threatMeterFillCount } from "@/lib/services/analysis/owner-view-presentation";
+import {
+  DEFAULT_THREAT_METER_SEGMENTS,
+  threatMeterFillCount,
+} from "@/lib/services/analysis/owner-view-presentation";
 
 /* ============================================================
    CASE FILE — shared dossier primitives
@@ -167,7 +170,7 @@ export function DeepRiskAnalysis({
 export function ThreatBar({
   grade,
   score,
-  segments = 14,
+  segments = DEFAULT_THREAT_METER_SEGMENTS,
   className = "",
 }: {
   grade: Grade;

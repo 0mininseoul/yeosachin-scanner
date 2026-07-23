@@ -108,10 +108,14 @@ export function paginatedRangeLabel(
 
 type OwnerRiskGrade = 'high_risk' | 'caution' | 'normal';
 
+// The threat meter renders as a fixed 10-segment gauge so that one filled
+// segment maps to one point of the rounded 1-10 risk score.
+export const DEFAULT_THREAT_METER_SEGMENTS = 10;
+
 const GRADE_FILL_RATIOS: Readonly<Record<OwnerRiskGrade, number>> = {
-    high_risk: 12 / 14,
-    caution: 8 / 14,
-    normal: 4 / 14,
+    high_risk: 9 / 10,
+    caution: 6 / 10,
+    normal: 3 / 10,
 };
 
 export function threatMeterFillCount(input: {
@@ -124,6 +128,42 @@ export function threatMeterFillCount(input: {
         ? Math.min(10, Math.max(1, input.displayScore)) / 10
         : GRADE_FILL_RATIOS[input.grade];
     return Math.min(input.segments, Math.max(1, Math.round(ratio * input.segments)));
+}
+
+// Owner-facing risk scores are shown without decimals; the same rounded value
+// drives the filled segment count so the gauge and the number never disagree.
+export function roundedOwnerScore(displayScore: number): number {
+    return Math.round(displayScore);
+}
+
+export interface GenderBreakdownSlice {
+    count: number;
+    percentage: number;
+}
+
+export interface GenderBreakdown {
+    male: GenderBreakdownSlice;
+    female: GenderBreakdownSlice;
+    unknown: GenderBreakdownSlice;
+}
+
+// Converts raw male/female/unknown counts into display slices with integer
+// percentages. A zero total is reported as 0% everywhere instead of dividing.
+export function genderBreakdownFromStats(stats: {
+    male: number;
+    female: number;
+    unknown: number;
+}): GenderBreakdown {
+    const total = stats.male + stats.female + stats.unknown;
+    const slice = (count: number): GenderBreakdownSlice => ({
+        count,
+        percentage: total > 0 ? Math.round((count / total) * 100) : 0,
+    });
+    return {
+        male: slice(stats.male),
+        female: slice(stats.female),
+        unknown: slice(stats.unknown),
+    };
 }
 
 export interface AnalysisPlanBadgePresentation {

@@ -4,8 +4,11 @@ import {
     analysisV2EventCopy,
     analysisV2ProgressCopy,
     boundedOwnerResultPage,
+    DEFAULT_THREAT_METER_SEGMENTS,
+    genderBreakdownFromStats,
     paginatedCountLabel,
     paginatedRangeLabel,
+    roundedOwnerScore,
     threatMeterFillCount,
     v2ResultFailureAction,
 } from './owner-view-presentation';
@@ -68,12 +71,68 @@ describe('owner view presentation behavior', () => {
         expect(paginatedRangeLabel(2, 23, false)).toBe('101-123');
     });
 
-    it('derives the threat meter from the actual 1-10 score', () => {
-        expect(threatMeterFillCount({ grade: 'normal', displayScore: 1, segments: 14 })).toBe(1);
-        expect(threatMeterFillCount({ grade: 'caution', displayScore: 4.2, segments: 14 })).toBe(6);
-        expect(threatMeterFillCount({ grade: 'high_risk', displayScore: 6.8, segments: 14 })).toBe(10);
-        expect(threatMeterFillCount({ grade: 'high_risk', displayScore: 10, segments: 14 })).toBe(14);
-        expect(threatMeterFillCount({ grade: 'caution', segments: 14 })).toBe(8);
+    it('defaults the threat meter to a 10-segment gauge', () => {
+        expect(DEFAULT_THREAT_METER_SEGMENTS).toBe(10);
+    });
+
+    it('fills one segment per rounded score point on the default 10-segment gauge', () => {
+        const s = DEFAULT_THREAT_METER_SEGMENTS;
+        expect(threatMeterFillCount({ grade: 'normal', displayScore: 1, segments: s })).toBe(1);
+        expect(threatMeterFillCount({ grade: 'caution', displayScore: 4.2, segments: s })).toBe(4);
+        expect(threatMeterFillCount({ grade: 'high_risk', displayScore: 6.8, segments: s })).toBe(7);
+        expect(threatMeterFillCount({ grade: 'high_risk', displayScore: 10, segments: s })).toBe(10);
+    });
+
+    it('keeps the score-less grade fallback on the default 10-segment gauge', () => {
+        const s = DEFAULT_THREAT_METER_SEGMENTS;
+        expect(threatMeterFillCount({ grade: 'high_risk', segments: s })).toBe(9);
+        expect(threatMeterFillCount({ grade: 'caution', segments: s })).toBe(6);
+        expect(threatMeterFillCount({ grade: 'normal', segments: s })).toBe(3);
+    });
+
+    it('matches the filled segment count to the displayed rounded score', () => {
+        const s = DEFAULT_THREAT_METER_SEGMENTS;
+        for (const [grade, score] of [
+            ['normal', 1.2],
+            ['caution', 4.2],
+            ['caution', 5.5],
+            ['high_risk', 6.8],
+            ['high_risk', 9.9],
+        ] as const) {
+            expect(threatMeterFillCount({ grade, displayScore: score, segments: s }))
+                .toBe(roundedOwnerScore(score));
+        }
+    });
+
+    it('rounds the owner display score to a whole number', () => {
+        expect(roundedOwnerScore(6.8)).toBe(7);
+        expect(roundedOwnerScore(6.4)).toBe(6);
+        expect(roundedOwnerScore(9)).toBe(9);
+        expect(roundedOwnerScore(5.5)).toBe(6);
+    });
+
+    it('converts gender stat counts into 0-safe percentages', () => {
+        expect(genderBreakdownFromStats({ male: 6, female: 3, unknown: 1 })).toEqual({
+            male: { count: 6, percentage: 60 },
+            female: { count: 3, percentage: 30 },
+            unknown: { count: 1, percentage: 10 },
+        });
+    });
+
+    it('treats an all-zero gender split as zero percent everywhere', () => {
+        expect(genderBreakdownFromStats({ male: 0, female: 0, unknown: 0 })).toEqual({
+            male: { count: 0, percentage: 0 },
+            female: { count: 0, percentage: 0 },
+            unknown: { count: 0, percentage: 0 },
+        });
+    });
+
+    it('rounds each gender percentage independently', () => {
+        expect(genderBreakdownFromStats({ male: 1, female: 1, unknown: 1 })).toEqual({
+            male: { count: 1, percentage: 33 },
+            female: { count: 1, percentage: 33 },
+            unknown: { count: 1, percentage: 33 },
+        });
     });
 
     it('presents every supported plan explicitly and keeps legacy null rows basic', () => {

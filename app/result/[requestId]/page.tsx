@@ -13,9 +13,11 @@ import {
 } from '@/lib/services/pending-analysis-target';
 import {
     boundedOwnerResultPage,
+    genderBreakdownFromStats,
     OWNER_RESULT_PAGE_SIZE,
     paginatedCountLabel,
     paginatedRangeLabel,
+    roundedOwnerScore,
     v2ResultFailureAction,
     type OwnerProgressStatus,
 } from '@/lib/services/analysis/owner-view-presentation';
@@ -128,15 +130,8 @@ interface ResultData {
         mutualFollows: number;
         genderRatio: GenderRatio | null;
         v2?: {
-            planId: 'basic' | 'standard' | 'plus';
             followers: AnalysisResultPageV1['summary']['followers'];
             following: AnalysisResultPageV1['summary']['following'];
-            publicMutuals: number;
-            privateMutuals: number;
-            screenedMutuals: number;
-            successfullyScreenedMutuals: number;
-            notScreenedMutuals: number;
-            exclusionApplied: boolean;
             highRiskCount: number;
         };
     };
@@ -198,7 +193,41 @@ const BRACKET_BY_GRADE: Record<string, string> = {
     normal: 'var(--color-line-2)',
 };
 
+function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
+    return (
+        <>
+            <div className="flex h-3 w-full overflow-hidden bg-line">
+                <div className="h-full bg-fg-dim" style={{ width: `${gr.male.percentage}%` }} />
+                <div className="h-full bg-blood" style={{ width: `${gr.female.percentage}%` }} />
+                <div className="h-full bg-line-2" style={{ width: `${gr.unknown.percentage}%` }} />
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 gap-3">
+                {[
+                    { label: '남성', c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
+                    { label: '여성', c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
+                    { label: '미상', c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
+                ].map((row) => (
+                    <div key={row.label} className="border-l border-line pl-3">
+                        <div className="flex items-center gap-1.5">
+                            <span className={`h-2 w-2 ${row.dot}`} />
+                            <span className="text-[12px] text-fg-dim">{row.label}</span>
+                        </div>
+                        <div className={`num mt-1 text-[18px] font-extrabold ${row.txt}`}>{row.c.count}</div>
+                        <div className="num text-[11px] text-fg-mute">{row.c.percentage}%</div>
+                    </div>
+                ))}
+            </div>
+        </>
+    );
+}
+
 function mapV2Result(result: AnalysisResultPageV1): ResultData {
+    // genderStats is an additive summary field; tolerate results produced before
+    // the backend contract ships it and fall back to hiding the gender breakdown.
+    const genderStats = (result.summary as {
+        genderStats?: { male: number; female: number; unknown: number };
+    }).genderStats;
     return {
         requestId: result.requestId,
         status: 'completed',
@@ -207,17 +236,10 @@ function mapV2Result(result: AnalysisResultPageV1): ResultData {
             targetInstagramId: result.summary.targetInstagramId,
             targetProfileImage: result.summary.targetProfileImage || undefined,
             mutualFollows: result.summary.detectedMutuals,
-            genderRatio: null,
+            genderRatio: genderStats ? genderBreakdownFromStats(genderStats) : null,
             v2: {
-                planId: result.summary.planId,
                 followers: result.summary.followers,
                 following: result.summary.following,
-                publicMutuals: result.summary.publicMutuals,
-                privateMutuals: result.summary.privateMutuals,
-                screenedMutuals: result.summary.screenedMutuals,
-                successfullyScreenedMutuals: result.summary.successfullyScreenedMutuals,
-                notScreenedMutuals: result.summary.notScreenedMutuals,
-                exclusionApplied: result.summary.exclusionApplied,
                 highRiskCount: result.femaleAccounts.filter(
                     account => account.riskBand === 'high_risk'
                 ).length,
@@ -669,61 +691,37 @@ export default function ResultPage({ params }: PageProps) {
                 )}
 
                 {/* pipeline-specific summary */}
-                {gr ? <CaseCard className="mt-6 p-5">
-                    <div className="mb-4 flex items-center justify-between">
-                        <span className="eyebrow">맞팔 계정 성별 분석</span>
-                        <span className="num text-[12px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
-                    </div>
-
-                    <div className="flex h-3 w-full overflow-hidden bg-line">
-                        <div className="h-full bg-fg-dim" style={{ width: `${gr.male.percentage}%` }} />
-                        <div className="h-full bg-blood" style={{ width: `${gr.female.percentage}%` }} />
-                        <div className="h-full bg-line-2" style={{ width: `${gr.unknown.percentage}%` }} />
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-3 gap-3">
-                        {[
-                            { label: '남성', c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
-                            { label: '여성', c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
-                            { label: '미상', c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
-                        ].map((row) => (
-                            <div key={row.label} className="border-l border-line pl-3">
-                                <div className="flex items-center gap-1.5">
-                                    <span className={`h-2 w-2 ${row.dot}`} />
-                                    <span className="text-[12px] text-fg-dim">{row.label}</span>
-                                </div>
-                                <div className={`num mt-1 text-[18px] font-extrabold ${row.txt}`}>{row.c.count}</div>
-                                <div className="num text-[11px] text-fg-mute">{row.c.percentage}%</div>
-                            </div>
-                        ))}
-                    </div>
-                </CaseCard> : summary.v2 ? (
+                {summary.v2 ? (
                     <CaseCard className="mt-6 p-5">
-                        <div className="flex items-center justify-between gap-3">
-                            <span className="eyebrow">수집 및 판독 범위</span>
-                            <span className="num text-[11px] uppercase text-fg-dim">{summary.v2.planId}</span>
+                        <div className="mb-4 flex items-center justify-between">
+                            <span className="eyebrow">맞팔 계정 분석</span>
+                            <span className="num text-[12px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
                         </div>
-                        <div className="mt-4 grid grid-cols-2 gap-px bg-line">
+
+                        {gr && <GenderRatioBreakdown gr={gr} />}
+
+                        <div className={`grid grid-cols-2 gap-px bg-line ${gr ? 'mt-4' : ''}`}>
                             {[
-                                { label: '팔로워', value: `${summary.v2.followers.collected}/${summary.v2.followers.declared}` },
-                                { label: '팔로잉', value: `${summary.v2.following.collected}/${summary.v2.following.declared}` },
-                                { label: '확인된 맞팔', value: String(summary.mutualFollows) },
-                                { label: '상세 판독', value: String(summary.v2.screenedMutuals) },
-                            ].map(item => (
+                                { label: '팔로워', value: summary.v2.followers.declared },
+                                { label: '팔로잉', value: summary.v2.following.declared },
+                            ].map((item) => (
                                 <div key={item.label} className="bg-ink-2 px-3 py-3">
                                     <span className="text-[11px] text-fg-mute">{item.label}</span>
-                                    <p className="num mt-1 text-[17px] font-bold text-fg">{item.value}</p>
+                                    <p className="num mt-1 text-[17px] font-bold text-fg">
+                                        {item.value.toLocaleString()}
+                                    </p>
                                 </div>
                             ))}
                         </div>
-                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-fg-dim">
-                            <span>공개 {summary.v2.publicMutuals}명</span>
-                            <span>비공개 {summary.v2.privateMutuals}명</span>
-                            <span>판독 완료 {summary.v2.successfullyScreenedMutuals}명</span>
-                            {summary.v2.notScreenedMutuals > 0 && (
-                                <span>플랜 범위 외 {summary.v2.notScreenedMutuals}명</span>
-                            )}
+                    </CaseCard>
+                ) : gr ? (
+                    <CaseCard className="mt-6 p-5">
+                        <div className="mb-4 flex items-center justify-between">
+                            <span className="eyebrow">맞팔 계정 성별 분석</span>
+                            <span className="num text-[12px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
                         </div>
+
+                        <GenderRatioBreakdown gr={gr} />
                     </CaseCard>
                 ) : null}
 
@@ -836,7 +834,7 @@ export default function ResultPage({ params }: PageProps) {
                                         />
                                         {account.displayScore !== undefined && (
                                             <span className="num shrink-0 text-[12px] font-bold text-fg">
-                                                {account.displayScore.toFixed(1)}/10
+                                                {roundedOwnerScore(account.displayScore)}/10
                                             </span>
                                         )}
                                         <InstaLink url={account.instagramUrl} />
