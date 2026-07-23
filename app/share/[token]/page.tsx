@@ -5,6 +5,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { shareResult } from '@/lib/services/result-share';
+import { OWNER_GENDER_LABELS } from '@/lib/services/analysis/owner-view-presentation';
 import {
     TopBar,
     Eyebrow,
@@ -260,9 +261,9 @@ export default function ShareResultPage({ params }: PageProps) {
                     </div>
                     <div className="mt-4 grid grid-cols-3 gap-3">
                         {[
-                            { label: '남성', c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
-                            { label: '여성', c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
-                            { label: '미상', c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
+                            { label: OWNER_GENDER_LABELS.male, c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
+                            { label: OWNER_GENDER_LABELS.female, c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
+                            { label: OWNER_GENDER_LABELS.unknown, c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
                         ].map((row) => (
                             <div key={row.label} className="border-l border-line pl-3">
                                 <div className="flex items-center gap-1.5">

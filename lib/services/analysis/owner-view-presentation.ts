@@ -147,6 +147,12 @@ export interface GenderBreakdown {
     unknown: GenderBreakdownSlice;
 }
 
+export const OWNER_GENDER_LABELS = {
+    male: '남자',
+    female: '여자',
+    unknown: '미상',
+} as const;
+
 // Converts raw male/female/unknown counts into display slices with integer
 // percentages. A zero total is reported as 0% everywhere instead of dividing.
 export function genderBreakdownFromStats(stats: {

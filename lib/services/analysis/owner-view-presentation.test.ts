@@ -6,6 +6,7 @@ import {
     boundedOwnerResultPage,
     DEFAULT_THREAT_METER_SEGMENTS,
     genderBreakdownFromStats,
+    OWNER_GENDER_LABELS,
     paginatedCountLabel,
     paginatedRangeLabel,
     roundedOwnerScore,
@@ -116,6 +117,14 @@ describe('owner view presentation behavior', () => {
             male: { count: 6, percentage: 60 },
             female: { count: 3, percentage: 30 },
             unknown: { count: 1, percentage: 10 },
+        });
+    });
+
+    it('uses the requested owner-facing gender card labels', () => {
+        expect(OWNER_GENDER_LABELS).toEqual({
+            male: '남자',
+            female: '여자',
+            unknown: '미상',
         });
     });
 
