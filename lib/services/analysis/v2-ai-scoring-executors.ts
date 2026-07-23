@@ -959,8 +959,10 @@ function preliminaryStoreRow(
         appearanceGrade: candidate.appearanceGrade,
         exposureScore: candidate.exposureScore,
         isBusinessAccount: candidate.isBusinessAccount,
-        hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
-        hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
+        // Preliminary persistence intentionally precedes partner-safety and
+        // therefore stores no weak adjustment or strong-evidence cap.
+        hasWeakPartnerEvidence: false,
+        hasStrongPartnerEvidence: false,
     });
     return {
         candidateId: candidate.candidateId,
