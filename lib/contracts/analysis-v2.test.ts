@@ -36,6 +36,7 @@ describe('analysis V2 public contracts', () => {
             publicMutuals: 3,
             privateMutuals: 0,
             screenedMutuals: 3,
+            genderStats: { male: 1, female: 1, unknown: 1 },
             successfullyScreenedMutuals: 1,
             fetchUnavailableMutuals: 1,
             mediaUnavailableMutuals: 1,
@@ -54,6 +55,14 @@ describe('analysis V2 public contracts', () => {
         expect(analysisResultSummaryV1Schema.safeParse({
             ...legacy,
             analysisUnavailableMutuals: 1,
+        }).success).toBe(false);
+        const withoutGenderStats: Partial<typeof legacy> = { ...legacy };
+        delete withoutGenderStats.genderStats;
+        expect(analysisResultSummaryV1Schema.safeParse(withoutGenderStats).success)
+            .toBe(false);
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
+            genderStats: { male: 1, female: 1, unknown: 0 },
         }).success).toBe(false);
     });
 
@@ -390,6 +399,7 @@ describe('analysis V2 public contracts', () => {
                 publicMutuals: 40,
                 privateMutuals: 10,
                 screenedMutuals: 40,
+                genderStats: { male: 20, female: 10, unknown: 10 },
                 successfullyScreenedMutuals: 38,
                 fetchUnavailableMutuals: 1,
                 mediaUnavailableMutuals: 1,
@@ -510,6 +520,7 @@ describe('analysis V2 public contracts', () => {
             publicMutuals: 390,
             privateMutuals: 10,
             screenedMutuals: 350,
+            genderStats: { male: 150, female: 100, unknown: 100 },
             successfullyScreenedMutuals: 350,
             fetchUnavailableMutuals: 0,
             mediaUnavailableMutuals: 0,
