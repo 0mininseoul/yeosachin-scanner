@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
+    MAX_FEATURE_MEDIA,
+    MAX_PARTNER_SAFETY_CONTACT_MEDIA,
+} from '@/lib/domain/analysis/media-policy';
+import {
     ANALYSIS_V2_MEDIA_ARTIFACT_DATABASE_NAMES,
+    ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS,
     analysisV2MediaArtifactKey,
     analysisV2MediaArtifactObjectName,
     analysisV2MediaBundleArtifactKey,
@@ -140,12 +145,31 @@ describe('analysis V2 normalized media bundles', () => {
             .toThrow('bundle selection mismatch');
     });
 
-    it('rejects item-count and aggregate-byte limits before constructing an oversized bundle', () => {
-        expect(() => serializeAnalysisV2MediaBundle(Array.from({ length: 12 }, (_, index) => ({
+    it('supports the full partner-safety contact selection and rejects one item beyond it', () => {
+        const selectionIds = Array.from(
+            { length: MAX_PARTNER_SAFETY_CONTACT_MEDIA },
+            (_, index) => `post:${index}`
+        );
+        const bundle = serializeAnalysisV2MediaBundle(selectionIds.map(selectionId => ({
+            selectionId,
+            normalizedJpeg: jpeg,
+        })));
+
+        expect(ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS).toBeGreaterThanOrEqual(MAX_FEATURE_MEDIA);
+        expect(ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS)
+            .toBeGreaterThanOrEqual(MAX_PARTNER_SAFETY_CONTACT_MEDIA);
+        expect(deserializeAnalysisV2MediaBundle(bundle, selectionIds)).toHaveLength(
+            MAX_PARTNER_SAFETY_CONTACT_MEDIA
+        );
+        expect(() => serializeAnalysisV2MediaBundle(Array.from({
+            length: ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS + 1,
+        }, (_, index) => ({
             selectionId: `post:${index}`,
             normalizedJpeg: jpeg,
         })))).toThrow('invalid bundle size');
+    });
 
+    it('rejects the aggregate-byte limit before constructing an oversized bundle', () => {
         const largeJpeg = Buffer.alloc(3 * 1024 * 1024, 0x11);
         largeJpeg[0] = 0xff;
         largeJpeg[1] = 0xd8;

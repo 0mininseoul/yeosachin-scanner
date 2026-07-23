@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 import { GoogleAuth } from 'google-auth-library';
+import {
+    MAX_FEATURE_MEDIA,
+    MAX_PARTNER_SAFETY_CONTACT_MEDIA,
+} from '@/lib/domain/analysis/media-policy';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -10,7 +14,10 @@ const SELECTION_ID_MAX_LENGTH = 240;
 
 export const ANALYSIS_V2_MEDIA_ARTIFACT_MAX_BYTES = 8 * 1024 * 1024;
 export const ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES = 32 * 1024 * 1024;
-export const ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS = 11;
+export const ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS = Math.max(
+    MAX_FEATURE_MEDIA,
+    MAX_PARTNER_SAFETY_CONTACT_MEDIA
+);
 export const ANALYSIS_V2_MEDIA_ARTIFACT_CLEANUP_CONCURRENCY = 8;
 export const ANALYSIS_V2_MEDIA_OBJECT_OPERATION_DEADLINE_MS = 25_000;
 
