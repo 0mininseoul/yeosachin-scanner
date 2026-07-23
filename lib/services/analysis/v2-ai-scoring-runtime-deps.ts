@@ -138,6 +138,7 @@ function projectTerminalResults(resume: AnalysisV2ProfileFetchResume) {
         if (
             result.outcome.status === 'failed'
             && result.outcome.failureCategory !== 'incomplete'
+            && result.outcome.failureCategory !== 'schema'
         ) {
             throw new Error('ANALYSIS_V2_PROFILE_CONSUMER_RETRYABLE_OUTCOME');
         }

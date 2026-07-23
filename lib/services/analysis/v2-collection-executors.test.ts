@@ -231,6 +231,21 @@ function incompleteFailure(username: string, source: 'selfhosted' | 'apify' = 'a
     };
 }
 
+function schemaFailure(username: string, source: 'selfhosted' | 'apify' = 'apify') {
+    return {
+        outcome: {
+            requestedUsername: username,
+            source,
+            status: 'failed' as const,
+            failureCategory: 'schema' as const,
+            httpStatus: null,
+            requestCount: 1,
+            latencyMs: 10,
+            capturedAt,
+        },
+    };
+}
+
 function unavailable(username: string) {
     return {
         outcome: {
@@ -1954,6 +1969,20 @@ describe('analysis V2 concrete collection executors', () => {
         expect(result.failedUsernames).toEqual(failedUsernames);
     });
 
+    it('evaluateProfileBatchCompleteness accepts exactly 90 percent coverage with three schema failures in 30', () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-3);
+        const final = usernames.map(username => (
+            failedUsernames.includes(username) ? schemaFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.allowedFailures).toBe(3);
+        expect(result.failedUsernames).toEqual(failedUsernames);
+    });
+
     it('evaluateProfileBatchCompleteness accepts the rounded 90 percent boundary with two incomplete failures in 27', () => {
         const usernames = Array.from({ length: 27 }, (_, index) => `user${index}`);
         const failedUsernames = usernames.slice(-2);
@@ -1981,7 +2010,32 @@ describe('analysis V2 concrete collection executors', () => {
         expect(result.allowedFailures).toBe(2);
     });
 
-    it('evaluateProfileBatchCompleteness rejects a non-incomplete failure within the numeric bound', () => {
+    it('evaluateProfileBatchCompleteness rejects schema failures below 90 percent coverage', () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const final = usernames.map((username, index) => (
+            index >= 26 ? schemaFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(false);
+        expect(result.allowedFailures).toBe(3);
+    });
+
+    it('evaluateProfileBatchCompleteness accepts a schema failure within the numeric bound', () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failedUsername = usernames.at(-1)!;
+        const final = usernames.map(username => (
+            username === failedUsername ? schemaFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.failedUsernames).toEqual([failedUsername]);
+    });
+
+    it('evaluateProfileBatchCompleteness rejects a timeout failure within the numeric bound', () => {
         const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
         const failedUsername = usernames.at(-1)!;
         const final = usernames.map(username => (

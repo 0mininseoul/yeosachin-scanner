@@ -765,7 +765,13 @@ export function evaluateProfileBatchCompleteness(
     const allowedFailures = requestedUsernames.length - Math.ceil(0.9 * requestedUsernames.length);
     const satisfied = final.length === requestedUsernames.length
         && failed.length <= allowedFailures
-        && failed.every(result => result.outcome.failureCategory === 'incomplete');
+        // A malformed external profile row is never used as evidence.  It is safe to
+        // classify that one candidate as unavailable, subject to the same 90% coverage
+        // floor as an omitted row; retryable transport/auth failures remain terminal.
+        && failed.every(result => (
+            result.outcome.failureCategory === 'incomplete'
+            || result.outcome.failureCategory === 'schema'
+        ));
     return {
         satisfied,
         failedUsernames: failed.map(result => result.outcome.requestedUsername),

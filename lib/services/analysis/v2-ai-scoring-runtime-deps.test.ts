@@ -77,6 +77,19 @@ function incompleteOutcome(username: string, source: 'selfhosted' | 'apify') {
     };
 }
 
+function schemaOutcome(username: string, source: 'selfhosted' | 'apify') {
+    return {
+        requestedUsername: username,
+        source,
+        status: 'failed' as const,
+        failureCategory: 'schema' as const,
+        httpStatus: null,
+        requestCount: 1,
+        latencyMs: 25,
+        capturedAt,
+    };
+}
+
 function profile(username: string) {
     return {
         username,
@@ -89,7 +102,7 @@ function profile(username: string) {
 }
 
 function resume(
-    finalStatus: 'unavailable' | 'failed' | 'incomplete'
+    finalStatus: 'unavailable' | 'failed' | 'incomplete' | 'schema'
 ): AnalysisV2ProfileFetchResume {
     return analysisV2ProfileFetchResumeSchema.parse({
         requestId,
@@ -106,7 +119,9 @@ function resume(
         fallbackResults: [{
             outcome: finalStatus === 'incomplete'
                 ? incompleteOutcome('terminal.one', 'apify')
-                : outcome('terminal.one', 'apify', finalStatus),
+                : finalStatus === 'schema'
+                  ? schemaOutcome('terminal.one', 'apify')
+                  : outcome('terminal.one', 'apify', finalStatus),
         }],
         primaryCapturedAt: capturedAt,
         fallbackCapturedAt: capturedAt,
@@ -180,6 +195,28 @@ describe('analysis V2 production profile consumer', () => {
     it('projects a tolerated final incomplete failure as unavailable', async () => {
         const reader = createAnalysisV2ProfileBatchReadModel(
             profileClient(resume('incomplete')).client
+        );
+
+        const loaded = await reader.loadExactBatch({
+            requestId,
+            consumerJobKey: 'track:profile-ai:batch:0',
+            consumerClaimToken: claimToken,
+            consumerInputHash,
+            producerJobKey: 'track:profiles:batch:0',
+            batch: 0,
+            expectedItemCount: 2,
+            expectedProducerInputHash: producerInputHash,
+        });
+
+        expect(loaded?.results).toEqual([
+            expect.objectContaining({ username: 'success.one', status: 'success' }),
+            { username: 'terminal.one', status: 'unavailable' },
+        ]);
+    });
+
+    it('projects a final schema failure as unavailable without exposing a profile', async () => {
+        const reader = createAnalysisV2ProfileBatchReadModel(
+            profileClient(resume('schema')).client
         );
 
         const loaded = await reader.loadExactBatch({
