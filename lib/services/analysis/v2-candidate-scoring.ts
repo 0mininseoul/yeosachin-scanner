@@ -101,8 +101,11 @@ export function calculateV2PreliminaryScores(input: {
             appearanceGrade: candidate.appearanceGrade,
             exposureScore: candidate.exposureScore,
             isBusinessAccount: candidate.isBusinessAccount,
-            hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
-            hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
+            // The public preliminary checkpoint has no partner-adjustment field.
+            // Preserve the signals on the candidate, but apply them only after
+            // the dedicated partner-safety stage has produced its checkpoint.
+            hasWeakPartnerEvidence: false,
+            hasStrongPartnerEvidence: false,
         });
         return {
             ...candidate,

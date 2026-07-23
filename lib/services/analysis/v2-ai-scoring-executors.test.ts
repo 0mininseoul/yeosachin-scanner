@@ -2136,6 +2136,52 @@ describe('V2 AI and scoring executors', () => {
         expect(new Set(shortlist.map(row => row.verificationShortlistRank)).size).toBe(10);
     });
 
+    it('defers the weak-partner adjustment until final scoring', async () => {
+        const memoryState = memory();
+        const weakCandidate = verifiedOutcome('woman.weak', { weakPartner: true });
+        memoryState.outcomes = [weakCandidate];
+        memoryState.primary = {
+            revision: 1,
+            resultHash: digest('primary'),
+            candidates: [{
+                candidateId: weakCandidate.candidateId,
+                instagramId: weakCandidate.instagramId,
+                interactions: [],
+            }],
+        };
+        const deps = dependencies(memoryState, {
+            evidence: {
+                loadRelationships: vi.fn(async () => relationshipSnapshot({
+                    excluded: null,
+                    usernames: [weakCandidate.instagramId],
+                })),
+                loadTargetEvidence: vi.fn(async () => targetEvidence()),
+            },
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.screening!(context('screening'));
+
+        const publicRow = vi.mocked(deps.resultStore.checkpointPreliminaryScores)
+            .mock.calls[0]![0].rows[0]!;
+        const componentTotal = Object.values(publicRow.components)
+            .reduce((total, component) => total + component, 0);
+        expect(publicRow.preScore).toBe(componentTotal);
+        expect(memoryState.screening?.candidates[0]).toMatchObject({
+            hasWeakPartnerEvidence: true,
+            preScore: componentTotal,
+        });
+
+        const final = calculateV2FinalScores({
+            preliminary: memoryState.screening!.candidates,
+            observedReverseLikeCandidateIds: new Set(),
+        });
+        expect(final[0]!.risk).toMatchObject({
+            weakPartnerAdjustment: -5,
+            preScore: Math.max(0, componentTotal - 5),
+        });
+    });
+
     it('checkpoints every candidate publicly while keeping paid verification frozen to Top 10', async () => {
         const memoryState = memory();
         const women = Array.from({ length: 12 }, (_, index) => `woman.${index + 1}`);
