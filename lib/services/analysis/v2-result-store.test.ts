@@ -435,6 +435,24 @@ describe('analysis V2 result finalization and loading', () => {
         expect(JSON.stringify(first)).not.toContain('cdninstagram.com');
     });
 
+    it('normalizes a pre-migration summary while keeping the public contract complete', async () => {
+        const snapshot = rawSnapshot(2);
+        const { genderStats: _legacyMissingGenderStats, ...legacySummary } = snapshot.summary;
+        const fake = rpcClient({
+            data: { ...snapshot, summary: legacySummary },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client, {
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+        });
+
+        await expect(store.loadSnapshot({ requestId, userId })).resolves.toMatchObject({
+            summary: {
+                genderStats: { male: 0, female: 0, unknown: 2 },
+            },
+        });
+    });
+
     it('rejects unbounded or structurally invalid database snapshots', async () => {
         const invalid = { ...rawSnapshot(1), unexpected: true };
         const fake = rpcClient({ data: invalid, error: null });

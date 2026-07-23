@@ -644,11 +644,16 @@ const checkpointManifestSchema = z.object({
     }
 });
 
-const { targetProfileImage: summaryImageShape, ...summaryWithoutImageShape } =
+const {
+    targetProfileImage: summaryImageShape,
+    genderStats: summaryGenderStatsShape,
+    ...summaryWithoutImageAndGenderShape
+} =
     analysisResultSummaryV1Schema.shape;
 void summaryImageShape;
 const rawSummarySchema = z.object({
-    ...summaryWithoutImageShape,
+    ...summaryWithoutImageAndGenderShape,
+    genderStats: summaryGenderStatsShape.optional(),
     targetProfileImageUrl: rawImageUrlSchema,
 }).strict();
 const { profileImage: femaleImageShape, ...femaleWithoutImageShape } =
@@ -885,9 +890,14 @@ function publicSummary(
     signer: ImageProxySigner,
     requestId: string
 ): AnalysisResultSummaryV1 {
-    const { targetProfileImageUrl, ...summary } = value;
+    const { targetProfileImageUrl, genderStats, ...summary } = value;
     return analysisResultSummaryV1Schema.parse({
         ...summary,
+        genderStats: genderStats ?? {
+            male: 0,
+            female: 0,
+            unknown: summary.screenedMutuals,
+        },
         targetProfileImage: publicImagePath(targetProfileImageUrl, signer, {
             requestId,
             kind: 'target',
