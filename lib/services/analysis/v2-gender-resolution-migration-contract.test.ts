@@ -15,6 +15,13 @@ const provenanceMigration = readFileSync(
     ),
     'utf8'
 );
+const recoveryDeferMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260725020000_defer_analysis_v2_ai_result_recovery_pending.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(migration: string, name: string): string {
     const marker = new RegExp(
@@ -34,6 +41,33 @@ describe('gender resolution forward migration contract', () => {
             expect(migration).toContain("version = '20260724230000'");
             expect(migration).toContain('ANALYSIS_V2_GENDER_RESOLUTION_PREDECESSOR_MISSING');
         }
+        expect(recoveryDeferMigration).toContain(
+            'MIGRATION_PREDECESSOR=20260725013000'
+        );
+        expect(recoveryDeferMigration).toContain("version = '20260725013000'");
+        expect(recoveryDeferMigration).toContain(
+            'ANALYSIS_V2_AI_RECOVERY_DEFER_PREDECESSOR_MISSING'
+        );
+    });
+
+    it('defers resolver recovery without consuming the ordinary job attempt budget', () => {
+        const defer = functionDefinition(
+            recoveryDeferMigration,
+            'defer_analysis_v2_job_for_ai_capacity'
+        );
+        expect(defer).toContain("'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'");
+        expect(defer).toContain('attempt_count = job.attempt_count - 1');
+        expect(defer).toContain(
+            'ai_capacity_deferral_count = job.ai_capacity_deferral_count + 1'
+        );
+        expect(defer).toContain('lease_token = NULL');
+        expect(defer).toContain('lease_expires_at = NULL');
+        expect(recoveryDeferMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.defer_analysis_v2_job_for_ai_capacity\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(recoveryDeferMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.defer_analysis_v2_job_for_ai_capacity\([\s\S]*?TO service_role;/
+        );
     });
 
     it('adds resolver stage identity while keeping its cache request-scoped', () => {

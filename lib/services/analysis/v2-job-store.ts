@@ -112,7 +112,8 @@ export interface AnalysisV2JobReleaseResult {
 export type AnalysisV2AiAdmissionErrorCode =
     | 'ANALYSIS_V2_AI_CAPACITY_PENDING'
     | 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
-    | 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE';
+    | 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE'
+    | 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING';
 
 export interface AnalysisV2JobStore {
     reserveDispatch(input: AnalysisV2JobIdentity): Promise<AnalysisV2JobDispatchReservation>;
@@ -709,6 +710,7 @@ export function createSupabaseAnalysisV2JobStore(
                 'ANALYSIS_V2_AI_CAPACITY_PENDING',
                 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
                 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+                'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
             ].includes(errorCode)) {
                 throw new Error(
                     'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid AI capacity code.'

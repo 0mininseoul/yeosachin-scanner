@@ -9,6 +9,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const recoveryDeferMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260725020000_defer_analysis_v2_ai_result_recovery_pending.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const REQUEST = '123e4567-e89b-42d3-a456-426614174000';
 const CLAIM = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow
 
@@ -60,6 +67,10 @@ describe('deployment-wide Gemini lease migration', () => {
             CREATE ROLE anon NOLOGIN;
             CREATE ROLE authenticated NOLOGIN;
             CREATE ROLE service_role NOLOGIN;
+            CREATE SCHEMA supabase_migrations;
+            CREATE TABLE supabase_migrations.schema_migrations(version TEXT PRIMARY KEY);
+            INSERT INTO supabase_migrations.schema_migrations(version)
+            VALUES ('20260725013000');
             CREATE TABLE public.analysis_requests (
                 id UUID PRIMARY KEY,
                 pipeline_version TEXT NOT NULL,
@@ -84,6 +95,7 @@ describe('deployment-wide Gemini lease migration', () => {
             );
         `);
         await db.exec(migration);
+        await db.exec(recoveryDeferMigration);
     });
 
     beforeEach(async () => {
@@ -234,7 +246,10 @@ describe('deployment-wide Gemini lease migration', () => {
         });
     });
 
-    it('returns an AI capacity claim to pending without consuming an attempt', async () => {
+    it.each([
+        'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+    ])('returns %s to pending without consuming an attempt', async errorCode => {
         await db.query(
             `INSERT INTO public.analysis_requests(id, pipeline_version, status)
              VALUES ($1, 'v2', 'processing')`,
@@ -264,10 +279,9 @@ describe('deployment-wide Gemini lease migration', () => {
             ai_capacity_deferral_count: number;
         }>(
             `SELECT * FROM public.defer_analysis_v2_job_for_ai_capacity(
-                $1, 'track:profile-ai:batch:0', $2,
-                'ANALYSIS_V2_AI_CAPACITY_PENDING'
+                $1, 'track:profile-ai:batch:0', $2, $3
             )`,
-            [REQUEST, CLAIM]
+            [REQUEST, CLAIM, errorCode]
         )).rows[0];
         expect(deferred).toEqual({
             released: true,
