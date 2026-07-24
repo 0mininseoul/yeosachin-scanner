@@ -6,7 +6,13 @@ export const AI_STAGE_NAMES = [
     'privateAccountName',
 ] as const;
 
-export type AiStageName = typeof AI_STAGE_NAMES[number];
+export const AI_STAGE_NAMES_V27 = [
+    ...AI_STAGE_NAMES,
+    'genderResolution',
+] as const;
+
+export type LegacyAiStageName = typeof AI_STAGE_NAMES[number];
+export type AiStageName = typeof AI_STAGE_NAMES_V27[number];
 export type AiThinkingLevel = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type AiMediaResolution = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -23,6 +29,12 @@ export interface AiStagePolicy {
 }
 
 export const AI_STAGE_POLICY_VERSION = 'ai-stage-policy-v2.6';
+export const AI_STAGE_POLICY_LATEST_VERSION = 'ai-stage-policy-v2.7';
+export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
+    AI_STAGE_POLICY_VERSION,
+    AI_STAGE_POLICY_LATEST_VERSION,
+] as const);
+export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
 export const AI_SHARED_CONCURRENCY_LIMIT = 8;
 export const AI_GEMINI_LEASE_SECONDS = 240;
@@ -86,12 +98,79 @@ export const AI_STAGE_POLICIES = Object.freeze({
         promptVersion: 'private-account-name-v1',
         schemaVersion: 1,
     }),
+} satisfies Record<LegacyAiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V27 = Object.freeze({
+    ...AI_STAGE_POLICIES,
+    genderResolution: Object.freeze({
+        model: 'gemini-3-flash-preview',
+        thinkingLevel: 'LOW',
+        mediaResolution: 'MEDIUM',
+        profileImageLimit: 1,
+        feedImageLimit: 4,
+        maxOutputTokens: 512,
+        concurrency: 2,
+        promptVersion: 'gender-resolution-v1',
+        schemaVersion: 1,
+    }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
-export function getAiStagePolicy(stage: AiStageName): Readonly<AiStagePolicy> {
-    return AI_STAGE_POLICIES[stage];
+export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
+    [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
+    [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
+});
+
+export function assertSupportedAiStagePolicyVersion(
+    value: unknown,
+): AiStagePolicyVersion {
+    if (
+        typeof value !== 'string'
+        || !SUPPORTED_AI_STAGE_POLICY_VERSIONS.includes(value as AiStagePolicyVersion)
+    ) {
+        throw new Error(`Unsupported AI stage policy version: ${String(value)}`);
+    }
+    return value as AiStagePolicyVersion;
+}
+
+export function getAiStagePolicy(stage: LegacyAiStageName): Readonly<AiStagePolicy>;
+export function getAiStagePolicy(
+    version: AiStagePolicyVersion,
+    stage: AiStageName,
+): Readonly<AiStagePolicy>;
+export function getAiStagePolicy(
+    versionOrStage: AiStagePolicyVersion | LegacyAiStageName,
+    requestedStage?: AiStageName,
+): Readonly<AiStagePolicy> {
+    const version = requestedStage === undefined
+        ? AI_STAGE_POLICY_VERSION
+        : assertSupportedAiStagePolicyVersion(versionOrStage);
+    const stage = requestedStage ?? versionOrStage as LegacyAiStageName;
+    const policy = AI_STAGE_POLICY_REGISTRY[version][stage as LegacyAiStageName];
+    if (!policy) {
+        throw new Error(`Unsupported AI stage "${stage}" for policy version "${version}"`);
+    }
+    return policy;
 }
 
 export function isAiStageName(value: unknown): value is AiStageName {
-    return typeof value === 'string' && AI_STAGE_NAMES.includes(value as AiStageName);
+    return typeof value === 'string' && AI_STAGE_NAMES_V27.includes(value as AiStageName);
+}
+
+export type AiStagePolicyRolloutMode = 'off' | 'test_entitlement' | 'production';
+export type AiStagePolicyAccessMode = 'test_entitlement' | 'production';
+
+export function selectAiStagePolicyVersion({
+    rolloutMode,
+    accessMode,
+}: {
+    rolloutMode: string | undefined;
+    accessMode: AiStagePolicyAccessMode;
+}): AiStagePolicyVersion {
+    if (rolloutMode === 'production') {
+        return AI_STAGE_POLICY_LATEST_VERSION;
+    }
+    if (rolloutMode === 'test_entitlement' && accessMode === 'test_entitlement') {
+        return AI_STAGE_POLICY_LATEST_VERSION;
+    }
+    return AI_STAGE_POLICY_VERSION;
 }

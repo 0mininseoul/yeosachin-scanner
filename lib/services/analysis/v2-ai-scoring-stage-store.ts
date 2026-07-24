@@ -23,7 +23,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const CANDIDATE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
-const PROFILE_AI_OPERATION_KEY_PATTERN = /^(gender-triage|feature-analysis):[a-f0-9]{64}$/;
+const PROFILE_AI_OPERATION_KEY_PATTERN =
+    /^(gender-triage|gender-resolution|feature-analysis):[a-f0-9]{64}$/;
 const PARTNER_OPERATION_KEY_PATTERN = /^partner-safety:[a-f0-9]{64}$/;
 const NARRATIVE_OPERATION_KEY_PATTERN = /^high-risk-narrative:[a-f0-9]{64}$/;
 
@@ -52,6 +53,33 @@ const usernameSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9._]{1,30}$
 const hashSchema = z.string().regex(SHA256_PATTERN);
 const selectionIdSchema = z.string().trim().min(1).max(240);
 const profileAiOperationKeySchema = z.string().regex(PROFILE_AI_OPERATION_KEY_PATTERN);
+const resolverOperationKeySchema = profileAiOperationKeySchema.regex(/^gender-resolution:/);
+const profileClassificationSchema = z.enum([
+    'verified_female',
+    'verified_non_female',
+    'unresolved',
+    'unresolved_stage_conflict',
+    'fetch_unavailable',
+    'media_unavailable',
+    'analysis_unavailable',
+]);
+const classificationSourceSchema = z.enum([
+    'triage',
+    'feature',
+    'gender_resolution',
+    'unknown',
+    'unavailable',
+]);
+const genderResolutionStatusSchema = z.enum([
+    'disabled',
+    'not_eligible',
+    'ready_applied',
+    'ready_not_needed',
+    'ready_inconclusive',
+    'cutoff',
+    'capacity_skipped',
+    'terminal_unavailable',
+]);
 const appearanceGradeSchema = z.union([
     z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5),
 ]);
@@ -87,15 +115,7 @@ const captionSchema = z.object({
 const profileOutcomeSchema = z.object({
     candidateId: candidateIdSchema,
     instagramId: usernameSchema,
-    status: z.enum([
-        'verified_female',
-        'verified_non_female',
-        'unresolved',
-        'unresolved_stage_conflict',
-        'fetch_unavailable',
-        'media_unavailable',
-        'analysis_unavailable',
-    ]),
+    status: profileClassificationSchema,
     unavailableReason: z.enum(['profile_fetch', 'ai_response']).nullable().optional(),
     profile: analysisV2CheckpointProfileSchema.nullable(),
     triage: genderTriageResultSchema.nullable(),
@@ -107,6 +127,11 @@ const profileOutcomeSchema = z.object({
     genderResultHash: hashSchema.nullable(),
     featureOperationKey: profileAiOperationKeySchema.regex(/^feature-analysis:/).nullable(),
     featureResultHash: hashSchema.nullable(),
+    baselineClassification: profileClassificationSchema.optional(),
+    classificationSource: classificationSourceSchema.optional(),
+    genderResolutionStatus: genderResolutionStatusSchema.optional(),
+    genderResolutionOperationKey: resolverOperationKeySchema.nullable().optional(),
+    genderResolutionResultHash: hashSchema.nullable().optional(),
     mediaBundlePersisted: z.boolean(),
 }).strict().transform(value => ({
     ...value,
@@ -116,7 +141,57 @@ const profileOutcomeSchema = z.object({
             : value.status === 'analysis_unavailable'
                 ? 'ai_response' as const
                 : null),
+    baselineClassification: value.baselineClassification ?? value.status,
+    classificationSource: value.classificationSource ?? (
+        value.status === 'verified_non_female' && value.feature === null
+            ? 'triage' as const
+            : value.status === 'verified_female'
+                || value.status === 'verified_non_female'
+                ? 'feature' as const
+                : value.status === 'unresolved'
+                    || value.status === 'unresolved_stage_conflict'
+                    ? 'unknown' as const
+                    : 'unavailable' as const
+    ),
+    genderResolutionStatus: value.genderResolutionStatus ?? 'disabled' as const,
+    genderResolutionOperationKey: value.genderResolutionOperationKey ?? null,
+    genderResolutionResultHash: value.genderResolutionResultHash ?? null,
 })).superRefine((value, context) => {
+    const classificationChanged = value.status !== value.baselineClassification;
+    if (classificationChanged && (
+        !['unresolved', 'unresolved_stage_conflict'].includes(value.baselineClassification)
+        || !['verified_female', 'verified_non_female'].includes(value.status)
+        || value.classificationSource !== 'gender_resolution'
+        || value.genderResolutionStatus !== 'ready_applied'
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Gender resolution provenance does not justify the classification change.',
+        });
+    }
+    const readyResolver = [
+        'ready_applied',
+        'ready_not_needed',
+        'ready_inconclusive',
+    ].includes(value.genderResolutionStatus);
+    if (readyResolver !== (
+        value.genderResolutionOperationKey !== null
+        && value.genderResolutionResultHash !== null
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Ready gender resolution provenance is incomplete.',
+        });
+    }
+    if (
+        value.classificationSource === 'gender_resolution'
+        && value.genderResolutionStatus !== 'ready_applied'
+    ) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Gender resolution source requires an applied ready result.',
+        });
+    }
     const fetchUnavailable = value.status === 'fetch_unavailable';
     if (fetchUnavailable !== (value.unavailableReason === 'profile_fetch')) {
         context.addIssue({ code: 'custom', message: 'Profile unavailable reason mismatch.' });

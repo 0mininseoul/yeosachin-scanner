@@ -233,6 +233,7 @@ export const OPERATIONAL_OPERATIONS = [
     'enqueue',
     'worker',
     'genderTriage',
+    'genderResolution',
     'featureAnalysis',
     'partnerSafety',
     'highRiskNarrative',

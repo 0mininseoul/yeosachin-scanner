@@ -6,6 +6,7 @@ const leaseMocks = vi.hoisted(() => ({
     acquire: vi.fn(),
     renew: vi.fn(),
     release: vi.fn(),
+    cutoff: vi.fn(),
 }));
 
 vi.mock('@/lib/observability/server', () => ({
@@ -26,6 +27,7 @@ beforeEach(() => {
     });
     leaseMocks.renew.mockReset();
     leaseMocks.release.mockReset().mockResolvedValue(undefined);
+    leaseMocks.cutoff.mockReset().mockResolvedValue(undefined);
 });
 
 import {
@@ -1169,5 +1171,88 @@ describe('analysis V2 Gemini audit adapter', () => {
             attemptTelemetry(),
             { value: 'female', confidence: 0.9 }
         )).resolves.toBeUndefined();
+    });
+
+    it('durably cuts off a pending resolver and fences its late success checkpoint', async () => {
+        const resolverIdentity = identity({
+            stage: 'genderResolution',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+            cacheScope: 'request',
+        });
+        const reserve = vi.fn().mockResolvedValue(reservation({
+            operationKey: resolverIdentity.operationKey,
+            stage: 'genderResolution',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+        }));
+        const terminalize = vi.fn().mockResolvedValue({});
+        const terminalizeSuccess = vi.fn();
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7',
+            resultIdentity: resolverIdentity,
+            resultSchema,
+            attemptStore: {
+                reserve,
+                terminalize,
+                loadOperation: vi.fn().mockResolvedValue([]),
+            },
+            resultStore: {
+                terminalizeSuccess,
+                checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+                loadRequest: vi.fn().mockResolvedValue(null),
+            } as unknown as AnalysisV2AiResultStore,
+        });
+        const resolverStart = startTelemetry({
+            modelName: 'gemini-3-flash-preview',
+            stage: 'genderResolution',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+        });
+        const lateSuccess = attemptTelemetry({
+            modelName: 'gemini-3-flash-preview',
+            stage: 'genderResolution',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+        });
+
+        await adapter.prepare();
+        await adapter.onBeforeAttempt(resolverStart);
+        await adapter.cutoff?.();
+        await adapter.onAttemptTelemetry(
+            lateSuccess,
+            { value: 'female', confidence: 0.9 }
+        );
+
+        expect(terminalize).toHaveBeenCalledOnce();
+        expect(terminalize).toHaveBeenCalledWith(expect.objectContaining({
+            operationKey: resolverIdentity.operationKey,
+            status: 'cutoff',
+            usageMetadataStatus: 'missing',
+            usageComplete: false,
+            tokenUsage: null,
+            estimatedCostUsd: null,
+            finishReason: null,
+        }));
+        expect(leaseMocks.cutoff).toHaveBeenCalledOnce();
+        expect(terminalizeSuccess).not.toHaveBeenCalled();
+        expect(leaseMocks.release).toHaveBeenCalledOnce();
     });
 });

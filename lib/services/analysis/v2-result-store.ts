@@ -30,7 +30,7 @@ const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const CANDIDATE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
-const AI_OPERATION_KEY_PATTERN = /^(gender-triage|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
+const AI_OPERATION_KEY_PATTERN = /^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
 
 export const ANALYSIS_V2_RESULT_DATABASE_NAMES = Object.freeze({
     featureManifestTable: 'analysis_v2_candidate_feature_manifests',
@@ -166,6 +166,13 @@ export interface AnalysisV2ProfileClassificationRow {
     genderResultHash: string | null;
     featureOperationKey: string | null;
     featureResultHash: string | null;
+    baselineClassification?: string;
+    classificationSource?: 'triage' | 'feature' | 'gender_resolution' | 'unknown' | 'unavailable';
+    genderResolutionStatus?: 'disabled' | 'not_eligible' | 'ready_applied'
+        | 'ready_not_needed' | 'ready_inconclusive' | 'cutoff'
+        | 'capacity_skipped' | 'terminal_unavailable';
+    genderResolutionOperationKey?: string | null;
+    genderResolutionResultHash?: string | null;
     feature: AnalysisV2VerifiedFemaleFeatureData | null;
 }
 
@@ -417,6 +424,21 @@ const featureRowSchema = z.object({
     genderResultHash: hashSchema.nullable(),
     featureOperationKey: operationKeySchema.regex(/^feature-analysis:/).nullable(),
     featureResultHash: hashSchema.nullable(),
+    baselineClassification: z.enum([
+        'verified_female', 'verified_non_female', 'unresolved',
+        'unresolved_stage_conflict', 'fetch_unavailable',
+        'media_unavailable', 'analysis_unavailable',
+    ]).optional(),
+    classificationSource: z.enum([
+        'triage', 'feature', 'gender_resolution', 'unknown', 'unavailable',
+    ]).optional(),
+    genderResolutionStatus: z.enum([
+        'disabled', 'not_eligible', 'ready_applied', 'ready_not_needed',
+        'ready_inconclusive', 'cutoff', 'capacity_skipped', 'terminal_unavailable',
+    ]).optional(),
+    genderResolutionOperationKey:
+        operationKeySchema.regex(/^gender-resolution:/).nullable().optional(),
+    genderResolutionResultHash: hashSchema.nullable().optional(),
     feature: verifiedFemaleFeatureDataSchema.nullable(),
 }).strict().superRefine((value, context) => {
     const genderPair = value.genderOperationKey !== null && value.genderResultHash !== null;
@@ -426,6 +448,12 @@ const featureRowSchema = z.object({
     }
     if ((value.featureOperationKey === null) !== (value.featureResultHash === null)) {
         context.addIssue({ code: 'custom', message: 'Feature operation/result must be paired.' });
+    }
+    if (
+        (value.genderResolutionOperationKey ?? null) === null
+        !== ((value.genderResolutionResultHash ?? null) === null)
+    ) {
+        context.addIssue({ code: 'custom', message: 'Resolver operation/result must be paired.' });
     }
     if (value.classification === 'unavailable' || value.classification === 'media_unavailable') {
         if (value.mediaContext || genderPair || featurePair || value.feature) {
@@ -660,8 +688,25 @@ void summaryImageShape;
 const rawSummarySchema = z.object({
     ...summaryWithoutImageAndGenderShape,
     genderStats: summaryGenderStatsShape.optional(),
+    successfullyScreenedMutuals: z.number().int().nonnegative(),
+    fetchUnavailableMutuals: z.number().int().nonnegative(),
+    mediaUnavailableMutuals: z.number().int().nonnegative(),
+    analysisUnavailableMutuals: z.number().int().nonnegative().default(0),
     targetProfileImageUrl: rawImageUrlSchema,
-}).strict();
+}).strict().superRefine((value, context) => {
+    if (
+        value.successfullyScreenedMutuals
+            + value.fetchUnavailableMutuals
+            + value.mediaUnavailableMutuals
+            + value.analysisUnavailableMutuals
+        !== value.screenedMutuals
+    ) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Internal screening outcomes must equal the selected scope.',
+        });
+    }
+});
 const { profileImage: femaleImageShape, ...femaleWithoutImageShape } =
     femaleResultRowV1Schema.shape;
 void femaleImageShape;
@@ -898,7 +943,19 @@ function publicSummary(
     signer: ImageProxySigner,
     requestId: string
 ): AnalysisResultSummaryV1 {
-    const { targetProfileImageUrl, genderStats, ...summary } = value;
+    const {
+        targetProfileImageUrl,
+        genderStats,
+        ...summary
+    } = value;
+    for (const internalField of [
+        'successfullyScreenedMutuals',
+        'fetchUnavailableMutuals',
+        'mediaUnavailableMutuals',
+        'analysisUnavailableMutuals',
+    ] as const) {
+        Reflect.deleteProperty(summary, internalField);
+    }
     return analysisResultSummaryV1Schema.parse({
         ...summary,
         genderStats: genderStats ?? {

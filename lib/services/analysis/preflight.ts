@@ -32,7 +32,7 @@ import {
 } from '@/lib/domain/earlybird/catalog';
 import { CURRENT_ANALYSIS_PIPELINE_VERSION } from '@/lib/domain/analysis/pipeline-version';
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
-import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
+import { selectAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
     analysisTestEntitlementsEnabled,
     assertAnalysisTestEntitlementConfiguration,
@@ -79,11 +79,16 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     exclusionRpc: 'set_analysis_v2_preflight_exclusion',
 });
 
-const PREFLIGHT_POLICY_VERSIONS = Object.freeze({
-    pipeline: CURRENT_ANALYSIS_PIPELINE_VERSION,
-    risk: RISK_POLICY_VERSION,
-    aiStage: AI_STAGE_POLICY_VERSION,
-});
+function preflightPolicyVersions(accessMode: PlanAccessMode) {
+    return Object.freeze({
+        pipeline: CURRENT_ANALYSIS_PIPELINE_VERSION,
+        risk: RISK_POLICY_VERSION,
+        aiStage: selectAiStagePolicyVersion({
+            rolloutMode: process.env.ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT,
+            accessMode,
+        }),
+    });
+}
 
 export type PreflightAuthProvider = 'google' | 'kakao';
 export type ExclusionDecision = 'exclude' | 'skip';
@@ -643,7 +648,7 @@ export function createSupabasePreflightStore(
                 p_plan_catalog_snapshot: planCatalogSnapshot(),
                 p_pricing_version: PLAN_PRICING_VERSION,
                 p_pricing_snapshot: pricingSnapshot(),
-                p_policy_versions_snapshot: PREFLIGHT_POLICY_VERSIONS,
+                p_policy_versions_snapshot: preflightPolicyVersions(input.accessMode),
             });
             if (error) throwRpcError(error, 'create');
             const row = rpcRow(data, 'create');

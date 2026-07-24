@@ -48,7 +48,7 @@ import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
 import { analysisV2ResultStore } from './v2-result-store';
-import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
+import { assertSupportedAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
     analysisV2AiPolicyStore,
     type AnalysisV2AiPolicyStore,
@@ -535,7 +535,9 @@ export async function executeAnalysisV2DagJob(
     let aiStagePolicyVersion: string | null = null;
     if (AI_PROVIDER_STAGES.has(current.stage)) {
         aiStagePolicyVersion = await aiPolicyStore.loadAiStagePolicyVersion(claim.requestId);
-        if (aiStagePolicyVersion !== AI_STAGE_POLICY_VERSION) {
+        try {
+            assertSupportedAiStagePolicyVersion(aiStagePolicyVersion);
+        } catch {
             executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
         }
     }
