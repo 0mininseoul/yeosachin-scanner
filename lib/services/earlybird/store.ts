@@ -9,6 +9,37 @@ const checkoutResultSchema = z.array(z.object({
 const sellerReferenceResultSchema = z.string()
     .regex(/^ord\.[a-f0-9]{32}$/);
 
+const checkoutRecoveryRowSchema = z.object({
+    id: z.string().uuid(),
+    user_id: z.string().uuid(),
+    preflight_id: z.string().uuid(),
+    plan_id: z.enum(['basic', 'standard']),
+    pricing_version: z.string().min(1).max(64),
+    expected_amount_krw: z.number().int().positive(),
+    expected_groble_product_id: z.string().min(1).max(128),
+    buyer_match_policy: z.string().min(1).max(64),
+    expected_buyer_phone_number_normalized: z.string().min(1).max(32).nullable(),
+    expected_buyer_phone_verification_source: z.string().min(1).max(64).nullable(),
+    disclosure_version: z.string().min(1).max(64),
+    disclosure_text: z.string().min(1).max(1_000),
+    disclosure_accepted_at: z.string().datetime({ offset: true }),
+    groble_seller_reference: sellerReferenceResultSchema.nullable(),
+    status: z.enum([
+        'payment_pending',
+        'payment_failed',
+        'paid',
+        'analysis_in_progress',
+        'completed',
+        'overflow_refund_required',
+        'cancelled',
+        'refund_pending',
+        'refunded',
+    ]),
+    payment_id: z.string().nullable(),
+    actual_amount_krw: z.number().int().nonnegative().nullable(),
+    paid_at: z.string().datetime({ offset: true }).nullable(),
+});
+
 const waitlistResultSchema = z.array(z.object({
     waitlist_id: z.string().uuid(),
     created: z.boolean(),
@@ -97,6 +128,54 @@ export const earlybirdStore = {
             orderId: parsed.data[0].order_id,
             created: parsed.data[0].created,
             sellerReference: sellerReference.data,
+        });
+    },
+
+    async findCheckoutForRecovery(userId: string, preflightId: string) {
+        const { data, error } = await supabaseAdmin
+            .from('earlybird_orders')
+            .select(
+                'id, user_id, preflight_id, plan_id, pricing_version, '
+                + 'expected_amount_krw, expected_groble_product_id, '
+                + 'buyer_match_policy, expected_buyer_phone_number_normalized, '
+                + 'expected_buyer_phone_verification_source, disclosure_version, '
+                + 'disclosure_text, disclosure_accepted_at, groble_seller_reference, '
+                + 'status, payment_id, actual_amount_krw, paid_at'
+            )
+            .eq('preflight_id', preflightId)
+            .eq('user_id', userId)
+            .maybeSingle();
+        if (error) {
+            throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+        }
+        if (!data) return null;
+        const parsed = checkoutRecoveryRowSchema.safeParse(data);
+        if (!parsed.success
+            || parsed.data.user_id !== userId
+            || parsed.data.preflight_id !== preflightId) {
+            throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+        }
+        return Object.freeze({
+            orderId: parsed.data.id,
+            userId: parsed.data.user_id,
+            preflightId: parsed.data.preflight_id,
+            planId: parsed.data.plan_id,
+            pricingVersion: parsed.data.pricing_version,
+            expectedAmountKrw: parsed.data.expected_amount_krw,
+            expectedProductId: parsed.data.expected_groble_product_id,
+            buyerMatchPolicy: parsed.data.buyer_match_policy,
+            expectedBuyerPhoneNumberNormalized:
+                parsed.data.expected_buyer_phone_number_normalized,
+            expectedBuyerPhoneVerificationSource:
+                parsed.data.expected_buyer_phone_verification_source,
+            disclosureVersion: parsed.data.disclosure_version,
+            disclosureText: parsed.data.disclosure_text,
+            disclosureAcceptedAt: parsed.data.disclosure_accepted_at,
+            sellerReference: parsed.data.groble_seller_reference,
+            status: parsed.data.status,
+            paymentId: parsed.data.payment_id,
+            actualAmountKrw: parsed.data.actual_amount_krw,
+            paidAt: parsed.data.paid_at,
         });
     },
 

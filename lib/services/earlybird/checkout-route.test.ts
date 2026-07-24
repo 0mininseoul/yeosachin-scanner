@@ -40,9 +40,10 @@ vi.mock('@/lib/services/analysis/preflight', () => ({
     preflightStore: { findForOwner: mocks.findForOwner },
 }));
 
-import { POST as checkout } from '@/app/api/earlybird/checkout/route';
+import * as checkoutRoute from '@/app/api/earlybird/checkout/route';
 import { POST as waitlist } from '@/app/api/earlybird/waitlist/route';
 
+const checkout = checkoutRoute.POST;
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174001';
 const ORDER_ID = '123e4567-e89b-42d3-a456-426614174002';
@@ -58,6 +59,64 @@ function request(path: string, body: unknown, origin = 'https://example.com'): R
         },
         body: JSON.stringify(body),
     });
+}
+
+async function recoverCheckout(body: unknown, origin = 'https://example.com'): Promise<Response> {
+    const handler = (
+        checkoutRoute as unknown as {
+            PUT?: (request: Request) => Promise<Response>;
+        }
+    ).PUT;
+    expect(handler).toBeTypeOf('function');
+    return handler!(new Request('https://example.com/api/earlybird/checkout', {
+        method: 'PUT',
+        headers: {
+            'content-type': 'application/json',
+            origin,
+        },
+        body: JSON.stringify(body),
+    }));
+}
+
+function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
+    return {
+        id: ORDER_ID,
+        user_id: USER_ID,
+        preflight_id: PREFLIGHT_ID,
+        plan_id: 'basic',
+        pricing_version: 'earlybird-2026-07-v1',
+        expected_amount_krw: 14_900,
+        expected_groble_product_id: 'basic_product-01',
+        buyer_match_policy: 'verified_kakao_phone',
+        expected_buyer_phone_number_normalized: '+821012345678',
+        expected_buyer_phone_verification_source: 'kakao_rest_api',
+        disclosure_version: 'earlybird-24h-v1',
+        disclosure_text:
+            '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.',
+        disclosure_accepted_at: '2026-07-24T12:00:00.000Z',
+        groble_seller_reference: SELLER_REFERENCE,
+        status: 'payment_pending',
+        payment_id: null,
+        actual_amount_krw: null,
+        paid_at: null,
+        ...overrides,
+    };
+}
+
+function installRecoveryOrder(order: unknown): ReturnType<typeof vi.fn> {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: order, error: null });
+    const query = {
+        select: vi.fn(),
+        eq: vi.fn(),
+        maybeSingle,
+    };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    mocks.from.mockImplementation((table: string) => {
+        if (table !== 'earlybird_orders') throw new Error(`unexpected table: ${table}`);
+        return query;
+    });
+    return query.eq;
 }
 
 function authenticate(userId: string | null = USER_ID): void {
@@ -267,6 +326,89 @@ describe('earlybird checkout and waitlist routes', () => {
             entry as { event?: string }).event === 'earlybird.checkout_created'
         )).toHaveLength(1);
         expect(mocks.flush).toHaveBeenCalledOnce();
+    });
+
+    it('recovers the same owner-scoped pending v1 checkout without trusting client commerce fields', async () => {
+        const ownerFilter = installRecoveryOrder(recoveryOrderRow());
+        const response = await recoverCheckout({
+            preflightId: PREFLIGHT_ID,
+        });
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            orderId: ORDER_ID,
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+                + `?ref=${SELLER_REFERENCE}`,
+        });
+        expect(mocks.from).toHaveBeenCalledWith('earlybird_orders');
+        expect(ownerFilter).toHaveBeenCalledWith('preflight_id', PREFLIGHT_ID);
+        expect(ownerFilter).toHaveBeenCalledWith('user_id', USER_ID);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+
+        mocks.from.mockClear();
+        const hostile = await recoverCheckout({
+            preflightId: PREFLIGHT_ID,
+            planId: 'standard',
+            amountKrw: 1,
+            productId: 'attacker-product',
+            checkoutUrl: 'https://attacker.example',
+        });
+        expect(hostile.status).toBe(400);
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('requires authentication and same-origin JSON for checkout recovery', async () => {
+        authenticate(null);
+        expect((await recoverCheckout({ preflightId: PREFLIGHT_ID })).status).toBe(401);
+        expect(mocks.from).not.toHaveBeenCalled();
+
+        authenticate();
+        expect((await recoverCheckout(
+            { preflightId: PREFLIGHT_ID },
+            'https://attacker.example'
+        )).status).toBe(403);
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('does not expose another owner order and never recovers paid or cancelled checkout state', async () => {
+        installRecoveryOrder(null);
+        const hidden = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+        expect(hidden.status).toBe(404);
+        await expect(hidden.json()).resolves.toEqual({
+            code: 'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND',
+            error: '복구할 결제창이 없습니다.',
+        });
+
+        for (const status of ['paid', 'cancelled'] as const) {
+            installRecoveryOrder(recoveryOrderRow({ status }));
+            const conflict = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+            expect(conflict.status).toBe(409);
+            const body = await conflict.json();
+            expect(body).toEqual({
+                code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+                error: '이 주문의 결제창을 다시 열 수 없습니다.',
+            });
+            expect(JSON.stringify(body)).not.toContain(SELLER_REFERENCE);
+        }
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('rejects a pending row whose immutable product or disclosure snapshot is inconsistent', async () => {
+        for (const overrides of [
+            { expected_groble_product_id: 'attacker-product' },
+            { expected_amount_krw: 1 },
+            { disclosure_text: 'different disclosure' },
+            { groble_seller_reference: null },
+        ]) {
+            installRecoveryOrder(recoveryOrderRow(overrides));
+            const response = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+            expect(response.status).toBe(409);
+            await expect(response.json()).resolves.toEqual({
+                code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+                error: '이 주문의 결제창을 다시 열 수 없습니다.',
+            });
+        }
+        expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
     it('preserves a newly-created checkout when background registration throws', async () => {

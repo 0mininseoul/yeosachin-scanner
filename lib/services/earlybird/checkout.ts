@@ -24,6 +24,37 @@ export class EarlybirdSoldOutError extends Error {
     }
 }
 
+export class EarlybirdCheckoutRecoveryError extends Error {
+    readonly code:
+        | 'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND'
+        | 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE';
+
+    constructor(code: EarlybirdCheckoutRecoveryError['code']) {
+        super(code);
+        this.name = 'EarlybirdCheckoutRecoveryError';
+        this.code = code;
+    }
+}
+
+const LEGACY_EARLYBIRD_PRICING_VERSION = 'earlybird-2026-07-v1';
+const LEGACY_EARLYBIRD_AMOUNTS = Object.freeze({
+    basic: 14_900,
+    standard: 19_900,
+});
+
+function recoverableAmount(
+    pricingVersion: string,
+    planId: 'basic' | 'standard'
+): number | null {
+    if (pricingVersion === LEGACY_EARLYBIRD_PRICING_VERSION) {
+        return LEGACY_EARLYBIRD_AMOUNTS[planId];
+    }
+    if (pricingVersion === EARLYBIRD_PRICING_VERSION) {
+        return EARLYBIRD_PLAN_CATALOG[planId].earlybirdAmountKrw;
+    }
+    return null;
+}
+
 export async function createEarlybirdCheckout(input: {
     userId: string;
     preflightId: string;
@@ -54,6 +85,59 @@ export async function createEarlybirdCheckout(input: {
         created: record.created,
         checkoutUrl: getGrobleCheckoutUrl(
             input.planId,
+            record.sellerReference,
+            config
+        ),
+    });
+}
+
+export async function recoverEarlybirdCheckout(input: {
+    userId: string;
+    preflightId: string;
+}) {
+    const record = await earlybirdStore.findCheckoutForRecovery(
+        input.userId,
+        input.preflightId
+    );
+    if (!record) {
+        throw new EarlybirdCheckoutRecoveryError(
+            'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND'
+        );
+    }
+    if (record.status !== 'payment_pending') {
+        throw new EarlybirdCheckoutRecoveryError(
+            'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
+        );
+    }
+
+    const config = readGrobleConfig();
+    const amountKrw = recoverableAmount(record.pricingVersion, record.planId);
+    if (
+        amountKrw === null
+        || record.expectedAmountKrw !== amountKrw
+        || record.expectedProductId !== config.productIds[record.planId]
+        || record.buyerMatchPolicy !== 'verified_kakao_phone'
+        || !record.expectedBuyerPhoneNumberNormalized
+        || record.expectedBuyerPhoneVerificationSource !== 'kakao_rest_api'
+        || record.disclosureVersion !== EARLYBIRD_DISCLOSURE_VERSION
+        || record.disclosureText !== EARLYBIRD_DISCLOSURE_TEXT
+        || !record.disclosureAcceptedAt
+        || !record.sellerReference
+        || record.paymentId !== null
+        || record.actualAmountKrw !== null
+        || record.paidAt !== null
+    ) {
+        throw new EarlybirdCheckoutRecoveryError(
+            'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
+        );
+    }
+
+    return Object.freeze({
+        orderId: record.orderId,
+        planId: record.planId,
+        expectedAmountKrw: record.expectedAmountKrw,
+        checkoutUrl: getGrobleCheckoutUrl(
+            record.planId,
             record.sellerReference,
             config
         ),

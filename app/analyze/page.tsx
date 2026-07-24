@@ -11,7 +11,6 @@ import {
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
 import {
-    applyEarlybirdPricingRefreshBoundary,
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
     emitCurrentEarlybirdPricingEvent,
@@ -19,6 +18,7 @@ import {
     isEarlybirdPlanSoldOut,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
+    recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
 import {
@@ -119,16 +119,20 @@ export default function AnalyzePage() {
             || stalePricingRefreshHandledRef.current === stalePricingPreflightId
         ) return;
         stalePricingRefreshHandledRef.current = stalePricingPreflightId;
-        applyEarlybirdPricingRefreshBoundary(stalePricingPreflightId, {
-            reset,
-            clearGirlfriendInstagramId: () => setGirlfriendInstagramId(''),
-            clearSelectedPlan: () => setSelectedPlan(null),
-            clearDisclosureAccepted: () => setDisclosureAccepted(false),
-            clearWaitlistComplete: () => setWaitlistComplete(false),
-            replaceAnalyzeRoute: () => router.replace('/analyze'),
-            showRefreshError: () => setError(
-                '가격이 변경되어 대상 계정을 다시 확인해주세요.'
-            ),
+        void recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId, {
+            request: fetch,
+            redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl),
+            refreshActions: {
+                reset,
+                clearGirlfriendInstagramId: () => setGirlfriendInstagramId(''),
+                clearSelectedPlan: () => setSelectedPlan(null),
+                clearDisclosureAccepted: () => setDisclosureAccepted(false),
+                clearWaitlistComplete: () => setWaitlistComplete(false),
+                replaceAnalyzeRoute: () => router.replace('/analyze'),
+                showRefreshError: () => setError(
+                    '가격이 변경되어 대상 계정을 다시 확인해주세요.'
+                ),
+            },
         });
     }, [reset, router, setError, stalePricingPreflightId]);
 

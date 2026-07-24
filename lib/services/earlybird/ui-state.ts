@@ -32,6 +32,15 @@ export interface EarlybirdPricingRefreshActions {
     showRefreshError: () => void;
 }
 
+interface StaleEarlybirdRecoveryDependencies {
+    request: (
+        input: RequestInfo | URL,
+        init?: RequestInit
+    ) => Promise<Response>;
+    redirectCheckout: (checkoutUrl: string) => void;
+    refreshActions: EarlybirdPricingRefreshActions;
+}
+
 interface PlanCardAvailability {
     planId: PlanId;
     selectionState: 'required' | 'available_upgrade' | 'unavailable';
@@ -72,6 +81,40 @@ export function applyEarlybirdPricingRefreshBoundary(
     actions.replaceAnalyzeRoute();
     actions.showRefreshError();
     return true;
+}
+
+export async function recoverOrRefreshStaleEarlybirdPricing(
+    stalePricingPreflightId: string,
+    dependencies: StaleEarlybirdRecoveryDependencies
+): Promise<'checkout_recovered' | 'pricing_refresh_required'> {
+    try {
+        const response = await dependencies.request('/api/earlybird/checkout', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ preflightId: stalePricingPreflightId }),
+        });
+        const payload: unknown = await response.json().catch(() => null);
+        if (
+            response.ok
+            && payload
+            && typeof payload === 'object'
+            && 'checkoutUrl' in payload
+            && typeof payload.checkoutUrl === 'string'
+            && isSafeGrobleCheckoutUrl(payload.checkoutUrl)
+        ) {
+            dependencies.redirectCheckout(payload.checkoutUrl);
+            return 'checkout_recovered';
+        }
+    } catch {
+        // A stale quote must fall back to the bounded reset path when recovery
+        // is unavailable; it must never render or submit the stale snapshot.
+    }
+
+    applyEarlybirdPricingRefreshBoundary(
+        stalePricingPreflightId,
+        dependencies.refreshActions
+    );
+    return 'pricing_refresh_required';
 }
 
 export function emitCurrentEarlybirdPricingEvent(

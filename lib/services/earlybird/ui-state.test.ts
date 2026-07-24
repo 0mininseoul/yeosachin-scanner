@@ -12,6 +12,7 @@ import {
     resolveAvailableEarlybirdPlan,
     resolveEarlybirdPricingBoundary,
 } from './ui-state';
+import * as earlybirdUiState from './ui-state';
 import { EARLYBIRD_DISCLOSURE_TEXT } from '@/lib/domain/earlybird/catalog';
 import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
 import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
@@ -265,7 +266,7 @@ describe('earlybird analyze UI state', () => {
         );
     });
 
-    it('resets and reroutes a stale v1 preflight before exposing a ready plan snapshot', () => {
+    it('resets and reroutes stale v1 fallback before exposing a ready plan snapshot', () => {
         const stale = readyPreflight('earlybird-2026-07-v1', 14_900, 19_900);
         expect(resolveEarlybirdPricingBoundary(stale)).toEqual({
             readyPreflight: null,
@@ -286,6 +287,103 @@ describe('earlybird analyze UI state', () => {
             actions
         )).toBe(true);
         for (const action of Object.values(actions)) {
+            expect(action).toHaveBeenCalledTimes(1);
+        }
+    });
+
+    it('recovers a safe owner checkout for stale v1 without reset or pricing analytics', async () => {
+        const recover = (
+            earlybirdUiState as unknown as {
+                recoverOrRefreshStaleEarlybirdPricing?: (
+                    preflightId: string,
+                    dependencies: Record<string, unknown>
+                ) => Promise<string>;
+            }
+        ).recoverOrRefreshStaleEarlybirdPricing;
+        expect(recover).toBeTypeOf('function');
+
+        const stale = readyPreflight('earlybird-2026-07-v1', 14_900, 19_900);
+        const emit = vi.fn();
+        for (const event of [
+            'plan_viewed',
+            'plan_selected',
+            'checkout_started',
+        ] as const) {
+            emitCurrentEarlybirdPricingEvent(event, stale, 'basic', emit);
+        }
+        const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+            orderId: '20000000-0000-4000-8000-000000000001',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+                + '?ref=ord.0123456789abcdef0123456789abcdef',
+        }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        }));
+        const redirectCheckout = vi.fn();
+        const refreshActions = {
+            reset: vi.fn(),
+            clearGirlfriendInstagramId: vi.fn(),
+            clearSelectedPlan: vi.fn(),
+            clearDisclosureAccepted: vi.fn(),
+            clearWaitlistComplete: vi.fn(),
+            replaceAnalyzeRoute: vi.fn(),
+            showRefreshError: vi.fn(),
+        };
+
+        await expect(recover!(stale.preflightId, {
+            request,
+            redirectCheckout,
+            refreshActions,
+        })).resolves.toBe('checkout_recovered');
+        expect(request).toHaveBeenCalledWith('/api/earlybird/checkout', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ preflightId: stale.preflightId }),
+        });
+        expect(redirectCheckout).toHaveBeenCalledWith(
+            'https://groble.im/payment/basic-checkout-a1'
+                + '?ref=ord.0123456789abcdef0123456789abcdef'
+        );
+        expect(emit).not.toHaveBeenCalled();
+        for (const action of Object.values(refreshActions)) {
+            expect(action).not.toHaveBeenCalled();
+        }
+    });
+
+    it('resets, reroutes, and shows the refresh error when stale v1 has no pending checkout', async () => {
+        const recover = (
+            earlybirdUiState as unknown as {
+                recoverOrRefreshStaleEarlybirdPricing: (
+                    preflightId: string,
+                    dependencies: Record<string, unknown>
+                ) => Promise<string>;
+            }
+        ).recoverOrRefreshStaleEarlybirdPricing;
+        const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+            code: 'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND',
+            error: '복구할 결제창이 없습니다.',
+        }), {
+            status: 404,
+            headers: { 'content-type': 'application/json' },
+        }));
+        const redirectCheckout = vi.fn();
+        const refreshActions = {
+            reset: vi.fn(),
+            clearGirlfriendInstagramId: vi.fn(),
+            clearSelectedPlan: vi.fn(),
+            clearDisclosureAccepted: vi.fn(),
+            clearWaitlistComplete: vi.fn(),
+            replaceAnalyzeRoute: vi.fn(),
+            showRefreshError: vi.fn(),
+        };
+
+        await expect(recover('10000000-0000-4000-8000-000000000001', {
+            request,
+            redirectCheckout,
+            refreshActions,
+        })).resolves.toBe('pricing_refresh_required');
+        expect(redirectCheckout).not.toHaveBeenCalled();
+        for (const action of Object.values(refreshActions)) {
             expect(action).toHaveBeenCalledTimes(1);
         }
     });
@@ -342,5 +440,11 @@ describe('earlybird analyze UI state', () => {
         expect(planViewIndex).toBeGreaterThan(boundaryIndex);
         expect(source).toContain('emitCurrentEarlybirdPricingEvent(');
         expect(source).toContain('stalePricingPreflightId');
+        expect(source).toContain(
+            'recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId'
+        );
+        expect(source).toContain(
+            'redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl)'
+        );
     });
 });
