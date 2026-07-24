@@ -11,6 +11,7 @@ import {
     EarlybirdCheckoutRecoveryError,
     EarlybirdSoldOutError,
     EarlybirdWaitlistRequiredError,
+    loadCurrentEarlybirdCheckoutPhone,
     recoverEarlybirdCheckout,
 } from '@/lib/services/earlybird/checkout';
 import { EarlybirdPersistenceError } from '@/lib/services/earlybird/store';
@@ -298,9 +299,11 @@ async function handlePUT(request: Request): Promise<NextResponse> {
     }
 
     try {
+        const currentPhone = await loadCurrentEarlybirdCheckoutPhone(user.id);
         const result = await recoverEarlybirdCheckout({
             userId: user.id,
             preflightId: parsed.data.preflightId,
+            currentPhone,
         });
         return NextResponse.json({
             orderId: result.orderId,
@@ -316,6 +319,9 @@ async function handlePUT(request: Request): Promise<NextResponse> {
                 error.code,
                 '이 주문의 결제창을 다시 열 수 없습니다.'
             );
+        }
+        if (error instanceof EarlybirdPersistenceError) {
+            return persistenceErrorResponse(error);
         }
         return errorResponse(
             503,

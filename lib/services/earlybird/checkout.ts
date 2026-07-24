@@ -7,8 +7,12 @@ import {
 } from '@/lib/domain/earlybird/catalog';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
+import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import { fetchEarlybirdRemainingSlots } from './inventory';
-import { earlybirdStore } from './store';
+import {
+    earlybirdStore,
+    EarlybirdPersistenceError,
+} from './store';
 
 export class EarlybirdWaitlistRequiredError extends Error {
     constructor() {
@@ -55,6 +59,38 @@ function recoverableAmount(
     return null;
 }
 
+export interface CurrentEarlybirdCheckoutPhone {
+    normalizedPhone: string;
+    verificationSource: 'kakao_rest_api';
+}
+
+export async function loadCurrentEarlybirdCheckoutPhone(
+    userId: string,
+    now: Date = new Date()
+): Promise<CurrentEarlybirdCheckoutPhone> {
+    const current = await earlybirdStore.findCurrentCheckoutPhone(userId);
+    const verifiedAtMs = current?.verifiedAt
+        ? Date.parse(current.verifiedAt)
+        : Number.NaN;
+    if (
+        !current
+        || current.provider !== 'kakao'
+        || !current.phoneNumber
+        || !current.phoneNumberNormalized
+        || normalizeKoreanMobileNumber(current.phoneNumber)
+            !== current.phoneNumberNormalized
+        || current.verificationSource !== 'kakao_rest_api'
+        || !Number.isFinite(verifiedAtMs)
+        || verifiedAtMs < now.getTime() - 24 * 60 * 60 * 1_000
+    ) {
+        throw new EarlybirdPersistenceError('CHECKOUT_PHONE_REQUIRED');
+    }
+    return Object.freeze({
+        normalizedPhone: current.phoneNumberNormalized,
+        verificationSource: 'kakao_rest_api',
+    });
+}
+
 export async function createEarlybirdCheckout(input: {
     userId: string;
     preflightId: string;
@@ -94,6 +130,7 @@ export async function createEarlybirdCheckout(input: {
 export async function recoverEarlybirdCheckout(input: {
     userId: string;
     preflightId: string;
+    currentPhone: CurrentEarlybirdCheckoutPhone;
 }) {
     const record = await earlybirdStore.findCheckoutForRecovery(
         input.userId,
@@ -119,6 +156,10 @@ export async function recoverEarlybirdCheckout(input: {
         || record.buyerMatchPolicy !== 'verified_kakao_phone'
         || !record.expectedBuyerPhoneNumberNormalized
         || record.expectedBuyerPhoneVerificationSource !== 'kakao_rest_api'
+        || record.expectedBuyerPhoneNumberNormalized
+            !== input.currentPhone.normalizedPhone
+        || record.expectedBuyerPhoneVerificationSource
+            !== input.currentPhone.verificationSource
         || record.disclosureVersion !== EARLYBIRD_DISCLOSURE_VERSION
         || record.disclosureText !== EARLYBIRD_DISCLOSURE_TEXT
         || !record.disclosureAcceptedAt

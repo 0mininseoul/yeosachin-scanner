@@ -103,20 +103,47 @@ function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
     };
 }
 
-function installRecoveryOrder(order: unknown): ReturnType<typeof vi.fn> {
-    const maybeSingle = vi.fn().mockResolvedValue({ data: order, error: null });
+function currentPhoneRow(overrides: Record<string, unknown> = {}) {
+    return {
+        id: USER_ID,
+        provider: 'kakao',
+        phone_number: '010-1234-5678',
+        phone_number_normalized: '+821012345678',
+        phone_number_verification_source: 'kakao_rest_api',
+        phone_number_verified_at: new Date().toISOString(),
+        ...overrides,
+    };
+}
+
+function recoveryQuery(data: unknown) {
     const query = {
         select: vi.fn(),
         eq: vi.fn(),
-        maybeSingle,
+        maybeSingle: vi.fn().mockResolvedValue({ data, error: null }),
     };
     query.select.mockReturnValue(query);
     query.eq.mockReturnValue(query);
+    return query;
+}
+
+function installRecoveryOrder(
+    order: unknown,
+    currentPhone: unknown = currentPhoneRow()
+): {
+    ownerFilter: ReturnType<typeof vi.fn>;
+    userFilter: ReturnType<typeof vi.fn>;
+} {
+    const orderQuery = recoveryQuery(order);
+    const userQuery = recoveryQuery(currentPhone);
     mocks.from.mockImplementation((table: string) => {
-        if (table !== 'earlybird_orders') throw new Error(`unexpected table: ${table}`);
-        return query;
+        if (table === 'earlybird_orders') return orderQuery;
+        if (table === 'users') return userQuery;
+        throw new Error(`unexpected table: ${table}`);
     });
-    return query.eq;
+    return {
+        ownerFilter: orderQuery.eq,
+        userFilter: userQuery.eq,
+    };
 }
 
 function authenticate(userId: string | null = USER_ID): void {
@@ -329,7 +356,7 @@ describe('earlybird checkout and waitlist routes', () => {
     });
 
     it('recovers the same owner-scoped pending v1 checkout without trusting client commerce fields', async () => {
-        const ownerFilter = installRecoveryOrder(recoveryOrderRow());
+        const { ownerFilter, userFilter } = installRecoveryOrder(recoveryOrderRow());
         const response = await recoverCheckout({
             preflightId: PREFLIGHT_ID,
         });
@@ -343,6 +370,8 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.from).toHaveBeenCalledWith('earlybird_orders');
         expect(ownerFilter).toHaveBeenCalledWith('preflight_id', PREFLIGHT_ID);
         expect(ownerFilter).toHaveBeenCalledWith('user_id', USER_ID);
+        expect(mocks.from).toHaveBeenCalledWith('users');
+        expect(userFilter).toHaveBeenCalledWith('id', USER_ID);
         expect(mocks.rpc).not.toHaveBeenCalled();
 
         mocks.from.mockClear();
@@ -388,6 +417,49 @@ describe('earlybird checkout and waitlist routes', () => {
                 code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
                 error: '이 주문의 결제창을 다시 열 수 없습니다.',
             });
+            expect(JSON.stringify(body)).not.toContain(SELLER_REFERENCE);
+        }
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('requires a current verified Kakao phone and exact immutable phone match before recovery', async () => {
+        const staleVerification = new Date(Date.now() - 25 * 60 * 60 * 1_000).toISOString();
+        for (const [currentPhone, expected] of [
+            [
+                currentPhoneRow({ phone_number_verified_at: staleVerification }),
+                {
+                    code: 'CHECKOUT_PHONE_REQUIRED',
+                    error: '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.',
+                },
+            ],
+            [
+                currentPhoneRow({
+                    phone_number: null,
+                    phone_number_normalized: null,
+                    phone_number_verification_source: null,
+                    phone_number_verified_at: null,
+                }),
+                {
+                    code: 'CHECKOUT_PHONE_REQUIRED',
+                    error: '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.',
+                },
+            ],
+            [
+                currentPhoneRow({
+                    phone_number: '010-9999-8888',
+                    phone_number_normalized: '+821099998888',
+                }),
+                {
+                    code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+                    error: '이 주문의 결제창을 다시 열 수 없습니다.',
+                },
+            ],
+        ] as const) {
+            installRecoveryOrder(recoveryOrderRow(), currentPhone);
+            const response = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+            expect(response.status).toBe(409);
+            const body = await response.json();
+            expect(body).toEqual(expected);
             expect(JSON.stringify(body)).not.toContain(SELLER_REFERENCE);
         }
         expect(mocks.rpc).not.toHaveBeenCalled();
