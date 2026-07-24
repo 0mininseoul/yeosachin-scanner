@@ -103,6 +103,7 @@ describe('Groble v2 release gate', () => {
         const loadDatabaseState = vi.fn().mockResolvedValue({
             bindings: EXACT_BINDINGS,
             pendingOldLineageCount: 0,
+            historicalProductEvidence: [],
         });
 
         await expect(runGate({
@@ -134,6 +135,7 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings,
                 pendingOldLineageCount: 0,
+                historicalProductEvidence: [],
             }),
         })).rejects.toThrow('GROBLE_V2_DB_BINDINGS_MISMATCH');
     });
@@ -146,7 +148,111 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings: EXACT_BINDINGS,
                 pendingOldLineageCount: 1,
+                historicalProductEvidence: [],
             }),
         })).rejects.toThrow('GROBLE_V2_PENDING_OLD_LINEAGE_REMAINS');
+    });
+
+    it('does not self-confirm an env typo that was copied into all four DB bindings', async () => {
+        const typoEnv = {
+            ...ENV,
+            GROBLE_BASIC_PRODUCT_ID: 'legacy_basic_env_typo',
+        };
+        const typoBindings = EXACT_BINDINGS.map(row => (
+            row.plan_id === 'basic'
+            && row.pricing_version === 'earlybird-2026-07-v1'
+                ? { ...row, product_id: typoEnv.GROBLE_BASIC_PRODUCT_ID }
+                : row
+        ));
+
+        await expect(runGate({
+            phase: 'pre-deploy',
+            confirmCheckoutWritesPaused: true,
+            env: typoEnv,
+            loadDatabaseState: vi.fn().mockResolvedValue({
+                bindings: typoBindings,
+                pendingOldLineageCount: 0,
+                historicalProductEvidence: [{
+                    source: 'order',
+                    plan_id: 'basic',
+                    product_id: 'legacy_basic_product',
+                }],
+            }),
+        })).rejects.toThrow(
+            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_MISMATCH'
+        );
+    });
+
+    it('validates webhook-only evidence and rejects cross-plan ambiguity', async () => {
+        await expect(runGate({
+            phase: 'pre-deploy',
+            confirmCheckoutWritesPaused: true,
+            env: ENV,
+            loadDatabaseState: vi.fn().mockResolvedValue({
+                bindings: EXACT_BINDINGS,
+                pendingOldLineageCount: 0,
+                historicalProductEvidence: [{
+                    source: 'webhook',
+                    plan_id: null,
+                    product_id: 'legacy_unknown_product',
+                }],
+            }),
+        })).rejects.toThrow(
+            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_MISMATCH'
+        );
+
+        await expect(runGate({
+            phase: 'pre-deploy',
+            confirmCheckoutWritesPaused: true,
+            env: ENV,
+            loadDatabaseState: vi.fn().mockResolvedValue({
+                bindings: EXACT_BINDINGS,
+                pendingOldLineageCount: 0,
+                historicalProductEvidence: [
+                    {
+                        source: 'order',
+                        plan_id: 'basic',
+                        product_id: 'legacy_basic_product',
+                    },
+                    {
+                        source: 'webhook',
+                        plan_id: 'standard',
+                        product_id: 'legacy_basic_product',
+                    },
+                ],
+            }),
+        })).rejects.toThrow(
+            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_AMBIGUOUS'
+        );
+    });
+
+    it('never hides historical evidence merely because an env typo marks it active', async () => {
+        const typoEnv = {
+            ...ENV,
+            GROBLE_BASIC_PRODUCT_ID: 'legacy_basic_env_typo',
+        };
+        const typoBindings = EXACT_BINDINGS.map(row => (
+            row.plan_id === 'basic'
+            && row.pricing_version === 'earlybird-2026-07-v1'
+                ? { ...row, product_id: typoEnv.GROBLE_BASIC_PRODUCT_ID }
+                : row
+        ));
+
+        await expect(runGate({
+            phase: 'pre-deploy',
+            confirmCheckoutWritesPaused: true,
+            env: typoEnv,
+            loadDatabaseState: vi.fn().mockResolvedValue({
+                bindings: typoBindings,
+                pendingOldLineageCount: 0,
+                historicalProductEvidence: [{
+                    source: 'order',
+                    plan_id: 'basic',
+                    product_id: ENV.GROBLE_V2_BASIC_PRODUCT_ID,
+                }],
+            }),
+        })).rejects.toThrow(
+            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_MISMATCH'
+        );
     });
 });

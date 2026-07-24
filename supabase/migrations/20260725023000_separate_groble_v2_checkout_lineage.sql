@@ -131,6 +131,7 @@ DECLARE
     v_existing public.earlybird_groble_product_versions%ROWTYPE;
     v_desired RECORD;
     v_changed BOOLEAN := FALSE;
+    v_is_first_configuration BOOLEAN;
 BEGIN
     IF EXISTS (
         SELECT 1
@@ -175,6 +176,81 @@ BEGIN
             0
         )
     );
+
+    SELECT NOT EXISTS (
+        SELECT 1
+        FROM public.earlybird_groble_product_versions
+    ) INTO v_is_first_configuration;
+
+    IF v_is_first_configuration AND EXISTS (
+        WITH product_plan_evidence AS (
+            SELECT
+                historical_order.expected_groble_product_id AS product_id,
+                historical_order.plan_id
+            FROM public.earlybird_orders AS historical_order
+
+            UNION ALL
+
+            SELECT
+                webhook_event.product_id,
+                referenced_order.plan_id
+            FROM public.earlybird_webhook_events AS webhook_event
+            JOIN public.earlybird_orders AS referenced_order
+              ON referenced_order.id = webhook_event.order_id
+        )
+        SELECT 1
+        FROM product_plan_evidence
+        GROUP BY product_id
+        HAVING pg_catalog.count(DISTINCT plan_id) > 1
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_LEGACY_PRODUCT_EVIDENCE_AMBIGUOUS',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF v_is_first_configuration AND (
+        EXISTS (
+            SELECT 1
+            FROM public.earlybird_orders AS historical_order
+            WHERE (
+                historical_order.plan_id = 'basic'
+                AND historical_order.expected_groble_product_id
+                    <> p_legacy_basic_product_id
+            )
+            OR (
+                historical_order.plan_id = 'standard'
+                AND historical_order.expected_groble_product_id
+                    <> p_legacy_standard_product_id
+            )
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM public.earlybird_webhook_events AS webhook_event
+            JOIN public.earlybird_orders AS referenced_order
+              ON referenced_order.id = webhook_event.order_id
+            WHERE (
+                referenced_order.plan_id = 'basic'
+                AND webhook_event.product_id <> p_legacy_basic_product_id
+            )
+            OR (
+                referenced_order.plan_id = 'standard'
+                AND webhook_event.product_id <> p_legacy_standard_product_id
+            )
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM public.earlybird_webhook_events AS webhook_event
+            WHERE webhook_event.order_id IS NULL
+              AND webhook_event.product_id NOT IN (
+                  p_legacy_basic_product_id,
+                  p_legacy_standard_product_id
+              )
+        )
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_LEGACY_PRODUCT_EVIDENCE_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
 
     FOR v_desired IN
         SELECT *
@@ -240,8 +316,12 @@ BEGIN
         IF EXISTS (
             SELECT 1
             FROM public.earlybird_orders AS evidence
-            WHERE evidence.pricing_version = v_existing.pricing_version
-              AND evidence.expected_groble_product_id = v_existing.product_id
+            WHERE evidence.expected_groble_product_id = v_existing.product_id
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM public.earlybird_webhook_events AS evidence
+            WHERE evidence.product_id = v_existing.product_id
         ) THEN
             RAISE EXCEPTION USING
                 MESSAGE = 'EARLYBIRD_PRODUCT_LINEAGE_FROZEN',

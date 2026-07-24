@@ -69,6 +69,18 @@ describe('Groble v2 product separation and legacy refresh migration', () => {
         expect(configuration).toContain('ON CONFLICT (plan_id, pricing_version)');
         expect(configuration).toContain('EARLYBIRD_PRODUCT_LINEAGE_FROZEN');
         expect(configuration).toContain(
+            'EARLYBIRD_LEGACY_PRODUCT_EVIDENCE_AMBIGUOUS'
+        );
+        expect(configuration).toContain(
+            'EARLYBIRD_LEGACY_PRODUCT_EVIDENCE_MISMATCH'
+        );
+        expect(configuration).toContain(
+            'FROM public.earlybird_webhook_events AS evidence'
+        );
+        expect(configuration).not.toContain(
+            'evidence.pricing_version = v_existing.pricing_version'
+        );
+        expect(configuration).toContain(
             'GRANT EXECUTE ON FUNCTION public.configure_earlybird_groble_product_lineage('
         );
     });

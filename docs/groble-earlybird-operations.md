@@ -45,14 +45,15 @@ v1/v2의 상품 ID 네 개와 결제창 주소 네 개는 전부 서로 다른 �
 
 이 문서는 순서만 정의한다. 사용자 승인 전에는 아래 배포와 실제 결제를 수행하지 않는다.
 
-1. Groble의 기존 두 상품이 Basic 6,900원/Standard 9,900원이고 상품별 재고가 10건인지 읽기 전용으로 다시 확인한다. 가격은 소유자가 이미 직접 변경했으므로 자동화나 이 저장소에서 수정하지 않는다.
-2. 운영 환경의 다섯 가지 필수 서버 전용 값과, 필요한 경우 이전 webhook secret을 비밀 관리 시스템에 설정한다.
-3. `20260717140000_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
-4. checkout 쓰기를 제한한 maintenance window에서 아래 전화번호 매칭 migration 게이트를 통과한 뒤 6개 파일을 순서대로 적용한다.
-5. migration 적용 후 DB schema, 12개 인자 finalizer와 9개 인자 호환 wrapper의 signature, service-role ACL을 확인한다.
-6. 애플리케이션 코드를 배포한다. 롤링 배포 중 이전 인스턴스는 9개 인자 wrapper를 계속 사용한다.
-7. Groble에 위 진입 페이지, 이동 페이지, 이동 버튼 문구, webhook URL과 이벤트를 설정한다.
-8. 승인된 별도 점검 창에서 서명 검증, 멱등 재전송, Basic/Standard 상태 복원을 확인한다.
+1. Groble에서 **신규 v2 Basic/Standard 상품**과 신규 결제창을 생성한다. 신규 상품이 Basic 6,900원/Standard 9,900원이고 상품별 재고가 10건인지, 진입·이동 페이지와 webhook 설정이 위 표와 일치하는지 읽기 전용으로 다시 확인한다. 기존 v1 상품의 가격이나 식별자는 수정하지 않는다.
+2. legacy 상품 ID 2개, legacy 결제창 주소 2개, 신규 v2 상품 ID 2개, 신규 v2 결제창 주소 2개와 현재 webhook secret을 비밀 관리 시스템에 설정한다. 필수 값은 총 9개다. `GROBLE_WEBHOOK_PREVIOUS_SECRET`은 공식 secret 교체 기간에만 쓰는 선택 값이다.
+3. checkout 접수를 먼저 중단하고 진행 중 writer를 drain한다. 이 상태를 migration, 원자 설정, 배포 후 검증이 끝날 때까지 유지한다.
+4. `--phase pre-migration` 실행 게이트를 통과한 뒤 migration history와 dry-run을 확인한다.
+5. 아직 적용되지 않은 경우 `20260724230000_update_earlybird_pricing_v2.sql`을 먼저 적용하고, 다음으로 `20260725023000_separate_groble_v2_checkout_lineage.sql`을 적용한다. 순서를 바꾸거나 두 migration 사이에 애플리케이션을 배포하지 않는다.
+6. `public.configure_earlybird_groble_product_lineage(...)` 한 번으로 v1 비활성 tombstone 두 개와 v2 활성 바인딩 두 개를 원자적으로 설정한다.
+7. `--phase pre-deploy` 실행 게이트로 DB의 네 바인딩, 과거 주문·webhook 상품 증거, 이전 상품 pending 0건을 환경변수와 독립적으로 검증한다.
+8. `create_earlybird_checkout_v2`, seller-reference webhook 확정, legacy refresh를 함께 포함한 현재 애플리케이션 revision을 배포한다. 구 RPC가 revoke된 DB에 구 checkout 코드를 배포하지 않는다.
+9. 서명 검증, 멱등 재전송, Basic/Standard checkout canary와 상태 조회를 확인하고, 검증을 마친 뒤에만 접수를 다시 연다.
 
 ### 가격 v2 상품 분리 maintenance gate
 
@@ -69,7 +70,7 @@ v1/v2의 상품 ID 네 개와 결제창 주소 네 개는 전부 서로 다른 �
 
 3. `20260725023000_separate_groble_v2_checkout_lineage.sql`까지 migration을 적용한다. 이 migration은 결제·환불·완료·이행·webhook 증거가 전혀 없는 v1 및 분리 전 v2 `payment_pending`만 종료하고 판매 수량은 바꾸지 않는다.
 4. SQL editor에서 `public.configure_earlybird_groble_product_lineage(...)`를 한 번 호출해 v1 Basic/Standard 비활성 tombstone과 v2 Basic/Standard 활성 바인딩 네 개를 원자적으로 설정한다. 8개 인자는 위 환경변수와 정확히 일치해야 한다. 일부 바인딩만 먼저 활성화하지 않는다.
-5. DB에 정확히 네 바인딩만 존재하고, 활성 상태·금액·식별자가 환경변수와 일치하며, 이전 상품의 pending 주문이 0개인지 배포 전에 실행 검증한다.
+5. DB에 정확히 네 바인딩만 존재하고, 활성 상태·금액·식별자가 환경변수와 일치하며, 과거 주문·webhook 상품 증거가 legacy ID와 독립적으로 일치하고 이전 상품의 pending 주문이 0개인지 배포 전에 실행 검증한다.
 
    ```bash
    npm run groble:v2:gate -- --phase pre-deploy --confirm-checkout-writes-paused
@@ -81,7 +82,7 @@ v1/v2의 상품 ID 네 개와 결제창 주소 네 개는 전부 서로 다른 �
 
 배포 후 실제 결제를 만들지 않고 Basic/Standard checkout 응답의 `https://groble.im/payment/...` 링크가 안전한 seller reference를 포함하는지만 읽기 전용 회귀 검증한다. Groble 대시보드나 상품 설정은 이 검증에서 변경하지 않는다.
 
-롤백은 코드를 먼저 이전 버전으로 돌린 뒤 접수를 중단한다. 이미 생성된 주문·결제 감사 행은 삭제하지 않는다. forward migration의 테이블을 되돌리는 파괴적 migration은 만들지 않는다.
+롤백할 때도 checkout 접수를 먼저 중단하고 진행 중 writer를 drain한다. 그 다음 현재 DB와 호환되는 revision으로만 코드를 되돌린다. 목표 revision이 revoke된 구 RPC를 필요로 하면 코드를 먼저 내리지 말고, 검토된 호환성 복구 forward migration을 적용하고 signature·ACL·주문 및 webhook 불변성을 확인한 뒤 해당 revision을 배포한다. canary와 읽기 전용 검증을 마친 뒤에만 접수를 다시 연다. 이미 생성된 주문·결제 감사 행은 삭제하지 않으며, forward migration의 테이블을 되돌리는 파괴적 migration은 만들지 않는다.
 
 ## 전화번호 매칭 migration 게이트
 

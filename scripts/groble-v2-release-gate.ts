@@ -15,9 +15,16 @@ type Binding = Readonly<{
     checkout_active: boolean;
 }>;
 
+type HistoricalProductEvidence = Readonly<{
+    source: 'order' | 'webhook';
+    plan_id: 'basic' | 'standard' | null;
+    product_id: string;
+}>;
+
 type DatabaseState = Readonly<{
     bindings: readonly Binding[];
     pendingOldLineageCount: number;
+    historicalProductEvidence: readonly HistoricalProductEvidence[];
 }>;
 
 export type GrobleV2ReleaseGateInput = Readonly<{
@@ -75,6 +82,36 @@ function canonicalBindings(bindings: readonly Binding[]): string {
     );
 }
 
+function validateHistoricalProductEvidence(
+    evidence: readonly HistoricalProductEvidence[],
+    config: GrobleProductLineageConfig
+): void {
+    const plansByProduct = new Map<string, Set<string>>();
+    for (const item of evidence) {
+        if (item.plan_id === null) continue;
+        const plans = plansByProduct.get(item.product_id) ?? new Set<string>();
+        plans.add(item.plan_id);
+        plansByProduct.set(item.product_id, plans);
+    }
+    if ([...plansByProduct.values()].some(plans => plans.size > 1)) {
+        throw new Error(
+            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_AMBIGUOUS'
+        );
+    }
+
+    const expectedByPlan = config.legacyProductIds;
+    const knownLegacyProducts = new Set(Object.values(expectedByPlan));
+    if (evidence.some(item => (
+        item.plan_id === null
+            ? !knownLegacyProducts.has(item.product_id)
+            : item.product_id !== expectedByPlan[item.plan_id]
+    ))) {
+        throw new Error(
+            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_MISMATCH'
+        );
+    }
+}
+
 async function loadProductionDatabaseState(
     config: GrobleProductLineageConfig
 ): Promise<DatabaseState> {
@@ -88,6 +125,57 @@ async function loadProductionDatabaseState(
     if (bindingError || !bindings) {
         throw new Error('GROBLE_V2_DB_BINDINGS_READ_FAILED');
     }
+
+    const {
+        data: historicalOrders,
+        error: historicalOrdersError,
+        count: historicalOrdersCount,
+    } =
+        await supabaseAdmin
+            .from('earlybird_orders')
+            .select(
+                'id,plan_id,expected_groble_product_id',
+                { count: 'exact' }
+            )
+            .limit(10_000);
+    if (
+        historicalOrdersError
+        || !historicalOrders
+        || historicalOrdersCount === null
+        || historicalOrders.length !== historicalOrdersCount
+    ) {
+        throw new Error('GROBLE_V2_HISTORICAL_ORDERS_READ_FAILED');
+    }
+    const orderRows = historicalOrders as unknown as Array<{
+        id: string;
+        plan_id: 'basic' | 'standard';
+        expected_groble_product_id: string;
+    }>;
+    const orderPlanById = new Map(
+        orderRows.map(order => [order.id, order.plan_id])
+    );
+
+    const {
+        data: webhookEvidence,
+        error: webhookEvidenceError,
+        count: webhookEvidenceCount,
+    } =
+        await supabaseAdmin
+            .from('earlybird_webhook_events')
+            .select('product_id,order_id', { count: 'exact' })
+            .limit(10_000);
+    if (
+        webhookEvidenceError
+        || !webhookEvidence
+        || webhookEvidenceCount === null
+        || webhookEvidence.length !== webhookEvidenceCount
+    ) {
+        throw new Error('GROBLE_V2_HISTORICAL_WEBHOOKS_READ_FAILED');
+    }
+    const webhookRows = webhookEvidence as unknown as Array<{
+        product_id: string;
+        order_id: string | null;
+    }>;
 
     const { count, error: pendingError } = await supabaseAdmin
         .from('earlybird_orders')
@@ -104,6 +192,20 @@ async function loadProductionDatabaseState(
     return {
         bindings: bindings as unknown as Binding[],
         pendingOldLineageCount: count,
+        historicalProductEvidence: [
+            ...orderRows.map(order => ({
+                source: 'order' as const,
+                plan_id: order.plan_id,
+                product_id: order.expected_groble_product_id,
+            })),
+            ...webhookRows.map(webhook => ({
+                source: 'webhook' as const,
+                plan_id: webhook.order_id
+                    ? orderPlanById.get(webhook.order_id) ?? null
+                    : null,
+                product_id: webhook.product_id,
+            })),
+        ],
     };
 }
 
@@ -133,6 +235,10 @@ export async function runGrobleV2ReleaseGate(
     ) {
         throw new Error('GROBLE_V2_DB_BINDINGS_MISMATCH');
     }
+    validateHistoricalProductEvidence(
+        state.historicalProductEvidence,
+        config
+    );
     if (state.pendingOldLineageCount !== 0) {
         throw new Error('GROBLE_V2_PENDING_OLD_LINEAGE_REMAINS');
     }

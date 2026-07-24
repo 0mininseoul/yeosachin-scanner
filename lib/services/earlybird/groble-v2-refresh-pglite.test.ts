@@ -569,6 +569,80 @@ describe('Groble v2 checkout lineage database behavior', () => {
         })).rejects.toThrow('EARLYBIRD_PRODUCT_LINEAGE_FROZEN');
     }, 30_000);
 
+    it('rejects a wrong first legacy identity when v1 order evidence already exists', async () => {
+        const db = await baseDatabase();
+        await seedV1Order(db, 16);
+        await applyLineageMigration(db);
+
+        await expect(configureLineage(db, {
+            legacyBasicProduct: 'legacy_basic_env_typo',
+        })).rejects.toThrow(
+            'EARLYBIRD_LEGACY_PRODUCT_EVIDENCE_MISMATCH'
+        );
+        expect((await db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count
+             FROM public.earlybird_groble_product_versions`
+        )).rows[0].count).toBe(0);
+    }, 30_000);
+
+    it('freezes a legacy binding referenced only by retired pre-separation v2 evidence', async () => {
+        const db = await baseDatabase();
+        await seedV1Order(db, 17, { pricingVersion: V2 });
+        await applyLineageMigration(db);
+        await configureLineage(db);
+
+        await expect(configureLineage(db, {
+            legacyBasicProduct: 'legacy_basic_corrected_too_late',
+        })).rejects.toThrow('EARLYBIRD_PRODUCT_LINEAGE_FROZEN');
+    }, 30_000);
+
+    it('reconciles webhook-only evidence on first configuration and freezes it later', async () => {
+        const db = await baseDatabase();
+        await db.query(
+            `INSERT INTO public.earlybird_webhook_events (
+                event_id, idempotency_key, event_type, occurred_at,
+                payment_id, product_id, amount_krw, disposition
+            ) VALUES (
+                'event-webhook-only', 'idem-webhook-only',
+                'payment.completed', pg_catalog.clock_timestamp(),
+                'payment-webhook-only', 'legacy_basic_product',
+                14900, 'unmatched'
+            )`
+        );
+        await applyLineageMigration(db);
+
+        await expect(configureLineage(db, {
+            legacyBasicProduct: 'legacy_basic_env_typo',
+        })).rejects.toThrow(
+            'EARLYBIRD_LEGACY_PRODUCT_EVIDENCE_MISMATCH'
+        );
+        await configureLineage(db);
+        await expect(configureLineage(db, {
+            legacyBasicProduct: 'legacy_basic_corrected_too_late',
+        })).rejects.toThrow('EARLYBIRD_PRODUCT_LINEAGE_FROZEN');
+    }, 30_000);
+
+    it('fails closed when one historical product is evidenced across both plans', async () => {
+        const db = await baseDatabase();
+        await seedV1Order(db, 18);
+        const standard = await seedV1Order(db, 19, { planId: 'standard' });
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET expected_groble_product_id = 'legacy_basic_product'
+             WHERE id = $1`,
+            [standard.orderId]
+        );
+        await applyLineageMigration(db);
+
+        await expect(configureLineage(db)).rejects.toThrow(
+            'EARLYBIRD_LEGACY_PRODUCT_EVIDENCE_AMBIGUOUS'
+        );
+        expect((await db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count
+             FROM public.earlybird_groble_product_versions`
+        )).rows[0].count).toBe(0);
+    }, 30_000);
+
     it('requires a seller reference for active v2 while preserving no-reference legacy refunds', async () => {
         const db = await baseDatabase();
         const activeLegacy = await seedV1Order(db, 9);
