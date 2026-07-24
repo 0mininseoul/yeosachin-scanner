@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { motion, useReducedMotion, type Variants } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import {
   availableAnalyticsStorage,
@@ -32,42 +32,10 @@ import {
   BrandMark,
   Eyebrow,
   CaseCard,
-  ThreatBar,
-  RiskTag,
-  Stamp,
   PrimaryButton,
 } from '@/components/case-ui';
-
-type Grade = 'high_risk' | 'caution' | 'normal';
-
-// NOTE: 데모용 목업. 원형 프로필은 실제 AI 생성 여성 이미지로 교체 예정(현재 플레이스홀더).
-const DEMO_SUSPECTS: { rank: string; grade: Grade; name: string }[] = [
-  { rank: '01', grade: 'high_risk', name: 'suzy_kim_02' },
-  { rank: '02', grade: 'caution', name: 'yuna.daily' },
-  { rank: '03', grade: 'normal', name: 'haram_log' },
-];
-
-const AVATAR_TINTS = [
-  { from: '#4a3136', to: '#241a1c' },
-  { from: '#3a3048', to: '#1c1a24' },
-  { from: '#48402e', to: '#241f1a' },
-];
-
-function DemoAvatar({ i }: { i: number }) {
-  const t = AVATAR_TINTS[i % AVATAR_TINTS.length];
-  return (
-    <div
-      className="relative h-10 w-10 shrink-0 overflow-hidden rounded-full border border-line-2"
-      style={{ background: `linear-gradient(140deg, ${t.from}, ${t.to})` }}
-      aria-hidden="true"
-    >
-      <svg viewBox="0 0 40 40" className="absolute inset-0 h-full w-full text-fg/30">
-        <circle cx="20" cy="15.5" r="6.8" fill="currentColor" />
-        <path d="M6.5 40c0-7.7 6-12.5 13.5-12.5S33.5 32.3 33.5 40z" fill="currentColor" />
-      </svg>
-    </div>
-  );
-}
+import { LandingSignatureCard } from '@/components/landing-signature-card';
+import { LandingReviews } from '@/components/landing-reviews';
 
 const STEPS = [
   {
@@ -93,21 +61,6 @@ const TRUST = [
   { title: '여사친들만 선별', body: '성별을 식별해 위장 여사친 후보만 골라냅니다.' },
   { title: '상호작용 추적', body: '좋아요·댓글·태그·멘션·친밀도까지 정밀 분석합니다.' },
   { title: '상대방은 절대 모름', body: '조회 흔적도, 알림도 남지 않습니다.' },
-];
-
-const REVIEWS = [
-  {
-    grade: 'high_risk' as Grade,
-    body: '그냥 아는 동생이라던 계정이 고위험 1위로 떴어요. 혹시나 해서 봤더니… 진짜 소름.',
-    who: '23세 · 대학생',
-    when: '어제',
-  },
-  {
-    grade: 'caution' as Grade,
-    body: '비공개 계정까지 리스트로 쫙 뽑아줘서 좋았어요. 내가 모르던 계정이 이렇게 많을 줄이야.',
-    who: '26세 · 직장인',
-    when: '2일 전',
-  },
 ];
 
 export default function LandingPage() {
@@ -180,14 +133,6 @@ export default function LandingPage() {
   };
 
   const EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
-  const listV: Variants = {
-    hidden: {},
-    show: { transition: { staggerChildren: reduce ? 0 : 0.12, delayChildren: reduce ? 0 : 0.55 } },
-  };
-  const itemV: Variants = {
-    hidden: reduce ? { opacity: 1 } : { opacity: 0, y: 8 },
-    show: reduce ? { opacity: 1 } : { opacity: 1, y: 0, transition: { duration: 0.4, ease: EASE } },
-  };
 
   return (
     <div className="min-h-dvh">
@@ -292,51 +237,7 @@ export default function LandingPage() {
             transition={{ delay: reduce ? 0 : 0.25, duration: 0.5, ease: EASE }}
             className="mt-10"
           >
-            <CaseCard bracket="var(--color-blood)" className="overflow-hidden">
-              {/* scanning line */}
-              <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
-                <div className="anim-scan h-16 w-full bg-gradient-to-b from-transparent via-blood/25 to-transparent" />
-              </div>
-
-              {/* header */}
-              <div className="flex items-center justify-between border-b border-line px-4 py-3">
-                <span className="eyebrow">위협 등급 판독</span>
-                <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-[0.14em] text-blood">
-                  <span className="anim-blink h-1.5 w-1.5 bg-blood" />
-                  LIVE
-                </span>
-              </div>
-
-              {/* suspect rows */}
-              <motion.ul variants={listV} initial="hidden" animate="show" className="divide-y divide-line/70">
-                {DEMO_SUSPECTS.map((s, i) => (
-                  <motion.li key={s.rank} variants={itemV} className="flex items-center gap-3 px-4 py-3.5">
-                    <DemoAvatar i={i} />
-                    <div className="min-w-0 flex-1">
-                      <div className="mb-2 flex items-center gap-2">
-                        <span className="num shrink-0 text-[12px] font-bold tracking-wider text-fg-mute">
-                          #{s.rank}
-                        </span>
-                        <span className="text-[13px] font-bold text-fg-dim">@</span>
-                        <span
-                          aria-hidden="true"
-                          className="min-w-0 flex-1 select-none truncate text-[13px] font-semibold text-fg/90 blur-[5px]"
-                        >
-                          {s.name}
-                        </span>
-                        <RiskTag grade={s.grade} className="ml-auto" />
-                      </div>
-                      <ThreatBar grade={s.grade} />
-                    </div>
-                  </motion.li>
-                ))}
-              </motion.ul>
-
-              <div className="flex items-center justify-between border-t border-line px-4 py-3">
-                <span className="text-[12px] text-fg-mute">3명 판독 완료</span>
-                <Stamp className="-rotate-3">고위험 감지</Stamp>
-              </div>
-            </CaseCard>
+            <LandingSignatureCard />
           </motion.div>
         </section>
 
@@ -406,17 +307,8 @@ export default function LandingPage() {
           <Eyebrow>열람 후기</Eyebrow>
           <h2 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">이미 많은 분들이 확인했어요</h2>
 
-          <div className="mt-8 space-y-3">
-            {REVIEWS.map((r, i) => (
-              <CaseCard key={i} className="p-5">
-                <div className="mb-3 flex items-center justify-between">
-                  <RiskTag grade={r.grade} />
-                  <span className="num text-[11px] tracking-[0.14em] text-fg-mute">{r.when}</span>
-                </div>
-                <p className="text-[14px] leading-relaxed text-fg">&ldquo;{r.body}&rdquo;</p>
-                <p className="mt-3 border-t border-line pt-3 text-[12px] text-fg-dim">{r.who}</p>
-              </CaseCard>
-            ))}
+          <div className="mt-8">
+            <LandingReviews />
           </div>
         </section>
 

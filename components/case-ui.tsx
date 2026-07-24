@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import {
@@ -229,6 +230,27 @@ export function Redaction({ className = "", style }: { className?: string; style
       style={style}
       aria-hidden="true"
     />
+  );
+}
+
+/* --- circular photo avatar for a suspect row --- */
+export function SuspectAvatar({
+  src,
+  size = 40,
+  className = "",
+}: {
+  src: string;
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <span
+      className={`relative block shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel ${className}`}
+      style={{ height: size, width: size }}
+      aria-hidden="true"
+    >
+      <Image src={src} alt="" fill sizes={`${size}px`} className="object-cover" />
+    </span>
   );
 }
 
