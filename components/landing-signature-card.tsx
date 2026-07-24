@@ -26,7 +26,7 @@ interface Suspect {
   score: number;
   recentMutualRank?: 1 | 2 | 3 | 4 | 5;
   verdict: string[];
-  capturedComment?: string;
+  capturedComments?: string[];
 }
 
 // NOTE: 랜딩 데모용 목업. 총평 근거는 실제 서비스가 트래킹하는 신호(좋아요 방향·댓글
@@ -44,7 +44,7 @@ const SUSPECTS: Suspect[] = [
       '셀카 위주 피드에 감성 카페·전시 태그가 반복되는, 취향 뚜렷한 계정이에요.',
       '맞팔 여성 187명 중 상호작용 1위 — 게시물마다 서로 좋아요가 오갔고, 댓글 친밀도도 ‘그냥 친구’ 선을 넘었습니다.',
     ],
-    capturedComment: '나 안보고시푸 ?',
+    capturedComments: ['오빠 나 안보고시푸 ?', '😘😘😘'],
   },
   {
     rank: '02',
@@ -218,8 +218,8 @@ export function LandingSignatureCard() {
                   ))}
                 </div>
 
-                {/* captured comment (revealed once the verdict finishes) */}
-                {s.capturedComment && (
+                {/* captured comments (revealed once the verdict finishes) */}
+                {s.capturedComments && s.capturedComments.length > 0 && (
                   <motion.div
                     initial={false}
                     animate={{ opacity: rowDone ? 1 : 0, y: rowDone ? 0 : 4 }}
@@ -229,9 +229,13 @@ export function LandingSignatureCard() {
                   >
                     <div className="border border-blood/25 bg-blood/[0.06] px-3 py-2.5">
                       <span className="eyebrow text-blood">포착된 댓글</span>
-                      <p className="mt-1.5 text-[12.5px] leading-relaxed text-fg">
-                        “{s.capturedComment}”
-                      </p>
+                      <div className="mt-1.5 space-y-1">
+                        {s.capturedComments.map((comment, ci) => (
+                          <p key={ci} className="text-[12.5px] leading-relaxed text-fg">
+                            “{comment}”
+                          </p>
+                        ))}
+                      </div>
                       <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-fg-mute">
                         <span aria-hidden="true">—</span>
                         <span aria-hidden="true" className="select-none blur-[4px]">
