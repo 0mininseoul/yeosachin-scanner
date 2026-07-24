@@ -225,13 +225,16 @@ describe('durable V2 AI stage runtime', () => {
         });
 
         const outcome = await Promise.race([
-            handle.cutoff().then(() => 'resolved' as const),
+            handle.cutoff().then(
+                () => 'resolved' as const,
+                () => 'rejected' as const,
+            ),
             new Promise<'timed_out'>(resolve => {
                 setTimeout(() => resolve('timed_out'), 100);
             }),
         ]);
 
-        expect(outcome).toBe('resolved');
+        expect(outcome).toBe('rejected');
         expect(handle.peek()).toEqual({ status: 'cutoff' });
         await handle.completion;
     });

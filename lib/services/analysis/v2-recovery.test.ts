@@ -60,6 +60,7 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
 
 function providerRecovery() {
     return {
+        recoverGeminiCutoffAttempts: vi.fn(async () => 0),
         reapGeminiCutoffLeases: vi.fn(async () => 0),
         recoverFulfillments: vi.fn(async () => ({
             reconciled: {
@@ -119,6 +120,7 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsCompleted: 0,
             fulfillmentsManualReview: 0,
             fulfillmentsFailed: 0,
+            geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
         });
         expect(dispatch).toHaveBeenCalledTimes(2);
@@ -250,6 +252,7 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsCompleted: 0,
             fulfillmentsManualReview: 0,
             fulfillmentsFailed: 0,
+            geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
         });
     });
@@ -289,6 +292,7 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsCompleted: 0,
             fulfillmentsManualReview: 0,
             fulfillmentsFailed: 0,
+            geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
         });
         expect(cleanupProviderRuns).toHaveBeenCalledOnce();
@@ -323,16 +327,23 @@ describe('analysis V2 dispatch recovery', () => {
     });
 
     it('reaps expired resolver quarantines once per bounded recovery pass', async () => {
+        const recoverGeminiCutoffAttempts = vi.fn(async () => 1);
         const reapGeminiCutoffLeases = vi.fn(async () => 2);
 
         await expect(recoverAnalysisV2Jobs({
             ...providerRecovery(),
             store: store([]),
+            recoverGeminiCutoffAttempts,
             reapGeminiCutoffLeases,
         })).resolves.toMatchObject({
             failed: 0,
+            geminiCutoffAttemptsRecovered: 1,
             geminiCutoffLeasesReaped: 2,
         });
+        expect(recoverGeminiCutoffAttempts).toHaveBeenCalledOnce();
         expect(reapGeminiCutoffLeases).toHaveBeenCalledOnce();
+        expect(recoverGeminiCutoffAttempts).toHaveBeenCalledBefore(
+            reapGeminiCutoffLeases
+        );
     });
 });

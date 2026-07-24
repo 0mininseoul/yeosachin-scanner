@@ -127,19 +127,36 @@ export interface AnalysisV2AiStageRuntimeDependencies {
 
 const GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS = 25;
 
+export class AnalysisV2GenderResolutionCutoffPersistenceError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_GENDER_RESOLUTION_CUTOFF_PERSISTENCE_ERROR');
+        this.name = 'AnalysisV2GenderResolutionCutoffPersistenceError';
+    }
+}
+
 async function waitForCutoffBookkeeping(
     operation: () => Promise<void> | undefined
 ): Promise<void> {
     const handled = Promise.resolve()
         .then(operation)
-        .catch(() => undefined);
-    await new Promise<void>(resolve => {
-        const timer = setTimeout(resolve, GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS);
-        void handled.then(() => {
-            clearTimeout(timer);
-            resolve();
-        });
-    });
+        .then(
+            () => 'fulfilled' as const,
+            () => 'rejected' as const,
+        );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+        handled,
+        new Promise<'timed_out'>(resolve => {
+            timer = setTimeout(
+                () => resolve('timed_out'),
+                GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS
+            );
+        }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (outcome !== 'fulfilled') {
+        throw new AnalysisV2GenderResolutionCutoffPersistenceError();
+    }
 }
 
 function canonicalJson(value: unknown): string {

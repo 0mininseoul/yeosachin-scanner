@@ -37,6 +37,10 @@ function quality(
         resolverCostKnownCount: 2,
         resolverConcurrencyLimit: 2,
         sharedConcurrencyLimit: 8,
+        requestCompleted: true,
+        standardPlan: true,
+        resultArchivePresent: true,
+        requestGatePassed: true,
         unknownGateEvaluable: true,
         unknownGatePassed: true,
         provenanceGatePassed: true,
@@ -80,6 +84,10 @@ describe('gender resolution E2E quality CLI', () => {
             resolverCostUnknownCount: 1,
             resolverConcurrencyLimit: 2,
             sharedConcurrencyLimit: 8,
+            requestCompleted: true,
+            standardPlan: true,
+            resultArchivePresent: true,
+            requestGatePassed: true,
             qualityGatePassed: true,
         });
         for (const forbidden of [
@@ -107,6 +115,30 @@ describe('gender resolution E2E quality CLI', () => {
         expect(JSON.parse(writeStdout.mock.calls[0]![0])).toMatchObject({
             finalUnknownRatio: 0.4,
             unknownGatePassed: false,
+            qualityGatePassed: false,
+        });
+    });
+
+    it('returns nonzero for a staging row even when unknown quality passes', async () => {
+        const writeStdout = vi.fn();
+        const result = await runGenderResolutionE2EQualityCli([
+            `--request-id=${requestId}`,
+        ], {
+            loadQuality: async () => quality({
+                requestCompleted: false,
+                resultArchivePresent: false,
+                requestGatePassed: false,
+                qualityGatePassed: false,
+            }),
+            writeStdout,
+        });
+        expect(result.exitCode).toBe(1);
+        expect(JSON.parse(writeStdout.mock.calls[0]![0])).toMatchObject({
+            requestCompleted: false,
+            standardPlan: true,
+            resultArchivePresent: false,
+            requestGatePassed: false,
+            unknownGatePassed: true,
             qualityGatePassed: false,
         });
     });

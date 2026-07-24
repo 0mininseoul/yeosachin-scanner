@@ -37,6 +37,10 @@ function quality(overrides: Record<string, unknown> = {}) {
         resolverCostKnownCount: 2,
         resolverConcurrencyLimit: 2,
         sharedConcurrencyLimit: 8,
+        requestCompleted: true,
+        standardPlan: true,
+        resultArchivePresent: true,
+        requestGatePassed: true,
         unknownGateEvaluable: true,
         unknownGatePassed: true,
         provenanceGatePassed: true,
@@ -133,5 +137,21 @@ describe('analysis V2 gender resolution durable quality gate', () => {
         })).store.requirePassing(requestId)).rejects.toBeInstanceOf(
             AnalysisV2GenderResolutionQualityGateError
         );
+    });
+
+    it('never passes a staging, non-Standard, or unarchived request', async () => {
+        for (const gates of [
+            { requestCompleted: false },
+            { standardPlan: false },
+            { resultArchivePresent: false },
+        ]) {
+            await expect(setup(quality({
+                ...gates,
+                requestGatePassed: false,
+                qualityGatePassed: false,
+            })).store.requirePassing(requestId)).rejects.toBeInstanceOf(
+                AnalysisV2GenderResolutionQualityGateError
+            );
+        }
     });
 });

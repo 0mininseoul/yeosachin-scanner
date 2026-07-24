@@ -614,6 +614,12 @@ SET search_path = ''
 AS $$
 DECLARE
     v_metrics public.analysis_v2_gender_resolution_metrics%ROWTYPE;
+    v_request public.analysis_requests%ROWTYPE;
+    v_summary public.analysis_v2_result_summaries%ROWTYPE;
+    v_request_completed BOOLEAN;
+    v_standard_plan BOOLEAN;
+    v_result_archive_present BOOLEAN;
+    v_request_passed BOOLEAN;
     v_unknown_evaluable BOOLEAN;
     v_unknown_passed BOOLEAN;
     v_provenance_passed BOOLEAN;
@@ -634,6 +640,24 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
+    SELECT analysis_request.*
+    INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id;
+    SELECT summary.*
+    INTO v_summary
+    FROM public.analysis_v2_result_summaries AS summary
+    WHERE summary.request_id = p_request_id;
+    v_request_completed := v_request.id IS NOT NULL
+        AND v_request.pipeline_version = 'v2'
+        AND v_request.status = 'completed';
+    v_standard_plan := v_request.id IS NOT NULL
+        AND v_request.selected_plan_id_snapshot = 'standard';
+    v_result_archive_present := v_summary.request_id IS NOT NULL
+        AND v_summary.plan_id = 'standard';
+    v_request_passed := v_request_completed
+        AND v_standard_plan
+        AND v_result_archive_present;
     v_unknown_evaluable := v_metrics.screened_count > 0;
     v_unknown_passed := v_unknown_evaluable
         AND v_metrics.final_unknown_count * 10 <= v_metrics.screened_count * 3;
@@ -674,11 +698,16 @@ BEGIN
         'resolverCostKnownCount', v_metrics.resolver_cost_known_count,
         'resolverConcurrencyLimit', 2,
         'sharedConcurrencyLimit', 8,
+        'requestCompleted', v_request_completed,
+        'standardPlan', v_standard_plan,
+        'resultArchivePresent', v_result_archive_present,
+        'requestGatePassed', v_request_passed,
         'unknownGateEvaluable', v_unknown_evaluable,
         'unknownGatePassed', v_unknown_passed,
         'provenanceGatePassed', v_provenance_passed,
         'immutabilityGatePassed', v_immutability_passed,
-        'qualityGatePassed', v_unknown_evaluable
+        'qualityGatePassed', v_request_passed
+            AND v_unknown_evaluable
             AND v_unknown_passed
             AND v_provenance_passed
             AND v_immutability_passed

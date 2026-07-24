@@ -35,6 +35,10 @@ const qualitySchema = z.object({
     resolverCostKnownCount: boundedCount,
     resolverConcurrencyLimit: z.literal(2),
     sharedConcurrencyLimit: z.literal(8),
+    requestCompleted: z.boolean(),
+    standardPlan: z.boolean(),
+    resultArchivePresent: z.boolean(),
+    requestGatePassed: z.boolean(),
     unknownGateEvaluable: z.boolean(),
     unknownGatePassed: z.boolean(),
     provenanceGatePassed: z.boolean(),
@@ -74,7 +78,11 @@ const qualitySchema = z.object({
     const provenancePassed =
         quality.appliedWithFencedResultCount === quality.appliedCount;
     const immutabilityPassed = quality.verifiedBaselineMutationCount === 0;
-    const overallPassed = evaluable
+    const requestPassed = quality.requestCompleted
+        && quality.standardPlan
+        && quality.resultArchivePresent;
+    const overallPassed = requestPassed
+        && evaluable
         && unknownPassed
         && provenancePassed
         && immutabilityPassed;
@@ -83,6 +91,7 @@ const qualitySchema = z.object({
         || !ratioValid
         || quality.unknownGateEvaluable !== evaluable
         || quality.unknownGatePassed !== unknownPassed
+        || quality.requestGatePassed !== requestPassed
         || quality.provenanceGatePassed !== provenancePassed
         || quality.immutabilityGatePassed !== immutabilityPassed
         || quality.qualityGatePassed !== overallPassed

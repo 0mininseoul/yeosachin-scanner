@@ -110,6 +110,17 @@ describe('gender resolver operation-aware lease migration', () => {
                 reservation_token UUID NOT NULL,
                 stage TEXT NOT NULL,
                 status TEXT NOT NULL,
+                model_name TEXT NOT NULL DEFAULT 'gemini-3-flash-preview',
+                location TEXT NOT NULL DEFAULT 'global',
+                thinking_level TEXT DEFAULT 'LOW',
+                media_count SMALLINT NOT NULL DEFAULT 5,
+                media_resolution TEXT DEFAULT 'MEDIUM',
+                prompt_version TEXT NOT NULL DEFAULT 'gender-resolution-v1',
+                schema_version SMALLINT NOT NULL DEFAULT 1,
+                max_output_tokens INTEGER NOT NULL DEFAULT 512,
+                retry_count SMALLINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    DEFAULT pg_catalog.clock_timestamp(),
                 PRIMARY KEY(request_id, operation_key, attempt),
                 CONSTRAINT analysis_v2_ai_attempt_stage_check CHECK (
                     stage IN (
@@ -421,6 +432,97 @@ describe('gender resolver operation-aware lease migration', () => {
             stage: 'genderResolution',
             claimToken: '223e4567-e89b-42d3-a456-426614174009',
         })).resolves.toMatchObject({ outcome: 'acquired', slot: 1 });
+    });
+
+    it('never auto-reaps a predecessor quarantine that requires evidence', async () => {
+        const legacy = (await asService<AcquireRow>(
+            `SELECT * FROM public.acquire_analysis_v2_gemini_lease(
+                $1, $2, 1, $3, 240
+            )`,
+            [
+                REQUEST,
+                'track:profile-ai:batch:0',
+                '223e4567-e89b-42d3-a456-426614174001',
+            ]
+        )).rows[0];
+        await db.query(
+            `UPDATE public.analysis_v2_gemini_leases
+             SET state = 'quarantined',
+                 expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second',
+                 quarantined_at = pg_catalog.clock_timestamp()
+             WHERE slot = $1`,
+            [legacy.slot]
+        );
+
+        await expect(acquireV2({
+            requestId: '123e4567-e89b-42d3-a456-426614174008',
+            jobKey: 'track:profile-ai:batch:8',
+            operationKey: `feature-analysis:${'8'.repeat(64)}`,
+            stage: 'featureAnalysis',
+            claimToken: '223e4567-e89b-42d3-a456-426614174008',
+        })).resolves.toMatchObject({ outcome: 'acquired', slot: 2 });
+        await expect(db.query<{
+            state: string;
+            stage: string | null;
+            resolution_evidence_hash: string | null;
+        }>(
+            `SELECT state, stage, resolution_evidence_hash
+             FROM public.analysis_v2_gemini_leases WHERE slot = $1`,
+            [legacy.slot]
+        )).resolves.toMatchObject({
+            rows: [{
+                state: 'quarantined',
+                stage: null,
+                resolution_evidence_hash: null,
+            }],
+        });
+    });
+
+    it('terminalizes an expired reserved resolver before its lease is reaped', async () => {
+        const jobKey = 'track:profile-ai:batch:0';
+        const jobClaim = '323e4567-e89b-42d3-a456-426614174001';
+        const reservation = '423e4567-e89b-42d3-a456-426614174001';
+        const leaseClaim = '223e4567-e89b-42d3-a456-426614174001';
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_attempts(
+                request_id, job_key, job_claim_token, operation_key, attempt,
+                reservation_token, stage, status
+            ) VALUES ($1, $2, $3, $4, 1, $5, 'genderResolution', 'reserved')`,
+            [REQUEST, jobKey, jobClaim, RESOLVER_OPERATION, reservation]
+        );
+        const lease = await acquireV2({
+            requestId: REQUEST,
+            jobKey,
+            operationKey: RESOLVER_OPERATION,
+            stage: 'genderResolution',
+            claimToken: leaseClaim,
+        });
+        await db.query(
+            `UPDATE public.analysis_v2_gemini_leases
+             SET state = 'quarantined',
+                 expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second',
+                 quarantined_at = pg_catalog.clock_timestamp()
+             WHERE slot = $1`,
+            [lease.slot]
+        );
+
+        await expect(asService<{ recovered: number }>(
+            `SELECT public.recover_analysis_v2_gender_resolution_cutoffs(8)
+                AS recovered`
+        )).resolves.toMatchObject({ rows: [{ recovered: 1 }] });
+        await expect(asService<{ reaped: number }>(
+            `SELECT public.reap_analysis_v2_gemini_cutoff_leases_v2(8)
+                AS reaped`
+        )).resolves.toMatchObject({ rows: [{ reaped: 1 }] });
+        await expect(db.query<{ status: string }>(
+            `SELECT status FROM public.analysis_v2_ai_attempts
+             WHERE request_id = $1 AND operation_key = $2`,
+            [REQUEST, RESOLVER_OPERATION]
+        )).resolves.toMatchObject({ rows: [{ status: 'cutoff' }] });
+        await expect(db.query<{ state: string }>(
+            `SELECT state FROM public.analysis_v2_gemini_leases WHERE slot = $1`,
+            [lease.slot]
+        )).resolves.toMatchObject({ rows: [{ state: 'available' }] });
     });
 
     it('keeps the v2.6 acquire RPC callable after the additive migration', async () => {

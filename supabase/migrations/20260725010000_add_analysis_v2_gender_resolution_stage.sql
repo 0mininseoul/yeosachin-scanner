@@ -368,7 +368,18 @@ BEGIN
         quarantined_at = NULL,
         updated_at = v_now
     WHERE lease.state = 'quarantined'
-      AND lease.expires_at <= v_now;
+      AND lease.stage = 'genderResolution'
+      AND lease.expires_at <= v_now
+      AND NOT EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_ai_attempts AS ai_attempt
+            WHERE ai_attempt.request_id = lease.request_id
+              AND ai_attempt.job_key = lease.job_key
+              AND ai_attempt.operation_key = lease.operation_key
+              AND ai_attempt.attempt = lease.attempt
+              AND ai_attempt.stage = 'genderResolution'
+              AND ai_attempt.status = 'reserved'
+      );
 
     SELECT lease.* INTO v_lease
     FROM public.analysis_v2_gemini_leases AS lease
@@ -758,6 +769,105 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.recover_analysis_v2_gender_resolution_cutoffs(
+    p_limit INTEGER DEFAULT 8
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_candidate RECORD;
+    v_recovered INTEGER := 0;
+BEGIN
+    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 8 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_GEMINI_LEASE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    FOR v_candidate IN
+        SELECT
+            attempt.request_id,
+            attempt.job_key,
+            attempt.job_claim_token,
+            attempt.operation_key,
+            attempt.attempt,
+            attempt.reservation_token,
+            attempt.model_name,
+            attempt.location,
+            attempt.thinking_level,
+            attempt.media_count,
+            attempt.media_resolution,
+            attempt.prompt_version,
+            attempt.schema_version,
+            attempt.max_output_tokens,
+            attempt.retry_count,
+            attempt.created_at,
+            lease.slot,
+            lease.lease_claim_token,
+            lease.fence
+        FROM public.analysis_v2_ai_attempts AS attempt
+        INNER JOIN public.analysis_v2_gemini_leases AS lease
+          ON lease.request_id = attempt.request_id
+         AND lease.job_key = attempt.job_key
+         AND lease.operation_key = attempt.operation_key
+         AND lease.attempt = attempt.attempt
+        WHERE attempt.stage = 'genderResolution'
+          AND attempt.status = 'reserved'
+          AND lease.stage = 'genderResolution'
+          AND lease.state IN ('leased', 'quarantined')
+          AND lease.expires_at <= v_now
+        ORDER BY attempt.created_at, attempt.request_id, attempt.operation_key
+        LIMIT p_limit
+    LOOP
+        PERFORM public.cutoff_analysis_v2_gender_resolution_attempt(
+            v_candidate.request_id,
+            v_candidate.job_key,
+            v_candidate.job_claim_token,
+            v_candidate.operation_key,
+            v_candidate.attempt,
+            v_candidate.reservation_token,
+            pg_catalog.jsonb_build_object(
+                'model_name', v_candidate.model_name,
+                'location', v_candidate.location,
+                'stage', 'genderResolution',
+                'thinking_level', v_candidate.thinking_level,
+                'media_count', v_candidate.media_count,
+                'media_resolution', v_candidate.media_resolution,
+                'prompt_version', v_candidate.prompt_version,
+                'schema_version', v_candidate.schema_version,
+                'max_output_tokens', v_candidate.max_output_tokens,
+                'retry_count', v_candidate.retry_count,
+                'usage_metadata_status', 'missing',
+                'usage_complete', FALSE,
+                'prompt_tokens', NULL,
+                'completion_tokens', NULL,
+                'total_tokens', NULL,
+                'thinking_tokens', NULL,
+                'latency_ms', LEAST(
+                    3600000::NUMERIC,
+                    GREATEST(
+                        0::NUMERIC,
+                        EXTRACT(EPOCH FROM (v_now - v_candidate.created_at))
+                            * 1000
+                    )
+                )::INTEGER,
+                'estimated_cost_usd', NULL,
+                'finish_reason', NULL
+            ),
+            v_candidate.slot,
+            v_candidate.lease_claim_token,
+            v_candidate.fence
+        );
+        v_recovered := v_recovered + 1;
+    END LOOP;
+    RETURN v_recovered;
+END;
+$$;
+
 CREATE FUNCTION public.reap_analysis_v2_gemini_cutoff_leases_v2(
     p_limit INTEGER DEFAULT 8
 )
@@ -784,6 +894,16 @@ BEGIN
         WHERE lease.state = 'quarantined'
           AND lease.stage = 'genderResolution'
           AND lease.expires_at <= v_now
+          AND NOT EXISTS (
+                SELECT 1
+                FROM public.analysis_v2_ai_attempts AS ai_attempt
+                WHERE ai_attempt.request_id = lease.request_id
+                  AND ai_attempt.job_key = lease.job_key
+                  AND ai_attempt.operation_key = lease.operation_key
+                  AND ai_attempt.attempt = lease.attempt
+                  AND ai_attempt.stage = 'genderResolution'
+                  AND ai_attempt.status = 'reserved'
+          )
         ORDER BY lease.slot
         LIMIT p_limit
         FOR UPDATE
@@ -822,6 +942,8 @@ REVOKE ALL ON FUNCTION public.cutoff_analysis_v2_gemini_lease_v2(
 REVOKE ALL ON FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt(
     UUID, TEXT, UUID, TEXT, SMALLINT, UUID, JSONB, INTEGER, UUID, BIGINT
 ) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.recover_analysis_v2_gender_resolution_cutoffs(INTEGER)
+    FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.reap_analysis_v2_gemini_cutoff_leases_v2(INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
 
@@ -840,6 +962,8 @@ GRANT EXECUTE ON FUNCTION public.cutoff_analysis_v2_gemini_lease_v2(
 GRANT EXECUTE ON FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt(
     UUID, TEXT, UUID, TEXT, SMALLINT, UUID, JSONB, INTEGER, UUID, BIGINT
 ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.recover_analysis_v2_gender_resolution_cutoffs(INTEGER)
+    TO service_role;
 GRANT EXECUTE ON FUNCTION public.reap_analysis_v2_gemini_cutoff_leases_v2(INTEGER)
     TO service_role;
 
@@ -852,3 +976,5 @@ COMMENT ON FUNCTION public.cutoff_analysis_v2_gemini_lease_v2(
 COMMENT ON FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt(
     UUID, TEXT, UUID, TEXT, SMALLINT, UUID, JSONB, INTEGER, UUID, BIGINT
 ) IS 'Atomically terminalizes a resolver cutoff and quarantines its exact Gemini lease; a successful attempt wins the race.';
+COMMENT ON FUNCTION public.recover_analysis_v2_gender_resolution_cutoffs(INTEGER)
+    IS 'Recovers expired reserved resolver attempts before their quarantined leases are reaped.';

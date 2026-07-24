@@ -66,6 +66,11 @@ describe('gender resolution forward migration contract', () => {
         expect(acquire).toContain("lease.state = 'quarantined'");
         expect(acquire).toContain('lease.expires_at <= v_now');
         expect(acquire).toContain("SET state = 'available'");
+        expect(acquire).toMatch(
+            /SET state = 'available',[\s\S]+?WHERE lease\.state = 'quarantined'\s+AND lease\.stage = 'genderResolution'\s+AND lease\.expires_at <= v_now/
+        );
+        expect(acquire).toContain('NOT EXISTS');
+        expect(acquire).toContain("ai_attempt.status = 'reserved'");
         expect(stageMigration).toContain('CHECK (slot BETWEEN 1 AND 8)');
     });
 
@@ -85,6 +90,10 @@ describe('gender resolution forward migration contract', () => {
         const reap = functionDefinition(
             stageMigration,
             'reap_analysis_v2_gemini_cutoff_leases_v2'
+        );
+        const recover = functionDefinition(
+            stageMigration,
+            'recover_analysis_v2_gender_resolution_cutoffs'
         );
         expect(legacyCutoff).toContain("SET state = 'quarantined'");
         expect(atomicCutoff).toContain(
@@ -106,6 +115,11 @@ describe('gender resolution forward migration contract', () => {
         expect(atomicCutoff).toContain('lease.operation_key = p_operation_key');
         expect(reap).toContain("lease.stage = 'genderResolution'");
         expect(reap).toContain('lease.expires_at <= v_now');
+        expect(reap).toContain('NOT EXISTS');
+        expect(recover).toContain("attempt.status = 'reserved'");
+        expect(recover).toContain(
+            'public.cutoff_analysis_v2_gender_resolution_attempt'
+        );
     });
 
     it('persists resolver provenance and keeps rolling internal summary compatibility', () => {
@@ -148,6 +162,12 @@ describe('gender resolution forward migration contract', () => {
         expect(quality).toContain("'unknownGatePassed'");
         expect(quality).toContain("'provenanceGatePassed'");
         expect(quality).toContain("'immutabilityGatePassed'");
+        expect(quality).toContain('public.analysis_requests');
+        expect(quality).toContain("status = 'completed'");
+        expect(quality).toContain("selected_plan_id_snapshot = 'standard'");
+        expect(quality).toContain('public.analysis_v2_result_summaries');
+        expect(quality).toContain("plan_id = 'standard'");
+        expect(quality).toContain("'requestGatePassed'");
         expect(quality).toContain("'resolverConcurrencyLimit', 2");
         expect(quality).toContain("'sharedConcurrencyLimit', 8");
         expect(provenanceMigration).toContain(

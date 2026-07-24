@@ -29,6 +29,8 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     releaseV2Rpc: 'release_analysis_v2_gemini_lease_v2',
     cutoffV2Rpc: 'cutoff_analysis_v2_gemini_lease_v2',
     cutoffAttemptV2Rpc: 'cutoff_analysis_v2_gender_resolution_attempt',
+    recoverCutoffAttemptsV2Rpc:
+        'recover_analysis_v2_gender_resolution_cutoffs',
     reapCutoffV2Rpc: 'reap_analysis_v2_gemini_cutoff_leases_v2',
 });
 
@@ -144,6 +146,7 @@ export interface AnalysisV2GeminiLeaseStore {
         lease: AnalysisV2GeminiLease;
         attempt: AnalysisV2AiAttemptTerminalInput;
     }): Promise<'cutoff' | 'already_terminal'>;
+    recoverCutoffAttempts(input?: { limit?: number }): Promise<number>;
     reapCutoff(input?: { limit?: number }): Promise<number>;
 }
 
@@ -456,6 +459,23 @@ export function createAnalysisV2GeminiLeaseStore(
             }
             const { data, error } = await dependencies.rpc(
                 ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.reapCutoffV2Rpc,
+                { p_limit: limit }
+            );
+            if (error) throw new AnalysisV2GeminiLeasePersistenceError();
+            const parsed = reapedCutoffCountSchema.safeParse(data);
+            if (!parsed.success) {
+                throw new AnalysisV2GeminiLeasePersistenceError();
+            }
+            return parsed.data;
+        },
+
+        async recoverCutoffAttempts(input = {}) {
+            const limit = input.limit ?? 8;
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) {
+                throw new AnalysisV2GeminiLeasePersistenceError();
+            }
+            const { data, error } = await dependencies.rpc(
+                ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.recoverCutoffAttemptsV2Rpc,
                 { p_limit: limit }
             );
             if (error) throw new AnalysisV2GeminiLeasePersistenceError();

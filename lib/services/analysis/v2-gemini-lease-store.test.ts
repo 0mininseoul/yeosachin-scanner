@@ -306,4 +306,18 @@ describe('deployment-wide Gemini lease store', () => {
         );
         expect(rpc).toHaveBeenCalledOnce();
     });
+
+    it('recovers reserved resolver cutoff attempts before reaping their leases', async () => {
+        const { rpc, store } = setup(2);
+
+        await expect(store.recoverCutoffAttempts({ limit: 2 })).resolves.toBe(2);
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.recoverCutoffAttemptsV2Rpc,
+            { p_limit: 2 }
+        );
+        await expect(store.recoverCutoffAttempts({ limit: 9 })).rejects.toThrow(
+            'ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR'
+        );
+        expect(rpc).toHaveBeenCalledOnce();
+    });
 });

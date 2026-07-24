@@ -78,9 +78,17 @@ describe('gender resolver provenance migration', () => {
             INSERT INTO supabase_migrations.schema_migrations(version)
             VALUES ('20260724230000');
 
-            CREATE TABLE public.analysis_requests(id UUID PRIMARY KEY);
-            INSERT INTO public.analysis_requests(id)
-            VALUES ('${REQUEST_V26}'), ('${REQUEST_V27}');
+            CREATE TABLE public.analysis_requests(
+                id UUID PRIMARY KEY,
+                pipeline_version TEXT,
+                status TEXT,
+                selected_plan_id_snapshot TEXT
+            );
+            INSERT INTO public.analysis_requests(
+                id, pipeline_version, status, selected_plan_id_snapshot
+            ) VALUES
+                ('${REQUEST_V26}', 'v2', 'completed', 'basic'),
+                ('${REQUEST_V27}', 'v2', 'processing', 'standard');
 
             CREATE TABLE public.analysis_v2_candidate_feature_manifests (
                 request_id UUID NOT NULL,
@@ -372,6 +380,33 @@ describe('gender resolver provenance migration', () => {
             resolver_cost_known_count: 1,
         });
 
+        const staging = await withRole('service_role', async () => (
+            await db.query<{ quality: Record<string, unknown> }>(
+                `SELECT public.load_analysis_v2_gender_resolution_quality($1)
+                    AS quality`,
+                [REQUEST_V27]
+            )
+        ).rows[0].quality);
+        expect(staging).toMatchObject({
+            requestCompleted: false,
+            standardPlan: true,
+            resultArchivePresent: false,
+            requestGatePassed: false,
+            unknownGatePassed: false,
+            qualityGatePassed: false,
+        });
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET status = 'completed'
+             WHERE id = $1`,
+            [REQUEST_V27]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_result_summaries(request_id, plan_id)
+             VALUES ($1, 'standard')`,
+            [REQUEST_V27]
+        );
+
         for (const table of [
             'analysis_v2_candidate_feature_rows',
             'analysis_v2_candidate_feature_manifests',
@@ -407,6 +442,10 @@ describe('gender resolver provenance migration', () => {
             resolverCostKnownCount: 1,
             resolverConcurrencyLimit: 2,
             sharedConcurrencyLimit: 8,
+            requestCompleted: true,
+            standardPlan: true,
+            resultArchivePresent: true,
+            requestGatePassed: true,
             unknownGateEvaluable: true,
             unknownGatePassed: false,
             provenanceGatePassed: true,
