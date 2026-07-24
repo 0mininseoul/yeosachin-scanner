@@ -208,13 +208,13 @@ const BRACKET_BY_GRADE: Record<string, string> = {
 function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
     return (
         <>
-            <div className="flex h-3 w-full overflow-hidden bg-line">
+            <div className="flex h-2.5 w-full overflow-hidden bg-line">
                 <div className="h-full bg-fg-dim" style={{ width: `${gr.male.percentage}%` }} />
                 <div className="h-full bg-blood" style={{ width: `${gr.female.percentage}%` }} />
                 <div className="h-full bg-line-2" style={{ width: `${gr.unknown.percentage}%` }} />
             </div>
 
-            <div className="mt-4 grid grid-cols-3 gap-3">
+            <div className="mt-3 grid grid-cols-3 gap-3">
                 {[
                     { label: OWNER_GENDER_LABELS.male, c: gr.male, Icon: Mars, txt: 'text-fg' },
                     { label: OWNER_GENDER_LABELS.female, c: gr.female, Icon: Venus, txt: 'text-blood' },
@@ -225,7 +225,7 @@ function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
                             <row.Icon aria-hidden="true" className={`h-3.5 w-3.5 ${row.txt}`} strokeWidth={2.25} />
                             <span className="text-[12px] text-fg-dim">{row.label}</span>
                         </div>
-                        <div className={`num mt-1 text-[18px] font-extrabold ${row.txt}`}>{row.c.count}</div>
+                        <div className={`num mt-0.5 text-[16px] font-extrabold ${row.txt}`}>{row.c.count}</div>
                         <div className="num text-[11px] text-fg-mute">{row.c.percentage}%</div>
                     </div>
                 ))}
@@ -657,9 +657,9 @@ export default function ResultPage({ params }: PageProps) {
 
                 {/* pipeline-specific summary */}
                 {summary.v2 && counts ? (
-                    <CaseCard className="mt-6 p-5">
+                    <CaseCard className="mt-6 p-4">
                         <span className="eyebrow">맞팔 계정 분석</span>
-                        <div className="num mt-3 flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[13px]">
+                        <div className="num mt-2.5 flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[13px]">
                             <span className="text-fg-dim">맞팔</span>
                             <span className="font-bold text-fg">{counts.mutual.toLocaleString()}</span>
                             <span className="px-1 text-fg-mute">·</span>
@@ -671,25 +671,25 @@ export default function ResultPage({ params }: PageProps) {
                         </div>
 
                         {gr && (
-                            <div className="mt-5 border-t border-line pt-4">
+                            <div className="mt-3.5 border-t border-line pt-3.5">
                                 <div className="flex items-center justify-between">
                                     <span className="text-[12px] font-semibold text-fg-dim">공개 계정 판독 분포</span>
                                     <span className="num text-[11px] text-fg-mute">판독 {counts.screened.toLocaleString()}명</span>
                                 </div>
-                                <div className="mt-3">
+                                <div className="mt-2.5">
                                     <GenderRatioBreakdown gr={gr} />
                                 </div>
                             </div>
                         )}
 
-                        <div className={`grid grid-cols-2 gap-px bg-line ${gr ? 'mt-5' : 'mt-4'}`}>
+                        <div className={`grid grid-cols-2 gap-px bg-line ${gr ? 'mt-3.5' : 'mt-3'}`}>
                             {[
                                 { label: '팔로워', value: summary.v2.followers.declared },
                                 { label: '팔로잉', value: summary.v2.following.declared },
                             ].map((item) => (
-                                <div key={item.label} className="bg-ink-2 px-3 py-3">
+                                <div key={item.label} className="bg-ink-2 px-3 py-2.5">
                                     <span className="text-[11px] text-fg-mute">{item.label}</span>
-                                    <p className="num mt-1 text-[17px] font-bold text-fg">
+                                    <p className="num mt-0.5 text-[16px] font-bold text-fg">
                                         {item.value.toLocaleString()}
                                     </p>
                                 </div>
