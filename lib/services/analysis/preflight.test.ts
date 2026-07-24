@@ -4,7 +4,7 @@ import type { ProviderCallContext } from '@/lib/services/instagram/providers/typ
 import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import { makeWebProfileFetcher } from '@/lib/services/instagram/providers/selfhosted/web-client';
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
-import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
+import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 
 import {
     PREFLIGHT_DATABASE_NAMES,
@@ -205,6 +205,7 @@ function workerStore(claimed: ClaimedPreflight | null = claim()) {
 
 describe('preflight persistence adapter', () => {
     it('keeps RPC names centralized and sends authenticated identity to create/replay', async () => {
+        vi.stubEnv('ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT', 'test_entitlement');
         const rpc = vi.fn(async () => ({
             data: [{
                 preflight_id: preflightId,
@@ -265,9 +266,10 @@ describe('preflight persistence adapter', () => {
             p_policy_versions_snapshot: {
                 pipeline: 'v2',
                 risk: RISK_POLICY_VERSION,
-                aiStage: AI_STAGE_POLICY_VERSION,
+                aiStage: AI_STAGE_POLICY_LATEST_VERSION,
             },
         });
+        vi.stubEnv('ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT', 'off');
     });
 
     it('owner-filters reads and reconstructs ready DTO state from decomposed columns', async () => {

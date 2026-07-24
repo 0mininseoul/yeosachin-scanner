@@ -182,6 +182,32 @@ describe('analysis V2 worker route', () => {
         });
     });
 
+    it('keeps resolver recovery pending on the internal retry delivery path', async () => {
+        mocks.process.mockResolvedValueOnce({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+        });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(500);
+        await expect(response.json()).resolves.toEqual({
+            code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+        });
+        expect(mocks.emit).toHaveBeenCalledOnce();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'analysis_v2.worker_retry',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                analysis_request_id: payload.requestId,
+                job_key: payload.jobKey,
+                disposition: 'transient',
+                retryable: true,
+                error_code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+            }),
+        });
+    });
+
     it('sanitizes a returned retry code before logging or responding', async () => {
         mocks.process.mockResolvedValueOnce({
             status: 'retry',

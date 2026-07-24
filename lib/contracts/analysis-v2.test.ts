@@ -13,7 +13,7 @@ const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const expiresAt = '2026-07-13T12:00:00.000Z';
 
 describe('analysis V2 public contracts', () => {
-    it('separates AI response unavailability while defaulting legacy summaries to zero', () => {
+    it('never exposes internal screening failure aggregates in the owner summary', () => {
         const legacy = {
             targetInstagramId: 'target',
             targetProfileImage: null,
@@ -45,21 +45,18 @@ describe('analysis V2 public contracts', () => {
             scorePolicyVersion: 'risk-policy-v2.2',
         };
 
-        expect(analysisResultSummaryV1Schema.parse(legacy).analysisUnavailableMutuals)
-            .toBe(0);
+        const parsed = analysisResultSummaryV1Schema.parse({
+            ...legacy,
+            analysisUnavailableMutuals: 1,
+        });
+        expect(parsed).not.toHaveProperty('successfullyScreenedMutuals');
+        expect(parsed).not.toHaveProperty('fetchUnavailableMutuals');
+        expect(parsed).not.toHaveProperty('mediaUnavailableMutuals');
+        expect(parsed).not.toHaveProperty('analysisUnavailableMutuals');
         expect(analysisResultSummaryV1Schema.safeParse({
             ...legacy,
             scorePolicyVersion: 'risk-policy-v2.3',
         }).success).toBe(true);
-        expect(analysisResultSummaryV1Schema.safeParse({
-            ...legacy,
-            successfullyScreenedMutuals: 0,
-            analysisUnavailableMutuals: 1,
-        }).success).toBe(true);
-        expect(analysisResultSummaryV1Schema.safeParse({
-            ...legacy,
-            analysisUnavailableMutuals: 1,
-        }).success).toBe(false);
         const withoutGenderStats: Partial<typeof legacy> = { ...legacy };
         delete withoutGenderStats.genderStats;
         expect(analysisResultSummaryV1Schema.safeParse(withoutGenderStats).success)
@@ -436,14 +433,19 @@ describe('analysis V2 public contracts', () => {
             ...base,
             femaleAccounts: [row],
         }).success).toBe(true);
-        expect(analysisResultPageV1Schema.safeParse({
+        const internalAggregateInput = analysisResultPageV1Schema.safeParse({
             ...base,
             summary: {
                 ...base.summary,
                 successfullyScreenedMutuals: 39,
             },
             femaleAccounts: [row],
-        }).success).toBe(false);
+        });
+        expect(internalAggregateInput.success).toBe(true);
+        if (internalAggregateInput.success) {
+            expect(internalAggregateInput.data.summary)
+                .not.toHaveProperty('successfullyScreenedMutuals');
+        }
         expect(analysisResultPageV1Schema.safeParse({
             ...base,
             femaleAccounts: [{ ...row, riskBand: 'normal' }],

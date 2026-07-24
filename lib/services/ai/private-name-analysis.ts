@@ -6,7 +6,11 @@ import {
     type GeminiAttemptTelemetry,
 } from './gemini';
 import { getVertexAIAnalysisConcurrency } from './pipeline-config';
-import { getAiStagePolicy } from './stage-policy';
+import {
+    AI_STAGE_POLICY_VERSION,
+    getAiStagePolicy,
+    type AiStagePolicyVersion,
+} from './stage-policy';
 import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
@@ -170,12 +174,19 @@ async function analyzePrivateNameChunk(
     accounts: z.output<typeof privateNameAccountSchema>[],
     requestId?: string,
     auditFactory?: PrivateNameAnalysisAudit,
-    chunkIndex = 0
+    chunkIndex = 0,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): Promise<PrivateNameAnalysisResult[]> {
     const expectedIds = accounts.map(account => account.id);
     const schema = createPrivateNameBatchResponseSchema(expectedIds);
     const prompt = buildPrivateNamePrompt(accounts);
-    const audit = chunkAuditSink(auditFactory, prompt, requestId, chunkIndex);
+    const audit = chunkAuditSink(
+        auditFactory,
+        prompt,
+        requestId,
+        chunkIndex,
+        policyVersion,
+    );
 
     try {
         const prepared = audit ? await audit.prepare() : null;
@@ -191,6 +202,7 @@ async function analyzePrivateNameChunk(
                     ...(audit
                         ? {
                             stage: 'privateAccountName' as const,
+                            aiStagePolicyVersion: policyVersion,
                             startingAttempt: prepared?.startingAttempt ?? 1,
                             onBeforeAttempt: audit.onBeforeAttempt,
                             onAttemptTelemetry: audit.onAttemptTelemetry,
@@ -214,9 +226,10 @@ async function analyzePrivateNameChunk(
 
 function privateNameChunkIdentity(
     prompt: string,
-    chunkIndex: number
+    chunkIndex: number,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): PrivateNameAnalysisChunkIdentity {
-    const policy = getAiStagePolicy('privateAccountName');
+    const policy = getAiStagePolicy(policyVersion, 'privateAccountName');
     const inputHash = createAnalysisV2AiResultInputHash(prompt);
     const resultIdentity = createAnalysisV2AiResultIdentity({
         stage: 'privateAccountName',
@@ -242,13 +255,14 @@ function chunkAuditSink(
     audit: PrivateNameAnalysisAudit | undefined,
     prompt: string,
     requestId: string | undefined,
-    chunkIndex: number
+    chunkIndex: number,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): PrivateNameAnalysisAuditSink | undefined {
     if (!audit) return undefined;
     if (typeof audit.forChunk !== 'function') {
         throw new Error('Private-name V2 audit requires a per-chunk sink factory.');
     }
-    const identity = privateNameChunkIdentity(prompt, chunkIndex);
+    const identity = privateNameChunkIdentity(prompt, chunkIndex, policyVersion);
     const sink = audit.forChunk(identity);
     if (
         !sink
@@ -271,7 +285,8 @@ function chunkAuditSink(
 export async function analyzePrivateAccountNames(
     rawAccounts: PrivateNameAccountInput[],
     requestId?: string,
-    audit?: PrivateNameAnalysisAudit
+    audit?: PrivateNameAnalysisAudit,
+    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
 ): Promise<PrivateNameAnalysisResult[]> {
     const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
     if (requestId !== undefined) {
@@ -281,6 +296,7 @@ export async function analyzePrivateAccountNames(
         throw new Error('Private-name V2 audit requires a request id.');
     }
     if (accounts.length === 0) return [];
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
 
     const chunks = Array.from(
         { length: Math.ceil(accounts.length / PRIVATE_NAME_BATCH_SIZE) },
@@ -300,7 +316,8 @@ export async function analyzePrivateAccountNames(
                     chunk,
                     requestId,
                     audit,
-                    chunkIndex
+                    chunkIndex,
+                    policyVersion,
                 );
             })
         );

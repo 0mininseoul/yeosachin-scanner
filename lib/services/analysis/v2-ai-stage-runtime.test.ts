@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
+import {
+    AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_VERSION,
+} from '@/lib/services/ai/stage-policy';
 
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: vi.fn() },
@@ -8,6 +11,10 @@ import {
     createDurableAnalysisV2AiStageRuntime,
     type AnalysisV2AiStageRuntimeDependencies,
 } from './v2-ai-stage-runtime';
+import {
+    AnalysisV2AiResultRecoveredCutoffError,
+    AnalysisV2AiResultRecoveryPendingError,
+} from './v2-ai-result-store';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -53,6 +60,7 @@ describe('durable V2 AI stage runtime', () => {
         const dependencies = {
             createAudit: vi.fn(),
             runGender: vi.fn(),
+            runGenderResolution: vi.fn(),
             runFeatures: vi.fn(),
             runPrivateNames: vi.fn(),
             runPartnerSafety: vi.fn(),
@@ -71,10 +79,205 @@ describe('durable V2 AI stage runtime', () => {
         for (const invoke of invocations) {
             await expect(invoke()).rejects.toThrow('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
         }
+        expect(() => runtime.startGenderResolution({ media: [] }, staleFence))
+            .toThrow('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
 
         for (const dependency of Object.values(dependencies)) {
             expect(dependency).not.toHaveBeenCalled();
         }
+    });
+
+    it('starts a v2.7 resolver and exposes only an audited ready result', async () => {
+        const onCutoff = vi.fn().mockResolvedValue(undefined);
+        const createAudit = vi.fn(options => ({
+            requestId: options.requestId,
+            operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity,
+            resultSchema: options.resultSchema,
+            prepare: vi.fn(),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+            cutoff: onCutoff,
+        }));
+        const runGenderResolution = vi.fn().mockResolvedValue({
+            assessment: {
+                inferredGender: 'female',
+                confidence: 'high',
+                ownerConsistency: 'same_person',
+                evidenceSelectionIds: ['profile:owner', 'post:owner:thumbnail'],
+            },
+            analyzedSelectionIds: ['profile:owner', 'post:owner:thumbnail'],
+        });
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit,
+            runGenderResolution,
+        });
+        const handle = runtime.startGenderResolution({
+            media: [{
+                selectionId: 'profile:owner',
+                kind: 'profile',
+                normalizedJpegBase64: '/9j/2Q==',
+            }, {
+                selectionId: 'post:owner:thumbnail',
+                kind: 'feed',
+                normalizedJpegBase64: '/9j/2g==',
+                postId: 'owner-post',
+            }],
+        }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+
+        expect(handle.peek()).toEqual({ status: 'pending' });
+        await handle.completion;
+        expect(handle.peek()).toMatchObject({
+            status: 'ready',
+            value: {
+                result: {
+                    assessment: { inferredGender: 'female' },
+                },
+                operationKey: expect.stringMatching(/^gender-resolution:[a-f0-9]{64}$/),
+                resultHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+                source: 'checkpoint',
+            },
+        });
+        expect(runGenderResolution).toHaveBeenCalledWith(
+            expect.any(Object),
+            expect.any(Object),
+            expect.objectContaining({ abortSignal: expect.any(AbortSignal) }),
+        );
+        expect(onCutoff).not.toHaveBeenCalled();
+    });
+
+    it('cuts off a pending resolver without waiting for the provider promise', async () => {
+        const onCutoff = vi.fn().mockResolvedValue(undefined);
+        const createAudit = vi.fn(options => ({
+            requestId: options.requestId,
+            operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity,
+            resultSchema: options.resultSchema,
+            prepare: vi.fn(),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+            cutoff: onCutoff,
+        }));
+        const runGenderResolution = vi.fn<
+            NonNullable<AnalysisV2AiStageRuntimeDependencies['runGenderResolution']>
+        >((_input, _audit, options) => (
+            new Promise<never>((_resolve, reject) => {
+                options?.abortSignal?.addEventListener(
+                    'abort',
+                    () => reject(new DOMException('aborted', 'AbortError')),
+                    { once: true },
+                );
+            })
+        ));
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit,
+            runGenderResolution,
+        });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+
+        await handle.cutoff();
+
+        expect(handle.peek()).toEqual({ status: 'cutoff' });
+        expect(onCutoff).toHaveBeenCalledOnce();
+        await handle.completion;
+    });
+
+    it.each([
+        {
+            label: 'never settles',
+            cutoff: () => new Promise<void>(() => undefined),
+        },
+        {
+            label: 'rejects',
+            cutoff: () => Promise.reject(new Error('temporary cutoff bookkeeping failure')),
+        },
+    ])('bounds resolver cutoff bookkeeping when it $label', async scenario => {
+        const createAudit = vi.fn(options => ({
+            requestId: options.requestId,
+            operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity,
+            resultSchema: options.resultSchema,
+            prepare: vi.fn(),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+            cutoff: vi.fn(scenario.cutoff),
+        }));
+        const runGenderResolution = vi.fn<
+            NonNullable<AnalysisV2AiStageRuntimeDependencies['runGenderResolution']>
+        >((_input, _audit, options) => (
+            new Promise<never>((_resolve, reject) => {
+                options?.abortSignal?.addEventListener(
+                    'abort',
+                    () => reject(new DOMException('aborted', 'AbortError')),
+                    { once: true },
+                );
+            })
+        ));
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit,
+            runGenderResolution,
+        });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+
+        const outcome = await Promise.race([
+            handle.cutoff().then(
+                () => 'resolved' as const,
+                () => 'rejected' as const,
+            ),
+            new Promise<'timed_out'>(resolve => {
+                setTimeout(() => resolve('timed_out'), 100);
+            }),
+        ]);
+
+        expect(outcome).toBe('rejected');
+        expect(handle.peek()).toEqual({ status: 'cutoff' });
+        await handle.completion;
+    });
+
+    it.each([
+        {
+            label: 'reserved attempt awaiting exact recovery',
+            error: new AnalysisV2AiResultRecoveryPendingError(),
+            status: 'recovery_pending' as const,
+            cutoffRejects: true,
+        },
+        {
+            label: 'durably recovered cutoff',
+            error: new AnalysisV2AiResultRecoveredCutoffError(),
+            status: 'cutoff' as const,
+            cutoffRejects: false,
+        },
+    ])('reconstructs a $label without exposing terminal_unavailable', async scenario => {
+        const cutoff = vi.fn().mockRejectedValue(scenario.error);
+        const createAudit = vi.fn(options => ({
+            requestId: options.requestId,
+            operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity,
+            resultSchema: options.resultSchema,
+            prepare: vi.fn().mockRejectedValue(scenario.error),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+            cutoff,
+        }));
+        const runtime = createDurableAnalysisV2AiStageRuntime({ createAudit });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+
+        await handle.completion;
+        expect(handle.peek()).toEqual({ status: scenario.status });
+        await expect(handle.cutoff()).resolves.toBeUndefined();
+        expect(handle.peek()).not.toEqual({ status: 'terminal_unavailable' });
     });
 
     it('replays the same cached gender operation without opening another provider attempt', async () => {

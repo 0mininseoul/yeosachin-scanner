@@ -9,6 +9,11 @@ import {
     AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
 } from '@/lib/services/ai/gemini-generation-policy';
 import {
+    AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_VERSION,
+    type AiStagePolicyVersion,
+} from '@/lib/services/ai/stage-policy';
+import {
     analysisV2AiAttemptStore,
     type AnalysisV2AiAttemptRecord,
     type AnalysisV2AiAttemptReservation,
@@ -30,7 +35,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 const LOCATION_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 const VERSION_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
-const OPERATION_KEY_PATTERN = /^(gender-triage|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
+const OPERATION_KEY_PATTERN = /^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
 const MAX_HASH_MATERIAL_BYTES = 8 * 1024 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024;
 const MAX_JSON_DEPTH = 64;
@@ -47,6 +52,7 @@ export const ANALYSIS_V2_AI_RESULT_DATABASE_NAMES = Object.freeze({
 
 export const ANALYSIS_V2_AI_RESULT_STAGES = [
     'genderTriage',
+    'genderResolution',
     'featureAnalysis',
     'highRiskNarrative',
     'privateAccountName',
@@ -68,6 +74,7 @@ const GLOBAL_CACHE_STAGES: ReadonlySet<AnalysisV2AiResultStage> = new Set([
 
 const OPERATION_PREFIX_BY_STAGE: Readonly<Record<AnalysisV2AiResultStage, string>> = {
     genderTriage: 'gender-triage',
+    genderResolution: 'gender-resolution',
     featureAnalysis: 'feature-analysis',
     highRiskNarrative: 'high-risk-narrative',
     privateAccountName: 'private-account-name',
@@ -355,6 +362,8 @@ export interface AnalysisV2AiAuditAdapter<T> {
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: unknown
     ): Promise<void>;
+    /** Resolver-only durable cutoff fence. Implementations must not await provider completion. */
+    cutoff?(): Promise<void>;
     resultSchema: z.ZodType<T>;
 }
 
@@ -364,6 +373,7 @@ export interface CreateAnalysisV2AiAuditAdapterOptions<T> {
     claimToken: string;
     resultIdentity: AnalysisV2AiResultIdentity;
     resultSchema: z.ZodType<T>;
+    aiStagePolicyVersion?: AiStagePolicyVersion;
     attemptStore?: AnalysisV2AiAttemptStore;
     resultStore?: AnalysisV2AiResultStore;
     leaseStore?: AnalysisV2GeminiLeaseStore;
@@ -388,6 +398,20 @@ export class AnalysisV2AiResultReplayBlockedError extends Error {
     constructor() {
         super('ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED');
         this.name = 'AnalysisV2AiResultReplayBlockedError';
+    }
+}
+
+export class AnalysisV2AiResultRecoveryPendingError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+        this.name = 'AnalysisV2AiResultRecoveryPendingError';
+    }
+}
+
+export class AnalysisV2AiResultRecoveredCutoffError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_AI_RESULT_RECOVERED_CUTOFF');
+        this.name = 'AnalysisV2AiResultRecoveredCutoffError';
     }
 }
 
@@ -1044,6 +1068,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
     const attemptStore = options.attemptStore ?? analysisV2AiAttemptStore;
     const resultStore = options.resultStore ?? analysisV2AiResultStore;
     const leaseStore = options.leaseStore ?? analysisV2GeminiLeaseStore;
+    const aiStagePolicyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
     const handlerDeadlineAtMs = options.handlerDeadlineAtMs
         ?? performance.now() + 300_000;
     if (!Number.isFinite(handlerDeadlineAtMs) || handlerDeadlineAtMs < 0) {
@@ -1053,7 +1078,11 @@ export function createAnalysisV2AiAuditAdapter<T>(
     }
     const reservations = new Map<number, AnalysisV2AiAttemptReservation>();
     const leases = new Map<number, AnalysisV2GeminiLease>();
+    const attemptStartedAt = new Map<number, number>();
     let preparation: Promise<AnalysisV2AiPreparedResult<T>> | null = null;
+    let attemptSetup: Promise<void> | null = null;
+    let cutoffStarted: Promise<void> | null = null;
+    let cutoffRequested = false;
     let expectedAttempt: number | null = null;
     let terminal = false;
     const emittedTerminalAttempts = new Set<number>();
@@ -1157,6 +1186,15 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     throw new AnalysisV2AiResultReplayBlockedError();
                 }
                 const last = attempts.at(-1);
+                const resolverReplay = resultIdentity.stage === 'genderResolution'
+                    && aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+                if (last?.status === 'reserved' && resolverReplay) {
+                    throw new AnalysisV2AiResultRecoveryPendingError();
+                }
+                if (last?.status === 'cutoff' && resolverReplay) {
+                    terminal = true;
+                    throw new AnalysisV2AiResultRecoveredCutoffError();
+                }
                 if (last?.status === 'response_rejected') {
                     terminal = true;
                     throw new Error(
@@ -1224,40 +1262,52 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: unexpected attempt reservation.'
                 );
             }
-            const lease = await leaseStore.acquire({
-                requestId: request.data.requestId,
-                jobKey: request.data.jobKey,
-                attempt: telemetry.attempt,
-                handlerDeadlineAtMs,
-            });
-            let reservation: AnalysisV2AiAttemptReservation;
-            try {
-                reservation = await attemptStore.reserve({
+            const setup = (async () => {
+                const lease = await leaseStore.acquire({
                     requestId: request.data.requestId,
                     jobKey: request.data.jobKey,
-                    claimToken: request.data.claimToken,
                     operationKey: resultIdentity.operationKey,
+                    stage: resultIdentity.stage,
                     attempt: telemetry.attempt,
-                    retryCount: telemetry.retryCount,
-                    modelName: telemetry.modelName,
-                    location: telemetry.location,
-                    stage: telemetry.stage,
-                    thinkingLevel: telemetry.thinkingLevel,
-                    mediaCount: telemetry.mediaCount,
-                    mediaResolution: telemetry.mediaResolution,
-                    promptVersion: telemetry.promptVersion,
-                    schemaVersion: telemetry.schemaVersion,
-                    maxOutputTokens: telemetry.maxOutputTokens,
+                    handlerDeadlineAtMs,
+                    aiStagePolicyVersion,
                 });
-                if (!reservation.created || reservation.status !== 'reserved') {
-                    throw new AnalysisV2AiResultReplayBlockedError();
+                let reservation: AnalysisV2AiAttemptReservation;
+                try {
+                    reservation = await attemptStore.reserve({
+                        requestId: request.data.requestId,
+                        jobKey: request.data.jobKey,
+                        claimToken: request.data.claimToken,
+                        operationKey: resultIdentity.operationKey,
+                        attempt: telemetry.attempt,
+                        retryCount: telemetry.retryCount,
+                        modelName: telemetry.modelName,
+                        location: telemetry.location,
+                        stage: telemetry.stage,
+                        thinkingLevel: telemetry.thinkingLevel,
+                        mediaCount: telemetry.mediaCount,
+                        mediaResolution: telemetry.mediaResolution,
+                        promptVersion: telemetry.promptVersion,
+                        schemaVersion: telemetry.schemaVersion,
+                        maxOutputTokens: telemetry.maxOutputTokens,
+                    });
+                    if (!reservation.created || reservation.status !== 'reserved') {
+                        throw new AnalysisV2AiResultReplayBlockedError();
+                    }
+                } catch (error) {
+                    await leaseStore.release(lease);
+                    throw error;
                 }
-            } catch (error) {
-                await leaseStore.release(lease);
-                throw error;
+                leases.set(telemetry.attempt, lease);
+                reservations.set(telemetry.attempt, reservation);
+                attemptStartedAt.set(telemetry.attempt, performance.now());
+            })();
+            attemptSetup = setup;
+            try {
+                await setup;
+            } finally {
+                if (attemptSetup === setup) attemptSetup = null;
             }
-            leases.set(telemetry.attempt, lease);
-            reservations.set(telemetry.attempt, reservation);
         },
 
         async onAttemptTelemetry(telemetry, parsedResult) {
@@ -1265,6 +1315,17 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 requestId: request.data.requestId,
                 resultIdentity,
             });
+            if (cutoffRequested) {
+                await cutoffStarted;
+                const lateLease = leases.get(telemetry.attempt);
+                if (lateLease) {
+                    await leaseStore.release(lateLease);
+                }
+                reservations.delete(telemetry.attempt);
+                leases.delete(telemetry.attempt);
+                attemptStartedAt.delete(telemetry.attempt);
+                return;
+            }
             const reservation = reservations.get(telemetry.attempt);
             const lease = leases.get(telemetry.attempt);
             if (!reservation || !lease) {
@@ -1354,6 +1415,85 @@ export function createAnalysisV2AiAuditAdapter<T>(
             }
             reservations.delete(telemetry.attempt);
             leases.delete(telemetry.attempt);
+            attemptStartedAt.delete(telemetry.attempt);
+        },
+
+        cutoff() {
+            if (cutoffStarted) return cutoffStarted;
+            if (
+                resultIdentity.stage !== 'genderResolution'
+                || aiStagePolicyVersion !== AI_STAGE_POLICY_LATEST_VERSION
+            ) {
+                return Promise.reject(new Error(
+                    'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: cutoff is resolver-only.'
+                ));
+            }
+            cutoffRequested = true;
+            terminal = true;
+            cutoffStarted = (async () => {
+                if (preparation) {
+                    try {
+                        await preparation;
+                    } catch (error) {
+                        if (
+                            error instanceof AnalysisV2AiResultRecoveryPendingError
+                            || error instanceof AnalysisV2AiResultRecoveredCutoffError
+                        ) {
+                            throw error;
+                        }
+                    }
+                }
+                try {
+                    await attemptSetup;
+                } catch {
+                    if (reservations.size === 0) return;
+                    throw new Error(
+                        'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: cutoff setup failed.'
+                    );
+                }
+                const attempt = Math.max(0, ...reservations.keys());
+                if (attempt === 0) return;
+                const reservation = reservations.get(attempt);
+                const lease = leases.get(attempt);
+                if (!reservation || !lease) {
+                    throw new Error(
+                        'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: cutoff fence missing.'
+                    );
+                }
+                const startedAt = attemptStartedAt.get(attempt) ?? performance.now();
+                await leaseStore.cutoffAttempt({
+                    lease,
+                    attempt: {
+                        requestId: request.data.requestId,
+                        jobKey: request.data.jobKey,
+                        claimToken: request.data.claimToken,
+                        operationKey: resultIdentity.operationKey,
+                        attempt,
+                        retryCount: reservation.retryCount,
+                        reservationToken: reservation.reservationToken,
+                        modelName: reservation.modelName,
+                        location: reservation.location,
+                        stage: reservation.stage,
+                        thinkingLevel: reservation.thinkingLevel,
+                        mediaCount: reservation.mediaCount,
+                        mediaResolution: reservation.mediaResolution,
+                        promptVersion: reservation.promptVersion,
+                        schemaVersion: reservation.schemaVersion,
+                        maxOutputTokens: reservation.maxOutputTokens,
+                        status: 'cutoff',
+                        usageMetadataStatus: 'missing',
+                        usageComplete: false,
+                        tokenUsage: null,
+                        latencyMs: Math.max(
+                            0,
+                            Math.round(performance.now() - startedAt)
+                        ),
+                        estimatedCostUsd: null,
+                        finishReason: null,
+                    },
+                });
+            })();
+            return cutoffStarted;
         },
     };
 }

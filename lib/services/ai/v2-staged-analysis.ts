@@ -19,7 +19,13 @@ import {
     type GeminiAttemptStartTelemetry,
     type GeminiAttemptTelemetry,
 } from './gemini';
-import { getAiStagePolicy, type AiStageName } from './stage-policy';
+import {
+    AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_VERSION,
+    getAiStagePolicy,
+    type AiStageName,
+    type AiStagePolicyVersion,
+} from './stage-policy';
 import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
@@ -63,6 +69,7 @@ const INSTAGRAM_USERNAME_PATTERN = /^[A-Za-z0-9._]{1,30}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const STAGED_OPERATION_PREFIX = Object.freeze({
     genderTriage: 'gender-triage',
+    genderResolution: 'gender-resolution',
     featureAnalysis: 'feature-analysis',
     partnerSafety: 'partner-safety',
     highRiskNarrative: 'high-risk-narrative',
@@ -81,6 +88,11 @@ const evidenceRefIdSchema = z.string().trim().min(1).max(240);
 const confidenceSchema = z.enum(['low', 'medium', 'high']);
 const inferredGenderSchema = z.enum(['female', 'male', 'unknown']);
 const ownerConsistencySchema = z.enum(['same_person', 'multiple_or_unclear', 'not_visible']);
+const genderResolutionOwnerConsistencySchema = z.enum([
+    'same_person',
+    'mixed_people',
+    'not_visible',
+]);
 const accountContextSchema = z.enum([
     'personal',
     'individual_creator',
@@ -190,6 +202,25 @@ export const genderTriageResultSchema = z.object({
 export type NormalizedAiMediaSelection = z.infer<typeof normalizedAiMediaSelectionSchema>;
 export type GenderTriageInput = z.input<typeof genderTriageInputSchema>;
 export type GenderTriageResult = z.infer<typeof genderTriageResultSchema>;
+
+export const genderResolutionInputSchema = z.object({
+    media: normalizedMediaListSchema,
+}).strict();
+
+export const genderResolutionModelResponseSchema = z.object({
+    inferredGender: inferredGenderSchema,
+    confidence: confidenceSchema,
+    ownerConsistency: genderResolutionOwnerConsistencySchema,
+    evidenceSelectionIds: z.array(selectionIdSchema).max(5),
+}).strict();
+
+export const genderResolutionResultSchema = z.object({
+    assessment: genderResolutionModelResponseSchema,
+    analyzedSelectionIds: z.array(selectionIdSchema).max(MAX_TRIAGE_FEED_MEDIA + 1),
+}).strict();
+
+export type GenderResolutionInput = z.input<typeof genderResolutionInputSchema>;
+export type GenderResolutionResult = z.infer<typeof genderResolutionResultSchema>;
 
 const safeOverviewSchema = z.string()
     .transform(value => sanitizePublicRiskNarrativeLine(value) ?? '')
@@ -755,9 +786,10 @@ function stagedResultIdentity(
     stage: AiStageName,
     prompt: string,
     media: readonly AnalysisV2AiIdentityMediaPart[],
-    cacheScope: 'request' | 'global_ttl'
+    cacheScope: 'request' | 'global_ttl',
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): AnalysisV2AiResultIdentity {
-    const policy = getAiStagePolicy(stage);
+    const policy = getAiStagePolicy(policyVersion, stage);
     return createAnalysisV2AiResultIdentity({
         stage,
         modelName: policy.model,
@@ -856,6 +888,43 @@ function genderResponseSchemaFor(media: readonly NormalizedAiMediaSelection[]) {
                 });
             }
         }));
+}
+
+export function genderResolutionModelResponseSchemaFor(
+    media: readonly NormalizedAiMediaSelection[]
+) {
+    const allowedIds = new Set(media.map(item => item.selectionId));
+    return genderResolutionModelResponseSchema
+        .superRefine((value, context) => {
+            assertEvidenceSelectionIds(
+                value.evidenceSelectionIds,
+                allowedIds,
+                ['evidenceSelectionIds'],
+                context
+            );
+        })
+        .transform(value => {
+            const evidenceSelectionIds = distinctAllowedEvidenceIds(
+                value.evidenceSelectionIds,
+                allowedIds
+            );
+            if (evidenceSelectionIds.length === 0) {
+                return {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds,
+                };
+            }
+            return {
+                ...value,
+                confidence: value.confidence === 'high' && evidenceSelectionIds.length < 2
+                    ? 'medium' as const
+                    : value.confidence,
+                evidenceSelectionIds,
+            };
+        })
+        .pipe(genderResolutionModelResponseSchema);
 }
 
 function normalizeFeatureResponse(
@@ -1084,6 +1153,60 @@ mediaManifest(JSON): ${JSON.stringify(mediaManifest(media))}
 `.trim();
 }
 
+function genderResolutionPrompt(media: readonly NormalizedAiMediaSelection[]): string {
+    return [
+        '아래 이미지만 보고 계정 소유자의 성별을 독립적으로 재판정하세요.',
+        '추측을 강요하지 말고 보이는 시각 근거만 사용하세요.',
+        '여러 사람이 섞이면 ownerConsistency=mixed_people로 반환하세요.',
+        '근거가 없으면 inferredGender=unknown, confidence=low, ownerConsistency=not_visible로 반환하세요.',
+        'high confidence 이진 판정에는 서로 다른 이미지 근거가 최소 2개 필요합니다.',
+        `사용 가능한 selectionId: ${media.map(item => item.selectionId).join(', ')}`,
+    ].join('\n');
+}
+
+function genderResolutionMediaProjection(
+    media: readonly NormalizedAiMediaSelection[]
+) {
+    const originalByOpaqueId = new Map<string, string>();
+    const opaqueByOriginalId = new Map<string, string>();
+    const projectedMedia = media.map((item, index) => {
+        const opaqueId = `resolver-media:${index + 1}`;
+        originalByOpaqueId.set(opaqueId, item.selectionId);
+        opaqueByOriginalId.set(item.selectionId, opaqueId);
+        return {
+            ...item,
+            selectionId: opaqueId,
+            postId: undefined,
+        };
+    });
+    return {
+        projectedMedia,
+        originalByOpaqueId,
+        opaqueByOriginalId,
+    };
+}
+
+export function genderResolutionCheckpointAssessment(
+    rawInput: GenderResolutionInput,
+    rawAssessment: GenderResolutionResult['assessment']
+): z.infer<typeof genderResolutionModelResponseSchema> {
+    const input = genderResolutionInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
+    const projection = genderResolutionMediaProjection(media);
+    const assessment = genderResolutionModelResponseSchema.parse(rawAssessment);
+    const evidenceSelectionIds = assessment.evidenceSelectionIds.map(selectionId => {
+        const opaqueId = projection.opaqueByOriginalId.get(selectionId);
+        if (!opaqueId) {
+            throw new Error('ANALYSIS_V2_GENDER_RESOLUTION_EVIDENCE_DRIFT');
+        }
+        return opaqueId;
+    });
+    return genderResolutionModelResponseSchema.parse({
+        ...assessment,
+        evidenceSelectionIds,
+    });
+}
+
 function featureAnalysisPrompt(
     input: z.output<typeof featureAnalysisInputSchema>,
     media: readonly NormalizedAiMediaSelection[]
@@ -1151,8 +1274,118 @@ function resolveFinalGenderDecision(
     return 'unresolved';
 }
 
+export type GenderBaselineClassification =
+    | FeatureAnalysisResult['finalGenderDecision']
+    | 'fetch_unavailable'
+    | 'media_unavailable'
+    | 'analysis_unavailable';
+export type GenderClassificationSource =
+    | 'triage'
+    | 'feature'
+    | 'gender_resolution'
+    | 'unknown'
+    | 'unavailable';
+
+export interface GenderResolutionReconciliationInput {
+    baselineClassification: GenderBaselineClassification;
+    baselineSource: Exclude<GenderClassificationSource, 'gender_resolution'>;
+    triage: GenderTriageResult['assessment'] | null;
+    feature: FeatureAnalysisResult | null;
+    /** Only a ready, audited, pre-cutoff resolver result may be passed here. */
+    resolver: GenderResolutionResult | null;
+}
+
+export interface GenderResolutionReconciliationResult {
+    finalClassification: GenderBaselineClassification;
+    classificationSource: GenderClassificationSource;
+    resolverApplied: boolean;
+}
+
+function verifiedClassificationFor(
+    gender: 'female' | 'male'
+): Extract<GenderBaselineClassification, 'verified_female' | 'verified_non_female'> {
+    return gender === 'female' ? 'verified_female' : 'verified_non_female';
+}
+
+function isBinaryGender(value: unknown): value is 'female' | 'male' {
+    return value === 'female' || value === 'male';
+}
+
+function isMediumOrHigh(value: 'low' | 'medium' | 'high'): boolean {
+    return value === 'medium' || value === 'high';
+}
+
+export function applyGenderResolution(
+    input: GenderResolutionReconciliationInput
+): GenderResolutionReconciliationResult {
+    const unchanged = (): GenderResolutionReconciliationResult => ({
+        finalClassification: input.baselineClassification,
+        classificationSource: input.baselineSource,
+        resolverApplied: false,
+    });
+    if (
+        input.baselineClassification === 'verified_female'
+        || input.baselineClassification === 'verified_non_female'
+        || input.baselineClassification === 'fetch_unavailable'
+        || input.baselineClassification === 'media_unavailable'
+        || input.baselineClassification === 'analysis_unavailable'
+        || input.resolver === null
+    ) {
+        return unchanged();
+    }
+
+    const resolver = genderResolutionResultSchema.parse(input.resolver).assessment;
+    const resolverGender = resolver.inferredGender;
+    const resolverEvidenceCount = new Set(resolver.evidenceSelectionIds).size;
+    const isHighSameOwnerResolver = isBinaryGender(resolverGender)
+        && resolver.confidence === 'high'
+        && resolver.ownerConsistency === 'same_person'
+        && resolverEvidenceCount >= 2;
+    let shouldApply = false;
+
+    if (input.baselineClassification === 'unresolved') {
+        shouldApply = isHighSameOwnerResolver;
+        const feature = input.feature?.features;
+        if (
+            !shouldApply
+            && feature
+            && isBinaryGender(resolverGender)
+            && feature.gender === resolverGender
+            && isMediumOrHigh(feature.genderConfidence)
+            && isMediumOrHigh(resolver.confidence)
+            && feature.ownerConsistency === 'same_person'
+            && resolver.ownerConsistency === 'same_person'
+            && new Set([
+                ...feature.evidenceSelectionIds.gender,
+                ...resolver.evidenceSelectionIds,
+            ]).size >= 3
+        ) {
+            shouldApply = true;
+        }
+    } else if (
+        input.baselineClassification === 'unresolved_stage_conflict'
+        && isHighSameOwnerResolver
+    ) {
+        const conflictingGenders = new Set([
+            input.triage?.inferredGender,
+            input.feature?.features.gender,
+        ].filter(isBinaryGender));
+        shouldApply = conflictingGenders.has(resolverGender);
+    }
+
+    if (!shouldApply || !isBinaryGender(resolverGender)) {
+        return unchanged();
+    }
+    return {
+        finalClassification: verifiedClassificationFor(resolverGender),
+        classificationSource: 'gender_resolution',
+        resolverApplied: true,
+    };
+}
+
 export function createGenderTriageResultIdentity(
-    rawInput: GenderTriageInput
+    rawInput: GenderTriageInput,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): AnalysisV2AiResultIdentity {
     const input = genderTriageInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
@@ -1160,12 +1393,29 @@ export function createGenderTriageResultIdentity(
         'genderTriage',
         genderTriagePrompt(media),
         media,
-        'request'
+        'request',
+        policyVersion,
+    );
+}
+
+export function createGenderResolutionResultIdentity(
+    rawInput: GenderResolutionInput
+): AnalysisV2AiResultIdentity {
+    const input = genderResolutionInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
+    const projection = genderResolutionMediaProjection(media);
+    return stagedResultIdentity(
+        'genderResolution',
+        genderResolutionPrompt(projection.projectedMedia),
+        media,
+        'request',
+        AI_STAGE_POLICY_LATEST_VERSION,
     );
 }
 
 export function createFeatureAnalysisResultIdentity(
-    rawInput: FeatureAnalysisInput
+    rawInput: FeatureAnalysisInput,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): AnalysisV2AiResultIdentity {
     const input = featureAnalysisInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
@@ -1173,18 +1423,27 @@ export function createFeatureAnalysisResultIdentity(
         'featureAnalysis',
         featureAnalysisPrompt(input, media),
         media,
-        'request'
+        'request',
+        policyVersion,
     );
 }
 
 export async function genderTriage(
     rawInput: GenderTriageInput,
-    rawAuditContext: StagedAiAuditContext
+    rawAuditContext: StagedAiAuditContext,
+    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
 ): Promise<GenderTriageResult> {
     const input = genderTriageInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
     const prompt = genderTriagePrompt(media);
-    const identity = stagedResultIdentity('genderTriage', prompt, media, 'request');
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const identity = stagedResultIdentity(
+        'genderTriage',
+        prompt,
+        media,
+        'request',
+        policyVersion,
+    );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderResponseSchemaFor(media);
     const prepared = await prepareStagedResult(audit, responseSchema);
@@ -1195,6 +1454,7 @@ export async function genderTriage(
                 schema: responseSchema,
                 analysisType: 'v2_gender_triage',
                 stage: 'genderTriage',
+                aiStagePolicyVersion: policyVersion,
                 requestId: audit.requestId,
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
@@ -1212,14 +1472,76 @@ export async function genderTriage(
     });
 }
 
+export async function genderResolution(
+    rawInput: GenderResolutionInput,
+    rawAuditContext: StagedAiAuditContext,
+    options: { abortSignal?: AbortSignal } = {},
+): Promise<GenderResolutionResult> {
+    const input = genderResolutionInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
+    const projection = genderResolutionMediaProjection(media);
+    const prompt = genderResolutionPrompt(projection.projectedMedia);
+    const identity = stagedResultIdentity(
+        'genderResolution',
+        prompt,
+        media,
+        'request',
+        AI_STAGE_POLICY_LATEST_VERSION,
+    );
+    const audit = parseAuditContext(rawAuditContext, identity);
+    const responseSchema = genderResolutionModelResponseSchemaFor(
+        projection.projectedMedia
+    );
+    const prepared = await prepareStagedResult(audit, responseSchema);
+    const checkpointAssessment = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
+        prompt,
+        media.map(item => item.normalizedJpegBase64),
+        {
+            schema: responseSchema,
+            analysisType: 'v2_gender_resolution',
+            stage: 'genderResolution',
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            requestId: audit.requestId,
+            startingAttempt: prepared.startingAttempt,
+            abortSignal: options.abortSignal,
+            onBeforeAttempt: audit.onBeforeAttempt,
+            onAttemptTelemetry: audit.onAttemptTelemetry,
+        },
+    ));
+    const assessment = genderResolutionModelResponseSchema.parse({
+        ...checkpointAssessment,
+        evidenceSelectionIds: checkpointAssessment.evidenceSelectionIds.map(
+            selectionId => {
+                const originalId = projection.originalByOpaqueId.get(selectionId);
+                if (!originalId) {
+                    throw new Error('ANALYSIS_V2_GENDER_RESOLUTION_EVIDENCE_DRIFT');
+                }
+                return originalId;
+            }
+        ),
+    });
+    return genderResolutionResultSchema.parse({
+        assessment,
+        analyzedSelectionIds: media.map(item => item.selectionId),
+    });
+}
+
 export async function featureAnalysis(
     rawInput: FeatureAnalysisInput,
-    rawAuditContext: StagedAiAuditContext
+    rawAuditContext: StagedAiAuditContext,
+    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
 ): Promise<FeatureAnalysisResult> {
     const input = featureAnalysisInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
     const prompt = featureAnalysisPrompt(input, media);
-    const identity = stagedResultIdentity('featureAnalysis', prompt, media, 'request');
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const identity = stagedResultIdentity(
+        'featureAnalysis',
+        prompt,
+        media,
+        'request',
+        policyVersion,
+    );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = featureResponseSchemaFor(media);
     const prepared = await prepareStagedResult(audit, responseSchema);
@@ -1230,6 +1552,7 @@ export async function featureAnalysis(
                 schema: responseSchema,
                 analysisType: 'v2_feature_analysis',
                 stage: 'featureAnalysis',
+                aiStagePolicyVersion: policyVersion,
                 requestId: audit.requestId,
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
@@ -1345,7 +1668,8 @@ function buildPartnerSafetyResult(input: {
 }
 
 export function createPartnerSafetyResultIdentity(
-    rawInput: PartnerSafetyInput
+    rawInput: PartnerSafetyInput,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): AnalysisV2AiResultIdentity | null {
     const input = partnerSafetyInputSchema.parse(rawInput);
     if (!input.contactSheet) return null;
@@ -1353,7 +1677,7 @@ export function createPartnerSafetyResultIdentity(
         selectionId: input.contactSheet.selectionId,
         kind: 'contact_sheet',
         normalizedJpegBase64: input.contactSheet.normalizedJpegBase64,
-    }], 'request');
+    }], 'request', policyVersion);
 }
 
 /**
@@ -1362,7 +1686,8 @@ export function createPartnerSafetyResultIdentity(
  */
 export async function partnerSafetyAnalysis(
     rawInput: PartnerSafetyInput,
-    rawAuditContext?: StagedAiAuditContext
+    rawAuditContext?: StagedAiAuditContext,
+    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
 ): Promise<PartnerSafetyResult> {
     const input = partnerSafetyInputSchema.parse(rawInput);
     if (!input.contactSheet) {
@@ -1373,6 +1698,7 @@ export async function partnerSafetyAnalysis(
             contactSheetSelectionId: null,
         });
     }
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
 
     if (!rawAuditContext) {
         throw new Error('A durable partner-safety audit context is required.');
@@ -1382,7 +1708,7 @@ export async function partnerSafetyAnalysis(
         selectionId: input.contactSheet.selectionId,
         kind: 'contact_sheet',
         normalizedJpegBase64: input.contactSheet.normalizedJpegBase64,
-    }], 'request');
+    }], 'request', policyVersion);
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = partnerSafetyResponseSchemaFor(input.contactSheet);
     let assessment: z.infer<typeof partnerSafetyModelResponseSchema>;
@@ -1395,6 +1721,7 @@ export async function partnerSafetyAnalysis(
                     schema: responseSchema,
                     analysisType: 'v2_partner_safety',
                     stage: 'partnerSafety',
+                    aiStagePolicyVersion: policyVersion,
                     requestId: audit.requestId,
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,
@@ -1729,7 +2056,8 @@ function fallbackEvidenceRefs(
 }
 
 export function createHighRiskNarrativeResultIdentity(
-    rawInput: HighRiskNarrativeInput
+    rawInput: HighRiskNarrativeInput,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): AnalysisV2AiResultIdentity {
     const input = highRiskNarrativeInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
@@ -1738,19 +2066,28 @@ export function createHighRiskNarrativeResultIdentity(
         'highRiskNarrative',
         narrativePrompt(input, media, sanitized),
         media,
-        'request'
+        'request',
+        policyVersion,
     );
 }
 
 export async function highRiskNarrative(
     rawInput: HighRiskNarrativeInput,
-    rawAuditContext: StagedAiAuditContext
+    rawAuditContext: StagedAiAuditContext,
+    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
 ): Promise<HighRiskNarrativeResult> {
     const input = highRiskNarrativeInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
     const sanitized = sanitizedNarrativeEvidence(input);
     const prompt = narrativePrompt(input, media, sanitized);
-    const identity = stagedResultIdentity('highRiskNarrative', prompt, media, 'request');
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const identity = stagedResultIdentity(
+        'highRiskNarrative',
+        prompt,
+        media,
+        'request',
+        policyVersion,
+    );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = narrativeResponseSchemaFor(input, media, sanitized);
     let response: z.infer<typeof highRiskNarrativeModelResponseSchema>;
@@ -1763,6 +2100,7 @@ export async function highRiskNarrative(
                     schema: responseSchema,
                     analysisType: 'v2_high_risk_narrative',
                     stage: 'highRiskNarrative',
+                    aiStagePolicyVersion: policyVersion,
                     requestId: audit.requestId,
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,

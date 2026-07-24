@@ -1,0 +1,1245 @@
+-- MIGRATION_PREDECESSOR=20260724230000
+-- Forward-only provenance persistence. Required migration-history predicate:
+-- version = '20260724230000'
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '2min';
+
+DO $migration$
+DECLARE
+    v_predecessor_present BOOLEAN := FALSE;
+BEGIN
+    IF pg_catalog.to_regclass('supabase_migrations.schema_migrations') IS NOT NULL THEN
+        EXECUTE $sql$
+            SELECT EXISTS (
+                SELECT 1
+                FROM supabase_migrations.schema_migrations
+                WHERE version = '20260724230000'
+            )
+        $sql$ INTO v_predecessor_present;
+    END IF;
+    IF NOT v_predecessor_present THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_PREDECESSOR_MISSING',
+            ERRCODE = 'P0001';
+    END IF;
+END;
+$migration$;
+
+ALTER TABLE public.analysis_v2_candidate_feature_rows
+    ADD COLUMN baseline_classification VARCHAR(32),
+    ADD COLUMN classification_source TEXT,
+    ADD COLUMN gender_resolution_status TEXT,
+    ADD COLUMN gender_resolution_operation_key VARCHAR(86),
+    ADD COLUMN gender_resolution_result_hash VARCHAR(64);
+
+UPDATE public.analysis_v2_candidate_feature_rows AS feature
+SET baseline_classification = feature.terminal_classification,
+    classification_source = CASE
+        WHEN feature.terminal_classification = 'verified_non_female'
+             AND feature.feature_operation_key IS NULL THEN 'triage'
+        WHEN feature.terminal_classification IN ('verified_female', 'verified_non_female')
+            THEN 'feature'
+        WHEN feature.terminal_classification IN ('unresolved', 'unresolved_stage_conflict')
+            THEN 'unknown'
+        ELSE 'unavailable'
+    END,
+    gender_resolution_status = 'disabled';
+
+ALTER TABLE public.analysis_v2_candidate_feature_rows
+    ALTER COLUMN baseline_classification SET NOT NULL,
+    ALTER COLUMN classification_source SET NOT NULL,
+    ALTER COLUMN gender_resolution_status SET NOT NULL,
+    ADD CONSTRAINT analysis_v2_candidate_feature_baseline_check CHECK (
+        baseline_classification IN (
+            'verified_female', 'verified_non_female', 'unresolved',
+            'unresolved_stage_conflict', 'fetch_unavailable',
+            'media_unavailable', 'analysis_unavailable', 'unavailable'
+        )
+    ),
+    ADD CONSTRAINT analysis_v2_candidate_feature_classification_source_check CHECK (
+        classification_source IN (
+            'triage', 'feature', 'gender_resolution', 'unknown', 'unavailable'
+        )
+    ),
+    ADD CONSTRAINT analysis_v2_candidate_feature_gender_resolution_status_check CHECK (
+        gender_resolution_status IN (
+            'disabled', 'not_eligible', 'ready_applied', 'ready_not_needed',
+            'ready_inconclusive', 'cutoff', 'capacity_skipped', 'terminal_unavailable'
+        )
+    ),
+    ADD CONSTRAINT analysis_v2_candidate_feature_gender_resolution_identity_check CHECK (
+        (
+            gender_resolution_status IN (
+                'ready_applied', 'ready_not_needed', 'ready_inconclusive'
+            )
+            AND gender_resolution_operation_key
+                ~ '^gender-resolution:[a-f0-9]{64}$'
+            AND gender_resolution_result_hash ~ '^[a-f0-9]{64}$'
+        )
+        OR (
+            gender_resolution_status NOT IN (
+                'ready_applied', 'ready_not_needed', 'ready_inconclusive'
+            )
+            AND gender_resolution_operation_key IS NULL
+            AND gender_resolution_result_hash IS NULL
+        )
+    ),
+    ADD CONSTRAINT analysis_v2_candidate_feature_resolution_change_check CHECK (
+        (
+            classification_source = 'gender_resolution'
+            AND gender_resolution_status = 'ready_applied'
+            AND baseline_classification IN ('unresolved', 'unresolved_stage_conflict')
+            AND terminal_classification IN ('verified_female', 'verified_non_female')
+        )
+        OR (
+            classification_source <> 'gender_resolution'
+            AND gender_resolution_status <> 'ready_applied'
+            AND terminal_classification = CASE baseline_classification
+                WHEN 'fetch_unavailable' THEN 'unavailable'
+                WHEN 'analysis_unavailable' THEN 'unavailable'
+                ELSE baseline_classification
+            END
+        )
+    );
+
+CREATE FUNCTION public.analysis_v2_validate_candidate_gender_resolution()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+    v_job_key TEXT;
+BEGIN
+    IF NEW.baseline_classification IS NULL THEN
+        NEW.baseline_classification := NEW.terminal_classification;
+    END IF;
+    IF NEW.classification_source IS NULL THEN
+        NEW.classification_source := CASE
+            WHEN NEW.terminal_classification = 'verified_non_female'
+                 AND NEW.feature_operation_key IS NULL THEN 'triage'
+            WHEN NEW.terminal_classification IN ('verified_female', 'verified_non_female')
+                THEN 'feature'
+            WHEN NEW.terminal_classification IN ('unresolved', 'unresolved_stage_conflict')
+                THEN 'unknown'
+            ELSE 'unavailable'
+        END;
+    END IF;
+    IF NEW.gender_resolution_status IS NULL THEN
+        NEW.gender_resolution_status := 'disabled';
+    END IF;
+    IF NEW.gender_resolution_status IN (
+        'ready_applied', 'ready_not_needed', 'ready_inconclusive'
+    ) THEN
+        SELECT manifest.producer_job_key INTO v_job_key
+        FROM public.analysis_v2_candidate_feature_manifests AS manifest
+        WHERE manifest.request_id = NEW.request_id
+          AND manifest.batch = NEW.batch;
+        IF v_job_key IS NULL OR NOT EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_ai_result_checkpoints AS result
+            WHERE result.request_id = NEW.request_id
+              AND result.job_key = v_job_key
+              AND result.operation_key = NEW.gender_resolution_operation_key
+              AND result.stage = 'genderResolution'
+              AND result.cache_scope = 'request'
+              AND result.result_hash = NEW.gender_resolution_result_hash
+        ) THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_RESULT_FENCE_MISMATCH',
+                ERRCODE = 'P0001';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_validate_candidate_gender_resolution()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TRIGGER validate_analysis_v2_candidate_gender_resolution
+BEFORE INSERT OR UPDATE OF
+    baseline_classification,
+    classification_source,
+    gender_resolution_status,
+    gender_resolution_operation_key,
+    gender_resolution_result_hash
+ON public.analysis_v2_candidate_feature_rows
+FOR EACH ROW
+EXECUTE FUNCTION public.analysis_v2_validate_candidate_gender_resolution();
+
+ALTER FUNCTION public.analysis_v2_checkpoint_candidate_features_complete(
+    UUID, TEXT, UUID, TEXT, INTEGER, INTEGER, JSONB
+) RENAME TO analysis_v2_checkpoint_candidate_features_complete_v26;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_checkpoint_candidate_features_complete_v26(
+    UUID, TEXT, UUID, TEXT, INTEGER, INTEGER, JSONB
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE FUNCTION public.analysis_v2_checkpoint_candidate_features_complete(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_job_input_hash TEXT,
+    p_batch INTEGER,
+    p_analyzed_count INTEGER,
+    p_rows JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+    v_stripped_rows JSONB;
+    v_checkpoint JSONB;
+    v_provenance_count INTEGER;
+BEGIN
+    IF p_rows IS NULL OR pg_catalog.jsonb_typeof(p_rows) <> 'array' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_RESULT_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    SELECT
+        pg_catalog.jsonb_agg(
+            item.value - ARRAY[
+                'baselineClassification',
+                'classificationSource',
+                'genderResolutionStatus',
+                'genderResolutionOperationKey',
+                'genderResolutionResultHash'
+            ]::TEXT[]
+            ORDER BY item.value->>'candidateId'
+        ),
+        pg_catalog.count(*) FILTER (
+            WHERE item.value ?& ARRAY[
+                'baselineClassification',
+                'classificationSource',
+                'genderResolutionStatus',
+                'genderResolutionOperationKey',
+                'genderResolutionResultHash'
+            ]
+        )::INTEGER
+    INTO v_stripped_rows, v_provenance_count
+    FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value);
+
+    IF v_provenance_count NOT IN (0, p_analyzed_count)
+       OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+            WHERE (
+                item.value ? 'baselineClassification'
+                OR item.value ? 'classificationSource'
+                OR item.value ? 'genderResolutionStatus'
+                OR item.value ? 'genderResolutionOperationKey'
+                OR item.value ? 'genderResolutionResultHash'
+            )
+            AND NOT item.value ?& ARRAY[
+                'baselineClassification',
+                'classificationSource',
+                'genderResolutionStatus',
+                'genderResolutionOperationKey',
+                'genderResolutionResultHash'
+            ]
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_RESULT_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    v_checkpoint := public.analysis_v2_checkpoint_candidate_features_complete_v26(
+        p_request_id,
+        p_job_key,
+        p_claim_token,
+        p_job_input_hash,
+        p_batch,
+        p_analyzed_count,
+        v_stripped_rows
+    );
+
+    UPDATE public.analysis_v2_candidate_feature_rows AS feature
+    SET baseline_classification = COALESCE(
+            item.value->>'baselineClassification',
+            item.value->>'classification'
+        ),
+        classification_source = COALESCE(
+            item.value->>'classificationSource',
+            CASE
+                WHEN item.value->>'classification' = 'verified_non_female'
+                     AND item.value->'featureOperationKey' = 'null'::JSONB THEN 'triage'
+                WHEN item.value->>'classification' IN (
+                    'verified_female', 'verified_non_female'
+                ) THEN 'feature'
+                WHEN item.value->>'classification' IN (
+                    'unresolved', 'unresolved_stage_conflict'
+                ) THEN 'unknown'
+                ELSE 'unavailable'
+            END
+        ),
+        gender_resolution_status = COALESCE(
+            item.value->>'genderResolutionStatus',
+            'disabled'
+        ),
+        gender_resolution_operation_key = NULLIF(
+            item.value->>'genderResolutionOperationKey',
+            ''
+        ),
+        gender_resolution_result_hash = NULLIF(
+            item.value->>'genderResolutionResultHash',
+            ''
+        )
+    FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+    WHERE feature.request_id = p_request_id
+      AND feature.batch = p_batch
+      AND feature.candidate_id = item.value->>'candidateId';
+
+    RETURN v_checkpoint;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_checkpoint_candidate_features_complete(
+    UUID, TEXT, UUID, TEXT, INTEGER, INTEGER, JSONB
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TABLE public.analysis_v2_gender_resolution_metrics (
+    request_id UUID NOT NULL
+        REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
+    policy_version VARCHAR(64) NOT NULL,
+    screened_count INTEGER NOT NULL,
+    resolver_eligible_count INTEGER NOT NULL,
+    baseline_unknown_count INTEGER NOT NULL,
+    final_unknown_count INTEGER NOT NULL,
+    ready_count INTEGER NOT NULL,
+    applied_count INTEGER NOT NULL,
+    applied_with_fenced_result_count INTEGER NOT NULL,
+    verified_baseline_mutation_count INTEGER NOT NULL,
+    inconclusive_count INTEGER NOT NULL,
+    cutoff_count INTEGER NOT NULL,
+    capacity_skipped_count INTEGER NOT NULL,
+    terminal_unavailable_count INTEGER NOT NULL,
+    partial_media_accepted_candidate_count INTEGER NOT NULL,
+    selected_media_total INTEGER NOT NULL,
+    normalized_media_total INTEGER NOT NULL,
+    failed_media_total INTEGER NOT NULL,
+    resolver_attempt_count INTEGER NOT NULL,
+    resolver_usage_complete_count INTEGER NOT NULL,
+    resolver_usage_missing_count INTEGER NOT NULL,
+    resolver_prompt_tokens BIGINT NOT NULL,
+    resolver_completion_tokens BIGINT NOT NULL,
+    resolver_total_tokens BIGINT NOT NULL,
+    resolver_thinking_tokens BIGINT NOT NULL,
+    resolver_estimated_cost_usd NUMERIC(18, 12),
+    resolver_cost_known_count INTEGER NOT NULL,
+    resolver_nonterminal_attempt_count INTEGER NOT NULL DEFAULT 0,
+    metrics_finalized_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    PRIMARY KEY (request_id),
+    CONSTRAINT analysis_v2_gender_resolution_metrics_counts_check CHECK (
+        screened_count >= 0
+        AND resolver_eligible_count BETWEEN 0 AND screened_count
+        AND baseline_unknown_count BETWEEN 0 AND screened_count
+        AND final_unknown_count BETWEEN 0 AND screened_count
+        AND ready_count BETWEEN 0 AND resolver_eligible_count
+        AND applied_count BETWEEN 0 AND ready_count
+        AND applied_with_fenced_result_count BETWEEN 0 AND applied_count
+        AND verified_baseline_mutation_count BETWEEN 0 AND screened_count
+        AND inconclusive_count BETWEEN 0 AND ready_count
+        AND cutoff_count BETWEEN 0 AND resolver_eligible_count
+        AND capacity_skipped_count BETWEEN 0 AND resolver_eligible_count
+        AND terminal_unavailable_count BETWEEN 0 AND resolver_eligible_count
+        AND partial_media_accepted_candidate_count BETWEEN 0 AND screened_count
+        AND selected_media_total >= 0
+        AND normalized_media_total BETWEEN 0 AND selected_media_total
+        AND failed_media_total = selected_media_total - normalized_media_total
+        AND resolver_attempt_count >= 0
+        AND resolver_usage_complete_count BETWEEN 0 AND resolver_attempt_count
+        AND resolver_usage_missing_count BETWEEN 0 AND resolver_attempt_count
+        AND resolver_usage_complete_count + resolver_usage_missing_count
+            = resolver_attempt_count
+        AND resolver_prompt_tokens >= 0
+        AND resolver_completion_tokens >= 0
+        AND resolver_total_tokens >= 0
+        AND resolver_thinking_tokens >= 0
+        AND resolver_total_tokens = resolver_prompt_tokens
+            + resolver_completion_tokens + resolver_thinking_tokens
+        AND resolver_estimated_cost_usd >= 0
+        AND resolver_cost_known_count BETWEEN 0 AND resolver_attempt_count
+        AND resolver_nonterminal_attempt_count
+            BETWEEN 0 AND resolver_attempt_count
+    )
+);
+
+ALTER TABLE public.analysis_v2_gender_resolution_metrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.analysis_v2_gender_resolution_metrics FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.analysis_v2_gender_resolution_metrics
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE FUNCTION public.analysis_v2_refresh_gender_resolution_metrics()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_metrics RECORD;
+    v_policy_version TEXT;
+    v_attempt_count INTEGER;
+    v_usage_complete_count INTEGER;
+    v_usage_missing_count INTEGER;
+    v_applied_with_fence_count INTEGER;
+    v_verified_baseline_mutation_count INTEGER;
+    v_prompt_tokens BIGINT;
+    v_completion_tokens BIGINT;
+    v_total_tokens BIGINT;
+    v_thinking_tokens BIGINT;
+    v_estimated_cost_usd NUMERIC(18, 12);
+    v_cost_known_count INTEGER;
+    v_nonterminal_attempt_count INTEGER;
+BEGIN
+    IF NEW.stage_kind <> 'profile_ai_batch' THEN
+        RETURN NEW;
+    END IF;
+    v_policy_version := public.load_analysis_v2_ai_stage_policy_version(NEW.request_id);
+    WITH outcomes AS (
+        SELECT outcome.value
+        FROM public.analysis_v2_ai_scoring_stage_checkpoints AS checkpoint
+        CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(
+            checkpoint.payload->'outcomes'
+        ) AS outcome(value)
+        WHERE checkpoint.request_id = NEW.request_id
+          AND checkpoint.stage_kind = 'profile_ai_batch'
+    )
+    SELECT
+        pg_catalog.count(*)::INTEGER AS screened_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'genderResolutionStatus'
+                NOT IN ('disabled', 'not_eligible')
+        )::INTEGER AS resolver_eligible_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'baselineClassification'
+                NOT IN ('verified_female', 'verified_non_female')
+        )::INTEGER AS baseline_unknown_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'status'
+                NOT IN ('verified_female', 'verified_non_female')
+        )::INTEGER AS final_unknown_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'genderResolutionStatus' IN (
+                'ready_applied', 'ready_not_needed', 'ready_inconclusive'
+            )
+        )::INTEGER AS ready_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'genderResolutionStatus' = 'ready_applied'
+        )::INTEGER AS applied_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'genderResolutionStatus' = 'ready_inconclusive'
+        )::INTEGER AS inconclusive_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'genderResolutionStatus' = 'cutoff'
+        )::INTEGER AS cutoff_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'genderResolutionStatus' = 'capacity_skipped'
+        )::INTEGER AS capacity_skipped_count,
+        pg_catalog.count(*) FILTER (
+            WHERE outcome.value->>'genderResolutionStatus' = 'terminal_unavailable'
+        )::INTEGER AS terminal_unavailable_count,
+        pg_catalog.count(*) FILTER (
+            WHERE pg_catalog.jsonb_array_length(
+                    outcome.value->'mediaCoverage'->'failures'
+                ) > 0
+              AND pg_catalog.jsonb_array_length(
+                    outcome.value->'mediaCoverage'->'failures'
+                ) * 5
+                    <= (outcome.value->'mediaCoverage'->>'selectedCount')::INTEGER
+        )::INTEGER AS partial_media_accepted_candidate_count,
+        COALESCE(pg_catalog.sum(
+            (outcome.value->'mediaCoverage'->>'selectedCount')::INTEGER
+        ), 0)::INTEGER AS selected_media_total,
+        COALESCE(pg_catalog.sum(
+            (outcome.value->'mediaCoverage'->>'normalizedCount')::INTEGER
+        ), 0)::INTEGER AS normalized_media_total
+    INTO v_metrics
+    FROM outcomes AS outcome;
+
+    SELECT
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'ready_applied'
+              AND feature.classification_source = 'gender_resolution'
+              AND feature.gender_resolution_operation_key
+                    ~ '^gender-resolution:[a-f0-9]{64}$'
+              AND feature.gender_resolution_result_hash ~ '^[a-f0-9]{64}$'
+        )::INTEGER,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.baseline_classification IN (
+                    'verified_female', 'verified_non_female'
+                )
+              AND feature.terminal_classification
+                    IS DISTINCT FROM feature.baseline_classification
+        )::INTEGER
+    INTO v_applied_with_fence_count, v_verified_baseline_mutation_count
+    FROM public.analysis_v2_candidate_feature_rows AS feature
+    WHERE feature.request_id = NEW.request_id;
+
+    SELECT
+        pg_catalog.count(*)::INTEGER,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.usage_metadata_status = 'complete'
+        )::INTEGER,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.usage_metadata_status IS DISTINCT FROM 'complete'
+        )::INTEGER,
+        COALESCE(pg_catalog.sum(attempt.prompt_tokens), 0)::BIGINT,
+        COALESCE(pg_catalog.sum(attempt.completion_tokens), 0)::BIGINT,
+        COALESCE(pg_catalog.sum(attempt.total_tokens), 0)::BIGINT,
+        COALESCE(pg_catalog.sum(attempt.thinking_tokens), 0)::BIGINT,
+        pg_catalog.sum(attempt.estimated_cost_usd)::NUMERIC(18, 12),
+        pg_catalog.count(attempt.estimated_cost_usd)::INTEGER,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.status = 'reserved'
+        )::INTEGER
+    INTO
+        v_attempt_count,
+        v_usage_complete_count,
+        v_usage_missing_count,
+        v_prompt_tokens,
+        v_completion_tokens,
+        v_total_tokens,
+        v_thinking_tokens,
+        v_estimated_cost_usd,
+        v_cost_known_count,
+        v_nonterminal_attempt_count
+    FROM public.analysis_v2_ai_attempts AS attempt
+    WHERE attempt.request_id = NEW.request_id
+      AND attempt.stage = 'genderResolution';
+
+    INSERT INTO public.analysis_v2_gender_resolution_metrics (
+        request_id,
+        policy_version,
+        screened_count,
+        resolver_eligible_count,
+        baseline_unknown_count,
+        final_unknown_count,
+        ready_count,
+        applied_count,
+        applied_with_fenced_result_count,
+        verified_baseline_mutation_count,
+        inconclusive_count,
+        cutoff_count,
+        capacity_skipped_count,
+        terminal_unavailable_count,
+        partial_media_accepted_candidate_count,
+        selected_media_total,
+        normalized_media_total,
+        failed_media_total,
+        resolver_attempt_count,
+        resolver_usage_complete_count,
+        resolver_usage_missing_count,
+        resolver_prompt_tokens,
+        resolver_completion_tokens,
+        resolver_total_tokens,
+        resolver_thinking_tokens,
+        resolver_estimated_cost_usd,
+        resolver_cost_known_count,
+        resolver_nonterminal_attempt_count,
+        metrics_finalized_at
+    ) VALUES (
+        NEW.request_id,
+        v_policy_version,
+        v_metrics.screened_count,
+        v_metrics.resolver_eligible_count,
+        v_metrics.baseline_unknown_count,
+        v_metrics.final_unknown_count,
+        v_metrics.ready_count,
+        v_metrics.applied_count,
+        v_applied_with_fence_count,
+        v_verified_baseline_mutation_count,
+        v_metrics.inconclusive_count,
+        v_metrics.cutoff_count,
+        v_metrics.capacity_skipped_count,
+        v_metrics.terminal_unavailable_count,
+        v_metrics.partial_media_accepted_candidate_count,
+        v_metrics.selected_media_total,
+        v_metrics.normalized_media_total,
+        v_metrics.selected_media_total - v_metrics.normalized_media_total,
+        v_attempt_count,
+        v_usage_complete_count,
+        v_usage_missing_count,
+        v_prompt_tokens,
+        v_completion_tokens,
+        v_total_tokens,
+        v_thinking_tokens,
+        v_estimated_cost_usd,
+        v_cost_known_count,
+        v_nonterminal_attempt_count,
+        NULL
+    )
+    ON CONFLICT (request_id) DO UPDATE
+    SET policy_version = EXCLUDED.policy_version,
+        screened_count = EXCLUDED.screened_count,
+        resolver_eligible_count = EXCLUDED.resolver_eligible_count,
+        baseline_unknown_count = EXCLUDED.baseline_unknown_count,
+        final_unknown_count = EXCLUDED.final_unknown_count,
+        ready_count = EXCLUDED.ready_count,
+        applied_count = EXCLUDED.applied_count,
+        applied_with_fenced_result_count =
+            EXCLUDED.applied_with_fenced_result_count,
+        verified_baseline_mutation_count =
+            EXCLUDED.verified_baseline_mutation_count,
+        inconclusive_count = EXCLUDED.inconclusive_count,
+        cutoff_count = EXCLUDED.cutoff_count,
+        capacity_skipped_count = EXCLUDED.capacity_skipped_count,
+        terminal_unavailable_count = EXCLUDED.terminal_unavailable_count,
+        partial_media_accepted_candidate_count =
+            EXCLUDED.partial_media_accepted_candidate_count,
+        selected_media_total = EXCLUDED.selected_media_total,
+        normalized_media_total = EXCLUDED.normalized_media_total,
+        failed_media_total = EXCLUDED.failed_media_total,
+        resolver_attempt_count = EXCLUDED.resolver_attempt_count,
+        resolver_usage_complete_count = EXCLUDED.resolver_usage_complete_count,
+        resolver_usage_missing_count = EXCLUDED.resolver_usage_missing_count,
+        resolver_prompt_tokens = EXCLUDED.resolver_prompt_tokens,
+        resolver_completion_tokens = EXCLUDED.resolver_completion_tokens,
+        resolver_total_tokens = EXCLUDED.resolver_total_tokens,
+        resolver_thinking_tokens = EXCLUDED.resolver_thinking_tokens,
+        resolver_estimated_cost_usd = EXCLUDED.resolver_estimated_cost_usd,
+        resolver_cost_known_count = EXCLUDED.resolver_cost_known_count,
+        resolver_nonterminal_attempt_count =
+            EXCLUDED.resolver_nonterminal_attempt_count,
+        metrics_finalized_at = NULL,
+        updated_at = pg_catalog.clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_refresh_gender_resolution_metrics()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TRIGGER refresh_analysis_v2_gender_resolution_metrics
+AFTER INSERT OR UPDATE OF payload
+ON public.analysis_v2_ai_scoring_stage_checkpoints
+FOR EACH ROW
+EXECUTE FUNCTION public.analysis_v2_refresh_gender_resolution_metrics();
+
+CREATE FUNCTION public.analysis_v2_seal_gender_resolution_metrics()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_policy_version TEXT;
+    v_outcomes RECORD;
+    v_features RECORD;
+    v_attempts RECORD;
+BEGIN
+    PERFORM 1
+    FROM public.analysis_v2_ai_attempts AS attempt
+    WHERE attempt.request_id = NEW.request_id
+      AND attempt.stage = 'genderResolution'
+    FOR UPDATE;
+
+    SELECT
+        pg_catalog.count(*)::INTEGER AS attempt_count,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.status = 'reserved'
+        )::INTEGER AS nonterminal_count,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.usage_metadata_status = 'complete'
+        )::INTEGER AS usage_complete_count,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.usage_metadata_status IS DISTINCT FROM 'complete'
+        )::INTEGER AS usage_missing_count,
+        COALESCE(pg_catalog.sum(attempt.prompt_tokens), 0)::BIGINT
+            AS prompt_tokens,
+        COALESCE(pg_catalog.sum(attempt.completion_tokens), 0)::BIGINT
+            AS completion_tokens,
+        COALESCE(pg_catalog.sum(attempt.total_tokens), 0)::BIGINT
+            AS total_tokens,
+        COALESCE(pg_catalog.sum(attempt.thinking_tokens), 0)::BIGINT
+            AS thinking_tokens,
+        pg_catalog.sum(attempt.estimated_cost_usd)::NUMERIC(18, 12)
+            AS estimated_cost_usd,
+        pg_catalog.count(attempt.estimated_cost_usd)::INTEGER
+            AS cost_known_count
+    INTO v_attempts
+    FROM public.analysis_v2_ai_attempts AS attempt
+    WHERE attempt.request_id = NEW.request_id
+      AND attempt.stage = 'genderResolution';
+
+    IF v_attempts.nonterminal_count <> 0 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_RESULT_NOT_READY',
+            ERRCODE = 'P0001';
+    END IF;
+
+    WITH outcomes AS (
+        SELECT outcome.value
+        FROM public.analysis_v2_ai_scoring_stage_checkpoints AS checkpoint
+        CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(
+            checkpoint.payload->'outcomes'
+        ) AS outcome(value)
+        WHERE checkpoint.request_id = NEW.request_id
+          AND checkpoint.stage_kind = 'profile_ai_batch'
+    )
+    SELECT
+        pg_catalog.count(*)::INTEGER AS outcome_count,
+        pg_catalog.count(*) FILTER (
+            WHERE pg_catalog.jsonb_array_length(
+                    outcome.value->'mediaCoverage'->'failures'
+                ) > 0
+              AND pg_catalog.jsonb_array_length(
+                    outcome.value->'mediaCoverage'->'failures'
+                ) * 5
+                    <= (outcome.value->'mediaCoverage'->>'selectedCount')::INTEGER
+        )::INTEGER AS partial_media_accepted_candidate_count,
+        COALESCE(pg_catalog.sum(
+            (outcome.value->'mediaCoverage'->>'selectedCount')::INTEGER
+        ), 0)::INTEGER AS selected_media_total,
+        COALESCE(pg_catalog.sum(
+            (outcome.value->'mediaCoverage'->>'normalizedCount')::INTEGER
+        ), 0)::INTEGER AS normalized_media_total
+    INTO v_outcomes
+    FROM outcomes AS outcome;
+
+    SELECT
+        pg_catalog.count(*)::INTEGER AS screened_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status
+                NOT IN ('disabled', 'not_eligible')
+        )::INTEGER AS resolver_eligible_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.baseline_classification
+                NOT IN ('verified_female', 'verified_non_female')
+        )::INTEGER AS baseline_unknown_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.terminal_classification
+                NOT IN ('verified_female', 'verified_non_female')
+        )::INTEGER AS final_unknown_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status IN (
+                'ready_applied', 'ready_not_needed', 'ready_inconclusive'
+            )
+        )::INTEGER AS ready_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'ready_applied'
+        )::INTEGER AS applied_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'ready_applied'
+              AND feature.classification_source = 'gender_resolution'
+              AND feature.gender_resolution_operation_key
+                    ~ '^gender-resolution:[a-f0-9]{64}$'
+              AND feature.gender_resolution_result_hash ~ '^[a-f0-9]{64}$'
+        )::INTEGER AS applied_with_fenced_result_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.baseline_classification IN (
+                    'verified_female', 'verified_non_female'
+                )
+              AND feature.terminal_classification
+                    IS DISTINCT FROM feature.baseline_classification
+        )::INTEGER AS verified_baseline_mutation_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'ready_inconclusive'
+        )::INTEGER AS inconclusive_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'cutoff'
+        )::INTEGER AS cutoff_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'capacity_skipped'
+        )::INTEGER AS capacity_skipped_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'terminal_unavailable'
+        )::INTEGER AS terminal_unavailable_count
+    INTO v_features
+    FROM public.analysis_v2_candidate_feature_rows AS feature
+    WHERE feature.request_id = NEW.request_id;
+
+    IF v_features.screened_count <> v_outcomes.outcome_count THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_RESULT_NOT_READY',
+            ERRCODE = 'P0001';
+    END IF;
+
+    v_policy_version :=
+        public.load_analysis_v2_ai_stage_policy_version(NEW.request_id);
+
+    INSERT INTO public.analysis_v2_gender_resolution_metrics (
+        request_id,
+        policy_version,
+        screened_count,
+        resolver_eligible_count,
+        baseline_unknown_count,
+        final_unknown_count,
+        ready_count,
+        applied_count,
+        applied_with_fenced_result_count,
+        verified_baseline_mutation_count,
+        inconclusive_count,
+        cutoff_count,
+        capacity_skipped_count,
+        terminal_unavailable_count,
+        partial_media_accepted_candidate_count,
+        selected_media_total,
+        normalized_media_total,
+        failed_media_total,
+        resolver_attempt_count,
+        resolver_usage_complete_count,
+        resolver_usage_missing_count,
+        resolver_prompt_tokens,
+        resolver_completion_tokens,
+        resolver_total_tokens,
+        resolver_thinking_tokens,
+        resolver_estimated_cost_usd,
+        resolver_cost_known_count,
+        resolver_nonterminal_attempt_count,
+        metrics_finalized_at
+    ) VALUES (
+        NEW.request_id,
+        v_policy_version,
+        v_features.screened_count,
+        v_features.resolver_eligible_count,
+        v_features.baseline_unknown_count,
+        v_features.final_unknown_count,
+        v_features.ready_count,
+        v_features.applied_count,
+        v_features.applied_with_fenced_result_count,
+        v_features.verified_baseline_mutation_count,
+        v_features.inconclusive_count,
+        v_features.cutoff_count,
+        v_features.capacity_skipped_count,
+        v_features.terminal_unavailable_count,
+        v_outcomes.partial_media_accepted_candidate_count,
+        v_outcomes.selected_media_total,
+        v_outcomes.normalized_media_total,
+        v_outcomes.selected_media_total - v_outcomes.normalized_media_total,
+        v_attempts.attempt_count,
+        v_attempts.usage_complete_count,
+        v_attempts.usage_missing_count,
+        v_attempts.prompt_tokens,
+        v_attempts.completion_tokens,
+        v_attempts.total_tokens,
+        v_attempts.thinking_tokens,
+        v_attempts.estimated_cost_usd,
+        v_attempts.cost_known_count,
+        0,
+        pg_catalog.clock_timestamp()
+    )
+    ON CONFLICT (request_id) DO UPDATE
+    SET policy_version = EXCLUDED.policy_version,
+        screened_count = EXCLUDED.screened_count,
+        resolver_eligible_count = EXCLUDED.resolver_eligible_count,
+        baseline_unknown_count = EXCLUDED.baseline_unknown_count,
+        final_unknown_count = EXCLUDED.final_unknown_count,
+        ready_count = EXCLUDED.ready_count,
+        applied_count = EXCLUDED.applied_count,
+        applied_with_fenced_result_count =
+            EXCLUDED.applied_with_fenced_result_count,
+        verified_baseline_mutation_count =
+            EXCLUDED.verified_baseline_mutation_count,
+        inconclusive_count = EXCLUDED.inconclusive_count,
+        cutoff_count = EXCLUDED.cutoff_count,
+        capacity_skipped_count = EXCLUDED.capacity_skipped_count,
+        terminal_unavailable_count = EXCLUDED.terminal_unavailable_count,
+        partial_media_accepted_candidate_count =
+            EXCLUDED.partial_media_accepted_candidate_count,
+        selected_media_total = EXCLUDED.selected_media_total,
+        normalized_media_total = EXCLUDED.normalized_media_total,
+        failed_media_total = EXCLUDED.failed_media_total,
+        resolver_attempt_count = EXCLUDED.resolver_attempt_count,
+        resolver_usage_complete_count = EXCLUDED.resolver_usage_complete_count,
+        resolver_usage_missing_count = EXCLUDED.resolver_usage_missing_count,
+        resolver_prompt_tokens = EXCLUDED.resolver_prompt_tokens,
+        resolver_completion_tokens = EXCLUDED.resolver_completion_tokens,
+        resolver_total_tokens = EXCLUDED.resolver_total_tokens,
+        resolver_thinking_tokens = EXCLUDED.resolver_thinking_tokens,
+        resolver_estimated_cost_usd = EXCLUDED.resolver_estimated_cost_usd,
+        resolver_cost_known_count = EXCLUDED.resolver_cost_known_count,
+        resolver_nonterminal_attempt_count = 0,
+        metrics_finalized_at = EXCLUDED.metrics_finalized_at,
+        updated_at = pg_catalog.clock_timestamp();
+
+    RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_seal_gender_resolution_metrics()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TRIGGER seal_analysis_v2_gender_resolution_metrics
+BEFORE INSERT
+ON public.analysis_v2_result_summaries
+FOR EACH ROW
+EXECUTE FUNCTION public.analysis_v2_seal_gender_resolution_metrics();
+
+CREATE FUNCTION public.load_analysis_v2_gender_resolution_quality(
+    p_request_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_metrics public.analysis_v2_gender_resolution_metrics%ROWTYPE;
+    v_request public.analysis_requests%ROWTYPE;
+    v_summary public.analysis_v2_result_summaries%ROWTYPE;
+    v_request_completed BOOLEAN;
+    v_standard_plan BOOLEAN;
+    v_result_archive_present BOOLEAN;
+    v_request_passed BOOLEAN;
+    v_unknown_evaluable BOOLEAN;
+    v_unknown_passed BOOLEAN;
+    v_provenance_passed BOOLEAN;
+    v_immutability_passed BOOLEAN;
+    v_purgeable_staging_sources_present BOOLEAN;
+    v_metrics_finalized BOOLEAN;
+    v_metrics_fresh BOOLEAN;
+    v_all_resolver_attempts_terminal BOOLEAN;
+    v_live_features RECORD;
+    v_live_attempts RECORD;
+    v_live_outcomes RECORD;
+BEGIN
+    IF p_request_id IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_QUALITY_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    SELECT metrics.*
+    INTO v_metrics
+    FROM public.analysis_v2_gender_resolution_metrics AS metrics
+    WHERE metrics.request_id = p_request_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_QUALITY_NOT_READY',
+            ERRCODE = 'P0001';
+    END IF;
+
+    v_purgeable_staging_sources_present := EXISTS (
+        SELECT 1
+        FROM public.analysis_v2_candidate_feature_rows AS feature
+        WHERE feature.request_id = p_request_id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.analysis_v2_candidate_feature_manifests AS manifest
+        WHERE manifest.request_id = p_request_id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.analysis_v2_ai_scoring_stage_checkpoints AS checkpoint
+        WHERE checkpoint.request_id = p_request_id
+          AND checkpoint.stage_kind = 'profile_ai_batch'
+    );
+
+    SELECT
+        pg_catalog.count(*)::INTEGER AS screened_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status
+                NOT IN ('disabled', 'not_eligible')
+        )::INTEGER AS resolver_eligible_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.baseline_classification
+                NOT IN ('verified_female', 'verified_non_female')
+        )::INTEGER AS baseline_unknown_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.terminal_classification
+                NOT IN ('verified_female', 'verified_non_female')
+        )::INTEGER AS final_unknown_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status IN (
+                'ready_applied', 'ready_not_needed', 'ready_inconclusive'
+            )
+        )::INTEGER AS ready_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'ready_applied'
+        )::INTEGER AS applied_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'ready_applied'
+              AND feature.classification_source = 'gender_resolution'
+              AND feature.gender_resolution_operation_key
+                    ~ '^gender-resolution:[a-f0-9]{64}$'
+              AND feature.gender_resolution_result_hash ~ '^[a-f0-9]{64}$'
+        )::INTEGER AS applied_with_fenced_result_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.baseline_classification IN (
+                    'verified_female', 'verified_non_female'
+                )
+              AND feature.terminal_classification
+                    IS DISTINCT FROM feature.baseline_classification
+        )::INTEGER AS verified_baseline_mutation_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'ready_inconclusive'
+        )::INTEGER AS inconclusive_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'cutoff'
+        )::INTEGER AS cutoff_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'capacity_skipped'
+        )::INTEGER AS capacity_skipped_count,
+        pg_catalog.count(*) FILTER (
+            WHERE feature.gender_resolution_status = 'terminal_unavailable'
+        )::INTEGER AS terminal_unavailable_count
+    INTO v_live_features
+    FROM public.analysis_v2_candidate_feature_rows AS feature
+    WHERE feature.request_id = p_request_id;
+
+    SELECT
+        pg_catalog.count(*)::INTEGER AS attempt_count,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.status = 'reserved'
+        )::INTEGER AS nonterminal_count,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.usage_metadata_status = 'complete'
+        )::INTEGER AS usage_complete_count,
+        pg_catalog.count(*) FILTER (
+            WHERE attempt.usage_metadata_status IS DISTINCT FROM 'complete'
+        )::INTEGER AS usage_missing_count,
+        COALESCE(pg_catalog.sum(attempt.prompt_tokens), 0)::BIGINT
+            AS prompt_tokens,
+        COALESCE(pg_catalog.sum(attempt.completion_tokens), 0)::BIGINT
+            AS completion_tokens,
+        COALESCE(pg_catalog.sum(attempt.total_tokens), 0)::BIGINT
+            AS total_tokens,
+        COALESCE(pg_catalog.sum(attempt.thinking_tokens), 0)::BIGINT
+            AS thinking_tokens,
+        pg_catalog.sum(attempt.estimated_cost_usd)::NUMERIC(18, 12)
+            AS estimated_cost_usd,
+        pg_catalog.count(attempt.estimated_cost_usd)::INTEGER
+            AS cost_known_count
+    INTO v_live_attempts
+    FROM public.analysis_v2_ai_attempts AS attempt
+    WHERE attempt.request_id = p_request_id
+      AND attempt.stage = 'genderResolution';
+
+    WITH outcomes AS (
+        SELECT outcome.value
+        FROM public.analysis_v2_ai_scoring_stage_checkpoints AS checkpoint
+        CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(
+            checkpoint.payload->'outcomes'
+        ) AS outcome(value)
+        WHERE checkpoint.request_id = p_request_id
+          AND checkpoint.stage_kind = 'profile_ai_batch'
+    )
+    SELECT
+        pg_catalog.count(*)::INTEGER AS outcome_count,
+        pg_catalog.count(*) FILTER (
+            WHERE pg_catalog.jsonb_array_length(
+                    outcome.value->'mediaCoverage'->'failures'
+                ) > 0
+              AND pg_catalog.jsonb_array_length(
+                    outcome.value->'mediaCoverage'->'failures'
+                ) * 5
+                    <= (outcome.value->'mediaCoverage'->>'selectedCount')::INTEGER
+        )::INTEGER AS partial_media_accepted_candidate_count,
+        COALESCE(pg_catalog.sum(
+            (outcome.value->'mediaCoverage'->>'selectedCount')::INTEGER
+        ), 0)::INTEGER AS selected_media_total,
+        COALESCE(pg_catalog.sum(
+            (outcome.value->'mediaCoverage'->>'normalizedCount')::INTEGER
+        ), 0)::INTEGER AS normalized_media_total
+    INTO v_live_outcomes
+    FROM outcomes AS outcome;
+
+    v_metrics_finalized := v_metrics.metrics_finalized_at IS NOT NULL;
+    v_all_resolver_attempts_terminal := v_metrics_finalized
+        AND v_metrics.resolver_nonterminal_attempt_count = 0
+        AND v_live_attempts.nonterminal_count = 0;
+    v_metrics_fresh := v_metrics_finalized AND (
+        NOT v_purgeable_staging_sources_present
+        OR (
+            v_metrics.screened_count = v_live_features.screened_count
+            AND v_metrics.screened_count = v_live_outcomes.outcome_count
+            AND v_metrics.resolver_eligible_count =
+                v_live_features.resolver_eligible_count
+            AND v_metrics.baseline_unknown_count =
+                v_live_features.baseline_unknown_count
+            AND v_metrics.final_unknown_count =
+                v_live_features.final_unknown_count
+            AND v_metrics.ready_count = v_live_features.ready_count
+            AND v_metrics.applied_count = v_live_features.applied_count
+            AND v_metrics.applied_with_fenced_result_count =
+                v_live_features.applied_with_fenced_result_count
+            AND v_metrics.verified_baseline_mutation_count =
+                v_live_features.verified_baseline_mutation_count
+            AND v_metrics.inconclusive_count =
+                v_live_features.inconclusive_count
+            AND v_metrics.cutoff_count = v_live_features.cutoff_count
+            AND v_metrics.capacity_skipped_count =
+                v_live_features.capacity_skipped_count
+            AND v_metrics.terminal_unavailable_count =
+                v_live_features.terminal_unavailable_count
+            AND v_metrics.partial_media_accepted_candidate_count =
+                v_live_outcomes.partial_media_accepted_candidate_count
+            AND v_metrics.selected_media_total =
+                v_live_outcomes.selected_media_total
+            AND v_metrics.normalized_media_total =
+                v_live_outcomes.normalized_media_total
+            AND v_metrics.failed_media_total =
+                v_live_outcomes.selected_media_total
+                    - v_live_outcomes.normalized_media_total
+        )
+    )
+        AND v_metrics.resolver_attempt_count =
+            v_live_attempts.attempt_count
+        AND v_metrics.resolver_usage_complete_count =
+            v_live_attempts.usage_complete_count
+        AND v_metrics.resolver_usage_missing_count =
+            v_live_attempts.usage_missing_count
+        AND v_metrics.resolver_prompt_tokens =
+            v_live_attempts.prompt_tokens
+        AND v_metrics.resolver_completion_tokens =
+            v_live_attempts.completion_tokens
+        AND v_metrics.resolver_total_tokens =
+            v_live_attempts.total_tokens
+        AND v_metrics.resolver_thinking_tokens =
+            v_live_attempts.thinking_tokens
+        AND v_metrics.resolver_estimated_cost_usd
+            IS NOT DISTINCT FROM v_live_attempts.estimated_cost_usd
+        AND v_metrics.resolver_cost_known_count =
+            v_live_attempts.cost_known_count
+        AND v_metrics.resolver_nonterminal_attempt_count =
+            v_live_attempts.nonterminal_count;
+
+    SELECT analysis_request.*
+    INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id;
+    SELECT summary.*
+    INTO v_summary
+    FROM public.analysis_v2_result_summaries AS summary
+    WHERE summary.request_id = p_request_id;
+    v_request_completed := v_request.id IS NOT NULL
+        AND v_request.pipeline_version = 'v2'
+        AND v_request.status = 'completed';
+    v_standard_plan := v_request.id IS NOT NULL
+        AND v_request.selected_plan_id_snapshot = 'standard';
+    v_result_archive_present := v_summary.request_id IS NOT NULL
+        AND v_summary.plan_id = 'standard';
+    v_request_passed := v_request_completed
+        AND v_standard_plan
+        AND v_result_archive_present;
+    v_unknown_evaluable := v_metrics.screened_count > 0;
+    v_unknown_passed := v_unknown_evaluable
+        AND v_metrics.final_unknown_count * 10 <= v_metrics.screened_count * 3;
+    v_provenance_passed :=
+        v_metrics.applied_with_fenced_result_count = v_metrics.applied_count;
+    v_immutability_passed := v_metrics.verified_baseline_mutation_count = 0;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'screenedCount', v_metrics.screened_count,
+        'resolverEligibleCount', v_metrics.resolver_eligible_count,
+        'baselineUnknownCount', v_metrics.baseline_unknown_count,
+        'finalUnknownCount', v_metrics.final_unknown_count,
+        'finalUnknownRatio', CASE
+            WHEN v_unknown_evaluable THEN
+                v_metrics.final_unknown_count::NUMERIC
+                    / v_metrics.screened_count::NUMERIC
+            ELSE NULL
+        END,
+        'readyCount', v_metrics.ready_count,
+        'appliedCount', v_metrics.applied_count,
+        'appliedWithFencedResultCount',
+            v_metrics.applied_with_fenced_result_count,
+        'verifiedBaselineMutationCount',
+            v_metrics.verified_baseline_mutation_count,
+        'inconclusiveCount', v_metrics.inconclusive_count,
+        'cutoffCount', v_metrics.cutoff_count,
+        'capacitySkippedCount', v_metrics.capacity_skipped_count,
+        'terminalUnavailableCount', v_metrics.terminal_unavailable_count,
+        'partialMediaAcceptedCandidateCount',
+            v_metrics.partial_media_accepted_candidate_count,
+        'selectedMediaTotal', v_metrics.selected_media_total,
+        'normalizedMediaTotal', v_metrics.normalized_media_total,
+        'failedMediaTotal', v_metrics.failed_media_total,
+        'resolverAttemptCount', v_metrics.resolver_attempt_count,
+        'resolverUsageCompleteCount', v_metrics.resolver_usage_complete_count,
+        'resolverUsageMissingCount', v_metrics.resolver_usage_missing_count,
+        'resolverEstimatedCostUsd', v_metrics.resolver_estimated_cost_usd,
+        'resolverCostKnownCount', v_metrics.resolver_cost_known_count,
+        'resolverNonterminalAttemptCount',
+            v_metrics.resolver_nonterminal_attempt_count,
+        'resolverConcurrencyLimit', 2,
+        'sharedConcurrencyLimit', 8,
+        'allResolverAttemptsTerminal', v_all_resolver_attempts_terminal,
+        'metricsFinalized', v_metrics_finalized,
+        'metricsFresh', v_metrics_fresh,
+        'requestCompleted', v_request_completed,
+        'standardPlan', v_standard_plan,
+        'resultArchivePresent', v_result_archive_present,
+        'requestGatePassed', v_request_passed,
+        'unknownGateEvaluable', v_unknown_evaluable,
+        'unknownGatePassed', v_unknown_passed,
+        'provenanceGatePassed', v_provenance_passed,
+        'immutabilityGatePassed', v_immutability_passed,
+        'qualityGatePassed', v_request_passed
+            AND v_unknown_evaluable
+            AND v_unknown_passed
+            AND v_provenance_passed
+            AND v_immutability_passed
+            AND v_all_resolver_attempts_terminal
+            AND v_metrics_fresh
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.load_analysis_v2_gender_resolution_quality(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_gender_resolution_quality(UUID)
+    TO service_role;
+
+CREATE OR REPLACE FUNCTION public.analysis_v2_result_summary_json(
+    p_summary public.analysis_v2_result_summaries
+)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+    SELECT pg_catalog.jsonb_build_object(
+        'targetInstagramId', p_summary.target_instagram_id,
+        'targetProfileImageUrl', p_summary.target_profile_image_url,
+        'planId', p_summary.plan_id,
+        'followers', pg_catalog.jsonb_build_object(
+            'declared', p_summary.followers_declared,
+            'collected', p_summary.followers_collected,
+            'coverageRatio', CASE WHEN p_summary.followers_declared = 0 THEN 1
+                ELSE p_summary.followers_collected::DOUBLE PRECISION
+                    / p_summary.followers_declared::DOUBLE PRECISION END,
+            'meetsCoverageGate', p_summary.followers_declared = 0
+                OR p_summary.followers_collected * 100 >= p_summary.followers_declared * 99,
+            'exactCountMatch', p_summary.followers_collected = p_summary.followers_declared
+        ),
+        'following', pg_catalog.jsonb_build_object(
+            'declared', p_summary.following_declared,
+            'collected', p_summary.following_collected,
+            'coverageRatio', CASE WHEN p_summary.following_declared = 0 THEN 1
+                ELSE p_summary.following_collected::DOUBLE PRECISION
+                    / p_summary.following_declared::DOUBLE PRECISION END,
+            'meetsCoverageGate', p_summary.following_declared = 0
+                OR p_summary.following_collected * 100 >= p_summary.following_declared * 99,
+            'exactCountMatch', p_summary.following_collected = p_summary.following_declared
+        ),
+        'detectedMutuals', p_summary.detected_mutuals,
+        'publicMutuals', p_summary.public_mutuals,
+        'privateMutuals', p_summary.private_mutuals,
+        'screenedMutuals', p_summary.screened_mutuals,
+        'genderStats', pg_catalog.jsonb_build_object(
+            'male', p_summary.male_count,
+            'female', p_summary.female_count,
+            'unknown', p_summary.unknown_count
+        ),
+        'successfullyScreenedMutuals', p_summary.screened_mutuals
+            - p_summary.fetch_unavailable_count - p_summary.media_unavailable_count
+            - p_summary.analysis_unavailable_count,
+        'fetchUnavailableMutuals', p_summary.fetch_unavailable_count,
+        'mediaUnavailableMutuals', p_summary.media_unavailable_count,
+        'analysisUnavailableMutuals', p_summary.analysis_unavailable_count,
+        'notScreenedMutuals', p_summary.not_screened_mutuals,
+        'exclusionApplied', p_summary.exclusion_applied,
+        'scorePolicyVersion', p_summary.score_policy_version
+    );
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_result_summary_json(
+    public.analysis_v2_result_summaries
+) FROM PUBLIC, anon, authenticated, service_role;
+
+COMMENT ON TABLE public.analysis_v2_gender_resolution_metrics IS
+    'Service-only aggregate quality and cost accounting; no usernames, email, image URL, or prompt.';

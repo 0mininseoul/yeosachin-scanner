@@ -48,7 +48,7 @@ import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
 import { analysisV2ResultStore } from './v2-result-store';
-import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
+import { assertSupportedAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
     analysisV2AiPolicyStore,
     type AnalysisV2AiPolicyStore,
@@ -70,6 +70,7 @@ const AI_ADMISSION_FAILURE_CODES: ReadonlySet<AnalysisV2AiAdmissionErrorCode> =
         'ANALYSIS_V2_AI_CAPACITY_PENDING',
         'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
         'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+        'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
     ]);
 export const ANALYSIS_V2_JOB_MAX_ATTEMPTS = 7;
 export const ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS = 20;
@@ -535,7 +536,9 @@ export async function executeAnalysisV2DagJob(
     let aiStagePolicyVersion: string | null = null;
     if (AI_PROVIDER_STAGES.has(current.stage)) {
         aiStagePolicyVersion = await aiPolicyStore.loadAiStagePolicyVersion(claim.requestId);
-        if (aiStagePolicyVersion !== AI_STAGE_POLICY_VERSION) {
+        try {
+            assertSupportedAiStagePolicyVersion(aiStagePolicyVersion);
+        } catch {
             executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
         }
     }
@@ -617,6 +620,7 @@ const TRANSIENT_FAILURE_CODES = new Set([
     'ANALYSIS_V2_AI_CAPACITY_PENDING',
     'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
     'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
     'ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR',
     'ANALYSIS_V2_AI_RESULT_NOT_READY',
     'ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR',

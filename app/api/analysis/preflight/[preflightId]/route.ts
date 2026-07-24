@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
@@ -20,6 +20,7 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import { insertLandingLead } from '@/lib/services/leads/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -35,6 +36,27 @@ async function authenticatedUser() {
     const supabase = await createClient();
     const { data: { user }, error } = await supabase.auth.getUser();
     return error || !user ? null : user;
+}
+
+function captureExcludedLandingLead(
+    preflightId: string,
+    excludedInstagramId: string,
+): void {
+    try {
+        after(async () => {
+            try {
+                await insertLandingLead({
+                    instagramId: excludedInstagramId,
+                    inputContext: 'excluded',
+                    sourcePreflightId: preflightId,
+                });
+            } catch {
+                // Lead capture is best-effort and must never alter the exclusion decision.
+            }
+        });
+    } catch {
+        // The durable exclusion remains authoritative when background work is unavailable.
+    }
 }
 
 async function consumedPreflightStatus(
@@ -153,6 +175,12 @@ async function handlePATCH(
                 ? parsed.data.excludedInstagramId
                 : null,
         });
+        if (parsed.data.decision === 'exclude') {
+            captureExcludedLandingLead(
+                preflightId,
+                parsed.data.excludedInstagramId,
+            );
+        }
         operationalLogger.emit({
             event: 'preflight.exclusion_decided',
             severity: 'info',

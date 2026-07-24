@@ -4,6 +4,7 @@ import { classifyAnalysisV2JobFailure } from './v2-worker';
 import {
     APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES,
 } from '@/lib/services/instagram/providers/apify-relationship';
+import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -79,10 +80,20 @@ describe('analysis V2 worker error codes', () => {
         'ANALYSIS_V2_AI_CAPACITY_PENDING',
         'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
         'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+        'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
     ])('classifies the nonterminal admission code %s as transient', code => {
         expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
         expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
             code,
+            disposition: 'transient',
+            retryable: true,
+        });
+    });
+
+    it('preserves the resolver recovery-pending executor error as transient', () => {
+        const error = new AnalysisV2AiResultRecoveryPendingError();
+        expect(classifyAnalysisV2JobFailure(error)).toMatchObject({
+            code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
             disposition: 'transient',
             retryable: true,
         });

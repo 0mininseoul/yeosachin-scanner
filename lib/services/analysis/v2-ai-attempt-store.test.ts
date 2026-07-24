@@ -354,6 +354,62 @@ describe('analysis V2 AI attempt store', () => {
         );
     });
 
+    it('persists resolver cutoff as a non-retryable terminal attempt with unknown cost', async () => {
+        const cutoffOperationKey = createAnalysisV2AiOperationKey(
+            'genderResolution',
+            'candidate:opaque|snapshot:abc123'
+        );
+        const cutoffRecord = successRecord({
+            operationKey: cutoffOperationKey,
+            stage: 'genderResolution',
+            status: 'cutoff',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+            usageMetadataStatus: 'missing',
+            usageComplete: false,
+            tokenUsage: null,
+            latencyMs: 25,
+            estimatedCostUsd: null,
+            finishReason: null,
+        });
+        const rpc = vi.fn().mockResolvedValue({ data: cutoffRecord, error: null });
+        const store = createAnalysisV2AiAttemptStore(rpcClient(rpc));
+
+        await expect(store.terminalize(terminalInput({
+            operationKey: cutoffOperationKey,
+            stage: 'genderResolution',
+            status: 'cutoff',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+            usageMetadataStatus: 'missing',
+            usageComplete: false,
+            tokenUsage: null,
+            latencyMs: 25,
+            estimatedCostUsd: null,
+            finishReason: null,
+        }))).resolves.toEqual(cutoffRecord);
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_ATTEMPT_DATABASE_NAMES.terminalizeRpc,
+            expect.objectContaining({
+                p_status: 'cutoff',
+                p_telemetry: expect.objectContaining({
+                    usage_metadata_status: 'missing',
+                    usage_complete: false,
+                    estimated_cost_usd: null,
+                    finish_reason: null,
+                }),
+            })
+        );
+    });
+
     it('fails closed on inconsistent or fabricated usage before the RPC', async () => {
         const rpc = vi.fn();
         const store = createAnalysisV2AiAttemptStore(rpcClient(rpc));

@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
     AI_STAGE_NAMES,
+    AI_STAGE_NAMES_V27,
     AI_STAGE_POLICIES,
+    AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
+    SUPPORTED_AI_STAGE_POLICY_VERSIONS,
     AI_CONCURRENCY_ENFORCEMENT_SCOPE,
     AI_GEMINI_LEASE_SECONDS,
     AI_GEMINI_MIN_REMAINING_MS,
     AI_GEMINI_SDK_TIMEOUT_MS,
     AI_SHARED_CONCURRENCY_LIMIT,
+    assertSupportedAiStagePolicyVersion,
     getAiStagePolicy,
     isAiStageName,
+    selectAiStagePolicyVersion,
 } from './stage-policy';
 
 describe('V2 AI stage policy', () => {
@@ -104,5 +110,79 @@ describe('V2 AI stage policy', () => {
     it('states that concurrency is deployment-wide and keeps 100-row name output capacity', () => {
         expect(AI_CONCURRENCY_ENFORCEMENT_SCOPE).toBe('deployment');
         expect(getAiStagePolicy('privateAccountName').maxOutputTokens).toBe(8_192);
+    });
+
+    it('freezes the complete v2.6 registry byte-for-byte while adding v2.7 separately', () => {
+        expect(SUPPORTED_AI_STAGE_POLICY_VERSIONS).toEqual([
+            'ai-stage-policy-v2.6',
+            'ai-stage-policy-v2.7',
+        ]);
+        expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
+        expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
+        expect(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6']).toBe(AI_STAGE_POLICIES);
+        expect(Object.keys(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6']))
+            .toEqual([...AI_STAGE_NAMES]);
+        expect(JSON.stringify(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6']))
+            .toBe(JSON.stringify(AI_STAGE_POLICIES));
+        expect(AI_STAGE_NAMES_V27).toEqual([...AI_STAGE_NAMES, 'genderResolution']);
+        for (const stage of AI_STAGE_NAMES) {
+            expect(getAiStagePolicy('ai-stage-policy-v2.7', stage))
+                .toBe(getAiStagePolicy('ai-stage-policy-v2.6', stage));
+        }
+    });
+
+    it('adds the bounded resolver only to v2.7', () => {
+        expect(getAiStagePolicy('ai-stage-policy-v2.7', 'genderResolution')).toEqual({
+            model: 'gemini-3-flash-preview',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            profileImageLimit: 1,
+            feedImageLimit: 4,
+            maxOutputTokens: 512,
+            concurrency: 2,
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+        });
+        expect(() => getAiStagePolicy('ai-stage-policy-v2.6', 'genderResolution'))
+            .toThrow('Unsupported AI stage');
+        expect(isAiStageName('genderResolution')).toBe(true);
+    });
+
+    it('accepts only registered immutable policy versions', () => {
+        expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.6'))
+            .toBe('ai-stage-policy-v2.6');
+        expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.7'))
+            .toBe('ai-stage-policy-v2.7');
+        expect(() => assertSupportedAiStagePolicyVersion('ai-stage-policy-v9'))
+            .toThrow('Unsupported AI stage policy version');
+        expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY)).toBe(true);
+        expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.7'])).toBe(true);
+    });
+
+    it('selects v2.7 only for newly eligible rollout requests', () => {
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'off',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.6');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'test_entitlement',
+            accessMode: 'test_entitlement',
+        })).toBe('ai-stage-policy-v2.7');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'test_entitlement',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.6');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.7');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            accessMode: 'test_entitlement',
+        })).toBe('ai-stage-policy-v2.7');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'unexpected',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.6');
     });
 });

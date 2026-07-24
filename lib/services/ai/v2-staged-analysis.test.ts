@@ -23,12 +23,16 @@ import type {
 } from '@/lib/services/analysis/v2-ai-attempt-store';
 import { zodToGeminiResponseJsonSchema } from './gemini';
 import {
+    applyGenderResolution,
     createFeatureAnalysisResultIdentity,
+    createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
     createHighRiskNarrativeResultIdentity,
     createPartnerSafetyResultIdentity,
     featureAnalysis,
     featureAnalysisModelResponseSchema,
+    genderResolution,
+    genderResolutionModelResponseSchemaFor,
     genderTriage,
     highRiskNarrative,
     highRiskNarrativeInputSchema,
@@ -39,6 +43,7 @@ import {
     partnerSafetyModelResponseSchema,
     type FeatureAnalysisInput,
     type FeatureAnalysisResult,
+    type GenderResolutionResult,
     type GenderTriageResult,
     type HighRiskNarrativeInput,
     type NormalizedAiMediaSelection,
@@ -68,7 +73,8 @@ function media(): NormalizedAiMediaSelection[] {
 }
 
 function audit(
-    stage: 'genderTriage' | 'featureAnalysis' | 'partnerSafety' | 'highRiskNarrative'
+    stage: 'genderTriage' | 'genderResolution' | 'featureAnalysis'
+    | 'partnerSafety' | 'highRiskNarrative'
     = 'genderTriage',
     rawInput?: unknown
 ): StagedAiAuditContext {
@@ -78,7 +84,13 @@ function audit(
                 typeof createGenderTriageResultIdentity
             >[0]
         )
-        : stage === 'featureAnalysis'
+        : stage === 'genderResolution'
+            ? createGenderResolutionResultIdentity(
+                (rawInput ?? { media: media() }) as Parameters<
+                    typeof createGenderResolutionResultIdentity
+                >[0]
+            )
+            : stage === 'featureAnalysis'
             ? createFeatureAnalysisResultIdentity(
                 (rawInput ?? featureInput()) as Parameters<
                     typeof createFeatureAnalysisResultIdentity
@@ -177,6 +189,21 @@ function verifiedFeatureResult(
     };
 }
 
+function genderResolutionResult(
+    overrides: Partial<GenderResolutionResult['assessment']> = {}
+): GenderResolutionResult {
+    return {
+        assessment: {
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate', 'post:2:thumbnail'],
+            ...overrides,
+        },
+        analyzedSelectionIds: media().slice(0, 5).map(item => item.selectionId),
+    };
+}
+
 function contactSheet() {
     return {
         selectionId: `contact-sheet:${'a'.repeat(64)}`,
@@ -246,6 +273,241 @@ describe('V2 staged AI services', () => {
             .toBe('request');
         expect(createFeatureAnalysisResultIdentity(featureInput()).cacheScope)
             .toBe('request');
+        expect(createGenderResolutionResultIdentity({ media: media() }).cacheScope)
+            .toBe('request');
+        expect(createGenderResolutionResultIdentity({ media: media() }).operationKey)
+            .toMatch(/^gender-resolution:[0-9a-f]{64}$/);
+    });
+
+    it('grounds resolver evidence in supplied media and never promotes confidence', () => {
+        const schema = genderResolutionModelResponseSchemaFor(media().slice(0, 5));
+        expect(() => schema.parse({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: [
+                'profile:candidate',
+                'profile:candidate',
+                'post:not-supplied',
+            ],
+        })).toThrow();
+        expect(schema.parse({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: [
+                'profile:candidate',
+                'profile:candidate',
+            ],
+        })).toEqual({
+            inferredGender: 'female',
+            confidence: 'medium',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate'],
+        });
+        expect(() => schema.parse({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'mixed_people',
+            evidenceSelectionIds: ['post:not-supplied'],
+        })).toThrow();
+        expect(schema.parse({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'mixed_people',
+            evidenceSelectionIds: [],
+        })).toEqual({
+            inferredGender: 'unknown',
+            confidence: 'low',
+            ownerConsistency: 'not_visible',
+            evidenceSelectionIds: [],
+        });
+    });
+
+    it('runs the audited resolver only under v2.7 with one profile and four feeds', async () => {
+        const controller = new AbortController();
+        const sensitiveUsername = 'private.username';
+        const resolverMedia = media().map((item, index) => ({
+            ...item,
+            selectionId: index === 0
+                ? `profile:${sensitiveUsername}`
+                : `post:${sensitiveUsername}:${index}:thumbnail`,
+            ...(item.postId ? { postId: `${sensitiveUsername}-post-${index}` } : {}),
+        }));
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['resolver-media:1', 'resolver-media:2'],
+        }));
+        const hooks = audit('genderResolution', { media: resolverMedia });
+
+        const result = await genderResolution(
+            { media: resolverMedia },
+            hooks,
+            { abortSignal: controller.signal },
+        );
+
+        expect(result.assessment.inferredGender).toBe('female');
+        expect(result.assessment.evidenceSelectionIds).toEqual([
+            `profile:${sensitiveUsername}`,
+            `post:${sensitiveUsername}:1:thumbnail`,
+        ]);
+        expect(result.analyzedSelectionIds).toHaveLength(5);
+        const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).not.toContain('@');
+        expect(prompt).not.toContain(sensitiveUsername);
+        expect(prompt).not.toContain('profile:');
+        expect(prompt).not.toContain('post:');
+        expect(prompt).toContain('resolver-media:1');
+        expect(prompt).toContain('resolver-media:5');
+        expect(images).toHaveLength(5);
+        expect(options).toMatchObject({
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7',
+            requestId,
+            abortSignal: controller.signal,
+            onBeforeAttempt: hooks.onBeforeAttempt,
+            onAttemptTelemetry: hooks.onAttemptTelemetry,
+        });
+    });
+
+    it('never lets a resolver overwrite an already verified baseline', () => {
+        const oppositeResolver = genderResolutionResult({
+            inferredGender: 'male',
+        });
+        expect(applyGenderResolution({
+            baselineClassification: 'verified_female',
+            baselineSource: 'feature',
+            triage: routedTriage().assessment,
+            feature: verifiedFeatureResult(),
+            resolver: oppositeResolver,
+        })).toEqual({
+            finalClassification: 'verified_female',
+            classificationSource: 'feature',
+            resolverApplied: false,
+        });
+        expect(applyGenderResolution({
+            baselineClassification: 'verified_non_female',
+            baselineSource: 'triage',
+            triage: routedTriage().assessment,
+            feature: null,
+            resolver: genderResolutionResult(),
+        })).toEqual({
+            finalClassification: 'verified_non_female',
+            classificationSource: 'triage',
+            resolverApplied: false,
+        });
+    });
+
+    it('resolves an unknown only from high same-owner evidence or medium agreement', () => {
+        const unresolvedFeature = {
+            ...verifiedFeatureResult({
+                genderConfidence: 'medium',
+                evidenceSelectionIds: {
+                    ...featureResponse().evidenceSelectionIds,
+                    gender: ['profile:candidate', 'post:1:thumbnail'],
+                },
+            }),
+            finalGenderDecision: 'unresolved' as const,
+        };
+        expect(applyGenderResolution({
+            baselineClassification: 'unresolved',
+            baselineSource: 'unknown',
+            triage: routedTriage().assessment,
+            feature: unresolvedFeature,
+            resolver: genderResolutionResult(),
+        })).toEqual({
+            finalClassification: 'verified_female',
+            classificationSource: 'gender_resolution',
+            resolverApplied: true,
+        });
+
+        const mediumResolver = genderResolutionResult({
+            confidence: 'medium',
+            evidenceSelectionIds: ['post:2:thumbnail'],
+        });
+        expect(applyGenderResolution({
+            baselineClassification: 'unresolved',
+            baselineSource: 'unknown',
+            triage: routedTriage().assessment,
+            feature: unresolvedFeature,
+            resolver: mediumResolver,
+        }).finalClassification).toBe('verified_female');
+        expect(applyGenderResolution({
+            baselineClassification: 'unresolved',
+            baselineSource: 'unknown',
+            triage: routedTriage().assessment,
+            feature: unresolvedFeature,
+            resolver: genderResolutionResult({
+                confidence: 'medium',
+                ownerConsistency: 'mixed_people',
+            }),
+        }).finalClassification).toBe('unresolved');
+    });
+
+    it('uses a high-confidence resolver only as a tie-break for an existing conflict', () => {
+        const triage = routedTriage({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate', 'post:1:thumbnail'],
+        }).assessment;
+        const conflictingFeature = {
+            ...verifiedFeatureResult(),
+            finalGenderDecision: 'unresolved_stage_conflict' as const,
+        };
+        expect(applyGenderResolution({
+            baselineClassification: 'unresolved_stage_conflict',
+            baselineSource: 'unknown',
+            triage,
+            feature: conflictingFeature,
+            resolver: genderResolutionResult({ inferredGender: 'male' }),
+        }).finalClassification).toBe('verified_non_female');
+        expect(applyGenderResolution({
+            baselineClassification: 'unresolved_stage_conflict',
+            baselineSource: 'unknown',
+            triage,
+            feature: conflictingFeature,
+            resolver: genderResolutionResult({
+                inferredGender: 'unknown',
+                confidence: 'low',
+            }),
+        }).finalClassification).toBe('unresolved_stage_conflict');
+    });
+
+    it('does not let resolver results replace unavailable or not-ready baselines', () => {
+        for (const baselineClassification of [
+            'fetch_unavailable',
+            'media_unavailable',
+            'analysis_unavailable',
+        ] as const) {
+            expect(applyGenderResolution({
+                baselineClassification,
+                baselineSource: 'unavailable',
+                triage: null,
+                feature: null,
+                resolver: genderResolutionResult(),
+            })).toEqual({
+                finalClassification: baselineClassification,
+                classificationSource: 'unavailable',
+                resolverApplied: false,
+            });
+        }
+        expect(applyGenderResolution({
+            baselineClassification: 'unresolved',
+            baselineSource: 'unknown',
+            triage: routedTriage().assessment,
+            feature: {
+                ...verifiedFeatureResult(),
+                finalGenderDecision: 'unresolved',
+            },
+            resolver: null,
+        }).finalClassification).toBe('unresolved');
     });
 
     it('accepts only bounded normalized JPEG artifacts with stable IDs', () => {
