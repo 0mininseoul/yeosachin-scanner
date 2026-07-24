@@ -289,7 +289,7 @@ describe('analytics and observability disclosure contract', () => {
         );
         expect(plan).toMatch(/ordinary-deploy exact primary:3[\s\S]{0,240}300-second drain/);
 
-        const plus = ANALYSIS_PLAN_CATALOG.plus;
+        const standard = ANALYSIS_PLAN_CATALOG.standard;
         const relationshipRate = dotenvNumber(
             exampleEnv,
             'APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD'
@@ -307,14 +307,15 @@ describe('analytics and observability disclosure contract', () => {
             'APIFY_COMMENTS_ESTIMATED_COST_PER_RESULT_USD'
         );
         const followerRelationshipExposure = (
-            plus.relationshipCapacity.followers * relationshipRate
+            standard.relationshipCapacity.followers * relationshipRate
         );
         const followingRelationshipExposure = (
-            plus.relationshipCapacity.following * relationshipRate
+            standard.relationshipCapacity.following * relationshipRate
         );
-        const fallbackExposure = plus.detailedMutualLimit * fallbackRate;
+        const fallbackExposure = standard.detailedMutualLimit * fallbackRate;
         const repairExposure = (
-            plus.detailedMutualLimit * REPLACEMENT_PROFILE_ACTOR.estimatedResultCostUsd
+            standard.detailedMutualLimit
+            * REPLACEMENT_PROFILE_ACTOR.estimatedResultCostUsd
         );
         const targetLikerExposure = (
             TARGET_LIKER_POST_LIMIT * TARGET_LIKER_LIMIT_PER_POST * likerRate
@@ -355,25 +356,25 @@ describe('analytics and observability disclosure contract', () => {
             quinaryMinimumBalance: Number((quinaryExposure * liveBalanceMargin).toFixed(6)),
             tertiaryMinimumBalance: Number((tertiaryExposure * liveBalanceMargin).toFixed(6)),
         }).toEqual({
-            followerRelationshipExposure: 1.02,
-            followingRelationshipExposure: 1.02,
-            fallbackExposure: 2.34,
-            repairExposure: 2.43,
+            followerRelationshipExposure: 0.68,
+            followingRelationshipExposure: 0.68,
+            fallbackExposure: 1.56,
+            repairExposure: 1.62,
             freshTargetProfileExposure: 0.0026,
             targetLikerExposure: 0.93,
             commentExposure: 0.234,
             candidateLikerExposure: 1.55,
-            senaryExposure: 6.7226,
-            quinaryExposure: 2.57,
+            senaryExposure: 4.7926,
+            quinaryExposure: 2.23,
             tertiaryExposure: 0.234,
-            senaryMinimumBalance: 7.39486,
-            quinaryMinimumBalance: 2.827,
+            senaryMinimumBalance: 5.27186,
+            quinaryMinimumBalance: 2.453,
             tertiaryMinimumBalance: 0.2574,
         });
         for (const formula of [
-            '1200 × $0.00085 = $1.02',
-            '900 × $0.0026 = $2.34',
-            '900 × $0.0027 = $2.43',
+            '800 × $0.00085 = $0.68',
+            '600 × $0.0026 = $1.56',
+            '600 × $0.0027 = $1.62',
             'fresh target profile `$0.0026`',
             '4 × 150 × $0.00155 = $0.93',
             '6 × 15 × $0.0026 = $0.234',
@@ -382,8 +383,8 @@ describe('analytics and observability disclosure contract', () => {
             expect(runbook).toContain(formula);
         }
         for (const [slot, total, minimum] of [
-            ['senary', '6.7226', '7.39486'],
-            ['quinary', '2.57', '2.827'],
+            ['senary', '4.7926', '5.27186'],
+            ['quinary', '2.23', '2.453'],
             ['tertiary', '0.234', '0.2574'],
         ]) {
             expect(runbook).toMatch(new RegExp(
@@ -395,6 +396,10 @@ describe('analytics and observability disclosure contract', () => {
         expect(runbook).toMatch(/quota[^\n]*(balance|잔액)[^\n]*(대체|갈음)[^\n]*(금지|않)/i);
         expect(runbook).toMatch(/baseline[^\n]*primary:3/i);
         expect(runbook).toMatch(/selected[^\n]*senary[^\n]*numeric/i);
+        expect(runbook).toMatch(/selected plan[^\n]*Standard/i);
+        expect(runbook).toMatch(/Standard[^\n]*(800|600)/i);
+        expect(plan).toMatch(/authorized Standard E2E/i);
+        expect(plan).not.toMatch(/authorized Plus E2E/i);
         expect(runbook).toMatch(/additional[^\n]*quinary[^\n]*tertiary/i);
         expect(runbook).toMatch(/false[^\n]*→[^\n]*true[^\n]*(유일|only)/i);
         expect(runbook).toMatch(

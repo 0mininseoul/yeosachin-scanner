@@ -68,16 +68,22 @@ if [[ -n "${FAKE_PRUNE_READINESS_COUNT_FILE:-}" ]]; then
 fi
 case "${FAKE_PRUNE_READINESS_MODE:-ready}" in
   ready)
-    printf '%s\n' "${FAKE_PRUNE_READINESS_JSON:-{\"ready\":true,\"dropSlots\":[\"quinary\",\"senary\",\"tertiary\"],\"activeRequestRuns\":0,\"unreconciledRequestRuns\":0,\"activePreflightRuns\":0,\"unreconciledPreflightRuns\":0,\"activeProfileRepairCanaryRuns\":0,\"unreconciledProfileRepairCanaryRuns\":0}}"
+    printf '%s\n' "${FAKE_PRUNE_READINESS_JSON:-{\"ready\":true,\"dropSlots\":[\"quinary\",\"senary\",\"tertiary\"],\"activeRequestRuns\":0,\"unreconciledRequestRuns\":0,\"activePreflightRuns\":0,\"unreconciledPreflightRuns\":0,\"activeProfileRepairCanaryRuns\":0,\"unreconciledProfileRepairCanaryRuns\":0,\"activeRequests\":0,\"activePreflights\":0,\"activeDropSlotPolicies\":0,\"incompleteProfileProviderCanaryCleanups\":0}}"
     ;;
   active)
-    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":1,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0}'
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":1,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0,"activeRequests":0,"activePreflights":0,"activeDropSlotPolicies":0,"incompleteProfileProviderCanaryCleanups":0}'
     ;;
   unreconciled-request)
-    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":1,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0}'
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":1,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0,"activeRequests":0,"activePreflights":0,"activeDropSlotPolicies":0,"incompleteProfileProviderCanaryCleanups":0}'
     ;;
   unreconciled-preflight)
-    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":1,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0}'
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":1,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0,"activeRequests":0,"activePreflights":0,"activeDropSlotPolicies":0,"incompleteProfileProviderCanaryCleanups":0}'
+    ;;
+  active-request)
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0,"activeRequests":1,"activePreflights":0,"activeDropSlotPolicies":1,"incompleteProfileProviderCanaryCleanups":0}'
+    ;;
+  profile-provider-cleanup)
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0,"activeRequests":0,"activePreflights":0,"activeDropSlotPolicies":0,"incompleteProfileProviderCanaryCleanups":1}'
     ;;
   invalid)
     printf '%s\n' '{"ready":true}'
@@ -2634,7 +2640,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
     --prune-apify-secret-refs=tertiary,quinary,senary \
   >"$temp_dir/worker-prune-ready.out"
 assert_contains "$temp_dir/worker-prune-ready.out" \
-  'verified: authoritative zero-active/zero-unreconciled evidence for exact Apify refs'
+  'verified: authoritative quiet-work, cleanup, and ledger evidence for exact Apify refs'
 assert_contains "$temp_dir/worker-prune-ready.out" \
   'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3'
 for removed_assignment in \
@@ -2726,7 +2732,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
     --prune-apify-secret-refs=tertiary,quinary,senary \
   >"$temp_dir/worker-prune-primary-retained-retry.out"
 assert_contains "$temp_dir/worker-prune-primary-retained-retry.out" \
-  'verified: authoritative zero-active/zero-unreconciled evidence for exact Apify refs'
+  'verified: authoritative quiet-work, cleanup, and ledger evidence for exact Apify refs'
 
 printf '0\n' >"$temp_dir/prune-trace-readiness-count"
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
@@ -2750,7 +2756,14 @@ fi
 assert_not_contains "$temp_dir/worker-prune-trace.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 
-for blocked_mode in active unreconciled-request unreconciled-preflight invalid missing; do
+for blocked_mode in \
+  active \
+  unreconciled-request \
+  unreconciled-preflight \
+  active-request \
+  profile-provider-cleanup \
+  invalid \
+  missing; do
   if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
     'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
     'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \

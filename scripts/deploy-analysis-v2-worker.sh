@@ -1192,10 +1192,14 @@ verify_apify_secret_ref_prune_readiness() {
   jq -e \
     --argjson requested_slots "$prune_apify_secret_refs_json" '
       (keys | sort) == ([
+        "activeDropSlotPolicies",
         "activePreflightRuns",
+        "activePreflights",
         "activeProfileRepairCanaryRuns",
         "activeRequestRuns",
+        "activeRequests",
         "dropSlots",
+        "incompleteProfileProviderCanaryCleanups",
         "ready",
         "unreconciledPreflightRuns",
         "unreconciledProfileRepairCanaryRuns",
@@ -1209,11 +1213,15 @@ verify_apify_secret_ref_prune_readiness() {
         .activePreflightRuns,
         .unreconciledPreflightRuns,
         .activeProfileRepairCanaryRuns,
-        .unreconciledProfileRepairCanaryRuns
+        .unreconciledProfileRepairCanaryRuns,
+        .activeRequests,
+        .activePreflights,
+        .activeDropSlotPolicies,
+        .incompleteProfileProviderCanaryCleanups
       ] | all(type == "number" and . == 0))
     ' <<<"$response" >/dev/null \
     || die "authoritative Apify secret-ref prune readiness is invalid or not ready"
-  log "verified: authoritative zero-active/zero-unreconciled evidence for exact Apify refs"
+  log "verified: authoritative quiet-work, cleanup, and ledger evidence for exact Apify refs"
 }
 
 service_origin() {

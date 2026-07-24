@@ -2,7 +2,7 @@
 
 > **For Codex:** Execute this plan with the `subagent-driven-development` workflow. Keep production calls, migrations, secret creation, deployment, and the paid E2E outside the implementation commit until review and CI are green.
 
-**Goal:** Add a true, same-named `senary` Apify credential slot for the single authorized Plus E2E while keeping `septenary` rejected and leaving the separate profile-repair microcanary at its existing five-slot boundary.
+**Goal:** Add a true, same-named `senary` Apify credential slot for the single authorized Standard E2E while keeping `septenary` rejected and leaving the separate profile-repair microcanary at its existing five-slot boundary. Plus remains out of scope because it is not launch-ready.
 
 **Architecture:** Extend the shared V2 credential-slot vocabulary, exact environment-to-secret identity maps, and helper-backed database policy with one append-only migration. Recreate the cleanup settlement RPC so a failed senary-backed run can be settled safely. Do not alias a token, edit an applied migration, or widen the profile-repair microcanary.
 
@@ -111,6 +111,8 @@ Run the Bash contract suites and focused TypeScript tests.
 **Required policy:**
 
 - Runtime supports primary through senary; septenary remains inventory-only and unsupported.
+- The one paid run selects exactly Standard. Its relationship caps are 800/800
+  and its detailed-mutual cap is 600; do not substitute the unready Plus plan.
 - Require the same-named numeric Secret Manager reference for senary.
 - State that the final map is permitted only after an immediate live credit and Actor allowance check.
 - Use the planned map, subject to that live gate:
@@ -120,6 +122,10 @@ Run the Bash contract suites and focused TypeScript tests.
   - target likers: senary
   - target comments: tertiary
   - candidate likers: quinary
+- Fix the Standard worst-case exposure from the catalog and current Actor
+  rates: senary `$4.7926` with 110% balance `$5.27186`; quinary `$2.23`
+  with 110% balance `$2.453`; tertiary `$0.234` with 110% balance
+  `$0.2574`.
 - Preserve the deployment sequence: verify the initial `primary:3` baseline, stage the exact
   same-named senary selected secret plus quinary/tertiary additional secrets with sharding disabled,
   activate only the sharding flag, then disable sharding and restore `primary:3` during teardown.
@@ -131,10 +137,13 @@ Run the Bash contract suites and focused TypeScript tests.
   300-second drain and require unchanged, exactly observed service generation,
   active revision, 100% traffic, refs, sharding, and destination afterward.
   The canonical build Supabase origin must equal the single latest
-  and active Cloud Run runtime origin. The service-role readiness RPC must prove zero active and zero
-  unreconciled request/preflight runs plus zero active, ambiguous, or
-  unreconciled 5-slot profile-repair canary runs for those exact slots before
-  staging and again immediately before promotion. Ordinary deploy/check keeps
+  and active Cloud Run runtime origin. The service-role readiness RPC must prove
+  global zero pending/processing requests and preflights, zero active drop-slot
+  policies, zero active or unreconciled request/preflight runs, zero active,
+  ambiguous, or unreconciled 5-slot profile-repair canary runs, and zero
+  incomplete official profile-provider source cleanup that depends on those
+  exact stored source-run slots before staging and again immediately before
+  promotion. Ordinary deploy/check keeps
   preserving valid recovery refs; prune `--check` requires a primary-only
   inventory.
 - Explicitly say profile-repair microcanary does not support senary.

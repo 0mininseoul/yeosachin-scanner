@@ -204,6 +204,7 @@ GOOGLE_CLOUD_PROJECT=test-project
 GOOGLE_CLOUD_LOCATION=global
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary
+ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
@@ -545,6 +546,28 @@ env \
   >"$temp_dir/senary-generator.out"
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "senary"'
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: "false"'
+
+sed 's/^ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=.*/ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true/' \
+  "$temp_dir/senary-manifest.env" >"$temp_dir/sharding-enabled-manifest.env"
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/sharding-enabled-manifest.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/sharding-enabled-generator.out"
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: "true"'
+
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/senary-manifest.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/senary-generator-restored.out"
 
 runtime_file="$temp_dir/generated/analysis-v2-runtime.yaml"
 build_file="$temp_dir/generated/analysis-v2-build.yaml"
@@ -555,6 +578,7 @@ build_file="$temp_dir/generated/analysis-v2-build.yaml"
 runtime_keys="$(sed -n 's/^\([A-Z0-9_]*\):.*/\1/p' "$runtime_file" | sort)"
 expected_runtime_keys="$(printf '%s\n' \
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
+  ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED \
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET \
   GOOGLE_CLOUD_LOCATION \
   GOOGLE_CLOUD_PROJECT \
@@ -571,12 +595,14 @@ expected_runtime_keys="$(printf '%s\n' \
   || fail "generated runtime manifest key allowlist drifted"
 
 manifest_gate_keys=(
+  ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS
 )
-manifest_gate_wrong_values=(false 749 101)
+manifest_gate_wrong_values=(enabled false 749 101)
 manifest_gate_wrong_errors=(
+  "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED must be true or false"
   "SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED must be true"
   "SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS must be 750"
   "SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS must be 100"

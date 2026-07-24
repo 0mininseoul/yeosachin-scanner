@@ -85,9 +85,36 @@ describe('analysis V2 senary Apify credential migration contract', () => {
         expect(readiness).toContain('analysis_v2_provider_runs');
         expect(readiness).toContain('analysis_preflight_provider_runs');
         expect(readiness).toContain('analysis_v2_profile_repair_canary_runs');
+        expect(readiness).toContain('analysis_v2_provider_execution_policies');
+        expect(readiness).toContain('analysis_requests');
+        expect(readiness).toContain('analysis_preflights');
+        expect(readiness).toContain('analysis_v2_profile_provider_canary_experiments');
+        expect(readiness).toContain('jsonb_each_text');
+        expect(readiness).toContain(
+            "source_run.actor_id = 'apify/instagram-profile-scraper'"
+        );
+        expect(readiness).toContain(
+            "source_run.job_key ~ '^track:profiles:batch:(?:0|[1-7])$'"
+        );
+        expect(readiness).toContain(
+            "source_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$'"
+        );
+        expect(readiness).toMatch(
+            /execution_policy\.operation_slot_map->>'profile-fallback'\s+= source_run\.credential_slot/
+        );
+        expect(readiness).toContain("analysis_request.status IN ('pending', 'processing')");
+        expect(readiness).toContain("preflight.status IN ('pending', 'processing')");
+        expect(readiness).toContain(
+            "experiment.source_kvs_cleanup_state IS DISTINCT FROM 'verified_absent'"
+        );
+        expect(readiness).toContain(
+            "experiment.source_dataset_cleanup_state IS DISTINCT FROM 'verified_absent'"
+        );
+        expect(readiness).toMatch(
+            /experiment\.source_request_queue_cleanup_state\s+IS DISTINCT FROM 'verified_absent'/
+        );
         expect(readiness).toContain("'starting', 'running', 'ambiguous'");
         expect(readiness).toContain('usage_reconciled_at IS NULL');
-        expect(readiness).not.toContain('analysis_v2_profile_provider_canary_runs');
         expect(migration).toMatch(
             /REVOKE ALL ON FUNCTION public\.analysis_v2_apify_secret_ref_prune_readiness\(TEXT\[\]\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
         );
@@ -155,6 +182,23 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
                 completed_at TIMESTAMP WITH TIME ZONE
             );
 
+            CREATE TABLE public.analysis_requests (
+                id UUID PRIMARY KEY,
+                status TEXT NOT NULL
+            );
+
+            CREATE TABLE public.analysis_preflights (
+                id UUID PRIMARY KEY,
+                status TEXT NOT NULL
+            );
+
+            CREATE TABLE public.analysis_v2_provider_execution_policies (
+                request_id UUID PRIMARY KEY,
+                mode TEXT NOT NULL DEFAULT 'test_operation_split',
+                policy_version TEXT NOT NULL DEFAULT 'authorized-free-e2e-v1',
+                operation_slot_map JSONB NOT NULL
+            );
+
             CREATE TABLE public.analysis_preflight_provider_runs (
                 preflight_id UUID PRIMARY KEY,
                 credential_slot TEXT NOT NULL,
@@ -169,6 +213,15 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
                 state TEXT NOT NULL,
                 usage_reconciled_at TIMESTAMP WITH TIME ZONE,
                 PRIMARY KEY (source_request_id, repetition)
+            );
+
+            CREATE TABLE public.analysis_v2_profile_provider_canary_experiments (
+                source_request_id UUID NOT NULL,
+                canary_version TEXT NOT NULL,
+                source_kvs_cleanup_state TEXT NOT NULL,
+                source_dataset_cleanup_state TEXT NOT NULL,
+                source_request_queue_cleanup_state TEXT NOT NULL,
+                PRIMARY KEY (source_request_id, canary_version)
             );
 
             CREATE OR REPLACE FUNCTION public.analysis_v2_provider_run_json(
@@ -251,6 +304,215 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
                 credentialSlot: 'senary',
                 status: 'failed',
                 actualUsageUsd: 0.01,
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('blocks future provider reservations while request or preflight work is active', async () => {
+        const callReadiness = () => db.query<{
+            result: {
+                ready: boolean;
+                activeRequests: number;
+                activePreflights: number;
+                activeDropSlotPolicies: number;
+            };
+        }>(`
+            SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
+                ARRAY['senary', 'quinary', 'tertiary']::TEXT[]
+            ) AS result
+        `);
+
+        await db.query(`
+            INSERT INTO public.analysis_requests (id, status) VALUES
+                ('70000000-0000-4000-8000-000000000001', 'pending'),
+                ('70000000-0000-4000-8000-000000000002', 'processing'),
+                ('70000000-0000-4000-8000-000000000003', 'failed')
+        `);
+        await db.query(`
+            INSERT INTO public.analysis_preflights (id, status) VALUES
+                ('71000000-0000-4000-8000-000000000001', 'pending'),
+                ('71000000-0000-4000-8000-000000000002', 'processing'),
+                ('71000000-0000-4000-8000-000000000003', 'consumed')
+        `);
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_execution_policies (
+                request_id, operation_slot_map
+            ) VALUES (
+                '70000000-0000-4000-8000-000000000001',
+                '{"target-profile":"primary","profile-fallback":"senary"}'::JSONB
+            ), (
+                '70000000-0000-4000-8000-000000000003',
+                '{"target-profile":"primary","profile-fallback":"quinary"}'::JSONB
+            )
+        `);
+
+        await db.exec('SET ROLE service_role');
+        try {
+            const blocked = await callReadiness();
+            expect(blocked.rows[0].result).toMatchObject({
+                ready: false,
+                activeRequests: 2,
+                activePreflights: 2,
+                activeDropSlotPolicies: 1,
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+
+        await db.query(`
+            UPDATE public.analysis_requests
+            SET status = 'failed'
+            WHERE status IN ('pending', 'processing')
+        `);
+        await db.query(`
+            UPDATE public.analysis_preflights
+            SET status = 'consumed'
+            WHERE status IN ('pending', 'processing')
+        `);
+
+        await db.exec('SET ROLE service_role');
+        try {
+            const ready = await callReadiness();
+            expect(ready.rows[0].result).toMatchObject({
+                ready: true,
+                activeRequests: 0,
+                activePreflights: 0,
+                activeDropSlotPolicies: 0,
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('blocks incomplete official-canary source cleanup on a dropped source slot', async () => {
+        const sourceRequestId = '80000000-0000-4000-8000-000000000001';
+        await db.query(`
+            INSERT INTO public.analysis_requests (id, status)
+            VALUES ($1, 'failed')
+        `, [sourceRequestId]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_execution_policies (
+                request_id, operation_slot_map
+            ) VALUES (
+                $1,
+                '{"profile-fallback":"primary"}'::JSONB
+            )
+        `, [sourceRequestId]);
+        for (let index = 0; index < 8; index += 1) {
+            const suffix = String(index + 1).padStart(12, '0');
+            await db.query(`
+                INSERT INTO public.analysis_v2_provider_runs (
+                    request_id, job_key, operation_key, input_hash, job_claim_token,
+                    reservation_token, logical_provider, actor_id, credential_slot,
+                    max_charge_usd, status, run_id, actual_usage_usd, reserved_at,
+                    run_started_at, terminalized_at, usage_reconciled_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    'apify', 'apify/instagram-profile-scraper', 'primary',
+                    0.02, 'succeeded', $7, 0.01,
+                    pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(),
+                    pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(),
+                    pg_catalog.clock_timestamp()
+                )
+            `, [
+                sourceRequestId,
+                `track:profiles:batch:${index}`,
+                `profile-fallback:${index.toString(16).repeat(64)}`,
+                (index + 1).toString(16).repeat(64),
+                `81000000-0000-4000-8000-${suffix}`,
+                `82000000-0000-4000-8000-${suffix}`,
+                `SourceRun12345${index}`,
+            ]);
+        }
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_runs (
+                request_id, job_key, operation_key, input_hash, job_claim_token,
+                reservation_token, logical_provider, actor_id, credential_slot,
+                max_charge_usd, status, run_id, actual_usage_usd, reserved_at,
+                run_started_at, terminalized_at, usage_reconciled_at, updated_at
+            ) VALUES (
+                $1, 'target-likers',
+                'target-likers:${'e'.repeat(64)}', '${'f'.repeat(64)}',
+                '83000000-0000-4000-8000-000000000001',
+                '84000000-0000-4000-8000-000000000001',
+                'apify', 'apify/instagram-post-likers-scraper', 'senary',
+                0.02, 'succeeded', 'UnrelatedRun123', 0.01,
+                pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(),
+                pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(),
+                pg_catalog.clock_timestamp()
+            )
+        `, [sourceRequestId]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_profile_provider_canary_experiments (
+                source_request_id, canary_version, source_kvs_cleanup_state,
+                source_dataset_cleanup_state, source_request_queue_cleanup_state
+            ) VALUES (
+                $1, 'profile-fallback-replacement-canary-v1',
+                'pending', 'pending', 'pending'
+            )
+        `, [sourceRequestId]);
+
+        const callReadiness = () => db.query<{
+            result: {
+                ready: boolean;
+                incompleteProfileProviderCanaryCleanups: number;
+            };
+        }>(`
+            SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
+                ARRAY['senary', 'quinary', 'tertiary']::TEXT[]
+            ) AS result
+        `);
+
+        await db.exec('SET ROLE service_role');
+        try {
+            const unrelated = await callReadiness();
+            expect(unrelated.rows[0].result).toMatchObject({
+                ready: true,
+                incompleteProfileProviderCanaryCleanups: 0,
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+
+        await db.query(`
+            UPDATE public.analysis_v2_provider_runs
+            SET credential_slot = 'senary'
+            WHERE request_id = $1
+              AND job_key = 'track:profiles:batch:0'
+        `, [sourceRequestId]);
+        await db.query(`
+            UPDATE public.analysis_v2_provider_execution_policies
+            SET operation_slot_map = '{"profile-fallback":"senary"}'::JSONB
+            WHERE request_id = $1
+        `, [sourceRequestId]);
+
+        await db.exec('SET ROLE service_role');
+        try {
+            const blocked = await callReadiness();
+            expect(blocked.rows[0].result).toMatchObject({
+                ready: false,
+                incompleteProfileProviderCanaryCleanups: 1,
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+
+        await db.query(`
+            UPDATE public.analysis_v2_profile_provider_canary_experiments
+            SET source_kvs_cleanup_state = 'verified_absent',
+                source_dataset_cleanup_state = 'verified_absent',
+                source_request_queue_cleanup_state = 'verified_absent'
+            WHERE source_request_id = $1
+        `, [sourceRequestId]);
+
+        await db.exec('SET ROLE service_role');
+        try {
+            const ready = await callReadiness();
+            expect(ready.rows[0].result).toMatchObject({
+                ready: true,
+                incompleteProfileProviderCanaryCleanups: 0,
             });
         } finally {
             await db.exec('RESET ROLE');

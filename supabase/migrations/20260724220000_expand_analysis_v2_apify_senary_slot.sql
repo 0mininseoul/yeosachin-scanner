@@ -127,9 +127,9 @@ COMMENT ON FUNCTION public.analysis_v2_valid_apify_credential_slot(TEXT) IS
     'Exact same-named credential identities supported by the general Analysis V2 worker; no token pooling or aliases.';
 
 -- Return authoritative, bounded evidence before a deploy intentionally removes
--- non-primary Secret Manager references. The official profile-provider canary
--- is primary-only, so it cannot depend on any accepted p_drop_slots value. The
--- historical profile-repair canary is five-slot and must be drained explicitly.
+-- non-primary Secret Manager references. Official profile-provider canary runs
+-- use primary, but cleanup of their eight retained source runs uses each source
+-- run's stored credential slot. Both canary journals must therefore be drained.
 CREATE OR REPLACE FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(
     p_drop_slots TEXT[]
 )
@@ -147,6 +147,10 @@ DECLARE
     v_unreconciled_preflight_runs BIGINT;
     v_active_profile_repair_canary_runs BIGINT;
     v_unreconciled_profile_repair_canary_runs BIGINT;
+    v_active_requests BIGINT;
+    v_active_preflights BIGINT;
+    v_active_drop_slot_policies BIGINT;
+    v_incomplete_profile_provider_canary_cleanups BIGINT;
 BEGIN
     SELECT pg_catalog.array_agg(slot ORDER BY slot)
     INTO v_drop_slots
@@ -209,6 +213,64 @@ BEGIN
       AND canary_run.state IN ('succeeded', 'failed')
       AND canary_run.usage_reconciled_at IS NULL;
 
+    -- A provider reservation can still be created before any provider ledger
+    -- row exists. Reserve is fenced by an active request, while target-profile
+    -- acquisition is fenced by an active preflight. Requiring global quiet
+    -- state prevents an old drained worker invocation from materializing a
+    -- drop-slot run after this point-in-time audit.
+    SELECT pg_catalog.count(*)
+    INTO v_active_requests
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.status IN ('pending', 'processing');
+
+    SELECT pg_catalog.count(*)
+    INTO v_active_preflights
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.status IN ('pending', 'processing');
+
+    -- Keep the policy-specific count as diagnostic evidence. Terminal requests
+    -- retain immutable policies but can no longer reserve provider runs.
+    SELECT pg_catalog.count(*)
+    INTO v_active_drop_slot_policies
+    FROM public.analysis_v2_provider_execution_policies AS policy
+    JOIN public.analysis_requests AS analysis_request
+      ON analysis_request.id = policy.request_id
+    WHERE analysis_request.status IN ('pending', 'processing')
+      AND EXISTS (
+          SELECT 1
+          FROM pg_catalog.jsonb_each_text(
+              policy.operation_slot_map
+          ) AS operation_slot(operation_kind, credential_slot)
+          WHERE operation_slot.credential_slot = ANY(v_drop_slots)
+      );
+
+    SELECT pg_catalog.count(*)
+    INTO v_incomplete_profile_provider_canary_cleanups
+    FROM public.analysis_v2_profile_provider_canary_experiments AS experiment
+    WHERE (
+        experiment.source_kvs_cleanup_state IS DISTINCT FROM 'verified_absent'
+        OR experiment.source_dataset_cleanup_state IS DISTINCT FROM 'verified_absent'
+        OR experiment.source_request_queue_cleanup_state
+            IS DISTINCT FROM 'verified_absent'
+    )
+      AND EXISTS (
+          SELECT 1
+          FROM public.analysis_v2_provider_runs AS source_run
+          JOIN public.analysis_v2_provider_execution_policies AS execution_policy
+            ON execution_policy.request_id = source_run.request_id
+          WHERE source_run.request_id = experiment.source_request_id
+            AND source_run.status = 'succeeded'
+            AND source_run.run_id ~ '^[A-Za-z0-9]{8,64}$'
+            AND source_run.actor_id = 'apify/instagram-profile-scraper'
+            AND source_run.job_key ~ '^track:profiles:batch:(?:0|[1-7])$'
+            AND source_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$'
+            AND execution_policy.mode = 'test_operation_split'
+            AND execution_policy.policy_version = 'authorized-free-e2e-v1'
+            AND execution_policy.operation_slot_map->>'profile-fallback'
+                = source_run.credential_slot
+            AND source_run.credential_slot = ANY(v_drop_slots)
+      );
+
     RETURN pg_catalog.jsonb_build_object(
         'ready',
             v_active_request_runs = 0
@@ -216,7 +278,11 @@ BEGIN
             AND v_active_preflight_runs = 0
             AND v_unreconciled_preflight_runs = 0
             AND v_active_profile_repair_canary_runs = 0
-            AND v_unreconciled_profile_repair_canary_runs = 0,
+            AND v_unreconciled_profile_repair_canary_runs = 0
+            AND v_active_requests = 0
+            AND v_active_preflights = 0
+            AND v_active_drop_slot_policies = 0
+            AND v_incomplete_profile_provider_canary_cleanups = 0,
         'dropSlots', pg_catalog.to_jsonb(v_drop_slots),
         'activeRequestRuns', v_active_request_runs,
         'unreconciledRequestRuns', v_unreconciled_request_runs,
@@ -224,7 +290,12 @@ BEGIN
         'unreconciledPreflightRuns', v_unreconciled_preflight_runs,
         'activeProfileRepairCanaryRuns', v_active_profile_repair_canary_runs,
         'unreconciledProfileRepairCanaryRuns',
-            v_unreconciled_profile_repair_canary_runs
+            v_unreconciled_profile_repair_canary_runs,
+        'activeRequests', v_active_requests,
+        'activePreflights', v_active_preflights,
+        'activeDropSlotPolicies', v_active_drop_slot_policies,
+        'incompleteProfileProviderCanaryCleanups',
+            v_incomplete_profile_provider_canary_cleanups
     );
 END;
 $$;
@@ -235,4 +306,4 @@ GRANT EXECUTE ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TE
     TO service_role;
 
 COMMENT ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TEXT[]) IS
-    'Service-only zero-active/zero-unreconciled evidence for exact non-primary Apify refs before a primary-only Cloud Run promotion.';
+    'Service-only global quiet-work, drop-slot ledger, policy, and source-cleanup evidence before a primary-only Cloud Run promotion.';
