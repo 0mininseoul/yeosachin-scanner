@@ -30,14 +30,14 @@ const maximumInput = {
     recentFemaleMutualRank: 1,
     appearanceGrade: 5 as const,
     exposureScore: 5,
-    isBusinessAccount: false,
+    accountContext: 'personal' as const,
     hasWeakPartnerEvidence: false,
     hasStrongPartnerEvidence: false,
 };
 
 describe('risk policy components', () => {
     it('keeps the final component weights at exactly 100 points', () => {
-        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.2');
+        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.3');
         expect(RISK_BANDS).toEqual(['normal', 'caution', 'high_risk']);
         expect(RISK_COMPONENT_WEIGHTS).toEqual({
             candidateToTargetLikes: 20,
@@ -68,23 +68,32 @@ describe('risk policy components', () => {
         expect(scoreRecentFemaleMutual(null)).toBe(0);
     });
 
-    it('applies the business multiplier only to recent and appearance context', () => {
-        const regular = calculateRiskPolicy(maximumInput);
-        const business = calculateRiskPolicy({ ...maximumInput, isBusinessAccount: true });
+    it.each([
+        ['personal', 1],
+        ['individual_creator', 0.5],
+        ['official_group_or_brand', 0],
+        ['uncertain', 1],
+    ] as const)(
+        'applies the %s multiplier only to recent and appearance context',
+        (accountContext, multiplier) => {
+            const regular = calculateRiskPolicy(maximumInput);
+            const adjusted = calculateRiskPolicy({ ...maximumInput, accountContext });
 
-        expect(business.components.candidateToTargetLikes)
-            .toBe(regular.components.candidateToTargetLikes);
-        expect(business.components.candidateToTargetComments)
-            .toBe(regular.components.candidateToTargetComments);
-        expect(business.components.targetToCandidateLike)
-            .toBe(regular.components.targetToCandidateLike);
-        expect(business.components.tagOrCaptionMention)
-            .toBe(regular.components.tagOrCaptionMention);
-        expect(business.components.recentMutual).toBe(regular.components.recentMutual * 0.5);
-        expect(business.components.appearanceExposure)
-            .toBe(regular.components.appearanceExposure * 0.5);
-        expect(business.preScore).toBe(78.5);
-    });
+            expect(adjusted.components.candidateToTargetLikes)
+                .toBe(regular.components.candidateToTargetLikes);
+            expect(adjusted.components.candidateToTargetComments)
+                .toBe(regular.components.candidateToTargetComments);
+            expect(adjusted.components.targetToCandidateLike)
+                .toBe(regular.components.targetToCandidateLike);
+            expect(adjusted.components.tagOrCaptionMention)
+                .toBe(regular.components.tagOrCaptionMention);
+            expect(adjusted.components.recentMutual)
+                .toBe(regular.components.recentMutual * multiplier);
+            expect(adjusted.components.appearanceExposure)
+                .toBe(regular.components.appearanceExposure * multiplier);
+            expect(adjusted.softContextMultiplier).toBe(multiplier);
+        }
+    );
 
     it('caps pre-score at 97 and reserves three points for reverse-like evidence', () => {
         const notCollected = calculateRiskPolicy({

@@ -14,6 +14,11 @@ import {
     type AnalysisV2AiAttemptReservation,
     type AnalysisV2AiAttemptStore,
 } from '@/lib/services/analysis/v2-ai-attempt-store';
+import {
+    analysisV2GeminiLeaseStore,
+    type AnalysisV2GeminiLease,
+    type AnalysisV2GeminiLeaseStore,
+} from '@/lib/services/analysis/v2-gemini-lease-store';
 import { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-fallback-policy';
 import { z } from 'zod';
 
@@ -340,6 +345,7 @@ export interface AnalysisV2AiAuditAdapter<T> {
     requestId: string;
     operationKey: string;
     resultIdentity: AnalysisV2AiResultIdentity;
+    handlerDeadlineAtMs?: number;
     /** Checkpoint/cache recovery and durable retry resumption must run before any provider call. */
     prepare(): Promise<AnalysisV2AiPreparedResult<T>>;
     /** Reserve the paid generation attempt before the Gemini SDK call. */
@@ -360,6 +366,8 @@ export interface CreateAnalysisV2AiAuditAdapterOptions<T> {
     resultSchema: z.ZodType<T>;
     attemptStore?: AnalysisV2AiAttemptStore;
     resultStore?: AnalysisV2AiResultStore;
+    leaseStore?: AnalysisV2GeminiLeaseStore;
+    handlerDeadlineAtMs?: number;
 }
 
 export class AnalysisV2AiResultConflictError extends Error {
@@ -1035,7 +1043,16 @@ export function createAnalysisV2AiAuditAdapter<T>(
     }
     const attemptStore = options.attemptStore ?? analysisV2AiAttemptStore;
     const resultStore = options.resultStore ?? analysisV2AiResultStore;
+    const leaseStore = options.leaseStore ?? analysisV2GeminiLeaseStore;
+    const handlerDeadlineAtMs = options.handlerDeadlineAtMs
+        ?? performance.now() + 300_000;
+    if (!Number.isFinite(handlerDeadlineAtMs) || handlerDeadlineAtMs < 0) {
+        throw new Error(
+            'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid handler deadline.'
+        );
+    }
     const reservations = new Map<number, AnalysisV2AiAttemptReservation>();
+    const leases = new Map<number, AnalysisV2GeminiLease>();
     let preparation: Promise<AnalysisV2AiPreparedResult<T>> | null = null;
     let expectedAttempt: number | null = null;
     let terminal = false;
@@ -1096,6 +1113,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
         requestId: request.data.requestId.toLowerCase(),
         operationKey: resultIdentity.operationKey,
         resultIdentity,
+        handlerDeadlineAtMs,
         resultSchema: options.resultSchema,
 
         async prepare() {
@@ -1206,26 +1224,39 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: unexpected attempt reservation.'
                 );
             }
-            const reservation = await attemptStore.reserve({
+            const lease = await leaseStore.acquire({
                 requestId: request.data.requestId,
                 jobKey: request.data.jobKey,
-                claimToken: request.data.claimToken,
-                operationKey: resultIdentity.operationKey,
                 attempt: telemetry.attempt,
-                retryCount: telemetry.retryCount,
-                modelName: telemetry.modelName,
-                location: telemetry.location,
-                stage: telemetry.stage,
-                thinkingLevel: telemetry.thinkingLevel,
-                mediaCount: telemetry.mediaCount,
-                mediaResolution: telemetry.mediaResolution,
-                promptVersion: telemetry.promptVersion,
-                schemaVersion: telemetry.schemaVersion,
-                maxOutputTokens: telemetry.maxOutputTokens,
+                handlerDeadlineAtMs,
             });
-            if (!reservation.created || reservation.status !== 'reserved') {
-                throw new AnalysisV2AiResultReplayBlockedError();
+            let reservation: AnalysisV2AiAttemptReservation;
+            try {
+                reservation = await attemptStore.reserve({
+                    requestId: request.data.requestId,
+                    jobKey: request.data.jobKey,
+                    claimToken: request.data.claimToken,
+                    operationKey: resultIdentity.operationKey,
+                    attempt: telemetry.attempt,
+                    retryCount: telemetry.retryCount,
+                    modelName: telemetry.modelName,
+                    location: telemetry.location,
+                    stage: telemetry.stage,
+                    thinkingLevel: telemetry.thinkingLevel,
+                    mediaCount: telemetry.mediaCount,
+                    mediaResolution: telemetry.mediaResolution,
+                    promptVersion: telemetry.promptVersion,
+                    schemaVersion: telemetry.schemaVersion,
+                    maxOutputTokens: telemetry.maxOutputTokens,
+                });
+                if (!reservation.created || reservation.status !== 'reserved') {
+                    throw new AnalysisV2AiResultReplayBlockedError();
+                }
+            } catch (error) {
+                await leaseStore.release(lease);
+                throw error;
             }
+            leases.set(telemetry.attempt, lease);
             reservations.set(telemetry.attempt, reservation);
         },
 
@@ -1235,9 +1266,10 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 resultIdentity,
             });
             const reservation = reservations.get(telemetry.attempt);
-            if (!reservation) {
+            const lease = leases.get(telemetry.attempt);
+            if (!reservation || !lease) {
                 throw new Error(
-                    'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: missing attempt reservation.'
+                    'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: missing attempt reservation or lease.'
                 );
             }
             const shared = {
@@ -1272,6 +1304,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     }, options.resultSchema);
                     terminal = true;
                     emitTerminalAttempt(telemetry);
+                    await leaseStore.release(lease);
                 } catch (error) {
                     if (
                         error instanceof AnalysisV2AiResultFenceError
@@ -1280,6 +1313,8 @@ export function createAnalysisV2AiAuditAdapter<T>(
                         terminal = true;
                         reservations.delete(telemetry.attempt);
                         emitTerminalAttempt(telemetry);
+                        await leaseStore.release(lease);
+                        leases.delete(telemetry.attempt);
                     }
                     throw error;
                 }
@@ -1310,6 +1345,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     finishReason: telemetry.finishReason,
                 });
                 emitTerminalAttempt(telemetry);
+                await leaseStore.release(lease);
                 if (telemetry.disposition === 'rate_limited' && telemetry.attempt < 4) {
                     expectedAttempt = telemetry.attempt + 1;
                 } else {
@@ -1317,6 +1353,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 }
             }
             reservations.delete(telemetry.attempt);
+            leases.delete(telemetry.attempt);
         },
     };
 }

@@ -41,6 +41,7 @@ export interface AnalysisV2AiJobFence {
     jobKey: string;
     claimToken: string;
     aiStagePolicyVersion: string;
+    handlerDeadlineAtMs?: number;
 }
 
 export interface AnalysisV2AuditedResult<T> {
@@ -129,6 +130,7 @@ function adapter<T>(
         claimToken,
         resultIdentity,
         resultSchema,
+        handlerDeadlineAtMs: fence.handlerDeadlineAtMs,
     });
 }
 

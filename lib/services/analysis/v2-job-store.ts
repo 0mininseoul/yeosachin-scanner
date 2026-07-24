@@ -21,6 +21,7 @@ export const ANALYSIS_V2_DATABASE_NAMES = Object.freeze({
     markDispatchedRpc: 'mark_analysis_v2_job_dispatched',
     claimRpc: 'claim_analysis_v2_job',
     deferTerminalCleanupRpc: 'defer_analysis_v2_terminal_cleanup',
+    deferAiCapacityRpc: 'defer_analysis_v2_job_for_ai_capacity',
     releaseClaimRpc: 'release_analysis_v2_job_claim',
     completeAndFanoutRpc: 'complete_analysis_v2_job_and_fanout',
     listDispatchableRpc: 'list_analysis_v2_dispatchable_jobs',
@@ -108,6 +109,11 @@ export interface AnalysisV2JobReleaseResult {
     requestStatus: string;
 }
 
+export type AnalysisV2AiAdmissionErrorCode =
+    | 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+    | 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+    | 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE';
+
 export interface AnalysisV2JobStore {
     reserveDispatch(input: AnalysisV2JobIdentity): Promise<AnalysisV2JobDispatchReservation>;
     rearmDispatch(input: AnalysisV2JobIdentity & {
@@ -131,6 +137,10 @@ export interface AnalysisV2JobStore {
     ): Promise<ClaimedAnalysisV2Job | null>;
     deferTerminalCleanup(
         claim: ClaimedAnalysisV2Job
+    ): Promise<AnalysisV2JobReleaseResult>;
+    deferAiCapacity(
+        claim: ClaimedAnalysisV2Job,
+        errorCode: AnalysisV2AiAdmissionErrorCode
     ): Promise<AnalysisV2JobReleaseResult>;
     releaseClaim(claim: ClaimedAnalysisV2Job, failure?: {
         errorCode?: string | null;
@@ -683,6 +693,62 @@ export function createSupabaseAnalysisV2JobStore(
             ) {
                 throw new Error(
                     'ANALYSIS_V2_JOB_PERSISTENCE_ERROR: invalid terminal cleanup defer.'
+                );
+            }
+            return {
+                released: true,
+                status,
+                attemptCount,
+                requestStatus,
+            };
+        },
+
+        async deferAiCapacity(claim, errorCode) {
+            const identity = assertAnalysisV2JobIdentity(claim);
+            if (![
+                'ANALYSIS_V2_AI_CAPACITY_PENDING',
+                'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+                'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+            ].includes(errorCode)) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid AI capacity code.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_DATABASE_NAMES.deferAiCapacityRpc,
+                {
+                    p_request_id: identity.requestId,
+                    p_job_key: identity.jobKey,
+                    p_claim_token: requiredUuid(claim.claimToken, 'claim token'),
+                    p_error_code: errorCode,
+                }
+            );
+            if (error) throwRpcError(error, 'AI capacity defer');
+            const row = singleRpcRow(data, 'AI capacity defer');
+            const status = requiredStatus(row.job_status);
+            const attemptCount = requiredSafeInteger(
+                row.attempt_count,
+                'attempt count',
+                0,
+                100
+            );
+            const requestStatus = row.request_status;
+            const deferralCount = requiredSafeInteger(
+                row.ai_capacity_deferral_count,
+                'AI capacity deferral count',
+                1,
+                100_000
+            );
+            if (
+                row.released !== true
+                || status !== 'pending'
+                || attemptCount !== claim.attemptCount - 1
+                || typeof requestStatus !== 'string'
+                || !JOB_PART_PATTERN.test(requestStatus)
+                || deferralCount < 1
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_PERSISTENCE_ERROR: invalid AI capacity defer.'
                 );
             }
             return {

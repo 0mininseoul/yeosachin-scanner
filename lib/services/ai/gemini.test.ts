@@ -560,8 +560,8 @@ describe('analyzeWithGemini stage request policy', () => {
             thinkingLevel: 'MEDIUM',
             mediaCount: 2,
             mediaResolution: 'MEDIUM',
-            promptVersion: 'feature-analysis-v2',
-            schemaVersion: 2,
+            promptVersion: 'feature-analysis-v3',
+            schemaVersion: 3,
             maxOutputTokens: 2_048,
             latencyMs: expect.any(Number),
             estimatedCostUsd: expect.any(Number),
@@ -634,6 +634,23 @@ describe('analyzeWithGemini stage request policy', () => {
             .toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
     });
 
+    it.each([
+        'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+        'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    ])('preserves the pre-SDK admission signal %s without usage telemetry', async code => {
+        const onAttemptTelemetry = vi.fn();
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            requestId: stageRequestId,
+            onBeforeAttempt: vi.fn().mockRejectedValue(new Error(code)),
+            onAttemptTelemetry,
+        })).rejects.toThrow(code);
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(onAttemptTelemetry).not.toHaveBeenCalled();
+    });
+
     it('durably emits a stage attempt even when SDK usage metadata is missing', async () => {
         const audit = stageAuditOptions();
         mocks.generateContent.mockResolvedValueOnce(responseWithText(
@@ -676,6 +693,7 @@ describe('analyzeWithGemini stage request policy', () => {
                     type: 'object',
                     additionalProperties: false,
                 }),
+                httpOptions: { timeout: 210_000 },
             },
         });
     });
@@ -785,21 +803,21 @@ describe('analyzeWithGemini process concurrency', () => {
         };
     }
 
-    it('caps all process-shared generations at ten', async () => {
+    it('caps all process-shared generations at eight', async () => {
         const deferred = deferredGenerations();
         const calls = Array.from({ length: 12 }, () => analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
             skipTokenLog: true,
         }));
 
-        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(10));
-        expect(deferred.maximumActive()).toBe(10);
-        deferred.releases.splice(0, 10).forEach(release => release());
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(8));
+        expect(deferred.maximumActive()).toBe(8);
+        deferred.releases.splice(0, 8).forEach(release => release());
         await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(12));
         deferred.releases.splice(0).forEach(release => release());
 
         await expect(Promise.all(calls)).resolves.toHaveLength(12);
-        expect(deferred.maximumActive()).toBe(10);
+        expect(deferred.maximumActive()).toBe(8);
     });
 
     it('applies the lower high-risk narrative cap of three', async () => {

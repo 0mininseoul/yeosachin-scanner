@@ -75,6 +75,19 @@ describe('analysis V2 worker error codes', () => {
         });
     });
 
+    it.each([
+        'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+        'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    ])('classifies the nonterminal admission code %s as transient', code => {
+        expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+            code,
+            disposition: 'transient',
+            retryable: true,
+        });
+    });
+
     it('recognizes a divergent profile repair replay as a permanent conflict', () => {
         const code = 'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT';
         expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);

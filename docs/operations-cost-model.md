@@ -1,6 +1,6 @@
 # V2 운영 비용 모델
 
-기준일: 2026-07-21. 이 문서는 현재 V2 코드의 **과금 단위와 측정 방법**을 정리한다. 2026-07-17 Standard E2E는 실패했으며 V2 유료 성공 E2E가 아직 끝나지 않았으므로 건당 달러 원가와 최종 판매가는 확정하지 않는다. Actor 콘솔 가격, 과거 V1 canary, 환경변수의 예산 상한을 V2 실측 원가로 대체해서는 안 된다.
+기준일: 2026-07-24. 이 문서는 현재 V2 코드의 **과금 단위와 측정 방법**을 정리한다. 2026-07-24 Plus 통제 E2E 1건은 완료됐지만 비용 완전성이 부족하고 Basic/Standard 통제 표본과 p50/p95가 없으므로 건당 완전 원가와 최종 판매가는 확정하지 않는다. Actor 콘솔 가격, 과거 V1 canary, 환경변수의 예산 상한을 V2 실측 원가로 대체해서는 안 된다.
 
 ## 플랜 범위
 
@@ -20,7 +20,7 @@
 
 ## Groble 얼리버드 표시안 (성공 E2E 후 확정)
 
-아래 표는 런타임 카탈로그와 분리된 **잠정 Groble 채널 제안**이다. 성공 E2E와 Groble 상품 심사를 모두 통과한 뒤에만 확정하며, 애플리케이션의 `pricingVersion=deferred`를 변경하지 않는다. 결제 연동은 이 문서와 authorized E2E 범위 밖이며 다른 브랜치에서 진행한다.
+아래 표는 런타임 카탈로그와 분리된 **Groble 얼리버드 채널 조건**이다. Basic 14,900원과 Standard 19,900원은 해당 채널의 실제 결제액이며, 표의 기준가는 할인 표시를 위한 채널 기준값일 뿐 자동 분석 출시 후의 최종 정가가 아니다. 애플리케이션의 `pricingVersion=deferred`는 변경하지 않는다.
 
 | 플랜 | 기준가 | 얼리버드 결제액 | 제공 방식 |
 |---|---:|---:|---|
@@ -28,7 +28,7 @@
 | Standard | 69,900원 | 19,900원 | 결제 후 24시간 이내 수동 전달 |
 | Plus | - | 대기 신청 | 대기 신청 |
 
-Basic과 Standard는 각각 독립적으로 선착순 10건씩만 받는 표시안이다. 이 수량과 금액은 성공 E2E 및 Groble 상품 심사 전에는 게시·판매 조건으로 확정하지 않는다.
+Basic과 Standard는 각각 독립적으로 선착순 10건씩만 받는다. Plus는 checkout 없이 대기 신청만 유지한다. 자동 분석 출시 후의 정가와 상시 판매 조건은 Basic/Standard 통제 표본, 완전 원가, Groble 운영 확인 뒤에 별도로 결정한다.
 
 ## V2 과금 경로
 
@@ -118,14 +118,24 @@ C_total   = C_provider + C_gemini + C_gcp
 
 GCP `$300` credit은 현금 청구 시점을 늦출 뿐 `C_gemini`와 `C_gcp`의 경제원가를 0으로 만들지 않는다. Apify 비용에는 적용되지 않는다.
 
+Gemini 유료 생성은 revision이나 instance 수와 무관하게 데이터베이스의 고정된 8개
+lease slot을 먼저 확보한 뒤에만 시작한다. lease는 240초이고 Gemini SDK 요청은 210초
+hard timeout을 사용한다. 300초 worker handler의 남은 시간이 225초 미만이면 SDK를
+호출하지 않는다. slot 부족, 격리 활성화, deadline 부족은 작업 실패나 분석 시도 횟수로
+소비하지 않고 지연 재실행한다. 각 AI attempt의 terminal 원장을 먼저 저장한 뒤 정확한
+token과 fence로 lease를 반환하며, 만료되거나 동일 attempt의 소유권이 충돌한 slot은
+자동 재사용하지 않고 격리한다. 격리 해제는 사고 근거의 SHA-256 hash를 남기는 DB
+owner 전용 함수로만 가능하다. process-local 8개 semaphore는 방어층일 뿐 전역
+동시성의 정본은 이 database lease다.
+
 `C_total`은 소비된 preflight의 모든 operation별 `u_preflight,j`를 해당 분석에 귀속한다. 사전 점검 후 결제/분석으로 전환되지 않고 만료·이탈한 preflight도 최초 fallback이 실행됐다면 최대 `$0.0026`의 획득 원가가 이미 발생한다. 유료 전환 경로에서 최초와 fresh generation 1회가 모두 fallback하면 최대 `$0.0052`이며, 추가 fresh generation이 생성되면 각 세대의 실제액을 더한다. 기간 총원가와 판매가 산정은 성공 분석만 모수로 보지 말고, 모든 생성 preflight operation의 실제액을 합산한 뒤 유료 전환 건에 배부해야 한다. Apify fallback이 대상 없음을 확인한 경우에도 유저 결제는 없지만 이 운영 원가는 발생할 수 있다.
 
 ## 현재 측정 상태
 
 | 항목 | Basic | Standard | Plus |
 |---|---:|---:|---:|
-| V2 provider 건당 비용 | 미측정 | 미측정 | 미측정 |
-| V2 Gemini 건당 비용 | 미측정 | 미측정 | 미측정 |
+| V2 provider 건당 비용 | 미측정 | 미측정 | `$3.33835` 단일 표본 |
+| V2 Gemini 건당 비용 | 미측정 | 미측정 | `$0.5858645` 모델 추정 단일 표본 |
 | V2 Cloud Run/Tasks 건당 비용 | 미측정 | 미측정 | 미측정 |
 | V2 전체 wall time p50/p95 | 미측정 | 미측정 | 미측정 |
 | E2E 기반 최종 판매가 | 보류 | 보류 | 보류 |
@@ -144,6 +154,24 @@ Preflight `3d6759a9-948c-4de1-be7a-d02aa72ed8fd`에서 대상 `0_min._.00`의 St
 - candidate 상세 profile은 236개였다. 직접 `selfhosted` 성공은 0개였고 rate-limit outcome 6개와 Instagram 요청을 보내지 않은 global-gate/circuit outcome 약 230개가 기록됐다. 정확히 unresolved인 계정만 Apify candidate fallback 대상으로 삼았으며 이 실행에서는 236개 모두 unresolved였다. Fallback은 227개 성공, 9개 incomplete/unavailable이었고, target을 포함한 aggregate는 228개 성공, 9개 incomplete였다. Cloud Run datacenter egress는 self-hosted-only profile 수집의 launch blocker로 남는다.
 - 요청이 upstream에서 실패했으므로 candidate liker stage는 실행되지 않았다.
 
+### 2026-07-24 Plus 통제 성공 표본
+
+승인된 Plus test-entitlement E2E 1건이 V2 결과 완료까지 도달했다. 이 실행은 기능
+준비도를 보여주는 통제 표본이며 reference-confirmed 실결제나 Basic/Standard 원가
+표본이 아니다.
+
+- provider actual은 `$3.33835`다.
+- usage가 저장된 Gemini attempt의 모델 추정액은 `$0.5858645`다.
+- 두 값을 더한 observed subtotal은 `$3.9242145`다.
+- `costComplete=false`다. 거절된 Gemini attempt 1건의 usage가 누락됐고 Cloud Run,
+  Cloud Tasks, 네트워크를 포함한 GCP infrastructure 비용을 포함하지 않는다.
+- 따라서 `$3.9242145`를 완전 건당 원가, p50/p95, 5분 SLA, Basic/Standard 원가,
+  얼리버드 마진 또는 최종 판매가의 근거로 사용하지 않는다.
+
+Basic/Standard 비용과 실패·재시도 분포는 아직 미측정이다. 최소 통제 표본과 실제
+reference-confirmed 주문의 이행 비용을 함께 대사하기 전에는 자동 분석 출시 후 정가를
+확정하지 않는다.
+
 ## V2 E2E 측정 절차
 
 1. Basic/Standard/Plus 각각 동의받은 fixture를 준비하고, cold와 warm cache를 분리한다.
@@ -159,6 +187,7 @@ Preflight `3d6759a9-948c-4de1-be7a-d02aa72ed8fd`에서 대상 `0_min._.00`의 St
 - `analysis_v2_provider_runs`: V2 Actor 예약, run id, terminal 상태, 실제 사용액과 비용 상한
 - `analysis_preflight_provider_runs`: 최초 preflight와 fresh-admission generation별 Apify target-profile summary fallback의 복합 operation 원장. 각 행은 예약, run id, credential slot, `$0.0026` 상한, terminal 상태, provider `finishedAt`이 최소 30초 지난 후의 실제 사용액을 가진다. 만료·이탈 preflight도 모든 operation 행의 정산 전에는 원장을 삭제하지 않는다.
 - `analysis_v2_ai_attempts`: V2 Gemini attempt, token, thinking, latency, 추정 비용
+- `analysis_v2_gemini_leases`: deployment-wide Gemini 8개 slot의 token·fence·lease·격리 상태. 런타임은 service-role acquire/renew/release만 사용하고 격리 해제는 DB owner만 수행한다.
 - `analysis_pipeline_jobs`: stage별 시도, 시작/완료, 오류와 wall time 계산 근거
 - `analysis_v2_profile_fetch_*`: 자체 결과와 exact unresolved fallback 집합
 - `analysis_progress_state`, `analysis_progress_events`: 사용자용 정리된 진행 상태

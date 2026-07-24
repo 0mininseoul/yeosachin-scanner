@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
+import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
 
 const productIdSchema = z.string()
     .trim()
@@ -71,7 +72,16 @@ export function readGrobleConfig(env: Environment = process.env): GrobleConfig {
 
 export function getGrobleCheckoutUrl(
     planId: PaidEarlybirdPlanId,
+    sellerReference: string,
     config: GrobleConfig
 ): string {
-    return `https://groble.im/payment/${encodeURIComponent(config.paymentAddresses[planId])}`;
+    const parsedReference = parseGrobleSellerReference(sellerReference);
+    if (!parsedReference) {
+        throw new Error('INVALID_GROBLE_SELLER_REFERENCE');
+    }
+    const url = new URL(
+        `https://groble.im/payment/${encodeURIComponent(config.paymentAddresses[planId])}`
+    );
+    url.searchParams.set('ref', parsedReference);
+    return url.toString();
 }

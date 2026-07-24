@@ -4,6 +4,9 @@ import {
     AI_STAGE_POLICIES,
     AI_STAGE_POLICY_VERSION,
     AI_CONCURRENCY_ENFORCEMENT_SCOPE,
+    AI_GEMINI_LEASE_SECONDS,
+    AI_GEMINI_MIN_REMAINING_MS,
+    AI_GEMINI_SDK_TIMEOUT_MS,
     AI_SHARED_CONCURRENCY_LIMIT,
     getAiStagePolicy,
     isAiStageName,
@@ -64,10 +67,15 @@ describe('V2 AI stage policy', () => {
     it('is immutable and explicitly versioned', () => {
         expect(Object.isFrozen(AI_STAGE_POLICIES)).toBe(true);
         expect(Object.isFrozen(AI_STAGE_POLICIES.genderTriage)).toBe(true);
-        expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.4');
-        expect(AI_SHARED_CONCURRENCY_LIMIT).toBe(10);
+        expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
+        expect(AI_SHARED_CONCURRENCY_LIMIT).toBe(8);
         expect(Math.max(...Object.values(AI_STAGE_POLICIES).map(policy => policy.concurrency)))
             .toBeLessThanOrEqual(AI_SHARED_CONCURRENCY_LIMIT);
+        expect(AI_GEMINI_LEASE_SECONDS).toBe(240);
+        expect(AI_GEMINI_MIN_REMAINING_MS).toBe(225_000);
+        expect(AI_GEMINI_SDK_TIMEOUT_MS).toBe(210_000);
+        expect(AI_GEMINI_SDK_TIMEOUT_MS)
+            .toBeLessThan(AI_GEMINI_MIN_REMAINING_MS);
     });
 
     it('versions conservative gender and feature response normalization at v2', () => {
@@ -84,8 +92,8 @@ describe('V2 AI stage policy', () => {
             schemaVersion: 2,
         });
         expect(getAiStagePolicy('featureAnalysis')).toMatchObject({
-            promptVersion: 'feature-analysis-v2',
-            schemaVersion: 2,
+            promptVersion: 'feature-analysis-v3',
+            schemaVersion: 3,
         });
         expect(getAiStagePolicy('privateAccountName')).toMatchObject({
             promptVersion: 'private-account-name-v1',
@@ -93,8 +101,8 @@ describe('V2 AI stage policy', () => {
         });
     });
 
-    it('states that concurrency is process-local and keeps 100-row name output capacity', () => {
-        expect(AI_CONCURRENCY_ENFORCEMENT_SCOPE).toBe('process');
+    it('states that concurrency is deployment-wide and keeps 100-row name output capacity', () => {
+        expect(AI_CONCURRENCY_ENFORCEMENT_SCOPE).toBe('deployment');
         expect(getAiStagePolicy('privateAccountName').maxOutputTokens).toBe(8_192);
     });
 });

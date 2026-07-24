@@ -242,7 +242,7 @@ async function handlePOST(
         };
         const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
         try {
-            persistence = await supabaseAdmin.rpc('finalize_earlybird_groble_payment', {
+            const params = {
                 p_event_id: payment.eventId,
                 p_idempotency_key: idempotencyKey,
                 p_event_type: 'payment.completed',
@@ -257,7 +257,19 @@ async function handlePOST(
                 p_product_id: payment.productId,
                 p_amount_krw: payment.amountKrw,
                 p_paid_at: payment.paidAt,
-            });
+            };
+            persistence = payment.sellerReference
+                ? await supabaseAdmin.rpc(
+                    'finalize_earlybird_groble_payment_by_reference',
+                    {
+                        p_seller_reference: payment.sellerReference,
+                        ...params,
+                    }
+                )
+                : await supabaseAdmin.rpc(
+                    'finalize_earlybird_groble_payment',
+                    params
+                );
         } catch {
             return reject(
                 500,

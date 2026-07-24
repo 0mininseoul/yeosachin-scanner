@@ -136,6 +136,7 @@ function featureResponse(overrides: Record<string, unknown> = {}) {
         exposureScore: 2,
         businessClassification: 'personal',
         businessConfidence: 'high',
+        accountContext: 'personal',
         marriageEvidence: 'none',
         partnerEvidence: 'none',
         partnerExclusionContext: 'none',
@@ -144,9 +145,11 @@ function featureResponse(overrides: Record<string, unknown> = {}) {
             appearance: ['post:1:thumbnail'],
             exposure: ['post:1:thumbnail'],
             business: ['profile:candidate'],
+            accountContext: ['profile:candidate'],
             marriagePartner: [],
         },
-        oneLineOverview: '여행과 일상을 선명한 사진으로 정돈해 보여 주는 계정입니다.',
+        oneLineOverview:
+            '여행 사진을 이렇게 야무지게 정리해 두면, 판독관은 계획형 매력까지 괜히 의심하게 됩니다.',
         ...overrides,
     };
 }
@@ -468,13 +471,12 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain(
             'businessClassification=uncertain, businessConfidence=low'
         );
+        expect(prompt).toContain('accountContext=uncertain');
         expect(prompt).toContain(
             'marriageEvidence=none, partnerEvidence=none, partnerExclusionContext=none'
         );
         expect(prompt).toContain('appearanceGrade=1, exposureScore=0');
-        expect(prompt).toContain(
-            '공개된 프로필과 게시물을 바탕으로 보수적으로 분석한 계정입니다.'
-        );
+        expect(prompt).toContain('장난스럽고 참견 많고 살짝 음모론적인 판독관');
         expect(zodToGeminiResponseJsonSchema(
             options.schema as Parameters<typeof zodToGeminiResponseJsonSchema>[0]
         )).toMatchObject({
@@ -604,12 +606,54 @@ describe('V2 staged AI services', () => {
         }))).toThrow('internals');
     });
 
+    it('requires evidence for a non-uncertain account context', () => {
+        expect(featureAnalysisModelResponseSchema.parse(featureResponse({
+            accountContext: 'official_group_or_brand',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                accountContext: ['profile:candidate', 'post:1:thumbnail'],
+            },
+            oneLineOverview:
+                '무대와 홍보 일정이 너무 분주해 보여서, 개인적인 수상함보다는 공식 계정의 야근이 먼저 걱정되네요.',
+        })).accountContext).toBe('official_group_or_brand');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            accountContext: 'official_group_or_brand',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                accountContext: [],
+            },
+        }))).toThrow('account context');
+    });
+
+    it('allows provocative examiner copy but rejects generic and definitive relationship claims', () => {
+        expect(featureAnalysisModelResponseSchema.parse(featureResponse({
+            oneLineOverview:
+                '옷도 잘 입고 사진 분위기도 영리하네요, 이런 피드는 괜히 주변 사람들의 시선을 오래 붙잡을 것 같습니다.',
+        })).oneLineOverview).toContain('시선');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            oneLineOverview: '여행을 좋아하는 개인 계정입니다.',
+        }))).toThrow('generic');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            oneLineOverview: '자료가 적어서 일반 단계로 판독됐어요.',
+        }))).toThrow('generic');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            oneLineOverview: '이 사람은 대상 계정과 사귀고 있는 것이 분명해 보입니다.',
+        }))).toThrow('definitive relationship accusation');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            oneLineOverview: '분위기가 묘하네요.',
+        }))).toThrow('too_small');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            oneLineOverview: '묘한 분위기가 계속 이어지네요, '.repeat(10),
+        }))).toThrow('too_big');
+    });
+
     it('normalizes unsupported feature evidence and unsafe claims to strict grounded values', async () => {
         const response = featureResponse({
             appearanceGrade: 5,
             exposureScore: 5,
             businessClassification: 'business',
             businessConfidence: 'high',
+            accountContext: 'official_group_or_brand',
             marriageEvidence: 'strong',
             partnerEvidence: 'strong',
             partnerExclusionContext: 'older_relative',
@@ -623,6 +667,7 @@ describe('V2 staged AI services', () => {
                 appearance: ['post:not-supplied'],
                 exposure: [],
                 business: ['post:not-supplied'],
+                accountContext: ['post:not-supplied'],
                 marriagePartner: [
                     'post:2:thumbnail',
                     'post:2:thumbnail',
@@ -645,6 +690,7 @@ describe('V2 staged AI services', () => {
             exposureScore: 0,
             businessClassification: 'uncertain',
             businessConfidence: 'low',
+            accountContext: 'uncertain',
             marriageEvidence: 'strong',
             partnerEvidence: 'strong',
             partnerExclusionContext: 'none',
@@ -653,9 +699,11 @@ describe('V2 staged AI services', () => {
                 appearance: [],
                 exposure: [],
                 business: [],
+                accountContext: [],
                 marriagePartner: ['post:2:thumbnail'],
             },
-            oneLineOverview: '공개된 프로필과 게시물을 바탕으로 보수적으로 분석한 계정입니다.',
+            oneLineOverview:
+                '단서는 적은데 분위기는 또렷하네요, 조용한 계정일수록 판독관의 촉은 괜히 더 바빠집니다.',
         });
         expect(() => featureAnalysisModelResponseSchema.parse(result.features)).not.toThrow();
         expect(result.finalGenderDecision).toBe('verified_female');

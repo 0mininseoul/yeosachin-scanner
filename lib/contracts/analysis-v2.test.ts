@@ -49,6 +49,10 @@ describe('analysis V2 public contracts', () => {
             .toBe(0);
         expect(analysisResultSummaryV1Schema.safeParse({
             ...legacy,
+            scorePolicyVersion: 'risk-policy-v2.3',
+        }).success).toBe(true);
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
             successfullyScreenedMutuals: 0,
             analysisUnavailableMutuals: 1,
         }).success).toBe(true);

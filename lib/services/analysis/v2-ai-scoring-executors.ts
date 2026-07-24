@@ -12,6 +12,10 @@ import {
 } from '@/lib/domain/analysis/risk-policy';
 import { createPartnerSafetyContactSheet } from '@/lib/services/ai/partner-contact-sheet';
 import {
+    resultImageOrderedManifestHash,
+    type ResultImageCaptureSource,
+} from '@/lib/services/media/result-image-capture';
+import {
     classifyAnalysisImagePreparationError,
     type AnalysisImagePreparationFailureDisposition,
     type AnalysisImagePreparationFailureReason,
@@ -50,6 +54,7 @@ import type {
     AnalysisV2PrivateNameRow,
     AnalysisV2ReverseLikeRow as AnalysisV2StoredReverseLikeRow,
     AnalysisV2ResultCheckpointManifest,
+    AnalysisV2ResultStageSnapshot,
     AnalysisV2ResultStore,
     AnalysisV2VerifiedFemaleFeatureRow,
 } from './v2-result-store';
@@ -376,7 +381,15 @@ export interface AnalysisV2AiScoringExecutorDependencies {
         | 'checkpointPrivateNames'
         | 'checkpointScores'
         | 'checkpointNarratives'
-        | 'finalize'>;
+        | 'finalize'
+        | 'loadStageSnapshot'>;
+    resultImages?: {
+        capture(input: AnalysisV2StageReadClaim & {
+            sources: readonly ResultImageCaptureSource[];
+            orderedManifestHash: string;
+            expectedRows: number;
+        }): Promise<unknown>;
+    };
     mediaStore: AnalysisV2MediaArtifactStore;
     ai: AnalysisV2AiStageRuntime;
     reverseLikes: AnalysisV2ReverseLikeCollector;
@@ -385,6 +398,62 @@ export interface AnalysisV2AiScoringExecutorDependencies {
     profileAiConcurrency?: number;
     partnerSafetyConcurrency?: number;
     narrativeConcurrency?: number;
+}
+
+export function buildAnalysisV2ResultImageSources(input: {
+    targetProfileImageUrl: string | null;
+    stage: AnalysisV2ResultStageSnapshot;
+}): ResultImageCaptureSource[] {
+    const featureByCandidate = new Map(
+        input.stage.profileClassifications.map(row => [
+            row.candidateId,
+            row,
+        ])
+    );
+    const female = [...input.stage.finalScores]
+        .sort((left, right) => (
+            right.displayScore - left.displayScore
+            || left.candidateId.localeCompare(right.candidateId)
+        ))
+        .map(score => {
+            const feature = featureByCandidate.get(score.candidateId);
+            if (!feature || feature.classification !== 'verified_female') {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_IMAGE_SOURCE_NOT_READY'
+                );
+            }
+            return {
+                candidateLocator: score.candidateId,
+                sourceUrl: feature.profileImageUrl,
+            };
+        });
+    const privateRows = [...input.stage.privateNames]
+        .sort((left, right) => (
+            right.nameFemaleScore - left.nameFemaleScore
+            || right.nameConfidence - left.nameConfidence
+            || left.instagramId.localeCompare(right.instagramId)
+        ));
+
+    return [
+        {
+            kind: 'target',
+            candidateLocator: 'target',
+            sortOrdinal: 0,
+            sourceUrl: input.targetProfileImageUrl,
+        },
+        ...female.map((row, index) => ({
+            kind: 'female' as const,
+            candidateLocator: row.candidateLocator,
+            sortOrdinal: index + 1,
+            sourceUrl: row.sourceUrl,
+        })),
+        ...privateRows.map((row, index) => ({
+            kind: 'private' as const,
+            candidateLocator: row.candidateId,
+            sortOrdinal: female.length + index + 1,
+            sourceUrl: row.profileImageUrl,
+        })),
+    ];
 }
 
 function sha256(domain: string, value: unknown): string {
@@ -707,8 +776,10 @@ function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2Verifi
             ? {
                 appearanceGrade: outcome.feature.features.appearanceGrade as AppearanceGrade,
                 exposureScore: outcome.feature.features.exposureScore,
-                isBusinessAccount:
-                    outcome.feature.features.businessClassification === 'business',
+                isBusinessAccount: [
+                    'individual_creator',
+                    'official_group_or_brand',
+                ].includes(outcome.feature.features.accountContext),
                 featurePartnerEvidenceStrong: strongFeaturePartnerEvidence(outcome.feature),
                 oneLineOverview: outcome.feature.features.oneLineOverview,
             }
@@ -909,6 +980,7 @@ function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSub
     return {
         ...checkpointClaim(context),
         aiStagePolicyVersion: context.aiStagePolicyVersion,
+        handlerDeadlineAtMs: context.handlerDeadlineAtMs,
     };
 }
 
@@ -958,7 +1030,7 @@ function preliminaryStoreRow(
         recentFemaleMutualRank: candidate.recentFemaleMutualRank,
         appearanceGrade: candidate.appearanceGrade,
         exposureScore: candidate.exposureScore,
-        isBusinessAccount: candidate.isBusinessAccount,
+        accountContext: candidate.accountContext,
         // Preliminary persistence intentionally precedes partner-safety and
         // therefore stores no weak adjustment or strong-evidence cap.
         hasWeakPartnerEvidence: false,
@@ -1379,8 +1451,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         username: outcome.instagramId,
                         appearanceGrade: outcome.feature!.features.appearanceGrade as AppearanceGrade,
                         exposureScore: outcome.feature!.features.exposureScore,
-                        isBusinessAccount:
-                            outcome.feature!.features.businessClassification === 'business',
+                        accountContext: outcome.feature!.features.accountContext,
                         hasWeakPartnerEvidence: weakFeaturePartnerEvidence(outcome.feature!),
                         hasStrongPartnerEvidence: strongFeaturePartnerEvidence(outcome.feature!),
                         uniqueTargetPostsLikedByCandidate:
@@ -1694,33 +1765,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const observed = new Set(reverse.rows
                 .filter(row => row.status === 'observed')
                 .map(row => row.candidateId));
-            const reverseById = new Map(reverse.rows.map(row => [row.candidateId, row]));
-            const initiallyScored = calculateV2FinalScores({
+            const candidates = calculateV2FinalScores({
                 preliminary,
                 observedReverseLikeCandidateIds: observed,
-            });
-            const candidates = initiallyScored.map(candidate => {
-                if (reverseById.get(candidate.candidateId)?.status !== 'not_collected') {
-                    return candidate;
-                }
-                const risk = calculateRiskPolicy({
-                    uniqueTargetPostsLikedByCandidate:
-                        candidate.uniqueTargetPostsLikedByCandidate,
-                    boundedCandidateCommentsOnTarget:
-                        candidate.boundedCandidateCommentsOnTarget,
-                    reverseLikeStatus: 'not_collected',
-                    hasTagOrCaptionMention: candidate.hasTagOrCaptionMention,
-                    recentFemaleMutualRank: candidate.recentFemaleMutualRank,
-                    appearanceGrade: candidate.appearanceGrade,
-                    exposureScore: candidate.exposureScore,
-                    isBusinessAccount: candidate.isBusinessAccount,
-                    hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
-                    hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
-                });
-                return { ...candidate, reverseLikeStatus: 'not_collected' as const, risk };
+                notCollectedCandidateIds: new Set(reverse.rows
+                    .filter(row => row.status === 'not_collected')
+                    .map(row => row.candidateId)),
             });
             const narrativeCandidateIds = candidates
-                .filter(row => row.risk.riskBand === 'high_risk' && row.featuredRank !== null)
+                .filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null)
                 .sort((left, right) => left.featuredRank! - right.featuredRank!)
                 .slice(0, 3)
                 .map(row => row.candidateId);
@@ -1736,8 +1789,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 }
                 return {
                     candidateId: candidate.candidateId,
-                    displayScore: candidate.risk.displayScore,
-                    riskBand: candidate.risk.riskBand as RiskBand,
+                    displayScore: candidate.displayScore,
+                    riskBand: candidate.riskBand as RiskBand,
                     featuredRank: candidate.featuredRank,
                     recentMutualRank: candidate.recentFemaleMutualRank,
                     verificationShortlistRank: candidate.verificationShortlistRank,
@@ -1879,9 +1932,40 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const target = await dependencies.targetProfiles.loadTargetProfile(
                 checkpointClaim(context)
             );
+            let resultImageManifest:
+                | { orderedManifestHash: string; expectedRows: number }
+                | undefined;
+            if (dependencies.resultImages) {
+                const stage = await dependencies.resultStore
+                    .loadStageSnapshot({
+                        requestId: context.claim.requestId,
+                    });
+                if (!stage) {
+                    throw new Error(
+                        'ANALYSIS_V2_RESULT_IMAGE_SOURCE_NOT_READY'
+                    );
+                }
+                const sources = buildAnalysisV2ResultImageSources({
+                    targetProfileImageUrl: target.profilePicUrl ?? null,
+                    stage,
+                });
+                const orderedManifestHash =
+                    resultImageOrderedManifestHash(sources);
+                await dependencies.resultImages.capture({
+                    ...checkpointClaim(context),
+                    sources,
+                    orderedManifestHash,
+                    expectedRows: sources.length,
+                });
+                resultImageManifest = {
+                    orderedManifestHash,
+                    expectedRows: sources.length,
+                };
+            }
             await dependencies.resultStore.finalize({
                 ...checkpointClaim(context),
                 targetProfileImageUrl: target.profilePicUrl ?? null,
+                ...(resultImageManifest ? { resultImageManifest } : {}),
             });
             await dependencies.stageStore.purgeTerminal(checkpointClaim(context));
             try {

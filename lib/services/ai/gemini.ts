@@ -26,6 +26,7 @@ import {
 } from './gemini-generation-policy';
 import {
     AI_SHARED_CONCURRENCY_LIMIT,
+    AI_GEMINI_SDK_TIMEOUT_MS,
     getAiStagePolicy,
     isAiStageName,
     type AiMediaResolution,
@@ -136,6 +137,12 @@ const RETRY_CONFIG = {
     baseDelay: 1000, // 1초
     maxDelay: 10000, // 최대 10초
 };
+
+const AI_ADMISSION_SIGNAL_CODES = new Set([
+    'ANALYSIS_V2_AI_CAPACITY_PENDING',
+    'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+    'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+]);
 
 // 토큰 사용량 타입
 export interface TokenUsage {
@@ -710,6 +717,9 @@ export async function analyzeWithGemini<T>(
                 const config: GenerateContentConfig = {
                     responseMimeType: 'application/json',
                     responseJsonSchema,
+                    httpOptions: {
+                        timeout: AI_GEMINI_SDK_TIMEOUT_MS,
+                    },
                     ...(resolvedMaxOutputTokens !== undefined
                         ? { maxOutputTokens: resolvedMaxOutputTokens }
                         : {}),
@@ -743,7 +753,13 @@ export async function analyzeWithGemini<T>(
                                 attempt: attemptNumber,
                                 retryCount: attemptNumber - 1,
                             });
-                        } catch {
+                        } catch (error) {
+                            if (
+                                error instanceof Error
+                                && AI_ADMISSION_SIGNAL_CODES.has(error.message)
+                            ) {
+                                throw error;
+                            }
                             throw new Error(
                                 'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
                             );
@@ -759,7 +775,12 @@ export async function analyzeWithGemini<T>(
             } catch (generationError) {
                 if (
                     generationError instanceof Error
-                    && generationError.message.startsWith('AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR:')
+                    && (
+                        generationError.message.startsWith(
+                            'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR:'
+                        )
+                        || AI_ADMISSION_SIGNAL_CODES.has(generationError.message)
+                    )
                 ) {
                     throw generationError;
                 }

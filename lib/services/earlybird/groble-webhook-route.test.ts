@@ -28,6 +28,7 @@ vi.mock('@/lib/observability/server', () => ({
 import { POST } from '@/app/api/webhooks/groble/route';
 
 const SECRET = 'webhook-secret';
+const SELLER_REFERENCE = 'ord.0123456789abcdef0123456789abcdef';
 
 function payload(overrides: Record<string, unknown> = {}) {
     return {
@@ -350,6 +351,42 @@ describe('signed Groble webhook route', () => {
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
             /different-groble-buyer|010-1234-5678|결제 구매자|merchant_0001|basic_product-01|delivery_0001|evt_test_/
         );
+    });
+
+    it('uses the exact-reference finalizer without logging the reference', async () => {
+        const body = JSON.stringify(payload({
+            sellerReference: SELLER_REFERENCE,
+        }));
+
+        const response = await POST(request(body));
+
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment_by_reference',
+            expect.objectContaining({
+                p_seller_reference: SELLER_REFERENCE,
+                p_event_id: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+                p_product_id: 'basic_product-01',
+                p_amount_krw: 14_900,
+            })
+        );
+        expect(mocks.rpc).not.toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment',
+            expect.anything()
+        );
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain(
+            SELLER_REFERENCE
+        );
+        expect(await response.text()).not.toContain(SELLER_REFERENCE);
+    });
+
+    it('rejects a present malformed reference without legacy fallback', async () => {
+        const response = await POST(request(JSON.stringify(payload({
+            sellerReference: 'buyer@example.com',
+        }))));
+
+        expect(response.status).toBe(400);
+        expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
     it.each([

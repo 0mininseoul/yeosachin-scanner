@@ -20,6 +20,7 @@ import {
 import { operationalLogger } from '@/lib/observability/server';
 
 export const maxDuration = 300;
+export const ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS = maxDuration * 1_000;
 
 const OBSERVABLE_JOB_KEY_PATTERN = /^(?:coordinator:(?:bootstrap|candidate-screening|finalize|join:(?:primary-evidence|final-score))|track:(?:relationships:collect|target-evidence:collect|profiles:batch:[0-9]+|profile-ai:batch:[0-9]+|private-names:batch:[0-9]+|reverse-likes:collect|partner-safety:batch:0|narratives:batch:0))$/;
 
@@ -71,6 +72,8 @@ async function handlePOST(
     request: Request,
     context: OperationalRequestContext,
 ): Promise<NextResponse> {
+    const handlerDeadlineAtMs =
+        performance.now() + ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS;
     let config;
     try {
         config = getAnalysisV2TasksConfig();
@@ -155,7 +158,9 @@ async function handlePOST(
     const jobKey = observableJobKey(delivery.jobKey);
     const analysisRequestId = delivery.requestId;
     try {
-        const outcome = await processAnalysisV2TaskDelivery(delivery);
+        const outcome = await processAnalysisV2TaskDelivery(delivery, {
+            handlerDeadlineAtMs,
+        });
         if (outcome.status === 'retry') {
             const errorCode = safeErrorCode(
                 outcome.errorCode,

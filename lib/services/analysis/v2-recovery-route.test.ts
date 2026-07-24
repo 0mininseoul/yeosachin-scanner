@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     available: vi.fn(),
     recover: vi.fn(),
     recoverCanary: vi.fn(),
+    purgeResultImages: vi.fn(),
 }));
 
 vi.mock('@/lib/services/analysis/v2-maintenance-auth', () => ({
@@ -20,6 +21,9 @@ vi.mock('@/lib/services/analysis/v2-recovery', () => ({
 }));
 vi.mock('@/lib/services/analysis/profile-provider-canary-recovery', () => ({
     recoverExpiredProfileProviderCanaries: mocks.recoverCanary,
+}));
+vi.mock('@/lib/services/media/result-image-purge', () => ({
+    purgeConfiguredResultImages: mocks.purgeResultImages,
 }));
 
 import { POST } from '@/app/api/analysis/v2/recover/route';
@@ -54,6 +58,12 @@ describe('analysis V2 recovery route', () => {
             finalized: 1,
             failed: 0,
         });
+        mocks.purgeResultImages.mockResolvedValue({
+            claimed: 2,
+            deleted: 2,
+            failed: 0,
+            hasMore: false,
+        });
     });
 
     it('runs the bounded recovery scan only for the configured OIDC identity', async () => {
@@ -62,8 +72,10 @@ describe('analysis V2 recovery route', () => {
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
         expect(mocks.recover).toHaveBeenCalledOnce();
         expect(mocks.recoverCanary).toHaveBeenCalledOnce();
+        expect(mocks.purgeResultImages).toHaveBeenCalledOnce();
         await expect(response.json()).resolves.toMatchObject({
             profileProviderCanary: { scanned: 1, finalized: 1, failed: 0 },
+            resultImagePurge: { claimed: 2, deleted: 2, failed: 0 },
         });
     });
 
@@ -73,6 +85,7 @@ describe('analysis V2 recovery route', () => {
         expect(closed.status).toBe(503);
         expect(mocks.recover).not.toHaveBeenCalled();
         expect(mocks.recoverCanary).not.toHaveBeenCalled();
+        expect(mocks.purgeResultImages).not.toHaveBeenCalled();
 
         mocks.available.mockReturnValue(true);
         mocks.recover.mockResolvedValue({
@@ -95,6 +108,16 @@ describe('analysis V2 recovery route', () => {
         mocks.recoverCanary.mockResolvedValue({ scanned: 1, finalized: 0, failed: 1 });
         const canaryRetry = await POST(request());
         expect(canaryRetry.status).toBe(500);
+
+        mocks.recoverCanary.mockResolvedValue({ scanned: 0, finalized: 0, failed: 0 });
+        mocks.purgeResultImages.mockResolvedValue({
+            claimed: 1,
+            deleted: 0,
+            failed: 1,
+            hasMore: false,
+        });
+        const purgeRetry = await POST(request());
+        expect(purgeRetry.status).toBe(500);
     });
 
     it('still runs canary cleanup when general recovery throws', async () => {
@@ -105,6 +128,7 @@ describe('analysis V2 recovery route', () => {
         expect(response.status).toBe(500);
         expect(mocks.recover).toHaveBeenCalledOnce();
         expect(mocks.recoverCanary).toHaveBeenCalledOnce();
+        expect(mocks.purgeResultImages).toHaveBeenCalledOnce();
     });
 
     it('fails closed before recovery when maintenance auth is unavailable or invalid', async () => {
@@ -122,5 +146,6 @@ describe('analysis V2 recovery route', () => {
         expect(unauthorized.status).toBe(401);
         expect(mocks.recover).not.toHaveBeenCalled();
         expect(mocks.recoverCanary).not.toHaveBeenCalled();
+        expect(mocks.purgeResultImages).not.toHaveBeenCalled();
     });
 });

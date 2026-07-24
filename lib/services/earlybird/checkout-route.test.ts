@@ -47,6 +47,7 @@ const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174001';
 const ORDER_ID = '123e4567-e89b-42d3-a456-426614174002';
 const WAITLIST_ID = '123e4567-e89b-42d3-a456-426614174003';
+const SELLER_REFERENCE = 'ord.0123456789abcdef0123456789abcdef';
 
 function request(path: string, body: unknown, origin = 'https://example.com'): Request {
     return new Request(`https://example.com${path}`, {
@@ -67,6 +68,21 @@ function authenticate(userId: string | null = USER_ID): void {
                 error: userId ? null : { message: 'unauthorized' },
             }),
         },
+    });
+}
+
+function mockCheckoutRecord(created: boolean): void {
+    mocks.rpc.mockImplementation(async (name: string) => {
+        if (name === 'create_earlybird_checkout') {
+            return {
+                data: [{ order_id: ORDER_ID, created }],
+                error: null,
+            };
+        }
+        if (name === 'issue_earlybird_groble_seller_reference') {
+            return { data: SELLER_REFERENCE, error: null };
+        }
+        return { data: null, error: { message: 'unexpected rpc' } };
     });
 }
 
@@ -157,10 +173,7 @@ describe('earlybird checkout and waitlist routes', () => {
     });
 
     it('uses server-owned Basic product and amount while ignoring client price/count fields', async () => {
-        mocks.rpc.mockResolvedValue({
-            data: [{ order_id: ORDER_ID, created: true }],
-            error: null,
-        });
+        mockCheckoutRecord(true);
         const response = await checkout(request('/api/earlybird/checkout', {
             preflightId: PREFLIGHT_ID,
             planId: 'basic',
@@ -173,7 +186,8 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+                + `?ref=${SELLER_REFERENCE}`,
         });
         expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout', expect.objectContaining({
             p_user_id: USER_ID,
@@ -184,6 +198,10 @@ describe('earlybird checkout and waitlist routes', () => {
             p_pricing_version: 'earlybird-2026-07-v1',
             p_disclosure_version: 'earlybird-24h-v1',
         }));
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'issue_earlybird_groble_seller_reference',
+            { p_order_id: ORDER_ID }
+        );
         expect(mocks.emit.mock.calls.some(([entry]) => (
             entry as { event?: string }).event === 'earlybird.checkout_created'
         )).toBe(false);
@@ -211,16 +229,13 @@ describe('earlybird checkout and waitlist routes', () => {
             entry as { event?: string }).event === 'earlybird.checkout_created'
         )).toHaveLength(1);
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
-            /basic_product-01|basic-checkout-a1/
+            /basic_product-01|basic-checkout-a1|ord\.[a-f0-9]{32}/
         );
         expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
     it('restores the same pending order on idempotent checkout replay', async () => {
-        mocks.rpc.mockResolvedValue({
-            data: [{ order_id: ORDER_ID, created: false }],
-            error: null,
-        });
+        mockCheckoutRecord(false);
         const response = await checkout(request('/api/earlybird/checkout', {
             preflightId: PREFLIGHT_ID,
             planId: 'standard',
@@ -255,10 +270,7 @@ describe('earlybird checkout and waitlist routes', () => {
     });
 
     it('preserves a newly-created checkout when background registration throws', async () => {
-        mocks.rpc.mockResolvedValue({
-            data: [{ order_id: ORDER_ID, created: true }],
-            error: null,
-        });
+        mockCheckoutRecord(true);
         mocks.after.mockImplementation(() => {
             throw new Error('after registration unavailable');
         });
@@ -272,7 +284,8 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+                + `?ref=${SELLER_REFERENCE}`,
         });
         expect(mocks.findForOwner).not.toHaveBeenCalled();
         const createdEvents = mocks.emit.mock.calls.filter(([entry]) => (
@@ -296,10 +309,7 @@ describe('earlybird checkout and waitlist routes', () => {
     });
 
     it('preserves an idempotent checkout replay when background registration throws', async () => {
-        mocks.rpc.mockResolvedValue({
-            data: [{ order_id: ORDER_ID, created: false }],
-            error: null,
-        });
+        mockCheckoutRecord(false);
         mocks.after.mockImplementation(() => {
             throw new Error('after registration unavailable');
         });
@@ -313,7 +323,8 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/standard-checkout-b2',
+            checkoutUrl: 'https://groble.im/payment/standard-checkout-b2'
+                + `?ref=${SELLER_REFERENCE}`,
         });
         expect(mocks.findForOwner).not.toHaveBeenCalled();
         const createdEvents = mocks.emit.mock.calls.filter(([entry]) => (
@@ -369,10 +380,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 })),
             })),
         });
-        mocks.rpc.mockResolvedValue({
-            data: [{ order_id: ORDER_ID, created: true }],
-            error: null,
-        });
+        mockCheckoutRecord(true);
 
         const response = await checkout(request('/api/earlybird/checkout', {
             preflightId: PREFLIGHT_ID,
@@ -383,7 +391,8 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+                + `?ref=${SELLER_REFERENCE}`,
         });
     });
 
@@ -391,10 +400,7 @@ describe('earlybird checkout and waitlist routes', () => {
         mocks.from.mockImplementation(() => {
             throw new Error('network down');
         });
-        mocks.rpc.mockResolvedValue({
-            data: [{ order_id: ORDER_ID, created: true }],
-            error: null,
-        });
+        mockCheckoutRecord(true);
 
         const response = await checkout(request('/api/earlybird/checkout', {
             preflightId: PREFLIGHT_ID,
@@ -405,7 +411,8 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+                + `?ref=${SELLER_REFERENCE}`,
         });
     });
 

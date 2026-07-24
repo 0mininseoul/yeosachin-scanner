@@ -51,6 +51,7 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
         markDispatched: vi.fn(),
         claim: vi.fn(),
         deferTerminalCleanup: vi.fn(),
+        deferAiCapacity: vi.fn(),
         releaseClaim: vi.fn(),
         completeAndFanout: vi.fn(),
         listDispatchable: vi.fn(async () => jobs),
@@ -59,6 +60,17 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
 
 function providerRecovery() {
     return {
+        recoverFulfillments: vi.fn(async () => ({
+            reconciled: {
+                scanned: 0,
+                completed: 0,
+                manualReview: 0,
+                retryable: 0,
+            },
+            scanned: 0,
+            advanced: 0,
+            failed: 0,
+        })),
         cleanupProviderRuns: vi.fn(async () => ({
             scanned: 0,
             settled: 0,
@@ -101,6 +113,11 @@ describe('analysis V2 dispatch recovery', () => {
             providerRunsSettled: 0,
             providerRunsBlocked: 0,
             providerUsageReconciled: 0,
+            fulfillmentsScanned: 0,
+            fulfillmentsAdvanced: 0,
+            fulfillmentsCompleted: 0,
+            fulfillmentsManualReview: 0,
+            fulfillmentsFailed: 0,
         });
         expect(dispatch).toHaveBeenCalledTimes(2);
         expect(jobStore.deferRecovery).toHaveBeenCalledWith({
@@ -226,6 +243,11 @@ describe('analysis V2 dispatch recovery', () => {
             providerRunsSettled: 0,
             providerRunsBlocked: 0,
             providerUsageReconciled: 0,
+            fulfillmentsScanned: 0,
+            fulfillmentsAdvanced: 0,
+            fulfillmentsCompleted: 0,
+            fulfillmentsManualReview: 0,
+            fulfillmentsFailed: 0,
         });
     });
 
@@ -245,6 +267,7 @@ describe('analysis V2 dispatch recovery', () => {
         }));
 
         await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
             store: store([]),
             cleanupProviderRuns,
             reconcileProviderUsage,
@@ -258,8 +281,40 @@ describe('analysis V2 dispatch recovery', () => {
             providerRunsSettled: 2,
             providerRunsBlocked: 2,
             providerUsageReconciled: 1,
+            fulfillmentsScanned: 0,
+            fulfillmentsAdvanced: 0,
+            fulfillmentsCompleted: 0,
+            fulfillmentsManualReview: 0,
+            fulfillmentsFailed: 0,
         });
         expect(cleanupProviderRuns).toHaveBeenCalledOnce();
         expect(reconcileProviderUsage).toHaveBeenCalledOnce();
+    });
+
+    it('replays only operator-admitted fulfillments and surfaces their recovery state', async () => {
+        const recoverFulfillments = vi.fn(async () => ({
+            reconciled: {
+                scanned: 2,
+                completed: 1,
+                manualReview: 1,
+                retryable: 0,
+            },
+            scanned: 3,
+            advanced: 2,
+            failed: 1,
+        }));
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverFulfillments,
+        })).resolves.toMatchObject({
+            failed: 1,
+            fulfillmentsScanned: 3,
+            fulfillmentsAdvanced: 2,
+            fulfillmentsCompleted: 1,
+            fulfillmentsManualReview: 1,
+            fulfillmentsFailed: 1,
+        });
+        expect(recoverFulfillments).toHaveBeenCalledOnce();
     });
 });

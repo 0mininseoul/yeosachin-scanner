@@ -87,10 +87,13 @@ describe('analysis V2 worker route', () => {
     });
 
     it('authenticates OIDC and processes only a strict task payload', async () => {
+        vi.spyOn(performance, 'now').mockReturnValue(12_345);
         const response = await POST(request());
         expect(response.status).toBe(200);
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
-        expect(mocks.process).toHaveBeenCalledWith(payload);
+        expect(mocks.process).toHaveBeenCalledWith(payload, {
+            handlerDeadlineAtMs: 312_345,
+        });
 
         const malformed = await POST(request({ ...payload, username: 'raw_user' }));
         expect(malformed.status).toBe(400);

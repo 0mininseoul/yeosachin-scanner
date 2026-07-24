@@ -1,4 +1,4 @@
-export const RISK_POLICY_VERSION = 'risk-policy-v2.2' as const;
+export const RISK_POLICY_VERSION = 'risk-policy-v2.3' as const;
 
 export const RISK_BANDS = ['normal', 'caution', 'high_risk'] as const;
 
@@ -44,6 +44,21 @@ export const FEATURED_RISK_LIMITS = Object.freeze({
 
 export const STRONG_PARTNER_PUBLIC_SCORE_CAP = 3.4;
 export const WEAK_PARTNER_RAW_ADJUSTMENT = -5;
+export const ACCOUNT_CONTEXTS = [
+    'personal',
+    'individual_creator',
+    'official_group_or_brand',
+    'uncertain',
+] as const;
+export type AccountContext = typeof ACCOUNT_CONTEXTS[number];
+
+export const ACCOUNT_CONTEXT_SOFT_MULTIPLIERS = Object.freeze({
+    personal: 1,
+    individual_creator: 0.5,
+    official_group_or_brand: 0,
+    uncertain: 1,
+} satisfies Record<AccountContext, 0 | 0.5 | 1>);
+/** @deprecated Use ACCOUNT_CONTEXT_SOFT_MULTIPLIERS.individual_creator. */
 export const BUSINESS_SOFT_CONTEXT_MULTIPLIER = 0.5;
 export const APPEARANCE_EXPOSURE_NORMALIZER = 20 / 18;
 export const PRE_SCORE_MAX = 97;
@@ -65,7 +80,7 @@ export interface RiskPolicyInput {
     recentFemaleMutualRank: number | null;
     appearanceGrade: AppearanceGrade;
     exposureScore: number;
-    isBusinessAccount: boolean;
+    accountContext: AccountContext;
     hasWeakPartnerEvidence: boolean;
     hasStrongPartnerEvidence: boolean;
 }
@@ -86,7 +101,7 @@ export interface RiskPolicyResult {
         recentMutual: number;
         appearanceExposure: number;
     }>;
-    businessSoftContextMultiplier: number;
+    softContextMultiplier: 0 | 0.5 | 1;
     weakPartnerAdjustment: 0 | typeof WEAK_PARTNER_RAW_ADJUSTMENT;
     preScore: number;
     rawScore: number;
@@ -259,11 +274,12 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
         input.appearanceGrade,
         input.exposureScore
     );
-    const businessSoftContextMultiplier = input.isBusinessAccount
-        ? BUSINESS_SOFT_CONTEXT_MULTIPLIER
-        : 1;
-    const recentMutual = recentMutualBeforeBusiness * businessSoftContextMultiplier;
-    const appearanceExposure = appearanceExposureBeforeBusiness * businessSoftContextMultiplier;
+    const softContextMultiplier = ACCOUNT_CONTEXT_SOFT_MULTIPLIERS[input.accountContext];
+    if (softContextMultiplier === undefined) {
+        throw new Error('RISK_POLICY_ERROR: invalid account context.');
+    }
+    const recentMutual = recentMutualBeforeBusiness * softContextMultiplier;
+    const appearanceExposure = appearanceExposureBeforeBusiness * softContextMultiplier;
 
     const weakPartnerAdjustment = input.hasWeakPartnerEvidence
         ? WEAK_PARTNER_RAW_ADJUSTMENT
@@ -302,7 +318,7 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
             recentMutual: recentMutualBeforeBusiness,
             appearanceExposure: appearanceExposureBeforeBusiness,
         }),
-        businessSoftContextMultiplier,
+        softContextMultiplier,
         weakPartnerAdjustment,
         preScore,
         rawScore,

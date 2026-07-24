@@ -35,4 +35,13 @@ describe('analysis V2 production AI/scoring registry', () => {
             ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary',
         })).toThrow('APIFY_QUINARY_API_TOKEN');
     });
+
+    it('requires complete private R2 configuration only when result images are enabled', () => {
+        expect(() => createProductionAnalysisV2AiScoringExecutorRegistry({
+            ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: 'analysis-v2-private-media',
+            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary',
+            APIFY_QUINARY_API_TOKEN: 'unit-test-token', // gitleaks:allow
+            ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'true',
+        })).toThrow('ANALYSIS_V2_RESULT_IMAGE_CONFIG_ERROR');
+    });
 });

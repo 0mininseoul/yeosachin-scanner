@@ -33,6 +33,7 @@ import {
     type AnalysisV2JobStore,
     type AnalysisV2JobSuccessor,
     type AnalysisV2TaskDelivery,
+    type AnalysisV2AiAdmissionErrorCode,
     type ClaimedAnalysisV2Job,
 } from './v2-job-store';
 import {
@@ -64,6 +65,12 @@ import {
 const PROFILE_FETCH_JOB_PATTERN = /^track:profiles:batch:\d+$/;
 const PROFILE_AI_JOB_PATTERN = /^track:profile-ai:batch:\d+$/;
 const PRIVATE_NAME_JOB_PATTERN = /^track:private-names:batch:\d+$/;
+const AI_ADMISSION_FAILURE_CODES: ReadonlySet<AnalysisV2AiAdmissionErrorCode> =
+    new Set([
+        'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+        'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    ]);
 export const ANALYSIS_V2_JOB_MAX_ATTEMPTS = 7;
 export const ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS = 20;
 
@@ -120,6 +127,7 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     job: AnalysisV2DagJob;
     state: AnalysisV2DagState;
     aiStagePolicyVersion: string | null;
+    handlerDeadlineAtMs?: number;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
     reportActiveProfile?: (username: string) => Promise<void>;
 }
@@ -464,6 +472,7 @@ export async function executeAnalysisV2DagJob(
         executors?: AnalysisV2StageExecutorRegistry;
         progressReporter?: AnalysisV2ProgressReporter | null;
         aiPolicyStore?: AnalysisV2AiPolicyStore;
+        handlerDeadlineAtMs?: number;
     } = {}
 ): Promise<readonly AnalysisV2JobSuccessor[]> {
     const stateStore = dependencies.stateStore ?? defaultDagStateStore;
@@ -478,6 +487,11 @@ export async function executeAnalysisV2DagJob(
             ? null
             : defaultProgressReporter;
     const aiPolicyStore = dependencies.aiPolicyStore ?? analysisV2AiPolicyStore;
+    const handlerDeadlineAtMs = dependencies.handlerDeadlineAtMs
+        ?? performance.now() + 300_000;
+    if (!Number.isFinite(handlerDeadlineAtMs) || handlerDeadlineAtMs < 0) {
+        executionError('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT', 'transient');
+    }
 
     if (claim.jobKey === ANALYSIS_V2_BOOTSTRAP_JOB_KEY) {
         assertBootstrapClaim(claim);
@@ -543,6 +557,7 @@ export async function executeAnalysisV2DagJob(
         job: current.job,
         state,
         aiStagePolicyVersion,
+        handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
             reportActiveProfile: async (username: string) => {
                 const startedAtMs = Math.max(
@@ -589,6 +604,7 @@ export async function executeAnalysisV2FoundationJob(
         executors?: AnalysisV2StageExecutorRegistry;
         progressReporter?: AnalysisV2ProgressReporter | null;
         aiPolicyStore?: AnalysisV2AiPolicyStore;
+        handlerDeadlineAtMs?: number;
     } = {}
 ): Promise<readonly AnalysisV2JobSuccessor[]> {
     return executeAnalysisV2DagJob(job, dependencies);
@@ -598,6 +614,10 @@ const TRANSIENT_FAILURE_CODES = new Set([
     'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR',
     'AI_RATE_LIMIT_ERROR',
     'ANALYSIS_V2_AI_ATTEMPT_NOT_READY',
+    'ANALYSIS_V2_AI_CAPACITY_PENDING',
+    'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+    'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    'ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR',
     'ANALYSIS_V2_AI_RESULT_NOT_READY',
     'ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR',
     'ANALYSIS_V2_FINALIZE_NOT_READY',
@@ -622,6 +642,12 @@ const TRANSIENT_FAILURE_CODES = new Set([
     'SCRAPING_DATASET_TRANSIENT_ERROR',
     'SCRAPING_RUN_PENDING_ERROR',
 ]);
+
+function isAiAdmissionFailureCode(
+    value: string
+): value is AnalysisV2AiAdmissionErrorCode {
+    return AI_ADMISSION_FAILURE_CODES.has(value as AnalysisV2AiAdmissionErrorCode);
+}
 
 const PERMANENT_FAILURE_CODES = new Set([
     'AI_AMBIGUOUS_GENERATION_ERROR',
@@ -836,6 +862,7 @@ export async function processAnalysisV2TaskDelivery(
         terminalFailureFinalizer?: AnalysisV2TerminalFailureFinalizer;
         terminalMediaCleanup?: AnalysisV2TerminalMediaCleanup;
         terminalFailureIntentLoader?: AnalysisV2TerminalFailureIntentLoader;
+        handlerDeadlineAtMs?: number;
     } = {}
 ): Promise<AnalysisV2WorkerOutcome> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -844,6 +871,7 @@ export async function processAnalysisV2TaskDelivery(
         executors: dependencies.executors,
         progressReporter: dependencies.progressReporter,
         aiPolicyStore: dependencies.aiPolicyStore,
+        handlerDeadlineAtMs: dependencies.handlerDeadlineAtMs,
     }));
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
     const claim = await store.claim(delivery);
@@ -883,6 +911,22 @@ export async function processAnalysisV2TaskDelivery(
         const failure = classifyAnalysisV2JobFailure(error);
         if (failure.disposition === 'fence') {
             throw new AnalysisV2JobFenceError();
+        }
+        if (isAiAdmissionFailureCode(failure.code)) {
+            const deferred = await store.deferAiCapacity(claim, failure.code);
+            if (
+                !deferred.released
+                || deferred.status !== 'pending'
+                || deferred.attemptCount !== claim.attemptCount - 1
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_PERSISTENCE_ERROR: invalid AI capacity defer.'
+                );
+            }
+            return Object.freeze({
+                status: 'retry',
+                errorCode: failure.code,
+            });
         }
         const maxAttempts = claim.jobKey === ANALYSIS_V2_FINALIZE_JOB_KEY
             ? ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS

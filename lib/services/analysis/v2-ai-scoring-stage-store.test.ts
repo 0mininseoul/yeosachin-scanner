@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { calculateV2PreliminaryScores } from './v2-candidate-scoring';
+import {
+    calculateV2FinalScores,
+    calculateV2PreliminaryScores,
+} from './v2-candidate-scoring';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -44,7 +47,7 @@ function preliminary() {
             username: 'woman.one',
             appearanceGrade: 4,
             exposureScore: 2,
-            isBusinessAccount: false,
+            accountContext: 'personal',
             hasWeakPartnerEvidence: false,
             hasStrongPartnerEvidence: false,
             uniqueTargetPostsLikedByCandidate: 1,
@@ -92,6 +95,64 @@ describe('analysis V2 AI/scoring stage store', () => {
                 p_payload: { shortlistHash, candidates },
             })
         );
+    });
+
+    it('persists calibrated v2.3 fields and rejects v2.2 final-score replay', async () => {
+        const candidates = calculateV2FinalScores({
+            preliminary: preliminary(),
+            observedReverseLikeCandidateIds: new Set(),
+        });
+        const narrativeBatchHash = digest('narrative-batch');
+        const resultHash = digest('final-score');
+        const payload = {
+            candidates,
+            narrativeCandidateIds: [],
+            narrativeBatchHash,
+        };
+        const accepted = clientWith({
+            data: {
+                stageKind: 'final_score',
+                batch: null,
+                revision: 1,
+                resultHash,
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(accepted.client);
+
+        await expect(store.checkpointFinalScores({
+            ...claim('track:final-score'),
+            ...payload,
+        })).resolves.toMatchObject({
+            resultHash,
+            candidates: [expect.objectContaining({
+                displayScore: expect.any(Number),
+                riskBand: expect.any(String),
+                relativeTierApplied: false,
+                risk: expect.objectContaining({ policyVersion: 'risk-policy-v2.3' }),
+            })],
+        });
+
+        const legacyPayload = structuredClone(payload);
+        Object.assign(legacyPayload.candidates[0]!.risk, {
+            policyVersion: 'risk-policy-v2.2',
+        });
+        const rejected = clientWith({
+            data: {
+                stageKind: 'final_score',
+                batch: null,
+                revision: 1,
+                resultHash,
+                itemCount: 1,
+                payload: legacyPayload,
+            },
+            error: null,
+        });
+        await expect(createSupabaseAnalysisV2AiScoringStageStore(rejected.client)
+            .loadFinalScores(claim('track:final-score')))
+            .rejects.toThrow('invalid payload');
     });
 
     it('loads profile batches in batch order and retains media failure coverage', async () => {

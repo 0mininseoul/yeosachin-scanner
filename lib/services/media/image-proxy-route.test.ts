@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server';
 const mocks = vi.hoisted(() => ({
     downloadSecureImage: vi.fn(),
     resolveResultImage: vi.fn(),
+    readResultImageObject: vi.fn(),
     createClient: vi.fn(),
     getUser: vi.fn(),
 }));
@@ -20,6 +21,7 @@ vi.mock('@/lib/services/media/secure-image-fetch', async (importOriginal) => {
 
 vi.mock('@/lib/services/media/result-image-resolver', () => ({
     resolveAnalysisV2ResultImageLocator: mocks.resolveResultImage,
+    readAnalysisV2ResultImageObject: mocks.readResultImageObject,
 }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 
@@ -59,8 +61,12 @@ describe('image proxy route authorization', () => {
             contentType: 'image/jpeg',
             finalUrl: 'https://cdninstagram.com/photo.jpg?oe=abc',
         });
-        mocks.resolveResultImage.mockResolvedValue(
-            'https://cdninstagram.com/result-photo.jpg?oe=abc'
+        mocks.resolveResultImage.mockResolvedValue({
+            source: 'legacy_url',
+            url: 'https://cdninstagram.com/result-photo.jpg?oe=abc',
+        });
+        mocks.readResultImageObject.mockResolvedValue(
+            Buffer.from([7, 8, 9])
         );
     });
 
@@ -160,6 +166,50 @@ describe('image proxy route authorization', () => {
         expect(mocks.downloadSecureImage).toHaveBeenCalledOnce();
         expect(mocks.downloadSecureImage.mock.calls[0]?.[0])
             .toBe('https://cdninstagram.com/result-photo.jpg?oe=abc');
+    });
+
+    it('serves an integrity-verified owner R2 object without any remote fallback', async () => {
+        mocks.resolveResultImage.mockResolvedValueOnce({
+            source: 'r2',
+            objectKey:
+                `v1/${'a'.repeat(32)}/female/${'b'.repeat(32)}.webp`,
+            sha256: 'c'.repeat(64),
+            byteSize: 3,
+            expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+        });
+
+        const response = await GET(signedResultRequest());
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe('image/webp');
+        expect(response.headers.get('cache-control'))
+            .toMatch(/^private, max-age=\d+, must-revalidate$/);
+        expect(response.headers.get('vercel-cdn-cache-control'))
+            .toBe('private, no-store');
+        expect(response.headers.get('vary')).toBe('Cookie');
+        expect(mocks.readResultImageObject).toHaveBeenCalledOnce();
+        expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
+    });
+
+    it('returns a private placeholder after an R2 read failure without raw fallback', async () => {
+        mocks.resolveResultImage.mockResolvedValueOnce({
+            source: 'r2',
+            objectKey:
+                `v1/${'a'.repeat(32)}/female/${'b'.repeat(32)}.webp`,
+            sha256: 'c'.repeat(64),
+            byteSize: 3,
+            expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+        });
+        mocks.readResultImageObject.mockRejectedValueOnce(
+            new Error('bucket and key must stay private')
+        );
+
+        const response = await GET(signedResultRequest());
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type'))
+            .toBe('image/svg+xml');
+        expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
     });
 
     it('retains the trusted compatibility fallback for generic signed images', async () => {

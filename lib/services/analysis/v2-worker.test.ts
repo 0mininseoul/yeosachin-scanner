@@ -135,6 +135,12 @@ function store(
             attemptCount: claimed.attemptCount,
             requestStatus: 'processing',
         })),
+        deferAiCapacity: vi.fn(async () => ({
+            released: true,
+            status: 'pending' as const,
+            attemptCount: claimed.attemptCount - 1,
+            requestStatus: 'processing',
+        })),
         releaseClaim: vi.fn(async (_claim, failure) => ({
             released: true,
             status: failure?.retryable === false ? 'failed' as const : 'pending' as const,
@@ -1051,6 +1057,33 @@ describe('analysis V2 durable DAG worker', () => {
                 maxAttempts: ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS,
             }
         );
+    });
+
+    it.each([
+        'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+        'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    ] as const)('defers %s without consuming the job failure budget', async code => {
+        const claimed = {
+            ...bootstrapClaim,
+            attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        };
+        const jobStore = store(claimed);
+        const terminalFailureFinalizer = vi.fn();
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error(code);
+            },
+            terminalFailureFinalizer,
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: code,
+        });
+        expect(jobStore.deferAiCapacity).toHaveBeenCalledWith(claimed, code);
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
     });
 
     it('classifies transient checkpoint persistence and explicit provider failures as retryable', async () => {

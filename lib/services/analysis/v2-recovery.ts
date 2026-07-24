@@ -18,6 +18,10 @@ import {
     type AnalysisV2ProviderCleanupSummary,
     type AnalysisV2ProviderReconciliationSummary,
 } from './v2-provider-lifecycle';
+import {
+    recoverEarlybirdFulfillments,
+    type EarlybirdFulfillmentRecoverySummary,
+} from '@/lib/services/earlybird/fulfillment-store';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -31,6 +35,11 @@ export interface AnalysisV2RecoverySummary {
     providerRunsSettled: number;
     providerRunsBlocked: number;
     providerUsageReconciled: number;
+    fulfillmentsScanned: number;
+    fulfillmentsAdvanced: number;
+    fulfillmentsCompleted: number;
+    fulfillmentsManualReview: number;
+    fulfillmentsFailed: number;
 }
 
 type RecoveryLookup = (job: {
@@ -43,8 +52,13 @@ type RecoveryDispatch = (requestId: string, jobKey: string) => Promise<unknown>;
 type TerminalMediaCleanup = () => Promise<unknown>;
 type ProviderRunCleanup = () => Promise<AnalysisV2ProviderCleanupSummary>;
 type ProviderUsageReconciliation = () => Promise<AnalysisV2ProviderReconciliationSummary>;
+type FulfillmentRecovery = () => Promise<EarlybirdFulfillmentRecoverySummary>;
 
-type RecoveryOutcome = keyof Omit<AnalysisV2RecoverySummary, 'scanned'>;
+type RecoveryOutcome =
+    | 'dispatched'
+    | 'taskPresent'
+    | 'lostRace'
+    | 'failed';
 
 function assertRecoverableDelivery(job: AnalysisV2DispatchableJob): {
     requestId: string;
@@ -134,6 +148,7 @@ export async function recoverAnalysisV2Jobs(
         cleanupTerminalMedia?: TerminalMediaCleanup;
         cleanupProviderRuns?: ProviderRunCleanup;
         reconcileProviderUsage?: ProviderUsageReconciliation;
+        recoverFulfillments?: FulfillmentRecovery;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -158,6 +173,11 @@ export async function recoverAnalysisV2Jobs(
         providerRunsSettled: 0,
         providerRunsBlocked: 0,
         providerUsageReconciled: 0,
+        fulfillmentsScanned: 0,
+        fulfillmentsAdvanced: 0,
+        fulfillmentsCompleted: 0,
+        fulfillmentsManualReview: 0,
+        fulfillmentsFailed: 0,
     };
     let cursor = 0;
     const worker = async () => {
@@ -174,6 +194,22 @@ export async function recoverAnalysisV2Jobs(
     await Promise.all(
         Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker())
     );
+    try {
+        const fulfillment = await (
+            dependencies.recoverFulfillments
+            ?? (() => recoverEarlybirdFulfillments())
+        )();
+        summary.fulfillmentsScanned = fulfillment.scanned;
+        summary.fulfillmentsAdvanced = fulfillment.advanced;
+        summary.fulfillmentsCompleted = fulfillment.reconciled.completed;
+        summary.fulfillmentsManualReview =
+            fulfillment.reconciled.manualReview;
+        summary.fulfillmentsFailed = fulfillment.failed;
+        summary.failed += fulfillment.failed;
+    } catch {
+        summary.fulfillmentsFailed += 1;
+        summary.failed += 1;
+    }
     try {
         await (dependencies.cleanupTerminalMedia ?? cleanupTerminalMedia)();
     } catch {

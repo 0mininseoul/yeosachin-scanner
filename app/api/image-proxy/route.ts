@@ -8,7 +8,11 @@ import {
     verifyAnalysisV2ResultImageProxyToken,
     verifyImageProxyToken,
 } from '@/lib/services/media/image-proxy-token';
-import { resolveAnalysisV2ResultImageLocator } from '@/lib/services/media/result-image-resolver';
+import {
+    readAnalysisV2ResultImageObject,
+    resolveAnalysisV2ResultImageLocator,
+    type ResolvedResultImage,
+} from '@/lib/services/media/result-image-resolver';
 import { createClient } from '@/lib/supabase/server';
 
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
@@ -85,6 +89,36 @@ function imageResponse(
     });
 }
 
+function retainedImageResponse(
+    bytes: Buffer,
+    tokenExpiresAt: string,
+    objectExpiresAt: string
+) {
+    const nowSeconds = Math.ceil(Date.now() / 1_000);
+    const tokenRemaining = Number(tokenExpiresAt) - nowSeconds;
+    const objectRemaining = Math.floor(
+        (Date.parse(objectExpiresAt) - Date.now()) / 1_000
+    );
+    const maxAge = Math.max(
+        0,
+        Math.min(tokenRemaining, objectRemaining, 30 * 60)
+    );
+    if (maxAge === 0) return getPlaceholderResponse();
+    return new NextResponse(new Uint8Array(bytes), {
+        headers: {
+            'Content-Type': 'image/webp',
+            'Content-Length': String(bytes.byteLength),
+            'Cache-Control':
+                `private, max-age=${maxAge}, must-revalidate`,
+            'CDN-Cache-Control': 'private, no-store',
+            'Vercel-CDN-Cache-Control': 'private, no-store',
+            Vary: 'Cookie',
+            'Cross-Origin-Resource-Policy': 'same-origin',
+            'X-Content-Type-Options': 'nosniff',
+        },
+    });
+}
+
 function errorResponse(error: string, status: number) {
     return NextResponse.json({ error }, {
         status,
@@ -129,18 +163,49 @@ export async function GET(request: NextRequest) {
         return errorResponse('Invalid image proxy token', 400);
     }
 
-    const authorizedUrl = isGeneric
-        ? verifyImageProxyToken(token, expires)
-        : await (async () => {
-            const locator = verifyAnalysisV2ResultImageProxyToken(token, expires);
-            if (!locator) return null;
-            const supabase = await createClient();
-            const { data: { user }, error } = await supabase.auth.getUser();
-            if (error || !user) return null;
-            return resolveAnalysisV2ResultImageLocator(locator, user.id);
-        })();
+    let resolvedResult: ResolvedResultImage | null = null;
+    let authorizedUrl: string | null;
+    if (isGeneric) {
+        authorizedUrl = verifyImageProxyToken(token, expires);
+    } else {
+        const locator = verifyAnalysisV2ResultImageProxyToken(
+            token,
+            expires
+        );
+        if (!locator) {
+            return errorResponse('Image proxy token rejected', 403);
+        }
+        const supabase = await createClient();
+        const { data: { user }, error } = await supabase.auth.getUser();
+        if (error || !user) {
+            return errorResponse('Image proxy token rejected', 403);
+        }
+        resolvedResult = await resolveAnalysisV2ResultImageLocator(
+            locator,
+            user.id
+        );
+        authorizedUrl = resolvedResult?.source === 'legacy_url'
+            ? resolvedResult.url
+            : resolvedResult?.source === 'r2'
+                ? 'r2:authorized'
+                : null;
+    }
     if (!authorizedUrl) {
         return errorResponse('Image proxy token rejected', 403);
+    }
+    if (resolvedResult?.source === 'r2') {
+        try {
+            const bytes = await readAnalysisV2ResultImageObject(
+                resolvedResult
+            );
+            return retainedImageResponse(
+                bytes,
+                expires,
+                resolvedResult.expiresAt
+            );
+        } catch {
+            return getPlaceholderResponse();
+        }
     }
 
     const startedAt = Date.now();

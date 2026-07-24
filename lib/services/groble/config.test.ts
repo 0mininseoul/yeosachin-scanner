@@ -44,13 +44,32 @@ describe('Groble server configuration', () => {
     it('builds only allowlisted Groble payment URLs for paid plans', () => {
         const config = readGrobleConfig(VALID_ENV);
 
-        expect(getGrobleCheckoutUrl('basic', config))
-            .toBe('https://groble.im/payment/basic-checkout-a1');
-        expect(getGrobleCheckoutUrl('standard', config))
-            .toBe('https://groble.im/payment/standard-checkout-b2');
+        expect(getGrobleCheckoutUrl(
+            'basic',
+            'ord.0123456789abcdef0123456789abcdef',
+            config
+        )).toBe(
+            'https://groble.im/payment/basic-checkout-a1'
+            + '?ref=ord.0123456789abcdef0123456789abcdef'
+        );
+        expect(getGrobleCheckoutUrl(
+            'standard',
+            'ord.fedcba9876543210fedcba9876543210',
+            config
+        )).toBe(
+            'https://groble.im/payment/standard-checkout-b2'
+            + '?ref=ord.fedcba9876543210fedcba9876543210'
+        );
         expect(config.productIds).toEqual({
             basic: 'basic_product-01',
             standard: 'standard_product-01',
         });
+    });
+
+    it('rejects a checkout reference outside the server-issued format', () => {
+        const config = readGrobleConfig(VALID_ENV);
+
+        expect(() => getGrobleCheckoutUrl('basic', 'buyer@example.com', config))
+            .toThrow('INVALID_GROBLE_SELLER_REFERENCE');
     });
 });

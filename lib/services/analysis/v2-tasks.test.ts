@@ -79,6 +79,7 @@ function mockStore(
         markDispatched: vi.fn().mockResolvedValue(undefined),
         claim: vi.fn(),
         deferTerminalCleanup: vi.fn(),
+        deferAiCapacity: vi.fn(),
         releaseClaim: vi.fn(),
         completeAndFanout: vi.fn(),
         listDispatchable: vi.fn(),

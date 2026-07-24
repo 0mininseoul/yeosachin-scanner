@@ -8,6 +8,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const relativeRiskMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260724123400_add_relative_risk_policy_v23.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string, last = false): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -57,6 +64,43 @@ const resultTables = [
 ] as const;
 
 describe('analysis V2 result migration contract', () => {
+    it('upgrades final-score replay to deterministic relative policy v2.3', () => {
+        expect(relativeRiskMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.analysis_v2_expected_relative_risk_rows('
+        );
+        expect(relativeRiskMigration).toContain('eligible.eligible_count < 3');
+        expect(relativeRiskMigration).toContain('eligible.eligible_count - 2');
+        expect(relativeRiskMigration).toContain('natural_row.natural_risk_band <> \'normal\'');
+        expect(relativeRiskMigration).toContain('WHERE NOT natural_row.strong_partner');
+        expect(relativeRiskMigration).toContain(
+            'partner.has_strong_partner_evidence'
+        );
+        expect(relativeRiskMigration).toContain(
+            "(item.value->>'displayScore')::NUMERIC - expected.display_score"
+        );
+        expect(relativeRiskMigration).toContain(
+            "item.value->>'riskBand' IS DISTINCT FROM expected.risk_band"
+        );
+        expect(relativeRiskMigration).toContain(
+            "'risk-policy-v2.2',\n        'risk-policy-v2.3'"
+        );
+        expect(relativeRiskMigration).toContain(
+            'public.analysis_v2_relative_overview_fallback('
+        );
+        expect(relativeRiskMigration).not.toContain(
+            "|| ' · ' || feature.instagram_id"
+        );
+        expect(relativeRiskMigration).not.toContain(
+            "pg_catalog.round(score.display_score)::INTEGER::TEXT"
+        );
+        expect(relativeRiskMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.analysis_v2_expected_relative_risk_rows\(JSONB, TEXT\[\]\)[\s\S]*FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(relativeRiskMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.checkpoint_analysis_v2_candidate_scores\([\s\S]*?\) TO service_role/
+        );
+    });
+
     it('keeps every staging and final table RPC-only behind forced RLS', () => {
         for (const table of resultTables) {
             expect(migration).toContain(`ALTER TABLE public.${table} ENABLE ROW LEVEL SECURITY`);

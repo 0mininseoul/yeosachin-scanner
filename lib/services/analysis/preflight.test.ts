@@ -3,6 +3,8 @@ import type { InstagramProfile } from '@/lib/types/instagram';
 import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import { makeWebProfileFetcher } from '@/lib/services/instagram/providers/selfhosted/web-client';
+import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
+import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
 
 import {
     PREFLIGHT_DATABASE_NAMES,
@@ -262,8 +264,8 @@ describe('preflight persistence adapter', () => {
             },
             p_policy_versions_snapshot: {
                 pipeline: 'v2',
-                risk: 'risk-policy-v2.2',
-                aiStage: 'ai-stage-policy-v2.4',
+                risk: RISK_POLICY_VERSION,
+                aiStage: AI_STAGE_POLICY_VERSION,
             },
         });
     });

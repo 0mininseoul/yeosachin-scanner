@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
-    BUSINESS_SOFT_CONTEXT_MULTIPLIER,
+    ACCOUNT_CONTEXT_SOFT_MULTIPLIERS,
     FEATURED_RISK_LIMITS,
     STRONG_PARTNER_PUBLIC_SCORE_CAP,
 } from '@/lib/domain/analysis/risk-policy';
@@ -22,6 +22,7 @@ import {
     createSupabaseAnalysisV2ResultStore,
     type AnalysisV2ProfileClassificationRow,
     type AnalysisV2ResultCheckpointManifest,
+    type AnalysisV2ResultStageSnapshot,
     type AnalysisV2ResultSupabaseClient,
 } from './v2-result-store';
 import type { AnalysisV2StageExecutorContext, AnalysisV2StageId } from './v2-worker';
@@ -218,6 +219,7 @@ function feature(
             exposureScore: 2,
             businessClassification: options.business ? 'business' : 'personal',
             businessConfidence: 'high',
+            accountContext: options.business ? 'individual_creator' : 'personal',
             marriageEvidence: options.strongPartner
                 ? 'strong'
                 : options.weakPartner ? 'possible' : 'none',
@@ -228,11 +230,13 @@ function feature(
                 appearance: mediaIds.slice(0, 1),
                 exposure: mediaIds.slice(0, 1),
                 business: options.business ? mediaIds.slice(0, 1) : [],
+                accountContext: mediaIds.slice(0, 1),
                 marriagePartner: options.strongPartner || options.weakPartner
                     ? mediaIds.slice(0, 1)
                     : [],
             },
-            oneLineOverview: '차분한 일상을 기록하는 공개 계정',
+            oneLineOverview:
+                '차분한 일상을 야무지게 기록해 두어서, 판독관은 오히려 숨은 취향부터 궁금해집니다.',
         },
         finalGenderDecision: decision,
         analyzedSelectionIds: [...mediaIds],
@@ -435,6 +439,7 @@ function dependencies(
             checkpointScores: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
             checkpointPrivateNames: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
             checkpointNarratives: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
+            loadStageSnapshot: vi.fn(async () => null),
             finalize: vi.fn(async () => ({
                 finalized: true,
                 requestStatus: 'completed' as const,
@@ -461,7 +466,7 @@ function dependencies(
                     notScreenedMutuals: 0,
                     privateMutuals: 0,
                     exclusionApplied: false,
-                    scorePolicyVersion: 'risk-policy-v2.2' as const,
+                    scorePolicyVersion: 'risk-policy-v2.3' as const,
                 },
             })),
         },
@@ -1930,7 +1935,7 @@ describe('V2 AI and scoring executors', () => {
                     username: candidate.instagramId,
                     appearanceGrade: 3,
                     exposureScore: 1,
-                    isBusinessAccount: false,
+                    accountContext: 'personal',
                     hasWeakPartnerEvidence: false,
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
@@ -2042,7 +2047,7 @@ describe('V2 AI and scoring executors', () => {
                     username: candidate.instagramId,
                     appearanceGrade: 3,
                     exposureScore: 1,
-                    isBusinessAccount: false,
+                    accountContext: 'personal',
                     hasWeakPartnerEvidence: false,
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
@@ -2199,7 +2204,7 @@ describe('V2 AI and scoring executors', () => {
                 username: outcome.instagramId,
                 appearanceGrade: 4,
                 exposureScore: 2,
-                isBusinessAccount: false,
+                accountContext: 'personal',
                 hasWeakPartnerEvidence:
                     outcome.feature!.features.marriageEvidence === 'possible',
                 hasStrongPartnerEvidence:
@@ -2314,7 +2319,7 @@ describe('V2 AI and scoring executors', () => {
                 username: candidate.instagramId,
                 appearanceGrade: 5,
                 exposureScore: 5,
-                isBusinessAccount: false,
+                accountContext: 'personal',
                 hasWeakPartnerEvidence: false,
                 hasStrongPartnerEvidence: false,
                 uniqueTargetPostsLikedByCandidate: 4,
@@ -2429,6 +2434,101 @@ describe('V2 AI and scoring executors', () => {
     });
 });
 
+describe('V2 retained result image finalization', () => {
+    it('captures target, ranked women, and name-ranked private images before finalization', async () => {
+        const memoryState = memory();
+        const deps = dependencies(memoryState);
+        const imageCapture = vi.fn(async (
+            _input: Parameters<
+                NonNullable<
+                    AnalysisV2AiScoringExecutorDependencies[
+                        'resultImages'
+                    ]
+                >['capture']
+            >[0]
+        ) => {
+            void _input;
+            return undefined;
+        });
+        deps.resultImages = { capture: imageCapture };
+        const stage = {
+            requestId: REQUEST_ID,
+            profileClassifications: [
+                {
+                    candidateId: 'candidate:one',
+                    classification: 'verified_female',
+                    profileImageUrl:
+                        'https://cdninstagram.com/woman.one.jpg',
+                },
+                {
+                    candidateId: 'candidate:two',
+                    classification: 'verified_female',
+                    profileImageUrl:
+                        'https://cdninstagram.com/woman.two.jpg',
+                },
+            ],
+            preliminaryScores: [],
+            reverseLikes: [],
+            partnerSafety: [],
+            finalScores: [
+                { candidateId: 'candidate:one', displayScore: 4.2 },
+                { candidateId: 'candidate:two', displayScore: 8.1 },
+            ],
+            privateNames: [
+                {
+                    candidateId: 'candidate:private-low',
+                    instagramId: 'private.low',
+                    profileImageUrl:
+                        'https://cdninstagram.com/private.low.jpg',
+                    nameFemaleScore: 0.7,
+                    nameConfidence: 0.8,
+                },
+                {
+                    candidateId: 'candidate:private-high',
+                    instagramId: 'private.high',
+                    profileImageUrl:
+                        'https://cdninstagram.com/private.high.jpg',
+                    nameFemaleScore: 0.9,
+                    nameConfidence: 0.9,
+                },
+            ],
+            narratives: [],
+        } as unknown as AnalysisV2ResultStageSnapshot;
+        vi.mocked(deps.resultStore.loadStageSnapshot)
+            .mockResolvedValue(stage);
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.finalize!(context('finalize', {
+            jobKey: 'coordinator:finalize',
+        }));
+
+        const captureInput = imageCapture.mock.calls[0]![0];
+        expect(captureInput.sources.map(row => [
+            row.kind,
+            row.candidateLocator,
+            row.sortOrdinal,
+        ])).toEqual([
+            ['target', 'target', 0],
+            ['female', 'candidate:two', 1],
+            ['female', 'candidate:one', 2],
+            ['private', 'candidate:private-high', 3],
+            ['private', 'candidate:private-low', 4],
+        ]);
+        expect(captureInput.orderedManifestHash)
+            .toMatch(/^[a-f0-9]{64}$/);
+        expect(deps.resultStore.finalize).toHaveBeenCalledWith(
+            expect.objectContaining({
+                resultImageManifest: {
+                    orderedManifestHash:
+                        captureInput.orderedManifestHash,
+                    expectedRows: 5,
+                },
+            })
+        );
+        expect(deps.mediaStore.cleanupTerminal).toHaveBeenCalledOnce();
+    });
+});
+
 describe('V2 final score invariants', () => {
     function candidate(index: number, overrides: Partial<V2FemaleCandidateEvidence> = {}): V2FemaleCandidateEvidence {
         return {
@@ -2436,7 +2536,7 @@ describe('V2 final score invariants', () => {
             username: `woman.${index}`,
             appearanceGrade: 3,
             exposureScore: 1,
-            isBusinessAccount: false,
+            accountContext: 'personal',
             hasWeakPartnerEvidence: false,
             hasStrongPartnerEvidence: false,
             uniqueTargetPostsLikedByCandidate: 0,
@@ -2450,14 +2550,14 @@ describe('V2 final score invariants', () => {
         const preliminary = calculateV2PreliminaryScores({
             candidates: [
                 candidate(1, {
-                    isBusinessAccount: false,
+                    accountContext: 'personal',
                     uniqueTargetPostsLikedByCandidate: 4,
                     boundedCandidateCommentsOnTarget: 12,
                     appearanceGrade: 5,
                     exposureScore: 5,
                 }),
                 candidate(2, {
-                    isBusinessAccount: true,
+                    accountContext: 'individual_creator',
                     uniqueTargetPostsLikedByCandidate: 4,
                     boundedCandidateCommentsOnTarget: 12,
                     appearanceGrade: 5,
@@ -2479,8 +2579,8 @@ describe('V2 final score invariants', () => {
             .toBe(personal.risk.components.candidateToTargetLikes);
         expect(business.risk.components.candidateToTargetComments)
             .toBe(personal.risk.components.candidateToTargetComments);
-        expect(business.risk.businessSoftContextMultiplier)
-            .toBe(BUSINESS_SOFT_CONTEXT_MULTIPLIER);
+        expect(business.risk.softContextMultiplier)
+            .toBe(ACCOUNT_CONTEXT_SOFT_MULTIPLIERS.individual_creator);
         expect(business.risk.publicScore).toBeLessThanOrEqual(STRONG_PARTNER_PUBLIC_SCORE_CAP);
     });
 
@@ -2507,13 +2607,13 @@ describe('V2 final score invariants', () => {
         expect(shortlist).toHaveLength(10);
         expect(final.find(row => row.candidateId === observedId)!.risk.components.targetToCandidateLike)
             .toBe(3);
-        expect(final.filter(row => row.risk.riskBand === 'high_risk' && row.featuredRank !== null))
+        expect(final.filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null))
             .toHaveLength(FEATURED_RISK_LIMITS.high_risk);
-        expect(final.filter(row => row.risk.riskBand === 'caution' && row.featuredRank !== null).length)
+        expect(final.filter(row => row.riskBand === 'caution' && row.featuredRank !== null).length)
             .toBeLessThanOrEqual(FEATURED_RISK_LIMITS.caution);
     });
 
-    it('does not force a high-risk account when every absolute score is low', () => {
+    it('assigns relative tiers when every natural score is low', () => {
         const candidates = Array.from({ length: 20 }, (_, index) => candidate(index + 1, {
             appearanceGrade: 1,
             exposureScore: 0,
@@ -2527,8 +2627,10 @@ describe('V2 final score invariants', () => {
             preliminary,
             observedReverseLikeCandidateIds: new Set(),
         });
-        expect(final.filter(row => row.risk.riskBand === 'high_risk')).toHaveLength(0);
-        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(0);
+        expect(final.every(row => row.risk.riskBand === 'normal')).toBe(true);
+        expect(final.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(final.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(3);
         expect(final.filter(row => row.relativeWatchRank !== null)).toHaveLength(2);
     });
 });

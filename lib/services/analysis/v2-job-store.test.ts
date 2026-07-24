@@ -421,6 +421,40 @@ describe('analysis V2 job store', () => {
         );
     });
 
+    it('defers AI capacity without consuming the claimed attempt', async () => {
+        const job = { ...claimedJob(), attemptCount: 3 };
+        const rpc = vi.fn().mockResolvedValue({
+            data: [{
+                released: true,
+                job_status: 'pending',
+                attempt_count: 2,
+                request_status: 'processing',
+                ai_capacity_deferral_count: 4,
+            }],
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.deferAiCapacity(
+            job,
+            'ANALYSIS_V2_AI_CAPACITY_PENDING'
+        )).resolves.toEqual({
+            released: true,
+            status: 'pending',
+            attemptCount: 2,
+            requestStatus: 'processing',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_DATABASE_NAMES.deferAiCapacityRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_claim_token: job.claimToken,
+                p_error_code: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            }
+        );
+    });
+
     it('completes and fans out camelCase successor contracts atomically', async () => {
         const job = claimedJob();
         const rpc = vi.fn().mockResolvedValue({

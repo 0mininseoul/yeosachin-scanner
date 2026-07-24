@@ -2,14 +2,30 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 const observabilityMocks = vi.hoisted(() => ({ emit: vi.fn() }));
+const leaseMocks = vi.hoisted(() => ({
+    acquire: vi.fn(),
+    renew: vi.fn(),
+    release: vi.fn(),
+}));
 
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: observabilityMocks.emit },
 }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('./v2-gemini-lease-store', () => ({
+    analysisV2GeminiLeaseStore: leaseMocks,
+}));
 
 beforeEach(() => {
     observabilityMocks.emit.mockReset();
+    leaseMocks.acquire.mockReset().mockResolvedValue({
+        slot: 1,
+        claimToken: '323e4567-e89b-42d3-a456-426614174000',
+        fence: 1,
+        expiresAt: '2026-07-24T10:04:00.000Z',
+    });
+    leaseMocks.renew.mockReset();
+    leaseMocks.release.mockReset().mockResolvedValue(undefined);
 });
 
 import {
@@ -592,6 +608,8 @@ describe('analysis V2 Gemini audit adapter', () => {
         );
 
         expect(reserve).toHaveBeenCalledOnce();
+        expect(leaseMocks.acquire.mock.invocationCallOrder[0])
+            .toBeLessThan(reserve.mock.invocationCallOrder[0]);
         expect(terminalizeSuccess).toHaveBeenCalledWith(
             expect.objectContaining({
                 reservationToken,
@@ -601,6 +619,9 @@ describe('analysis V2 Gemini audit adapter', () => {
             resultSchema
         );
         expect(terminalize).not.toHaveBeenCalled();
+        expect(terminalizeSuccess.mock.invocationCallOrder[0])
+            .toBeLessThan(leaseMocks.release.mock.invocationCallOrder[0]);
+        expect(leaseMocks.release).toHaveBeenCalledOnce();
         expect(observabilityMocks.emit).toHaveBeenCalledOnce();
         expect(observabilityMocks.emit).toHaveBeenCalledWith({
             event: 'gemini.stage_completed',
