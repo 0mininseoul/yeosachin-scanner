@@ -8,6 +8,9 @@ readonly ARTIFACT_REGISTRY_API="artifactregistry.googleapis.com"
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
+readonly R2_ACCESS_KEY_ID_SECRET_ID="ai-baram-v2-r2-writer-access-key-id"
+readonly R2_SECRET_ACCESS_KEY_SECRET_ID="ai-baram-v2-r2-writer-secret-access-key"
+readonly RESULT_IMAGE_OBJECT_HMAC_SECRET_ID="ai-baram-v2-result-image-object-hmac"
 readonly DEFAULT_CPU="2"
 readonly DEFAULT_MEMORY="2Gi"
 readonly DEFAULT_CONCURRENCY="8"
@@ -93,6 +96,14 @@ Optional deployment environment variables:
   ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS
                                                Optional comma-separated slot:version refs for
                                                explicitly reviewed non-selected slots.
+  ANALYSIS_V2_RESULT_IMAGES_ENABLED            Enables retained result images; defaults false.
+  ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT          Required private R2 S3 endpoint when enabled.
+  ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET            Required dedicated R2 bucket when enabled.
+  ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION
+  ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION
+  ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION
+                                               Required numeric Secret Manager versions when
+                                               retained result images are enabled.
   ANALYSIS_V2_DEPLOY_REVISION_NONCE          Optional 5-character lowercase test/deploy nonce.
 
 The deployed service uses request-based billing (CPU throttling), scale-to-zero,
@@ -465,6 +476,15 @@ service_runtime_config_matches() {
     --arg image_version "$image_signing_secret_version" \
     --arg identity_hmac_secret "$PREFLIGHT_IDENTITY_HMAC_SECRET_ID" \
     --arg identity_hmac_version "$preflight_identity_hmac_secret_version" \
+    --arg result_images_enabled "$result_images_enabled" \
+    --arg result_image_r2_endpoint "$result_image_r2_endpoint" \
+    --arg result_image_r2_bucket "$result_image_r2_bucket" \
+    --arg r2_access_key_id_secret "$R2_ACCESS_KEY_ID_SECRET_ID" \
+    --arg r2_access_key_id_version "$r2_access_key_id_secret_version" \
+    --arg r2_secret_access_key_secret "$R2_SECRET_ACCESS_KEY_SECRET_ID" \
+    --arg r2_secret_access_key_version "$r2_secret_access_key_secret_version" \
+    --arg result_image_hmac_secret "$RESULT_IMAGE_OBJECT_HMAC_SECRET_ID" \
+    --arg result_image_hmac_version "$result_image_object_hmac_secret_version" \
     --arg cpu "$worker_cpu" \
     --arg memory "$worker_memory" \
     --arg concurrency "$worker_concurrency" \
@@ -493,6 +513,7 @@ service_runtime_config_matches() {
             }]
         | sort_by(.env);
       def value($name): [env[] | select(.name == $name) | .value];
+      def entries($name): [env[] | select(.name == $name)];
       def secret_ref($env_name; $secret_name; $version):
         [env[] | select(.name == $env_name)] as $entries
         | ($entries | length) == 1
@@ -505,8 +526,37 @@ service_runtime_config_matches() {
           | select(.name as $name | apify_env_names | index($name) | not)
           | select(.name != "IMAGE_PROXY_SIGNING_SECRET")
           | select(.name != "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
+          | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID")
+          | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY")
+          | select(.name != "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET")
           | select(.name | test("(^|_)(SECRET|PASSWORD|CREDENTIALS?|PRIVATE_KEY|SERVICE_ROLE_KEY|API_KEY|API_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|OIDC_TOKEN|TOKEN|KEY_BASE64)$"))
           | .name];
+      def result_image_config_matches:
+        if $result_images_enabled == "true" then
+          value("ANALYSIS_V2_RESULT_IMAGES_ENABLED") == ["true"]
+            and value("ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT") == [$result_image_r2_endpoint]
+            and value("ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET") == [$result_image_r2_bucket]
+            and secret_ref(
+              "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID";
+              $r2_access_key_id_secret;
+              $r2_access_key_id_version
+            )
+            and secret_ref(
+              "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY";
+              $r2_secret_access_key_secret;
+              $r2_secret_access_key_version
+            )
+            and secret_ref(
+              "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET";
+              $result_image_hmac_secret;
+              $result_image_hmac_version
+            )
+        else
+          value("ANALYSIS_V2_RESULT_IMAGES_ENABLED") == ["false"]
+            and (entries("ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID") | length) == 0
+            and (entries("ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY") | length) == 0
+            and (entries("ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET") | length) == 0
+        end;
       (.spec.template.spec.containers | length) == 1
         and .spec.template.spec.serviceAccountName == $runtime_sa
         and ((.spec.template.spec.timeoutSeconds | tostring) == $timeout)
@@ -523,6 +573,7 @@ service_runtime_config_matches() {
         and secret_ref($apify_env_key; $apify_secret; $apify_version)
         and secret_ref("IMAGE_PROXY_SIGNING_SECRET"; $image_secret; $image_version)
         and secret_ref("ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET"; $identity_hmac_secret; $identity_hmac_version)
+        and result_image_config_matches
         and (apify_refs == ($expected_apify_refs | sort_by(.env)))
         and (apify_refs | length) >= 1
         and (apify_refs | length) <= 5
@@ -623,7 +674,10 @@ service_has_forbidden_plaintext_credential() {
           (.name == "SUPABASE_SERVICE_ROLE_KEY"
             or (.name as $name | allowed_apify_env_names | index($name))
             or .name == "IMAGE_PROXY_SIGNING_SECRET"
-            or .name == "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
+            or .name == "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET"
+            or .name == "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID"
+            or .name == "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY"
+            or .name == "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET")
           and has("value")
         )
       | .name] as $plaintext_secret_refs
@@ -633,6 +687,9 @@ service_has_forbidden_plaintext_credential() {
         | select(.name as $name | allowed_apify_env_names | index($name) | not)
         | select(.name != "IMAGE_PROXY_SIGNING_SECRET")
         | select(.name != "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
+        | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID")
+        | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY")
+        | select(.name != "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET")
         | .name] as $other_credentials
     | ($plaintext_secret_refs | length) > 0 or ($other_credentials | length) > 0
   ' <<<"$config" >/dev/null
@@ -936,10 +993,21 @@ worker_endpoint_env_matches() {
     --arg maintenance_sa "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL" \
     --arg slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
     --arg worker_enabled "$worker_enabled" \
-    --arg recovery_enabled "$recovery_enabled" '
+    --arg recovery_enabled "$recovery_enabled" \
+    --arg result_images_enabled "$result_images_enabled" \
+    --arg result_image_r2_endpoint "$result_image_r2_endpoint" \
+    --arg result_image_r2_bucket "$result_image_r2_bucket" '
       def value($name):
         [.spec.template.spec.containers[0].env[]? |
           select(.name == $name) | .value];
+      def result_image_env_matches:
+        if $result_images_enabled == "true" then
+          value("ANALYSIS_V2_RESULT_IMAGES_ENABLED") == ["true"]
+            and value("ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT") == [$result_image_r2_endpoint]
+            and value("ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET") == [$result_image_r2_bucket]
+        else
+          value("ANALYSIS_V2_RESULT_IMAGES_ENABLED") == ["false"]
+        end;
       (.spec.template.spec.containers[0].env // []) as $env
       | ([$env[] | select(.name == "ANALYSIS_V2_TASKS_TARGET_URL") | .value]
           == [$v2_target])
@@ -968,7 +1036,8 @@ worker_endpoint_env_matches() {
         and value("PREFLIGHT_TASKS_CALLER_AUTH_MODE") == ["adc"]
         and value("PREFLIGHT_LOCAL_AFTER_ENABLED") == ["false"]
         and value("ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL") == [$maintenance_sa]
-        and value("ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE") == [$audience]' \
+        and value("ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE") == [$audience]
+        and result_image_env_matches' \
     <<<"$config" >/dev/null
 }
 
@@ -976,6 +1045,13 @@ ensure_worker_endpoint_env() {
   local config
   local origin
   local -a staging_args=(--no-traffic)
+  local result_image_env_assignments="ANALYSIS_V2_RESULT_IMAGES_ENABLED=$result_images_enabled"
+  local remove_env_vars="ANALYSIS_V2_ADMISSION_ENABLED,ANALYSIS_V2_WORKER_EXECUTION_ENABLED"
+  if [[ "$result_images_enabled" == "true" ]]; then
+    result_image_env_assignments="$result_image_env_assignments,ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT=$result_image_r2_endpoint,ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET=$result_image_r2_bucket"
+  else
+    remove_env_vars="$remove_env_vars,ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT,ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET"
+  fi
   if [[ "$mode" == "dry-run" && "$initial_deployment" == "true" ]]; then
     log "[dry-run] canonical Cloud Run task targets will be set after source deployment"
     return 0
@@ -1009,8 +1085,8 @@ ensure_worker_endpoint_env() {
     "${staging_args[@]}" \
     "--revision-suffix=$final_revision_suffix" \
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha" \
-    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin" \
-    '--remove-env-vars=ANALYSIS_V2_ADMISSION_ENABLED,ANALYSIS_V2_WORKER_EXECUTION_ENABLED' \
+    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
+    "--remove-env-vars=$remove_env_vars" \
     --quiet
 
   if [[ "$mode" == "apply" ]]; then
@@ -1093,7 +1169,7 @@ validate_runtime_env_keys() {
       VERCEL|VERCEL_ENV|GCP_VERCEL_WIF_PROVIDER_RESOURCE|VERCEL_OIDC_TEAM_SLUG|VERCEL_OIDC_TEAM_ID|VERCEL_OIDC_PROJECT_ID|*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL|ANALYSIS_V2_ADMISSION_ENABLED|ANALYSIS_V2_WORKER_EXECUTION_ENABLED|ANALYSIS_V2_TASKS_ENABLED|ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED|PREFLIGHT_TASKS_ENABLED|PREFLIGHT_LOCAL_AFTER_ENABLED)
         die "runtime env file contains a forbidden placement, gate, or WIF bootstrap key: $key"
         ;;
-      SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|APIFY_API_TOKEN|APIFY_*_API_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_SERVICE_ACCOUNT_KEY_BASE64|*_API_KEY|*_SECRET|*_PASSWORD|*_CREDENTIAL|*_CREDENTIALS|*_PRIVATE_KEY|*_KEY_BASE64|*_ACCESS_TOKEN|*_REFRESH_TOKEN|*_OIDC_TOKEN|*_TOKEN)
+      SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID|ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY|APIFY_API_TOKEN|APIFY_*_API_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_SERVICE_ACCOUNT_KEY_BASE64|*_API_KEY|*_SECRET|*_PASSWORD|*_CREDENTIAL|*_CREDENTIALS|*_PRIVATE_KEY|*_KEY_BASE64|*_ACCESS_TOKEN|*_REFRESH_TOKEN|*_OIDC_TOKEN|*_TOKEN)
         die "runtime env file must not contain plaintext provider or credential key: $key"
         ;;
     esac
@@ -1176,6 +1252,10 @@ verify_worker_prerequisites() {
 }
 
 build_deploy_args() {
+  local result_image_env_assignments="ANALYSIS_V2_RESULT_IMAGES_ENABLED=$result_images_enabled"
+  if [[ "$result_images_enabled" == "true" ]]; then
+    result_image_env_assignments="$result_image_env_assignments,ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT=$result_image_r2_endpoint,ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET=$result_image_r2_bucket"
+  fi
   deploy_args=(
     gcloud run deploy "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE"
     "--project=$ANALYSIS_V2_TASKS_PROJECT"
@@ -1204,14 +1284,14 @@ build_deploy_args() {
     "--revision-suffix=$build_revision_suffix"
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha"
     '--description=Private durable Analysis V2 Cloud Tasks worker'
-    "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SECRET_ID:$supabase_secret_version,$apify_secret_assignments,IMAGE_PROXY_SIGNING_SECRET=$IMAGE_SIGNING_SECRET_ID:$image_signing_secret_version,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=$PREFLIGHT_IDENTITY_HMAC_SECRET_ID:$preflight_identity_hmac_secret_version"
+    "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SECRET_ID:$supabase_secret_version,$apify_secret_assignments,IMAGE_PROXY_SIGNING_SECRET=$IMAGE_SIGNING_SECRET_ID:$image_signing_secret_version,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=$PREFLIGHT_IDENTITY_HMAC_SECRET_ID:$preflight_identity_hmac_secret_version$result_image_secret_assignments"
     '--quiet'
   )
 
   if [[ -n "$worker_env_deploy_file" ]]; then
     deploy_args+=("--env-vars-file=$worker_env_deploy_file")
   else
-    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT")
+    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,$result_image_env_assignments")
   fi
   if [[ "$initial_deployment" != "true" ]]; then
     deploy_args+=('--no-traffic')
@@ -1814,6 +1894,12 @@ readonly worker_max_instances="${ANALYSIS_V2_WORKER_MAX_INSTANCES:-$DEFAULT_MAX_
 readonly worker_timeout_seconds="${ANALYSIS_V2_WORKER_TIMEOUT_SECONDS:-$DEFAULT_TIMEOUT_SECONDS}"
 readonly worker_enabled="${ANALYSIS_V2_WORKER_ENABLED:-false}"
 readonly recovery_enabled="${ANALYSIS_V2_RECOVERY_ENABLED:-false}"
+readonly result_images_enabled="${ANALYSIS_V2_RESULT_IMAGES_ENABLED:-false}"
+readonly result_image_r2_endpoint="${ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT:-}"
+readonly result_image_r2_bucket="${ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET:-}"
+readonly r2_access_key_id_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION:-}"
+readonly r2_secret_access_key_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION:-}"
+readonly result_image_object_hmac_secret_version="${ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION:-}"
 readonly preflight_queue="${PREFLIGHT_TASKS_QUEUE:-analysis-preflight}"
 readonly task_member="serviceAccount:$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL"
 readonly maintenance_member="serviceAccount:$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
@@ -1853,6 +1939,31 @@ parse_additional_apify_secret_versions
   || die "ANALYSIS_V2_WORKER_ENABLED must be true or false"
 [[ "$recovery_enabled" == "true" || "$recovery_enabled" == "false" ]] \
   || die "ANALYSIS_V2_RECOVERY_ENABLED must be true or false"
+[[ "$result_images_enabled" == "true" || "$result_images_enabled" == "false" ]] \
+  || die "ANALYSIS_V2_RESULT_IMAGES_ENABLED must be true or false"
+if [[ "$result_images_enabled" == "true" ]]; then
+  required_env ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT
+  required_env ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET
+  required_env ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION
+  required_env ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION
+  required_env ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION
+  [[ "$result_image_r2_endpoint" =~ ^https://[a-f0-9]{32}\.r2\.cloudflarestorage\.com$ ]] \
+    || die "ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT must be the exact private Cloudflare R2 account endpoint"
+  validate_bucket "$result_image_r2_bucket" \
+    "ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET"
+  validate_numeric_version "$r2_access_key_id_secret_version" \
+    ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION
+  validate_numeric_version "$r2_secret_access_key_secret_version" \
+    ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION
+  validate_numeric_version "$result_image_object_hmac_secret_version" \
+    ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION
+elif [[ -n "$result_image_r2_endpoint$result_image_r2_bucket$r2_access_key_id_secret_version$r2_secret_access_key_secret_version$result_image_object_hmac_secret_version" ]]; then
+  die "retained result-image endpoint, bucket, and secret versions require ANALYSIS_V2_RESULT_IMAGES_ENABLED=true"
+fi
+result_image_secret_assignments=""
+if [[ "$result_images_enabled" == "true" ]]; then
+  result_image_secret_assignments=",ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID_SECRET_ID:$r2_access_key_id_secret_version,ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY_SECRET_ID:$r2_secret_access_key_secret_version,ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET=$RESULT_IMAGE_OBJECT_HMAC_SECRET_ID:$result_image_object_hmac_secret_version"
+fi
 validate_service_account_email "$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL" \
   "ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL"
 validate_service_account_email "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
@@ -1896,6 +2007,23 @@ if [[ -n "$worker_env_file" ]]; then
   env_json_value_equals "$runtime_env_json" SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS \
     "$SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS" \
     || die "runtime env file must set SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100"
+  runtime_env_json="$(jq -c \
+    --arg enabled "$result_images_enabled" \
+    --arg endpoint "$result_image_r2_endpoint" \
+    --arg bucket "$result_image_r2_bucket" '
+      . + {ANALYSIS_V2_RESULT_IMAGES_ENABLED: $enabled}
+      | if $enabled == "true" then
+          . + {
+            ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT: $endpoint,
+            ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: $bucket
+          }
+        else
+          del(
+            .ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT,
+            .ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET
+          )
+        end
+    ' <<<"$runtime_env_json")"
   write_env_snapshot "$runtime_env_json" runtime worker_env_deploy_file
 fi
 if [[ -n "$worker_build_env_file" ]]; then

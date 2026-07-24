@@ -513,6 +513,7 @@ case "$command_line" in
           and .SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED == "true"
           and .SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS == "750"
           and .SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS == "100"
+          and .ANALYSIS_V2_RESULT_IMAGES_ENABLED == "false"
           and (keys | all(test("(TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY)$") | not))
       ' "$runtime_manifest" >/dev/null || exit 93
       source_runtime_slot_applied='true'
@@ -788,6 +789,7 @@ case "$command_line" in
                   {name: "SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED", value: $selfhosted_global_gate},
                   {name: "SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS", value: $selfhosted_global_interval},
                   {name: "SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS", value: $selfhosted_response_guard},
+                  {name: "ANALYSIS_V2_RESULT_IMAGES_ENABLED", value: "false"},
                   {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
                   {name: "ANALYSIS_V2_WORKER_ENABLED", value: $worker_gate},
                   {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $recovery_gate},
@@ -1335,6 +1337,11 @@ ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 GOOGLE_APPLICATION_CREDENTIALS="RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
 
+cat >"$temp_dir/runtime-r2-credential.env" <<'EOF'
+ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
+ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY="R2_RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
+EOF
+
 cat >"$temp_dir/runtime-admission.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
@@ -1706,6 +1713,34 @@ assert_contains "$temp_dir/worker.out" \
   "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
 assert_contains "$temp_dir/worker.out" \
   "deploy-lock bucket metadata and IAM are audited separately by an admin"
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'ANALYSIS_V2_RESULT_IMAGES_ENABLED=true' \
+  'ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT=https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com' \
+  'ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET=analysis-v2-result-images' \
+  'ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION=3' \
+  'ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION=4' \
+  'ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION=5' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-result-images.out"
+assert_contains "$temp_dir/worker-result-images.out" \
+  "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID=ai-baram-v2-r2-writer-access-key-id:3"
+assert_contains "$temp_dir/worker-result-images.out" \
+  "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY=ai-baram-v2-r2-writer-secret-access-key:4"
+assert_contains "$temp_dir/worker-result-images.out" \
+  "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET=ai-baram-v2-result-image-object-hmac:5"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT=https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-result-images-partial.out" 2>&1; then
+  fail "partial retained result-image configuration was accepted while disabled"
+fi
+assert_contains "$temp_dir/worker-result-images-partial.out" \
+  "require ANALYSIS_V2_RESULT_IMAGES_ENABLED=true"
 
 env -u ANALYSIS_V1_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
   "${unconfigured_legacy_enqueuer_env[@]}" \
@@ -2613,6 +2648,17 @@ assert_contains "$temp_dir/runtime-credential.out" \
   "runtime env file must not contain plaintext provider or credential key: GOOGLE_APPLICATION_CREDENTIALS"
 assert_not_contains "$temp_dir/runtime-credential.out" \
   "RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-r2-credential.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/runtime-r2-credential.out" 2>&1; then
+  fail "runtime plaintext R2 credential override was accepted"
+fi
+assert_contains "$temp_dir/runtime-r2-credential.out" \
+  "runtime env file must not contain plaintext provider or credential key: ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY"
+assert_not_contains "$temp_dir/runtime-r2-credential.out" \
+  "R2_RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
 
 for forbidden_gate in admission legacy-gate; do
   if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
