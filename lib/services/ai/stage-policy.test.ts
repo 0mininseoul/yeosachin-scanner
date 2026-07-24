@@ -64,7 +64,7 @@ describe('V2 AI stage policy', () => {
     it('is immutable and explicitly versioned', () => {
         expect(Object.isFrozen(AI_STAGE_POLICIES)).toBe(true);
         expect(Object.isFrozen(AI_STAGE_POLICIES.genderTriage)).toBe(true);
-        expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.4');
+        expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.5');
         expect(AI_SHARED_CONCURRENCY_LIMIT).toBe(10);
         expect(Math.max(...Object.values(AI_STAGE_POLICIES).map(policy => policy.concurrency)))
             .toBeLessThanOrEqual(AI_SHARED_CONCURRENCY_LIMIT);
@@ -84,8 +84,8 @@ describe('V2 AI stage policy', () => {
             schemaVersion: 2,
         });
         expect(getAiStagePolicy('featureAnalysis')).toMatchObject({
-            promptVersion: 'feature-analysis-v2',
-            schemaVersion: 2,
+            promptVersion: 'feature-analysis-v3',
+            schemaVersion: 3,
         });
         expect(getAiStagePolicy('privateAccountName')).toMatchObject({
             promptVersion: 'private-account-name-v1',
