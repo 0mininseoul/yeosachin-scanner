@@ -9,6 +9,14 @@ const migration = readFileSync(
     'utf8'
 );
 
+const resultImageMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260724123500_add_analysis_v2_result_image_objects.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
 const deleteRoute = readFileSync(
     new URL('../../../app/api/analysis/result/[requestId]/route.ts', import.meta.url),
     'utf8'
@@ -49,6 +57,25 @@ describe('analysis V2 owner history and deletion migration contract', () => {
         expect(deleteRoute).toContain(".eq('user_id', user.id)");
         expect(deleteRoute).toContain(".in('status', ['completed', 'failed'])");
         expect(deleteRoute).toContain("if (authError || !user)");
+    });
+
+    it('queues every retained image key before the owned request is deleted', () => {
+        expect(resultImageMigration).toContain(
+            'CREATE FUNCTION public.enqueue_analysis_v2_result_image_purges_before_delete()'
+        );
+        expect(resultImageMigration).toContain(
+            'BEFORE DELETE ON public.analysis_requests'
+        );
+        expect(resultImageMigration).toContain(
+            'INSERT INTO public.analysis_v2_result_image_purge_outbox'
+        );
+        expect(resultImageMigration).toContain("'owner_delete'");
+        expect(resultImageMigration).toContain(
+            "image_object.status = 'ready'"
+        );
+        expect(resultImageMigration).not.toMatch(
+            /analysis_v2_result_image_purge_outbox[\s\S]{0,500}REFERENCES public\.analysis_requests/
+        );
     });
 
     it('projects only the authenticated owner history through a locked-down function', () => {
