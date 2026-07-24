@@ -42,10 +42,14 @@ describe('earlybird pricing v2 forward migration contract', () => {
 
     it('replays only an exact pending order without rewriting its v1 snapshot', () => {
         const replay = migration.indexOf('SELECT existing_order.*');
+        const latestPreflightCheck = migration.indexOf(
+            'FROM public.analysis_preflights AS newer'
+        );
         const refresh = migration.indexOf(
             "RAISE EXCEPTION 'EARLYBIRD_PRICING_REFRESH_REQUIRED'"
         );
         expect(replay).toBeGreaterThan(-1);
+        expect(latestPreflightCheck).toBeGreaterThan(replay);
         expect(refresh).toBeGreaterThan(replay);
         expect(migration.slice(replay, refresh)).toMatch(
             /v_existing\.user_id <> p_user_id[\s\S]*?v_existing\.plan_id <> p_plan_id[\s\S]*?v_existing\.expected_groble_product_id <> p_expected_product_id[\s\S]*?v_existing\.status <> 'payment_pending'/

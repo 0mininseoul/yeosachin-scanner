@@ -215,6 +215,44 @@ async function seedPreflight(
     return seed;
 }
 
+async function seedNewerPreflightForUser(
+    db: PGlite,
+    seed: Seed,
+    index: number,
+    planId: PaidPlanId,
+    version: typeof V1 | typeof V2
+): Promise<Seed> {
+    const newer = {
+        ...seed,
+        preflightId: uuid('2', index),
+    };
+    await db.query(
+        `INSERT INTO public.analysis_preflights (
+            id, user_id, target_instagram_id, status, exclusion_decision,
+            access_mode, plan_cards_snapshot, pricing_version, pricing_snapshot,
+            target_followers_count, target_following_count, required_plan_id,
+            created_at, expires_at
+        )
+        SELECT
+            $1, user_id, target_instagram_id, 'ready', exclusion_decision,
+            access_mode, $2, $3, $4, $5, target_following_count, $6,
+            created_at + INTERVAL '1 second',
+            pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+        FROM public.analysis_preflights
+        WHERE id = $7`,
+        [
+            newer.preflightId,
+            planCards(planId),
+            version,
+            pricingSnapshot(version),
+            planId === 'basic' ? 300 : 700,
+            planId,
+            seed.preflightId,
+        ]
+    );
+    return newer;
+}
+
 async function checkout(
     db: PGlite,
     seed: Seed,
@@ -385,6 +423,39 @@ describe('earlybird pricing v2 database behavior', () => {
         expect(after).toEqual(before);
     }, 30_000);
 
+    it('replays the exact pending P1 order even after a newer P2 is ready and blocks a new same-product checkout', async () => {
+        const db = await createDatabase(false);
+        const p1 = await seedPreflight(db, 11, 'basic', V1);
+        const original = await checkout(db, p1, 'basic', V1);
+        const before = (await db.query<{
+            id: string;
+            pricing_version: string;
+            expected_amount_krw: number;
+            status: string;
+            updated_at: string;
+        }>(
+            `SELECT id, pricing_version, expected_amount_krw, status, updated_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0];
+
+        await db.exec(pricingV2Migration);
+        const p2 = await seedNewerPreflightForUser(db, p1, 12, 'basic', V2);
+
+        await expect(checkout(db, p1, 'basic', V2)).resolves.toEqual({
+            order_id: original.order_id,
+            created: false,
+        });
+        expect((await db.query<typeof before>(
+            `SELECT id, pricing_version, expected_amount_krw, status, updated_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0]).toEqual(before);
+        await expect(checkout(db, p2, 'basic', V2)).rejects.toThrow(
+            /EARLYBIRD_CHECKOUT_ALREADY_PENDING/
+        );
+    }, 30_000);
+
     it('preserves paid/cancelled orders and webhook audit rows across the migration', async () => {
         const db = await createDatabase(false);
         const paidSeed = await seedPreflight(db, 7, 'basic', V1);
@@ -419,6 +490,12 @@ describe('earlybird pricing v2 database behavior', () => {
             `SELECT event_id, idempotency_key, amount_krw, disposition
              FROM public.earlybird_webhook_events ORDER BY event_id`
         )).rows).toEqual(eventsBefore);
+        await expect(checkout(db, paidSeed, 'basic', V2)).rejects.toThrow(
+            /EARLYBIRD_ORDER_CONFLICT/
+        );
+        await expect(checkout(db, cancelledSeed, 'standard', V2)).rejects.toThrow(
+            /EARLYBIRD_ORDER_CONFLICT/
+        );
     }, 30_000);
 
     it('keeps webhook discount acceptance bounded to zero through expected amount', async () => {

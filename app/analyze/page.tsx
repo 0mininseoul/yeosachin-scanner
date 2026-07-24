@@ -11,12 +11,15 @@ import {
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
 import {
+    applyEarlybirdPricingRefreshBoundary,
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
+    emitCurrentEarlybirdPricingEvent,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
+    resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
 import {
     availablePendingTargetStorage,
@@ -73,6 +76,7 @@ export default function AnalyzePage() {
     const initializedRef = useRef(false);
     const planViewsTrackedRef = useRef(new Set<string>());
     const planSelectionsTrackedRef = useRef(new Set<string>());
+    const stalePricingRefreshHandledRef = useRef<string | null>(null);
     const {
         targetInstagramId,
         preflight,
@@ -87,7 +91,10 @@ export default function AnalyzePage() {
         reset,
     } = useAnalysisV2Preflight();
 
-    const readyPreflight = preflight?.status === 'ready' ? preflight : null;
+    const {
+        readyPreflight,
+        stalePricingPreflightId,
+    } = resolveEarlybirdPricingBoundary(preflight);
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
     // 모든 플랜을 선택(비교)할 수 있게 하되, 아무것도 안 고르면 적격 플랜을 기본 선택.
     // 부적격 플랜을 골라도 선택 상태는 유지하고, 구매 버튼만 비활성화한다.
@@ -105,6 +112,25 @@ export default function AnalyzePage() {
             plan => isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
         )
         : false;
+
+    useEffect(() => {
+        if (
+            !stalePricingPreflightId
+            || stalePricingRefreshHandledRef.current === stalePricingPreflightId
+        ) return;
+        stalePricingRefreshHandledRef.current = stalePricingPreflightId;
+        applyEarlybirdPricingRefreshBoundary(stalePricingPreflightId, {
+            reset,
+            clearGirlfriendInstagramId: () => setGirlfriendInstagramId(''),
+            clearSelectedPlan: () => setSelectedPlan(null),
+            clearDisclosureAccepted: () => setDisclosureAccepted(false),
+            clearWaitlistComplete: () => setWaitlistComplete(false),
+            replaceAnalyzeRoute: () => router.replace('/analyze'),
+            showRefreshError: () => setError(
+                '가격이 변경되어 대상 계정을 다시 확인해주세요.'
+            ),
+        });
+    }, [reset, router, setError, stalePricingPreflightId]);
 
     useEffect(() => {
         if (!disclosureModalOpen) return;
@@ -136,12 +162,12 @@ export default function AnalyzePage() {
             if (planViewsTrackedRef.current.has(key)) continue;
             planViewsTrackedRef.current.add(key);
             if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), key)) continue;
-            trackEvent(EVENTS.PLAN_VIEWED, {
-                plan_id: plan.planId,
-                required_plan_id: readyPreflight.requiredPlan,
-                amount_krw: plan.price.amountKrw,
-                preflight_id: readyPreflight.preflightId,
-            });
+            emitCurrentEarlybirdPricingEvent(
+                'plan_viewed',
+                readyPreflight,
+                plan.planId,
+                properties => trackEvent(EVENTS.PLAN_VIEWED, properties)
+            );
         }
     }, [exclusionDecided, readyPreflight]);
 
@@ -233,12 +259,12 @@ export default function AnalyzePage() {
         if (planSelectionsTrackedRef.current.has(key)) return;
         planSelectionsTrackedRef.current.add(key);
         if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), key)) return;
-        trackEvent(EVENTS.PLAN_SELECTED, {
-            plan_id: planId,
-            required_plan_id: readyPreflight.requiredPlan,
-            ...(plan.price.status === 'quoted' ? { amount_krw: plan.price.amountKrw } : {}),
-            preflight_id: readyPreflight.preflightId,
-        });
+        emitCurrentEarlybirdPricingEvent(
+            'plan_selected',
+            readyPreflight,
+            planId,
+            properties => trackEvent(EVENTS.PLAN_SELECTED, properties)
+        );
     };
 
     const handlePlanSelection = (planId: PlanId) => {
@@ -272,7 +298,12 @@ export default function AnalyzePage() {
                 preflight_id: readyPreflight.preflightId,
             };
             if (paidPlan) {
-                trackEvent(EVENTS.CHECKOUT_STARTED, analyticsProperties);
+                emitCurrentEarlybirdPricingEvent(
+                    'checkout_started',
+                    readyPreflight,
+                    effectiveSelectedPlan,
+                    properties => trackEvent(EVENTS.CHECKOUT_STARTED, properties)
+                );
             }
             const response = await fetch(
                 paidPlan ? '/api/earlybird/checkout' : '/api/earlybird/waitlist',

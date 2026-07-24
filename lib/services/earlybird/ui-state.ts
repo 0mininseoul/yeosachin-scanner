@@ -1,14 +1,104 @@
-import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
+import {
+    PLAN_PRICING_VERSION,
+    type PlanId,
+} from '@/lib/domain/analysis/plan-catalog';
 import {
     EARLYBIRD_PLAN_CATALOG,
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
 import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
+import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
+
+type ReadyPreflight = Extract<PreflightStatusV1, { status: 'ready' }>;
+type EarlybirdPricingEvent =
+    | 'plan_viewed'
+    | 'plan_selected'
+    | 'checkout_started';
+
+export interface EarlybirdPricingEventProperties extends Record<string, unknown> {
+    plan_id: PlanId;
+    preflight_id: string;
+    required_plan_id?: PlanId;
+    amount_krw?: number;
+}
+
+export interface EarlybirdPricingRefreshActions {
+    reset: () => void;
+    clearGirlfriendInstagramId: () => void;
+    clearSelectedPlan: () => void;
+    clearDisclosureAccepted: () => void;
+    clearWaitlistComplete: () => void;
+    replaceAnalyzeRoute: () => void;
+    showRefreshError: () => void;
+}
 
 interface PlanCardAvailability {
     planId: PlanId;
     selectionState: 'required' | 'available_upgrade' | 'unavailable';
     remainingSlots?: number | null;
+}
+
+export function resolveEarlybirdPricingBoundary(
+    preflight: PreflightStatusV1 | null | undefined
+): {
+    readyPreflight: ReadyPreflight | null;
+    stalePricingPreflightId: string | null;
+} {
+    if (!preflight || preflight.status !== 'ready') {
+        return { readyPreflight: null, stalePricingPreflightId: null };
+    }
+    if (
+        preflight.pricingVersion !== PLAN_PRICING_VERSION
+        || preflight.plans.some(plan => plan.pricingVersion !== PLAN_PRICING_VERSION)
+    ) {
+        return {
+            readyPreflight: null,
+            stalePricingPreflightId: preflight.preflightId,
+        };
+    }
+    return { readyPreflight: preflight, stalePricingPreflightId: null };
+}
+
+export function applyEarlybirdPricingRefreshBoundary(
+    stalePricingPreflightId: string | null,
+    actions: EarlybirdPricingRefreshActions
+): boolean {
+    if (!stalePricingPreflightId) return false;
+    actions.reset();
+    actions.clearGirlfriendInstagramId();
+    actions.clearSelectedPlan();
+    actions.clearDisclosureAccepted();
+    actions.clearWaitlistComplete();
+    actions.replaceAnalyzeRoute();
+    actions.showRefreshError();
+    return true;
+}
+
+export function emitCurrentEarlybirdPricingEvent(
+    event: EarlybirdPricingEvent,
+    preflight: PreflightStatusV1 | null | undefined,
+    planId: PlanId,
+    emit: (properties: EarlybirdPricingEventProperties) => void
+): boolean {
+    const { readyPreflight } = resolveEarlybirdPricingBoundary(preflight);
+    if (!readyPreflight) return false;
+
+    const plan = readyPreflight.plans.find(candidate => candidate.planId === planId);
+    if (!plan || plan.selectionState === 'unavailable') return false;
+    if (event !== 'plan_selected' && !isPaidEarlybirdPlanId(planId)) return false;
+    if (event !== 'plan_selected' && plan.price.status !== 'quoted') return false;
+
+    emit({
+        plan_id: planId,
+        preflight_id: readyPreflight.preflightId,
+        ...(event === 'checkout_started'
+            ? {}
+            : { required_plan_id: readyPreflight.requiredPlan }),
+        ...(plan.price.status === 'quoted'
+            ? { amount_krw: plan.price.amountKrw }
+            : {}),
+    });
+    return true;
 }
 
 export function isEarlybirdPlanSoldOut(card: PlanCardAvailability): boolean {

@@ -138,24 +138,6 @@ BEGIN
         RAISE EXCEPTION 'PREFLIGHT_NOT_VALID';
     END IF;
 
-    IF EXISTS (
-        SELECT 1
-        FROM public.analysis_preflights AS newer
-        WHERE newer.user_id = p_user_id
-          AND newer.status = 'ready'
-          AND newer.expires_at > pg_catalog.clock_timestamp()
-          AND newer.exclusion_decision IN ('skip', 'exclude')
-          AND (
-              newer.created_at > v_preflight.created_at
-              OR (
-                  newer.created_at = v_preflight.created_at
-                  AND newer.id::TEXT > v_preflight.id::TEXT
-              )
-          )
-    ) THEN
-        RAISE EXCEPTION 'PREFLIGHT_NOT_LATEST';
-    END IF;
-
     -- Preserve the immutable payment intent when a v1 order already exists.
     -- The caller-owned amount/version are intentionally ignored only for this
     -- exact pending replay; no order snapshot is updated.
@@ -177,6 +159,24 @@ BEGIN
         END IF;
         RETURN QUERY SELECT v_existing.id, FALSE;
         RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.analysis_preflights AS newer
+        WHERE newer.user_id = p_user_id
+          AND newer.status = 'ready'
+          AND newer.expires_at > pg_catalog.clock_timestamp()
+          AND newer.exclusion_decision IN ('skip', 'exclude')
+          AND (
+              newer.created_at > v_preflight.created_at
+              OR (
+                  newer.created_at = v_preflight.created_at
+                  AND newer.id::TEXT > v_preflight.id::TEXT
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'PREFLIGHT_NOT_LATEST';
     END IF;
 
     IF v_preflight.pricing_version <> p_pricing_version THEN

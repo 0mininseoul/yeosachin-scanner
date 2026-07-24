@@ -1,22 +1,88 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+    applyEarlybirdPricingRefreshBoundary,
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
+    emitCurrentEarlybirdPricingEvent,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
     resolveAvailableEarlybirdPlan,
+    resolveEarlybirdPricingBoundary,
 } from './ui-state';
 import { EARLYBIRD_DISCLOSURE_TEXT } from '@/lib/domain/earlybird/catalog';
 import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
+import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 
 const planCards = [
     { planId: 'basic', selectionState: 'unavailable' },
     { planId: 'standard', selectionState: 'required' },
     { planId: 'plus', selectionState: 'available_upgrade' },
 ] as const;
+
+function readyPreflight(
+    pricingVersion: string,
+    basicAmount: number,
+    standardAmount: number
+): Extract<PreflightStatusV1, { status: 'ready' }> {
+    return {
+        schemaVersion: 1,
+        preflightId: '10000000-0000-4000-8000-000000000001',
+        expiresAt: '2026-07-25T12:00:00.000Z',
+        status: 'ready',
+        exclusionDecision: 'skip',
+        target: {
+            username: 'pricing_target',
+            fullName: null,
+            bio: null,
+            profileImage: null,
+            followersCount: 300,
+            followingCount: 300,
+            isPrivate: false,
+        },
+        accessMode: 'production',
+        capacityRequiredPlan: 'basic',
+        requiredPlan: 'basic',
+        pricingVersion,
+        plans: [
+            {
+                planId: 'basic',
+                launchStatus: 'production',
+                relationshipCapacity: { followers: 400, following: 400 },
+                detailedMutualLimit: 300,
+                selectionState: 'required',
+                unavailableReason: null,
+                pricingVersion,
+                price: { status: 'quoted', currency: 'KRW', amountKrw: basicAmount },
+                remainingSlots: 10,
+            },
+            {
+                planId: 'standard',
+                launchStatus: 'production',
+                relationshipCapacity: { followers: 800, following: 800 },
+                detailedMutualLimit: 600,
+                selectionState: 'available_upgrade',
+                unavailableReason: null,
+                pricingVersion,
+                price: { status: 'quoted', currency: 'KRW', amountKrw: standardAmount },
+                remainingSlots: 10,
+            },
+            {
+                planId: 'plus',
+                launchStatus: 'production',
+                relationshipCapacity: { followers: 1_200, following: 1_200 },
+                detailedMutualLimit: 900,
+                selectionState: 'available_upgrade',
+                unavailableReason: null,
+                pricingVersion,
+                price: { status: 'deferred', currency: 'KRW', amountKrw: null },
+                remainingSlots: null,
+            },
+        ],
+    };
+}
 
 describe('earlybird analyze UI state', () => {
     it('accepts only known deep-link plan values', () => {
@@ -197,5 +263,84 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain(
             '가격이 변경되어 대상 계정을 다시 확인해주세요.'
         );
+    });
+
+    it('resets and reroutes a stale v1 preflight before exposing a ready plan snapshot', () => {
+        const stale = readyPreflight('earlybird-2026-07-v1', 14_900, 19_900);
+        expect(resolveEarlybirdPricingBoundary(stale)).toEqual({
+            readyPreflight: null,
+            stalePricingPreflightId: stale.preflightId,
+        });
+        const actions = {
+            reset: vi.fn(),
+            clearGirlfriendInstagramId: vi.fn(),
+            clearSelectedPlan: vi.fn(),
+            clearDisclosureAccepted: vi.fn(),
+            clearWaitlistComplete: vi.fn(),
+            replaceAnalyzeRoute: vi.fn(),
+            showRefreshError: vi.fn(),
+        };
+
+        expect(applyEarlybirdPricingRefreshBoundary(
+            stale.preflightId,
+            actions
+        )).toBe(true);
+        for (const action of Object.values(actions)) {
+            expect(action).toHaveBeenCalledTimes(1);
+        }
+    });
+
+    it('emits zero pricing events for stale v1 and current 6,900/9,900 prices for fresh v2', () => {
+        const stale = readyPreflight('earlybird-2026-07-v1', 14_900, 19_900);
+        const fresh = readyPreflight('earlybird-2026-07-v2', 6_900, 9_900);
+        const emit = vi.fn();
+
+        for (const event of [
+            'plan_viewed',
+            'plan_selected',
+            'checkout_started',
+        ] as const) {
+            expect(emitCurrentEarlybirdPricingEvent(
+                event,
+                stale,
+                'basic',
+                emit
+            )).toBe(false);
+        }
+        expect(emit).not.toHaveBeenCalled();
+
+        for (const [planId, amountKrw] of [
+            ['basic', 6_900],
+            ['standard', 9_900],
+        ] as const) {
+            for (const event of [
+                'plan_viewed',
+                'plan_selected',
+                'checkout_started',
+            ] as const) {
+                expect(emitCurrentEarlybirdPricingEvent(
+                    event,
+                    fresh,
+                    planId,
+                    emit
+                )).toBe(true);
+                expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({
+                    plan_id: planId,
+                    amount_krw: amountKrw,
+                    preflight_id: fresh.preflightId,
+                }));
+            }
+        }
+        expect(emit).toHaveBeenCalledTimes(6);
+    });
+
+    it('guards ready preflights at the client pricing boundary before rendering plans or emitting pricing events', () => {
+        const source = readFileSync(new URL('../../../app/analyze/page.tsx', import.meta.url), 'utf8');
+        const boundaryIndex = source.indexOf('resolveEarlybirdPricingBoundary(preflight)');
+        const planViewIndex = source.indexOf('EVENTS.PLAN_VIEWED');
+        expect(boundaryIndex).toBeGreaterThan(-1);
+        expect(planViewIndex).toBeGreaterThan(boundaryIndex);
+        expect(source).toContain('emitCurrentEarlybirdPricingEvent(');
+        expect(source).toContain('stalePricingPreflightId');
     });
 });
