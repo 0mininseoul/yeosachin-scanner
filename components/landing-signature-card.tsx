@@ -26,8 +26,7 @@ interface Suspect {
   score: number;
   recentMutualRank?: 1 | 2 | 3 | 4 | 5;
   verdict: string[];
-  chips: string[];
-  intimateComment?: string;
+  capturedComment?: string;
 }
 
 // NOTE: 랜딩 데모용 목업. 총평 근거는 실제 서비스가 트래킹하는 신호(좋아요 방향·댓글
@@ -45,8 +44,7 @@ const SUSPECTS: Suspect[] = [
       '셀카 위주 피드에 감성 카페·전시 태그가 반복되는, 취향 뚜렷한 계정이에요.',
       '맞팔 여성 187명 중 상호작용 1위 — 게시물마다 서로 좋아요가 오갔고, 댓글 친밀도도 ‘그냥 친구’ 선을 넘었습니다.',
     ],
-    chips: ['양방향 좋아요', '친밀 댓글 3건'],
-    intimateComment: '어제 진짜 재밌었어… 다음엔 둘이서만 보자 ㅎㅎ',
+    capturedComment: '이 각도 진짜 반칙이다 ㅎㅎ 자꾸 눈길 가잖아',
   },
   {
     rank: '02',
@@ -55,24 +53,16 @@ const SUSPECTS: Suspect[] = [
     avatar: '/demo/suspect-02.jpg',
     score: 6,
     verdict: ['데일리룩 위주 계정인데, 남친이 이 피드에 꾸준히 좋아요를 남긴 흔적이 잡혔어요.'],
-    chips: ['일방 좋아요'],
   },
   {
     rank: '03',
-    grade: 'normal',
+    grade: 'caution',
     name: 'haram_log',
     avatar: '/demo/suspect-03.jpg',
-    score: 3,
-    verdict: ['단체 사진·공개 태그가 대부분. 양방향 상호작용이나 친밀 댓글은 아직 관측되지 않았어요.'],
-    chips: [],
+    score: 5,
+    verdict: ['취미 모임에서 자주 엮이는 계정인데, 최근 댓글 주고받는 빈도가 눈에 띄게 늘었어요.'],
   },
 ];
-
-const CHIP_TONE: Record<Grade, string> = {
-  high_risk: 'border-blood/40 bg-blood/10 text-blood',
-  caution: 'border-amber/40 bg-amber/10 text-amber',
-  normal: 'border-line-2 bg-panel text-fg-dim',
-};
 
 const CHAR_INTERVAL_MS = 26;
 
@@ -158,9 +148,9 @@ export function LandingSignatureCard() {
   return (
     <div ref={ref}>
       <CaseCard bracket="var(--color-blood)" className="overflow-hidden">
-        {/* scanning line */}
+        {/* scanning line — sweeps the full card height even as it grows */}
         <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
-          <div className="anim-scan h-16 w-full bg-gradient-to-b from-transparent via-blood/25 to-transparent" />
+          <div className="anim-scan absolute left-0 h-16 w-full bg-gradient-to-b from-transparent via-blood/25 to-transparent" />
         </div>
 
         {/* header */}
@@ -228,8 +218,8 @@ export function LandingSignatureCard() {
                   ))}
                 </div>
 
-                {/* evidence chips + captured comment (revealed once the verdict finishes) */}
-                {(s.chips.length > 0 || s.intimateComment) && (
+                {/* captured comment (revealed once the verdict finishes) */}
+                {s.capturedComment && (
                   <motion.div
                     initial={false}
                     animate={{ opacity: rowDone ? 1 : 0, y: rowDone ? 0 : 4 }}
@@ -237,37 +227,18 @@ export function LandingSignatureCard() {
                     className="mt-2.5"
                     aria-hidden={!rowDone}
                   >
-                    {s.chips.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5">
-                        {s.chips.map((chip) => (
-                          <span
-                            key={chip}
-                            className={`inline-flex items-center gap-1 border px-2 py-[3px] text-[10px] font-bold tracking-[0.06em] ${CHIP_TONE[s.grade]}`}
-                          >
-                            <span className="h-1 w-1 bg-current" />
-                            {chip}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-
-                    {s.intimateComment && (
-                      <div className="mt-2.5 border border-blood/25 bg-blood/[0.06] px-3 py-2.5">
-                        <span className="eyebrow text-blood">포착된 친밀 댓글</span>
-                        <p className="mt-1.5 text-[12.5px] leading-relaxed text-fg">
-                          “{s.intimateComment}”
-                        </p>
-                        <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-fg-mute">
-                          <span aria-hidden="true">—</span>
-                          <span
-                            aria-hidden="true"
-                            className="select-none blur-[4px]"
-                          >
-                            @{s.name}
-                          </span>
-                        </p>
-                      </div>
-                    )}
+                    <div className="border border-blood/25 bg-blood/[0.06] px-3 py-2.5">
+                      <span className="eyebrow text-blood">포착된 댓글</span>
+                      <p className="mt-1.5 text-[12.5px] leading-relaxed text-fg">
+                        “{s.capturedComment}”
+                      </p>
+                      <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-fg-mute">
+                        <span aria-hidden="true">—</span>
+                        <span aria-hidden="true" className="select-none blur-[4px]">
+                          @{s.name}
+                        </span>
+                      </p>
+                    </div>
                   </motion.div>
                 )}
               </motion.li>
