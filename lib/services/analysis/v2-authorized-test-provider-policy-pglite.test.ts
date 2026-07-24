@@ -19,6 +19,20 @@ const profileRepairPolicyMigration = readFileSync(
     'utf8'
 );
 
+const senaryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260724220000_expand_analysis_v2_apify_senary_slot.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const senaryHelperMigration = senaryMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.analysis_v2_valid_apify_credential_slot\([\s\S]*?\n\$\$;/
+)?.[0];
+if (!senaryHelperMigration) {
+    throw new Error('senary credential helper migration is missing');
+}
+
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const OTHER_USER_ID = '10000000-0000-4000-8000-000000000002';
 const REQUEST_ID = '20000000-0000-4000-8000-000000000001';
@@ -38,7 +52,7 @@ const POLICY_VERSION = 'authorized-free-e2e-v1';
 
 const operationSlots = {
     'target-profile': 'tertiary',
-    'relationship-followers': 'primary',
+    'relationship-followers': 'senary',
     'relationship-following': 'secondary',
     'profile-fallback': 'tertiary',
     'target-likers': 'quaternary',
@@ -344,6 +358,7 @@ describe('authorized test provider policy migration PGlite contract', () => {
         await db.exec(bootstrap);
         await db.exec(migration);
         await db.exec(profileRepairPolicyMigration);
+        await db.exec(senaryHelperMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -490,22 +505,25 @@ describe('authorized test provider policy migration PGlite contract', () => {
     it('allows only the slot bound to the provider operation prefix', async () => {
         await consumeAuthorized();
 
-        const reservation = await reserve('primary');
+        const reservation = await reserve('senary');
         expect(reservation).toMatchObject({
             requestId: REQUEST_ID,
             operationKey: `relationship-followers:${OPERATION_DIGEST}`,
-            credentialSlot: 'primary',
+            credentialSlot: 'senary',
         });
 
         await expect(reserve('secondary')).rejects.toThrow(
             /ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH/
         );
-        await expect(reserve('primary', 'relationship-following')).rejects.toThrow(
+        await expect(reserve('senary', 'relationship-following')).rejects.toThrow(
             /ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH/
         );
         expect(await reserve('tertiary', 'target-profile')).toMatchObject({
             credentialSlot: 'tertiary',
         });
+        await expect(reserve('septenary')).rejects.toThrow(
+            /ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SLOT_MISMATCH/
+        );
     });
 
     it('binds profile-repair to the immutable profile-fallback slot', async () => {

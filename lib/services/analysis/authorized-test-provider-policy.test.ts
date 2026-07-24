@@ -26,6 +26,7 @@ const authorizedEnv = {
     APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
     APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
     APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+    APIFY_SENARY_API_TOKEN: 'senary-test-token',
 } as const;
 
 const authorizedTarget = {
@@ -161,5 +162,29 @@ describe('authorized analysis V2 test provider policy', () => {
             policy!,
             envWithoutQuinary
         )).toThrow('APIFY_QUINARY_API_TOKEN');
+    });
+
+    it('accepts the same-named senary credential and continues to reject septenary', () => {
+        const senaryEnv = {
+            ...authorizedEnv,
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'senary',
+        };
+        const policy = configuredAuthorizedTestProviderPolicy(authorizedTarget, senaryEnv);
+        expect(policy?.operationSlots['relationship-followers']).toBe('senary');
+        expect(resolveAnalysisV2ApifyCredentialSlot({
+            accessMode: 'test_entitlement',
+            policy,
+            operation: 'relationship-followers',
+            env: senaryEnv,
+        })).toBe('senary');
+
+        expect(() => assertAuthorizedTestProviderCredentialsAvailable(policy!, {
+            ...senaryEnv,
+            APIFY_SENARY_API_TOKEN: '',
+        })).toThrow('APIFY_SENARY_API_TOKEN');
+        expect(() => configuredAuthorizedTestProviderPolicy(authorizedTarget, {
+            ...senaryEnv,
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'septenary',
+        })).toThrow('ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT');
     });
 });

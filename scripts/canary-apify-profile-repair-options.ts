@@ -1,7 +1,4 @@
-import {
-    APIFY_CREDENTIAL_SLOTS,
-    type ApifyCredentialSlot,
-} from '../lib/services/instagram/providers/types';
+import type { ApifyCredentialSlot } from '../lib/services/instagram/providers/types';
 
 export const PROFILE_REPAIR_CANARY_REPEATS = 2;
 export const PROFILE_REPAIR_CANARY_MAX_RUN_USD = 0.05;
@@ -15,6 +12,15 @@ export const EXPECTED_INPUT_COUNT = PROFILE_REPAIR_CANARY_EXPECTED_INPUT_COUNT;
 const UUID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CRITICAL_JOB_KEY_PATTERN = /^track:profiles:batch:(?:0|[1-9][0-9]{0,2})$/;
+const PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS = [
+    'primary',
+    'secondary',
+    'tertiary',
+    'quaternary',
+    'quinary',
+] as const satisfies readonly ApifyCredentialSlot[];
+export type ProfileRepairCanaryCredentialSlot =
+    typeof PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS[number];
 const VALUE_FLAGS = new Set([
     '--source-request-id',
     '--critical-job-key',
@@ -33,7 +39,7 @@ const CONFIRMATION_FLAG = '--confirm-paid-api-call';
 export interface ProfileRepairCanaryOptions {
     sourceRequestId: string;
     criticalJobKey: string;
-    credentialSlot: ApifyCredentialSlot;
+    credentialSlot: ProfileRepairCanaryCredentialSlot;
     confirmPaidApiCall: boolean;
     repeats: 0 | typeof PROFILE_REPAIR_CANARY_REPEATS;
     maximumRunChargeUsd: 0 | typeof PROFILE_REPAIR_CANARY_MAX_RUN_USD;
@@ -92,7 +98,9 @@ export function parseProfileRepairCanaryArgs(
     if (
         !UUID_PATTERN.test(sourceRequestId)
         || !CRITICAL_JOB_KEY_PATTERN.test(criticalJobKey)
-        || !APIFY_CREDENTIAL_SLOTS.includes(credentialSlot as ApifyCredentialSlot)
+        || !PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS.includes(
+            credentialSlot as (typeof PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS)[number]
+        )
     ) {
         inputError('invalid arguments');
     }
@@ -101,7 +109,7 @@ export function parseProfileRepairCanaryArgs(
     return Object.freeze({
         sourceRequestId: sourceRequestId.toLowerCase(),
         criticalJobKey,
-        credentialSlot: credentialSlot as ApifyCredentialSlot,
+        credentialSlot: credentialSlot as ProfileRepairCanaryCredentialSlot,
         confirmPaidApiCall,
         repeats: confirmPaidApiCall ? PROFILE_REPAIR_CANARY_REPEATS : 0,
         maximumRunChargeUsd: confirmPaidApiCall

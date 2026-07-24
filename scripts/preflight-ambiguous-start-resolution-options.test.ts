@@ -57,6 +57,22 @@ describe('ambiguous preflight start resolution CLI options', () => {
         });
     });
 
+    it('accepts senary as a same-named V2 slot and rejects septenary', () => {
+        expect(parseAmbiguousStartOptions(resolveArguments.map((argument) =>
+            argument === '--credential-slot=quinary'
+                ? '--credential-slot=senary'
+                : argument
+        ))).toMatchObject({
+            mode: 'resolve',
+            credentialSlot: 'senary',
+        });
+        expect(() => parseAmbiguousStartOptions(resolveArguments.map((argument) =>
+            argument === '--credential-slot=quinary'
+                ? '--credential-slot=septenary'
+                : argument
+        ))).toThrow(/unsupported --credential-slot/);
+    });
+
     it('rejects an incomplete or weakly confirmed mutation', () => {
         expect(() => parseAmbiguousStartOptions([])).toThrow(/choose exactly one/);
         expect(() => parseAmbiguousStartOptions([
@@ -71,11 +87,6 @@ describe('ambiguous preflight start resolution CLI options', () => {
     it('rejects unbounded listing and identity drift', () => {
         expect(() => parseAmbiguousStartOptions(['--list', '--limit=101']))
             .toThrow(/1 through 100/);
-        expect(() => parseAmbiguousStartOptions(resolveArguments.map((argument) =>
-            argument === '--credential-slot=quinary'
-                ? '--credential-slot=senary'
-                : argument
-        ))).toThrow(/unsupported --credential-slot/);
         expect(() => parseAmbiguousStartOptions(resolveArguments.map((argument) =>
             argument === '--max-charge-usd=0.002600000000'
                 ? '--max-charge-usd=0'

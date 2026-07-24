@@ -6,6 +6,7 @@ import type {
     ProviderCostTerminalStatus,
     ProviderRunCheckpoint,
 } from '@/lib/services/instagram/providers/types';
+import { isApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
@@ -246,8 +247,7 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
         || !SHA256_PATTERN.test(row.inputHash)
         || row.logicalProvider !== 'apify'
         || row.actorId !== APIFY_PROFILE_ACTOR_ID
-        || !['primary', 'secondary', 'tertiary', 'quaternary', 'quinary']
-            .includes(String(credentialSlot))
+        || !isApifyCredentialSlot(credentialSlot)
         || !['starting', 'running', 'rejected', 'succeeded', 'failed', 'aborted', 'timed_out']
             .includes(String(status))
     ) {
@@ -308,7 +308,7 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
         inputHash: row.inputHash,
         logicalProvider: 'apify',
         actorId: APIFY_PROFILE_ACTOR_ID,
-        credentialSlot: credentialSlot as ApifyCredentialSlot,
+        credentialSlot,
         maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
         status: status as PreflightProviderRunStatus,
         runId: runId as string | null,

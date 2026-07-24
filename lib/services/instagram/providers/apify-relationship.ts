@@ -304,6 +304,7 @@ export function selectApifyApiToken(
         tertiary: 'APIFY_TERTIARY_API_TOKEN',
         quaternary: 'APIFY_QUATERNARY_API_TOKEN',
         quinary: 'APIFY_QUINARY_API_TOKEN',
+        senary: 'APIFY_SENARY_API_TOKEN',
     }[slot];
     const token = slot === 'primary'
         ? env[key]?.trim() || env.APIFY_API_TOKEN?.trim()

@@ -1,3 +1,5 @@
+import { isApifyCredentialSlot } from '../lib/services/instagram/providers/types';
+
 export const AMBIGUOUS_START_CONFIRMATION =
     'I_VERIFIED_EXACT_APIFY_ACTOR_SLOT_AND_TIME_WINDOW_HAS_NO_RUN';
 
@@ -5,14 +7,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 const OPERATION_KEY_PATTERN = /^(?:target-profile-fallback|target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100))$/;
-const CREDENTIAL_SLOTS = new Set([
-    'primary',
-    'secondary',
-    'tertiary',
-    'quaternary',
-    'quinary',
-]);
-
 export interface AmbiguousStartListOptions {
     mode: 'list';
     limit: number;
@@ -151,7 +145,7 @@ export function parseAmbiguousStartOptions(argv: string[]): AmbiguousStartOption
     if (!SHA256_PATTERN.test(inputHash)) fail('--input-hash must be a lowercase SHA-256');
     if (logicalProvider !== 'apify') fail('unsupported --logical-provider');
     if (actorId !== 'apify/instagram-profile-scraper') fail('unsupported --actor-id');
-    if (!CREDENTIAL_SLOTS.has(credentialSlot)) fail('unsupported --credential-slot');
+    if (!isApifyCredentialSlot(credentialSlot)) fail('unsupported --credential-slot');
     if (maxChargeUsd !== '0.002600000000') fail('--max-charge-usd must be 0.002600000000');
     if (!ISO_TIMESTAMP_PATTERN.test(reservedAt) || !Number.isFinite(Date.parse(reservedAt))) {
         fail('--reserved-at must be an ISO timestamp with timezone');

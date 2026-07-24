@@ -23,6 +23,7 @@ Required source dotenv keys:
   GOOGLE_CLOUD_LOCATION
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT
+  ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true|false
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
@@ -119,6 +120,9 @@ const project = required('GOOGLE_CLOUD_PROJECT');
 const location = required('GOOGLE_CLOUD_LOCATION');
 const bucket = required('ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET');
 const slot = required('ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
+const authorizedTestShardingEnabled = required(
+  'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED',
+);
 const globalGateEnabled = required('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED');
 const globalMinIntervalMs = required('SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS');
 const globalResponseGuardMs = required('SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS');
@@ -135,8 +139,11 @@ if (location !== 'global') {
 if (!/^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$/.test(bucket)) {
   throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET is invalid');
 }
-if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary'].includes(slot)) {
+if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary'].includes(slot)) {
   throw new Error('ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be explicit and valid');
+}
+if (!['true', 'false'].includes(authorizedTestShardingEnabled)) {
+  throw new Error('ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED must be true or false');
 }
 if (globalGateEnabled !== 'true') {
   throw new Error('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED must be true');
@@ -154,6 +161,7 @@ const runtime = {
   GOOGLE_CLOUD_LOCATION: location,
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: bucket,
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot,
+  ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: authorizedTestShardingEnabled,
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: globalGateEnabled,
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: globalMinIntervalMs,
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS: globalResponseGuardMs,

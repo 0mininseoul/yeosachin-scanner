@@ -232,6 +232,29 @@ describe('profile repair canary run store', () => {
         expect(client.rpc).not.toHaveBeenCalled();
     });
 
+    it('rejects senary at both the reservation and stored-row boundaries', async () => {
+        const reservationClient = clientWith();
+        const reservationStore = createProfileRepairCanaryRunStore(
+            reservationClient,
+            { randomUUID: () => RESERVATION_TOKEN }
+        );
+        await expect(reservationStore.reserve({
+            sourceRequestId: SOURCE_REQUEST_ID,
+            repetition: 1,
+            credentialSlot: 'senary' as never,
+        })).rejects.toThrow('PROFILE_REPAIR_CANARY_RUN_VALIDATION_ERROR');
+        expect(reservationClient.rpc).not.toHaveBeenCalled();
+
+        const storedClient = clientWith(row('starting', {
+            credentialSlot: 'senary',
+        }));
+        const storedRunStore = createProfileRepairCanaryRunStore(storedClient);
+        await expect(storedRunStore.load({
+            sourceRequestId: SOURCE_REQUEST_ID,
+            repetition: 1,
+        })).rejects.toThrow('PROFILE_REPAIR_CANARY_RUN_PERSISTENCE_ERROR');
+    });
+
     it('fails closed on conflicting terminal writes without surfacing provider detail', async () => {
         const rpc = vi.fn().mockResolvedValue({
             data: null,

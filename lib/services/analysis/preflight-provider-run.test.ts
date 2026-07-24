@@ -123,6 +123,26 @@ describe('preflight provider-run adapter', () => {
         expect(JSON.stringify(rpc.mock.calls)).not.toContain('target.name');
     });
 
+    it('loads a stored senary identity and rejects an unsupported septenary identity', async () => {
+        const senaryStore = createPreflightProviderRunStore({
+            rpc: vi.fn(async () => ({
+                data: row('running', { credentialSlot: 'senary' }),
+                error: null,
+            })),
+        });
+        await expect(senaryStore.load({ preflightId, claimToken, inputHash }))
+            .resolves.toMatchObject({ credentialSlot: 'senary' });
+
+        const septenaryStore = createPreflightProviderRunStore({
+            rpc: vi.fn(async () => ({
+                data: row('running', { credentialSlot: 'septenary' }),
+                error: null,
+            })),
+        });
+        await expect(septenaryStore.load({ preflightId, claimToken, inputHash }))
+            .rejects.toThrow('invalid run identity');
+    });
+
     it('fails closed when an RPC returns a different hash or billing identity', async () => {
         const wrongHash = createPreflightProviderRunStore({
             rpc: vi.fn(async () => ({
@@ -289,8 +309,15 @@ describe('preflight provider-run adapter', () => {
         expect(JSON.stringify(rpc.mock.calls)).not.toContain('api-token');
     });
 
-    it('reconciles all five credential slots and rejects unstable status or over-cap usage', async () => {
-        const slots = ['primary', 'secondary', 'tertiary', 'quaternary', 'quinary'] as const;
+    it('reconciles all six credential slots and rejects unstable status or over-cap usage', async () => {
+        const slots = [
+            'primary',
+            'secondary',
+            'tertiary',
+            'quaternary',
+            'quinary',
+            'senary',
+        ] as const;
         const stable = slots.map((credentialSlot, index) => row('succeeded', {
             preflightId: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
             inputHash: String(index + 1).repeat(64),
@@ -320,9 +347,9 @@ describe('preflight provider-run adapter', () => {
                     }),
                 };
             },
-        })).resolves.toEqual({ eligible: 5, finalized: 5, failed: 0, hasMore: false });
+        })).resolves.toEqual({ eligible: 6, finalized: 6, failed: 0, hasMore: false });
         expect(new Set(selectedSlots)).toEqual(new Set(slots));
-        expect(reconcileUsage).toHaveBeenCalledTimes(5);
+        expect(reconcileUsage).toHaveBeenCalledTimes(6);
 
         const unsafeStore = {
             listUnreconciled: vi.fn(async () => [stable[0], stable[1]]),
