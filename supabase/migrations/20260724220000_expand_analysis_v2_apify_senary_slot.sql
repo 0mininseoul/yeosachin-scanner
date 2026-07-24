@@ -125,3 +125,114 @@ GRANT EXECUTE ON FUNCTION public.settle_analysis_v2_provider_run_for_cleanup(
 
 COMMENT ON FUNCTION public.analysis_v2_valid_apify_credential_slot(TEXT) IS
     'Exact same-named credential identities supported by the general Analysis V2 worker; no token pooling or aliases.';
+
+-- Return authoritative, bounded evidence before a deploy intentionally removes
+-- non-primary Secret Manager references. The official profile-provider canary
+-- is primary-only, so it cannot depend on any accepted p_drop_slots value. The
+-- historical profile-repair canary is five-slot and must be drained explicitly.
+CREATE OR REPLACE FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(
+    p_drop_slots TEXT[]
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_drop_slots TEXT[];
+    v_active_request_runs BIGINT;
+    v_unreconciled_request_runs BIGINT;
+    v_active_preflight_runs BIGINT;
+    v_unreconciled_preflight_runs BIGINT;
+    v_active_profile_repair_canary_runs BIGINT;
+    v_unreconciled_profile_repair_canary_runs BIGINT;
+BEGIN
+    SELECT pg_catalog.array_agg(slot ORDER BY slot)
+    INTO v_drop_slots
+    FROM pg_catalog.unnest(p_drop_slots) AS requested(slot);
+
+    IF p_drop_slots IS NULL
+       OR pg_catalog.cardinality(p_drop_slots) NOT BETWEEN 1 AND 5
+       OR pg_catalog.cardinality(v_drop_slots) <> (
+            SELECT pg_catalog.count(DISTINCT slot)
+            FROM pg_catalog.unnest(p_drop_slots) AS requested(slot)
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.unnest(p_drop_slots) AS requested(slot)
+            WHERE slot IS NULL
+               OR slot = 'primary'
+               OR NOT public.analysis_v2_valid_apify_credential_slot(slot)
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_SLOTS_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT pg_catalog.count(*)
+    INTO v_active_request_runs
+    FROM public.analysis_v2_provider_runs AS provider_run
+    WHERE provider_run.credential_slot = ANY(v_drop_slots)
+      AND provider_run.status IN ('starting', 'running');
+
+    SELECT pg_catalog.count(*)
+    INTO v_unreconciled_request_runs
+    FROM public.analysis_v2_provider_runs AS provider_run
+    WHERE provider_run.credential_slot = ANY(v_drop_slots)
+      AND provider_run.status IN ('succeeded', 'failed', 'aborted', 'timed_out')
+      AND provider_run.usage_reconciled_at IS NULL;
+
+    SELECT pg_catalog.count(*)
+    INTO v_active_preflight_runs
+    FROM public.analysis_preflight_provider_runs AS provider_run
+    WHERE provider_run.credential_slot = ANY(v_drop_slots)
+      AND provider_run.status IN ('starting', 'running');
+
+    SELECT pg_catalog.count(*)
+    INTO v_unreconciled_preflight_runs
+    FROM public.analysis_preflight_provider_runs AS provider_run
+    WHERE provider_run.credential_slot = ANY(v_drop_slots)
+      AND provider_run.status IN ('succeeded', 'failed', 'aborted', 'timed_out')
+      AND provider_run.usage_reconciled_at IS NULL;
+
+    SELECT pg_catalog.count(*)
+    INTO v_active_profile_repair_canary_runs
+    FROM public.analysis_v2_profile_repair_canary_runs AS canary_run
+    WHERE canary_run.credential_slot = ANY(v_drop_slots)
+      AND canary_run.state IN ('starting', 'running', 'ambiguous');
+
+    SELECT pg_catalog.count(*)
+    INTO v_unreconciled_profile_repair_canary_runs
+    FROM public.analysis_v2_profile_repair_canary_runs AS canary_run
+    WHERE canary_run.credential_slot = ANY(v_drop_slots)
+      AND canary_run.state IN ('succeeded', 'failed')
+      AND canary_run.usage_reconciled_at IS NULL;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'ready',
+            v_active_request_runs = 0
+            AND v_unreconciled_request_runs = 0
+            AND v_active_preflight_runs = 0
+            AND v_unreconciled_preflight_runs = 0
+            AND v_active_profile_repair_canary_runs = 0
+            AND v_unreconciled_profile_repair_canary_runs = 0,
+        'dropSlots', pg_catalog.to_jsonb(v_drop_slots),
+        'activeRequestRuns', v_active_request_runs,
+        'unreconciledRequestRuns', v_unreconciled_request_runs,
+        'activePreflightRuns', v_active_preflight_runs,
+        'unreconciledPreflightRuns', v_unreconciled_preflight_runs,
+        'activeProfileRepairCanaryRuns', v_active_profile_repair_canary_runs,
+        'unreconciledProfileRepairCanaryRuns',
+            v_unreconciled_profile_repair_canary_runs
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TEXT[])
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TEXT[])
+    TO service_role;
+
+COMMENT ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TEXT[]) IS
+    'Service-only zero-active/zero-unreconciled evidence for exact non-primary Apify refs before a primary-only Cloud Run promotion.';

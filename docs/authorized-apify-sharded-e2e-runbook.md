@@ -303,11 +303,36 @@ paid account instead of rotating free accounts.
 
 ## Teardown
 
+teardown의 최종 selected baseline은 exact `primary:3`이다.
+
 1. teardown에서 `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false`를 Vercel intake와 Cloud Run worker를 포함해 이 값을 설정한 모든 runtime에 적용하고 effective 설정을 확인한다.
-2. policy-bound request가 하나도 남지 않았음을 확인한 뒤 worker의 non-selected temporary Apify secret reference를 제거한다.
-3. teardown baseline으로 Cloud Run의 normal selected slot을 `ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary`로 복원하고, 선택 secret reference가 exact `ai-baram-v2-apify-primary:3`인지 확인한다. token 값은 출력하지 않는다.
-4. Pre-run public admission/access-mode 상태를 정확히 복원해 `ANALYSIS_V2_ADMISSION_ENABLED=true`인지 확인한다. normal no-header 요청은 `production`에 남고 공개 preflight/early-bird intake를 계속 사용할 수 있어야 한다. paid webhook은 계속 `awaiting_operator`까지만 만들며 outbox/operator approval 없이 자동 fulfillment나 공개 분석 dispatch를 시작하지 않는다.
-5. Commercial display terms are defined only by the canonical ["Groble 얼리버드 표시안 (성공 E2E 후 확정)" block](./operations-cost-model.md). Payment integration is outside this E2E's scope and remains on a separate branch; do not implement or enable it as part of this run.
+2. policy-bound request가 하나도 남지 않았음을 확인한다. DB의 `analysis_v2_provider_runs`, `analysis_preflight_provider_runs`, 5-slot `analysis_v2_profile_repair_canary_runs`에서 제거 대상 `tertiary`, `quinary`, `senary`의 active/ambiguous 실행과 종료 후 미정산 실행이 모두 0이어야 한다. Primary 전용 official profile-provider canary는 이 세 ref에 의존하지 않는다.
+3. teardown baseline으로 normal selected slot을 `ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary`, numeric version을 `ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3`으로 복원하고 `ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS`는 unset한다. 아래 명시적 경로만 temporary ref를 제거할 수 있다. 일반 deploy와 일반 `--check`는 오래된 실행 복구를 위해 유효한 non-selected ref를 계속 보존한다.
+
+```bash
+set +x
+unset ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS
+export ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary
+export ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3
+
+bash scripts/deploy-analysis-v2-worker.sh --dry-run \
+  --prune-apify-secret-refs=tertiary,quinary,senary
+bash scripts/deploy-analysis-v2-worker.sh \
+  --prune-apify-secret-refs=tertiary,quinary,senary
+bash scripts/deploy-analysis-v2-worker.sh --check \
+  --prune-apify-secret-refs=tertiary,quinary,senary
+```
+
+이 flag는 latest와 active revision에서 관측한 모든 non-primary ref를 정확히 열거해야 하며,
+selected `primary:3` 외 ref나 additional ref를 허용하지 않는다. 배포 script는 Secret Manager의
+Supabase service-role 값을 argv, stdout, stderr, shell trace에 넣지 않고 readiness RPC를
+staging 전과 promotion 직전에 각각 다시 호출한다. 어느 ledger count가 0이 아니거나 evidence가
+누락·변조됐거나 slot set이 다르면 staging/promotion을 중단한다. 성공 후 prune `--check`는
+exact `APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3` 하나만 허용한다.
+
+4. 선택 secret reference가 exact `ai-baram-v2-apify-primary:3`이고 Cloud Run inventory에 다른 Apify ref가 없음을 확인한다. token 값은 출력하지 않는다.
+5. Pre-run public admission/access-mode 상태를 정확히 복원해 `ANALYSIS_V2_ADMISSION_ENABLED=true`인지 확인한다. normal no-header 요청은 `production`에 남고 공개 preflight/earlybird intake를 계속 사용할 수 있어야 한다. paid webhook은 계속 `awaiting_operator`까지만 만들며 outbox/operator approval 없이 자동 fulfillment나 공개 분석 dispatch를 시작하지 않는다.
+6. Commercial display terms are defined only by the canonical ["Groble 얼리버드 표시안 (성공 E2E 후 확정)" block](./operations-cost-model.md). Payment integration is outside this E2E's scope and remains on a separate branch; do not implement or enable it as part of this run.
 
 ## 2026-07-16 canary evidence
 

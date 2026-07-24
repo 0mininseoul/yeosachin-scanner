@@ -74,6 +74,27 @@ describe('analysis V2 senary Apify credential migration contract', () => {
             /GRANT EXECUTE ON FUNCTION public\.settle_analysis_v2_provider_run_for_cleanup\([\s\S]*?TO service_role/
         );
     });
+
+    it('adds a service-only, bounded prune-readiness RPC for every affected ledger', () => {
+        const readiness = functionDefinition(
+            'analysis_v2_apify_secret_ref_prune_readiness'
+        );
+        expect(readiness).toContain('SECURITY DEFINER');
+        expect(readiness).toContain("SET search_path = ''");
+        expect(readiness).toContain("slot = 'primary'");
+        expect(readiness).toContain('analysis_v2_provider_runs');
+        expect(readiness).toContain('analysis_preflight_provider_runs');
+        expect(readiness).toContain('analysis_v2_profile_repair_canary_runs');
+        expect(readiness).toContain("'starting', 'running', 'ambiguous'");
+        expect(readiness).toContain('usage_reconciled_at IS NULL');
+        expect(readiness).not.toContain('analysis_v2_profile_provider_canary_runs');
+        expect(migration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.analysis_v2_apify_secret_ref_prune_readiness\(TEXT\[\]\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(migration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.analysis_v2_apify_secret_ref_prune_readiness\(TEXT\[\]\)[\s\S]*?TO service_role/
+        );
+    });
 });
 
 const describeDatabase = migration === '' ? describe.skip : describe;
@@ -132,6 +153,22 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
             CREATE TABLE public.analysis_v2_provider_cleanup_intents (
                 request_id UUID PRIMARY KEY,
                 completed_at TIMESTAMP WITH TIME ZONE
+            );
+
+            CREATE TABLE public.analysis_preflight_provider_runs (
+                preflight_id UUID PRIMARY KEY,
+                credential_slot TEXT NOT NULL,
+                status TEXT NOT NULL,
+                usage_reconciled_at TIMESTAMP WITH TIME ZONE
+            );
+
+            CREATE TABLE public.analysis_v2_profile_repair_canary_runs (
+                source_request_id UUID NOT NULL,
+                repetition INTEGER NOT NULL,
+                credential_slot TEXT NOT NULL,
+                state TEXT NOT NULL,
+                usage_reconciled_at TIMESTAMP WITH TIME ZONE,
+                PRIMARY KEY (source_request_id, repetition)
             );
 
             CREATE OR REPLACE FUNCTION public.analysis_v2_provider_run_json(
@@ -215,6 +252,150 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
                 status: 'failed',
                 actualUsageUsd: 0.01,
             });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('returns ready only after affected request, preflight, and repair-canary runs drain', async () => {
+        const callReadiness = () => db.query<{
+            result: {
+                ready: boolean;
+                activeRequestRuns: number;
+                unreconciledRequestRuns: number;
+                activePreflightRuns: number;
+                unreconciledPreflightRuns: number;
+                activeProfileRepairCanaryRuns: number;
+                unreconciledProfileRepairCanaryRuns: number;
+            };
+        }>(`
+            SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
+                ARRAY['senary', 'quinary', 'tertiary']::TEXT[]
+            ) AS result
+        `);
+
+        await db.query(`
+            INSERT INTO public.analysis_preflight_provider_runs (
+                preflight_id, credential_slot, status, usage_reconciled_at
+            ) VALUES (
+                '40000000-0000-4000-8000-000000000001',
+                'tertiary', 'failed', NULL
+            ), (
+                '40000000-0000-4000-8000-000000000002',
+                'quinary', 'running', NULL
+            )
+        `);
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_runs (
+                request_id, job_key, operation_key, input_hash, job_claim_token,
+                reservation_token, logical_provider, actor_id, credential_slot,
+                max_charge_usd, status, run_id, reserved_at, run_started_at,
+                terminalized_at, usage_reconciled_at, updated_at
+            ) VALUES (
+                '60000000-0000-4000-8000-000000000001',
+                'active', 'operation:active', '${'c'.repeat(64)}',
+                '61000000-0000-4000-8000-000000000001',
+                '62000000-0000-4000-8000-000000000001',
+                'apify', 'actor/test', 'senary', 0.02, 'starting', NULL,
+                pg_catalog.clock_timestamp(), NULL, NULL, NULL,
+                pg_catalog.clock_timestamp()
+            ), (
+                '60000000-0000-4000-8000-000000000002',
+                'unreconciled', 'operation:unreconciled', '${'d'.repeat(64)}',
+                '61000000-0000-4000-8000-000000000002',
+                '62000000-0000-4000-8000-000000000002',
+                'apify', 'actor/test', 'quinary', 0.02, 'failed',
+                'UnreconciledRun123',
+                pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(),
+                pg_catalog.clock_timestamp(), NULL,
+                pg_catalog.clock_timestamp()
+            )
+        `);
+        await db.query(`
+            INSERT INTO public.analysis_v2_profile_repair_canary_runs (
+                source_request_id, repetition, credential_slot, state,
+                usage_reconciled_at
+            ) VALUES (
+                '50000000-0000-4000-8000-000000000001',
+                1, 'quinary', 'ambiguous', NULL
+            ), (
+                '50000000-0000-4000-8000-000000000002',
+                1, 'tertiary', 'failed', NULL
+            )
+        `);
+
+        await db.exec('SET ROLE service_role');
+        try {
+            const blocked = await callReadiness();
+            expect(blocked.rows[0].result).toMatchObject({
+                ready: false,
+                activeRequestRuns: 1,
+                unreconciledRequestRuns: 1,
+                activePreflightRuns: 1,
+                unreconciledPreflightRuns: 1,
+                activeProfileRepairCanaryRuns: 1,
+                unreconciledProfileRepairCanaryRuns: 1,
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+        await db.query(`DELETE FROM public.analysis_preflight_provider_runs`);
+        await db.query(`
+            DELETE FROM public.analysis_v2_provider_runs
+            WHERE request_id IN (
+                '60000000-0000-4000-8000-000000000001',
+                '60000000-0000-4000-8000-000000000002'
+            )
+        `);
+        await db.query(`DELETE FROM public.analysis_v2_profile_repair_canary_runs`);
+        await db.exec('SET ROLE service_role');
+        try {
+            const ready = await callReadiness();
+            expect(ready.rows[0].result).toMatchObject({
+                ready: true,
+                activeRequestRuns: 0,
+                unreconciledPreflightRuns: 0,
+                activeProfileRepairCanaryRuns: 0,
+            });
+            expect(ready.rows[0].result).toMatchObject({
+                dropSlots: ['quinary', 'senary', 'tertiary'],
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('rejects primary, duplicate, unsupported, empty, and null prune slots', async () => {
+        await db.exec('SET ROLE service_role');
+        try {
+            for (const expression of [
+                "ARRAY['primary']::TEXT[]",
+                "ARRAY['senary', 'senary']::TEXT[]",
+                "ARRAY['septenary']::TEXT[]",
+                'ARRAY[]::TEXT[]',
+                'NULL::TEXT[]',
+            ]) {
+                await expect(db.query(`
+                    SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
+                        ${expression}
+                    )
+                `)).rejects.toThrow(
+                    'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_SLOTS_INVALID'
+                );
+            }
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('does not expose prune readiness to an authenticated application role', async () => {
+        await db.exec('SET ROLE authenticated');
+        try {
+            await expect(db.query(`
+                SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
+                    ARRAY['senary']::TEXT[]
+                )
+            `)).rejects.toThrow(/permission denied/i);
         } finally {
             await db.exec('RESET ROLE');
         }

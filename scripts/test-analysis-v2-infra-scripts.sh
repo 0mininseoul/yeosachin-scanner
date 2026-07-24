@@ -31,6 +31,47 @@ assert_not_contains() {
 }
 
 mkdir -p "$temp_dir/bin"
+cat >"$temp_dir/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+config="$(cat)"
+[[ "$config" == *'apikey: SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'* ]] \
+  || exit 89
+[[ "$config" == *'Authorization: Bearer SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'* ]] \
+  || exit 89
+if [[ -n "${FAKE_PRUNE_READINESS_COUNT_FILE:-}" ]]; then
+  count='0'
+  [[ ! -f "$FAKE_PRUNE_READINESS_COUNT_FILE" ]] \
+    || count="$(<"$FAKE_PRUNE_READINESS_COUNT_FILE")"
+  printf '%s\n' "$((10#$count + 1))" >"$FAKE_PRUNE_READINESS_COUNT_FILE"
+fi
+case "${FAKE_PRUNE_READINESS_MODE:-ready}" in
+  ready)
+    printf '%s\n' "${FAKE_PRUNE_READINESS_JSON:-{\"ready\":true,\"dropSlots\":[\"quinary\",\"senary\",\"tertiary\"],\"activeRequestRuns\":0,\"unreconciledRequestRuns\":0,\"activePreflightRuns\":0,\"unreconciledPreflightRuns\":0,\"activeProfileRepairCanaryRuns\":0,\"unreconciledProfileRepairCanaryRuns\":0}}"
+    ;;
+  active)
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":1,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0}'
+    ;;
+  unreconciled-request)
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":1,"activePreflightRuns":0,"unreconciledPreflightRuns":0,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0}'
+    ;;
+  unreconciled-preflight)
+    printf '%s\n' '{"ready":false,"dropSlots":["quinary","senary","tertiary"],"activeRequestRuns":0,"unreconciledRequestRuns":0,"activePreflightRuns":0,"unreconciledPreflightRuns":1,"activeProfileRepairCanaryRuns":0,"unreconciledProfileRepairCanaryRuns":0}'
+    ;;
+  invalid)
+    printf '%s\n' '{"ready":true}'
+    ;;
+  missing)
+    exit 22
+    ;;
+  *)
+    exit 90
+    ;;
+esac
+EOF
+chmod +x "$temp_dir/bin/curl"
+
 cat >"$temp_dir/bin/gcloud" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -350,6 +391,9 @@ case "$command_line" in
     jq -nc \
       --arg name "projects/123456789012/secrets/$secret_id/versions/$version" \
       '{name: $name, state: "ENABLED"}'
+    ;;
+  "secrets versions access"*)
+    printf '%s\n' 'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
     ;;
   "secrets versions list"*)
     [[ "$identity_ready" == "true" ]] || exit 1
@@ -725,6 +769,12 @@ case "$command_line" in
           *",${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-quinary},"*) ;;
           *) apify_secret_slots="$apify_secret_slots,${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-quinary}" ;;
         esac
+      fi
+      if [[ "${FAKE_GCLOUD_PRUNE_PRIMARY_ONLY:-false}" == "true" \
+        && ( "$state" == "staged_build" || "$state" == "staged_final" \
+          || "$state" == "promoted" ) ]]; then
+        apify_secret_slots='primary'
+        apify_secret_version='3'
       fi
       if [[ "$state" == "staged_final" || "$state" == "promoted" \
         || "$state" == "rolled_back" || "$state" == "rolled_back_bootstrap" ]]; then
@@ -1298,6 +1348,14 @@ EOF
 cat >"$temp_dir/runtime-secondary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="secondary"
+SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
+SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
+SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
+EOF
+
+cat >"$temp_dir/runtime-primary-slot.env" <<'EOF'
+ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT="primary"
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
@@ -2383,6 +2441,190 @@ assert_contains "$temp_dir/worker-secondary-slot-recovery.out" \
   'APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7'
 assert_not_contains "$temp_dir/worker-secondary-slot-recovery.out" \
   'APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:6'
+
+# Explicit pruning is the only path that may remove valid recovery refs. It is
+# primary:3-only, exact-slot, and backed by bounded service-role evidence.
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=7' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-ready.out"
+assert_contains "$temp_dir/worker-prune-ready.out" \
+  'verified: authoritative zero-active/zero-unreconciled evidence for exact Apify refs'
+assert_contains "$temp_dir/worker-prune-ready.out" \
+  'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3'
+for removed_assignment in \
+  'APIFY_TERTIARY_API_TOKEN=' \
+  'APIFY_QUINARY_API_TOKEN=' \
+  'APIFY_SENARY_API_TOKEN='; do
+  assert_not_contains "$temp_dir/worker-prune-ready.out" "$removed_assignment"
+done
+assert_not_contains "$temp_dir/worker-prune-ready.out" \
+  'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+
+# A failed post-promotion verification can safely roll traffic back to the old
+# temporary-slot revision while leaving the latest template primary-only. Only
+# the audited prune retry may recover from that intentionally divergent state.
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION=7' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-rollback-retry.out"
+assert_contains "$temp_dir/worker-prune-rollback-retry.out" \
+  'verified: authoritative zero-active/zero-unreconciled evidence for exact Apify refs'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'FAKE_PRUNE_READINESS_MODE=invalid' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash -x "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-trace.out" 2>&1; then
+  fail "trace-mode explicit pruning accepted invalid evidence"
+fi
+assert_not_contains "$temp_dir/worker-prune-trace.out" \
+  'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+
+for blocked_mode in active unreconciled-request unreconciled-preflight invalid missing; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
+    'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+    'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+    'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+    'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+    "FAKE_PRUNE_READINESS_MODE=$blocked_mode" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+      --prune-apify-secret-refs=tertiary,quinary,senary \
+    >"$temp_dir/worker-prune-$blocked_mode.out" 2>&1; then
+    fail "explicit pruning accepted blocked readiness: $blocked_mode"
+  fi
+  assert_not_contains "$temp_dir/worker-prune-$blocked_mode.out" \
+    'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+done
+
+for invalid_prune_case in \
+  'selected:senary' \
+  'version:latest' \
+  'version:7' \
+  'slots:primary' \
+  'slots:senary,senary' \
+  'slots:septenary' \
+  'slots:senary'; do
+  prune_slot='primary'
+  prune_version='3'
+  prune_refs='tertiary,quinary,senary'
+  case "$invalid_prune_case" in
+    selected:*) prune_slot="${invalid_prune_case#*:}" ;;
+    version:*) prune_version="${invalid_prune_case#*:}" ;;
+    slots:*) prune_refs="${invalid_prune_case#*:}" ;;
+  esac
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
+    'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+    'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+    "ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$prune_slot" \
+    "ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=$prune_version" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+      "--prune-apify-secret-refs=$prune_refs" \
+    >"$temp_dir/worker-prune-invalid.out" 2>&1; then
+    fail "explicit pruning accepted invalid contract: $invalid_prune_case"
+  fi
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:4' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-additional.out" 2>&1; then
+  fail "explicit pruning accepted additional recovery refs"
+fi
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-primary-only-check.out"
+assert_contains "$temp_dir/worker-prune-primary-only-check.out" \
+  'verified: private worker runtime, bounded scaling, and default dynamic egress'
+
+printf 'ready\n' >"$temp_dir/prune-apply-state"
+printf '0\n' >"$temp_dir/prune-readiness-count"
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_PRUNE_PRIMARY_ONLY=true' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/prune-apply-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_PRUNE_READINESS_COUNT_FILE=$temp_dir/prune-readiness-count" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-apply.out"
+[[ "$(<"$temp_dir/prune-readiness-count")" == "2" ]] \
+  || fail "explicit prune apply did not recheck readiness before promotion"
+[[ "$(<"$temp_dir/prune-apply-state")" == "promoted" ]] \
+  || fail "explicit prune apply did not promote the primary-only revision"
+assert_not_contains "$temp_dir/worker-prune-apply.out" \
+  'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-extra-ref-check.out" 2>&1; then
+  fail "explicit prune check accepted a non-primary recovery ref"
+fi
+assert_contains "$temp_dir/worker-prune-extra-ref-check.out" \
+  'explicit prune check requires exactly APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3'
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary' \

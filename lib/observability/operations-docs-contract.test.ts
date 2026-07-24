@@ -258,6 +258,28 @@ describe('analytics and observability disclosure contract', () => {
         );
         expect(exampleEnv).toContain('ANALYSIS_V2_APIFY_API_TOKEN_SLOT=senary');
         expect(plan).toContain('target profile and profile fallback/repair: senary');
+        for (const document of [runbook, plan]) {
+            expect(document).toContain(
+                '--prune-apify-secret-refs=tertiary,quinary,senary'
+            );
+            expect(document).toMatch(/primary:3/);
+            expect(document).toMatch(/active/i);
+            expect(document).toMatch(/unreconciled|미정산/i);
+            expect(document).toMatch(/profile-repair/i);
+        }
+        expect(runbook).toContain(
+            'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3'
+        );
+        for (const mode of ['--dry-run', '--check']) {
+            expect(runbook).toContain(
+                `bash scripts/deploy-analysis-v2-worker.sh ${mode}`
+            );
+        }
+        expect(runbook).toMatch(
+            /bash scripts\/deploy-analysis-v2-worker\.sh \\\n\s+--prune-apify-secret-refs=tertiary,quinary,senary/
+        );
+        expect(runbook).toMatch(/staging 전과 promotion 직전/);
+        expect(runbook).toMatch(/일반 deploy[\s\S]{0,120}보존/);
 
         const plus = ANALYSIS_PLAN_CATALOG.plus;
         const relationshipRate = dotenvNumber(

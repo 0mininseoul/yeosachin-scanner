@@ -124,7 +124,14 @@ Run the Bash contract suites and focused TypeScript tests.
   same-named senary selected secret plus quinary/tertiary additional secrets with sharding disabled,
   activate only the sharding flag, then disable sharding and restore `primary:3` during teardown.
 - Retain the one-owner, one-target, signed `test_entitlement` boundary.
-- Retain fail-closed teardown: sharding off, temporary nonselected refs/env removed, normal primary restored.
+- Retain fail-closed teardown: sharding off, then use only
+  `--prune-apify-secret-refs=tertiary,quinary,senary` with exact selected
+  `primary:3`. The service-role readiness RPC must prove zero active and zero
+  unreconciled request/preflight runs plus zero active, ambiguous, or
+  unreconciled 5-slot profile-repair canary runs for those exact slots before
+  staging and again immediately before promotion. Ordinary deploy/check keeps
+  preserving valid recovery refs; prune `--check` requires a primary-only
+  inventory.
 - Explicitly say profile-repair microcanary does not support senary.
 
 ## Task 6: Verification and commit

@@ -34,10 +34,11 @@ readonly -a APIFY_TOKEN_SLOTS=(
 mode="apply"
 reconcile_iam="false"
 reconcile_jobs="false"
+prune_apify_secret_refs_raw=""
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-analysis-v2-worker.sh [--dry-run | --check] [--reconcile-iam] [--reconcile-jobs]
+Usage: scripts/deploy-analysis-v2-worker.sh [--dry-run | --check] [--reconcile-iam] [--reconcile-jobs] [--prune-apify-secret-refs=SLOTS]
 
 Source-deploys or verifies the private V2 Cloud Run worker, then composes with
 configure-analysis-v2-tasks-queue.sh for queue, OIDC, and recovery IAM setup.
@@ -127,6 +128,10 @@ Options:
   --check    Verify deployed config and composed queue/IAM without changing it.
   --reconcile-iam   Replace reviewed drifted queue/task/Run IAM.
   --reconcile-jobs  Replace reviewed drifted maintenance Scheduler jobs.
+  --prune-apify-secret-refs=SLOTS
+              Opt-in removal of the exact comma-separated non-primary refs.
+              Requires selected primary version 3, no additional refs, and
+              authoritative zero-active/zero-unreconciled DB evidence twice.
   -h, --help Show this help.
 EOF
 }
@@ -272,6 +277,36 @@ parse_additional_apify_secret_versions() {
       --arg secret "ai-baram-v2-apify-$slot" \
       --arg version "$version" \
       '$refs + [{env: $env, secret: $secret, version: $version}]')"
+  done
+}
+
+parse_prune_apify_secret_refs() {
+  local raw="$prune_apify_secret_refs_raw"
+  local slot
+  local seen=','
+  local -a slots=()
+
+  prune_apify_secret_refs_json='[]'
+  prune_apify_secret_refs_enabled="false"
+  [[ -n "$raw" ]] || return 0
+  prune_apify_secret_refs_enabled="true"
+  IFS=',' read -r -a slots <<<"$raw"
+  ((${#slots[@]} > 0 && ${#slots[@]} <= 5)) \
+    || die "--prune-apify-secret-refs requires one through five exact non-primary slots"
+  for slot in "${slots[@]}"; do
+    [[ -n "$slot" && "$slot" != "primary" ]] \
+      || die "--prune-apify-secret-refs must not include the selected primary slot"
+    validate_slot "$slot"
+    case "$seen" in
+      *",$slot,"*)
+        die "--prune-apify-secret-refs contains a duplicate slot"
+        ;;
+    esac
+    seen="$seen$slot,"
+    prune_apify_secret_refs_json="$(jq -cn \
+      --argjson slots "$prune_apify_secret_refs_json" \
+      --arg slot "$slot" \
+      '$slots + [$slot] | sort')"
   done
 }
 
@@ -791,6 +826,7 @@ verify_existing_service_secret_identity() {
     --arg requested_env "$apify_env_key" \
     --arg requested_secret "$apify_secret_id" \
     --arg requested_version "$apify_secret_version" \
+    --argjson allow_prune_retry "$prune_apify_secret_refs_enabled" \
     --argjson latest "$latest_identity" \
     --argjson active "$active_identity" '
       def requested_ref($identity):
@@ -801,8 +837,9 @@ verify_existing_service_secret_identity() {
           secret: $requested_secret,
           version: $requested_version
         }];
-      ([$active.refs[]
-          | select(. as $ref | $latest.refs | index($ref) | not)] | length) == 0
+      ($allow_prune_retry
+        or ([$active.refs[]
+          | select(. as $ref | $latest.refs | index($ref) | not)] | length) == 0)
         and ($latest.runtimeSlot == $active.runtimeSlot
           or $latest.runtimeSlot == $requested_slot)
         and (requested_ref($latest) | length) <= 1
@@ -816,10 +853,70 @@ verify_existing_service_secret_identity() {
     || die "existing worker Apify references are invalid or the selected slot version changed; active and latest identities must agree, latest may not drop an active recovery reference, and same-slot overwrite can strand unresolved runs and account identity"
 }
 
+verify_prune_apify_secret_inventory() {
+  local latest_config="$1"
+  local active_config="$2"
+  local latest_identity
+  local active_identity
+  local observed_drop_slots
+
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+  latest_identity="$(apify_identity_for_existing_config "$latest_config")" \
+    || die "latest Cloud Run Apify inventory is invalid for explicit pruning"
+  active_identity="$(apify_identity_for_existing_config "$active_config")" \
+    || die "active Cloud Run Apify inventory is invalid for explicit pruning"
+
+  if [[ "$mode" == "check" ]]; then
+    jq -ne \
+      --argjson latest "$latest_identity" \
+      --argjson active "$active_identity" '
+        def primary_only:
+          .runtimeSlot == "primary"
+          and .refs == [{
+            env: "APIFY_PRIMARY_API_TOKEN",
+            secret: "ai-baram-v2-apify-primary",
+            version: "3"
+          }];
+        ($latest | primary_only) and ($active | primary_only)
+      ' >/dev/null \
+      || die "explicit prune check requires exactly APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3"
+    return 0
+  fi
+
+  observed_drop_slots="$(jq -cn \
+    --argjson latest "$latest_identity" \
+    --argjson active "$active_identity" '
+      [$latest.refs[], $active.refs[]
+        | select(.env != "APIFY_PRIMARY_API_TOKEN")
+        | .env
+        | sub("^APIFY_"; "")
+        | sub("_API_TOKEN$"; "")
+        | ascii_downcase]
+      | unique
+      | sort
+    ')"
+  [[ "$observed_drop_slots" == "$prune_apify_secret_refs_json" ]] \
+    || die "--prune-apify-secret-refs must exactly name every observed non-primary ref in latest and active Cloud Run inventory"
+}
+
 prepare_apify_secret_assignments() {
   local config="${1:-}"
   local retained_refs='[]'
   local combined_refs='[]'
+  if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
+    expected_apify_secret_refs_json="$(jq -cn \
+      --arg selected_env "$apify_env_key" \
+      --arg selected_secret "$apify_secret_id" \
+      --arg selected_version "$apify_secret_version" '
+        [{
+          env: $selected_env,
+          secret: $selected_secret,
+          version: $selected_version
+        }]
+      ')"
+    apify_secret_assignments="$apify_env_key=$apify_secret_id:$apify_secret_version"
+    return 0
+  fi
   if [[ -n "$config" ]]; then
     retained_refs="$(jq -ce \
       --arg selected_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
@@ -898,6 +995,62 @@ prepare_apify_secret_assignments() {
   apify_secret_assignments="$(jq -r '
       map("\(.env)=\(.secret):\(.version)") | join(",")
     ' <<<"$expected_apify_secret_refs_json")"
+}
+
+verify_apify_secret_ref_prune_readiness() {
+  local request_json
+  local response
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+
+  request_json="$(jq -cn \
+    --argjson slots "$prune_apify_secret_refs_json" \
+    '{p_drop_slots: $slots}')"
+  response="$(
+    gcloud secrets versions access "$supabase_secret_version" \
+      "--secret=$SUPABASE_SECRET_ID" \
+      "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+      | awk '
+          NR == 1 && length($0) > 0 {
+            printf "apikey: %s\\n", $0
+            printf "Authorization: Bearer %s\\n", $0
+            next
+          }
+          { exit 42 }
+          END { if (NR != 1) exit 42 }
+        ' \
+      | curl --silent --show-error --fail-with-body \
+          --header @- \
+          --request POST \
+          --header 'Content-Type: application/json' \
+          --url "${supabase_public_url%/}/rest/v1/rpc/analysis_v2_apify_secret_ref_prune_readiness" \
+          --data-binary "$request_json"
+  )" || die "authoritative Apify secret-ref prune readiness could not be obtained"
+
+  jq -e \
+    --argjson requested_slots "$prune_apify_secret_refs_json" '
+      (keys | sort) == ([
+        "activePreflightRuns",
+        "activeProfileRepairCanaryRuns",
+        "activeRequestRuns",
+        "dropSlots",
+        "ready",
+        "unreconciledPreflightRuns",
+        "unreconciledProfileRepairCanaryRuns",
+        "unreconciledRequestRuns"
+      ] | sort)
+      and .dropSlots == $requested_slots
+      and .ready == true
+      and ([
+        .activeRequestRuns,
+        .unreconciledRequestRuns,
+        .activePreflightRuns,
+        .unreconciledPreflightRuns,
+        .activeProfileRepairCanaryRuns,
+        .unreconciledProfileRepairCanaryRuns
+      ] | all(type == "number" and . == 0))
+    ' <<<"$response" >/dev/null \
+    || die "authoritative Apify secret-ref prune readiness is invalid or not ready"
+  log "verified: authoritative zero-active/zero-unreconciled evidence for exact Apify refs"
 }
 
 service_origin() {
@@ -1349,10 +1502,14 @@ deploy_or_verify_service() {
       || die "Cloud Run traffic tags are forbidden while Gemini concurrency is process-local"
     resolve_known_good_service_revision "$config"
     verify_existing_service_secret_identity "$config" "$known_good_config"
+    verify_prune_apify_secret_inventory "$config" "$known_good_config"
     prepare_apify_secret_assignments "$config"
+    verify_apify_secret_ref_prune_readiness
   else
     lookup_status="$?"
     if [[ "$lookup_status" == "$SERVICE_JSON_NOT_FOUND_STATUS" ]]; then
+      [[ "$prune_apify_secret_refs_enabled" != "true" ]] \
+        || die "--prune-apify-secret-refs requires an existing Cloud Run service"
       initial_deployment="true"
       prepare_apify_secret_assignments
     else
@@ -1801,6 +1958,7 @@ promote_staged_revision() {
     || die "Cloud Run service was not observable immediately before promotion"
   service_traffic_matches_revision "$config" "$known_good_revision" \
     || die "live traffic changed after staging; refusing a concurrent promotion"
+  verify_apify_secret_ref_prune_readiness
   rollback_armed="true"
   gcloud run services update-traffic \
     "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
@@ -1835,6 +1993,13 @@ while (($# > 0)); do
       ;;
     --reconcile-jobs)
       reconcile_jobs="true"
+      ;;
+    --prune-apify-secret-refs=*)
+      [[ -z "$prune_apify_secret_refs_raw" ]] \
+        || die "--prune-apify-secret-refs may be supplied only once"
+      prune_apify_secret_refs_raw="${1#*=}"
+      [[ -n "$prune_apify_secret_refs_raw" ]] \
+        || die "--prune-apify-secret-refs requires a comma-separated slot list"
       ;;
     -h|--help)
       usage
@@ -1940,6 +2105,19 @@ validate_numeric_version "$preflight_identity_hmac_secret_version" \
 command -v jq >/dev/null 2>&1 || die "jq is required"
 explicit_additional_apify_refs_json='[]'
 parse_additional_apify_secret_versions
+prune_apify_secret_refs_json='[]'
+prune_apify_secret_refs_enabled="false"
+parse_prune_apify_secret_refs
+if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
+  [[ "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" == "primary" ]] \
+    || die "--prune-apify-secret-refs requires ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary"
+  [[ "$apify_secret_version" == "3" ]] \
+    || die "--prune-apify-secret-refs requires ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3"
+  [[ "$explicit_additional_apify_refs_json" == '[]' ]] \
+    || die "--prune-apify-secret-refs forbids ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS"
+  [[ -n "$worker_build_env_file" ]] \
+    || die "--prune-apify-secret-refs requires ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE for the authoritative Supabase URL"
+fi
 [[ "$worker_enabled" == "true" || "$worker_enabled" == "false" ]] \
   || die "ANALYSIS_V2_WORKER_ENABLED must be true or false"
 [[ "$recovery_enabled" == "true" || "$recovery_enabled" == "false" ]] \
@@ -2045,6 +2223,12 @@ if [[ -n "$worker_build_env_file" ]]; then
     || die "build env file must be a valid, duplicate-free YAML mapping"
   validate_build_env_keys "$worker_build_env_file" "$build_env_json"
   write_env_snapshot "$build_env_json" build worker_build_env_deploy_file
+fi
+supabase_public_url=""
+if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
+  supabase_public_url="$(jq -er '.NEXT_PUBLIC_SUPABASE_URL' <<<"$build_env_json")" \
+    || die "build env file must expose the authoritative Supabase URL for pruning"
+  command -v curl >/dev/null 2>&1 || die "curl is required for authoritative pruning"
 fi
 validate_service_account_email "$worker_build_service_account" \
   "ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT"
