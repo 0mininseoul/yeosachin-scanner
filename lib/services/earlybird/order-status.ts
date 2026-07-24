@@ -18,9 +18,10 @@ export type EarlybirdOrderSystemStatus = z.infer<typeof earlybirdOrderSystemStat
 const orderRowSchema = z.object({
     id: z.string().uuid(),
     user_id: z.string().uuid(),
+    preflight_id: z.string().uuid(),
     target_instagram_id: z.string().min(1).max(30),
     plan_id: z.enum(['basic', 'standard']),
-    actual_amount_krw: z.number().int().positive().nullable(),
+    actual_amount_krw: z.number().int().nonnegative().nullable(),
     status: earlybirdOrderSystemStatusSchema,
     paid_at: z.string().datetime({ offset: true }).nullable(),
     due_at: z.string().datetime({ offset: true }).nullable(),
@@ -51,6 +52,7 @@ const PLAN_NAMES = { basic: 'Basic', standard: 'Standard' } as const;
 
 export interface EarlybirdOrderStatusDto {
     orderId: string;
+    preflightId: string;
     targetInstagramId: string;
     planId: 'basic' | 'standard';
     planName: 'Basic' | 'Standard';
@@ -76,7 +78,7 @@ export async function loadLatestEarlybirdOrder(
 ): Promise<EarlybirdOrderStatusDto | null> {
     let query = supabaseAdmin
         .from('earlybird_orders')
-        .select('id, user_id, target_instagram_id, plan_id, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, created_at')
+        .select('id, user_id, preflight_id, target_instagram_id, plan_id, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, created_at')
         .eq('user_id', userId);
     if (planId) query = query.eq('plan_id', planId);
     const { data, error } = await query
@@ -110,6 +112,7 @@ export async function loadLatestEarlybirdOrder(
 
     return Object.freeze({
         orderId: order.id,
+        preflightId: order.preflight_id,
         targetInstagramId: order.target_instagram_id,
         planId: order.plan_id,
         planName: PLAN_NAMES[order.plan_id],

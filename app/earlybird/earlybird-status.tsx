@@ -14,6 +14,7 @@ import {
     earlybirdStatusEventKey,
     paymentConfirmationEventKey,
 } from '@/lib/services/earlybird/analytics-state';
+import { recoverPendingEarlybirdCheckout } from '@/lib/services/earlybird/ui-state';
 
 function formatTimestamp(value: string): string {
     return new Intl.DateTimeFormat('ko-KR', {
@@ -36,6 +37,9 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     const trackedRef = useRef(new Set<string>());
     const router = useRouter();
     const [notifyModalOpen, setNotifyModalOpen] = useState(false);
+    const [checkoutRecoveryPending, setCheckoutRecoveryPending] = useState(false);
+    const [checkoutRecoveryError, setCheckoutRecoveryError] = useState<string | null>(null);
+    const checkoutRecoveryGuardRef = useRef({ inFlight: false });
 
     useEffect(() => {
         if (!notifyModalOpen) return;
@@ -68,6 +72,20 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             }
         }
     }, [order]);
+
+    const handleCheckoutRecovery = async () => {
+        setCheckoutRecoveryError(null);
+        await recoverPendingEarlybirdCheckout(
+            order.preflightId,
+            checkoutRecoveryGuardRef.current,
+            {
+                request: fetch,
+                redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl),
+                setPending: setCheckoutRecoveryPending,
+                showError: setCheckoutRecoveryError,
+            }
+        );
+    };
 
     return (
         <>
@@ -108,6 +126,31 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 >
                     판독 결과 확인하기
                 </Link>
+            ) : order.systemStatus === 'payment_pending' ? (
+                <>
+                    <PrimaryButton
+                        className="mt-5"
+                        disabled={checkoutRecoveryPending}
+                        onClick={handleCheckoutRecovery}
+                    >
+                        {checkoutRecoveryPending ? '결제창 불러오는 중…' : '결제 계속하기'}
+                    </PrimaryButton>
+                    {checkoutRecoveryError && (
+                        <p
+                            className="mt-3 text-center text-[12px] leading-relaxed text-blood"
+                            role="alert"
+                        >
+                            {checkoutRecoveryError}
+                        </p>
+                    )}
+                    <button
+                        type="button"
+                        className="mt-4 w-full text-center text-[13px] font-semibold text-fg-dim"
+                        onClick={() => setNotifyModalOpen(true)}
+                    >
+                        이메일 알림 받기
+                    </button>
+                </>
             ) : (
                 <PrimaryButton className="mt-5" onClick={() => setNotifyModalOpen(true)}>
                     이메일 알림 받기

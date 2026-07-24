@@ -447,4 +447,125 @@ describe('earlybird analyze UI state', () => {
             'redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl)'
         );
     });
+
+    it('continues one pending checkout at a time and redirects only to the safe server URL', async () => {
+        const recover = (
+            earlybirdUiState as unknown as {
+                recoverPendingEarlybirdCheckout?: (
+                    preflightId: string,
+                    guard: { inFlight: boolean },
+                    dependencies: Record<string, unknown>
+                ) => Promise<string>;
+            }
+        ).recoverPendingEarlybirdCheckout;
+        expect(recover).toBeTypeOf('function');
+
+        let resolveRequest!: (response: Response) => void;
+        const request = vi.fn().mockReturnValue(new Promise<Response>((resolve) => {
+            resolveRequest = resolve;
+        }));
+        const redirectCheckout = vi.fn();
+        const setPending = vi.fn();
+        const showError = vi.fn();
+        const guard = { inFlight: false };
+        const preflightId = '10000000-0000-4000-8000-000000000001';
+        const dependencies = {
+            request,
+            redirectCheckout,
+            setPending,
+            showError,
+        };
+
+        const first = recover!(preflightId, guard, dependencies);
+        await expect(recover!(preflightId, guard, dependencies)).resolves.toBe(
+            'already_in_progress'
+        );
+        expect(request).toHaveBeenCalledTimes(1);
+        expect(setPending).toHaveBeenCalledTimes(1);
+        expect(setPending).toHaveBeenCalledWith(true);
+
+        resolveRequest(new Response(JSON.stringify({
+            orderId: '20000000-0000-4000-8000-000000000001',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+                + '?ref=ord.0123456789abcdef0123456789abcdef',
+        }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        }));
+
+        await expect(first).resolves.toBe('checkout_recovered');
+        expect(request).toHaveBeenCalledWith('/api/earlybird/checkout', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ preflightId }),
+        });
+        expect(redirectCheckout).toHaveBeenCalledOnce();
+        expect(showError).not.toHaveBeenCalled();
+        expect(setPending).toHaveBeenLastCalledWith(false);
+        expect(guard.inFlight).toBe(false);
+    });
+
+    it.each([
+        [
+            409,
+            'CHECKOUT_PHONE_REQUIRED',
+            '카카오 전화번호 확인이 만료되었습니다. 다시 로그인한 뒤 시도해주세요.',
+        ],
+        [
+            409,
+            'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+            '현재 주문은 결제를 이어갈 수 없습니다. 새로고침 후 상태를 확인해주세요.',
+        ],
+        [
+            404,
+            'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND',
+            '이어갈 결제 내역을 찾지 못했습니다. 새로고침 후 다시 확인해주세요.',
+        ],
+    ])('shows a bounded friendly error for recovery HTTP %i %s', async (
+        httpStatus,
+        code,
+        expectedMessage
+    ) => {
+        const recover = (
+            earlybirdUiState as unknown as {
+                recoverPendingEarlybirdCheckout: (
+                    preflightId: string,
+                    guard: { inFlight: boolean },
+                    dependencies: Record<string, unknown>
+                ) => Promise<string>;
+            }
+        ).recoverPendingEarlybirdCheckout;
+        const showError = vi.fn();
+
+        await expect(recover(
+            '10000000-0000-4000-8000-000000000001',
+            { inFlight: false },
+            {
+                request: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+                    code,
+                    error: 'internal seller reference ord.secret must never be shown',
+                }), {
+                    status: httpStatus,
+                    headers: { 'content-type': 'application/json' },
+                })),
+                redirectCheckout: vi.fn(),
+                setPending: vi.fn(),
+                showError,
+            }
+        )).resolves.toBe('recovery_failed');
+        expect(showError).toHaveBeenCalledWith(expectedMessage);
+        expect(JSON.stringify(showError.mock.calls)).not.toContain('ord.secret');
+    });
+
+    it('wires the pending-order status to a disabled, owner recovery action', () => {
+        const source = readFileSync(
+            new URL('../../../app/earlybird/earlybird-status.tsx', import.meta.url),
+            'utf8'
+        );
+        expect(source).toContain("order.systemStatus === 'payment_pending'");
+        expect(source).toContain('order.preflightId');
+        expect(source).toContain('recoverPendingEarlybirdCheckout(');
+        expect(source).toContain('disabled={checkoutRecoveryPending}');
+        expect(source).toContain('결제 계속하기');
+    });
 });

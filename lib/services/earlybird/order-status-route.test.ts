@@ -35,11 +35,13 @@ import { GET } from '@/app/api/earlybird/orders/latest/route';
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ORDER_ID = '123e4567-e89b-42d3-a456-426614174001';
 const RESULT_ID = '123e4567-e89b-42d3-a456-426614174002';
+const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174003';
 
 function orderRow(overrides: Record<string, unknown> = {}) {
     return {
         id: ORDER_ID,
         user_id: USER_ID,
+        preflight_id: PREFLIGHT_ID,
         target_instagram_id: 'target.account',
         plan_id: 'basic',
         actual_amount_krw: 14_900,
@@ -100,12 +102,13 @@ describe('earlybird owner order status route', () => {
         expect(mocks.orderQuery?.eq).toHaveBeenCalledWith('user_id', USER_ID);
         expect(mocks.orderQuery?.eq).toHaveBeenCalledWith('plan_id', 'basic');
         expect(mocks.orderQuery?.select).toHaveBeenCalledWith(
-            'id, user_id, target_instagram_id, plan_id, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, created_at'
+            'id, user_id, preflight_id, target_instagram_id, plan_id, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, created_at'
         );
         const body = await response.json();
         expect(body).toEqual({
             order: {
                 orderId: ORDER_ID,
+                preflightId: PREFLIGHT_ID,
                 targetInstagramId: 'target.account',
                 planId: 'basic',
                 planName: 'Basic',
@@ -119,6 +122,25 @@ describe('earlybird owner order status route', () => {
             },
         });
         expect(JSON.stringify(body)).not.toMatch(/payment_id|product|disclosure|buyer|card/);
+    });
+
+    it('returns a paid zero-KRW coupon order instead of dropping the owner history', async () => {
+        installQueries(orderRow({ actual_amount_krw: 0 }));
+
+        const response = await GET(new Request(
+            'https://example.com/api/earlybird/orders/latest'
+        ));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                orderId: ORDER_ID,
+                preflightId: PREFLIGHT_ID,
+                actualAmountKrw: 0,
+                systemStatus: 'paid',
+                displayStatus: '판독 대기',
+            },
+        });
     });
 
     it('returns 404 when the owner-scoped query finds no order', async () => {

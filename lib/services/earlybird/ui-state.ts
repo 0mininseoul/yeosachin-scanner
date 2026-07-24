@@ -41,6 +41,20 @@ interface StaleEarlybirdRecoveryDependencies {
     refreshActions: EarlybirdPricingRefreshActions;
 }
 
+export interface EarlybirdCheckoutRecoveryGuard {
+    inFlight: boolean;
+}
+
+interface PendingEarlybirdRecoveryDependencies {
+    request: (
+        input: RequestInfo | URL,
+        init?: RequestInit
+    ) => Promise<Response>;
+    redirectCheckout: (checkoutUrl: string) => void;
+    setPending: (pending: boolean) => void;
+    showError: (message: string) => void;
+}
+
 interface PlanCardAvailability {
     planId: PlanId;
     selectionState: 'required' | 'available_upgrade' | 'unavailable';
@@ -115,6 +129,62 @@ export async function recoverOrRefreshStaleEarlybirdPricing(
         dependencies.refreshActions
     );
     return 'pricing_refresh_required';
+}
+
+function pendingCheckoutRecoveryErrorMessage(code: string | null): string {
+    if (code === 'CHECKOUT_PHONE_REQUIRED' || code === 'UNAUTHORIZED') {
+        return '카카오 전화번호 확인이 만료되었습니다. 다시 로그인한 뒤 시도해주세요.';
+    }
+    if (code === 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE') {
+        return '현재 주문은 결제를 이어갈 수 없습니다. 새로고침 후 상태를 확인해주세요.';
+    }
+    if (code === 'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND') {
+        return '이어갈 결제 내역을 찾지 못했습니다. 새로고침 후 다시 확인해주세요.';
+    }
+    return '결제창을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.';
+}
+
+export async function recoverPendingEarlybirdCheckout(
+    preflightId: string,
+    guard: EarlybirdCheckoutRecoveryGuard,
+    dependencies: PendingEarlybirdRecoveryDependencies
+): Promise<'checkout_recovered' | 'already_in_progress' | 'recovery_failed'> {
+    if (guard.inFlight) return 'already_in_progress';
+    guard.inFlight = true;
+    dependencies.setPending(true);
+    try {
+        const response = await dependencies.request('/api/earlybird/checkout', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ preflightId }),
+        });
+        const payload: unknown = await response.json().catch(() => null);
+        if (
+            response.ok
+            && payload
+            && typeof payload === 'object'
+            && 'checkoutUrl' in payload
+            && typeof payload.checkoutUrl === 'string'
+            && isSafeGrobleCheckoutUrl(payload.checkoutUrl)
+        ) {
+            dependencies.redirectCheckout(payload.checkoutUrl);
+            return 'checkout_recovered';
+        }
+        const code = payload
+            && typeof payload === 'object'
+            && 'code' in payload
+            && typeof payload.code === 'string'
+            ? payload.code
+            : null;
+        dependencies.showError(pendingCheckoutRecoveryErrorMessage(code));
+        return 'recovery_failed';
+    } catch {
+        dependencies.showError(pendingCheckoutRecoveryErrorMessage(null));
+        return 'recovery_failed';
+    } finally {
+        guard.inFlight = false;
+        dependencies.setPending(false);
+    }
 }
 
 export function emitCurrentEarlybirdPricingEvent(

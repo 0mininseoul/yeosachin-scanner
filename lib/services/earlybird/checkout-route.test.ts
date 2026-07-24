@@ -355,7 +355,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
-    it('recovers the same owner-scoped pending v1 checkout without trusting client commerce fields', async () => {
+    it('recovers the same owner-scoped pending checkout after preflight expiry without trusting client commerce fields', async () => {
         const { ownerFilter, userFilter } = installRecoveryOrder(recoveryOrderRow());
         const response = await recoverCheckout({
             preflightId: PREFLIGHT_ID,
@@ -372,6 +372,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(ownerFilter).toHaveBeenCalledWith('user_id', USER_ID);
         expect(mocks.from).toHaveBeenCalledWith('users');
         expect(userFilter).toHaveBeenCalledWith('id', USER_ID);
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
         expect(mocks.rpc).not.toHaveBeenCalled();
 
         mocks.from.mockClear();
