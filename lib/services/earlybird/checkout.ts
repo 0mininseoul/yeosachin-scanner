@@ -52,7 +52,11 @@ export async function createEarlybirdCheckout(input: {
     return Object.freeze({
         orderId: record.orderId,
         created: record.created,
-        checkoutUrl: getGrobleCheckoutUrl(input.planId, config),
+        checkoutUrl: getGrobleCheckoutUrl(
+            input.planId,
+            record.sellerReference,
+            config
+        ),
     });
 }
 

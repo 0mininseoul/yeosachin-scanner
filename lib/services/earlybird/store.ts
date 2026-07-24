@@ -6,6 +6,9 @@ const checkoutResultSchema = z.array(z.object({
     created: z.boolean(),
 })).length(1);
 
+const sellerReferenceResultSchema = z.string()
+    .regex(/^ord\.[a-f0-9]{32}$/);
+
 const waitlistResultSchema = z.array(z.object({
     waitlist_id: z.string().uuid(),
     created: z.boolean(),
@@ -71,9 +74,28 @@ export const earlybirdStore = {
         if (!parsed.success) {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
         }
+        const { data: referenceData, error: referenceError } =
+            await supabaseAdmin.rpc(
+                'issue_earlybird_groble_seller_reference',
+                { p_order_id: parsed.data[0].order_id }
+            );
+        if (referenceError) {
+            throw new EarlybirdPersistenceError(
+                boundedDatabaseCode(referenceError)
+            );
+        }
+        const sellerReference = sellerReferenceResultSchema.safeParse(
+            referenceData
+        );
+        if (!sellerReference.success) {
+            throw new EarlybirdPersistenceError(
+                'EARLYBIRD_PERSISTENCE_FAILED'
+            );
+        }
         return Object.freeze({
             orderId: parsed.data[0].order_id,
             created: parsed.data[0].created,
+            sellerReference: sellerReference.data,
         });
     },
 

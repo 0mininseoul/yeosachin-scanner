@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { GROBLE_SELLER_REFERENCE_PATTERN } from '@/lib/services/earlybird/seller-reference';
 
 const FIVE_MINUTES_SECONDS = 300;
 const HEX_SHA256_PATTERN = /^[a-f0-9]{64}$/i;
@@ -29,6 +30,7 @@ const paymentCompletedSchema = z.object({
     data: z.object({
         object: z.object({
             merchantUid: boundedIdentifier,
+            sellerReference: z.string().regex(GROBLE_SELLER_REFERENCE_PATTERN).optional(),
             buyer: z.object({
                 email: z.string().trim().email().max(320),
                 phoneNumber: z.string().trim().min(1).max(64).optional(),
@@ -101,6 +103,7 @@ export interface GroblePaymentCompletedEvent {
     paymentId: string;
     buyerEmail: string;
     buyerPhoneNumber: string | null;
+    sellerReference: string | null;
     productId: string;
     amountKrw: number;
     paidAt: string;
@@ -173,6 +176,7 @@ export function parseGroblePaymentCompletedEvent(
         paymentId: payment.merchantUid,
         buyerEmail: payment.buyer.email.trim().toLowerCase(),
         buyerPhoneNumber: payment.buyer.phoneNumber ?? null,
+        sellerReference: payment.sellerReference ?? null,
         productId: payment.content.id,
         amountKrw: payment.pricing.finalAmount,
         paidAt: payment.payment.purchasedAt,

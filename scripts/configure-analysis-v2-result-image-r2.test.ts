@@ -15,6 +15,7 @@ function dryRun(overrides: Record<string, string> = {}) {
         encoding: 'utf8',
         env: {
             PATH: process.env.PATH,
+            NODE_ENV: process.env.NODE_ENV ?? 'test',
             CLOUDFLARE_ACCOUNT_ID:
                 '0123456789abcdef0123456789abcdef',
             ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET:

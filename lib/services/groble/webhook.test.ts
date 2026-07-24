@@ -11,6 +11,7 @@ const NOW_MS = Date.parse('2026-07-17T12:00:00.000Z');
 const TIMESTAMP = String(Math.floor(NOW_MS / 1_000));
 const SECRET = 'current-secret';
 const PREVIOUS_SECRET = 'previous-secret';
+const VALID_SELLER_REFERENCE = 'ord.0123456789abcdef0123456789abcdef';
 const WHITESPACE_TEST_EVENT_IDS = [
     ['leading', ' evt_test_a1b2c3d4e5f60718293a4b5c'],
     ['trailing', 'evt_test_a1b2c3d4e5f60718293a4b5c\t'],
@@ -151,10 +152,31 @@ describe('Groble payment.completed parser', () => {
             paymentId: 'merchant_0001',
             buyerEmail: 'buyer@example.com',
             buyerPhoneNumber: '010-1234-5678',
+            sellerReference: null,
             productId: 'basic_product-01',
             amountKrw: 14_900,
             paidAt: '2026-07-17T21:00:00+09:00',
         });
+    });
+
+    it('projects a valid opaque seller reference', () => {
+        const event = paymentPayload({ sellerReference: VALID_SELLER_REFERENCE });
+
+        expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
+            sellerReference: VALID_SELLER_REFERENCE,
+        });
+    });
+
+    it.each([
+        '',
+        'ord.0123456789abcdef',
+        'ord.0123456789ABCDEF0123456789ABCDEF',
+        'buyer@example.com',
+        123,
+    ])('rejects a present malformed seller reference %#', sellerReference => {
+        const event = paymentPayload({ sellerReference });
+
+        expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
     });
 
     it('returns a null buyer phone for legacy completed events', () => {
