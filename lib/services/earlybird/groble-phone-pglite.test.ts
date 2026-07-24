@@ -80,6 +80,18 @@ const deliveryWindowMigration = deliveryWindowMigrationFile
         'utf8'
     )
     : '';
+const discountedLateCancelMigrationFile = readdirSync(migrationsDirectory)
+    .filter(file => file.endsWith(
+        '_fix_discounted_late_cancelled_payment.sql'
+    ))
+    .sort()
+    .at(-1);
+const discountedLateCancelMigration = discountedLateCancelMigrationFile
+    ? readFileSync(
+        new URL(discountedLateCancelMigrationFile, migrationsDirectory),
+        'utf8'
+    )
+    : '';
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -221,13 +233,14 @@ async function createDatabaseBeforePhoneMigration(): Promise<PGlite> {
 }
 
 // 현행 production migration 집합 = 6개 rollout + normalizer EXECUTE 복구 + 할인 결제 허용
-// + 얼리버드 제공 기한 24시간 단축.
+// + 얼리버드 제공 기한 24시간 단축 + 할인된 지연 결제 재귀속.
 async function applyPhoneMigrations(database: PGlite): Promise<void> {
     for (const migration of [
         ...phoneMigrations,
         normalizerGrantMigration,
         discountAcceptanceMigration,
         deliveryWindowMigration,
+        discountedLateCancelMigration,
     ]) {
         await database.exec(migration);
     }
@@ -1804,6 +1817,112 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rows[0].status).toBe('payment_pending');
     });
 
+    it.each([9_900, 0])(
+        'reattributes a discounted late canonical payment of %i won for refund',
+        async amount => {
+            const index = amount === 0 ? 307 : 306;
+            const seed = await seedPreflight(index, 'standard');
+            const checkout = await createCheckout(seed, 'standard');
+            await asService(
+                `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+                [checkout.order_id]
+            );
+
+            const result = await finalize(seed, 'standard', index, { amount });
+
+            expect(result).toMatchObject({
+                disposition: 'late_cancelled_payment',
+                order_id: checkout.order_id,
+                status: 'refund_pending',
+            });
+            expect((await db.query<{
+                actual_amount_krw: number;
+                sold_count: number;
+            }>(
+                `SELECT earlybird_order.actual_amount_krw, inventory.sold_count
+                 FROM public.earlybird_orders AS earlybird_order
+                 JOIN public.earlybird_plan_inventory AS inventory
+                   ON inventory.plan_id = earlybird_order.plan_id
+                 WHERE earlybird_order.id = $1`,
+                [checkout.order_id]
+            )).rows[0]).toEqual({
+                actual_amount_krw: amount,
+                sold_count: 0,
+            });
+        }
+    );
+
+    it.each([9_900, 0])(
+        'reattributes a discounted late rolling payment of %i won for refund',
+        async amount => {
+            const index = amount === 0 ? 309 : 308;
+            const seed = await seedPreflight(index, 'standard');
+            const checkout = await createCheckout(seed, 'standard');
+            await forceLegacyOrder(checkout.order_id);
+            await asService(
+                `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+                [checkout.order_id]
+            );
+
+            const result = await finalizeRolling({
+                eventId: `rolling-discounted-late-event-${index}`,
+                idempotencyKey: `rolling-discounted-late-idem-${index}`,
+                paymentId: `rolling-discounted-late-payment-${index}`,
+                buyerEmail: seed.email,
+                productId: STANDARD_PRODUCT_ID,
+                amount,
+            });
+
+            expect(result).toMatchObject({
+                disposition: 'late_cancelled_payment',
+                order_id: checkout.order_id,
+                status: 'refund_pending',
+            });
+            expect((await db.query<{ sold_count: number }>(
+                `SELECT sold_count
+                 FROM public.earlybird_plan_inventory
+                 WHERE plan_id = 'standard'`
+            )).rows[0].sold_count).toBe(0);
+        }
+    );
+
+    it.each([
+        {
+            index: 310,
+            label: 'an amount above the expected price',
+            overrides: { amount: 19_901 },
+        },
+        {
+            index: 311,
+            label: 'the wrong product',
+            overrides: { productId: BASIC_PRODUCT_ID, amount: 9_900 },
+        },
+    ])('does not reattribute $label to a cancelled order', async scenario => {
+        const seed = await seedPreflight(scenario.index, 'standard');
+        const checkout = await createCheckout(seed, 'standard');
+        await asService(
+            `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+            [checkout.order_id]
+        );
+
+        const result = await finalize(seed, 'standard', scenario.index, scenario.overrides);
+
+        expect(result).toMatchObject({
+            disposition: 'unmatched',
+            order_id: null,
+            status: null,
+        });
+        expect((await db.query<{ status: string }>(
+            `SELECT status FROM public.earlybird_orders WHERE id = $1`,
+            [checkout.order_id]
+        )).rows[0].status).toBe('cancelled');
+        expect((await db.query<{ sold_count: number }>(
+            `SELECT sold_count
+             FROM public.earlybird_plan_inventory
+             WHERE plan_id = 'standard'`
+        )).rows[0].sold_count).toBe(0);
+    });
+
     it('matches an unresolved cancelled snapshot by phone when buyer email differs', async () => {
         const seed = await seedPreflight(106);
         const checkout = await createCheckout(seed);
@@ -1916,9 +2035,12 @@ describe('Groble phone checkout and finalizer behavior', () => {
         await forceLegacyOrder(firstCheckout.order_id);
         await forceLegacyOrder(secondCheckout.order_id);
 
-        const result = await finalize(seed, 'basic', 213, {
-            normalizedPhone: null,
-            rawPhone: null,
+        const result = await finalizeRolling({
+            eventId: 'rolling-discounted-ambiguous-event',
+            idempotencyKey: 'rolling-discounted-ambiguous-idem',
+            paymentId: 'rolling-discounted-ambiguous-payment',
+            buyerEmail: seed.email,
+            amount: 9_900,
         });
 
         expect(result).toMatchObject({

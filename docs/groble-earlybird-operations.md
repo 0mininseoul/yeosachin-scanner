@@ -160,6 +160,7 @@ ORDER BY query_start;
 - 이미 결제된 11번째 예외는 `overflow_refund_required`로 분리된다. 운영자는 이 상태를 환불 처리 대상으로 확인하고, 실제 조치는 승인된 Groble 운영 절차를 따른다.
 - 구매자 취소 요청은 `refund_pending`으로 표시한다. 최종 `cancelled`/`refunded` 전환은 서비스 역할 전용 RPC를 사용하는 운영 절차에서만 수행한다.
 - 취소 요청 webhook이 결제 완료 webhook보다 먼저 도착해도 후속 결제를 판매로 확정하거나 수량에 포함하지 않고 `refund_pending`으로 재조정한다.
+- 취소된 주문의 결제가 뒤늦게 도착했을 때 실결제액이 `0원 이상`이고 checkout snapshot의 예상 금액 이하라면 쿠폰 할인 결제를 포함해 원래 주문에 `late_cancelled_payment`로 귀속하고 `refund_pending`으로 격리한다. 예상 금액 초과, 다른 상품, 복수 후보는 귀속하지 않으며 판매 수량에도 포함하지 않는다.
 - 결제 확정은 `analysis_requests`를 만들거나 Cloud Tasks/V2 자동 분석을 시작하지 않는다.
 
 ### 만료 preflight 보존
