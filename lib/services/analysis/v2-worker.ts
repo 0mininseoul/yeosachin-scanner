@@ -65,6 +65,7 @@ const PROFILE_FETCH_JOB_PATTERN = /^track:profiles:batch:\d+$/;
 const PROFILE_AI_JOB_PATTERN = /^track:profile-ai:batch:\d+$/;
 const PRIVATE_NAME_JOB_PATTERN = /^track:private-names:batch:\d+$/;
 export const ANALYSIS_V2_JOB_MAX_ATTEMPTS = 7;
+export const ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS = 20;
 
 export type AnalysisV2StageId =
     | 'relationships'
@@ -883,8 +884,11 @@ export async function processAnalysisV2TaskDelivery(
         if (failure.disposition === 'fence') {
             throw new AnalysisV2JobFenceError();
         }
+        const maxAttempts = claim.jobKey === ANALYSIS_V2_FINALIZE_JOB_KEY
+            ? ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS
+            : ANALYSIS_V2_JOB_MAX_ATTEMPTS;
         const exhausted = failure.retryable
-            && claim.attemptCount >= ANALYSIS_V2_JOB_MAX_ATTEMPTS;
+            && claim.attemptCount >= maxAttempts;
         if (!failure.retryable || exhausted) {
             const cleanupRetry = await finalizeTerminalFailureOrDeferProviderCleanup(
                 claim,
@@ -906,7 +910,7 @@ export async function processAnalysisV2TaskDelivery(
         const released = await store.releaseClaim(claim, {
             errorCode: failure.code,
             retryable: failure.retryable,
-            maxAttempts: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+            maxAttempts,
         });
         if (released.status === 'failed' || released.status === 'cancelled') {
             throw new Error('ANALYSIS_V2_TERMINAL_FAILURE_CLEANUP_REQUIRED');

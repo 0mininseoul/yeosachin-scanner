@@ -20,6 +20,7 @@ import type {
 } from './v2-job-store';
 import { AnalysisV2JobFenceError } from './v2-job-store';
 import {
+    ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS,
     ANALYSIS_V2_JOB_MAX_ATTEMPTS,
     AnalysisV2JobExecutionError,
     classifyAnalysisV2JobFailure,
@@ -1019,6 +1020,37 @@ describe('analysis V2 durable DAG worker', () => {
             errorCode: 'JOB_ATTEMPTS_EXHAUSTED',
         });
         expect(terminalFailureFinalizer).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a dependency-complete finalizer retryable beyond the generic limit', async () => {
+        const finalizerClaim: ClaimedAnalysisV2Job = {
+            ...bootstrapClaim,
+            jobKey: ANALYSIS_V2_FINALIZE_JOB_KEY,
+            kind: 'finalizer',
+            attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        };
+        const jobStore = store(finalizerClaim);
+
+        await expect(processAnalysisV2TaskDelivery({
+            ...delivery,
+            jobKey: ANALYSIS_V2_FINALIZE_JOB_KEY,
+        }, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error('ANALYSIS_V2_RESULT_NOT_READY');
+            },
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_RESULT_NOT_READY',
+        });
+        expect(jobStore.releaseClaim).toHaveBeenCalledWith(
+            finalizerClaim,
+            {
+                errorCode: 'ANALYSIS_V2_RESULT_NOT_READY',
+                retryable: true,
+                maxAttempts: ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS,
+            }
+        );
     });
 
     it('classifies transient checkpoint persistence and explicit provider failures as retryable', async () => {

@@ -65,6 +65,9 @@ const repairMigration = readMigration(
 const terminalOutcomeMigration = readMigration(
     '20260720140000_read_analysis_v2_profile_repair_terminal_outcome.sql'
 );
+const genderStatsMigration = readMigration(
+    '20260723191547_persist_analysis_v2_gender_stats.sql'
+);
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const PREFLIGHT_ID = '22222222-2222-4222-8222-222222222222';
@@ -94,6 +97,7 @@ CREATE TABLE public.analysis_requests (
     selected_plan_id_snapshot TEXT,
     policy_versions_snapshot JSONB,
     exclusion_decision_snapshot TEXT,
+    gender_stats JSONB,
     progress INTEGER,
     background_processing BOOLEAN,
     progress_step TEXT,
@@ -855,6 +859,7 @@ describe('analysis V2 profile repair terminal outcome PGlite migration', () => {
         await db.exec(internalFinalizerSource);
         await db.exec(aiUnavailableMigration);
         await db.exec(terminalOutcomeMigration);
+        await db.exec(genderStatsMigration);
     }, 120_000);
 
     afterAll(async () => {
