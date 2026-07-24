@@ -154,4 +154,63 @@ describe('analytics and observability disclosure contract', () => {
         expect(env).not.toContain(provisioningCredential);
         expect(env).not.toContain(publicAxiomPrefix);
     });
+
+    it('freezes the evidence-backed pre-Starter decision boundary', () => {
+        const costs = source('docs/operations-cost-model.md');
+        const checklist = source('docs/pre-starter-launch-checklist.md');
+        const groble = source('docs/groble-earlybird-operations.md');
+
+        for (const value of [
+            '$3.33835',
+            '$0.5858645',
+            '$3.9242145',
+        ]) {
+            expect(costs).toContain(value);
+        }
+        expect(costs).toMatch(/Plus[^\n]*통제[^\n]*표본/);
+        expect(costs).toMatch(/costComplete=false/);
+        expect(costs).toMatch(/Gemini[^\n]*1건[^\n]*usage[^\n]*누락/);
+        expect(costs).toMatch(/GCP[^\n]*포함하지/);
+        expect(costs).toMatch(/Basic\/Standard[^\n]*(미측정|확정하지)/);
+        expect(costs).toMatch(/최종 판매가[^\n]*(보류|확정하지)/);
+
+        expect(checklist).toMatch(
+            /reference-confirmed[^\n]*실결제[^\n]*1건 이상/
+        );
+        expect(checklist).toMatch(/미확인 paid[^\n]*0건/);
+        expect(checklist).toMatch(/기한 초과[^\n]*0건/);
+        expect(checklist).toMatch(/환불 책임[^\n]*0건/);
+        expect(checklist).toMatch(
+            /active analysis requests[^\n]*jobs[^\n]*provider runs[^\n]*fulfillment leases[^\n]*모두 0/
+        );
+        expect(checklist).toMatch(/Gemini[^\n]*8개[^\n]*available/);
+        expect(checklist).toMatch(/quarantined[^\n]*0개/);
+        expect(checklist).toMatch(
+            /production migration history[^\n]*reviewed branch/
+        );
+        expect(checklist).toMatch(
+            /Groble[^\n]*가격[^\n]*재고[^\n]*server catalog/
+        );
+        expect(checklist).toMatch(
+            /Starter[^\n]*구매[^\n]*APIFY_SECONDARY_API_TOKEN[^\n]*명시적 승인/
+        );
+        expect(checklist).toMatch(
+            /통과[^\n]*(구매|구독)[^\n]*(변경|교체)[^\n]*(자동|의미하지)/
+        );
+        expect(checklist).toContain('npm run report:earlybird-demand');
+
+        expect(groble).toMatch(
+            /awaiting_operator[^\n]*(analysis_requests|자동 분석)[^\n]*(만들지 않|시작하지 않)/
+        );
+        expect(groble).toContain('--confirm-paid-api-call');
+        expect(groble).toMatch(
+            /awaiting_operator[^\n]*recovery[^\n]*자동 승인하지 않/
+        );
+
+        for (const document of [costs, checklist, groble]) {
+            expect(document).not.toMatch(/Plus[^\n]*(구매 가능|판매 중)/);
+            expect(document).not.toMatch(/최종 정가[^\n]*(확정|결정)/);
+            expect(document).not.toMatch(/자동 public launch|자동 공개 출시/);
+        }
+    });
 });

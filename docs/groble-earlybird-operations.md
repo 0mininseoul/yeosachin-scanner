@@ -175,9 +175,7 @@ npm run report:earlybird-demand -- --start 2026-07-24 --end 2026-08-01
 
 ### 운영자 승인 후 유료 주문 이행
 
-reference가 확인된 `paid` 주문은 webhook transaction에서
-`earlybird_fulfillments.awaiting_operator` 행만 만든다. 이 시점에는
-`analysis_requests`, provider run, Gemini attempt, Cloud Task를 만들지 않는다.
+reference가 확인된 `paid` 주문은 webhook transaction에서 `earlybird_fulfillments.awaiting_operator` 행만 만든다. 이 시점에는 `analysis_requests`, provider run, Gemini attempt, Cloud Task를 만들지 않는다.
 아래 명령의 exact flag가 결제 API 호출 가능성을 인지한 운영자의 명시적 승인 경계다.
 
 ```bash
