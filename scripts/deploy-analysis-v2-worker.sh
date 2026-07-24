@@ -175,8 +175,17 @@ log() {
 }
 
 print_command() {
+  local argument
+  local source_identity="${source_commit_sha:-}"
   printf '[dry-run]'
-  printf ' %q' "$@"
+  for argument in "$@"; do
+    if [[ ( "${prune_apify_secret_refs_enabled:-false}" == "true" \
+        || "${clear_apify_secret_ref_prune_fence_enabled:-false}" == "true" ) \
+      && -n "$source_identity" ]]; then
+      argument="${argument//$source_identity/[fence-owner-redacted]}"
+    fi
+    printf ' %q' "$argument"
+  done
   printf '\n'
 }
 
@@ -2376,7 +2385,12 @@ promote_staged_revision() {
   service_traffic_matches_revision "$config" "$staged_revision" \
     || die "promoted Cloud Run revision does not serve exactly 100% of traffic"
   verify_revision_provenance "$staged_revision" "$source_commit_sha"
-  log "promoted verified revision: $staged_revision (commit $source_commit_sha)"
+  if [[ "$prune_apify_secret_refs_enabled" == "true" \
+    || "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
+    log "promoted verified revision: $staged_revision (source provenance verified)"
+  else
+    log "promoted verified revision: $staged_revision (commit $source_commit_sha)"
+  fi
 }
 
 while (($# > 0)); do
@@ -2526,6 +2540,12 @@ parse_clear_apify_secret_ref_prune_fence
 [[ "$prune_apify_secret_refs_enabled" != "true" \
   || "$clear_apify_secret_ref_prune_fence_enabled" != "true" ]] \
   || die "--prune-apify-secret-refs and --clear-apify-secret-ref-prune-fence are mutually exclusive"
+if [[ "$prune_apify_secret_refs_enabled" == "true" \
+  || "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
+  # The exact source SHA is also the durable fence owner identity. Disable
+  # ambient shell tracing before it is resolved or passed to external commands.
+  set +x
+fi
 if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
   [[ "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" == "primary" ]] \
     || die "--prune-apify-secret-refs requires ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary"

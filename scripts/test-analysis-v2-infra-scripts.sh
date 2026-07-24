@@ -110,8 +110,17 @@ acquire_analysis_v2_apify_secret_ref_prune_fence)
   if [[ -n "${FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE:-}" ]]; then
     increment_count_file "$FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE"
   fi
-  [[ "${FAKE_PRUNE_FENCE_ACQUIRE_MODE:-ready}" == 'ready' ]] || exit 22
-  printf '%s\n' '{"active":true,"acquired":true,"dropSlots":["quinary","senary","tertiary"]}'
+  case "${FAKE_PRUNE_FENCE_ACQUIRE_MODE:-ready}" in
+  ready)
+    printf '%s\n' '{"active":true,"acquired":true,"dropSlots":["quinary","senary","tertiary"]}'
+    ;;
+  adopted)
+    printf '%s\n' '{"active":true,"acquired":false,"dropSlots":["quinary","senary","tertiary"]}'
+    ;;
+  *)
+    exit 22
+    ;;
+  esac
   ;;
 load_analysis_v2_apify_secret_ref_prune_fence)
   if [[ -n "${FAKE_PRUNE_FENCE_LOAD_COUNT_FILE:-}" ]]; then
@@ -2697,6 +2706,8 @@ for removed_assignment in \
 done
 assert_not_contains "$temp_dir/worker-prune-ready.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+assert_not_contains "$temp_dir/worker-prune-ready.out" \
+  "$repo_source_commit"
 assert_contains "$temp_dir/worker-prune-ready.out" 'sleep 300'
 [[ "$(<"$temp_dir/prune-dry-run-acquire-count")" == "0" ]] \
   || fail "prune dry-run mutated the durable fence"
@@ -2822,6 +2833,10 @@ fi
 }
 assert_not_contains "$temp_dir/worker-prune-trace.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+assert_not_contains "$temp_dir/worker-prune-trace.out" \
+  'dddddddddddddddddddddddddddddddddddddddd'
+assert_not_contains "$temp_dir/worker-prune-trace.out" \
+  "$repo_source_commit"
 
 for blocked_mode in \
   active \
@@ -3001,6 +3016,55 @@ env "${common_env[@]}" \
 [[ "$(<"$temp_dir/prune-apply-sleep")" == "300" ]] \
   || fail "explicit prune apply did not execute exactly one 300-second drain"
 assert_not_contains "$temp_dir/worker-prune-apply.out" \
+  'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+assert_not_contains "$temp_dir/worker-prune-apply.out" \
+  "$deploy_source_commit"
+
+# A retry by the exact same source owner adopts the existing durable fence,
+# repeats both audits, and can finish the same primary-only promotion without
+# ever clearing that fence.
+printf 'ready\n' >"$temp_dir/prune-idempotent-retry-state"
+printf '42\n' >"$temp_dir/prune-idempotent-retry-generation"
+printf '0\n' >"$temp_dir/prune-idempotent-retry-readiness-count"
+printf '0\n' >"$temp_dir/prune-idempotent-retry-acquire-count"
+printf '0\n' >"$temp_dir/prune-idempotent-retry-clear-count"
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_PRUNE_PRIMARY_ONLY=true' \
+  'FAKE_PRUNE_FENCE_ACQUIRE_MODE=adopted' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/prune-idempotent-retry-state" \
+  "FAKE_GCLOUD_SERVICE_GENERATION_FILE=$temp_dir/prune-idempotent-retry-generation" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_PRUNE_READINESS_COUNT_FILE=$temp_dir/prune-idempotent-retry-readiness-count" \
+  "FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE=$temp_dir/prune-idempotent-retry-acquire-count" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/prune-idempotent-retry-clear-count" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-idempotent-retry.out"
+[[ "$(<"$temp_dir/prune-idempotent-retry-acquire-count")" == "1" ]] \
+  || fail "idempotent prune retry did not adopt the durable fence exactly once"
+[[ "$(<"$temp_dir/prune-idempotent-retry-readiness-count")" == "2" ]] \
+  || fail "idempotent prune retry did not execute both readiness audits"
+[[ "$(<"$temp_dir/prune-idempotent-retry-clear-count")" == "0" ]] \
+  || fail "idempotent prune retry cleared its retained durable fence"
+[[ "$(<"$temp_dir/prune-idempotent-retry-state")" == "promoted" ]] \
+  || fail "idempotent prune retry did not promote the primary-only revision"
+assert_contains "$temp_dir/worker-prune-idempotent-retry.out" \
+  'verified: final worker revision is staged without receiving live traffic'
+assert_contains "$temp_dir/worker-prune-idempotent-retry.out" \
+  'verified: durable exact-slot Apify prune fence is active'
+assert_not_contains "$temp_dir/worker-prune-idempotent-retry.out" \
+  "$deploy_source_commit"
+assert_not_contains "$temp_dir/worker-prune-idempotent-retry.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 
 # A post-promotion verification failure rolls traffic back but deliberately
