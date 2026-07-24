@@ -443,6 +443,83 @@ describe('Groble v2 checkout lineage database behavior', () => {
         )).rows[0].sold_count).toBe(0);
     }, 30_000);
 
+    it('preserves a pending legacy candidate when compatible commercial webhook evidence is unassigned', async () => {
+        const db = await baseDatabase();
+        const pending = await seedV1Order(db, 20);
+        await db.query(
+            `UPDATE public.earlybird_plan_inventory
+             SET sold_count = 4
+             WHERE plan_id = 'basic'`
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_webhook_events (
+                event_id, idempotency_key, event_type, occurred_at,
+                payment_id, product_id, amount_krw, disposition, order_id
+            ) VALUES (
+                'event-unassigned-commercial',
+                'idem-unassigned-commercial',
+                'payment.completed',
+                pg_catalog.clock_timestamp(),
+                'payment-unassigned-commercial',
+                'legacy_basic_product',
+                6900,
+                'unmatched',
+                NULL
+            )`
+        );
+
+        await applyLineageMigration(db);
+
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1',
+            [pending.orderId]
+        )).rows[0].status).toBe('payment_pending');
+        expect((await db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count
+             FROM public.earlybird_checkout_retirements`
+        )).rows[0].count).toBe(0);
+        expect((await db.query<{ sold_count: number }>(
+            `SELECT sold_count FROM public.earlybird_plan_inventory
+             WHERE plan_id = 'basic'`
+        )).rows[0].sold_count).toBe(4);
+    }, 30_000);
+
+    it('does not let cross-plan or over-amount unassigned evidence protect a pending order', async () => {
+        const db = await baseDatabase();
+        const pending = await seedV1Order(db, 21);
+        await db.query(
+            `INSERT INTO public.earlybird_webhook_events (
+                event_id, idempotency_key, event_type, occurred_at,
+                payment_id, product_id, amount_krw, disposition
+            ) VALUES
+                (
+                    'event-cross-plan', 'idem-cross-plan',
+                    'payment.completed', pg_catalog.clock_timestamp(),
+                    'payment-cross-plan', 'legacy_standard_product',
+                    9900, 'unmatched'
+                ),
+                (
+                    'event-over-amount', 'idem-over-amount',
+                    'payment.completed', pg_catalog.clock_timestamp(),
+                    'payment-over-amount', 'legacy_basic_product',
+                    14901, 'unmatched'
+                )`
+        );
+
+        await applyLineageMigration(db);
+
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1',
+            [pending.orderId]
+        )).rows[0].status).toBe('cancelled');
+        expect((await db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count
+             FROM public.earlybird_checkout_retirements
+             WHERE legacy_order_id = $1`,
+            [pending.orderId]
+        )).rows[0].count).toBe(1);
+    }, 30_000);
+
     it('idempotently replaces an existing v2 Standard old-product checkout using the new DB binding', async () => {
         const db = await baseDatabase();
         const legacy = await seedV1Order(db, 7, {

@@ -106,6 +106,16 @@ describe('Groble v2 product separation and legacy refresh migration', () => {
         expect(retirement).toContain('actual_amount_krw IS NULL');
         expect(retirement).toContain('paid_at IS NULL');
         expect(retirement).toContain('result_request_id IS NULL');
+        expect(retirement).toContain('webhook_event.order_id IS NULL');
+        expect(retirement).toContain(
+            "webhook_event.event_type = 'payment.completed'"
+        );
+        expect(retirement).toMatch(
+            /webhook_event\.product_id\s*=\s*legacy_order\.expected_groble_product_id/
+        );
+        expect(retirement).toMatch(
+            /webhook_event\.amount_krw\s*<=\s*legacy_order\.expected_amount_krw/
+        );
         expect(retirement).toContain("SET status = 'cancelled'");
         expect(retirement).toContain("'pricing_v2_product_separation'");
         expect(retirement).not.toMatch(

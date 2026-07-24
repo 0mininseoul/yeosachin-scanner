@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     runGrobleV2ReleaseGate,
+    type GrobleV2ApprovedLineageManifest,
     type GrobleV2ReleaseGateInput,
 } from './groble-v2-release-gate';
 
@@ -50,11 +51,50 @@ const EXACT_BINDINGS = [
     },
 ] as const;
 
-function runGate(input: GrobleV2ReleaseGateInput) {
-    return runGrobleV2ReleaseGate(input);
+const APPROVED_MANIFEST: GrobleV2ApprovedLineageManifest = {
+    schemaVersion: 1,
+    approvalId: 'reviewed-groble-lineage-20260725',
+    reviewedAt: '2026-07-25T00:00:00.000Z',
+    legacy: {
+        basic: {
+            productId: ENV.GROBLE_BASIC_PRODUCT_ID,
+            paymentAddress: ENV.GROBLE_BASIC_PAYMENT_ADDRESS,
+        },
+        standard: {
+            productId: ENV.GROBLE_STANDARD_PRODUCT_ID,
+            paymentAddress: ENV.GROBLE_STANDARD_PAYMENT_ADDRESS,
+        },
+    },
+    v2: {
+        basic: {
+            productId: ENV.GROBLE_V2_BASIC_PRODUCT_ID,
+            paymentAddress: ENV.GROBLE_V2_BASIC_PAYMENT_ADDRESS,
+        },
+        standard: {
+            productId: ENV.GROBLE_V2_STANDARD_PRODUCT_ID,
+            paymentAddress: ENV.GROBLE_V2_STANDARD_PAYMENT_ADDRESS,
+        },
+    },
+};
+
+function runGate(
+    input: Omit<GrobleV2ReleaseGateInput, 'approvedManifest'>
+) {
+    return runGrobleV2ReleaseGate({
+        approvedManifest: APPROVED_MANIFEST,
+        ...input,
+    });
 }
 
 describe('Groble v2 release gate', () => {
+    it('requires an independently reviewed manifest', async () => {
+        await expect(runGrobleV2ReleaseGate({
+            phase: 'pre-migration',
+            confirmCheckoutWritesPaused: true,
+            env: ENV,
+        })).rejects.toThrow('GROBLE_V2_APPROVED_MANIFEST_REQUIRED');
+    });
+
     it('fails before migration unless writes are paused and all eight identifiers exist', async () => {
         await expect(runGate({
             phase: 'pre-migration',
@@ -103,6 +143,7 @@ describe('Groble v2 release gate', () => {
         const loadDatabaseState = vi.fn().mockResolvedValue({
             bindings: EXACT_BINDINGS,
             pendingOldLineageCount: 0,
+            unassignedCommercialWebhookCandidateCount: 0,
             historicalProductEvidence: [],
         });
 
@@ -135,6 +176,7 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings,
                 pendingOldLineageCount: 0,
+                unassignedCommercialWebhookCandidateCount: 0,
                 historicalProductEvidence: [],
             }),
         })).rejects.toThrow('GROBLE_V2_DB_BINDINGS_MISMATCH');
@@ -148,6 +190,7 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings: EXACT_BINDINGS,
                 pendingOldLineageCount: 1,
+                unassignedCommercialWebhookCandidateCount: 0,
                 historicalProductEvidence: [],
             }),
         })).rejects.toThrow('GROBLE_V2_PENDING_OLD_LINEAGE_REMAINS');
@@ -172,15 +215,14 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings: typoBindings,
                 pendingOldLineageCount: 0,
+                unassignedCommercialWebhookCandidateCount: 0,
                 historicalProductEvidence: [{
                     source: 'order',
                     plan_id: 'basic',
                     product_id: 'legacy_basic_product',
                 }],
             }),
-        })).rejects.toThrow(
-            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_MISMATCH'
-        );
+        })).rejects.toThrow('GROBLE_V2_APPROVED_MANIFEST_MISMATCH');
     });
 
     it('validates webhook-only evidence and rejects cross-plan ambiguity', async () => {
@@ -191,6 +233,7 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings: EXACT_BINDINGS,
                 pendingOldLineageCount: 0,
+                unassignedCommercialWebhookCandidateCount: 0,
                 historicalProductEvidence: [{
                     source: 'webhook',
                     plan_id: null,
@@ -208,6 +251,7 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings: EXACT_BINDINGS,
                 pendingOldLineageCount: 0,
+                unassignedCommercialWebhookCandidateCount: 0,
                 historicalProductEvidence: [
                     {
                         source: 'order',
@@ -245,14 +289,106 @@ describe('Groble v2 release gate', () => {
             loadDatabaseState: vi.fn().mockResolvedValue({
                 bindings: typoBindings,
                 pendingOldLineageCount: 0,
+                unassignedCommercialWebhookCandidateCount: 0,
                 historicalProductEvidence: [{
                     source: 'order',
                     plan_id: 'basic',
                     product_id: ENV.GROBLE_V2_BASIC_PRODUCT_ID,
                 }],
             }),
+        })).rejects.toThrow('GROBLE_V2_APPROVED_MANIFEST_MISMATCH');
+    });
+
+    it.each([
+        [
+            'v2 product',
+            'GROBLE_V2_BASIC_PRODUCT_ID',
+            'v2_basic_product_copied_typo',
+            'product_id',
+        ],
+        [
+            'v2 payment address',
+            'GROBLE_V2_BASIC_PAYMENT_ADDRESS',
+            'v2-basic-address-copied-typo',
+            'payment_address',
+        ],
+    ] as const)(
+        'rejects a copied %s typo even when env and DB agree',
+        async (_label, envKey, typo, bindingField) => {
+            const typoEnv = { ...ENV, [envKey]: typo };
+            const typoBindings = EXACT_BINDINGS.map(row => (
+                row.plan_id === 'basic'
+                && row.pricing_version === 'earlybird-2026-07-v2'
+                    ? { ...row, [bindingField]: typo }
+                    : row
+            ));
+
+            await expect(runGate({
+                phase: 'pre-deploy',
+                confirmCheckoutWritesPaused: true,
+                env: typoEnv,
+                loadDatabaseState: vi.fn().mockResolvedValue({
+                    bindings: typoBindings,
+                    pendingOldLineageCount: 0,
+                    unassignedCommercialWebhookCandidateCount: 0,
+                    historicalProductEvidence: [],
+                }),
+            })).rejects.toThrow(
+                'GROBLE_V2_APPROVED_MANIFEST_MISMATCH'
+            );
+        }
+    );
+
+    it('rejects a Basic/Standard legacy product swap against the reviewed manifest', async () => {
+        const swappedEnv = {
+            ...ENV,
+            GROBLE_BASIC_PRODUCT_ID: ENV.GROBLE_STANDARD_PRODUCT_ID,
+            GROBLE_STANDARD_PRODUCT_ID: ENV.GROBLE_BASIC_PRODUCT_ID,
+        };
+        const swappedBindings = EXACT_BINDINGS.map(row => {
+            if (row.pricing_version !== 'earlybird-2026-07-v1') return row;
+            return {
+                ...row,
+                product_id: row.plan_id === 'basic'
+                    ? ENV.GROBLE_STANDARD_PRODUCT_ID
+                    : ENV.GROBLE_BASIC_PRODUCT_ID,
+            };
+        });
+
+        await expect(runGate({
+            phase: 'pre-deploy',
+            confirmCheckoutWritesPaused: true,
+            env: swappedEnv,
+            loadDatabaseState: vi.fn().mockResolvedValue({
+                bindings: swappedBindings,
+                pendingOldLineageCount: 0,
+                unassignedCommercialWebhookCandidateCount: 0,
+                historicalProductEvidence: [{
+                    source: 'webhook',
+                    plan_id: null,
+                    product_id: ENV.GROBLE_BASIC_PRODUCT_ID,
+                }],
+            }),
+        })).rejects.toThrow('GROBLE_V2_APPROVED_MANIFEST_MISMATCH');
+    });
+
+    it('blocks deploy for compatible unassigned commercial webhook candidates', async () => {
+        await expect(runGate({
+            phase: 'pre-deploy',
+            confirmCheckoutWritesPaused: true,
+            env: ENV,
+            loadDatabaseState: vi.fn().mockResolvedValue({
+                bindings: EXACT_BINDINGS,
+                pendingOldLineageCount: 0,
+                unassignedCommercialWebhookCandidateCount: 1,
+                historicalProductEvidence: [{
+                    source: 'webhook',
+                    plan_id: null,
+                    product_id: ENV.GROBLE_BASIC_PRODUCT_ID,
+                }],
+            }),
         })).rejects.toThrow(
-            'GROBLE_V2_HISTORICAL_PRODUCT_EVIDENCE_MISMATCH'
+            'GROBLE_V2_UNASSIGNED_COMMERCIAL_WEBHOOK_REMAINS'
         );
     });
 });

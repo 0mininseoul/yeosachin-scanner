@@ -1,5 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import {
+    existsSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -22,6 +30,7 @@ describe('Groble v2 release documentation contract', () => {
         expect(operations).toContain('신규 Basic/Standard 상품');
         expect(operations).toContain('--phase pre-migration');
         expect(operations).toContain('--phase pre-deploy');
+        expect(operations).toContain('--approved-manifest');
         expect(operations).toContain(
             '--confirm-checkout-writes-paused'
         );
@@ -35,6 +44,9 @@ describe('Groble v2 release documentation contract', () => {
         expect(packageJson).toContain('--env-file-if-exists=.env.local');
         expect(gate).toContain('pendingOldLineageCount');
         expect(gate).toContain('historicalProductEvidence');
+        expect(gate).toContain(
+            'unassignedCommercialWebhookCandidateCount'
+        );
         expect(gate).toContain('earlybird_groble_product_versions');
         expect(gate).toContain('expected_amount_krw');
         expect(gate).not.toContain('console.log(config');
@@ -43,6 +55,8 @@ describe('Groble v2 release documentation contract', () => {
     it('pins the safe primary rollout and DB-compatible rollback order', () => {
         expect(operations).toContain('신규 v2 Basic/Standard 상품');
         expect(operations).toContain('필수 값은 총 9개');
+        expect(operations).toContain('source 외부의 승인 manifest');
+        expect(operations).toContain('manifest·환경변수·DB의 세 출처');
         expect(operations).toContain(
             'checkout 접수를 먼저 중단하고 진행 중 writer를 drain'
         );
@@ -61,36 +75,77 @@ describe('Groble v2 release documentation contract', () => {
     });
 
     it('executes the documented pre-migration command with injected env', () => {
-        const result = spawnSync(
-            'npm',
-            [
-                'run',
-                'groble:v2:gate',
-                '--',
-                '--phase',
-                'pre-migration',
-                '--confirm-checkout-writes-paused',
-            ],
-            {
-                cwd: fileURLToPath(new URL('..', import.meta.url)),
-                encoding: 'utf8',
-                env: {
-                    ...process.env,
-                    GROBLE_BASIC_PRODUCT_ID: 'legacy_basic_product',
-                    GROBLE_STANDARD_PRODUCT_ID: 'legacy_standard_product',
-                    GROBLE_BASIC_PAYMENT_ADDRESS: 'legacy-basic-address',
-                    GROBLE_STANDARD_PAYMENT_ADDRESS: 'legacy-standard-address',
-                    GROBLE_V2_BASIC_PRODUCT_ID: 'v2_basic_product',
-                    GROBLE_V2_STANDARD_PRODUCT_ID: 'v2_standard_product',
-                    GROBLE_V2_BASIC_PAYMENT_ADDRESS: 'v2-basic-address',
-                    GROBLE_V2_STANDARD_PAYMENT_ADDRESS: 'v2-standard-address',
+        const tempDirectory = mkdtempSync(
+            join(tmpdir(), 'groble-v2-release-gate-')
+        );
+        const manifestPath = join(tempDirectory, 'approved-lineage.json');
+        writeFileSync(manifestPath, JSON.stringify({
+            schemaVersion: 1,
+            approvalId: 'reviewed-test-lineage',
+            reviewedAt: '2026-07-25T00:00:00.000Z',
+            legacy: {
+                basic: {
+                    productId: 'legacy_basic_product',
+                    paymentAddress: 'legacy-basic-address',
                 },
-            }
-        );
+                standard: {
+                    productId: 'legacy_standard_product',
+                    paymentAddress: 'legacy-standard-address',
+                },
+            },
+            v2: {
+                basic: {
+                    productId: 'v2_basic_product',
+                    paymentAddress: 'v2-basic-address',
+                },
+                standard: {
+                    productId: 'v2_standard_product',
+                    paymentAddress: 'v2-standard-address',
+                },
+            },
+        }));
+        try {
+            const result = spawnSync(
+                'npm',
+                [
+                    'run',
+                    'groble:v2:gate',
+                    '--',
+                    '--phase',
+                    'pre-migration',
+                    '--approved-manifest',
+                    manifestPath,
+                    '--confirm-checkout-writes-paused',
+                ],
+                {
+                    cwd: fileURLToPath(new URL('..', import.meta.url)),
+                    encoding: 'utf8',
+                    env: {
+                        ...process.env,
+                        GROBLE_BASIC_PRODUCT_ID: 'legacy_basic_product',
+                        GROBLE_STANDARD_PRODUCT_ID:
+                            'legacy_standard_product',
+                        GROBLE_BASIC_PAYMENT_ADDRESS:
+                            'legacy-basic-address',
+                        GROBLE_STANDARD_PAYMENT_ADDRESS:
+                            'legacy-standard-address',
+                        GROBLE_V2_BASIC_PRODUCT_ID: 'v2_basic_product',
+                        GROBLE_V2_STANDARD_PRODUCT_ID:
+                            'v2_standard_product',
+                        GROBLE_V2_BASIC_PAYMENT_ADDRESS:
+                            'v2-basic-address',
+                        GROBLE_V2_STANDARD_PAYMENT_ADDRESS:
+                            'v2-standard-address',
+                    },
+                }
+            );
 
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toContain(
-            '{"phase":"pre-migration","status":"passed"}'
-        );
+            expect(result.status, result.stderr).toBe(0);
+            expect(result.stdout).toContain(
+                '{"phase":"pre-migration","status":"passed"}'
+            );
+        } finally {
+            rmSync(tempDirectory, { recursive: true, force: true });
+        }
     });
 });

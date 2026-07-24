@@ -638,6 +638,14 @@ BEGIN
               SELECT 1
               FROM public.earlybird_webhook_events AS webhook_event
               WHERE webhook_event.order_id = legacy_order.id
+                 OR (
+                      webhook_event.order_id IS NULL
+                      AND webhook_event.event_type = 'payment.completed'
+                      AND webhook_event.product_id
+                          = legacy_order.expected_groble_product_id
+                      AND webhook_event.amount_krw
+                          <= legacy_order.expected_amount_krw
+                 )
           )
         ORDER BY legacy_order.expected_groble_product_id
     LOOP
@@ -689,6 +697,14 @@ BEGIN
               SELECT 1
               FROM public.earlybird_webhook_events AS webhook_event
               WHERE webhook_event.order_id = legacy_order.id
+                 OR (
+                      webhook_event.order_id IS NULL
+                      AND webhook_event.event_type = 'payment.completed'
+                      AND webhook_event.product_id
+                          = legacy_order.expected_groble_product_id
+                      AND webhook_event.amount_krw
+                          <= legacy_order.expected_amount_krw
+                 )
           )
         ORDER BY legacy_order.user_id
     LOOP
@@ -737,6 +753,14 @@ BEGIN
               SELECT 1
               FROM public.earlybird_webhook_events AS webhook_event
               WHERE webhook_event.order_id = legacy_order.id
+                 OR (
+                      webhook_event.order_id IS NULL
+                      AND webhook_event.event_type = 'payment.completed'
+                      AND webhook_event.product_id
+                          = legacy_order.expected_groble_product_id
+                      AND webhook_event.amount_krw
+                          <= legacy_order.expected_amount_krw
+                 )
           )
         FOR UPDATE OF legacy_order
     ),
