@@ -11,7 +11,7 @@ function migration(): string {
 }
 
 describe('Groble v2 product separation and legacy refresh migration', () => {
-    it('creates immutable service-only product, retirement, and refresh lineage', () => {
+    it('creates service-only product configuration and immutable audit lineage', () => {
         const sql = migration();
 
         for (const table of [
@@ -35,13 +35,45 @@ describe('Groble v2 product separation and legacy refresh migration', () => {
         expect(sql).toContain('UNIQUE (product_id)');
         expect(sql).toContain('UNIQUE (payment_address)');
         expect(sql).toContain('UNIQUE (plan_id, pricing_version)');
-        expect(sql).toContain('EARLYBIRD_PRODUCT_VERSION_REUSE');
-        expect(sql).toContain('EARLYBIRD_PAYMENT_ADDRESS_VERSION_REUSE');
+        expect(sql).toContain(
+            'CREATE FUNCTION public.configure_earlybird_groble_product_lineage('
+        );
+        expect(sql).toContain('GROBLE_IDENTIFIERS_MUST_BE_GLOBALLY_DISTINCT');
+        expect(sql).toContain('EARLYBIRD_PRODUCT_LINEAGE_FROZEN');
+        expect(sql).not.toContain(
+            'CREATE FUNCTION public.configure_earlybird_groble_product_version('
+        );
         expect(sql).toContain('EARLYBIRD_AUDIT_IMMUTABLE');
         expect(sql).toContain("SET search_path = ''");
     });
 
-    it('atomically retires only untouched exact-price v1 pending orders without identifiers', () => {
+    it('activates v2 only through one atomic four-binding configuration', () => {
+        const sql = migration();
+        const configuration = sql.slice(
+            sql.indexOf(
+                'CREATE FUNCTION public.configure_earlybird_groble_product_lineage('
+            ),
+            sql.indexOf(
+                '-- The phone-aware canonical finalizer'
+            )
+        );
+
+        expect(configuration).toContain("'basic', 'earlybird-2026-07-v1'");
+        expect(configuration).toContain("'standard', 'earlybird-2026-07-v1'");
+        expect(configuration).toContain("'basic', 'earlybird-2026-07-v2'");
+        expect(configuration).toContain("'standard', 'earlybird-2026-07-v2'");
+        expect(configuration).toContain('14900, FALSE');
+        expect(configuration).toContain('19900, FALSE');
+        expect(configuration).toContain('6900, TRUE');
+        expect(configuration).toContain('9900, TRUE');
+        expect(configuration).toContain('ON CONFLICT (plan_id, pricing_version)');
+        expect(configuration).toContain('EARLYBIRD_PRODUCT_LINEAGE_FROZEN');
+        expect(configuration).toContain(
+            'GRANT EXECUTE ON FUNCTION public.configure_earlybird_groble_product_lineage('
+        );
+    });
+
+    it('atomically retires every untouched old-product pending order across v1 and v2 prices', () => {
         const sql = migration();
         const retirement = sql.slice(
             sql.indexOf('DO $retire_legacy$'),
@@ -49,11 +81,14 @@ describe('Groble v2 product separation and legacy refresh migration', () => {
         );
 
         expect(retirement).toContain("pricing_version = 'earlybird-2026-07-v1'");
+        expect(retirement).toContain("pricing_version = 'earlybird-2026-07-v2'");
         expect(retirement).toContain("status = 'payment_pending'");
         expect(retirement).toContain("plan_id = 'basic'");
         expect(retirement).toContain('expected_amount_krw = 14900');
         expect(retirement).toContain("plan_id = 'standard'");
         expect(retirement).toContain('expected_amount_krw = 19900');
+        expect(retirement).toContain('expected_amount_krw = 6900');
+        expect(retirement).toContain('expected_amount_krw = 9900');
         expect(retirement).toContain('payment_id IS NULL');
         expect(retirement).toContain('actual_groble_product_id IS NULL');
         expect(retirement).toContain('actual_amount_krw IS NULL');
@@ -75,7 +110,9 @@ describe('Groble v2 product separation and legacy refresh migration', () => {
 
         expect(sql).toContain('CREATE FUNCTION public.create_earlybird_checkout_v2(');
         expect(sql).toContain('p_payment_address TEXT');
-        expect(sql).toContain("p_pricing_version = 'earlybird-2026-07-v2'");
+        expect(sql).toContain(
+            "p_pricing_version IS DISTINCT FROM 'earlybird-2026-07-v2'"
+        );
         expect(sql).toContain('binding.product_id <> p_expected_product_id');
         expect(sql).toContain('binding.payment_address <> p_payment_address');
         expect(sql).toContain('binding.expected_amount_krw <> p_expected_amount_krw');

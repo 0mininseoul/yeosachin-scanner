@@ -194,6 +194,7 @@ describe('earlybird owner order status route', () => {
             order: {
                 orderId: ORDER_ID,
                 systemStatus: 'cancelled',
+                displayStatus: '새 할인가 구매 필요',
                 checkoutAction: 'refresh_pricing',
             },
         });

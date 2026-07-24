@@ -97,6 +97,7 @@ CREATE TABLE public.analysis_preflights (
 `;
 
 const V1 = 'earlybird-2026-07-v1';
+const V2 = 'earlybird-2026-07-v2';
 const DISCLOSURE_VERSION = 'earlybird-24h-v1';
 const DISCLOSURE_TEXT =
     '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.';
@@ -111,6 +112,75 @@ async function applyLineageMigration(db: PGlite): Promise<void> {
             : String(error);
         throw new Error(`lineage migration failed: ${details}`, { cause: error });
     }
+}
+
+async function configureLineage(
+    db: PGlite,
+    overrides: Partial<Record<
+        | 'legacyBasicProduct'
+        | 'legacyBasicAddress'
+        | 'legacyStandardProduct'
+        | 'legacyStandardAddress'
+        | 'v2BasicProduct'
+        | 'v2BasicAddress'
+        | 'v2StandardProduct'
+        | 'v2StandardAddress',
+        string
+    >> = {}
+): Promise<boolean> {
+    const values = {
+        legacyBasicProduct: 'legacy_basic_product',
+        legacyBasicAddress: 'legacy-basic-address',
+        legacyStandardProduct: 'legacy_standard_product',
+        legacyStandardAddress: 'legacy-standard-address',
+        v2BasicProduct: 'v2_basic_product',
+        v2BasicAddress: 'v2-basic-address',
+        v2StandardProduct: 'v2_standard_product',
+        v2StandardAddress: 'v2-standard-address',
+        ...overrides,
+    };
+    const configured = await db.query<{ configured: boolean }>(
+        `SELECT public.configure_earlybird_groble_product_lineage(
+            $1, $2, $3, $4, $5, $6, $7, $8
+        ) AS configured`,
+        Object.values(values)
+    );
+    return configured.rows[0].configured;
+}
+
+async function refreshLegacyCheckout(
+    db: PGlite,
+    legacy: Seed
+): Promise<{
+    order_id: string;
+    seller_reference: string;
+}> {
+    const refreshed = await db.query<{
+        order_id: string;
+        seller_reference: string;
+    }>(
+        `SELECT * FROM public.refresh_legacy_earlybird_checkout(
+            $1, $2, $3, $4, pg_catalog.clock_timestamp(),
+            '{"basic":"production","standard":"production","plus":"production"}'::JSONB,
+            '{
+                "basic":{"launchStatus":"production","relationshipCapacity":{"followers":400,"following":400},"detailedMutualLimit":300},
+                "standard":{"launchStatus":"production","relationshipCapacity":{"followers":800,"following":800},"detailedMutualLimit":600},
+                "plus":{"launchStatus":"production","relationshipCapacity":{"followers":1200,"following":1200},"detailedMutualLimit":900}
+            }'::JSONB,
+            '{
+                "basic":{"status":"quoted","currency":"KRW","amountKrw":6900},
+                "standard":{"status":"quoted","currency":"KRW","amountKrw":9900},
+                "plus":{"status":"deferred","currency":"KRW","amountKrw":null}
+            }'::JSONB
+        )`,
+        [
+            legacy.userId,
+            legacy.orderId,
+            DISCLOSURE_VERSION,
+            DISCLOSURE_TEXT,
+        ]
+    );
+    return refreshed.rows[0];
 }
 
 interface Seed {
@@ -140,8 +210,21 @@ async function baseDatabase(): Promise<PGlite> {
 async function seedV1Order(
     db: PGlite,
     index: number,
-    options: { sellerReference?: boolean; status?: 'payment_pending' | 'paid' } = {}
+    options: {
+        sellerReference?: boolean;
+        status?: 'payment_pending' | 'paid';
+        planId?: 'basic' | 'standard';
+        pricingVersion?: typeof V1 | typeof V2;
+        planSequence?: number;
+    } = {}
 ): Promise<Seed> {
+    const planId = options.planId ?? 'basic';
+    const pricingVersion = options.pricingVersion ?? V1;
+    const amount = pricingVersion === V1
+        ? planId === 'basic' ? 14_900 : 19_900
+        : planId === 'basic' ? 6_900 : 9_900;
+    const productId = `legacy_${planId}_product`;
+    const selectionState = planId === 'basic' ? 'required' : 'available_upgrade';
     const userId = uuid(1, index);
     const preflightId = uuid(2, index);
     const phone = `+8210${String(index).padStart(8, '0')}`;
@@ -163,20 +246,47 @@ async function seedV1Order(
             expires_at
         ) VALUES (
             $1, $2, $3, 'ready', 'skip', 'production',
-            '{"basic":{"selectionState":"required"}}'::JSONB,
-            $4,
-            '{"basic":{"status":"quoted","currency":"KRW","amountKrw":14900}}'::JSONB,
+            pg_catalog.jsonb_build_object(
+                $4::TEXT, pg_catalog.jsonb_build_object(
+                    'selectionState', $5::TEXT
+                )
+            ),
+            $6,
+            pg_catalog.jsonb_build_object(
+                $4::TEXT, pg_catalog.jsonb_build_object(
+                    'status', 'quoted',
+                    'currency', 'KRW',
+                    'amountKrw', $7::INTEGER
+                )
+            ),
             100, 100, 'basic',
             pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
         )`,
-        [preflightId, userId, `buyer_${index}`, V1]
+        [
+            preflightId,
+            userId,
+            `buyer_${index}`,
+            planId,
+            selectionState,
+            pricingVersion,
+            amount,
+        ]
     );
     const checkout = await db.query<{ order_id: string }>(
         `SELECT * FROM public.create_earlybird_checkout(
-            $1, $2, 'basic', 'legacy_basic_product', 14900, $3, $4, $5,
+            $1, $2, $3, $4, $5, $6, $7, $8,
             pg_catalog.clock_timestamp()
         )`,
-        [userId, preflightId, V1, DISCLOSURE_VERSION, DISCLOSURE_TEXT]
+        [
+            userId,
+            preflightId,
+            planId,
+            productId,
+            amount,
+            pricingVersion,
+            DISCLOSURE_VERSION,
+            DISCLOSURE_TEXT,
+        ]
     );
     const orderId = checkout.rows[0].order_id;
     let sellerReference: string | null = null;
@@ -196,9 +306,9 @@ async function seedV1Order(
                  actual_amount_krw = expected_amount_krw,
                  paid_at = pg_catalog.clock_timestamp(),
                  due_at = pg_catalog.clock_timestamp() + INTERVAL '24 hours',
-                 plan_sequence = 1
+                 plan_sequence = $3
              WHERE id = $1`,
-            [orderId, `paid-${index}`]
+            [orderId, `paid-${index}`, options.planSequence ?? 1]
         );
     }
     return { userId, preflightId, orderId, sellerReference };
@@ -209,38 +319,104 @@ afterEach(async () => {
 });
 
 describe('Groble v2 checkout lineage database behavior', () => {
-    it('retires only untouched v1 pending orders exactly once and preserves commercial states', async () => {
+    it('retires untouched pending old-product orders across v1 and v2 exactly once', async () => {
         const db = await baseDatabase();
         const noReference = await seedV1Order(db, 1);
         const withReference = await seedV1Order(db, 2, { sellerReference: true });
-        const paid = await seedV1Order(db, 3, { status: 'paid' });
+        const pendingV2Basic = await seedV1Order(db, 3, {
+            pricingVersion: V2,
+        });
+        const pendingV2Standard = await seedV1Order(db, 4, {
+            pricingVersion: V2,
+            planId: 'standard',
+        });
+        const paid = await seedV1Order(db, 5, { status: 'paid' });
+        const refundPending = await seedV1Order(db, 12, {
+            status: 'paid',
+            planSequence: 2,
+        });
+        const completed = await seedV1Order(db, 13, {
+            status: 'paid',
+            planSequence: 3,
+        });
+        const fulfilled = await seedV1Order(db, 14);
+        const webhookObserved = await seedV1Order(db, 15);
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'refund_pending'
+             WHERE id = $1`,
+            [refundPending.orderId]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'completed'
+             WHERE id = $1`,
+            [completed.orderId]
+        );
+        await db.query(
+            'INSERT INTO public.earlybird_fulfillments (order_id) VALUES ($1)',
+            [fulfilled.orderId]
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_webhook_events (
+                event_id, idempotency_key, event_type, occurred_at,
+                payment_id, product_id, amount_krw, disposition, order_id
+            ) VALUES (
+                'event-observed', 'idem-observed', 'payment.completed',
+                pg_catalog.clock_timestamp(), 'payment-observed',
+                'legacy_basic_product', 14900, 'unmatched', $1
+            )`,
+            [webhookObserved.orderId]
+        );
+        await db.query(
+            `UPDATE public.earlybird_plan_inventory
+             SET sold_count = 3
+             WHERE plan_id = 'basic'`
+        );
 
         await applyLineageMigration(db);
 
         const rows = await db.query<{ id: string; status: string }>(
             `SELECT id, status
              FROM public.earlybird_orders
-             WHERE id IN ($1, $2, $3)
+             WHERE id IN ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ORDER BY id`,
-            [noReference.orderId, withReference.orderId, paid.orderId]
+            [
+                noReference.orderId,
+                withReference.orderId,
+                pendingV2Basic.orderId,
+                pendingV2Standard.orderId,
+                paid.orderId,
+                refundPending.orderId,
+                completed.orderId,
+                fulfilled.orderId,
+                webhookObserved.orderId,
+            ]
         );
         const statusById = new Map(rows.rows.map(row => [row.id, row.status]));
         expect(statusById.get(noReference.orderId)).toBe('cancelled');
         expect(statusById.get(withReference.orderId)).toBe('cancelled');
+        expect(statusById.get(pendingV2Basic.orderId)).toBe('cancelled');
+        expect(statusById.get(pendingV2Standard.orderId)).toBe('cancelled');
         expect(statusById.get(paid.orderId)).toBe('paid');
+        expect(statusById.get(refundPending.orderId)).toBe('refund_pending');
+        expect(statusById.get(completed.orderId)).toBe('completed');
+        expect(statusById.get(fulfilled.orderId)).toBe('payment_pending');
+        expect(statusById.get(webhookObserved.orderId)).toBe('payment_pending');
         expect((await db.query<{ count: number }>(
             'SELECT count(*)::INTEGER AS count FROM public.earlybird_checkout_retirements'
-        )).rows[0].count).toBe(2);
+        )).rows[0].count).toBe(4);
         expect((await db.query<{ sold_count: number }>(
             `SELECT sold_count FROM public.earlybird_plan_inventory
              WHERE plan_id = 'basic'`
-        )).rows[0].sold_count).toBe(0);
+        )).rows[0].sold_count).toBe(3);
     }, 30_000);
 
     it('attributes a late discounted payment directly to its retired reference as refund pending', async () => {
         const db = await baseDatabase();
-        const legacy = await seedV1Order(db, 4, { sellerReference: true });
+        const legacy = await seedV1Order(db, 6, { sellerReference: true });
         await applyLineageMigration(db);
+        await configureLineage(db);
 
         const finalized = await db.query<{
             disposition: string;
@@ -267,22 +443,15 @@ describe('Groble v2 checkout lineage database behavior', () => {
         )).rows[0].sold_count).toBe(0);
     }, 30_000);
 
-    it('idempotently replaces an eligible retired checkout using the DB-owned v2 binding', async () => {
+    it('idempotently replaces an existing v2 Standard old-product checkout using the new DB binding', async () => {
         const db = await baseDatabase();
-        const legacy = await seedV1Order(db, 5, { sellerReference: true });
+        const legacy = await seedV1Order(db, 7, {
+            sellerReference: true,
+            pricingVersion: V2,
+            planId: 'standard',
+        });
         await applyLineageMigration(db);
-        await db.query(
-            `SELECT public.configure_earlybird_groble_product_version(
-                'basic', 'earlybird-2026-07-v1', 'legacy_basic_product',
-                'legacy-basic-address', 14900, FALSE
-            )`
-        );
-        await db.query(
-            `SELECT public.configure_earlybird_groble_product_version(
-                'basic', 'earlybird-2026-07-v2', 'v2_basic_product',
-                'v2-basic-address', 6900, TRUE
-            )`
-        );
+        await configureLineage(db);
         const args = [
             legacy.userId,
             legacy.orderId,
@@ -319,8 +488,8 @@ describe('Groble v2 checkout lineage database behavior', () => {
 
         expect(first).toMatchObject({
             created: true,
-            plan_id: 'basic',
-            payment_address: 'v2-basic-address',
+            plan_id: 'standard',
+            payment_address: 'v2-standard-address',
         });
         expect(first.order_id).not.toBe(legacy.orderId);
         expect(first.seller_reference).toMatch(/^ord\.[a-f0-9]{32}$/);
@@ -333,5 +502,203 @@ describe('Groble v2 checkout lineage database behavior', () => {
         expect((await db.query<{ count: number }>(
             'SELECT count(*)::INTEGER AS count FROM public.earlybird_checkout_refreshes'
         )).rows[0].count).toBe(1);
+    }, 30_000);
+
+    it('configures all four bindings atomically and corrects a typo before evidence', async () => {
+        const db = await baseDatabase();
+        await applyLineageMigration(db);
+
+        expect(await configureLineage(db, {
+            v2BasicProduct: 'v2_basic_typo',
+        })).toBe(true);
+        expect(await configureLineage(db)).toBe(true);
+        expect(await configureLineage(db)).toBe(false);
+
+        const bindings = await db.query<{
+            pricing_version: string;
+            plan_id: string;
+            product_id: string;
+            checkout_active: boolean;
+        }>(
+            `SELECT pricing_version, plan_id, product_id, checkout_active
+             FROM public.earlybird_groble_product_versions
+             ORDER BY pricing_version, plan_id`
+        );
+        expect(bindings.rows).toHaveLength(4);
+        expect(bindings.rows.filter(row => row.checkout_active)).toEqual([
+            expect.objectContaining({
+                pricing_version: V2,
+                plan_id: 'basic',
+                product_id: 'v2_basic_product',
+            }),
+            expect.objectContaining({
+                pricing_version: V2,
+                plan_id: 'standard',
+                product_id: 'v2_standard_product',
+            }),
+        ]);
+    }, 30_000);
+
+    it('rejects partial configuration, globally reused identities, and correction after evidence', async () => {
+        const db = await baseDatabase();
+        await applyLineageMigration(db);
+
+        await expect(db.query(
+            `SELECT public.configure_earlybird_groble_product_version(
+                'basic', $1, 'v2_basic_product',
+                'v2-basic-address', 6900, TRUE
+            )`,
+            [V2]
+        )).rejects.toThrow(/does not exist/i);
+        await expect(configureLineage(db, {
+            v2StandardAddress: 'legacy_basic_product',
+        })).rejects.toThrow('GROBLE_IDENTIFIERS_MUST_BE_GLOBALLY_DISTINCT');
+
+        await configureLineage(db);
+        const legacy = await seedV1Order(db, 8, {
+            pricingVersion: V2,
+        });
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET expected_groble_product_id = 'v2_basic_product'
+             WHERE id = $1`,
+            [legacy.orderId]
+        );
+        await expect(configureLineage(db, {
+            v2BasicProduct: 'v2_basic_corrected_too_late',
+        })).rejects.toThrow('EARLYBIRD_PRODUCT_LINEAGE_FROZEN');
+    }, 30_000);
+
+    it('requires a seller reference for active v2 while preserving no-reference legacy refunds', async () => {
+        const db = await baseDatabase();
+        const activeLegacy = await seedV1Order(db, 9);
+        const lateLegacy = await seedV1Order(db, 10, {
+            sellerReference: true,
+        });
+        await applyLineageMigration(db);
+        await configureLineage(db);
+        const active = await refreshLegacyCheckout(db, activeLegacy);
+
+        await expect(db.query(
+            `SELECT * FROM public.finalize_earlybird_groble_payment(
+                'event-active-no-ref', 'idem-active-no-ref', 'payment.completed',
+                pg_catalog.clock_timestamp(), 'payment-active-no-ref',
+                'buyer-9@example.com', NULL, NULL, NULL,
+                'v2_basic_product', 6900, pg_catalog.clock_timestamp()
+            )`
+        )).rejects.toThrow('GROBLE_SELLER_REFERENCE_REQUIRED');
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1',
+            [active.order_id]
+        )).rows[0].status).toBe('payment_pending');
+
+        const late = await db.query<{ disposition: string; status: string }>(
+            `SELECT * FROM public.finalize_earlybird_groble_payment(
+                'event-legacy-no-ref', 'idem-legacy-no-ref', 'payment.completed',
+                pg_catalog.clock_timestamp(), 'payment-legacy-no-ref',
+                'buyer-10@example.com', '+821000000010', NULL, NULL,
+                'legacy_basic_product', 6900, pg_catalog.clock_timestamp()
+            )`
+        );
+        expect(late.rows[0]).toMatchObject({
+            disposition: 'late_cancelled_payment',
+            status: 'refund_pending',
+        });
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1',
+            [lateLegacy.orderId]
+        )).rows[0].status).toBe('refund_pending');
+    }, 30_000);
+
+    it('rejects active underpayment without mutation and accepts only exact duplicate evidence', async () => {
+        const db = await baseDatabase();
+        const legacy = await seedV1Order(db, 11);
+        await applyLineageMigration(db);
+        await configureLineage(db);
+        const active = await refreshLegacyCheckout(db, legacy);
+        const finalize = (
+            eventId: string,
+            idempotencyKey: string,
+            paymentId: string,
+            productId: string,
+            amount: number
+        ) => db.query<{ disposition: string; status: string }>(
+            `SELECT * FROM public.finalize_earlybird_groble_payment_by_reference(
+                $1, $2, $3, 'payment.completed',
+                pg_catalog.clock_timestamp(), $4,
+                'buyer-11@example.com', NULL, NULL, NULL,
+                $5, $6, pg_catalog.clock_timestamp()
+            )`,
+            [
+                active.seller_reference,
+                eventId,
+                idempotencyKey,
+                paymentId,
+                productId,
+                amount,
+            ]
+        );
+
+        await expect(finalize(
+            'event-underpaid',
+            'idem-underpaid',
+            'payment-underpaid',
+            'v2_basic_product',
+            6_899
+        )).rejects.toThrow('EARLYBIRD_PAYMENT_AMOUNT_MISMATCH');
+        expect((await db.query<{
+            status: string;
+            payment_id: string | null;
+        }>(
+            'SELECT status, payment_id FROM public.earlybird_orders WHERE id = $1',
+            [active.order_id]
+        )).rows[0]).toEqual({
+            status: 'payment_pending',
+            payment_id: null,
+        });
+        expect((await db.query<{ count: number }>(
+            'SELECT count(*)::INTEGER AS count FROM public.earlybird_webhook_events'
+        )).rows[0].count).toBe(0);
+
+        expect((await finalize(
+            'event-paid',
+            'idem-paid',
+            'payment-paid',
+            'v2_basic_product',
+            6_900
+        )).rows[0]).toMatchObject({
+            disposition: 'accepted',
+            status: 'paid',
+        });
+        expect((await finalize(
+            'event-paid',
+            'idem-paid',
+            'payment-paid',
+            'v2_basic_product',
+            6_900
+        )).rows[0].disposition).toBe('duplicate_event');
+
+        await expect(finalize(
+            'event-paid',
+            'idem-paid',
+            'payment-paid',
+            'v2_basic_product',
+            6_899
+        )).rejects.toThrow('EARLYBIRD_SELLER_REFERENCE_CONFLICT');
+        await expect(finalize(
+            'event-payment-drift',
+            'idem-payment-drift',
+            'payment-paid',
+            'v2_standard_product',
+            9_900
+        )).rejects.toThrow('EARLYBIRD_SELLER_REFERENCE_CONFLICT');
+
+        expect((await db.query<{ count: number }>(
+            'SELECT count(*)::INTEGER AS count FROM public.earlybird_webhook_events'
+        )).rows[0].count).toBe(1);
+        expect((await db.query<{ sold_count: number }>(
+            `SELECT sold_count FROM public.earlybird_plan_inventory
+             WHERE plan_id = 'basic'`
+        )).rows[0].sold_count).toBe(1);
     }, 30_000);
 });

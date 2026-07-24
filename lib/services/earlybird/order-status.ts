@@ -101,6 +101,7 @@ export async function loadLatestEarlybirdOrder(
     const order = parsed.data;
 
     let resultUrl: string | null = null;
+    let displayStatus = DISPLAY_STATUS[order.status];
     let checkoutAction: EarlybirdOrderStatusDto['checkoutAction'] =
         order.status === 'payment_pending' ? 'continue' : null;
     if (order.status === 'completed' && order.result_request_id) {
@@ -130,6 +131,7 @@ export async function loadLatestEarlybirdOrder(
             && parsedRetirement.data.legacy_order_id === order.id
         ) {
             checkoutAction = 'refresh_pricing';
+            displayStatus = '새 할인가 구매 필요';
         }
     }
 
@@ -144,7 +146,7 @@ export async function loadLatestEarlybirdOrder(
         dueAt: order.due_at,
         planSequence: order.plan_sequence,
         systemStatus: order.status,
-        displayStatus: DISPLAY_STATUS[order.status],
+        displayStatus,
         resultUrl,
         checkoutAction,
     });

@@ -101,10 +101,6 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER earlybird_groble_product_versions_immutable
-BEFORE UPDATE OR DELETE ON public.earlybird_groble_product_versions
-FOR EACH ROW EXECUTE FUNCTION public.reject_earlybird_checkout_lineage_mutation();
-
 CREATE TRIGGER earlybird_checkout_retirements_immutable
 BEFORE UPDATE OR DELETE ON public.earlybird_checkout_retirements
 FOR EACH ROW EXECUTE FUNCTION public.reject_earlybird_checkout_lineage_mutation();
@@ -116,13 +112,15 @@ FOR EACH ROW EXECUTE FUNCTION public.reject_earlybird_checkout_lineage_mutation(
 REVOKE ALL ON FUNCTION public.reject_earlybird_checkout_lineage_mutation()
     FROM PUBLIC, anon, authenticated, service_role;
 
-CREATE FUNCTION public.configure_earlybird_groble_product_version(
-    p_plan_id TEXT,
-    p_pricing_version TEXT,
-    p_product_id TEXT,
-    p_payment_address TEXT,
-    p_expected_amount_krw INTEGER,
-    p_checkout_active BOOLEAN
+CREATE FUNCTION public.configure_earlybird_groble_product_lineage(
+    p_legacy_basic_product_id TEXT,
+    p_legacy_basic_payment_address TEXT,
+    p_legacy_standard_product_id TEXT,
+    p_legacy_standard_payment_address TEXT,
+    p_v2_basic_product_id TEXT,
+    p_v2_basic_payment_address TEXT,
+    p_v2_standard_product_id TEXT,
+    p_v2_standard_payment_address TEXT
 )
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -131,38 +129,43 @@ SET search_path = ''
 AS $$
 DECLARE
     v_existing public.earlybird_groble_product_versions%ROWTYPE;
+    v_desired RECORD;
+    v_changed BOOLEAN := FALSE;
 BEGIN
-    IF p_plan_id IS NULL
-       OR p_plan_id NOT IN ('basic', 'standard')
-       OR p_pricing_version IS NULL
-       OR p_pricing_version NOT IN (
-            'earlybird-2026-07-v1',
-            'earlybird-2026-07-v2'
-       )
-       OR p_product_id IS NULL
-       OR p_product_id !~ '^[A-Za-z0-9_-]{1,128}$'
-       OR p_payment_address IS NULL
-       OR p_payment_address !~ '^[A-Za-z0-9_-]{1,128}$'
-       OR p_expected_amount_krw IS NULL
-       OR p_checkout_active IS NULL
-       OR (
-            p_pricing_version = 'earlybird-2026-07-v1'
-            AND (
-                p_checkout_active
-                OR (p_plan_id = 'basic' AND p_expected_amount_krw <> 14900)
-                OR (p_plan_id = 'standard' AND p_expected_amount_krw <> 19900)
-            )
-       )
-       OR (
-            p_pricing_version = 'earlybird-2026-07-v2'
-            AND (
-                NOT p_checkout_active
-                OR (p_plan_id = 'basic' AND p_expected_amount_krw <> 6900)
-                OR (p_plan_id = 'standard' AND p_expected_amount_krw <> 9900)
-            )
-       ) THEN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.unnest(ARRAY[
+            p_legacy_basic_product_id,
+            p_legacy_basic_payment_address,
+            p_legacy_standard_product_id,
+            p_legacy_standard_payment_address,
+            p_v2_basic_product_id,
+            p_v2_basic_payment_address,
+            p_v2_standard_product_id,
+            p_v2_standard_payment_address
+        ]) AS identifier(value)
+        WHERE identifier.value IS NULL
+           OR identifier.value !~ '^[A-Za-z0-9_-]{1,128}$'
+    ) THEN
         RAISE EXCEPTION USING
-            MESSAGE = 'EARLYBIRD_PRODUCT_VERSION_INVALID',
+            MESSAGE = 'EARLYBIRD_PRODUCT_LINEAGE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    IF (
+        SELECT pg_catalog.count(DISTINCT identifier.value)
+        FROM pg_catalog.unnest(ARRAY[
+            p_legacy_basic_product_id,
+            p_legacy_basic_payment_address,
+            p_legacy_standard_product_id,
+            p_legacy_standard_payment_address,
+            p_v2_basic_product_id,
+            p_v2_basic_payment_address,
+            p_v2_standard_product_id,
+            p_v2_standard_payment_address
+        ]) AS identifier(value)
+    ) <> 8 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'GROBLE_IDENTIFIERS_MUST_BE_GLOBALLY_DISTINCT',
             ERRCODE = 'P0001';
     END IF;
 
@@ -173,64 +176,147 @@ BEGIN
         )
     );
 
-    SELECT binding.*
-    INTO v_existing
-    FROM public.earlybird_groble_product_versions AS binding
-    WHERE (binding.plan_id = p_plan_id
-           AND binding.pricing_version = p_pricing_version)
-       OR binding.product_id = p_product_id
-       OR binding.payment_address = p_payment_address
-    ORDER BY binding.plan_id, binding.pricing_version
-    LIMIT 1;
+    FOR v_desired IN
+        SELECT *
+        FROM (
+            VALUES
+                (
+                    'basic'::TEXT,
+                    'earlybird-2026-07-v1'::VARCHAR(64),
+                    p_legacy_basic_product_id,
+                    p_legacy_basic_payment_address,
+                    14900,
+                    FALSE
+                ),
+                (
+                    'standard'::TEXT,
+                    'earlybird-2026-07-v1'::VARCHAR(64),
+                    p_legacy_standard_product_id,
+                    p_legacy_standard_payment_address,
+                    19900,
+                    FALSE
+                ),
+                (
+                    'basic'::TEXT,
+                    'earlybird-2026-07-v2'::VARCHAR(64),
+                    p_v2_basic_product_id,
+                    p_v2_basic_payment_address,
+                    6900,
+                    TRUE
+                ),
+                (
+                    'standard'::TEXT,
+                    'earlybird-2026-07-v2'::VARCHAR(64),
+                    p_v2_standard_product_id,
+                    p_v2_standard_payment_address,
+                    9900,
+                    TRUE
+                )
+        ) AS desired(
+            plan_id,
+            pricing_version,
+            product_id,
+            payment_address,
+            expected_amount_krw,
+            checkout_active
+        )
+    LOOP
+        SELECT binding.*
+        INTO v_existing
+        FROM public.earlybird_groble_product_versions AS binding
+        WHERE binding.plan_id = v_desired.plan_id
+          AND binding.pricing_version = v_desired.pricing_version;
 
-    IF FOUND THEN
-        IF v_existing.plan_id = p_plan_id
-           AND v_existing.pricing_version = p_pricing_version
-           AND v_existing.product_id = p_product_id
-           AND v_existing.payment_address = p_payment_address
-           AND v_existing.expected_amount_krw = p_expected_amount_krw
-           AND v_existing.checkout_active = p_checkout_active THEN
-            RETURN FALSE;
+        IF NOT FOUND THEN
+            v_changed := TRUE;
+            CONTINUE;
         END IF;
-        IF v_existing.product_id = p_product_id THEN
+        IF v_existing.product_id = v_desired.product_id
+           AND v_existing.payment_address = v_desired.payment_address
+           AND v_existing.expected_amount_krw = v_desired.expected_amount_krw
+           AND v_existing.checkout_active = v_desired.checkout_active THEN
+            CONTINUE;
+        END IF;
+        IF EXISTS (
+            SELECT 1
+            FROM public.earlybird_orders AS evidence
+            WHERE evidence.pricing_version = v_existing.pricing_version
+              AND evidence.expected_groble_product_id = v_existing.product_id
+        ) THEN
             RAISE EXCEPTION USING
-                MESSAGE = 'EARLYBIRD_PRODUCT_VERSION_REUSE',
+                MESSAGE = 'EARLYBIRD_PRODUCT_LINEAGE_FROZEN',
                 ERRCODE = 'P0001';
         END IF;
-        IF v_existing.payment_address = p_payment_address THEN
-            RAISE EXCEPTION USING
-                MESSAGE = 'EARLYBIRD_PAYMENT_ADDRESS_VERSION_REUSE',
-                ERRCODE = 'P0001';
-        END IF;
-        RAISE EXCEPTION USING
-            MESSAGE = 'EARLYBIRD_PRODUCT_VERSION_CONFLICT',
-            ERRCODE = 'P0001';
+        v_changed := TRUE;
+    END LOOP;
+
+    IF NOT v_changed THEN
+        RETURN FALSE;
     END IF;
 
-    INSERT INTO public.earlybird_groble_product_versions (
+    DELETE FROM public.earlybird_groble_product_versions AS existing
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM (
+            VALUES
+                ('basic'::TEXT, 'earlybird-2026-07-v1'::VARCHAR(64),
+                 p_legacy_basic_product_id, p_legacy_basic_payment_address),
+                ('standard'::TEXT, 'earlybird-2026-07-v1'::VARCHAR(64),
+                 p_legacy_standard_product_id, p_legacy_standard_payment_address),
+                ('basic'::TEXT, 'earlybird-2026-07-v2'::VARCHAR(64),
+                 p_v2_basic_product_id, p_v2_basic_payment_address),
+                ('standard'::TEXT, 'earlybird-2026-07-v2'::VARCHAR(64),
+                 p_v2_standard_product_id, p_v2_standard_payment_address)
+        ) AS desired(plan_id, pricing_version, product_id, payment_address)
+        WHERE desired.plan_id = existing.plan_id
+          AND desired.pricing_version = existing.pricing_version
+          AND desired.product_id = existing.product_id
+          AND desired.payment_address = existing.payment_address
+    );
+
+    INSERT INTO public.earlybird_groble_product_versions AS binding (
         plan_id,
         pricing_version,
         product_id,
         payment_address,
         expected_amount_krw,
         checkout_active
-    ) VALUES (
-        p_plan_id,
-        p_pricing_version,
-        p_product_id,
-        p_payment_address,
-        p_expected_amount_krw,
-        p_checkout_active
-    );
+    ) VALUES
+        (
+            'basic', 'earlybird-2026-07-v1',
+            p_legacy_basic_product_id, p_legacy_basic_payment_address,
+            14900, FALSE
+        ),
+        (
+            'standard', 'earlybird-2026-07-v1',
+            p_legacy_standard_product_id, p_legacy_standard_payment_address,
+            19900, FALSE
+        ),
+        (
+            'basic', 'earlybird-2026-07-v2',
+            p_v2_basic_product_id, p_v2_basic_payment_address,
+            6900, TRUE
+        ),
+        (
+            'standard', 'earlybird-2026-07-v2',
+            p_v2_standard_product_id, p_v2_standard_payment_address,
+            9900, TRUE
+        )
+    ON CONFLICT (plan_id, pricing_version) DO UPDATE
+    SET product_id = EXCLUDED.product_id,
+        payment_address = EXCLUDED.payment_address,
+        expected_amount_krw = EXCLUDED.expected_amount_krw,
+        checkout_active = EXCLUDED.checkout_active,
+        configured_at = pg_catalog.clock_timestamp();
     RETURN TRUE;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.configure_earlybird_groble_product_version(
-    TEXT, TEXT, TEXT, TEXT, INTEGER, BOOLEAN
+REVOKE ALL ON FUNCTION public.configure_earlybird_groble_product_lineage(
+    TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT
 ) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.configure_earlybird_groble_product_version(
-    TEXT, TEXT, TEXT, TEXT, INTEGER, BOOLEAN
+GRANT EXECUTE ON FUNCTION public.configure_earlybird_groble_product_lineage(
+    TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT
 ) TO service_role;
 
 -- The phone-aware canonical finalizer previously acquired payment and user
@@ -267,6 +353,9 @@ SET search_path = ''
 AS $$
 DECLARE
     v_lock_user_id UUID;
+    v_binding public.earlybird_groble_product_versions%ROWTYPE;
+    v_legacy_reference TEXT;
+    v_legacy_match_count INTEGER;
 BEGIN
     IF p_event_type IS DISTINCT FROM 'payment.completed'
        OR p_event_id IS NULL
@@ -308,6 +397,21 @@ BEGIN
         )
     );
 
+    SELECT configured.*
+    INTO v_binding
+    FROM public.earlybird_groble_product_versions AS configured
+    WHERE configured.product_id = p_product_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_PRODUCT_CONFIGURATION_REQUIRED',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_binding.checkout_active THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'GROBLE_SELLER_REFERENCE_REQUIRED',
+            ERRCODE = 'P0001';
+    END IF;
+
     FOR v_lock_user_id IN
         SELECT potential_user.user_id
         FROM (
@@ -336,6 +440,50 @@ BEGIN
             pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
         );
     END LOOP;
+
+    SELECT
+        pg_catalog.min(candidate.groble_seller_reference),
+        pg_catalog.count(*)::INTEGER
+    INTO v_legacy_reference, v_legacy_match_count
+    FROM public.earlybird_orders AS candidate
+    JOIN public.users AS buyer ON buyer.id = candidate.user_id
+    WHERE candidate.expected_groble_product_id = p_product_id
+      AND candidate.status = 'cancelled'
+      AND candidate.payment_id IS NULL
+      AND candidate.groble_seller_reference IS NOT NULL
+      AND (
+          (
+              candidate.buyer_match_policy = 'legacy_email'
+              AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                  = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+          )
+          OR (
+              candidate.buyer_match_policy = 'verified_kakao_phone'
+              AND p_buyer_phone_normalized IS NOT NULL
+              AND candidate.expected_buyer_phone_number_normalized
+                  = p_buyer_phone_normalized
+          )
+      );
+    IF v_legacy_match_count = 1 THEN
+        RETURN QUERY
+        SELECT *
+        FROM public.finalize_earlybird_groble_payment_by_reference(
+            v_legacy_reference,
+            p_event_id,
+            p_idempotency_key,
+            p_event_type,
+            p_occurred_at,
+            p_payment_id,
+            p_buyer_email,
+            p_buyer_phone_normalized,
+            p_buyer_phone_raw,
+            p_buyer_display_name,
+            p_product_id,
+            p_amount_krw,
+            p_paid_at
+        );
+        RETURN;
+    END IF;
 
     RETURN QUERY
     SELECT *
@@ -375,14 +523,29 @@ BEGIN
         FROM public.earlybird_orders AS legacy_order
         LEFT JOIN public.earlybird_fulfillments AS fulfillment
           ON fulfillment.order_id = legacy_order.id
-        WHERE legacy_order.pricing_version = 'earlybird-2026-07-v1'
-          AND legacy_order.status = 'payment_pending'
+        WHERE legacy_order.status = 'payment_pending'
           AND (
-              (legacy_order.plan_id = 'basic'
-               AND legacy_order.expected_amount_krw = 14900)
+              (
+                  legacy_order.pricing_version = 'earlybird-2026-07-v1'
+                  AND (
+                      (legacy_order.plan_id = 'basic'
+                       AND legacy_order.expected_amount_krw = 14900)
+                      OR
+                      (legacy_order.plan_id = 'standard'
+                       AND legacy_order.expected_amount_krw = 19900)
+                  )
+              )
               OR
-              (legacy_order.plan_id = 'standard'
-               AND legacy_order.expected_amount_krw = 19900)
+              (
+                  legacy_order.pricing_version = 'earlybird-2026-07-v2'
+                  AND (
+                      (legacy_order.plan_id = 'basic'
+                       AND legacy_order.expected_amount_krw = 6900)
+                      OR
+                      (legacy_order.plan_id = 'standard'
+                       AND legacy_order.expected_amount_krw = 9900)
+                  )
+              )
           )
           AND legacy_order.payment_id IS NULL
           AND legacy_order.actual_groble_product_id IS NULL
@@ -411,14 +574,29 @@ BEGIN
         FROM public.earlybird_orders AS legacy_order
         LEFT JOIN public.earlybird_fulfillments AS fulfillment
           ON fulfillment.order_id = legacy_order.id
-        WHERE legacy_order.pricing_version = 'earlybird-2026-07-v1'
-          AND legacy_order.status = 'payment_pending'
+        WHERE legacy_order.status = 'payment_pending'
           AND (
-              (legacy_order.plan_id = 'basic'
-               AND legacy_order.expected_amount_krw = 14900)
+              (
+                  legacy_order.pricing_version = 'earlybird-2026-07-v1'
+                  AND (
+                      (legacy_order.plan_id = 'basic'
+                       AND legacy_order.expected_amount_krw = 14900)
+                      OR
+                      (legacy_order.plan_id = 'standard'
+                       AND legacy_order.expected_amount_krw = 19900)
+                  )
+              )
               OR
-              (legacy_order.plan_id = 'standard'
-               AND legacy_order.expected_amount_krw = 19900)
+              (
+                  legacy_order.pricing_version = 'earlybird-2026-07-v2'
+                  AND (
+                      (legacy_order.plan_id = 'basic'
+                       AND legacy_order.expected_amount_krw = 6900)
+                      OR
+                      (legacy_order.plan_id = 'standard'
+                       AND legacy_order.expected_amount_krw = 9900)
+                  )
+              )
           )
           AND legacy_order.payment_id IS NULL
           AND legacy_order.actual_groble_product_id IS NULL
@@ -444,14 +622,29 @@ BEGIN
         FROM public.earlybird_orders AS legacy_order
         LEFT JOIN public.earlybird_fulfillments AS fulfillment
           ON fulfillment.order_id = legacy_order.id
-        WHERE legacy_order.pricing_version = 'earlybird-2026-07-v1'
-          AND legacy_order.status = 'payment_pending'
+        WHERE legacy_order.status = 'payment_pending'
           AND (
-              (legacy_order.plan_id = 'basic'
-               AND legacy_order.expected_amount_krw = 14900)
+              (
+                  legacy_order.pricing_version = 'earlybird-2026-07-v1'
+                  AND (
+                      (legacy_order.plan_id = 'basic'
+                       AND legacy_order.expected_amount_krw = 14900)
+                      OR
+                      (legacy_order.plan_id = 'standard'
+                       AND legacy_order.expected_amount_krw = 19900)
+                  )
+              )
               OR
-              (legacy_order.plan_id = 'standard'
-               AND legacy_order.expected_amount_krw = 19900)
+              (
+                  legacy_order.pricing_version = 'earlybird-2026-07-v2'
+                  AND (
+                      (legacy_order.plan_id = 'basic'
+                       AND legacy_order.expected_amount_krw = 6900)
+                      OR
+                      (legacy_order.plan_id = 'standard'
+                       AND legacy_order.expected_amount_krw = 9900)
+                  )
+              )
           )
           AND legacy_order.payment_id IS NULL
           AND legacy_order.actual_groble_product_id IS NULL
@@ -593,6 +786,7 @@ DECLARE
     v_order public.earlybird_orders%ROWTYPE;
     v_event public.earlybird_webhook_events%ROWTYPE;
     v_payment_order public.earlybird_orders%ROWTYPE;
+    v_binding public.earlybird_groble_product_versions%ROWTYPE;
     v_product_lock TEXT;
     v_sequence SMALLINT;
 BEGIN
@@ -686,23 +880,22 @@ BEGIN
     ORDER BY webhook_event.processed_at
     LIMIT 1;
     IF FOUND THEN
-        IF v_event.order_id IS NULL THEN
-            RETURN QUERY SELECT
-                'duplicate_event'::TEXT,
-                NULL::UUID,
-                NULL::TEXT,
-                NULL::SMALLINT;
-        ELSE
-            SELECT existing_order.*
-            INTO v_payment_order
-            FROM public.earlybird_orders AS existing_order
-            WHERE existing_order.id = v_event.order_id;
-            RETURN QUERY SELECT
-                'duplicate_event'::TEXT,
-                v_payment_order.id,
-                v_payment_order.status,
-                v_payment_order.plan_sequence;
+        IF v_event.event_id IS DISTINCT FROM p_event_id
+           OR v_event.idempotency_key IS DISTINCT FROM p_idempotency_key
+           OR v_event.event_type IS DISTINCT FROM p_event_type
+           OR v_event.payment_id IS DISTINCT FROM p_payment_id
+           OR v_event.product_id IS DISTINCT FROM p_product_id
+           OR v_event.amount_krw IS DISTINCT FROM p_amount_krw
+           OR v_event.order_id IS DISTINCT FROM v_order.id THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'EARLYBIRD_SELLER_REFERENCE_CONFLICT',
+                ERRCODE = 'P0001';
         END IF;
+        RETURN QUERY SELECT
+            'duplicate_event'::TEXT,
+            v_order.id,
+            v_order.status,
+            v_order.plan_sequence;
         RETURN;
     END IF;
 
@@ -712,7 +905,13 @@ BEGIN
     WHERE existing_order.payment_id = p_payment_id
     FOR UPDATE;
     IF FOUND THEN
-        IF v_payment_order.id <> v_order.id THEN
+        IF v_payment_order.id <> v_order.id
+           OR v_payment_order.groble_seller_reference
+                IS DISTINCT FROM p_seller_reference
+           OR v_payment_order.actual_groble_product_id
+                IS DISTINCT FROM p_product_id
+           OR v_payment_order.actual_amount_krw
+                IS DISTINCT FROM p_amount_krw THEN
             RAISE EXCEPTION USING
                 MESSAGE = 'EARLYBIRD_SELLER_REFERENCE_CONFLICT',
                 ERRCODE = 'P0001';
@@ -744,6 +943,34 @@ BEGIN
             v_order.status,
             v_order.plan_sequence;
         RETURN;
+    END IF;
+
+    SELECT configured.*
+    INTO v_binding
+    FROM public.earlybird_groble_product_versions AS configured
+    WHERE configured.product_id = v_order.expected_groble_product_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_PRODUCT_CONFIGURATION_REQUIRED',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_order.expected_groble_product_id <> p_product_id
+       OR (
+            v_binding.checkout_active
+            AND (
+                v_order.pricing_version <> v_binding.pricing_version
+                OR v_order.plan_id <> v_binding.plan_id
+                OR v_order.expected_amount_krw <> v_binding.expected_amount_krw
+                OR p_amount_krw <> v_binding.expected_amount_krw
+            )
+       )
+       OR (
+            NOT v_binding.checkout_active
+            AND p_amount_krw > v_order.expected_amount_krw
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_PAYMENT_AMOUNT_MISMATCH',
+            ERRCODE = 'P0001';
     END IF;
 
     IF v_order.status = 'cancelled' THEN
@@ -803,51 +1030,6 @@ BEGIN
         RAISE EXCEPTION USING
             MESSAGE = 'EARLYBIRD_SELLER_REFERENCE_CONFLICT',
             ERRCODE = 'P0001';
-    END IF;
-
-    IF v_order.expected_groble_product_id <> p_product_id
-       OR p_amount_krw > v_order.expected_amount_krw THEN
-        UPDATE public.earlybird_orders AS mismatch_order
-        SET status = 'payment_failed',
-            payment_id = p_payment_id,
-            actual_groble_product_id = p_product_id,
-            actual_amount_krw = p_amount_krw,
-            paid_at = p_paid_at,
-            seller_reference_confirmed_at = COALESCE(
-                mismatch_order.seller_reference_confirmed_at,
-                pg_catalog.clock_timestamp()
-            ),
-            updated_at = pg_catalog.clock_timestamp()
-        WHERE mismatch_order.id = v_order.id
-        RETURNING mismatch_order.* INTO v_order;
-
-        INSERT INTO public.earlybird_webhook_events (
-            event_id,
-            idempotency_key,
-            event_type,
-            occurred_at,
-            payment_id,
-            product_id,
-            amount_krw,
-            disposition,
-            order_id
-        ) VALUES (
-            p_event_id,
-            p_idempotency_key,
-            p_event_type,
-            p_occurred_at,
-            p_payment_id,
-            p_product_id,
-            p_amount_krw,
-            'mismatch',
-            v_order.id
-        );
-        RETURN QUERY SELECT
-            'mismatch'::TEXT,
-            v_order.id,
-            v_order.status,
-            NULL::SMALLINT;
-        RETURN;
     END IF;
 
     IF EXISTS (
@@ -1140,13 +1322,28 @@ BEGIN
     END IF;
 
     IF v_legacy.status <> 'cancelled'
-       OR v_legacy.pricing_version <> 'earlybird-2026-07-v1'
-       OR (
-            (v_legacy.plan_id = 'basic'
-             AND v_legacy.expected_amount_krw <> 14900)
+       OR NOT (
+            (
+                v_legacy.pricing_version = 'earlybird-2026-07-v1'
+                AND (
+                    (v_legacy.plan_id = 'basic'
+                     AND v_legacy.expected_amount_krw = 14900)
+                    OR
+                    (v_legacy.plan_id = 'standard'
+                     AND v_legacy.expected_amount_krw = 19900)
+                )
+            )
             OR
-            (v_legacy.plan_id = 'standard'
-             AND v_legacy.expected_amount_krw <> 19900)
+            (
+                v_legacy.pricing_version = 'earlybird-2026-07-v2'
+                AND (
+                    (v_legacy.plan_id = 'basic'
+                     AND v_legacy.expected_amount_krw = 6900)
+                    OR
+                    (v_legacy.plan_id = 'standard'
+                     AND v_legacy.expected_amount_krw = 9900)
+                )
+            )
        )
        OR v_legacy.payment_id IS NOT NULL
        OR v_legacy.actual_groble_product_id IS NOT NULL

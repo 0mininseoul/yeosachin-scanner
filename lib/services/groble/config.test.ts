@@ -64,6 +64,19 @@ describe('Groble server configuration', () => {
         })).toThrow('GROBLE_PAYMENT_ADDRESS_VERSION_REUSE');
     });
 
+    it('requires all eight legacy and v2 product/address identifiers to be globally distinct', () => {
+        expect(() => readGrobleConfig({
+            ...VALID_ENV,
+            GROBLE_V2_BASIC_PAYMENT_ADDRESS:
+                VALID_ENV.GROBLE_STANDARD_PRODUCT_ID,
+        })).toThrow('GROBLE_IDENTIFIERS_MUST_BE_GLOBALLY_DISTINCT');
+        expect(() => readGrobleConfig({
+            ...VALID_ENV,
+            GROBLE_BASIC_PAYMENT_ADDRESS:
+                VALID_ENV.GROBLE_V2_STANDARD_PRODUCT_ID,
+        })).toThrow('GROBLE_IDENTIFIERS_MUST_BE_GLOBALLY_DISTINCT');
+    });
+
     it('builds checkout URLs only from the active v2 products and preserves legacy webhook IDs', () => {
         const config = readGrobleConfig(VALID_ENV);
 

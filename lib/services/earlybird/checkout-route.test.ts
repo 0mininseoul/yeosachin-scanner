@@ -541,6 +541,24 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
+    it('returns the public sold-out conflict when a legacy refresh loses inventory', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: null,
+            error: { message: 'EARLYBIRD_SOLD_OUT: internal detail' },
+        });
+
+        const response = await refreshLegacyCheckout({
+            legacyOrderId: ORDER_ID,
+            disclosureAccepted: true,
+        });
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+            code: 'EARLYBIRD_SOLD_OUT',
+            error: '이 플랜의 얼리버드 물량이 모두 소진되었습니다.',
+        });
+    });
+
     it('requires a current verified Kakao phone and exact immutable phone match before recovery', async () => {
         const staleVerification = new Date(Date.now() - 25 * 60 * 60 * 1_000).toISOString();
         for (const [currentPhone, expected] of [

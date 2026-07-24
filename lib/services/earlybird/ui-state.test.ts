@@ -574,6 +574,9 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain("order.checkoutAction === 'refresh_pricing'");
         expect(source).toContain('legacyDisclosureAccepted');
         expect(source).toContain('새 할인가로 다시 구매');
+        expect(source).toContain(
+            '기존 결제창은 가격 변경으로 종료되었습니다.'
+        );
     });
 
     it('refreshes a retired checkout with only the legacy order id and fresh consent', async () => {

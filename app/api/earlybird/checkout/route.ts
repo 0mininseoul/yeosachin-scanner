@@ -58,6 +58,13 @@ function persistenceErrorResponse(error: EarlybirdPersistenceError): NextRespons
             '가격이 변경되어 대상 계정을 다시 확인해주세요.'
         );
     }
+    if (error.code === 'EARLYBIRD_SOLD_OUT') {
+        return errorResponse(
+            409,
+            error.code,
+            '이 플랜의 얼리버드 물량이 모두 소진되었습니다.'
+        );
+    }
     if (error.code === 'PLAN_UPGRADE_REQUIRED'
         || error.code === 'PLAN_SELECTION_UNAVAILABLE'
         || error.code === 'EARLYBIRD_ORDER_CONFLICT') {

@@ -114,9 +114,19 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 {order.displayStatus}
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-                위장여사친 판독기를 이용해주셔서 감사합니다.
-                <br />
-                결제 확정 후 실제 24시간 이내에 이메일로 판독 결과를 전달합니다.
+                {order.checkoutAction === 'refresh_pricing' ? (
+                    <>
+                        기존 결제창은 가격 변경으로 종료되었습니다.
+                        <br />
+                        현재 할인 가격에 다시 동의하면 새 결제창을 준비합니다.
+                    </>
+                ) : (
+                    <>
+                        위장여사친 판독기를 이용해주셔서 감사합니다.
+                        <br />
+                        결제 확정 후 실제 24시간 이내에 이메일로 판독 결과를 전달합니다.
+                    </>
+                )}
             </p>
 
             <CaseCard className="mt-8 p-5">
