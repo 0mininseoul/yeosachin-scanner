@@ -7,8 +7,9 @@ import {
     DEFAULT_THREAT_METER_SEGMENTS,
     genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
-    paginatedCountLabel,
-    paginatedRangeLabel,
+    resolveResultPageCursor,
+    resultPaginationModel,
+    resultSummaryCounts,
     roundedOwnerScore,
     threatMeterFillCount,
     v2ResultFailureAction,
@@ -59,17 +60,86 @@ describe('owner view presentation behavior', () => {
             .toBe('새로운 판독 단서를 확인하고 있습니다.');
     });
 
-    it('marks incomplete paginated counts and becomes exact on the final page', () => {
-        expect(paginatedCountLabel(50, true)).toBe('50+');
-        expect(paginatedCountLabel(73, false)).toBe('73');
-    });
-
-    it('labels the current bounded result page without accumulating prior rows', () => {
+    it('bounds a result page to the page size without accumulating prior rows', () => {
         expect(boundedOwnerResultPage(Array.from({ length: 900 }, (_, index) => index)))
             .toHaveLength(50);
-        expect(paginatedRangeLabel(0, 50, true)).toBe('1-50+');
-        expect(paginatedRangeLabel(1, 50, true)).toBe('51-100+');
-        expect(paginatedRangeLabel(2, 23, false)).toBe('101-123');
+    });
+
+    it('shows no pagination when a single page holds everything', () => {
+        expect(resultPaginationModel({ pageIndex: 0, knownPageCount: 1, hasFrontier: false }))
+            .toBeNull();
+    });
+
+    it('offers the next page number as soon as a frontier cursor exists', () => {
+        const model = resultPaginationModel({ pageIndex: 0, knownPageCount: 1, hasFrontier: true });
+        expect(model).not.toBeNull();
+        expect(model!.hasPrevious).toBe(false);
+        expect(model!.hasNext).toBe(true);
+        expect(model!.items).toEqual([
+            { type: 'page', pageIndex: 0, label: '1', current: true },
+            { type: 'page', pageIndex: 1, label: '2', current: false },
+        ]);
+    });
+
+    it('marks the current page and exposes previous/next around it', () => {
+        const model = resultPaginationModel({ pageIndex: 1, knownPageCount: 2, hasFrontier: true });
+        expect(model!.hasPrevious).toBe(true);
+        expect(model!.hasNext).toBe(true);
+        expect(model!.items.map((i) => i.type === 'page' ? `${i.label}${i.current ? '*' : ''}` : '…'))
+            .toEqual(['1', '2*', '3']);
+    });
+
+    it('stops offering next once every visited page has no frontier', () => {
+        const model = resultPaginationModel({ pageIndex: 2, knownPageCount: 3, hasFrontier: false });
+        expect(model!.hasNext).toBe(false);
+        expect(model!.hasPrevious).toBe(true);
+        expect(model!.items.map((i) => i.type === 'page' ? i.label : '…')).toEqual(['1', '2', '3']);
+    });
+
+    it('collapses far pages with an ellipsis to stay compact', () => {
+        const model = resultPaginationModel({ pageIndex: 5, knownPageCount: 7, hasFrontier: false });
+        expect(model!.items.map((i) => i.type === 'page' ? `${i.label}${i.current ? '*' : ''}` : '…'))
+            .toEqual(['1', '…', '5', '6*', '7']);
+    });
+
+    it('reuses a stored cursor for an already-visited page', () => {
+        const state = { cursors: [null, 'c1'], frontierNextCursor: 'c2' };
+        expect(resolveResultPageCursor(state, 0)).toEqual({ kind: 'known', cursor: null });
+        expect(resolveResultPageCursor(state, 1)).toEqual({ kind: 'known', cursor: 'c1' });
+    });
+
+    it('reaches exactly one page past the visited set via the frontier cursor', () => {
+        const state = { cursors: [null, 'c1'], frontierNextCursor: 'c2' };
+        expect(resolveResultPageCursor(state, 2)).toEqual({ kind: 'frontier', cursor: 'c2' });
+    });
+
+    it('never jumps to a page whose cursor is unknown', () => {
+        const withFrontier = { cursors: [null, 'c1'], frontierNextCursor: 'c2' };
+        expect(resolveResultPageCursor(withFrontier, 3)).toEqual({ kind: 'unreachable' });
+        const noFrontier = { cursors: [null, 'c1'], frontierNextCursor: null };
+        expect(resolveResultPageCursor(noFrontier, 2)).toEqual({ kind: 'unreachable' });
+        expect(resolveResultPageCursor(noFrontier, -1)).toEqual({ kind: 'unreachable' });
+    });
+
+    it('derives the summary counts so public + private equals mutual', () => {
+        const counts = resultSummaryCounts({
+            detectedMutuals: 280,
+            publicMutuals: 185,
+            privateMutuals: 95,
+            screenedMutuals: 185,
+        });
+        expect(counts).toEqual({ mutual: 280, publicCount: 185, privateCount: 95, screened: 185 });
+        expect(counts.publicCount + counts.privateCount).toBe(counts.mutual);
+    });
+
+    it('keeps the gender breakdown summing to the screened public count', () => {
+        const screened = 185;
+        const gr = genderBreakdownFromStats({ male: 100, female: 70, unknown: 15 });
+        expect(gr.male.count + gr.female.count + gr.unknown.count).toBe(screened);
+    });
+
+    it('exposes accessible text labels for each gender so icons stay decorative', () => {
+        expect(OWNER_GENDER_LABELS).toEqual({ male: '남자', female: '여자', unknown: '미상' });
     });
 
     it('defaults the threat meter to a 10-segment gauge', () => {
