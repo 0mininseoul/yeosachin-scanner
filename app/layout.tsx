@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
+import { Analytics } from "@vercel/analytics/next";
 import { AmplitudeProvider } from "@/components/amplitude-provider";
 import { CANONICAL_APP_ORIGIN } from "@/lib/constants/app-url";
 import "./globals.css";
@@ -69,6 +70,7 @@ export default function RootLayout({
     <html lang="ko" className={paperlogy.variable}>
       <body className="antialiased">
         <AmplitudeProvider>{children}</AmplitudeProvider>
+        <Analytics />
       </body>
     </html>
   );
