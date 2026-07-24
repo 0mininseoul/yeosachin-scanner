@@ -86,6 +86,7 @@ describe('analysis V2 retained result image migration contract', () => {
             'claim_analysis_v2_result_image_purges',
             'complete_analysis_v2_result_image_purge',
             'complete_analysis_v2_result_and_purge_with_images',
+            'load_analysis_v2_result_image_object',
         ]) {
             expect(migration).toContain(
                 `FUNCTION public.${name}(`

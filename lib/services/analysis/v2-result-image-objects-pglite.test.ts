@@ -370,4 +370,59 @@ describe('retained result image registry', () => {
         expect(requests.rows[0]?.count).toBe(0);
         expect(purges.rows).toEqual([{ object_key: outcome.objectKey }]);
     });
+
+    it('resolves ready unexpired objects only for the completed owner', async () => {
+        await beginManifest(1);
+        const outcome = readyOutcome({
+            kind: 'target',
+            locator: 'target',
+            ordinal: 0,
+            mandatory: true,
+        });
+        await registerOutcome(outcome);
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET status = 'completed'
+             WHERE id = $1`,
+            [REQUEST_ID]
+        );
+
+        const owner = await db.query<{ value: {
+            objectKey: string;
+            sha256: string;
+            byteSize: number;
+        } | null }>(
+            `SELECT public.load_analysis_v2_result_image_object(
+                $1, $2, 'target', NULL
+            ) AS value`,
+            [REQUEST_ID, '223e4567-e89b-42d3-a456-426614174000']
+        );
+        const stranger = await db.query<{ value: unknown }>(
+            `SELECT public.load_analysis_v2_result_image_object(
+                $1, $2, 'target', NULL
+            ) AS value`,
+            [REQUEST_ID, '423e4567-e89b-42d3-a456-426614174000']
+        );
+        expect(owner.rows[0]?.value).toMatchObject({
+            objectKey: outcome.objectKey,
+            sha256: IMAGE_HASH,
+            byteSize: 1234,
+        });
+        expect(stranger.rows[0]?.value).toBeNull();
+
+        await db.query(
+            `UPDATE public.analysis_v2_result_image_objects
+             SET captured_at = clock_timestamp() - INTERVAL '30 days',
+                 expires_at = clock_timestamp()
+             WHERE request_id = $1`,
+            [REQUEST_ID]
+        );
+        const expired = await db.query<{ value: unknown }>(
+            `SELECT public.load_analysis_v2_result_image_object(
+                $1, $2, 'target', NULL
+            ) AS value`,
+            [REQUEST_ID, '223e4567-e89b-42d3-a456-426614174000']
+        );
+        expect(expired.rows[0]?.value).toBeNull();
+    });
 });

@@ -1129,6 +1129,64 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.load_analysis_v2_result_image_object(
+    p_request_id UUID,
+    p_user_id UUID,
+    p_kind TEXT,
+    p_candidate_id TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_locator TEXT;
+    v_result JSONB;
+BEGIN
+    IF p_request_id IS NULL OR p_user_id IS NULL
+       OR p_kind NOT IN ('target', 'female', 'private')
+       OR (
+            p_kind = 'target'
+            AND p_candidate_id IS NOT NULL
+       )
+       OR (
+            p_kind <> 'target'
+            AND (
+                p_candidate_id IS NULL
+                OR p_candidate_id !~ '^[A-Za-z0-9._:-]{1,128}$'
+                OR p_candidate_id ~* 'https?'
+            )
+       ) THEN
+        RETURN NULL;
+    END IF;
+    v_locator := CASE
+        WHEN p_kind = 'target' THEN 'target'
+        ELSE p_candidate_id
+    END;
+    SELECT pg_catalog.jsonb_build_object(
+        'objectKey', image_object.object_key,
+        'sha256', image_object.sha256,
+        'byteSize', image_object.byte_size,
+        'expiresAt', image_object.expires_at
+    )
+    INTO v_result
+    FROM public.analysis_requests AS analysis_request
+    JOIN public.analysis_v2_result_image_objects AS image_object
+      ON image_object.request_id = analysis_request.id
+     AND image_object.kind = p_kind
+     AND image_object.candidate_locator = v_locator
+    WHERE analysis_request.id = p_request_id
+      AND analysis_request.user_id = p_user_id
+      AND analysis_request.pipeline_version = 'v2'
+      AND analysis_request.status = 'completed'
+      AND image_object.status = 'ready'
+      AND image_object.expires_at > pg_catalog.clock_timestamp();
+    RETURN v_result;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.analysis_v2_result_image_coverage_ok(
     INTEGER, INTEGER, INTEGER, INTEGER, INTEGER
 ) FROM PUBLIC, anon, authenticated, service_role;
@@ -1164,6 +1222,9 @@ REVOKE ALL ON FUNCTION public.enqueue_analysis_v2_result_image_purges_before_del
 REVOKE ALL ON FUNCTION public.complete_analysis_v2_result_and_purge_with_images(
     UUID, TEXT, UUID, TEXT, TEXT, TEXT, INTEGER
 ) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.load_analysis_v2_result_image_object(
+    UUID, UUID, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
 
 GRANT EXECUTE ON FUNCTION public.analysis_v2_result_image_coverage_ok(
     INTEGER, INTEGER, INTEGER, INTEGER, INTEGER
@@ -1194,4 +1255,7 @@ GRANT EXECUTE ON FUNCTION public.complete_analysis_v2_result_image_purge(
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_analysis_v2_result_and_purge_with_images(
     UUID, TEXT, UUID, TEXT, TEXT, TEXT, INTEGER
+) TO service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_result_image_object(
+    UUID, UUID, TEXT, TEXT
 ) TO service_role;
