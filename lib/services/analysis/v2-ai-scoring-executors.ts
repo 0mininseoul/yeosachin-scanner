@@ -707,8 +707,7 @@ function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2Verifi
             ? {
                 appearanceGrade: outcome.feature.features.appearanceGrade as AppearanceGrade,
                 exposureScore: outcome.feature.features.exposureScore,
-                isBusinessAccount:
-                    outcome.feature.features.businessClassification === 'business',
+                accountContext: outcome.feature.features.accountContext,
                 featurePartnerEvidenceStrong: strongFeaturePartnerEvidence(outcome.feature),
                 oneLineOverview: outcome.feature.features.oneLineOverview,
             }
@@ -958,7 +957,7 @@ function preliminaryStoreRow(
         recentFemaleMutualRank: candidate.recentFemaleMutualRank,
         appearanceGrade: candidate.appearanceGrade,
         exposureScore: candidate.exposureScore,
-        isBusinessAccount: candidate.isBusinessAccount,
+        accountContext: candidate.accountContext,
         // Preliminary persistence intentionally precedes partner-safety and
         // therefore stores no weak adjustment or strong-evidence cap.
         hasWeakPartnerEvidence: false,
@@ -1379,8 +1378,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         username: outcome.instagramId,
                         appearanceGrade: outcome.feature!.features.appearanceGrade as AppearanceGrade,
                         exposureScore: outcome.feature!.features.exposureScore,
-                        isBusinessAccount:
-                            outcome.feature!.features.businessClassification === 'business',
+                        accountContext: outcome.feature!.features.accountContext,
                         hasWeakPartnerEvidence: weakFeaturePartnerEvidence(outcome.feature!),
                         hasStrongPartnerEvidence: strongFeaturePartnerEvidence(outcome.feature!),
                         uniqueTargetPostsLikedByCandidate:
@@ -1694,33 +1692,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const observed = new Set(reverse.rows
                 .filter(row => row.status === 'observed')
                 .map(row => row.candidateId));
-            const reverseById = new Map(reverse.rows.map(row => [row.candidateId, row]));
-            const initiallyScored = calculateV2FinalScores({
+            const candidates = calculateV2FinalScores({
                 preliminary,
                 observedReverseLikeCandidateIds: observed,
-            });
-            const candidates = initiallyScored.map(candidate => {
-                if (reverseById.get(candidate.candidateId)?.status !== 'not_collected') {
-                    return candidate;
-                }
-                const risk = calculateRiskPolicy({
-                    uniqueTargetPostsLikedByCandidate:
-                        candidate.uniqueTargetPostsLikedByCandidate,
-                    boundedCandidateCommentsOnTarget:
-                        candidate.boundedCandidateCommentsOnTarget,
-                    reverseLikeStatus: 'not_collected',
-                    hasTagOrCaptionMention: candidate.hasTagOrCaptionMention,
-                    recentFemaleMutualRank: candidate.recentFemaleMutualRank,
-                    appearanceGrade: candidate.appearanceGrade,
-                    exposureScore: candidate.exposureScore,
-                    isBusinessAccount: candidate.isBusinessAccount,
-                    hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
-                    hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
-                });
-                return { ...candidate, reverseLikeStatus: 'not_collected' as const, risk };
+                notCollectedCandidateIds: new Set(reverse.rows
+                    .filter(row => row.status === 'not_collected')
+                    .map(row => row.candidateId)),
             });
             const narrativeCandidateIds = candidates
-                .filter(row => row.risk.riskBand === 'high_risk' && row.featuredRank !== null)
+                .filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null)
                 .sort((left, right) => left.featuredRank! - right.featuredRank!)
                 .slice(0, 3)
                 .map(row => row.candidateId);
@@ -1736,8 +1716,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 }
                 return {
                     candidateId: candidate.candidateId,
-                    displayScore: candidate.risk.displayScore,
-                    riskBand: candidate.risk.riskBand as RiskBand,
+                    displayScore: candidate.displayScore,
+                    riskBand: candidate.riskBand as RiskBand,
                     featuredRank: candidate.featuredRank,
                     recentMutualRank: candidate.recentFemaleMutualRank,
                     verificationShortlistRank: candidate.verificationShortlistRank,

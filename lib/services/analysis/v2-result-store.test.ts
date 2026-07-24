@@ -93,7 +93,7 @@ function terminalRow(
         feature: classification === 'verified_female' ? {
             appearanceGrade: 3,
             exposureScore: 2,
-            isBusinessAccount: false,
+            accountContext: 'personal',
             featurePartnerEvidenceStrong: false,
             oneLineOverview: '사진 구성이 차분한 공개 계정으로 보여요',
         } : null,

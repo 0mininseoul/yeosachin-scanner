@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
-    BUSINESS_SOFT_CONTEXT_MULTIPLIER,
+    ACCOUNT_CONTEXT_SOFT_MULTIPLIERS,
     FEATURED_RISK_LIMITS,
     STRONG_PARTNER_PUBLIC_SCORE_CAP,
 } from '@/lib/domain/analysis/risk-policy';
@@ -218,6 +218,7 @@ function feature(
             exposureScore: 2,
             businessClassification: options.business ? 'business' : 'personal',
             businessConfidence: 'high',
+            accountContext: options.business ? 'individual_creator' : 'personal',
             marriageEvidence: options.strongPartner
                 ? 'strong'
                 : options.weakPartner ? 'possible' : 'none',
@@ -228,11 +229,13 @@ function feature(
                 appearance: mediaIds.slice(0, 1),
                 exposure: mediaIds.slice(0, 1),
                 business: options.business ? mediaIds.slice(0, 1) : [],
+                accountContext: mediaIds.slice(0, 1),
                 marriagePartner: options.strongPartner || options.weakPartner
                     ? mediaIds.slice(0, 1)
                     : [],
             },
-            oneLineOverview: '차분한 일상을 기록하는 공개 계정',
+            oneLineOverview:
+                '차분한 일상을 야무지게 기록해 두어서, 판독관은 오히려 숨은 취향부터 궁금해집니다.',
         },
         finalGenderDecision: decision,
         analyzedSelectionIds: [...mediaIds],
@@ -461,7 +464,7 @@ function dependencies(
                     notScreenedMutuals: 0,
                     privateMutuals: 0,
                     exclusionApplied: false,
-                    scorePolicyVersion: 'risk-policy-v2.2' as const,
+                    scorePolicyVersion: 'risk-policy-v2.3' as const,
                 },
             })),
         },
@@ -1930,7 +1933,7 @@ describe('V2 AI and scoring executors', () => {
                     username: candidate.instagramId,
                     appearanceGrade: 3,
                     exposureScore: 1,
-                    isBusinessAccount: false,
+                    accountContext: 'personal',
                     hasWeakPartnerEvidence: false,
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
@@ -2042,7 +2045,7 @@ describe('V2 AI and scoring executors', () => {
                     username: candidate.instagramId,
                     appearanceGrade: 3,
                     exposureScore: 1,
-                    isBusinessAccount: false,
+                    accountContext: 'personal',
                     hasWeakPartnerEvidence: false,
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
@@ -2199,7 +2202,7 @@ describe('V2 AI and scoring executors', () => {
                 username: outcome.instagramId,
                 appearanceGrade: 4,
                 exposureScore: 2,
-                isBusinessAccount: false,
+                accountContext: 'personal',
                 hasWeakPartnerEvidence:
                     outcome.feature!.features.marriageEvidence === 'possible',
                 hasStrongPartnerEvidence:
@@ -2314,7 +2317,7 @@ describe('V2 AI and scoring executors', () => {
                 username: candidate.instagramId,
                 appearanceGrade: 5,
                 exposureScore: 5,
-                isBusinessAccount: false,
+                accountContext: 'personal',
                 hasWeakPartnerEvidence: false,
                 hasStrongPartnerEvidence: false,
                 uniqueTargetPostsLikedByCandidate: 4,
@@ -2436,7 +2439,7 @@ describe('V2 final score invariants', () => {
             username: `woman.${index}`,
             appearanceGrade: 3,
             exposureScore: 1,
-            isBusinessAccount: false,
+            accountContext: 'personal',
             hasWeakPartnerEvidence: false,
             hasStrongPartnerEvidence: false,
             uniqueTargetPostsLikedByCandidate: 0,
@@ -2450,14 +2453,14 @@ describe('V2 final score invariants', () => {
         const preliminary = calculateV2PreliminaryScores({
             candidates: [
                 candidate(1, {
-                    isBusinessAccount: false,
+                    accountContext: 'personal',
                     uniqueTargetPostsLikedByCandidate: 4,
                     boundedCandidateCommentsOnTarget: 12,
                     appearanceGrade: 5,
                     exposureScore: 5,
                 }),
                 candidate(2, {
-                    isBusinessAccount: true,
+                    accountContext: 'individual_creator',
                     uniqueTargetPostsLikedByCandidate: 4,
                     boundedCandidateCommentsOnTarget: 12,
                     appearanceGrade: 5,
@@ -2479,8 +2482,8 @@ describe('V2 final score invariants', () => {
             .toBe(personal.risk.components.candidateToTargetLikes);
         expect(business.risk.components.candidateToTargetComments)
             .toBe(personal.risk.components.candidateToTargetComments);
-        expect(business.risk.businessSoftContextMultiplier)
-            .toBe(BUSINESS_SOFT_CONTEXT_MULTIPLIER);
+        expect(business.risk.softContextMultiplier)
+            .toBe(ACCOUNT_CONTEXT_SOFT_MULTIPLIERS.individual_creator);
         expect(business.risk.publicScore).toBeLessThanOrEqual(STRONG_PARTNER_PUBLIC_SCORE_CAP);
     });
 
@@ -2507,13 +2510,13 @@ describe('V2 final score invariants', () => {
         expect(shortlist).toHaveLength(10);
         expect(final.find(row => row.candidateId === observedId)!.risk.components.targetToCandidateLike)
             .toBe(3);
-        expect(final.filter(row => row.risk.riskBand === 'high_risk' && row.featuredRank !== null))
+        expect(final.filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null))
             .toHaveLength(FEATURED_RISK_LIMITS.high_risk);
-        expect(final.filter(row => row.risk.riskBand === 'caution' && row.featuredRank !== null).length)
+        expect(final.filter(row => row.riskBand === 'caution' && row.featuredRank !== null).length)
             .toBeLessThanOrEqual(FEATURED_RISK_LIMITS.caution);
     });
 
-    it('does not force a high-risk account when every absolute score is low', () => {
+    it('assigns relative tiers when every natural score is low', () => {
         const candidates = Array.from({ length: 20 }, (_, index) => candidate(index + 1, {
             appearanceGrade: 1,
             exposureScore: 0,
@@ -2527,8 +2530,10 @@ describe('V2 final score invariants', () => {
             preliminary,
             observedReverseLikeCandidateIds: new Set(),
         });
-        expect(final.filter(row => row.risk.riskBand === 'high_risk')).toHaveLength(0);
-        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(0);
+        expect(final.every(row => row.risk.riskBand === 'normal')).toBe(true);
+        expect(final.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(final.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(3);
         expect(final.filter(row => row.relativeWatchRank !== null)).toHaveLength(2);
     });
 });

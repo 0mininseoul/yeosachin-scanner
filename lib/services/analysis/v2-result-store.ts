@@ -17,7 +17,10 @@ import {
     decodeResultCursor,
     paginateAnalysisResults,
 } from '@/lib/domain/analysis/result-pagination';
-import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
+import {
+    RISK_POLICY_VERSION,
+    type AccountContext,
+} from '@/lib/domain/analysis/risk-policy';
 import {
     canonicalizeImageProxyUrl,
     createAnalysisV2ResultImageProxyPath,
@@ -122,7 +125,7 @@ export interface AnalysisV2ResultJobClaim {
 export interface AnalysisV2VerifiedFemaleFeatureData {
     appearanceGrade: 1 | 2 | 3 | 4 | 5;
     exposureScore: number;
-    isBusinessAccount: boolean;
+    accountContext: AccountContext;
     featurePartnerEvidenceStrong: boolean;
     oneLineOverview: string;
 }
@@ -391,7 +394,12 @@ const verifiedFemaleFeatureDataSchema = z.object({
         z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5),
     ]),
     exposureScore: z.number().int().min(0).max(5),
-    isBusinessAccount: z.boolean(),
+    accountContext: z.enum([
+        'personal',
+        'individual_creator',
+        'official_group_or_brand',
+        'uncertain',
+    ]),
     featurePartnerEvidenceStrong: z.boolean(),
     oneLineOverview: oneLineOverviewSchema,
 }).strict();

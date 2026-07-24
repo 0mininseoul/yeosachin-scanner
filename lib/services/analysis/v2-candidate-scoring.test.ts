@@ -13,7 +13,7 @@ V2FemaleCandidateEvidence {
         username: `woman.${index}`,
         appearanceGrade: 3,
         exposureScore: 1,
-        isBusinessAccount: false,
+        accountContext: 'personal',
         hasWeakPartnerEvidence: false,
         hasStrongPartnerEvidence: false,
         uniqueTargetPostsLikedByCandidate: 0,
@@ -69,7 +69,7 @@ describe('V2 candidate scoring orchestration', () => {
             .toBe('not_collected');
     });
 
-    it('keeps absolute bands and adds a separate relative watch for larger weak sets', () => {
+    it('assigns relative high-risk and caution tiers for larger weak sets', () => {
         const candidates = Array.from({ length: 20 }, (_, index) => candidate(index + 1, {
             appearanceGrade: 1,
             exposureScore: 0,
@@ -85,7 +85,62 @@ describe('V2 candidate scoring orchestration', () => {
         });
 
         expect(final.every(row => row.risk.riskBand === 'normal')).toBe(true);
+        expect(final.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(final.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(3);
         expect(final.filter(row => row.relativeWatchRank !== null)).toHaveLength(2);
+    });
+
+    it('does not apply minimum tiers when only two rows remain partner-cap eligible', () => {
+        const preliminary = calculateV2PreliminaryScores({
+            candidates: [
+                candidate(1, { hasStrongPartnerEvidence: true }),
+                candidate(2),
+                candidate(3),
+            ],
+            orderedMutualUsernames: [],
+            excludedUsername: null,
+        });
+        const final = calculateV2FinalScores({
+            preliminary,
+            observedReverseLikeCandidateIds: new Set(),
+        });
+
+        expect(final.every(row => row.riskBand === row.risk.riskBand)).toBe(true);
+        expect(final.every(row => row.relativeTierApplied === false)).toBe(true);
+    });
+
+    it('removes official-account soft context without discounting direct interaction', () => {
+        const preliminary = calculateV2PreliminaryScores({
+            candidates: [
+                candidate(1, {
+                    accountContext: 'official_group_or_brand',
+                    appearanceGrade: 5,
+                    exposureScore: 5,
+                    uniqueTargetPostsLikedByCandidate: 1,
+                }),
+                candidate(2, {
+                    accountContext: 'personal',
+                    appearanceGrade: 1,
+                    exposureScore: 0,
+                    uniqueTargetPostsLikedByCandidate: 1,
+                }),
+            ],
+            orderedMutualUsernames: ['woman.1'],
+            excludedUsername: null,
+        });
+        const final = calculateV2FinalScores({
+            preliminary,
+            observedReverseLikeCandidateIds: new Set(),
+        });
+        const official = final.find(row => row.username === 'woman.1')!;
+        const personal = final.find(row => row.username === 'woman.2')!;
+
+        expect(official.risk.softContextMultiplier).toBe(0);
+        expect(official.risk.components.candidateToTargetLikes)
+            .toBe(personal.risk.components.candidateToTargetLikes);
+        expect(official.risk.components.recentMutual).toBe(0);
+        expect(official.risk.components.appearanceExposure).toBe(0);
     });
 
     it('detects either-direction target/candidate tags and caption mentions', () => {

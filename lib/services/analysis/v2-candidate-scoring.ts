@@ -6,17 +6,20 @@ import {
     assignFeaturedRiskRanks,
     assignVerificationShortlist,
     calculateRiskPolicy,
+    type AccountContext,
     type AppearanceGrade,
     type ReverseLikeStatus,
+    type RiskBand,
     type RiskPolicyResult,
 } from '@/lib/domain/analysis/risk-policy';
+import { assignRelativeRiskTiers } from '@/lib/domain/analysis/relative-risk-policy';
 
 export interface V2FemaleCandidateEvidence {
     candidateId: string;
     username: string;
     appearanceGrade: AppearanceGrade;
     exposureScore: number;
-    isBusinessAccount: boolean;
+    accountContext: AccountContext;
     hasWeakPartnerEvidence: boolean;
     hasStrongPartnerEvidence: boolean;
     uniqueTargetPostsLikedByCandidate: number;
@@ -34,6 +37,9 @@ export interface V2PreliminaryCandidateScore extends V2FemaleCandidateEvidence {
 export interface V2FinalCandidateScore extends V2PreliminaryCandidateScore {
     reverseLikeStatus: ReverseLikeStatus;
     risk: RiskPolicyResult;
+    displayScore: number;
+    riskBand: RiskBand;
+    relativeTierApplied: boolean;
     featuredRank: number | null;
     relativeWatchRank: number | null;
 }
@@ -100,7 +106,7 @@ export function calculateV2PreliminaryScores(input: {
             recentFemaleMutualRank: recent?.rank ?? null,
             appearanceGrade: candidate.appearanceGrade,
             exposureScore: candidate.exposureScore,
-            isBusinessAccount: candidate.isBusinessAccount,
+            accountContext: candidate.accountContext,
             // The public preliminary checkpoint has no partner-adjustment field.
             // Preserve the signals on the candidate, but apply them only after
             // the dedicated partner-safety stage has produced its checkpoint.
@@ -132,7 +138,7 @@ function relativeWatchAssignments(
         .filter(candidate => !alreadyFeatured.has(candidate.candidateId))
         .slice()
         .sort((left, right) => (
-            right.risk.displayScore - left.risk.displayScore
+            right.displayScore - left.displayScore
             || left.candidateId.localeCompare(right.candidateId)
         ))
         .slice(0, 2)
@@ -142,6 +148,7 @@ function relativeWatchAssignments(
 export function calculateV2FinalScores(input: {
     preliminary: readonly V2PreliminaryCandidateScore[];
     observedReverseLikeCandidateIds: ReadonlySet<string>;
+    notCollectedCandidateIds?: ReadonlySet<string>;
 }): V2FinalCandidateScore[] {
     const shortlistIds = new Set(
         input.preliminary
@@ -153,13 +160,24 @@ export function calculateV2FinalScores(input: {
             throw new Error('V2_SCORING_ERROR: reverse-like evidence is outside the frozen shortlist.');
         }
     }
+    const notCollectedIds = input.notCollectedCandidateIds ?? new Set<string>();
+    for (const candidateId of notCollectedIds) {
+        if (input.observedReverseLikeCandidateIds.has(candidateId)) {
+            throw new Error(
+                'V2_SCORING_ERROR: reverse-like evidence cannot be both observed and not collected.'
+            );
+        }
+    }
 
     const scored = input.preliminary.map(candidate => {
-        const reverseLikeStatus: ReverseLikeStatus = shortlistIds.has(candidate.candidateId)
-            ? input.observedReverseLikeCandidateIds.has(candidate.candidateId)
+        const reverseLikeStatus: ReverseLikeStatus = (
+            notCollectedIds.has(candidate.candidateId)
+            || !shortlistIds.has(candidate.candidateId)
+        )
+            ? 'not_collected'
+            : input.observedReverseLikeCandidateIds.has(candidate.candidateId)
                 ? 'observed'
-                : 'not_observed'
-            : 'not_collected';
+                : 'not_observed';
         const risk = calculateRiskPolicy({
             uniqueTargetPostsLikedByCandidate: candidate.uniqueTargetPostsLikedByCandidate,
             boundedCandidateCommentsOnTarget: candidate.boundedCandidateCommentsOnTarget,
@@ -168,23 +186,37 @@ export function calculateV2FinalScores(input: {
             recentFemaleMutualRank: candidate.recentFemaleMutualRank,
             appearanceGrade: candidate.appearanceGrade,
             exposureScore: candidate.exposureScore,
-            isBusinessAccount: candidate.isBusinessAccount,
+            accountContext: candidate.accountContext,
             hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
             hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
         });
         return { ...candidate, reverseLikeStatus, risk };
     });
-    const featured = assignFeaturedRiskRanks(scored.map(candidate => ({
+    const relativeById = new Map(assignRelativeRiskTiers(scored.map(candidate => ({
+        candidateId: candidate.candidateId,
+        naturalDisplayScore: candidate.risk.displayScore,
+        naturalRiskBand: candidate.risk.riskBand,
+        partnerCapApplied: candidate.hasStrongPartnerEvidence,
+    }))).map(assignment => [assignment.candidateId, assignment]));
+    const calibrated = scored.map(candidate => {
+        const assignment = relativeById.get(candidate.candidateId);
+        if (!assignment) {
+            throw new Error('V2_SCORING_ERROR: relative risk assignment is incomplete.');
+        }
+        return {
+            ...candidate,
+            displayScore: assignment.displayScore,
+            riskBand: assignment.riskBand,
+            relativeTierApplied: assignment.relativeTierApplied,
+        };
+    });
+    const featured = assignFeaturedRiskRanks(calibrated.map(candidate => ({
         ...candidate,
-        publicScore: candidate.risk.displayScore,
-        riskBand: candidate.risk.riskBand,
+        publicScore: candidate.displayScore,
     })));
-    const withoutRelative = featured.map(({ publicScore, riskBand, ...row }) => {
-        if (
-            publicScore !== row.risk.displayScore
-            || riskBand !== row.risk.riskBand
-        ) {
-            throw new Error('V2_SCORING_ERROR: featured ranking changed the absolute score band.');
+    const withoutRelative = featured.map(({ publicScore, ...row }) => {
+        if (publicScore !== row.displayScore) {
+            throw new Error('V2_SCORING_ERROR: featured ranking changed the display score.');
         }
         return row;
     });

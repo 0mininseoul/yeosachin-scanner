@@ -55,6 +55,13 @@ const profileAiOperationKeySchema = z.string().regex(PROFILE_AI_OPERATION_KEY_PA
 const appearanceGradeSchema = z.union([
     z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5),
 ]);
+const accountContextSchema = z.enum([
+    'personal',
+    'individual_creator',
+    'official_group_or_brand',
+    'uncertain',
+]);
+const riskBandSchema = z.enum(['normal', 'caution', 'high_risk']);
 const nullableRankSchema = z.number().int().min(1).max(900).nullable();
 
 const mediaCoverageSchema = z.object({
@@ -199,7 +206,7 @@ const preliminaryCandidateSchema = z.object({
     username: usernameSchema,
     appearanceGrade: appearanceGradeSchema,
     exposureScore: z.number().int().min(0).max(5),
-    isBusinessAccount: z.boolean(),
+    accountContext: accountContextSchema,
     hasWeakPartnerEvidence: z.boolean(),
     hasStrongPartnerEvidence: z.boolean(),
     uniqueTargetPostsLikedByCandidate: z.number().int().min(0).max(4),
@@ -221,13 +228,13 @@ const scoreComponentsSchema = z.object({
 }).strict();
 
 const riskResultSchema = z.object({
-    policyVersion: z.literal('risk-policy-v2.2'),
+    policyVersion: z.literal('risk-policy-v2.3'),
     components: scoreComponentsSchema,
     softContextBeforeBusinessAdjustment: z.object({
         recentMutual: z.number().finite().min(0).max(17),
         appearanceExposure: z.number().finite().min(0).max(20),
     }).strict(),
-    businessSoftContextMultiplier: z.union([z.literal(0.5), z.literal(1)]),
+    softContextMultiplier: z.union([z.literal(0), z.literal(0.5), z.literal(1)]),
     weakPartnerAdjustment: z.union([z.literal(-5), z.literal(0)]),
     preScore: z.number().finite().min(0).max(97),
     rawScore: z.number().finite().min(0).max(100),
@@ -236,13 +243,17 @@ const riskResultSchema = z.object({
     displayScore: z.number().finite().min(1).max(10),
     possibleUpperPublicScore: z.number().finite().min(1).max(10),
     possibleUpperDisplayScore: z.number().finite().min(1).max(10),
-    riskBand: z.enum(['normal', 'caution', 'high_risk']),
+    riskBand: riskBandSchema,
     partnerCapApplied: z.boolean(),
 }).strict();
 
 const finalCandidateSchema = preliminaryCandidateSchema.extend({
     reverseLikeStatus: z.enum(['observed', 'not_observed', 'not_collected']),
     risk: riskResultSchema,
+    displayScore: z.number().finite().min(1).max(10)
+        .refine(value => Math.round(value * 10) === value * 10),
+    riskBand: riskBandSchema,
+    relativeTierApplied: z.boolean(),
     featuredRank: z.number().int().min(1).max(15).nullable(),
     relativeWatchRank: z.number().int().min(1).max(2).nullable(),
 }).strict();
