@@ -2916,6 +2916,11 @@ if [[ "$mode" == "apply" ]]; then
   final_active_config="$(revision_json "$staged_revision")" \
     || die "promoted Cloud Run revision was not observable for prune-fence verification"
   verify_reattached_apify_prune_fence_refs "$final_config" "$final_active_config"
+  if [[ "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
+    # Exact latest/active reattachment is now the safe serving state. A clear
+    # conflict or lost response must preserve it regardless of fence state.
+    rollback_armed="false"
+  fi
   clear_apify_secret_ref_prune_fence_after_reattachment
   rollback_armed="false"
   log "verified: post-promotion queue, IAM, Scheduler, runtime, and traffic contracts"

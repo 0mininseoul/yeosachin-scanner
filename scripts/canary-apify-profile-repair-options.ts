@@ -19,6 +19,8 @@ const PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS = [
     'quaternary',
     'quinary',
 ] as const satisfies readonly ApifyCredentialSlot[];
+export type ProfileRepairCanaryCredentialSlot =
+    typeof PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS[number];
 const VALUE_FLAGS = new Set([
     '--source-request-id',
     '--critical-job-key',
@@ -37,7 +39,7 @@ const CONFIRMATION_FLAG = '--confirm-paid-api-call';
 export interface ProfileRepairCanaryOptions {
     sourceRequestId: string;
     criticalJobKey: string;
-    credentialSlot: ApifyCredentialSlot;
+    credentialSlot: ProfileRepairCanaryCredentialSlot;
     confirmPaidApiCall: boolean;
     repeats: 0 | typeof PROFILE_REPAIR_CANARY_REPEATS;
     maximumRunChargeUsd: 0 | typeof PROFILE_REPAIR_CANARY_MAX_RUN_USD;
@@ -107,7 +109,7 @@ export function parseProfileRepairCanaryArgs(
     return Object.freeze({
         sourceRequestId: sourceRequestId.toLowerCase(),
         criticalJobKey,
-        credentialSlot: credentialSlot as ApifyCredentialSlot,
+        credentialSlot: credentialSlot as ProfileRepairCanaryCredentialSlot,
         confirmPaidApiCall,
         repeats: confirmPaidApiCall ? PROFILE_REPAIR_CANARY_REPEATS : 0,
         maximumRunChargeUsd: confirmPaidApiCall
