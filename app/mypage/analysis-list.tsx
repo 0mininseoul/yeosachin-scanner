@@ -8,6 +8,7 @@ import {
     type OwnerAnalysisHistoryItemV1,
 } from '@/lib/services/analysis/owner-history';
 import { analysisPlanBadgePresentation } from '@/lib/services/analysis/owner-view-presentation';
+import { formatKstDateTime } from '@/lib/services/date-time-presentation';
 
 interface Props {
     initialAnalyses: OwnerAnalysisHistoryItemV1[];
@@ -62,12 +63,9 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                                     </span>
                                 </div>
                                 <div className="num mt-1.5 text-[12px] text-fg-mute">
-                                    {item.createdAt ? (
-                                        <>
-                                            {new Date(item.createdAt).toLocaleDateString()}{' '}
-                                            {new Date(item.createdAt).toLocaleTimeString()}
-                                        </>
-                                    ) : '날짜 미상'}
+                                    {item.createdAt
+                                        ? formatKstDateTime(item.createdAt)
+                                        : '날짜 미상'}
                                 </div>
                             </div>
 

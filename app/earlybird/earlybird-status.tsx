@@ -15,14 +15,7 @@ import {
     paymentConfirmationEventKey,
 } from '@/lib/services/earlybird/analytics-state';
 import { recoverPendingEarlybirdCheckout } from '@/lib/services/earlybird/ui-state';
-
-function formatTimestamp(value: string): string {
-    return new Intl.DateTimeFormat('ko-KR', {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-        timeZone: 'Asia/Seoul',
-    }).format(new Date(value));
-}
+import { formatKstDateTime } from '@/lib/services/date-time-presentation';
 
 function DetailRow({ label, value }: { label: string; value: string }) {
     return (
@@ -106,13 +99,13 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                     <DetailRow
                         label="접수 시각"
                         value={order.acceptedAt
-                            ? formatTimestamp(order.acceptedAt)
+                            ? formatKstDateTime(order.acceptedAt)
                             : '결제 확인 후 표시'}
                     />
                     <DetailRow
                         label="전달 예정"
                         value={order.dueAt
-                            ? formatTimestamp(order.dueAt)
+                            ? formatKstDateTime(order.dueAt)
                             : '결제 확정 후 24시간 이내 전달 예정'}
                     />
                     <DetailRow label="현재 상태" value={order.displayStatus} />
