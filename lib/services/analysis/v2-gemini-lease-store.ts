@@ -9,6 +9,9 @@ import {
     type AiStageName,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
+import type {
+    AnalysisV2AiAttemptTerminalInput,
+} from '@/lib/services/analysis/v2-ai-attempt-store';
 
 const UUID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -25,6 +28,7 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     releaseRpc: 'release_analysis_v2_gemini_lease',
     releaseV2Rpc: 'release_analysis_v2_gemini_lease_v2',
     cutoffV2Rpc: 'cutoff_analysis_v2_gemini_lease_v2',
+    cutoffAttemptV2Rpc: 'cutoff_analysis_v2_gender_resolution_attempt',
     reapCutoffV2Rpc: 'reap_analysis_v2_gemini_cutoff_leases_v2',
 });
 
@@ -93,6 +97,14 @@ const cutoffResultSchema = z.array(z.object({
     fence: z.number().int().min(0).safe(),
     expires_at: z.string().datetime({ offset: true }).nullable(),
 }).strict()).length(1);
+const cutoffAttemptResultSchema = z.object({
+    outcome: z.enum(['cutoff', 'already_terminal']),
+    attempt_status: z.enum(['cutoff', 'success']),
+    lease_state: z.enum(['available', 'leased', 'quarantined']),
+    fence: z.number().int().min(1).safe(),
+    expires_at: z.string().datetime({ offset: true }),
+}).strict();
+const reapedCutoffCountSchema = z.number().int().min(0).max(8);
 
 export type AnalysisV2GeminiLease = Readonly<{
     slot: number;
@@ -128,6 +140,11 @@ export interface AnalysisV2GeminiLeaseStore {
     renew(lease: AnalysisV2GeminiLease): Promise<AnalysisV2GeminiLease>;
     release(lease: AnalysisV2GeminiLease): Promise<void>;
     cutoff(lease: AnalysisV2GeminiLease): Promise<void>;
+    cutoffAttempt(input: {
+        lease: AnalysisV2GeminiLease;
+        attempt: AnalysisV2AiAttemptTerminalInput;
+    }): Promise<'cutoff' | 'already_terminal'>;
+    reapCutoff(input?: { limit?: number }): Promise<number>;
 }
 
 export class AnalysisV2AiCapacityPendingError extends Error {
@@ -356,6 +373,97 @@ export function createAnalysisV2GeminiLeaseStore(
             ) {
                 throw new AnalysisV2GeminiLeaseFenceError();
             }
+        },
+
+        async cutoffAttempt({ lease, attempt }) {
+            if (
+                !isV2Lease(lease)
+                || lease.stage !== 'genderResolution'
+                || attempt.stage !== 'genderResolution'
+                || attempt.status !== 'cutoff'
+                || attempt.operationKey !== lease.operationKey
+                || attempt.attempt !== attempt.retryCount + 1
+                || attempt.usageMetadataStatus !== 'missing'
+                || attempt.usageComplete
+                || attempt.tokenUsage !== null
+                || attempt.estimatedCostUsd !== null
+                || attempt.finishReason !== null
+            ) {
+                throw new AnalysisV2GeminiLeasePersistenceError();
+            }
+            const { data, error } = await dependencies.rpc(
+                ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.cutoffAttemptV2Rpc,
+                {
+                    p_request_id: attempt.requestId,
+                    p_job_key: attempt.jobKey,
+                    p_job_claim_token: attempt.claimToken,
+                    p_operation_key: attempt.operationKey,
+                    p_attempt: attempt.attempt,
+                    p_reservation_token: attempt.reservationToken,
+                    p_telemetry: {
+                        model_name: attempt.modelName,
+                        location: attempt.location,
+                        stage: attempt.stage,
+                        thinking_level: attempt.thinkingLevel,
+                        media_count: attempt.mediaCount,
+                        media_resolution: attempt.mediaResolution,
+                        prompt_version: attempt.promptVersion,
+                        schema_version: attempt.schemaVersion,
+                        max_output_tokens: attempt.maxOutputTokens,
+                        retry_count: attempt.retryCount,
+                        usage_metadata_status: attempt.usageMetadataStatus,
+                        usage_complete: attempt.usageComplete,
+                        prompt_tokens: null,
+                        completion_tokens: null,
+                        total_tokens: null,
+                        thinking_tokens: null,
+                        latency_ms: attempt.latencyMs,
+                        estimated_cost_usd: null,
+                        finish_reason: null,
+                    },
+                    p_slot: lease.slot,
+                    p_lease_claim_token: lease.claimToken,
+                    p_lease_fence: lease.fence,
+                }
+            );
+            if (error) throw new AnalysisV2GeminiLeasePersistenceError();
+            const parsed = cutoffAttemptResultSchema.safeParse(data);
+            if (
+                !parsed.success
+                || parsed.data.fence !== lease.fence
+                || (
+                    parsed.data.outcome === 'cutoff'
+                    && (
+                        parsed.data.attempt_status !== 'cutoff'
+                        || parsed.data.lease_state !== 'quarantined'
+                    )
+                )
+                || (
+                    parsed.data.outcome === 'already_terminal'
+                    && parsed.data.attempt_status === 'cutoff'
+                    && parsed.data.lease_state !== 'quarantined'
+                )
+            ) {
+                throw new AnalysisV2GeminiLeaseFenceError();
+            }
+            return parsed.data.outcome;
+        },
+
+        async reapCutoff(input = {}) {
+            const limit = input.limit ?? 8;
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) {
+                throw new AnalysisV2GeminiLeasePersistenceError();
+            }
+            const { data, error } = await dependencies.rpc(
+                ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.reapCutoffV2Rpc,
+                { p_limit: limit }
+            );
+            if (error) throw new AnalysisV2GeminiLeasePersistenceError();
+            const parsed = reapedCutoffCountSchema.safeParse(data);
+            if (!parsed.success) {
+                throw new AnalysisV2GeminiLeasePersistenceError();
+            }
+            return parsed.data;
         },
     };
 }

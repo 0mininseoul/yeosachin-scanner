@@ -22,6 +22,7 @@ import {
     recoverEarlybirdFulfillments,
     type EarlybirdFulfillmentRecoverySummary,
 } from '@/lib/services/earlybird/fulfillment-store';
+import { analysisV2GeminiLeaseStore } from './v2-gemini-lease-store';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -40,6 +41,7 @@ export interface AnalysisV2RecoverySummary {
     fulfillmentsCompleted: number;
     fulfillmentsManualReview: number;
     fulfillmentsFailed: number;
+    geminiCutoffLeasesReaped: number;
 }
 
 type RecoveryLookup = (job: {
@@ -53,6 +55,7 @@ type TerminalMediaCleanup = () => Promise<unknown>;
 type ProviderRunCleanup = () => Promise<AnalysisV2ProviderCleanupSummary>;
 type ProviderUsageReconciliation = () => Promise<AnalysisV2ProviderReconciliationSummary>;
 type FulfillmentRecovery = () => Promise<EarlybirdFulfillmentRecoverySummary>;
+type GeminiCutoffLeaseReaper = () => Promise<number>;
 
 type RecoveryOutcome =
     | 'dispatched'
@@ -149,6 +152,7 @@ export async function recoverAnalysisV2Jobs(
         cleanupProviderRuns?: ProviderRunCleanup;
         reconcileProviderUsage?: ProviderUsageReconciliation;
         recoverFulfillments?: FulfillmentRecovery;
+        reapGeminiCutoffLeases?: GeminiCutoffLeaseReaper;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -178,6 +182,7 @@ export async function recoverAnalysisV2Jobs(
         fulfillmentsCompleted: 0,
         fulfillmentsManualReview: 0,
         fulfillmentsFailed: 0,
+        geminiCutoffLeasesReaped: 0,
     };
     let cursor = 0;
     const worker = async () => {
@@ -208,6 +213,14 @@ export async function recoverAnalysisV2Jobs(
         summary.failed += fulfillment.failed;
     } catch {
         summary.fulfillmentsFailed += 1;
+        summary.failed += 1;
+    }
+    try {
+        summary.geminiCutoffLeasesReaped = await (
+            dependencies.reapGeminiCutoffLeases
+            ?? (() => analysisV2GeminiLeaseStore.reapCutoff({ limit: 8 }))
+        )();
+    } catch {
         summary.failed += 1;
     }
     try {

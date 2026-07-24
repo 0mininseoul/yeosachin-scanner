@@ -184,6 +184,58 @@ describe('durable V2 AI stage runtime', () => {
         await handle.completion;
     });
 
+    it.each([
+        {
+            label: 'never settles',
+            cutoff: () => new Promise<void>(() => undefined),
+        },
+        {
+            label: 'rejects',
+            cutoff: () => Promise.reject(new Error('temporary cutoff bookkeeping failure')),
+        },
+    ])('bounds resolver cutoff bookkeeping when it $label', async scenario => {
+        const createAudit = vi.fn(options => ({
+            requestId: options.requestId,
+            operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity,
+            resultSchema: options.resultSchema,
+            prepare: vi.fn(),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+            cutoff: vi.fn(scenario.cutoff),
+        }));
+        const runGenderResolution = vi.fn<
+            NonNullable<AnalysisV2AiStageRuntimeDependencies['runGenderResolution']>
+        >((_input, _audit, options) => (
+            new Promise<never>((_resolve, reject) => {
+                options?.abortSignal?.addEventListener(
+                    'abort',
+                    () => reject(new DOMException('aborted', 'AbortError')),
+                    { once: true },
+                );
+            })
+        ));
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit,
+            runGenderResolution,
+        });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+
+        const outcome = await Promise.race([
+            handle.cutoff().then(() => 'resolved' as const),
+            new Promise<'timed_out'>(resolve => {
+                setTimeout(() => resolve('timed_out'), 100);
+            }),
+        ]);
+
+        expect(outcome).toBe('resolved');
+        expect(handle.peek()).toEqual({ status: 'cutoff' });
+        await handle.completion;
+    });
+
     it('replays the same cached gender operation without opening another provider attempt', async () => {
         const cached = cachedAuditFactory({
             gender: {

@@ -63,13 +63,20 @@ describe('gender resolution forward migration contract', () => {
         expect(acquire).toContain('v_resolver_count >= 2');
         expect(acquire).toContain("'resolver_capacity_pending'::TEXT");
         expect(acquire).toContain('pg_advisory_xact_lock');
+        expect(acquire).toContain("lease.state = 'quarantined'");
+        expect(acquire).toContain('lease.expires_at <= v_now');
+        expect(acquire).toContain("SET state = 'available'");
         expect(stageMigration).toContain('CHECK (slot BETWEEN 1 AND 8)');
     });
 
     it('quarantines cutoff and permits only fenced SDK completion or TTL reaping', () => {
-        const cutoff = functionDefinition(
+        const legacyCutoff = functionDefinition(
             stageMigration,
             'cutoff_analysis_v2_gemini_lease_v2'
+        );
+        const atomicCutoff = functionDefinition(
+            stageMigration,
+            'cutoff_analysis_v2_gender_resolution_attempt'
         );
         const release = functionDefinition(
             stageMigration,
@@ -79,17 +86,29 @@ describe('gender resolution forward migration contract', () => {
             stageMigration,
             'reap_analysis_v2_gemini_cutoff_leases_v2'
         );
-        expect(cutoff).toContain("SET state = 'quarantined'");
-        for (const definition of [cutoff, release]) {
+        expect(legacyCutoff).toContain("SET state = 'quarantined'");
+        expect(atomicCutoff).toContain(
+            'public.analysis_v2_terminalize_ai_attempt_internal'
+        );
+        expect(atomicCutoff).toContain("'cutoff'");
+        expect(atomicCutoff).toContain("SET state = 'quarantined'");
+        expect(atomicCutoff).toContain("'already_terminal'");
+        expect(atomicCutoff).toContain('pg_advisory_xact_lock');
+        for (const definition of [legacyCutoff, release]) {
             expect(definition).toContain('lease.lease_claim_token = p_claim_token');
             expect(definition).toContain('lease.fence = p_fence');
             expect(definition).toContain('lease.operation_key = p_operation_key');
         }
+        expect(atomicCutoff).toContain(
+            'lease.lease_claim_token = p_lease_claim_token'
+        );
+        expect(atomicCutoff).toContain('lease.fence = p_lease_fence');
+        expect(atomicCutoff).toContain('lease.operation_key = p_operation_key');
         expect(reap).toContain("lease.stage = 'genderResolution'");
         expect(reap).toContain('lease.expires_at <= v_now');
     });
 
-    it('persists resolver provenance and strips failure aggregates from owner summary', () => {
+    it('persists resolver provenance and keeps rolling internal summary compatibility', () => {
         for (const field of [
             'baseline_classification',
             'classification_source',
@@ -112,8 +131,30 @@ describe('gender resolution forward migration contract', () => {
             'mediaUnavailableMutuals',
             'analysisUnavailableMutuals',
         ]) {
-            expect(summary).not.toContain(externalField);
+            expect(summary).toContain(`'${externalField}'`);
         }
         expect(summary).toContain("'genderStats'");
+    });
+
+    it('exposes only durable aggregate resolver quality to the service role', () => {
+        const quality = functionDefinition(
+            provenanceMigration,
+            'load_analysis_v2_gender_resolution_quality'
+        );
+        expect(provenanceMigration).toContain('applied_with_fenced_result_count');
+        expect(provenanceMigration).toContain('verified_baseline_mutation_count');
+        expect(provenanceMigration).toContain('resolver_estimated_cost_usd');
+        expect(quality).toContain('analysis_v2_gender_resolution_metrics');
+        expect(quality).toContain("'unknownGatePassed'");
+        expect(quality).toContain("'provenanceGatePassed'");
+        expect(quality).toContain("'immutabilityGatePassed'");
+        expect(quality).toContain("'resolverConcurrencyLimit', 2");
+        expect(quality).toContain("'sharedConcurrencyLimit', 8");
+        expect(provenanceMigration).toContain(
+            'GRANT EXECUTE ON FUNCTION public.load_analysis_v2_gender_resolution_quality(UUID)'
+        );
+        expect(provenanceMigration).toContain(
+            'FROM PUBLIC, anon, authenticated, service_role'
+        );
     });
 });

@@ -224,4 +224,86 @@ describe('deployment-wide Gemini lease store', () => {
             }
         );
     });
+
+    it('atomically terminalizes a resolver cutoff and quarantines its exact lease', async () => {
+        const operationKey = `gender-resolution:${'a'.repeat(64)}`;
+        const { rpc, store } = setup({
+            outcome: 'cutoff',
+            attempt_status: 'cutoff',
+            lease_state: 'quarantined',
+            fence: 9,
+            expires_at: expiresAt,
+        });
+        const lease = {
+            slot: 2,
+            claimToken,
+            fence: 9,
+            expiresAt,
+            operationKey,
+            stage: 'genderResolution' as const,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7' as const,
+        };
+
+        await expect(store.cutoffAttempt({
+            lease,
+            attempt: {
+                requestId,
+                jobKey: 'track:profile-ai:batch:0',
+                claimToken: '323e4567-e89b-42d3-a456-426614174000',
+                operationKey,
+                attempt: 1,
+                retryCount: 0,
+                reservationToken: '423e4567-e89b-42d3-a456-426614174000',
+                modelName: 'gemini-3-flash-preview',
+                location: 'global',
+                stage: 'genderResolution',
+                thinkingLevel: 'LOW',
+                mediaCount: 5,
+                mediaResolution: 'MEDIUM',
+                promptVersion: 'gender-resolution-v1',
+                schemaVersion: 1,
+                maxOutputTokens: 512,
+                status: 'cutoff',
+                usageMetadataStatus: 'missing',
+                usageComplete: false,
+                tokenUsage: null,
+                latencyMs: 12,
+                estimatedCostUsd: null,
+                finishReason: null,
+            },
+        })).resolves.toBe('cutoff');
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.cutoffAttemptV2Rpc,
+            {
+                p_request_id: requestId,
+                p_job_key: 'track:profile-ai:batch:0',
+                p_job_claim_token: '323e4567-e89b-42d3-a456-426614174000',
+                p_operation_key: operationKey,
+                p_attempt: 1,
+                p_reservation_token: '423e4567-e89b-42d3-a456-426614174000',
+                p_telemetry: expect.objectContaining({
+                    stage: 'genderResolution',
+                    usage_metadata_status: 'missing',
+                    usage_complete: false,
+                }),
+                p_slot: 2,
+                p_lease_claim_token: claimToken,
+                p_lease_fence: 9,
+            }
+        );
+    });
+
+    it('reaps only a bounded number of expired resolver cutoff leases', async () => {
+        const { rpc, store } = setup(2);
+
+        await expect(store.reapCutoff({ limit: 2 })).resolves.toBe(2);
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.reapCutoffV2Rpc,
+            { p_limit: 2 }
+        );
+        await expect(store.reapCutoff({ limit: 0 })).rejects.toThrow(
+            'ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR'
+        );
+        expect(rpc).toHaveBeenCalledOnce();
+    });
 });

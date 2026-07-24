@@ -20,6 +20,7 @@ import {
     featureAnalysis,
     featureAnalysisModelResponseSchema,
     genderResolution,
+    genderResolutionCheckpointAssessment,
     genderResolutionModelResponseSchema,
     genderTriage,
     genderTriageModelResponseSchema,
@@ -122,6 +123,23 @@ export interface AnalysisV2AiStageRuntimeDependencies {
     runPrivateNames?: typeof analyzePrivateAccountNames;
     runPartnerSafety?: typeof partnerSafetyAnalysis;
     runNarrative?: typeof highRiskNarrative;
+}
+
+const GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS = 25;
+
+async function waitForCutoffBookkeeping(
+    operation: () => Promise<void> | undefined
+): Promise<void> {
+    const handled = Promise.resolve()
+        .then(operation)
+        .catch(() => undefined);
+    await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS);
+        void handled.then(() => {
+            clearTimeout(timer);
+            resolve();
+        });
+    });
 }
 
 function canonicalJson(value: unknown): string {
@@ -242,7 +260,12 @@ export function createDurableAnalysisV2AiStageRuntime(
                         value: {
                             result,
                             operationKey: identity.operationKey,
-                            resultHash: analysisV2CanonicalAiResultHash(result.assessment),
+                            resultHash: analysisV2CanonicalAiResultHash(
+                                genderResolutionCheckpointAssessment(
+                                    input,
+                                    result.assessment
+                                )
+                            ),
                             source: 'checkpoint',
                         },
                     };
@@ -266,7 +289,7 @@ export function createDurableAnalysisV2AiStageRuntime(
                         if (state.status !== 'pending') return;
                         state = { status: 'cutoff' };
                         controller.abort();
-                        await audit.cutoff?.();
+                        await waitForCutoffBookkeeping(() => audit.cutoff?.());
                     })();
                     return cutoffStarted;
                 },

@@ -281,7 +281,7 @@ describe('V2 staged AI services', () => {
 
     it('grounds resolver evidence in supplied media and never promotes confidence', () => {
         const schema = genderResolutionModelResponseSchemaFor(media().slice(0, 5));
-        expect(schema.parse({
+        expect(() => schema.parse({
             inferredGender: 'female',
             confidence: 'high',
             ownerConsistency: 'same_person',
@@ -290,17 +290,32 @@ describe('V2 staged AI services', () => {
                 'profile:candidate',
                 'post:not-supplied',
             ],
+        })).toThrow();
+        expect(schema.parse({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: [
+                'profile:candidate',
+                'profile:candidate',
+            ],
         })).toEqual({
             inferredGender: 'female',
             confidence: 'medium',
             ownerConsistency: 'same_person',
             evidenceSelectionIds: ['profile:candidate'],
         });
-        expect(schema.parse({
+        expect(() => schema.parse({
             inferredGender: 'male',
             confidence: 'high',
             ownerConsistency: 'mixed_people',
             evidenceSelectionIds: ['post:not-supplied'],
+        })).toThrow();
+        expect(schema.parse({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'mixed_people',
+            evidenceSelectionIds: [],
         })).toEqual({
             inferredGender: 'unknown',
             confidence: 'low',
@@ -311,6 +326,14 @@ describe('V2 staged AI services', () => {
 
     it('runs the audited resolver only under v2.7 with one profile and four feeds', async () => {
         const controller = new AbortController();
+        const sensitiveUsername = 'private.username';
+        const resolverMedia = media().map((item, index) => ({
+            ...item,
+            selectionId: index === 0
+                ? `profile:${sensitiveUsername}`
+                : `post:${sensitiveUsername}:${index}:thumbnail`,
+            ...(item.postId ? { postId: `${sensitiveUsername}-post-${index}` } : {}),
+        }));
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,
             _images: string[],
@@ -319,20 +342,29 @@ describe('V2 staged AI services', () => {
             inferredGender: 'female',
             confidence: 'high',
             ownerConsistency: 'same_person',
-            evidenceSelectionIds: ['profile:candidate', 'post:1:thumbnail'],
+            evidenceSelectionIds: ['resolver-media:1', 'resolver-media:2'],
         }));
-        const hooks = audit('genderResolution');
+        const hooks = audit('genderResolution', { media: resolverMedia });
 
         const result = await genderResolution(
-            { media: media() },
+            { media: resolverMedia },
             hooks,
             { abortSignal: controller.signal },
         );
 
         expect(result.assessment.inferredGender).toBe('female');
+        expect(result.assessment.evidenceSelectionIds).toEqual([
+            `profile:${sensitiveUsername}`,
+            `post:${sensitiveUsername}:1:thumbnail`,
+        ]);
         expect(result.analyzedSelectionIds).toHaveLength(5);
         const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
         expect(prompt).not.toContain('@');
+        expect(prompt).not.toContain(sensitiveUsername);
+        expect(prompt).not.toContain('profile:');
+        expect(prompt).not.toContain('post:');
+        expect(prompt).toContain('resolver-media:1');
+        expect(prompt).toContain('resolver-media:5');
         expect(images).toHaveLength(5);
         expect(options).toMatchObject({
             stage: 'genderResolution',

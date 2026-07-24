@@ -102,8 +102,15 @@ describe('gender resolver operation-aware lease migration', () => {
             RETURNS TEXT LANGUAGE sql IMMUTABLE STRICT SET search_path = ''
             AS $$ SELECT '${'c'.repeat(64)}'::TEXT $$;
             CREATE TABLE public.analysis_v2_ai_attempts (
+                request_id UUID NOT NULL,
+                job_key TEXT NOT NULL,
+                job_claim_token UUID NOT NULL,
+                operation_key TEXT NOT NULL,
+                attempt SMALLINT NOT NULL,
+                reservation_token UUID NOT NULL,
                 stage TEXT NOT NULL,
                 status TEXT NOT NULL,
+                PRIMARY KEY(request_id, operation_key, attempt),
                 CONSTRAINT analysis_v2_ai_attempt_stage_check CHECK (
                     stage IN (
                         'genderTriage', 'featureAnalysis', 'highRiskNarrative',
@@ -138,11 +145,45 @@ describe('gender resolver operation-aware lease migration', () => {
             )
             RETURNS JSONB LANGUAGE plpgsql SET search_path = ''
             AS $$
+            DECLARE
+                v_attempt public.analysis_v2_ai_attempts%ROWTYPE;
             BEGIN
                 IF p_status NOT IN ('success', 'rate_limited', 'ambiguous', 'rejected', 'response_rejected') THEN
                     RAISE EXCEPTION 'invalid';
                 END IF;
-                RETURN '{}'::JSONB;
+                SELECT ai_attempt.*
+                INTO v_attempt
+                FROM public.analysis_v2_ai_attempts AS ai_attempt
+                WHERE ai_attempt.request_id = p_request_id
+                  AND ai_attempt.operation_key = p_operation_key
+                  AND ai_attempt.attempt = p_attempt
+                FOR UPDATE;
+                IF NOT FOUND THEN
+                    RAISE EXCEPTION USING
+                        MESSAGE = 'ANALYSIS_V2_AI_ATTEMPT_NOT_READY',
+                        ERRCODE = 'P0001';
+                END IF;
+                IF v_attempt.job_key IS DISTINCT FROM p_job_key
+                   OR v_attempt.job_claim_token IS DISTINCT FROM p_claim_token
+                   OR v_attempt.reservation_token IS DISTINCT FROM p_reservation_token THEN
+                    RAISE EXCEPTION USING
+                        MESSAGE = 'ANALYSIS_V2_AI_ATTEMPT_FENCE_MISMATCH',
+                        ERRCODE = 'P0001';
+                END IF;
+                IF v_attempt.status <> 'reserved' THEN
+                    IF v_attempt.status <> p_status THEN
+                        RAISE EXCEPTION USING
+                            MESSAGE = 'ANALYSIS_V2_AI_ATTEMPT_CONFLICT',
+                            ERRCODE = 'P0001';
+                    END IF;
+                    RETURN pg_catalog.jsonb_build_object('status', v_attempt.status);
+                END IF;
+                UPDATE public.analysis_v2_ai_attempts AS ai_attempt
+                SET status = p_status
+                WHERE ai_attempt.request_id = p_request_id
+                  AND ai_attempt.operation_key = p_operation_key
+                  AND ai_attempt.attempt = p_attempt;
+                RETURN pg_catalog.jsonb_build_object('status', p_status);
             END;
             $$;
         `);
@@ -151,6 +192,7 @@ describe('gender resolver operation-aware lease migration', () => {
 
     beforeEach(async () => {
         await db.exec(`
+            DELETE FROM public.analysis_v2_ai_attempts;
             UPDATE public.analysis_v2_gemini_leases
             SET state = 'available',
                 fence = 0,
@@ -236,6 +278,149 @@ describe('gender resolver operation-aware lease migration', () => {
             stage: 'featureAnalysis',
             claimToken: '223e4567-e89b-42d3-a456-426614174004',
         })).resolves.toMatchObject({ outcome: 'acquired', slot: 3 });
+    });
+
+    it('atomically terminalizes cutoff with its exact lease and lets success win the race', async () => {
+        const jobKey = 'track:profile-ai:batch:0';
+        const jobClaim = '323e4567-e89b-42d3-a456-426614174001';
+        const reservation = '423e4567-e89b-42d3-a456-426614174001';
+        const leaseClaim = '223e4567-e89b-42d3-a456-426614174001';
+        const telemetry = {
+            stage: 'genderResolution',
+            model_name: 'gemini-3-flash-preview',
+            location: 'global',
+            thinking_level: 'LOW',
+            media_count: 5,
+            media_resolution: 'MEDIUM',
+            prompt_version: 'gender-resolution-v1',
+            schema_version: 1,
+            max_output_tokens: 512,
+            retry_count: 0,
+            usage_metadata_status: 'missing',
+            usage_complete: false,
+            prompt_tokens: null,
+            completion_tokens: null,
+            total_tokens: null,
+            thinking_tokens: null,
+            latency_ms: 12,
+            estimated_cost_usd: null,
+            finish_reason: null,
+        };
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_attempts(
+                request_id, job_key, job_claim_token, operation_key, attempt,
+                reservation_token, stage, status
+            ) VALUES ($1, $2, $3, $4, 1, $5, 'genderResolution', 'reserved')`,
+            [REQUEST, jobKey, jobClaim, RESOLVER_OPERATION, reservation]
+        );
+        const lease = await acquireV2({
+            requestId: REQUEST,
+            jobKey,
+            operationKey: RESOLVER_OPERATION,
+            stage: 'genderResolution',
+            claimToken: leaseClaim,
+        });
+        const cutoff = (await asService<{
+            value: {
+                outcome: string;
+                attempt_status: string;
+                lease_state: string;
+            };
+        }>(
+            `SELECT public.cutoff_analysis_v2_gender_resolution_attempt(
+                $1, $2, $3, $4, 1::SMALLINT, $5, $6::JSONB, $7, $8, $9
+            ) AS value`,
+            [
+                REQUEST,
+                jobKey,
+                jobClaim,
+                RESOLVER_OPERATION,
+                reservation,
+                JSON.stringify(telemetry),
+                lease.slot,
+                leaseClaim,
+                lease.fence,
+            ]
+        )).rows[0].value;
+        expect(cutoff).toMatchObject({
+            outcome: 'cutoff',
+            attempt_status: 'cutoff',
+            lease_state: 'quarantined',
+        });
+        await expect(db.query<{ status: string }>(
+            `SELECT status FROM public.analysis_v2_ai_attempts
+             WHERE request_id = $1 AND operation_key = $2`,
+            [REQUEST, RESOLVER_OPERATION]
+        )).resolves.toMatchObject({ rows: [{ status: 'cutoff' }] });
+
+        await db.exec(`
+            UPDATE public.analysis_v2_ai_attempts SET status = 'success';
+            UPDATE public.analysis_v2_gemini_leases
+            SET state = 'leased',
+                quarantined_at = NULL
+            WHERE slot = 1;
+        `);
+        const successWon = (await asService<{
+            value: {
+                outcome: string;
+                attempt_status: string;
+                lease_state: string;
+            };
+        }>(
+            `SELECT public.cutoff_analysis_v2_gender_resolution_attempt(
+                $1, $2, $3, $4, 1::SMALLINT, $5, $6::JSONB, $7, $8, $9
+            ) AS value`,
+            [
+                REQUEST,
+                jobKey,
+                jobClaim,
+                RESOLVER_OPERATION,
+                reservation,
+                JSON.stringify(telemetry),
+                lease.slot,
+                leaseClaim,
+                lease.fence,
+            ]
+        )).rows[0].value;
+        expect(successWon).toMatchObject({
+            outcome: 'already_terminal',
+            attempt_status: 'success',
+            lease_state: 'leased',
+        });
+    });
+
+    it('reaps an expired resolver quarantine inside the next acquire lock', async () => {
+        const first = await acquireV2({
+            requestId: REQUEST,
+            jobKey: 'track:profile-ai:batch:0',
+            operationKey: RESOLVER_OPERATION,
+            stage: 'genderResolution',
+            claimToken: '223e4567-e89b-42d3-a456-426614174001',
+        });
+        await asService(
+            `SELECT * FROM public.cutoff_analysis_v2_gemini_lease_v2(
+                $1, $2, $3, $4
+            )`,
+            [
+                first.slot,
+                '223e4567-e89b-42d3-a456-426614174001',
+                first.fence,
+                RESOLVER_OPERATION,
+            ]
+        );
+        await db.exec(`
+            UPDATE public.analysis_v2_gemini_leases
+            SET expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second'
+            WHERE slot = 1;
+        `);
+
+        await expect(acquireV2({
+            requestId: '123e4567-e89b-42d3-a456-426614174009',
+            jobKey: 'track:profile-ai:batch:9',
+            operationKey: `gender-resolution:${'9'.repeat(64)}`,
+            stage: 'genderResolution',
+            claimToken: '223e4567-e89b-42d3-a456-426614174009',
+        })).resolves.toMatchObject({ outcome: 'acquired', slot: 1 });
     });
 
     it('keeps the v2.6 acquire RPC callable after the additive migration', async () => {

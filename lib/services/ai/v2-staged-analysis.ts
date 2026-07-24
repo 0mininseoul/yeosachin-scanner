@@ -895,6 +895,14 @@ export function genderResolutionModelResponseSchemaFor(
 ) {
     const allowedIds = new Set(media.map(item => item.selectionId));
     return genderResolutionModelResponseSchema
+        .superRefine((value, context) => {
+            assertEvidenceSelectionIds(
+                value.evidenceSelectionIds,
+                allowedIds,
+                ['evidenceSelectionIds'],
+                context
+            );
+        })
         .transform(value => {
             const evidenceSelectionIds = distinctAllowedEvidenceIds(
                 value.evidenceSelectionIds,
@@ -1156,6 +1164,49 @@ function genderResolutionPrompt(media: readonly NormalizedAiMediaSelection[]): s
     ].join('\n');
 }
 
+function genderResolutionMediaProjection(
+    media: readonly NormalizedAiMediaSelection[]
+) {
+    const originalByOpaqueId = new Map<string, string>();
+    const opaqueByOriginalId = new Map<string, string>();
+    const projectedMedia = media.map((item, index) => {
+        const opaqueId = `resolver-media:${index + 1}`;
+        originalByOpaqueId.set(opaqueId, item.selectionId);
+        opaqueByOriginalId.set(item.selectionId, opaqueId);
+        return {
+            ...item,
+            selectionId: opaqueId,
+            postId: undefined,
+        };
+    });
+    return {
+        projectedMedia,
+        originalByOpaqueId,
+        opaqueByOriginalId,
+    };
+}
+
+export function genderResolutionCheckpointAssessment(
+    rawInput: GenderResolutionInput,
+    rawAssessment: GenderResolutionResult['assessment']
+): z.infer<typeof genderResolutionModelResponseSchema> {
+    const input = genderResolutionInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
+    const projection = genderResolutionMediaProjection(media);
+    const assessment = genderResolutionModelResponseSchema.parse(rawAssessment);
+    const evidenceSelectionIds = assessment.evidenceSelectionIds.map(selectionId => {
+        const opaqueId = projection.opaqueByOriginalId.get(selectionId);
+        if (!opaqueId) {
+            throw new Error('ANALYSIS_V2_GENDER_RESOLUTION_EVIDENCE_DRIFT');
+        }
+        return opaqueId;
+    });
+    return genderResolutionModelResponseSchema.parse({
+        ...assessment,
+        evidenceSelectionIds,
+    });
+}
+
 function featureAnalysisPrompt(
     input: z.output<typeof featureAnalysisInputSchema>,
     media: readonly NormalizedAiMediaSelection[]
@@ -1352,9 +1403,10 @@ export function createGenderResolutionResultIdentity(
 ): AnalysisV2AiResultIdentity {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
+    const projection = genderResolutionMediaProjection(media);
     return stagedResultIdentity(
         'genderResolution',
-        genderResolutionPrompt(media),
+        genderResolutionPrompt(projection.projectedMedia),
         media,
         'request',
         AI_STAGE_POLICY_LATEST_VERSION,
@@ -1427,7 +1479,8 @@ export async function genderResolution(
 ): Promise<GenderResolutionResult> {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const prompt = genderResolutionPrompt(media);
+    const projection = genderResolutionMediaProjection(media);
+    const prompt = genderResolutionPrompt(projection.projectedMedia);
     const identity = stagedResultIdentity(
         'genderResolution',
         prompt,
@@ -1436,9 +1489,11 @@ export async function genderResolution(
         AI_STAGE_POLICY_LATEST_VERSION,
     );
     const audit = parseAuditContext(rawAuditContext, identity);
-    const responseSchema = genderResolutionModelResponseSchemaFor(media);
+    const responseSchema = genderResolutionModelResponseSchemaFor(
+        projection.projectedMedia
+    );
     const prepared = await prepareStagedResult(audit, responseSchema);
-    const assessment = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
+    const checkpointAssessment = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
         prompt,
         media.map(item => item.normalizedJpegBase64),
         {
@@ -1453,6 +1508,18 @@ export async function genderResolution(
             onAttemptTelemetry: audit.onAttemptTelemetry,
         },
     ));
+    const assessment = genderResolutionModelResponseSchema.parse({
+        ...checkpointAssessment,
+        evidenceSelectionIds: checkpointAssessment.evidenceSelectionIds.map(
+            selectionId => {
+                const originalId = projection.originalByOpaqueId.get(selectionId);
+                if (!originalId) {
+                    throw new Error('ANALYSIS_V2_GENDER_RESOLUTION_EVIDENCE_DRIFT');
+                }
+                return originalId;
+            }
+        ),
+    });
     return genderResolutionResultSchema.parse({
         assessment,
         analyzedSelectionIds: media.map(item => item.selectionId),

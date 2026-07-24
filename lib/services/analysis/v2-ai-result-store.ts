@@ -1426,32 +1426,37 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     );
                 }
                 const startedAt = attemptStartedAt.get(attempt) ?? performance.now();
-                await attemptStore.terminalize({
-                    requestId: request.data.requestId,
-                    jobKey: request.data.jobKey,
-                    claimToken: request.data.claimToken,
-                    operationKey: resultIdentity.operationKey,
-                    attempt,
-                    retryCount: reservation.retryCount,
-                    reservationToken: reservation.reservationToken,
-                    modelName: reservation.modelName,
-                    location: reservation.location,
-                    stage: reservation.stage,
-                    thinkingLevel: reservation.thinkingLevel,
-                    mediaCount: reservation.mediaCount,
-                    mediaResolution: reservation.mediaResolution,
-                    promptVersion: reservation.promptVersion,
-                    schemaVersion: reservation.schemaVersion,
-                    maxOutputTokens: reservation.maxOutputTokens,
-                    status: 'cutoff',
-                    usageMetadataStatus: 'missing',
-                    usageComplete: false,
-                    tokenUsage: null,
-                    latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-                    estimatedCostUsd: null,
-                    finishReason: null,
+                await leaseStore.cutoffAttempt({
+                    lease,
+                    attempt: {
+                        requestId: request.data.requestId,
+                        jobKey: request.data.jobKey,
+                        claimToken: request.data.claimToken,
+                        operationKey: resultIdentity.operationKey,
+                        attempt,
+                        retryCount: reservation.retryCount,
+                        reservationToken: reservation.reservationToken,
+                        modelName: reservation.modelName,
+                        location: reservation.location,
+                        stage: reservation.stage,
+                        thinkingLevel: reservation.thinkingLevel,
+                        mediaCount: reservation.mediaCount,
+                        mediaResolution: reservation.mediaResolution,
+                        promptVersion: reservation.promptVersion,
+                        schemaVersion: reservation.schemaVersion,
+                        maxOutputTokens: reservation.maxOutputTokens,
+                        status: 'cutoff',
+                        usageMetadataStatus: 'missing',
+                        usageComplete: false,
+                        tokenUsage: null,
+                        latencyMs: Math.max(
+                            0,
+                            Math.round(performance.now() - startedAt)
+                        ),
+                        estimatedCostUsd: null,
+                        finishReason: null,
+                    },
                 });
-                await leaseStore.cutoff(lease);
             })();
             return cutoffStarted;
         },

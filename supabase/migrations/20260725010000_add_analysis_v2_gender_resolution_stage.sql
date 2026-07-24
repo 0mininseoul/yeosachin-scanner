@@ -355,6 +355,21 @@ BEGIN
     WHERE lease.state = 'leased'
       AND lease.expires_at <= v_now;
 
+    UPDATE public.analysis_v2_gemini_leases AS lease
+    SET state = 'available',
+        request_id = NULL,
+        job_key = NULL,
+        operation_key = NULL,
+        stage = NULL,
+        attempt = NULL,
+        lease_claim_token = NULL,
+        acquired_at = NULL,
+        expires_at = NULL,
+        quarantined_at = NULL,
+        updated_at = v_now
+    WHERE lease.state = 'quarantined'
+      AND lease.expires_at <= v_now;
+
     SELECT lease.* INTO v_lease
     FROM public.analysis_v2_gemini_leases AS lease
     WHERE lease.request_id = p_request_id
@@ -592,6 +607,157 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_job_claim_token UUID,
+    p_operation_key TEXT,
+    p_attempt SMALLINT,
+    p_reservation_token UUID,
+    p_telemetry JSONB,
+    p_slot INTEGER,
+    p_lease_claim_token UUID,
+    p_lease_fence BIGINT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_attempt_status TEXT;
+    v_attempt public.analysis_v2_ai_attempts%ROWTYPE;
+    v_lease public.analysis_v2_gemini_leases%ROWTYPE;
+    v_message TEXT;
+    v_outcome TEXT := 'cutoff';
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+BEGIN
+    IF p_request_id IS NULL
+       OR p_job_key IS NULL
+       OR p_job_claim_token IS NULL
+       OR p_operation_key IS NULL
+       OR p_attempt IS NULL
+       OR p_reservation_token IS NULL
+       OR p_telemetry IS NULL
+       OR p_slot IS NULL OR p_slot NOT BETWEEN 1 AND 8
+       OR p_lease_claim_token IS NULL
+       OR p_lease_fence IS NULL OR p_lease_fence < 1
+       OR p_telemetry->>'stage' IS DISTINCT FROM 'genderResolution'
+       OR NOT public.analysis_v2_valid_ai_operation_key(p_operation_key)
+       OR NOT public.analysis_v2_ai_operation_matches_stage(
+            p_operation_key,
+            'genderResolution'
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_CUTOFF_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('analysis-v2-gemini-leases', 0)
+    );
+
+    BEGIN
+        PERFORM public.analysis_v2_terminalize_ai_attempt_internal(
+            p_request_id,
+            p_job_key,
+            p_job_claim_token,
+            p_operation_key,
+            p_attempt,
+            p_reservation_token,
+            'cutoff',
+            p_telemetry
+        );
+    EXCEPTION
+        WHEN SQLSTATE 'P0001' THEN
+            GET STACKED DIAGNOSTICS v_message = MESSAGE_TEXT;
+            IF v_message IS DISTINCT FROM 'ANALYSIS_V2_AI_ATTEMPT_CONFLICT' THEN
+                RAISE;
+            END IF;
+            SELECT ai_attempt.*
+            INTO v_attempt
+            FROM public.analysis_v2_ai_attempts AS ai_attempt
+            WHERE ai_attempt.request_id = p_request_id
+              AND ai_attempt.job_key = p_job_key
+              AND ai_attempt.job_claim_token = p_job_claim_token
+              AND ai_attempt.operation_key = p_operation_key
+              AND ai_attempt.attempt = p_attempt
+              AND ai_attempt.reservation_token = p_reservation_token
+              AND ai_attempt.stage = 'genderResolution'
+            FOR UPDATE;
+            IF NOT FOUND OR v_attempt.status NOT IN ('success', 'cutoff') THEN
+                RAISE;
+            END IF;
+            v_outcome := 'already_terminal';
+            v_attempt_status := v_attempt.status;
+    END;
+
+    IF v_attempt_status IS NULL THEN
+        v_attempt_status := 'cutoff';
+    END IF;
+
+    SELECT lease.*
+    INTO v_lease
+    FROM public.analysis_v2_gemini_leases AS lease
+    WHERE lease.slot = p_slot
+    FOR UPDATE;
+
+    IF v_attempt_status = 'success' THEN
+        IF v_lease.fence IS DISTINCT FROM p_lease_fence
+           OR v_lease.state NOT IN ('available', 'leased', 'quarantined') THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_CUTOFF_FENCE_MISMATCH',
+                ERRCODE = 'P0001';
+        END IF;
+        RETURN pg_catalog.jsonb_build_object(
+            'outcome', v_outcome,
+            'attempt_status', v_attempt_status,
+            'lease_state', v_lease.state,
+            'fence', v_lease.fence,
+            'expires_at', COALESCE(v_lease.expires_at, v_now)
+        );
+    END IF;
+
+    IF v_lease.state NOT IN ('leased', 'quarantined')
+       OR v_lease.request_id IS DISTINCT FROM p_request_id
+       OR v_lease.job_key IS DISTINCT FROM p_job_key
+       OR v_lease.operation_key IS DISTINCT FROM p_operation_key
+       OR v_lease.attempt IS DISTINCT FROM p_attempt
+       OR v_lease.stage IS DISTINCT FROM 'genderResolution'
+       OR v_lease.lease_claim_token IS DISTINCT FROM p_lease_claim_token
+       OR v_lease.fence IS DISTINCT FROM p_lease_fence THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_CUTOFF_FENCE_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF v_lease.state = 'leased' THEN
+        UPDATE public.analysis_v2_gemini_leases AS lease
+        SET state = 'quarantined',
+            quarantined_at = v_now,
+            updated_at = v_now
+        WHERE lease.slot = p_slot
+          AND lease.lease_claim_token = p_lease_claim_token
+          AND lease.fence = p_lease_fence
+          AND lease.operation_key = p_operation_key
+        RETURNING lease.* INTO v_lease;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ANALYSIS_V2_GENDER_RESOLUTION_CUTOFF_FENCE_MISMATCH',
+                ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'outcome', v_outcome,
+        'attempt_status', v_attempt_status,
+        'lease_state', v_lease.state,
+        'fence', v_lease.fence,
+        'expires_at', v_lease.expires_at
+    );
+END;
+$$;
+
 CREATE FUNCTION public.reap_analysis_v2_gemini_cutoff_leases_v2(
     p_limit INTEGER DEFAULT 8
 )
@@ -653,6 +819,9 @@ REVOKE ALL ON FUNCTION public.release_analysis_v2_gemini_lease_v2(
 REVOKE ALL ON FUNCTION public.cutoff_analysis_v2_gemini_lease_v2(
     INTEGER, UUID, BIGINT, TEXT
 ) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt(
+    UUID, TEXT, UUID, TEXT, SMALLINT, UUID, JSONB, INTEGER, UUID, BIGINT
+) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.reap_analysis_v2_gemini_cutoff_leases_v2(INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
 
@@ -668,6 +837,9 @@ GRANT EXECUTE ON FUNCTION public.release_analysis_v2_gemini_lease_v2(
 GRANT EXECUTE ON FUNCTION public.cutoff_analysis_v2_gemini_lease_v2(
     INTEGER, UUID, BIGINT, TEXT
 ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt(
+    UUID, TEXT, UUID, TEXT, SMALLINT, UUID, JSONB, INTEGER, UUID, BIGINT
+) TO service_role;
 GRANT EXECUTE ON FUNCTION public.reap_analysis_v2_gemini_cutoff_leases_v2(INTEGER)
     TO service_role;
 
@@ -677,3 +849,6 @@ COMMENT ON FUNCTION public.acquire_analysis_v2_gemini_lease_v2(
 COMMENT ON FUNCTION public.cutoff_analysis_v2_gemini_lease_v2(
     INTEGER, UUID, BIGINT, TEXT
 ) IS 'Fences a resolver cutoff in quarantine until explicit SDK completion or TTL reaping.';
+COMMENT ON FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt(
+    UUID, TEXT, UUID, TEXT, SMALLINT, UUID, JSONB, INTEGER, UUID, BIGINT
+) IS 'Atomically terminalizes a resolver cutoff and quarantines its exact Gemini lease; a successful attempt wins the race.';
