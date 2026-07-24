@@ -68,6 +68,7 @@
     "vitest": "^3.2.7"
   },
   "overrides": {
+    "minimatch": "10.2.5",
     "postcss": "8.5.18",
     "sharp": "$sharp"
   }
