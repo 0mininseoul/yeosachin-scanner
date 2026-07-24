@@ -4,7 +4,7 @@
 
 **Goal:** Snapshot target, female-public, and private-mutual result images into a private 30-day Cloudflare R2 store, allow bounded small capture gaps, and deliver ready images only through the owner-bound proxy.
 
-**Architecture:** A worker-side capture coordinator securely downloads and normalizes each source to bounded WebP, writes it through an S3-compatible R2 adapter, verifies it with `HeadObject`, and checkpoints metadata plus a repair outbox in Supabase. The existing signed result-image locator remains the browser API; the authenticated resolver returns either a legacy remote locator while the flag is off or an opaque R2 object reference while the flag is on. Finalization validates row/image manifests and bounded coverage in SQL.
+**Architecture:** A worker-side capture coordinator securely downloads and normalizes each source to bounded WebP, writes it through an S3-compatible R2 adapter, verifies it with `HeadObject`, and checkpoints metadata in Supabase. The existing signed result-image locator remains the browser API; the authenticated resolver returns either a legacy remote locator while the flag is off or an opaque R2 object reference while the flag is on. Finalization validates row/image manifests and bounded coverage in SQL.
 
 **Tech Stack:** TypeScript, Vitest, Sharp, AWS S3-compatible client, Supabase PostgreSQL, PGlite, Cloudflare R2
 
@@ -15,11 +15,11 @@
 - Modify `package.json` and `package-lock.json`: pin the S3 client dependency.
 - Create `lib/services/media/result-image-normalizer.ts` and test: first-frame 256px WebP normalization and 128 KiB bound.
 - Create `lib/services/media/r2-result-image-store.ts` and test: config, opaque keys, put/head/get/delete, redacted errors.
-- Create `lib/services/media/result-image-capture.ts` and test: bounded source fetch, concurrency, metadata checkpoint, and repair behavior.
+- Create `lib/services/media/result-image-capture.ts` and test: bounded source fetch, concurrency, metadata checkpoint, and finalizer retry behavior.
 - Create `lib/services/media/result-image-registry.ts` and test: typed Supabase RPC boundary.
 - Modify `lib/services/media/result-image-resolver.ts` and test: legacy/R2 compatibility reader and exact-expiry denial.
 - Modify `app/api/image-proxy/route.ts` and `lib/services/media/image-proxy-route.test.ts`: owner-only WebP delivery without raw fallback.
-- Modify `supabase/migrations/20260724123500_add_analysis_v2_result_image_objects.sql`: metadata, coverage fence, repair outbox, purge outbox, grants, and RLS.
+- Modify `supabase/migrations/20260724123500_add_analysis_v2_result_image_objects.sql`: metadata, coverage fence, purge outbox, grants, and RLS.
 - Create `lib/services/analysis/v2-result-image-objects-migration-contract.test.ts`: SQL surface contract.
 - Create `lib/services/analysis/v2-result-image-objects-pglite.test.ts`: threshold, expiry, idempotency, and deletion behavior.
 - Modify `lib/services/analysis/v2-result-store.ts`, `lib/services/analysis/v2-result-store.test.ts`, `lib/services/analysis/v2-ai-scoring-executors.ts`, and `lib/services/analysis/v2-ai-scoring-executors.test.ts`: submit ordered image-manifest hash and enforce readiness flag.
@@ -176,7 +176,7 @@ git commit -m "feat: add private R2 result image adapter"
 
 Expected: PASS.
 
-### Task 3: Metadata, repair, purge, and bounded finalization fence
+### Task 3: Metadata, purge, and bounded finalization fence
 
 **Files:**
 - Modify: `supabase/migrations/20260724123500_add_analysis_v2_result_image_objects.sql`
@@ -198,8 +198,8 @@ Contract/PGlite tests must prove:
 - zero denominators pass;
 - target/top-three sourced images must be ready;
 - manifest hash and idempotent replay are enforced;
-- capture failures enqueue repair; owner deletion enqueues opaque purge keys and hides the
-  analysis immediately.
+- exact failed sources can be promoted on a later finalizer retry; owner deletion enqueues
+  opaque purge keys and hides the analysis immediately.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -216,12 +216,12 @@ Expected: FAIL because the migration contains only its scaffold comment.
 Create `analysis_v2_result_image_objects` keyed by `(request_id, kind, candidate_locator)`.
 Use enums/check constraints for `target|female|private` and
 `ready|source_missing|capture_failed`. Store a nullable bounded internal failure code, not
-provider messages. Add force RLS and indexes for expiry and repair claiming.
+provider messages. Add force RLS and indexes for expiry and purge claiming.
 
-- [ ] **Step 4: Create register/claim/complete/purge RPCs**
+- [ ] **Step 4: Create register and purge RPCs**
 
 All mutations must verify the request/job fence, be replay-idempotent, compare an ordered
-manifest hash, lease repair/purge work with UUID claim tokens, and return bounded records.
+manifest hash, lease purge work with UUID claim tokens, and return bounded records.
 Revoke all function execution from `PUBLIC, anon, authenticated` and grant exact signatures
 to `service_role`.
 
@@ -293,9 +293,9 @@ Expected: FAIL because the modules do not exist.
 
 - [ ] **Step 3: Implement the registry RPC adapter**
 
-Expose typed methods `loadManifestPage`, `registerOutcome`, `claimRepair`,
-`completeRepair`, `claimPurge`, and `completePurge`. Validate UUIDs, opaque keys, hashes,
-byte sizes, timestamps, and bounded failure codes at the TypeScript boundary.
+Expose typed methods `loadManifestPage`, `registerOutcome`, `claimPurge`, and
+`completePurge`. Validate UUIDs, opaque keys, hashes, byte sizes, timestamps, and bounded
+failure codes at the TypeScript boundary.
 
 - [ ] **Step 4: Implement secure capture**
 

@@ -10,11 +10,10 @@ const migration = readFileSync(
 );
 
 describe('analysis V2 retained result image migration contract', () => {
-    it('keeps metadata and both outboxes private', () => {
+    it('keeps metadata and the purge outbox private', () => {
         for (const table of [
             'analysis_v2_result_image_manifests',
             'analysis_v2_result_image_objects',
-            'analysis_v2_result_image_repair_outbox',
             'analysis_v2_result_image_purge_outbox',
         ]) {
             expect(migration).toContain(
@@ -39,7 +38,7 @@ describe('analysis V2 retained result image migration contract', () => {
                 'CREATE TABLE public.analysis_v2_result_image_objects'
             ),
             migration.indexOf(
-                'CREATE TABLE public.analysis_v2_result_image_repair_outbox'
+                'CREATE TABLE public.analysis_v2_result_image_purge_outbox'
             )
         );
         expect(migration).toContain(
@@ -75,14 +74,12 @@ describe('analysis V2 retained result image migration contract', () => {
         );
     });
 
-    it('provides fenced idempotent registry, repair, purge, and finalizer RPCs', () => {
+    it('provides fenced idempotent registry, purge, and finalizer RPCs', () => {
         for (const name of [
             'begin_analysis_v2_result_image_manifest',
             'register_analysis_v2_result_image_outcome',
             'seal_analysis_v2_result_image_manifest',
             'load_analysis_v2_result_image_manifest_page',
-            'claim_analysis_v2_result_image_repairs',
-            'complete_analysis_v2_result_image_repair',
             'claim_analysis_v2_result_image_purges',
             'complete_analysis_v2_result_image_purge',
             'complete_analysis_v2_result_and_purge_with_images',

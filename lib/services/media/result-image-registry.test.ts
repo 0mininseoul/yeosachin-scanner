@@ -103,36 +103,17 @@ describe('result image registry RPC adapter', () => {
         );
     });
 
-    it('claims and completes bounded repair and purge work', async () => {
-        const repairClaim = {
-            requestId: CLAIM.requestId,
-            kind: 'female' as const,
-            candidateLocator: 'candidate:one',
-            failureCode: 'UPSTREAM_UNAVAILABLE',
-        };
+    it('claims and completes bounded purge work', async () => {
         const purgeClaim = {
             objectKey: `v1/${'1'.repeat(32)}/female/${'2'.repeat(32)}.webp`,
             reason: 'expired',
         };
         const client = rpcClient(
-            { data: [repairClaim], error: null },
-            { data: true, error: null },
             { data: [purgeClaim], error: null },
             { data: true, error: null }
         );
         const registry = createResultImageRegistry(client);
 
-        await expect(registry.claimRepair({
-            claimToken: CLAIM.claimToken,
-            limit: 10,
-            leaseSeconds: 120,
-        })).resolves.toEqual([repairClaim]);
-        await expect(registry.completeRepair({
-            ...repairClaim,
-            claimToken: CLAIM.claimToken,
-            success: false,
-            failureCode: 'RATE_LIMITED',
-        })).resolves.toBe(true);
         await expect(registry.claimPurge({
             claimToken: CLAIM.claimToken,
             limit: 10,

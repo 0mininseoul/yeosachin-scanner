@@ -66,8 +66,6 @@ function registry(overrides: Record<string, unknown> = {}) {
             readyImages: 1,
             captureFailedImages: 0,
         })),
-        claimRepair: vi.fn(),
-        completeRepair: vi.fn(),
         claimPurge: vi.fn(),
         completePurge: vi.fn(),
         ...overrides,

@@ -133,42 +133,6 @@ CREATE TABLE public.analysis_v2_result_image_objects (
     )
 );
 
-CREATE TABLE public.analysis_v2_result_image_repair_outbox (
-    request_id UUID NOT NULL,
-    kind VARCHAR(16) NOT NULL,
-    candidate_locator VARCHAR(128) NOT NULL,
-    failure_code VARCHAR(64) NOT NULL CHECK (
-        failure_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
-    ),
-    status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (
-        status IN ('pending', 'claimed')
-    ),
-    attempt_count SMALLINT NOT NULL DEFAULT 0 CHECK (
-        attempt_count BETWEEN 0 AND 20
-    ),
-    available_at TIMESTAMP WITH TIME ZONE NOT NULL
-        DEFAULT pg_catalog.clock_timestamp(),
-    claim_token UUID,
-    lease_expires_at TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL
-        DEFAULT pg_catalog.clock_timestamp(),
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL
-        DEFAULT pg_catalog.clock_timestamp(),
-    PRIMARY KEY (request_id, kind, candidate_locator),
-    FOREIGN KEY (request_id, kind, candidate_locator)
-        REFERENCES public.analysis_v2_result_image_objects(
-            request_id, kind, candidate_locator
-        ) ON DELETE CASCADE,
-    CONSTRAINT analysis_v2_result_image_repair_claim_check CHECK (
-        (status = 'pending' AND claim_token IS NULL AND lease_expires_at IS NULL)
-        OR (
-            status = 'claimed'
-            AND claim_token IS NOT NULL
-            AND lease_expires_at IS NOT NULL
-        )
-    )
-);
-
 -- This table intentionally has no request foreign key. It must survive an owner
 -- deleting the request so physical object deletion can be retried.
 CREATE TABLE public.analysis_v2_result_image_purge_outbox (
@@ -210,10 +174,6 @@ CREATE TABLE public.analysis_v2_result_image_purge_outbox (
 
 CREATE INDEX idx_analysis_v2_result_image_expiry
     ON public.analysis_v2_result_image_objects(expires_at, request_id);
-CREATE INDEX idx_analysis_v2_result_image_repair_claim
-    ON public.analysis_v2_result_image_repair_outbox(
-        status, available_at, lease_expires_at
-    );
 CREATE INDEX idx_analysis_v2_result_image_purge_claim
     ON public.analysis_v2_result_image_purge_outbox(
         status, available_at, lease_expires_at
@@ -223,16 +183,12 @@ ALTER TABLE public.analysis_v2_result_image_manifests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.analysis_v2_result_image_manifests FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.analysis_v2_result_image_objects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.analysis_v2_result_image_objects FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.analysis_v2_result_image_repair_outbox ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.analysis_v2_result_image_repair_outbox FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.analysis_v2_result_image_purge_outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.analysis_v2_result_image_purge_outbox FORCE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.analysis_v2_result_image_manifests
     FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON TABLE public.analysis_v2_result_image_objects
-    FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON TABLE public.analysis_v2_result_image_repair_outbox
     FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON TABLE public.analysis_v2_result_image_purge_outbox
     FROM PUBLIC, anon, authenticated, service_role;
@@ -569,10 +525,6 @@ BEGIN
             WHERE image_object.request_id = p_request_id
               AND image_object.kind = v_kind
               AND image_object.candidate_locator = v_locator;
-            DELETE FROM public.analysis_v2_result_image_repair_outbox AS repair
-            WHERE repair.request_id = p_request_id
-              AND repair.kind = v_kind
-              AND repair.candidate_locator = v_locator;
             RETURN pg_catalog.jsonb_build_object(
                 'registered', TRUE,
                 'status', 'ready'
@@ -608,20 +560,6 @@ BEGIN
         v_source_fingerprint, v_status, v_object_key, v_sha256, v_byte_size,
         v_captured_at, v_now, v_expires_at, v_failure_code, v_is_mandatory
     );
-
-    IF v_status = 'capture_failed' THEN
-        INSERT INTO public.analysis_v2_result_image_repair_outbox (
-            request_id, kind, candidate_locator, failure_code
-        ) VALUES (
-            p_request_id, v_kind, v_locator, v_failure_code
-        )
-        ON CONFLICT (request_id, kind, candidate_locator) DO UPDATE
-        SET failure_code = EXCLUDED.failure_code,
-            status = 'pending',
-            claim_token = NULL,
-            lease_expires_at = NULL,
-            updated_at = v_now;
-    END IF;
     RETURN pg_catalog.jsonb_build_object(
         'registered', TRUE,
         'status', v_status
@@ -801,132 +739,6 @@ BEGIN
             LIMIT p_page_size
         ) AS page
     ), '[]'::JSONB);
-END;
-$$;
-
-CREATE FUNCTION public.claim_analysis_v2_result_image_repairs(
-    p_claim_token UUID,
-    p_limit INTEGER,
-    p_lease_seconds INTEGER
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = ''
-AS $$
-DECLARE
-    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
-    v_rows JSONB;
-BEGIN
-    IF p_claim_token IS NULL
-       OR p_limit NOT BETWEEN 1 AND 100
-       OR p_lease_seconds NOT BETWEEN 30 AND 900 THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_RESULT_IMAGE_INVALID',
-            ERRCODE = 'P0001';
-    END IF;
-    WITH claimable AS (
-        SELECT repair.request_id, repair.kind, repair.candidate_locator
-        FROM public.analysis_v2_result_image_repair_outbox AS repair
-        WHERE repair.available_at <= v_now
-          AND (
-            repair.status = 'pending'
-            OR (
-                repair.status = 'claimed'
-                AND repair.lease_expires_at <= v_now
-            )
-          )
-        ORDER BY repair.available_at, repair.request_id,
-            repair.kind, repair.candidate_locator
-        LIMIT p_limit
-        FOR UPDATE SKIP LOCKED
-    ),
-    claimed AS (
-        UPDATE public.analysis_v2_result_image_repair_outbox AS repair
-        SET status = 'claimed',
-            claim_token = p_claim_token,
-            lease_expires_at = v_now
-                + pg_catalog.make_interval(secs => p_lease_seconds),
-            attempt_count = repair.attempt_count + 1,
-            updated_at = v_now
-        FROM claimable
-        WHERE repair.request_id = claimable.request_id
-          AND repair.kind = claimable.kind
-          AND repair.candidate_locator = claimable.candidate_locator
-        RETURNING repair.request_id, repair.kind,
-            repair.candidate_locator, repair.failure_code
-    )
-    SELECT COALESCE(pg_catalog.jsonb_agg(
-        pg_catalog.jsonb_build_object(
-            'requestId', claimed.request_id,
-            'kind', claimed.kind,
-            'candidateLocator', claimed.candidate_locator,
-            'failureCode', claimed.failure_code
-        )
-        ORDER BY claimed.request_id, claimed.kind,
-            claimed.candidate_locator
-    ), '[]'::JSONB)
-    INTO v_rows
-    FROM claimed;
-    RETURN v_rows;
-END;
-$$;
-
-CREATE FUNCTION public.complete_analysis_v2_result_image_repair(
-    p_request_id UUID,
-    p_kind TEXT,
-    p_candidate_locator TEXT,
-    p_claim_token UUID,
-    p_success BOOLEAN,
-    p_failure_code TEXT DEFAULT NULL
-)
-RETURNS BOOLEAN
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = ''
-AS $$
-DECLARE
-    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
-BEGIN
-    IF p_request_id IS NULL OR p_claim_token IS NULL
-       OR p_kind NOT IN ('target', 'female', 'private')
-       OR p_candidate_locator !~ '^[A-Za-z0-9._:-]{1,128}$'
-       OR (
-            p_success
-            AND p_failure_code IS NOT NULL
-       )
-       OR (
-            NOT p_success
-            AND p_failure_code !~ '^[A-Z][A-Z0-9_]{0,63}$'
-       ) THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_RESULT_IMAGE_INVALID',
-            ERRCODE = 'P0001';
-    END IF;
-    IF p_success THEN
-        DELETE FROM public.analysis_v2_result_image_repair_outbox AS repair
-        WHERE repair.request_id = p_request_id
-          AND repair.kind = p_kind
-          AND repair.candidate_locator = p_candidate_locator
-          AND repair.status = 'claimed'
-          AND repair.claim_token = p_claim_token
-          AND repair.lease_expires_at > v_now;
-    ELSE
-        UPDATE public.analysis_v2_result_image_repair_outbox AS repair
-        SET status = 'pending',
-            failure_code = p_failure_code,
-            available_at = v_now + INTERVAL '5 minutes',
-            claim_token = NULL,
-            lease_expires_at = NULL,
-            updated_at = v_now
-        WHERE repair.request_id = p_request_id
-          AND repair.kind = p_kind
-          AND repair.candidate_locator = p_candidate_locator
-          AND repair.status = 'claimed'
-          AND repair.claim_token = p_claim_token
-          AND repair.lease_expires_at > v_now;
-    END IF;
-    RETURN FOUND;
 END;
 $$;
 
@@ -1208,12 +1020,6 @@ REVOKE ALL ON FUNCTION public.seal_analysis_v2_result_image_manifest(
 REVOKE ALL ON FUNCTION public.load_analysis_v2_result_image_manifest_page(
     UUID, TEXT, UUID, TEXT, INTEGER, INTEGER
 ) FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON FUNCTION public.claim_analysis_v2_result_image_repairs(
-    UUID, INTEGER, INTEGER
-) FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON FUNCTION public.complete_analysis_v2_result_image_repair(
-    UUID, TEXT, TEXT, UUID, BOOLEAN, TEXT
-) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.claim_analysis_v2_result_image_purges(
     UUID, INTEGER, INTEGER
 ) FROM PUBLIC, anon, authenticated, service_role;
@@ -1243,12 +1049,6 @@ GRANT EXECUTE ON FUNCTION public.seal_analysis_v2_result_image_manifest(
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.load_analysis_v2_result_image_manifest_page(
     UUID, TEXT, UUID, TEXT, INTEGER, INTEGER
-) TO service_role;
-GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_result_image_repairs(
-    UUID, INTEGER, INTEGER
-) TO service_role;
-GRANT EXECUTE ON FUNCTION public.complete_analysis_v2_result_image_repair(
-    UUID, TEXT, TEXT, UUID, BOOLEAN, TEXT
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_result_image_purges(
     UUID, INTEGER, INTEGER

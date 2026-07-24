@@ -12,8 +12,6 @@ export const RESULT_IMAGE_REGISTRY_RPC = Object.freeze({
     register: 'register_analysis_v2_result_image_outcome',
     seal: 'seal_analysis_v2_result_image_manifest',
     loadPage: 'load_analysis_v2_result_image_manifest_page',
-    claimRepair: 'claim_analysis_v2_result_image_repairs',
-    completeRepair: 'complete_analysis_v2_result_image_repair',
     claimPurge: 'claim_analysis_v2_result_image_purges',
     completePurge: 'complete_analysis_v2_result_image_purge',
 });
@@ -149,13 +147,6 @@ const sealResultSchema = z.object({
     sourcedImages: z.number().int().min(0).max(50_001),
     readyImages: z.number().int().min(0).max(50_001),
     captureFailedImages: z.number().int().min(0).max(50_001),
-}).strict();
-
-const repairClaimSchema = z.object({
-    requestId: z.string().regex(UUID_PATTERN),
-    kind: kindSchema,
-    candidateLocator: candidateLocatorSchema,
-    failureCode: z.string().regex(FAILURE_CODE_PATTERN),
 }).strict();
 
 const purgeClaimSchema = z.object({
@@ -336,54 +327,6 @@ export function createResultImageRegistry(
                 p_page_size: input.pageSize,
             });
             return parseResponse(z.array(outcomeSchema).max(500), data);
-        },
-
-        async claimRepair(input: {
-            claimToken: string;
-            limit: number;
-            leaseSeconds: number;
-        }) {
-            validateWorkClaim(input);
-            const data = await rpc(RESULT_IMAGE_REGISTRY_RPC.claimRepair, {
-                p_claim_token: input.claimToken.toLowerCase(),
-                p_limit: input.limit,
-                p_lease_seconds: input.leaseSeconds,
-            });
-            return parseResponse(z.array(repairClaimSchema).max(100), data);
-        },
-
-        async completeRepair(input: {
-            requestId: string;
-            kind: 'target' | 'female' | 'private';
-            candidateLocator: string;
-            claimToken: string;
-            success: boolean;
-            failureCode: string | null;
-        }) {
-            const parsed = parseInput(z.object({
-                requestId: z.string().regex(UUID_PATTERN),
-                kind: kindSchema,
-                candidateLocator: candidateLocatorSchema,
-                claimToken: z.string().regex(UUID_PATTERN),
-                success: z.boolean(),
-                failureCode: z.string().regex(FAILURE_CODE_PATTERN).nullable(),
-            }).strict().superRefine((value, context) => {
-                if (value.success === (value.failureCode !== null)) {
-                    context.addIssue({
-                        code: 'custom',
-                        message: 'Invalid repair completion.',
-                    });
-                }
-            }), input);
-            const data = await rpc(RESULT_IMAGE_REGISTRY_RPC.completeRepair, {
-                p_request_id: parsed.requestId.toLowerCase(),
-                p_kind: parsed.kind,
-                p_candidate_locator: parsed.candidateLocator,
-                p_claim_token: parsed.claimToken.toLowerCase(),
-                p_success: parsed.success,
-                p_failure_code: parsed.failureCode,
-            });
-            return parseResponse(z.boolean(), data);
         },
 
         async claimPurge(input: {

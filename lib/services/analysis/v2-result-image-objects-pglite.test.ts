@@ -241,7 +241,7 @@ describe('retained result image registry', () => {
             .rejects.toThrow('ANALYSIS_V2_RESULT_IMAGE_INVALID');
     });
 
-    it('enqueues repair and blocks sealing when a mandatory sourced image failed', async () => {
+    it('blocks sealing when a mandatory sourced image failed', async () => {
         await beginManifest(3);
         await registerOutcome(readyOutcome({
             kind: 'target',
@@ -270,13 +270,6 @@ describe('retained result image registry', () => {
             mandatory: true,
         }));
 
-        const repairs = await db.query<{ count: number }>(
-            `SELECT count(*)::INTEGER AS count
-             FROM public.analysis_v2_result_image_repair_outbox
-             WHERE request_id = $1`,
-            [REQUEST_ID]
-        );
-        expect(repairs.rows[0]?.count).toBe(1);
         await expect(db.query(
             `SELECT public.seal_analysis_v2_result_image_manifest(
                 $1, 'coordinator:finalize', $2, $3, $4
@@ -287,7 +280,7 @@ describe('retained result image registry', () => {
         );
     });
 
-    it('promotes an exact failed source to ready on retry and clears repair work', async () => {
+    it('promotes an exact failed source to ready on finalizer retry', async () => {
         await beginManifest(1);
         await registerOutcome({
             kind: 'target',
@@ -319,17 +312,10 @@ describe('retained result image registry', () => {
              WHERE request_id = $1`,
             [REQUEST_ID]
         );
-        const repairs = await db.query<{ count: number }>(
-            `SELECT count(*)::INTEGER AS count
-             FROM public.analysis_v2_result_image_repair_outbox
-             WHERE request_id = $1`,
-            [REQUEST_ID]
-        );
         expect(objects.rows[0]).toMatchObject({
             status: 'ready',
             object_key: expect.stringMatching(/^v1\//),
         });
-        expect(repairs.rows[0]?.count).toBe(0);
         await expect(db.query(
             `SELECT public.seal_analysis_v2_result_image_manifest(
                 $1, 'coordinator:finalize', $2, $3, $4

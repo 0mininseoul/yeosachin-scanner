@@ -37,8 +37,7 @@ retention period. At a normalized 60–100 KB per image, that is approximately 3
 - Produce one account-specific Korean overview per public female row in the requested
   playful, provocative examiner voice, with room for imaginative interpretation.
 - Snapshot scraped target, public, and private profile images into private Cloudflare R2
-  storage, make them owner-readable for no more than 30 days, and continue repairing a
-  small tolerated failure set after result completion.
+  storage and make successfully captured images owner-readable for no more than 30 days.
 - Require high but bounded row and image coverage instead of blocking completion on every
   single missing item.
 - Re-run the authorized target as a fresh E2E after the code and infrastructure are
@@ -213,8 +212,7 @@ Before result finalization, the worker:
 3. records a `ready` metadata row only after `HeadObject` confirms size and hash;
 4. records `source_missing` only when the scraped source genuinely had no image URL; and
 5. records `capture_failed` with a bounded internal reason after transient retries are
-   exhausted, enqueues it for post-completion repair, and submits the image-manifest hash
-   to the finalizer.
+   exhausted, then submits the image-manifest hash to the finalizer.
 
 Finalization fails closed unless:
 
@@ -235,7 +233,7 @@ not have owner result rows. A zero expected count passes without division.
 The result summary persists expected and durable row counts internally so an accepted
 small mismatch is observable without exposing detailed screening counts in the owner UI.
 Missing result rows are not fabricated. `capture_failed` images render the existing
-fallback while the repair outbox retries the same opaque locator.
+fallback for the retained result lifetime.
 
 An uploaded object whose database transaction later fails is harmless and is removed by
 the R2 lifecycle.
@@ -304,8 +302,8 @@ login verification code is requested only if the owner session has expired.
   objects.
 - Hash mismatch or count coverage below the threshold: fail with a bounded internal code
   and no result identifiers in logs.
-- Tolerated `capture_failed` image: complete the result, render the owner-safe fallback,
-  and keep retrying through the durable repair outbox.
+- Tolerated `capture_failed` image: complete the result and render the owner-safe
+  fallback.
 - Expired image: return a non-cacheable not-found response; never fall back to the raw CDN
   URL.
 - Narrative generation unavailable: use an evidence-specific safe fallback and preserve
@@ -336,7 +334,7 @@ login verification code is requested only if the owner session has expired.
   stripping, animation flattening, malformed image rejection, and SSRF boundaries.
 - PGlite tests prove force-RLS metadata, exact grants, the 98%/five-row and
   95%/ten-image thresholds, mandatory target/top-three images, expiry checks, idempotent
-  replay, repair outbox behavior, and deletion outbox behavior.
+  replay, failed-source promotion during finalizer retry, and deletion outbox behavior.
 - Route tests prove owner-only image access, exact 30-day denial, no raw URL fallback, and
   safe cache headers.
 - Infrastructure script tests prove a private R2 bucket, disabled public URL, exact
