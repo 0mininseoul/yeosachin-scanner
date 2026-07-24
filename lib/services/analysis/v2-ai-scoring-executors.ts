@@ -12,6 +12,10 @@ import {
 } from '@/lib/domain/analysis/risk-policy';
 import { createPartnerSafetyContactSheet } from '@/lib/services/ai/partner-contact-sheet';
 import {
+    resultImageOrderedManifestHash,
+    type ResultImageCaptureSource,
+} from '@/lib/services/media/result-image-capture';
+import {
     classifyAnalysisImagePreparationError,
     type AnalysisImagePreparationFailureDisposition,
     type AnalysisImagePreparationFailureReason,
@@ -50,6 +54,7 @@ import type {
     AnalysisV2PrivateNameRow,
     AnalysisV2ReverseLikeRow as AnalysisV2StoredReverseLikeRow,
     AnalysisV2ResultCheckpointManifest,
+    AnalysisV2ResultStageSnapshot,
     AnalysisV2ResultStore,
     AnalysisV2VerifiedFemaleFeatureRow,
 } from './v2-result-store';
@@ -376,7 +381,15 @@ export interface AnalysisV2AiScoringExecutorDependencies {
         | 'checkpointPrivateNames'
         | 'checkpointScores'
         | 'checkpointNarratives'
-        | 'finalize'>;
+        | 'finalize'
+        | 'loadStageSnapshot'>;
+    resultImages?: {
+        capture(input: AnalysisV2StageReadClaim & {
+            sources: readonly ResultImageCaptureSource[];
+            orderedManifestHash: string;
+            expectedRows: number;
+        }): Promise<unknown>;
+    };
     mediaStore: AnalysisV2MediaArtifactStore;
     ai: AnalysisV2AiStageRuntime;
     reverseLikes: AnalysisV2ReverseLikeCollector;
@@ -385,6 +398,62 @@ export interface AnalysisV2AiScoringExecutorDependencies {
     profileAiConcurrency?: number;
     partnerSafetyConcurrency?: number;
     narrativeConcurrency?: number;
+}
+
+export function buildAnalysisV2ResultImageSources(input: {
+    targetProfileImageUrl: string | null;
+    stage: AnalysisV2ResultStageSnapshot;
+}): ResultImageCaptureSource[] {
+    const featureByCandidate = new Map(
+        input.stage.profileClassifications.map(row => [
+            row.candidateId,
+            row,
+        ])
+    );
+    const female = [...input.stage.finalScores]
+        .sort((left, right) => (
+            right.displayScore - left.displayScore
+            || left.candidateId.localeCompare(right.candidateId)
+        ))
+        .map(score => {
+            const feature = featureByCandidate.get(score.candidateId);
+            if (!feature || feature.classification !== 'verified_female') {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_IMAGE_SOURCE_NOT_READY'
+                );
+            }
+            return {
+                candidateLocator: score.candidateId,
+                sourceUrl: feature.profileImageUrl,
+            };
+        });
+    const privateRows = [...input.stage.privateNames]
+        .sort((left, right) => (
+            right.nameFemaleScore - left.nameFemaleScore
+            || right.nameConfidence - left.nameConfidence
+            || left.instagramId.localeCompare(right.instagramId)
+        ));
+
+    return [
+        {
+            kind: 'target',
+            candidateLocator: 'target',
+            sortOrdinal: 0,
+            sourceUrl: input.targetProfileImageUrl,
+        },
+        ...female.map((row, index) => ({
+            kind: 'female' as const,
+            candidateLocator: row.candidateLocator,
+            sortOrdinal: index + 1,
+            sourceUrl: row.sourceUrl,
+        })),
+        ...privateRows.map((row, index) => ({
+            kind: 'private' as const,
+            candidateLocator: row.candidateId,
+            sortOrdinal: female.length + index + 1,
+            sourceUrl: row.profileImageUrl,
+        })),
+    ];
 }
 
 function sha256(domain: string, value: unknown): string {
@@ -1862,9 +1931,40 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const target = await dependencies.targetProfiles.loadTargetProfile(
                 checkpointClaim(context)
             );
+            let resultImageManifest:
+                | { orderedManifestHash: string; expectedRows: number }
+                | undefined;
+            if (dependencies.resultImages) {
+                const stage = await dependencies.resultStore
+                    .loadStageSnapshot({
+                        requestId: context.claim.requestId,
+                    });
+                if (!stage) {
+                    throw new Error(
+                        'ANALYSIS_V2_RESULT_IMAGE_SOURCE_NOT_READY'
+                    );
+                }
+                const sources = buildAnalysisV2ResultImageSources({
+                    targetProfileImageUrl: target.profilePicUrl ?? null,
+                    stage,
+                });
+                const orderedManifestHash =
+                    resultImageOrderedManifestHash(sources);
+                await dependencies.resultImages.capture({
+                    ...checkpointClaim(context),
+                    sources,
+                    orderedManifestHash,
+                    expectedRows: sources.length,
+                });
+                resultImageManifest = {
+                    orderedManifestHash,
+                    expectedRows: sources.length,
+                };
+            }
             await dependencies.resultStore.finalize({
                 ...checkpointClaim(context),
                 targetProfileImageUrl: target.profilePicUrl ?? null,
+                ...(resultImageManifest ? { resultImageManifest } : {}),
             });
             await dependencies.stageStore.purgeTerminal(checkpointClaim(context));
             try {

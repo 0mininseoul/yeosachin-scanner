@@ -241,6 +241,57 @@ describe('retained result image registry', () => {
         );
     });
 
+    it('promotes an exact failed source to ready on retry and clears repair work', async () => {
+        await beginManifest(1);
+        await registerOutcome({
+            kind: 'target',
+            candidateLocator: 'target',
+            sortOrdinal: 0,
+            sourceFingerprint: SOURCE_HASH,
+            status: 'capture_failed',
+            objectKey: null,
+            sha256: null,
+            byteSize: null,
+            capturedAt: null,
+            expiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+            failureCode: 'UPSTREAM_UNAVAILABLE',
+            isMandatory: true,
+        });
+        await registerOutcome(readyOutcome({
+            kind: 'target',
+            locator: 'target',
+            ordinal: 0,
+            mandatory: true,
+        }));
+
+        const objects = await db.query<{
+            status: string;
+            object_key: string | null;
+        }>(
+            `SELECT status, object_key
+             FROM public.analysis_v2_result_image_objects
+             WHERE request_id = $1`,
+            [REQUEST_ID]
+        );
+        const repairs = await db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count
+             FROM public.analysis_v2_result_image_repair_outbox
+             WHERE request_id = $1`,
+            [REQUEST_ID]
+        );
+        expect(objects.rows[0]).toMatchObject({
+            status: 'ready',
+            object_key: expect.stringMatching(/^v1\//),
+        });
+        expect(repairs.rows[0]?.count).toBe(0);
+        await expect(db.query(
+            `SELECT public.seal_analysis_v2_result_image_manifest(
+                $1, 'coordinator:finalize', $2, $3, $4
+            )`,
+            [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH, MANIFEST_HASH]
+        )).resolves.toBeDefined();
+    });
+
     it('allows bounded non-mandatory gaps and finalizes only the exact manifest', async () => {
         await beginManifest(3);
         await registerOutcome(readyOutcome({

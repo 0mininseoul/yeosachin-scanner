@@ -22,6 +22,7 @@ import {
     createSupabaseAnalysisV2ResultStore,
     type AnalysisV2ProfileClassificationRow,
     type AnalysisV2ResultCheckpointManifest,
+    type AnalysisV2ResultStageSnapshot,
     type AnalysisV2ResultSupabaseClient,
 } from './v2-result-store';
 import type { AnalysisV2StageExecutorContext, AnalysisV2StageId } from './v2-worker';
@@ -438,6 +439,7 @@ function dependencies(
             checkpointScores: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
             checkpointPrivateNames: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
             checkpointNarratives: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
+            loadStageSnapshot: vi.fn(async () => null),
             finalize: vi.fn(async () => ({
                 finalized: true,
                 requestStatus: 'completed' as const,
@@ -2429,6 +2431,101 @@ describe('V2 AI and scoring executors', () => {
         expect(narrativeInput.carouselCaptionDossier?.text).toContain('[슬라이드 1]');
         expect(narrativeInput.carouselCaptionDossier?.text.length).toBeLessThanOrEqual(2_000);
         expect(memoryState.narrative?.rows[0].lines[1]).toContain(actualComment);
+    });
+});
+
+describe('V2 retained result image finalization', () => {
+    it('captures target, ranked women, and name-ranked private images before finalization', async () => {
+        const memoryState = memory();
+        const deps = dependencies(memoryState);
+        const imageCapture = vi.fn(async (
+            _input: Parameters<
+                NonNullable<
+                    AnalysisV2AiScoringExecutorDependencies[
+                        'resultImages'
+                    ]
+                >['capture']
+            >[0]
+        ) => {
+            void _input;
+            return undefined;
+        });
+        deps.resultImages = { capture: imageCapture };
+        const stage = {
+            requestId: REQUEST_ID,
+            profileClassifications: [
+                {
+                    candidateId: 'candidate:one',
+                    classification: 'verified_female',
+                    profileImageUrl:
+                        'https://cdninstagram.com/woman.one.jpg',
+                },
+                {
+                    candidateId: 'candidate:two',
+                    classification: 'verified_female',
+                    profileImageUrl:
+                        'https://cdninstagram.com/woman.two.jpg',
+                },
+            ],
+            preliminaryScores: [],
+            reverseLikes: [],
+            partnerSafety: [],
+            finalScores: [
+                { candidateId: 'candidate:one', displayScore: 4.2 },
+                { candidateId: 'candidate:two', displayScore: 8.1 },
+            ],
+            privateNames: [
+                {
+                    candidateId: 'candidate:private-low',
+                    instagramId: 'private.low',
+                    profileImageUrl:
+                        'https://cdninstagram.com/private.low.jpg',
+                    nameFemaleScore: 0.7,
+                    nameConfidence: 0.8,
+                },
+                {
+                    candidateId: 'candidate:private-high',
+                    instagramId: 'private.high',
+                    profileImageUrl:
+                        'https://cdninstagram.com/private.high.jpg',
+                    nameFemaleScore: 0.9,
+                    nameConfidence: 0.9,
+                },
+            ],
+            narratives: [],
+        } as unknown as AnalysisV2ResultStageSnapshot;
+        vi.mocked(deps.resultStore.loadStageSnapshot)
+            .mockResolvedValue(stage);
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.finalize!(context('finalize', {
+            jobKey: 'coordinator:finalize',
+        }));
+
+        const captureInput = imageCapture.mock.calls[0]![0];
+        expect(captureInput.sources.map(row => [
+            row.kind,
+            row.candidateLocator,
+            row.sortOrdinal,
+        ])).toEqual([
+            ['target', 'target', 0],
+            ['female', 'candidate:two', 1],
+            ['female', 'candidate:one', 2],
+            ['private', 'candidate:private-high', 3],
+            ['private', 'candidate:private-low', 4],
+        ]);
+        expect(captureInput.orderedManifestHash)
+            .toMatch(/^[a-f0-9]{64}$/);
+        expect(deps.resultStore.finalize).toHaveBeenCalledWith(
+            expect.objectContaining({
+                resultImageManifest: {
+                    orderedManifestHash:
+                        captureInput.orderedManifestHash,
+                    expectedRows: 5,
+                },
+            })
+        );
+        expect(deps.mediaStore.cleanupTerminal).toHaveBeenCalledOnce();
     });
 });
 

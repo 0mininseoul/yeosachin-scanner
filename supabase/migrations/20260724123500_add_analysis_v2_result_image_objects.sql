@@ -548,6 +548,33 @@ BEGIN
       AND image_object.candidate_locator = v_locator
     FOR UPDATE;
     IF FOUND THEN
+        IF v_existing.status = 'capture_failed'
+           AND v_status = 'ready'
+           AND v_existing.sort_ordinal IS NOT DISTINCT FROM v_ordinal
+           AND v_existing.source_fingerprint IS NOT DISTINCT FROM
+                v_source_fingerprint
+           AND v_existing.is_mandatory IS NOT DISTINCT FROM v_is_mandatory THEN
+            UPDATE public.analysis_v2_result_image_objects AS image_object
+            SET status = 'ready',
+                object_key = v_object_key,
+                sha256 = v_sha256,
+                byte_size = v_byte_size,
+                captured_at = v_captured_at,
+                expires_at = v_expires_at,
+                failure_code = NULL,
+                updated_at = v_now
+            WHERE image_object.request_id = p_request_id
+              AND image_object.kind = v_kind
+              AND image_object.candidate_locator = v_locator;
+            DELETE FROM public.analysis_v2_result_image_repair_outbox AS repair
+            WHERE repair.request_id = p_request_id
+              AND repair.kind = v_kind
+              AND repair.candidate_locator = v_locator;
+            RETURN pg_catalog.jsonb_build_object(
+                'registered', TRUE,
+                'status', 'ready'
+            );
+        END IF;
         IF v_existing.sort_ordinal IS DISTINCT FROM v_ordinal
            OR v_existing.source_fingerprint IS DISTINCT FROM
                 v_source_fingerprint

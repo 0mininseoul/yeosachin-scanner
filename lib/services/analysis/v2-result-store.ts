@@ -63,6 +63,8 @@ export const ANALYSIS_V2_RESULT_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_v2_result_snapshot',
     loadPageRpc: 'load_analysis_v2_result_page',
     loadImageRpc: 'load_analysis_v2_result_image_url',
+    finalizeWithImagesRpc:
+        'complete_analysis_v2_result_and_purge_with_images',
 });
 
 const candidateIdSchema = z.string().regex(CANDIDATE_ID_PATTERN);
@@ -320,6 +322,10 @@ export interface AnalysisV2ResultStore {
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     finalize(input: AnalysisV2ResultJobClaim & {
         targetProfileImageUrl: string | null;
+        resultImageManifest?: {
+            orderedManifestHash: string;
+            expectedRows: number;
+        };
     }): Promise<AnalysisV2FinalizationResult>;
     fail(input: AnalysisV2ResultJobClaim & {
         errorCode: string;
@@ -806,6 +812,8 @@ function throwRpcError(error: RpcError, operation: string): never {
     if (
         error.message === 'ANALYSIS_V2_RESULT_NOT_READY'
         || error.message === 'ANALYSIS_V2_FINALIZE_NOT_READY'
+        || error.message
+            === 'ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY'
     ) {
         throw new AnalysisV2ResultNotReadyError();
     }
@@ -1183,14 +1191,42 @@ export function createSupabaseAnalysisV2ResultStore(
                 throw new Error('ANALYSIS_V2_RESULT_VALIDATION_ERROR: invalid finalizer job.');
             }
             const targetProfileImageUrl = rawImageUrlSchema.parse(input.targetProfileImageUrl);
+            const resultImageManifest = input.resultImageManifest;
+            if (
+                resultImageManifest
+                && (
+                    !SHA256_PATTERN.test(
+                        resultImageManifest.orderedManifestHash
+                    )
+                    || !Number.isSafeInteger(
+                        resultImageManifest.expectedRows
+                    )
+                    || resultImageManifest.expectedRows < 0
+                    || resultImageManifest.expectedRows > 50_001
+                )
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_VALIDATION_ERROR: '
+                    + 'invalid result image manifest.'
+                );
+            }
             const { data, error } = await client.rpc(
-                ANALYSIS_V2_RESULT_DATABASE_NAMES.finalizeRpc,
+                resultImageManifest
+                    ? ANALYSIS_V2_RESULT_DATABASE_NAMES
+                        .finalizeWithImagesRpc
+                    : ANALYSIS_V2_RESULT_DATABASE_NAMES.finalizeRpc,
                 {
                     p_request_id: claim.requestId,
                     p_job_key: claim.jobKey,
                     p_claim_token: claim.claimToken,
                     p_job_input_hash: claim.jobInputHash,
                     p_target_profile_image_url: targetProfileImageUrl,
+                    ...(resultImageManifest ? {
+                        p_image_manifest_hash:
+                            resultImageManifest.orderedManifestHash,
+                        p_image_expected_rows:
+                            resultImageManifest.expectedRows,
+                    } : {}),
                 }
             );
             if (error) throwRpcError(error, 'result finalization');

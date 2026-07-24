@@ -370,6 +370,42 @@ describe('analysis V2 result finalization and loading', () => {
         });
     });
 
+    it('uses the image-manifest finalizer only when capture metadata is supplied', async () => {
+        const fake = rpcClient({
+            data: {
+                finalized: true,
+                requestStatus: 'completed',
+                summary: rawSummary(),
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client, {
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+        });
+
+        await store.finalize({
+            ...claim('coordinator:finalize'),
+            targetProfileImageUrl: rawImageUrl,
+            resultImageManifest: {
+                orderedManifestHash: hashB,
+                expectedRows: 3,
+            },
+        });
+
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_RESULT_DATABASE_NAMES.finalizeWithImagesRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: 'coordinator:finalize',
+                p_claim_token: claimToken,
+                p_job_input_hash: hashA,
+                p_target_profile_image_url: canonicalImageUrl,
+                p_image_manifest_hash: hashB,
+                p_image_expected_rows: 3,
+            }
+        );
+    });
+
     it('returns a compact opaque result image path even when the stored CDN URL is long', async () => {
         const previousSecret = process.env.IMAGE_PROXY_SIGNING_SECRET;
         process.env.IMAGE_PROXY_SIGNING_SECRET = 'result-image-secret-that-is-longer-than-thirty-two-characters';
