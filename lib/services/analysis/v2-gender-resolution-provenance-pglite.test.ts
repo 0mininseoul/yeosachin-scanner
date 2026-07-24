@@ -16,10 +16,35 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const resultRuntimeBoundaryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260713213000_harden_analysis_v2_result_runtime_boundary.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
+function extractFunction(source: string, functionName: string): string {
+    const marker = `CREATE OR REPLACE FUNCTION public.${functionName}(`;
+    const start = source.indexOf(marker);
+    const end = source.indexOf('\n$$;', start);
+    if (start < 0 || end < 0) {
+        throw new Error(`function not found: ${functionName}`);
+    }
+    return source.slice(start, end + '\n$$;'.length);
+}
+
+const purgeResultWorkingSet = extractFunction(
+    resultRuntimeBoundaryMigration,
+    'analysis_v2_purge_result_working_set'
+);
 
 const REQUEST_V26 = '123e4567-e89b-42d3-a456-426614174000';
 const REQUEST_V27 = '123e4567-e89b-42d3-a456-426614174001';
 const REQUEST_RECOVERY = '123e4567-e89b-42d3-a456-426614174002';
+const REQUEST_PURGED_PASS = '123e4567-e89b-42d3-a456-426614174003';
+const REQUEST_PURGED_STALE = '123e4567-e89b-42d3-a456-426614174004';
+const REQUEST_PURGED_TAMPER = '123e4567-e89b-42d3-a456-426614174005';
 const RESOLVER_OPERATION = `gender-resolution:${'a'.repeat(64)}`;
 const RESOLVER_HASH = 'b'.repeat(64);
 
@@ -67,6 +92,102 @@ async function checkpoint(requestId: string, rows: unknown[]) {
     );
 }
 
+async function finalizeAndPurgeWithResolverAttempt(requestId: string) {
+    const appliedOperation = `gender-resolution:${requestId.replaceAll('-', '').padEnd(64, '0')}`;
+    const appliedHash = requestId.replaceAll('-', '').padEnd(64, '1');
+    await db.query(
+        `INSERT INTO public.analysis_v2_ai_result_checkpoints(
+            request_id, job_key, operation_key, stage, cache_scope, result_hash
+        ) VALUES ($1, 'track:profile-ai:batch:0', $2, 'genderResolution', 'request', $3)`,
+        [requestId, appliedOperation, appliedHash]
+    );
+    await checkpoint(requestId, [
+        row({
+            candidateId: 'candidate:resolved',
+            classification: 'verified_female',
+            baselineClassification: 'unresolved',
+            classificationSource: 'gender_resolution',
+            genderResolutionStatus: 'ready_applied',
+            genderResolutionOperationKey: appliedOperation,
+            genderResolutionResultHash: appliedHash,
+        }),
+        ...[1, 2, 3].map(index => row({
+            candidateId: `candidate:baseline:${index}`,
+            classification: 'verified_non_female',
+            baselineClassification: 'verified_non_female',
+            classificationSource: 'feature',
+            genderResolutionStatus: 'not_eligible',
+            genderResolutionOperationKey: null,
+            genderResolutionResultHash: null,
+        })),
+    ]);
+    await db.query(
+        `INSERT INTO public.analysis_v2_ai_attempts(
+            request_id, stage, status, usage_metadata_status, prompt_tokens,
+            completion_tokens, total_tokens, thinking_tokens,
+            estimated_cost_usd
+        ) VALUES (
+            $1, 'genderResolution', 'success', 'complete',
+            80, 15, 100, 5, 0.00008
+        )`,
+        [requestId]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints(
+            request_id, stage_kind, payload
+        ) VALUES ($1, 'profile_ai_batch', $2::JSONB)`,
+        [
+            requestId,
+            JSON.stringify({
+                outcomes: [{
+                    status: 'verified_female',
+                    baselineClassification: 'unresolved',
+                    genderResolutionStatus: 'ready_applied',
+                    mediaCoverage: {
+                        selectedCount: 1,
+                        normalizedCount: 1,
+                        failures: [],
+                    },
+                }, ...Array.from({ length: 3 }, () => ({
+                    status: 'verified_non_female',
+                    baselineClassification: 'verified_non_female',
+                    genderResolutionStatus: 'not_eligible',
+                    mediaCoverage: {
+                        selectedCount: 1,
+                        normalizedCount: 1,
+                        failures: [],
+                    },
+                }))],
+            }),
+        ]
+    );
+
+    // This is the production finalizer's durable ordering: summary insert (which seals
+    // resolver metrics), request completion, then the real terminal working-set purge.
+    await db.query(
+        `INSERT INTO public.analysis_v2_result_summaries(request_id, plan_id)
+         VALUES ($1, 'standard')`,
+        [requestId]
+    );
+    await db.query(
+        `UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`,
+        [requestId]
+    );
+    await db.query(
+        `SELECT public.analysis_v2_purge_result_working_set($1, TRUE)`,
+        [requestId]
+    );
+}
+
+async function loadQuality(requestId: string): Promise<Record<string, unknown>> {
+    return withRole('service_role', async () => (
+        await db.query<{ quality: Record<string, unknown> }>(
+            `SELECT public.load_analysis_v2_gender_resolution_quality($1) AS quality`,
+            [requestId]
+        )
+    ).rows[0].quality);
+}
+
 describe('gender resolver provenance migration', () => {
     beforeAll(async () => {
         db = await PGlite.create();
@@ -90,7 +211,10 @@ describe('gender resolver provenance migration', () => {
             ) VALUES
                 ('${REQUEST_V26}', 'v2', 'completed', 'basic'),
                 ('${REQUEST_V27}', 'v2', 'processing', 'standard'),
-                ('${REQUEST_RECOVERY}', 'v2', 'processing', 'standard');
+                ('${REQUEST_RECOVERY}', 'v2', 'processing', 'standard'),
+                ('${REQUEST_PURGED_PASS}', 'v2', 'processing', 'standard'),
+                ('${REQUEST_PURGED_STALE}', 'v2', 'processing', 'standard'),
+                ('${REQUEST_PURGED_TAMPER}', 'v2', 'processing', 'standard');
 
             CREATE TABLE public.analysis_v2_candidate_feature_manifests (
                 request_id UUID NOT NULL,
@@ -104,8 +228,23 @@ describe('gender resolver provenance migration', () => {
                 candidate_id TEXT NOT NULL,
                 terminal_classification TEXT NOT NULL,
                 feature_operation_key TEXT,
-                PRIMARY KEY(request_id, candidate_id)
+                PRIMARY KEY(request_id, candidate_id),
+                FOREIGN KEY(request_id, batch)
+                    REFERENCES public.analysis_v2_candidate_feature_manifests(
+                        request_id, batch
+                    )
+                    ON DELETE CASCADE
             );
+            CREATE TABLE public.analysis_v2_narrative_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_candidate_score_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_partner_safety_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_reverse_like_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_preliminary_score_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_private_name_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_profile_fetch_batches (request_id UUID);
+            CREATE TABLE public.analysis_v2_target_evidence_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_relationship_manifests (request_id UUID);
+            CREATE TABLE public.analysis_v2_relationship_sides (request_id UUID);
             CREATE TABLE public.analysis_v2_ai_result_checkpoints (
                 request_id UUID NOT NULL,
                 job_key TEXT NOT NULL,
@@ -189,6 +328,7 @@ describe('gender resolver provenance migration', () => {
             AS $$ SELECT 'ai-stage-policy-v2.7'::TEXT $$;
         `);
         await db.exec(migration);
+        await db.exec(purgeResultWorkingSet);
     });
 
     afterAll(async () => {
@@ -432,7 +572,6 @@ describe('gender resolver provenance migration', () => {
             'analysis_v2_candidate_feature_manifests',
             'analysis_v2_ai_scoring_stage_checkpoints',
             'analysis_v2_ai_result_checkpoints',
-            'analysis_v2_ai_attempts',
         ]) {
             await db.query(
                 `DELETE FROM public.${table} WHERE request_id = $1`,
@@ -486,6 +625,86 @@ describe('gender resolver provenance migration', () => {
             `SELECT public.load_analysis_v2_gender_resolution_quality($1)`,
             [REQUEST_V27]
         ))).rejects.toThrow(/permission denied/);
+    });
+
+    it('passes the quality gate after finalizer sealing and the production working-set purge', async () => {
+        await finalizeAndPurgeWithResolverAttempt(REQUEST_PURGED_PASS);
+
+        const retained = (await db.query<{
+            feature_rows: number;
+            feature_manifests: number;
+            scoring_checkpoints: number;
+            resolver_attempts: number;
+        }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_v2_candidate_feature_rows
+                 WHERE request_id = $1) AS feature_rows,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_v2_candidate_feature_manifests
+                 WHERE request_id = $1) AS feature_manifests,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_v2_ai_scoring_stage_checkpoints
+                 WHERE request_id = $1) AS scoring_checkpoints,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_v2_ai_attempts
+                 WHERE request_id = $1 AND stage = 'genderResolution')
+                    AS resolver_attempts`,
+            [REQUEST_PURGED_PASS]
+        )).rows[0];
+        expect(retained).toEqual({
+            feature_rows: 0,
+            feature_manifests: 0,
+            scoring_checkpoints: 0,
+            resolver_attempts: 1,
+        });
+
+        await expect(loadQuality(REQUEST_PURGED_PASS)).resolves.toMatchObject({
+            screenedCount: 4,
+            finalUnknownCount: 0,
+            resolverAttemptCount: 1,
+            resolverNonterminalAttemptCount: 0,
+            allResolverAttemptsTerminal: true,
+            metricsFinalized: true,
+            metricsFresh: true,
+            unknownGatePassed: true,
+            qualityGatePassed: true,
+        });
+    });
+
+    it('fails closed when purgeable staging reappears after metrics were finalized', async () => {
+        await finalizeAndPurgeWithResolverAttempt(REQUEST_PURGED_STALE);
+        await db.query(
+            `INSERT INTO public.analysis_v2_candidate_feature_manifests(
+                request_id, batch, producer_job_key
+             ) VALUES ($1, 99, 'track:profile-ai:batch:99')`,
+            [REQUEST_PURGED_STALE]
+        );
+
+        await expect(loadQuality(REQUEST_PURGED_STALE)).resolves.toMatchObject({
+            allResolverAttemptsTerminal: true,
+            metricsFinalized: true,
+            metricsFresh: false,
+            qualityGatePassed: false,
+        });
+    });
+
+    it('fails closed when the retained resolver attempt ledger is tampered nonterminal', async () => {
+        await finalizeAndPurgeWithResolverAttempt(REQUEST_PURGED_TAMPER);
+        await db.query(
+            `UPDATE public.analysis_v2_ai_attempts
+             SET status = 'reserved'
+             WHERE request_id = $1 AND stage = 'genderResolution'`,
+            [REQUEST_PURGED_TAMPER]
+        );
+
+        await expect(loadQuality(REQUEST_PURGED_TAMPER)).resolves.toMatchObject({
+            resolverAttemptCount: 1,
+            allResolverAttemptsTerminal: false,
+            metricsFinalized: true,
+            metricsFresh: false,
+            qualityGatePassed: false,
+        });
     });
 
     it('blocks finalization until recovery terminalizes the exact resolver attempt', async () => {

@@ -890,7 +890,7 @@ DECLARE
     v_unknown_passed BOOLEAN;
     v_provenance_passed BOOLEAN;
     v_immutability_passed BOOLEAN;
-    v_staging_sources_present BOOLEAN;
+    v_purgeable_staging_sources_present BOOLEAN;
     v_metrics_finalized BOOLEAN;
     v_metrics_fresh BOOLEAN;
     v_all_resolver_attempts_terminal BOOLEAN;
@@ -913,15 +913,14 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    v_staging_sources_present := EXISTS (
+    v_purgeable_staging_sources_present := EXISTS (
         SELECT 1
         FROM public.analysis_v2_candidate_feature_rows AS feature
         WHERE feature.request_id = p_request_id
     ) OR EXISTS (
         SELECT 1
-        FROM public.analysis_v2_ai_attempts AS attempt
-        WHERE attempt.request_id = p_request_id
-          AND attempt.stage = 'genderResolution'
+        FROM public.analysis_v2_candidate_feature_manifests AS manifest
+        WHERE manifest.request_id = p_request_id
     ) OR EXISTS (
         SELECT 1
         FROM public.analysis_v2_ai_scoring_stage_checkpoints AS checkpoint
@@ -1043,7 +1042,7 @@ BEGIN
         AND v_metrics.resolver_nonterminal_attempt_count = 0
         AND v_live_attempts.nonterminal_count = 0;
     v_metrics_fresh := v_metrics_finalized AND (
-        NOT v_staging_sources_present
+        NOT v_purgeable_staging_sources_present
         OR (
             v_metrics.screened_count = v_live_features.screened_count
             AND v_metrics.screened_count = v_live_outcomes.outcome_count
@@ -1075,26 +1074,28 @@ BEGIN
             AND v_metrics.failed_media_total =
                 v_live_outcomes.selected_media_total
                     - v_live_outcomes.normalized_media_total
-            AND v_metrics.resolver_attempt_count =
-                v_live_attempts.attempt_count
-            AND v_metrics.resolver_usage_complete_count =
-                v_live_attempts.usage_complete_count
-            AND v_metrics.resolver_usage_missing_count =
-                v_live_attempts.usage_missing_count
-            AND v_metrics.resolver_prompt_tokens =
-                v_live_attempts.prompt_tokens
-            AND v_metrics.resolver_completion_tokens =
-                v_live_attempts.completion_tokens
-            AND v_metrics.resolver_total_tokens =
-                v_live_attempts.total_tokens
-            AND v_metrics.resolver_thinking_tokens =
-                v_live_attempts.thinking_tokens
-            AND v_metrics.resolver_estimated_cost_usd
-                IS NOT DISTINCT FROM v_live_attempts.estimated_cost_usd
-            AND v_metrics.resolver_cost_known_count =
-                v_live_attempts.cost_known_count
         )
-    );
+    )
+        AND v_metrics.resolver_attempt_count =
+            v_live_attempts.attempt_count
+        AND v_metrics.resolver_usage_complete_count =
+            v_live_attempts.usage_complete_count
+        AND v_metrics.resolver_usage_missing_count =
+            v_live_attempts.usage_missing_count
+        AND v_metrics.resolver_prompt_tokens =
+            v_live_attempts.prompt_tokens
+        AND v_metrics.resolver_completion_tokens =
+            v_live_attempts.completion_tokens
+        AND v_metrics.resolver_total_tokens =
+            v_live_attempts.total_tokens
+        AND v_metrics.resolver_thinking_tokens =
+            v_live_attempts.thinking_tokens
+        AND v_metrics.resolver_estimated_cost_usd
+            IS NOT DISTINCT FROM v_live_attempts.estimated_cost_usd
+        AND v_metrics.resolver_cost_known_count =
+            v_live_attempts.cost_known_count
+        AND v_metrics.resolver_nonterminal_attempt_count =
+            v_live_attempts.nonterminal_count;
 
     SELECT analysis_request.*
     INTO v_request
