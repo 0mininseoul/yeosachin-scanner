@@ -11,17 +11,17 @@ const ORDER_ID = '22222222-2222-4222-8222-222222222222';
 
 describe('earlybird analytics state', () => {
     it('keys each selectable plan view by preflight and pricing snapshot', () => {
-        expect(planViewEventKey(PREFLIGHT_ID, 'earlybird-2026-07-v1', 'basic')).toBe(
-            `amplitude:plan_viewed:${PREFLIGHT_ID}:earlybird-2026-07-v1:basic`,
+        expect(planViewEventKey(PREFLIGHT_ID, 'earlybird-2026-07-v2', 'basic')).toBe(
+            `amplitude:plan_viewed:${PREFLIGHT_ID}:earlybird-2026-07-v2:basic`,
         );
-        expect(planViewEventKey(PREFLIGHT_ID, 'earlybird-2026-07-v1', 'standard')).toBe(
-            `amplitude:plan_viewed:${PREFLIGHT_ID}:earlybird-2026-07-v1:standard`,
+        expect(planViewEventKey(PREFLIGHT_ID, 'earlybird-2026-07-v2', 'standard')).toBe(
+            `amplitude:plan_viewed:${PREFLIGHT_ID}:earlybird-2026-07-v2:standard`,
         );
     });
 
     it('keys explicit plan selection independently from visibility', () => {
-        expect(planSelectedEventKey(PREFLIGHT_ID, 'earlybird-2026-07-v1', 'standard')).toBe(
-            `amplitude:plan_selected:${PREFLIGHT_ID}:earlybird-2026-07-v1:standard`,
+        expect(planSelectedEventKey(PREFLIGHT_ID, 'earlybird-2026-07-v2', 'standard')).toBe(
+            `amplitude:plan_selected:${PREFLIGHT_ID}:earlybird-2026-07-v2:standard`,
         );
     });
 

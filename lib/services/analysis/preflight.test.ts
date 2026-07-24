@@ -256,10 +256,10 @@ describe('preflight persistence adapter', () => {
                     detailedMutualLimit: 900,
                 },
             },
-            p_pricing_version: 'earlybird-2026-07-v1',
+            p_pricing_version: 'earlybird-2026-07-v2',
             p_pricing_snapshot: {
-                basic: { status: 'quoted', currency: 'KRW', amountKrw: 14_900 },
-                standard: { status: 'quoted', currency: 'KRW', amountKrw: 19_900 },
+                basic: { status: 'quoted', currency: 'KRW', amountKrw: 6_900 },
+                standard: { status: 'quoted', currency: 'KRW', amountKrw: 9_900 },
                 plus: { status: 'deferred', currency: 'KRW', amountKrw: null },
             },
             p_policy_versions_snapshot: {

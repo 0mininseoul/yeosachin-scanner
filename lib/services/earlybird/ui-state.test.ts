@@ -82,15 +82,15 @@ describe('earlybird analyze UI state', () => {
 
     it('presents reference, earlybird, and waitlist pricing without invented wording', () => {
         expect(buildEarlybirdPlanPresentation('basic')).toEqual({
-            referencePriceLabel: '39,900원',
-            priceLabel: '14,900원',
-            discountLabel: '63%',
+            referencePriceLabel: '13,900원',
+            priceLabel: '6,900원',
+            discountLabel: '50%',
             actionLabel: '얼리버드 사전 구매하기',
         });
         expect(buildEarlybirdPlanPresentation('standard')).toMatchObject({
-            referencePriceLabel: '69,900원',
-            priceLabel: '19,900원',
-            discountLabel: '72%',
+            referencePriceLabel: '19,900원',
+            priceLabel: '9,900원',
+            discountLabel: '50%',
         });
         expect(buildEarlybirdPlanPresentation('plus')).toEqual({
             referencePriceLabel: null,
@@ -185,5 +185,17 @@ describe('earlybird analyze UI state', () => {
         // There must be exactly one refresh call site, so it can't be moved
         // outside the gate elsewhere while leaving this occurrence intact.
         expect(source.indexOf(refreshCallToken, refreshCallIndex + 1)).toBe(-1);
+    });
+
+    it('clears a stale v1 preflight after the server requires a v2 pricing refresh', () => {
+        const source = readFileSync(new URL('../../../app/analyze/page.tsx', import.meta.url), 'utf8');
+        const refreshCodeIndex = source.indexOf("'EARLYBIRD_PRICING_REFRESH_REQUIRED'");
+        const resetCallIndex = source.indexOf('reset()', refreshCodeIndex);
+        expect(refreshCodeIndex).toBeGreaterThan(-1);
+        expect(resetCallIndex).toBeGreaterThan(refreshCodeIndex);
+        expect(resetCallIndex - refreshCodeIndex).toBeLessThan(800);
+        expect(source).toContain(
+            '가격이 변경되어 대상 계정을 다시 확인해주세요.'
+        );
     });
 });

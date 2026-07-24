@@ -1,5 +1,9 @@
 # Groble Earlybird Presale Implementation Plan
 
+> 이 완료 계획의 v1 가격은 2026-07-25 `earlybird-2026-07-v2`로 대체되었다.
+> 현행 가격 정본은 Basic 13,900원→6,900원, Standard 19,900원→9,900원,
+> 각각 50% 표시와 독립 재고 10건이다. 아래 값은 당시 구현 이력이다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **[중요: 폐기된 기한 안내]** 이 계획서는 판독 결과 제공 기한을 결제 완료 후 **48시간**

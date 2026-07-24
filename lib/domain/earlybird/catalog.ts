@@ -1,6 +1,6 @@
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 
-export const EARLYBIRD_PRICING_VERSION = 'earlybird-2026-07-v1' as const;
+export const EARLYBIRD_PRICING_VERSION = 'earlybird-2026-07-v2' as const;
 export const EARLYBIRD_DISCLOSURE_VERSION = 'earlybird-24h-v1' as const;
 export const EARLYBIRD_DISCLOSURE_TEXT =
     '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.' as const;
@@ -27,15 +27,15 @@ type WaitlistEarlybirdPlan = Readonly<{
 export const EARLYBIRD_PLAN_CATALOG = Object.freeze({
     basic: Object.freeze({
         planId: 'basic',
-        referenceAmountKrw: 39_900,
-        earlybirdAmountKrw: 14_900,
+        referenceAmountKrw: 13_900,
+        earlybirdAmountKrw: 6_900,
         serverLimit: 10,
         fulfillment: 'groble_payment',
     } satisfies PaidEarlybirdPlan),
     standard: Object.freeze({
         planId: 'standard',
-        referenceAmountKrw: 69_900,
-        earlybirdAmountKrw: 19_900,
+        referenceAmountKrw: 19_900,
+        earlybirdAmountKrw: 9_900,
         serverLimit: 10,
         fulfillment: 'groble_payment',
     } satisfies PaidEarlybirdPlan),

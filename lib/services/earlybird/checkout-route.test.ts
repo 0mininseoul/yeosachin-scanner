@@ -194,8 +194,8 @@ describe('earlybird checkout and waitlist routes', () => {
             p_preflight_id: PREFLIGHT_ID,
             p_plan_id: 'basic',
             p_expected_product_id: 'basic_product-01',
-            p_expected_amount_krw: 14_900,
-            p_pricing_version: 'earlybird-2026-07-v1',
+            p_expected_amount_krw: 6_900,
+            p_pricing_version: 'earlybird-2026-07-v2',
             p_disclosure_version: 'earlybird-24h-v1',
         }));
         expect(mocks.rpc).toHaveBeenCalledWith(
@@ -220,7 +220,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 order_id: ORDER_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'basic',
-                amount_krw: 14_900,
+                amount_krw: 6_900,
                 operation: 'checkout',
                 disposition: 'accepted',
             },
@@ -258,7 +258,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 order_id: ORDER_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'standard',
-                amount_krw: 19_900,
+                amount_krw: 9_900,
                 operation: 'checkout',
                 disposition: 'exists',
             }),
@@ -299,7 +299,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 preflight_id: PREFLIGHT_ID,
                 order_id: ORDER_ID,
                 plan_id: 'basic',
-                amount_krw: 14_900,
+                amount_krw: 6_900,
                 operation: 'checkout',
                 disposition: 'accepted',
             }),
@@ -456,6 +456,24 @@ describe('earlybird checkout and waitlist routes', () => {
         });
     });
 
+    it('requires a fresh preflight when the stored pricing snapshot predates v2', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: null,
+            error: { message: 'EARLYBIRD_PRICING_REFRESH_REQUIRED' },
+        });
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+            code: 'EARLYBIRD_PRICING_REFRESH_REQUIRED',
+            error: '가격이 변경되어 대상 계정을 다시 확인해주세요.',
+        });
+    });
+
     it('requires a Kakao phone snapshot without returning phone evidence', async () => {
         mocks.rpc.mockResolvedValue({
             data: null,
@@ -484,7 +502,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 preflight_id: PREFLIGHT_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'basic',
-                amount_krw: 14_900,
+                amount_krw: 6_900,
                 operation: 'checkout',
                 disposition: 'rejected',
                 error_code: 'VALIDATION_ERROR',

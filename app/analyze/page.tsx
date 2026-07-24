@@ -306,6 +306,19 @@ export default function AnalyzePage() {
                     // plan card flips to sold-out copy instead of contradicting this error.
                     await refreshPreflight();
                 }
+                if (
+                    payload && typeof payload === 'object' && 'code' in payload
+                    && payload.code === 'EARLYBIRD_PRICING_REFRESH_REQUIRED'
+                ) {
+                    reset();
+                    setGirlfriendInstagramId('');
+                    setSelectedPlan(null);
+                    setDisclosureAccepted(false);
+                    setWaitlistComplete(false);
+                    router.replace('/analyze');
+                    setError('가격이 변경되어 대상 계정을 다시 확인해주세요.');
+                    return;
+                }
                 setError(message);
                 return;
             }

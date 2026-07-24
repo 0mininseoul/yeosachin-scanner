@@ -40,6 +40,7 @@ function boundedDatabaseCode(error: unknown): string {
         'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
         'CHECKOUT_PHONE_REQUIRED',
         'EARLYBIRD_PRICE_SNAPSHOT_INVALID',
+        'EARLYBIRD_PRICING_REFRESH_REQUIRED',
     ].find(code => message.includes(code));
     return knownCode ?? 'EARLYBIRD_PERSISTENCE_FAILED';
 }

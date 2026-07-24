@@ -9,9 +9,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
     EARLYBIRD_DISCLOSURE_TEXT,
     EARLYBIRD_DISCLOSURE_VERSION,
-    EARLYBIRD_PRICING_VERSION,
 } from '@/lib/domain/earlybird/catalog';
 
+const LEGACY_PRICING_VERSION = 'earlybird-2026-07-v1';
 const databaseUrl = process.env.EARLYBIRD_POSTGRES_TEST_URL;
 const destructiveTestMarker = process.env.EARLYBIRD_POSTGRES_TEST_MARKER;
 const describePostgres = databaseUrl ? describe : describe.skip;
@@ -216,7 +216,7 @@ async function seedNativeCheckout(
             userId,
             `native_lock_${index}`,
             planCards('basic'),
-            EARLYBIRD_PRICING_VERSION,
+            LEGACY_PRICING_VERSION,
             pricingSnapshot,
         ]
     );
@@ -247,7 +247,7 @@ async function seedNativePreflight(
             userId,
             `native_lock_${index}`,
             planCards('basic'),
-            EARLYBIRD_PRICING_VERSION,
+            LEGACY_PRICING_VERSION,
             pricingSnapshot,
         ]
     );
@@ -268,7 +268,7 @@ async function createNativeCheckout(
             seed.userId,
             seed.preflightId,
             productId,
-            EARLYBIRD_PRICING_VERSION,
+            LEGACY_PRICING_VERSION,
             EARLYBIRD_DISCLOSURE_VERSION,
             EARLYBIRD_DISCLOSURE_TEXT,
         ]
@@ -401,7 +401,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                         seed.userId,
                         `target_${seed.index}`,
                         planCards(planId),
-                        EARLYBIRD_PRICING_VERSION,
+                        LEGACY_PRICING_VERSION,
                         pricingSnapshot,
                         planId === 'basic' ? 300 : 700,
                         planId,
@@ -418,7 +418,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                         planId,
                         productId,
                         amount,
-                        EARLYBIRD_PRICING_VERSION,
+                        LEGACY_PRICING_VERSION,
                         EARLYBIRD_DISCLOSURE_VERSION,
                         EARLYBIRD_DISCLOSURE_TEXT,
                     ]
@@ -493,7 +493,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 preflightId,
                 userId,
                 planCards('basic'),
-                EARLYBIRD_PRICING_VERSION,
+                LEGACY_PRICING_VERSION,
                 pricingSnapshot,
             ]
         );
@@ -543,7 +543,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 [
                     userId,
                     preflightId,
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     EARLYBIRD_DISCLOSURE_VERSION,
                     EARLYBIRD_DISCLOSURE_TEXT,
                 ]
@@ -600,7 +600,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 preflightId,
                 userId,
                 planCards('basic'),
-                EARLYBIRD_PRICING_VERSION,
+                LEGACY_PRICING_VERSION,
                 pricingSnapshot,
             ]
         );
@@ -612,7 +612,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
             [
                 userId,
                 preflightId,
-                EARLYBIRD_PRICING_VERSION,
+                LEGACY_PRICING_VERSION,
                 EARLYBIRD_DISCLOSURE_VERSION,
                 EARLYBIRD_DISCLOSURE_TEXT,
             ]
@@ -748,7 +748,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                     verified.userId,
                     verified.preflightId,
                     productId,
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     EARLYBIRD_DISCLOSURE_VERSION,
                     EARLYBIRD_DISCLOSURE_TEXT,
                 ]
@@ -1034,7 +1034,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 preflightId,
                 userId,
                 planCards('basic'),
-                EARLYBIRD_PRICING_VERSION,
+                LEGACY_PRICING_VERSION,
                 pricingSnapshot,
             ]
         );
@@ -1065,7 +1065,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 [
                     userId,
                     preflightId,
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     EARLYBIRD_DISCLOSURE_VERSION,
                     EARLYBIRD_DISCLOSURE_TEXT,
                 ]

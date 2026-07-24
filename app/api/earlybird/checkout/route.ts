@@ -45,6 +45,13 @@ function persistenceErrorResponse(error: EarlybirdPersistenceError): NextRespons
             '기존 결제창의 처리 상태를 먼저 확인해주세요.'
         );
     }
+    if (error.code === 'EARLYBIRD_PRICING_REFRESH_REQUIRED') {
+        return errorResponse(
+            409,
+            error.code,
+            '가격이 변경되어 대상 계정을 다시 확인해주세요.'
+        );
+    }
     if (error.code === 'PLAN_UPGRADE_REQUIRED'
         || error.code === 'PLAN_SELECTION_UNAVAILABLE'
         || error.code === 'EARLYBIRD_ORDER_CONFLICT') {

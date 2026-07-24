@@ -6,21 +6,25 @@ import {
     EARLYBIRD_PRICING_VERSION,
     isPaidEarlybirdPlanId,
 } from './catalog';
+import {
+    ANALYSIS_PLAN_CATALOG,
+    PLAN_PRICING_VERSION,
+} from '@/lib/domain/analysis/plan-catalog';
 
 describe('earlybird presale catalog', () => {
     it('owns immutable prices and independent plan limits on the server', () => {
-        expect(EARLYBIRD_PRICING_VERSION).toBe('earlybird-2026-07-v1');
+        expect(EARLYBIRD_PRICING_VERSION).toBe('earlybird-2026-07-v2');
         expect(EARLYBIRD_PLAN_CATALOG.basic).toEqual({
             planId: 'basic',
-            referenceAmountKrw: 39_900,
-            earlybirdAmountKrw: 14_900,
+            referenceAmountKrw: 13_900,
+            earlybirdAmountKrw: 6_900,
             serverLimit: 10,
             fulfillment: 'groble_payment',
         });
         expect(EARLYBIRD_PLAN_CATALOG.standard).toEqual({
             planId: 'standard',
-            referenceAmountKrw: 69_900,
-            earlybirdAmountKrw: 19_900,
+            referenceAmountKrw: 19_900,
+            earlybirdAmountKrw: 9_900,
             serverLimit: 10,
             fulfillment: 'groble_payment',
         });
@@ -37,6 +41,16 @@ describe('earlybird presale catalog', () => {
         expect(EARLYBIRD_DISCLOSURE_VERSION).toBe('earlybird-24h-v1');
         expect(EARLYBIRD_DISCLOSURE_TEXT).toBe(
             '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.'
+        );
+    });
+
+    it('matches the preflight pricing snapshot catalog exactly', () => {
+        expect(EARLYBIRD_PRICING_VERSION).toBe(PLAN_PRICING_VERSION);
+        expect(EARLYBIRD_PLAN_CATALOG.basic.earlybirdAmountKrw).toBe(
+            ANALYSIS_PLAN_CATALOG.basic.price.amountKrw
+        );
+        expect(EARLYBIRD_PLAN_CATALOG.standard.earlybirdAmountKrw).toBe(
+            ANALYSIS_PLAN_CATALOG.standard.price.amountKrw
         );
     });
 

@@ -43,7 +43,9 @@ credential cutover 직전 같은 읽기 snapshot에서 active analysis requests,
 - production migration history가 reviewed branch와 정확히 일치해야 한다.
 - `supabase db push --linked --dry-run`에 예상하지 않은 migration이 없어야 한다.
 - 배포 SHA와 검토 SHA가 같고 CI·preview 검증이 통과해야 한다.
-- Groble Basic/Standard 가격과 재고가 server catalog의 결제액·각 10건과 같아야 한다.
+- server catalog와 DB checkout RPC의 가격 버전이 모두 `earlybird-2026-07-v2`여야 한다.
+- Groble Basic/Standard 가격은 결제액이 각각 6,900원/9,900원이고 재고가 각각 10건으로 server catalog와 같아야 한다. 기준가는 각각 13,900원/19,900원이며 UI 할인 표시는 모두 50%여야 한다.
+- 배포 뒤 실제 결제를 만들지 않는 read-only checkout 회귀에서 Basic/Standard 링크가 정확한 `groble.im/payment` origin과 seller reference를 유지해야 한다.
 - Plus checkout은 없고 대기 신청만 유지해야 한다.
 - public automatic analysis admission과 webhook 자동 fulfillment는 비활성 상태여야 한다.
 

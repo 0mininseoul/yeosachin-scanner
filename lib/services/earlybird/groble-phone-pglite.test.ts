@@ -4,7 +4,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import {
     EARLYBIRD_DISCLOSURE_TEXT,
     EARLYBIRD_DISCLOSURE_VERSION,
-    EARLYBIRD_PRICING_VERSION,
 } from '@/lib/domain/earlybird/catalog';
 
 // 아래 두 상수는 createDatabaseBeforePhoneMigration() 스냅샷(할인/딜리버리-윈도우
@@ -12,6 +11,7 @@ import {
 // 전용이다. 그 시점의 라이브 함수는 여전히 48시간 고지를 요구하므로, 24시간으로 바뀐
 // 현재 EARLYBIRD_DISCLOSURE_VERSION/TEXT 를 쓰면 안 된다.
 const LEGACY_DISCLOSURE_VERSION = 'earlybird-48h-v1';
+const LEGACY_PRICING_VERSION = 'earlybird-2026-07-v1';
 const LEGACY_DISCLOSURE_TEXT =
     '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 48시간 이내 판독 결과를 제공합니다.';
 
@@ -326,7 +326,7 @@ async function seedPreflight(
             seed.userId,
             `target_${index}`,
             planCards(planId),
-            EARLYBIRD_PRICING_VERSION,
+            LEGACY_PRICING_VERSION,
             pricingSnapshot,
             planId === 'basic' ? 300 : 700,
             planId,
@@ -358,7 +358,7 @@ async function seedNewPreflight(
             userId,
             `target_${index}`,
             planCards(planId),
-            EARLYBIRD_PRICING_VERSION,
+            LEGACY_PRICING_VERSION,
             pricingSnapshot,
             planId === 'basic' ? 300 : 700,
             planId,
@@ -381,7 +381,7 @@ async function createCheckout(
             planId,
             planId === 'basic' ? BASIC_PRODUCT_ID : STANDARD_PRODUCT_ID,
             planId === 'basic' ? 14_900 : 19_900,
-            EARLYBIRD_PRICING_VERSION,
+            LEGACY_PRICING_VERSION,
             EARLYBIRD_DISCLOSURE_VERSION,
             EARLYBIRD_DISCLOSURE_TEXT,
         ]
@@ -520,7 +520,7 @@ describe('Groble phone migration upgrade behavior', () => {
                     preflightId,
                     userId,
                     planCards('basic'),
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     pricingSnapshot,
                 ]
             );
@@ -534,7 +534,7 @@ describe('Groble phone migration upgrade behavior', () => {
                     userId,
                     preflightId,
                     BASIC_PRODUCT_ID,
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     LEGACY_DISCLOSURE_VERSION,
                     LEGACY_DISCLOSURE_TEXT,
                 ]
@@ -819,7 +819,7 @@ describe('Groble phone migration upgrade behavior', () => {
                         userId,
                         `existing_target_${scenario.index}`,
                         planCards('basic'),
-                        EARLYBIRD_PRICING_VERSION,
+                        LEGACY_PRICING_VERSION,
                         pricingSnapshot,
                     ]
                 );
@@ -833,7 +833,7 @@ describe('Groble phone migration upgrade behavior', () => {
                         userId,
                         preflightId,
                         BASIC_PRODUCT_ID,
-                        EARLYBIRD_PRICING_VERSION,
+                        LEGACY_PRICING_VERSION,
                         LEGACY_DISCLOSURE_VERSION,
                         LEGACY_DISCLOSURE_TEXT,
                     ]
@@ -937,7 +937,7 @@ describe('Groble phone migration upgrade behavior', () => {
                         userId,
                         `transition_target_${index}`,
                         planCards('basic'),
-                        EARLYBIRD_PRICING_VERSION,
+                        LEGACY_PRICING_VERSION,
                         pricingSnapshot,
                     ]
                 );
@@ -951,7 +951,7 @@ describe('Groble phone migration upgrade behavior', () => {
                         userId,
                         preflightId,
                         BASIC_PRODUCT_ID,
-                        EARLYBIRD_PRICING_VERSION,
+                        LEGACY_PRICING_VERSION,
                         LEGACY_DISCLOSURE_VERSION,
                         LEGACY_DISCLOSURE_TEXT,
                     ]
@@ -1345,7 +1345,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
                 [
                     seed.userId,
                     seed.preflightId,
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     BASIC_PRODUCT_ID,
                     EARLYBIRD_DISCLOSURE_VERSION,
                     EARLYBIRD_DISCLOSURE_TEXT,
@@ -2386,7 +2386,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
                     seed.userId,
                     seed.preflightId,
                     BASIC_PRODUCT_ID,
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     EARLYBIRD_DISCLOSURE_VERSION,
                     EARLYBIRD_DISCLOSURE_TEXT,
                 ]
@@ -2636,7 +2636,7 @@ describe('Groble phone normalizer service-role execute', () => {
                     preflightId,
                     userId,
                     planCards('basic'),
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     pricingSnapshot,
                 ]
             );
@@ -2651,7 +2651,7 @@ describe('Groble phone normalizer service-role execute', () => {
                     userId,
                     preflightId,
                     BASIC_PRODUCT_ID,
-                    EARLYBIRD_PRICING_VERSION,
+                    LEGACY_PRICING_VERSION,
                     EARLYBIRD_DISCLOSURE_VERSION,
                     EARLYBIRD_DISCLOSURE_TEXT,
                 ]
