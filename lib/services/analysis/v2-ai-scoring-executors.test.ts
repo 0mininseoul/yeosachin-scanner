@@ -859,6 +859,62 @@ describe('V2 AI and scoring executors', () => {
         });
     });
 
+    it('fails closed without checkpointing while an exact resolver attempt awaits recovery', async () => {
+        const memoryState = memory();
+        const account = profile('resolver.recovery.pending');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+        });
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async input => ({
+            result: feature(input.media.map(row => row.selectionId), 'unresolved'),
+            operationKey: `feature-analysis:${digest('resolver-recovery-feature')}`,
+            resultHash: digest('resolver-recovery-feature-result'),
+            source: 'checkpoint' as const,
+        }));
+        deps.ai.startGenderResolution = vi.fn(() => ({
+            operationKey: `gender-resolution:${digest('recovery-pending-resolver')}`,
+            completion: Promise.resolve(),
+            peek: () => ({ status: 'recovery_pending' as const }),
+            cutoff: vi.fn().mockResolvedValue(undefined),
+        }));
+        const base = state();
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('resolver-recovery-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('resolver-recovery-producer'),
+                        revision: 1,
+                        resultHash: digest('resolver-recovery-result'),
+                    }],
+                }),
+            }),
+        )).rejects.toThrow('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+        expect(memoryState.outcomes).toEqual([]);
+    });
+
     it('preserves ready resolver provenance when feature analysis becomes unavailable', async () => {
         const memoryState = memory();
         const account = profile('resolver.ready.rejected');

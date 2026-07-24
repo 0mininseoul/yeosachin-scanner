@@ -19,6 +19,7 @@ const migration = readFileSync(
 
 const REQUEST_V26 = '123e4567-e89b-42d3-a456-426614174000';
 const REQUEST_V27 = '123e4567-e89b-42d3-a456-426614174001';
+const REQUEST_RECOVERY = '123e4567-e89b-42d3-a456-426614174002';
 const RESOLVER_OPERATION = `gender-resolution:${'a'.repeat(64)}`;
 const RESOLVER_HASH = 'b'.repeat(64);
 
@@ -88,7 +89,8 @@ describe('gender resolver provenance migration', () => {
                 id, pipeline_version, status, selected_plan_id_snapshot
             ) VALUES
                 ('${REQUEST_V26}', 'v2', 'completed', 'basic'),
-                ('${REQUEST_V27}', 'v2', 'processing', 'standard');
+                ('${REQUEST_V27}', 'v2', 'processing', 'standard'),
+                ('${REQUEST_RECOVERY}', 'v2', 'processing', 'standard');
 
             CREATE TABLE public.analysis_v2_candidate_feature_manifests (
                 request_id UUID NOT NULL,
@@ -115,6 +117,7 @@ describe('gender resolver provenance migration', () => {
             CREATE TABLE public.analysis_v2_ai_attempts (
                 request_id UUID NOT NULL,
                 stage TEXT NOT NULL,
+                status TEXT NOT NULL,
                 usage_metadata_status TEXT,
                 prompt_tokens INTEGER,
                 completion_tokens INTEGER,
@@ -292,12 +295,26 @@ describe('gender resolver provenance migration', () => {
     it('refreshes request-level resolver and partial-media metrics idempotently', async () => {
         await db.query(
             `INSERT INTO public.analysis_v2_ai_attempts(
-                request_id, stage, usage_metadata_status, prompt_tokens,
+                request_id, stage, status, usage_metadata_status, prompt_tokens,
                 completion_tokens, total_tokens, thinking_tokens,
                 estimated_cost_usd
             ) VALUES
-                ($1, 'genderResolution', 'complete', 100, 20, 125, 5, 0.0001),
-                ($1, 'genderResolution', 'missing', NULL, NULL, NULL, NULL, NULL)`,
+                ($1, 'genderResolution', 'success', 'complete',
+                    100, 20, 125, 5, 0.0001),
+                ($1, 'genderResolution', 'cutoff', 'missing',
+                    NULL, NULL, NULL, NULL, NULL)`,
+            [REQUEST_V27]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_candidate_feature_rows(
+                request_id, batch, candidate_id, terminal_classification,
+                feature_operation_key, baseline_classification,
+                classification_source, gender_resolution_status,
+                gender_resolution_operation_key, gender_resolution_result_hash
+            ) VALUES (
+                $1, 0, 'candidate:2', 'unresolved', NULL, 'unresolved',
+                'unknown', 'cutoff', NULL, NULL
+            )`,
             [REQUEST_V27]
         );
         await db.query(
@@ -392,6 +409,9 @@ describe('gender resolver provenance migration', () => {
             standardPlan: true,
             resultArchivePresent: false,
             requestGatePassed: false,
+            allResolverAttemptsTerminal: false,
+            metricsFinalized: false,
+            metricsFresh: false,
             unknownGatePassed: false,
             qualityGatePassed: false,
         });
@@ -446,6 +466,10 @@ describe('gender resolver provenance migration', () => {
             standardPlan: true,
             resultArchivePresent: true,
             requestGatePassed: true,
+            resolverNonterminalAttemptCount: 0,
+            allResolverAttemptsTerminal: true,
+            metricsFinalized: true,
+            metricsFresh: true,
             unknownGateEvaluable: true,
             unknownGatePassed: false,
             provenanceGatePassed: true,
@@ -462,5 +486,128 @@ describe('gender resolver provenance migration', () => {
             `SELECT public.load_analysis_v2_gender_resolution_quality($1)`,
             [REQUEST_V27]
         ))).rejects.toThrow(/permission denied/);
+    });
+
+    it('blocks finalization until recovery terminalizes the exact resolver attempt', async () => {
+        await checkpoint(REQUEST_RECOVERY, [row({
+            genderResolutionStatus: 'cutoff',
+            baselineClassification: 'unresolved',
+            classificationSource: 'unknown',
+            genderResolutionOperationKey: null,
+            genderResolutionResultHash: null,
+        })]);
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_attempts(
+                request_id, stage, status, usage_metadata_status, prompt_tokens,
+                completion_tokens, total_tokens, thinking_tokens,
+                estimated_cost_usd
+            ) VALUES (
+                $1, 'genderResolution', 'reserved', NULL,
+                NULL, NULL, NULL, NULL, NULL
+            )`,
+            [REQUEST_RECOVERY]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints(
+                request_id, stage_kind, payload
+            ) VALUES ($1, 'profile_ai_batch', $2::JSONB)`,
+            [
+                REQUEST_RECOVERY,
+                JSON.stringify({
+                    outcomes: [{
+                        status: 'unresolved',
+                        baselineClassification: 'unresolved',
+                        genderResolutionStatus: 'cutoff',
+                        mediaCoverage: {
+                            selectedCount: 1,
+                            normalizedCount: 1,
+                            failures: [],
+                        },
+                    }],
+                }),
+            ]
+        );
+
+        await expect(db.query(
+            `INSERT INTO public.analysis_v2_result_summaries(request_id, plan_id)
+             VALUES ($1, 'standard')`,
+            [REQUEST_RECOVERY]
+        )).rejects.toThrow(/ANALYSIS_V2_RESULT_NOT_READY/);
+        const pendingQuality = await withRole('service_role', async () => (
+            await db.query<{ quality: Record<string, unknown> }>(
+                `SELECT public.load_analysis_v2_gender_resolution_quality($1)
+                    AS quality`,
+                [REQUEST_RECOVERY]
+            )
+        ).rows[0].quality);
+        expect(pendingQuality).toMatchObject({
+            resolverNonterminalAttemptCount: 1,
+            allResolverAttemptsTerminal: false,
+            metricsFinalized: false,
+            metricsFresh: false,
+            qualityGatePassed: false,
+        });
+
+        await db.query(
+            `UPDATE public.analysis_v2_ai_attempts
+             SET status = 'cutoff', usage_metadata_status = 'missing'
+             WHERE request_id = $1 AND stage = 'genderResolution'`,
+            [REQUEST_RECOVERY]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_result_summaries(request_id, plan_id)
+             VALUES ($1, 'standard')`,
+            [REQUEST_RECOVERY]
+        );
+
+        const sealed = (await db.query<{
+            cutoff_count: number;
+            terminal_unavailable_count: number;
+            resolver_nonterminal_attempt_count: number;
+            metrics_finalized: boolean;
+        }>(
+            `SELECT cutoff_count, terminal_unavailable_count,
+                    resolver_nonterminal_attempt_count,
+                    metrics_finalized_at IS NOT NULL AS metrics_finalized
+             FROM public.analysis_v2_gender_resolution_metrics
+             WHERE request_id = $1`,
+            [REQUEST_RECOVERY]
+        )).rows[0];
+        expect(sealed).toEqual({
+            cutoff_count: 1,
+            terminal_unavailable_count: 0,
+            resolver_nonterminal_attempt_count: 0,
+            metrics_finalized: true,
+        });
+
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET status = 'completed'
+             WHERE id = $1`,
+            [REQUEST_RECOVERY]
+        );
+        const recoveredQuality = await withRole('service_role', async () => (
+            await db.query<{ quality: Record<string, unknown> }>(
+                `SELECT public.load_analysis_v2_gender_resolution_quality($1)
+                    AS quality`,
+                [REQUEST_RECOVERY]
+            )
+        ).rows[0].quality);
+        expect(recoveredQuality).toMatchObject({
+            cutoffCount: 1,
+            terminalUnavailableCount: 0,
+            resolverNonterminalAttemptCount: 0,
+            allResolverAttemptsTerminal: true,
+            metricsFinalized: true,
+            metricsFresh: true,
+        });
+        for (const forbidden of [
+            'requestId',
+            'operationKey',
+            'reservationToken',
+            'providerMessage',
+        ]) {
+            expect(recoveredQuality).not.toHaveProperty(forbidden);
+        }
     });
 });

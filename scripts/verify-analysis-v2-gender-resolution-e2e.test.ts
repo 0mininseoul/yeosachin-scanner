@@ -35,8 +35,12 @@ function quality(
         resolverUsageMissingCount: 1,
         resolverEstimatedCostUsd: 0.0001,
         resolverCostKnownCount: 2,
+        resolverNonterminalAttemptCount: 0,
         resolverConcurrencyLimit: 2,
         sharedConcurrencyLimit: 8,
+        allResolverAttemptsTerminal: true,
+        metricsFinalized: true,
+        metricsFresh: true,
         requestCompleted: true,
         standardPlan: true,
         resultArchivePresent: true,
@@ -88,6 +92,9 @@ describe('gender resolution E2E quality CLI', () => {
             standardPlan: true,
             resultArchivePresent: true,
             requestGatePassed: true,
+            allResolverAttemptsTerminal: true,
+            metricsFinalized: true,
+            metricsFresh: true,
             qualityGatePassed: true,
         });
         for (const forbidden of [
@@ -139,6 +146,30 @@ describe('gender resolution E2E quality CLI', () => {
             resultArchivePresent: false,
             requestGatePassed: false,
             unknownGatePassed: true,
+            qualityGatePassed: false,
+        });
+    });
+
+    it('returns nonzero while resolver recovery or metrics sealing remains pending', async () => {
+        const writeStdout = vi.fn();
+        const result = await runGenderResolutionE2EQualityCli([
+            `--request-id=${requestId}`,
+        ], {
+            loadQuality: async () => quality({
+                resolverNonterminalAttemptCount: 1,
+                allResolverAttemptsTerminal: false,
+                metricsFinalized: false,
+                metricsFresh: false,
+                qualityGatePassed: false,
+            }),
+            writeStdout,
+        });
+        expect(result.exitCode).toBe(1);
+        expect(JSON.parse(writeStdout.mock.calls[0]![0])).toMatchObject({
+            resolverNonterminalAttemptCount: 1,
+            allResolverAttemptsTerminal: false,
+            metricsFinalized: false,
+            metricsFresh: false,
             qualityGatePassed: false,
         });
     });

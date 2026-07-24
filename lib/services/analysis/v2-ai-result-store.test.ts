@@ -36,6 +36,8 @@ import {
     ANALYSIS_V2_AI_RESULT_DATABASE_NAMES,
     AnalysisV2AiResultConflictError,
     AnalysisV2AiResultFenceError,
+    AnalysisV2AiResultRecoveredCutoffError,
+    AnalysisV2AiResultRecoveryPendingError,
     createAnalysisV2AiAuditAdapter,
     createAnalysisV2AiMediaSnapshotHash,
     createAnalysisV2AiMediaSnapshotHashFromParts,
@@ -921,6 +923,71 @@ describe('analysis V2 Gemini audit adapter', () => {
             expect(resultStore.checkpointGlobalHit).not.toHaveBeenCalled();
         }
     );
+
+    it.each([
+        {
+            status: 'reserved' as const,
+            error: AnalysisV2AiResultRecoveryPendingError,
+        },
+        {
+            status: 'cutoff' as const,
+            error: AnalysisV2AiResultRecoveredCutoffError,
+        },
+    ])('reconstructs resolver $status without opening another paid attempt', async scenario => {
+        const resolverIdentity = identity({
+            stage: 'genderResolution',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+            cacheScope: 'request',
+        });
+        const last = reservation({
+            operationKey: resolverIdentity.operationKey,
+            status: scenario.status,
+            stage: 'genderResolution',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'LOW',
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+            ...(scenario.status === 'cutoff'
+                ? {
+                    usageMetadataStatus: 'missing' as const,
+                    usageComplete: false,
+                    latencyMs: 25,
+                    terminalizedAt: '2026-07-14T03:00:01.000Z',
+                }
+                : {}),
+        });
+        const reserve = vi.fn();
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7',
+            resultIdentity: resolverIdentity,
+            resultSchema,
+            attemptStore: {
+                reserve,
+                terminalize: vi.fn(),
+                loadOperation: vi.fn().mockResolvedValue([last]),
+            },
+            resultStore: {
+                terminalizeSuccess: vi.fn(),
+                loadRequest: vi.fn().mockResolvedValue(null),
+                checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+            } as unknown as AnalysisV2AiResultStore,
+        });
+
+        await expect(adapter.prepare()).rejects.toBeInstanceOf(scenario.error);
+        await expect(adapter.cutoff?.()).rejects.toBeInstanceOf(scenario.error);
+        expect(reserve).not.toHaveBeenCalled();
+        expect(leaseMocks.acquire).not.toHaveBeenCalled();
+    });
 
     it('reconstructs a durable response rejection without reserving another attempt', async () => {
         const last = reservation({

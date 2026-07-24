@@ -33,8 +33,12 @@ const qualitySchema = z.object({
     resolverUsageMissingCount: boundedCount,
     resolverEstimatedCostUsd: z.number().finite().min(0).max(1_000_000).nullable(),
     resolverCostKnownCount: boundedCount,
+    resolverNonterminalAttemptCount: boundedCount,
     resolverConcurrencyLimit: z.literal(2),
     sharedConcurrencyLimit: z.literal(8),
+    allResolverAttemptsTerminal: z.boolean(),
+    metricsFinalized: z.boolean(),
+    metricsFresh: z.boolean(),
     requestCompleted: z.boolean(),
     standardPlan: z.boolean(),
     resultArchivePresent: z.boolean(),
@@ -64,6 +68,7 @@ const qualitySchema = z.object({
         && quality.resolverUsageCompleteCount + quality.resolverUsageMissingCount
             === quality.resolverAttemptCount
         && quality.resolverCostKnownCount <= quality.resolverAttemptCount
+        && quality.resolverNonterminalAttemptCount <= quality.resolverAttemptCount
     );
     const evaluable = quality.screenedCount > 0;
     const unknownPassed = evaluable
@@ -85,7 +90,10 @@ const qualitySchema = z.object({
         && evaluable
         && unknownPassed
         && provenancePassed
-        && immutabilityPassed;
+        && immutabilityPassed
+        && quality.allResolverAttemptsTerminal
+        && quality.metricsFinalized
+        && quality.metricsFresh;
     if (
         !countBoundsValid
         || !ratioValid
@@ -94,6 +102,13 @@ const qualitySchema = z.object({
         || quality.requestGatePassed !== requestPassed
         || quality.provenanceGatePassed !== provenancePassed
         || quality.immutabilityGatePassed !== immutabilityPassed
+        || (
+            quality.allResolverAttemptsTerminal
+            && (
+                !quality.metricsFinalized
+                || quality.resolverNonterminalAttemptCount !== 0
+            )
+        )
         || quality.qualityGatePassed !== overallPassed
     ) {
         context.addIssue({

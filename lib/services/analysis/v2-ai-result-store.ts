@@ -401,6 +401,20 @@ export class AnalysisV2AiResultReplayBlockedError extends Error {
     }
 }
 
+export class AnalysisV2AiResultRecoveryPendingError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+        this.name = 'AnalysisV2AiResultRecoveryPendingError';
+    }
+}
+
+export class AnalysisV2AiResultRecoveredCutoffError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_AI_RESULT_RECOVERED_CUTOFF');
+        this.name = 'AnalysisV2AiResultRecoveredCutoffError';
+    }
+}
+
 export class AnalysisV2AiResultNotReadyError extends Error {
     constructor() {
         super('ANALYSIS_V2_AI_RESULT_NOT_READY');
@@ -1172,6 +1186,15 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     throw new AnalysisV2AiResultReplayBlockedError();
                 }
                 const last = attempts.at(-1);
+                const resolverReplay = resultIdentity.stage === 'genderResolution'
+                    && aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+                if (last?.status === 'reserved' && resolverReplay) {
+                    throw new AnalysisV2AiResultRecoveryPendingError();
+                }
+                if (last?.status === 'cutoff' && resolverReplay) {
+                    terminal = true;
+                    throw new AnalysisV2AiResultRecoveredCutoffError();
+                }
                 if (last?.status === 'response_rejected') {
                     terminal = true;
                     throw new Error(
@@ -1408,6 +1431,18 @@ export function createAnalysisV2AiAuditAdapter<T>(
             cutoffRequested = true;
             terminal = true;
             cutoffStarted = (async () => {
+                if (preparation) {
+                    try {
+                        await preparation;
+                    } catch (error) {
+                        if (
+                            error instanceof AnalysisV2AiResultRecoveryPendingError
+                            || error instanceof AnalysisV2AiResultRecoveredCutoffError
+                        ) {
+                            throw error;
+                        }
+                    }
+                }
                 try {
                     await attemptSetup;
                 } catch {

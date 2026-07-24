@@ -69,6 +69,7 @@ import type {
     AnalysisV2StageExecutorRegistry,
 } from './v2-worker';
 import type { AnalysisV2AiStageRuntime } from './v2-ai-stage-runtime';
+import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
 
 const PROFILE_BATCH_JOB_PREFIX = 'track:profiles:batch:';
@@ -1353,6 +1354,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         if (resolverState?.status === 'pending') {
                             await resolverHandle!.cutoff();
                         }
+                        if (resolverState?.status === 'recovery_pending') {
+                            throw new AnalysisV2AiResultRecoveryPendingError();
+                        }
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             const readyResolver = resolverState?.status === 'ready'
                                 ? resolverState.value
@@ -1390,8 +1394,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     if (resolverState?.status === 'pending') {
                         await resolverHandle!.cutoff();
                     }
-                    const readyResolver = resolverState?.status === 'ready'
-                        ? resolverState.value
+                    const settledResolverState = resolverHandle?.peek() ?? resolverState;
+                    if (settledResolverState?.status === 'recovery_pending') {
+                        throw new AnalysisV2AiResultRecoveryPendingError();
+                    }
+                    const readyResolver = settledResolverState?.status === 'ready'
+                        ? settledResolverState.value
                         : null;
                     const reconciliation = applyGenderResolution({
                         baselineClassification,
@@ -1409,16 +1417,16 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             ? 'disabled' as const
                             : !resolverHandle
                                 ? 'not_eligible' as const
-                                : resolverState?.status === 'ready'
+                                : settledResolverState?.status === 'ready'
                                     ? reconciliation.resolverApplied
                                         ? 'ready_applied' as const
                                         : baselineClassification === 'verified_female'
                                             || baselineClassification === 'verified_non_female'
                                             ? 'ready_not_needed' as const
                                             : 'ready_inconclusive' as const
-                                    : resolverState?.status === 'capacity_skipped'
+                                    : settledResolverState?.status === 'capacity_skipped'
                                         ? 'capacity_skipped' as const
-                                        : resolverState?.status === 'terminal_unavailable'
+                                        : settledResolverState?.status === 'terminal_unavailable'
                                             ? 'terminal_unavailable' as const
                                             : 'cutoff' as const;
                     let mediaBundlePersisted = false;

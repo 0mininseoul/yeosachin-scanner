@@ -40,6 +40,8 @@ import {
     type PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
 import {
+    AnalysisV2AiResultRecoveredCutoffError,
+    AnalysisV2AiResultRecoveryPendingError,
     createAnalysisV2AiAuditAdapter,
     createAnalysisV2AiResultContentHash,
     type AnalysisV2AiAuditAdapter,
@@ -102,6 +104,7 @@ export type AnalysisV2GenderResolutionState =
         value: AnalysisV2AuditedResult<GenderResolutionResult>;
     }
     | { status: 'cutoff' }
+    | { status: 'recovery_pending' }
     | { status: 'capacity_skipped' }
     | { status: 'terminal_unavailable' };
 
@@ -140,21 +143,30 @@ async function waitForCutoffBookkeeping(
     const handled = Promise.resolve()
         .then(operation)
         .then(
-            () => 'fulfilled' as const,
-            () => 'rejected' as const,
+            () => ({ status: 'fulfilled' as const }),
+            (error: unknown) => ({ status: 'rejected' as const, error }),
         );
     let timer: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race([
         handled,
-        new Promise<'timed_out'>(resolve => {
+        new Promise<{ status: 'timed_out' }>(resolve => {
             timer = setTimeout(
-                () => resolve('timed_out'),
+                () => resolve({ status: 'timed_out' }),
                 GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS
             );
         }),
     ]);
     if (timer) clearTimeout(timer);
-    if (outcome !== 'fulfilled') {
+    if (
+        outcome.status === 'rejected'
+        && (
+            outcome.error instanceof AnalysisV2AiResultRecoveryPendingError
+            || outcome.error instanceof AnalysisV2AiResultRecoveredCutoffError
+        )
+    ) {
+        throw outcome.error;
+    }
+    if (outcome.status !== 'fulfilled') {
         throw new AnalysisV2GenderResolutionCutoffPersistenceError();
     }
 }
@@ -289,10 +301,15 @@ export function createDurableAnalysisV2AiStageRuntime(
                 } catch (error) {
                     if (state.status !== 'pending') return;
                     state = {
-                        status: error instanceof Error
-                            && error.message === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
-                            ? 'capacity_skipped'
-                            : 'terminal_unavailable',
+                        status: error instanceof AnalysisV2AiResultRecoveryPendingError
+                            ? 'recovery_pending'
+                            : error instanceof AnalysisV2AiResultRecoveredCutoffError
+                                ? 'cutoff'
+                                : error instanceof Error
+                                    && error.message
+                                        === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
+                                    ? 'capacity_skipped'
+                                    : 'terminal_unavailable',
                     };
                 }
             })();
@@ -306,7 +323,18 @@ export function createDurableAnalysisV2AiStageRuntime(
                         if (state.status !== 'pending') return;
                         state = { status: 'cutoff' };
                         controller.abort();
-                        await waitForCutoffBookkeeping(() => audit.cutoff?.());
+                        try {
+                            await waitForCutoffBookkeeping(() => audit.cutoff?.());
+                        } catch (error) {
+                            if (error instanceof AnalysisV2AiResultRecoveryPendingError) {
+                                state = { status: 'recovery_pending' };
+                            }
+                            if (error instanceof AnalysisV2AiResultRecoveredCutoffError) {
+                                state = { status: 'cutoff' };
+                                return;
+                            }
+                            throw error;
+                        }
                     })();
                     return cutoffStarted;
                 },

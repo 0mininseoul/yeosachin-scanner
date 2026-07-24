@@ -151,6 +151,10 @@ describe('gender resolution forward migration contract', () => {
     });
 
     it('exposes only durable aggregate resolver quality to the service role', () => {
+        const seal = functionDefinition(
+            provenanceMigration,
+            'analysis_v2_seal_gender_resolution_metrics'
+        );
         const quality = functionDefinition(
             provenanceMigration,
             'load_analysis_v2_gender_resolution_quality'
@@ -158,6 +162,21 @@ describe('gender resolution forward migration contract', () => {
         expect(provenanceMigration).toContain('applied_with_fenced_result_count');
         expect(provenanceMigration).toContain('verified_baseline_mutation_count');
         expect(provenanceMigration).toContain('resolver_estimated_cost_usd');
+        expect(provenanceMigration).toContain(
+            'resolver_nonterminal_attempt_count'
+        );
+        expect(provenanceMigration).toContain('metrics_finalized_at');
+        expect(seal).toContain("attempt.status = 'reserved'");
+        expect(seal).toContain("'ANALYSIS_V2_RESULT_NOT_READY'");
+        expect(seal).toContain('ON CONFLICT (request_id) DO UPDATE');
+        expect(seal).toContain('v_features.cutoff_count');
+        expect(seal).toContain('v_features.terminal_unavailable_count');
+        expect(provenanceMigration).toContain(
+            'CREATE TRIGGER seal_analysis_v2_gender_resolution_metrics'
+        );
+        expect(provenanceMigration).toContain(
+            'BEFORE INSERT\nON public.analysis_v2_result_summaries'
+        );
         expect(quality).toContain('analysis_v2_gender_resolution_metrics');
         expect(quality).toContain("'unknownGatePassed'");
         expect(quality).toContain("'provenanceGatePassed'");
@@ -168,6 +187,9 @@ describe('gender resolution forward migration contract', () => {
         expect(quality).toContain('public.analysis_v2_result_summaries');
         expect(quality).toContain("plan_id = 'standard'");
         expect(quality).toContain("'requestGatePassed'");
+        expect(quality).toContain("'allResolverAttemptsTerminal'");
+        expect(quality).toContain("'metricsFinalized'");
+        expect(quality).toContain("'metricsFresh'");
         expect(quality).toContain("'resolverConcurrencyLimit', 2");
         expect(quality).toContain("'sharedConcurrencyLimit', 8");
         expect(provenanceMigration).toContain(

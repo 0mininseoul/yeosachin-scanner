@@ -35,8 +35,12 @@ function quality(overrides: Record<string, unknown> = {}) {
         resolverUsageMissingCount: 1,
         resolverEstimatedCostUsd: 0.0001,
         resolverCostKnownCount: 2,
+        resolverNonterminalAttemptCount: 0,
         resolverConcurrencyLimit: 2,
         sharedConcurrencyLimit: 8,
+        allResolverAttemptsTerminal: true,
+        metricsFinalized: true,
+        metricsFresh: true,
         requestCompleted: true,
         standardPlan: true,
         resultArchivePresent: true,
@@ -148,6 +152,27 @@ describe('analysis V2 gender resolution durable quality gate', () => {
             await expect(setup(quality({
                 ...gates,
                 requestGatePassed: false,
+                qualityGatePassed: false,
+            })).store.requirePassing(requestId)).rejects.toBeInstanceOf(
+                AnalysisV2GenderResolutionQualityGateError
+            );
+        }
+    });
+
+    it('fails closed for a nonterminal resolver or stale unsealed metrics', async () => {
+        await expect(setup(quality({
+            resolverNonterminalAttemptCount: 1,
+            allResolverAttemptsTerminal: false,
+            qualityGatePassed: false,
+        })).store.requirePassing(requestId)).rejects.toBeInstanceOf(
+            AnalysisV2GenderResolutionQualityGateError
+        );
+        for (const metrics of [
+            { metricsFinalized: false, allResolverAttemptsTerminal: false },
+            { metricsFresh: false },
+        ]) {
+            await expect(setup(quality({
+                ...metrics,
                 qualityGatePassed: false,
             })).store.requirePassing(requestId)).rejects.toBeInstanceOf(
                 AnalysisV2GenderResolutionQualityGateError

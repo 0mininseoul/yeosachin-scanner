@@ -11,6 +11,10 @@ import {
     createDurableAnalysisV2AiStageRuntime,
     type AnalysisV2AiStageRuntimeDependencies,
 } from './v2-ai-stage-runtime';
+import {
+    AnalysisV2AiResultRecoveredCutoffError,
+    AnalysisV2AiResultRecoveryPendingError,
+} from './v2-ai-result-store';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -237,6 +241,43 @@ describe('durable V2 AI stage runtime', () => {
         expect(outcome).toBe('rejected');
         expect(handle.peek()).toEqual({ status: 'cutoff' });
         await handle.completion;
+    });
+
+    it.each([
+        {
+            label: 'reserved attempt awaiting exact recovery',
+            error: new AnalysisV2AiResultRecoveryPendingError(),
+            status: 'recovery_pending' as const,
+            cutoffRejects: true,
+        },
+        {
+            label: 'durably recovered cutoff',
+            error: new AnalysisV2AiResultRecoveredCutoffError(),
+            status: 'cutoff' as const,
+            cutoffRejects: false,
+        },
+    ])('reconstructs a $label without exposing terminal_unavailable', async scenario => {
+        const cutoff = vi.fn().mockRejectedValue(scenario.error);
+        const createAudit = vi.fn(options => ({
+            requestId: options.requestId,
+            operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity,
+            resultSchema: options.resultSchema,
+            prepare: vi.fn().mockRejectedValue(scenario.error),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+            cutoff,
+        }));
+        const runtime = createDurableAnalysisV2AiStageRuntime({ createAudit });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+
+        await handle.completion;
+        expect(handle.peek()).toEqual({ status: scenario.status });
+        await expect(handle.cutoff()).resolves.toBeUndefined();
+        expect(handle.peek()).not.toEqual({ status: 'terminal_unavailable' });
     });
 
     it('replays the same cached gender operation without opening another provider attempt', async () => {
