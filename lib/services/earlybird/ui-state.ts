@@ -77,7 +77,8 @@ export function isSafeGrobleCheckoutUrl(value: string): boolean {
         const url = new URL(value);
         const queryEntries = Array.from(url.searchParams.entries());
         const [queryKey, queryValue] = queryEntries[0] ?? [];
-        const rawQueryKey = url.search.slice(1).split('=', 1)[0];
+        const canonicalReference = parseGrobleSellerReference(queryValue);
+        const rawQuery = url.search.slice(1);
 
         return url.origin === 'https://groble.im'
             && url.username === ''
@@ -85,10 +86,10 @@ export function isSafeGrobleCheckoutUrl(value: string): boolean {
             && url.hash === ''
             && /^\/payment\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)
             && queryEntries.length === 1
-            && rawQueryKey === 'ref'
             && queryKey === 'ref'
             && url.searchParams.getAll('ref').length === 1
-            && parseGrobleSellerReference(queryValue) !== null;
+            && canonicalReference !== null
+            && rawQuery === `ref=${canonicalReference}`;
     } catch {
         return false;
     }
