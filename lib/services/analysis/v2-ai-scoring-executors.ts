@@ -707,7 +707,10 @@ function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2Verifi
             ? {
                 appearanceGrade: outcome.feature.features.appearanceGrade as AppearanceGrade,
                 exposureScore: outcome.feature.features.exposureScore,
-                accountContext: outcome.feature.features.accountContext,
+                isBusinessAccount: [
+                    'individual_creator',
+                    'official_group_or_brand',
+                ].includes(outcome.feature.features.accountContext),
                 featurePartnerEvidenceStrong: strongFeaturePartnerEvidence(outcome.feature),
                 oneLineOverview: outcome.feature.features.oneLineOverview,
             }

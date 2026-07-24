@@ -194,6 +194,7 @@ export function calculateV2FinalScores(input: {
     });
     const relativeById = new Map(assignRelativeRiskTiers(scored.map(candidate => ({
         candidateId: candidate.candidateId,
+        naturalPublicScore: candidate.risk.publicScore,
         naturalDisplayScore: candidate.risk.displayScore,
         naturalRiskBand: candidate.risk.riskBand,
         partnerCapApplied: candidate.hasStrongPartnerEvidence,

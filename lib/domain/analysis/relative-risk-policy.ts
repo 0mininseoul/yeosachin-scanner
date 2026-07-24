@@ -6,6 +6,7 @@ import {
 
 export interface RelativeRiskCandidate {
     candidateId: string;
+    naturalPublicScore: number;
     naturalDisplayScore: number;
     naturalRiskBand: RiskBand;
     partnerCapApplied: boolean;
@@ -39,6 +40,10 @@ function validateCandidates(candidates: readonly RelativeRiskCandidate[]): void 
             throw new Error('RELATIVE_RISK_POLICY_ERROR: candidate IDs must be unique.');
         }
         if (
+            !Number.isFinite(candidate.naturalPublicScore)
+            || candidate.naturalPublicScore < 1
+            || candidate.naturalPublicScore > 10
+            ||
             !Number.isFinite(candidate.naturalDisplayScore)
             || roundToOneDecimal(candidate.naturalDisplayScore)
                 !== candidate.naturalDisplayScore
@@ -77,7 +82,7 @@ export function assignRelativeRiskTiers(
         .filter(candidate => !candidate.partnerCapApplied)
         .slice()
         .sort((left, right) => (
-            right.naturalDisplayScore - left.naturalDisplayScore
+            right.naturalPublicScore - left.naturalPublicScore
             || left.candidateId.localeCompare(right.candidateId)
         ));
 

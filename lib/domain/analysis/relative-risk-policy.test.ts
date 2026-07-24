@@ -8,10 +8,12 @@ function candidate(
     candidateId: string,
     naturalDisplayScore: number,
     naturalRiskBand: RelativeRiskCandidate['naturalRiskBand'] = 'normal',
-    partnerCapApplied = false
+    partnerCapApplied = false,
+    naturalPublicScore = naturalDisplayScore
 ): RelativeRiskCandidate {
     return {
         candidateId,
+        naturalPublicScore,
         naturalDisplayScore,
         naturalRiskBand,
         partnerCapApplied,
@@ -87,6 +89,20 @@ describe('relative risk tier policy', () => {
         });
         expect(result.find(row => row.candidateId === 'candidate:b')?.riskBand).toBe('caution');
         expect(result.find(row => row.candidateId === 'candidate:c')?.riskBand).toBe('caution');
+    });
+
+    it('orders display-score ties by the unrounded natural public score first', () => {
+        const result = assignRelativeRiskTiers([
+            candidate('candidate:a', 3.3, 'normal', false, 3.26),
+            candidate('candidate:z', 3.3, 'normal', false, 3.34),
+            candidate('candidate:m', 2.2),
+        ]);
+
+        expect(result.find(row => row.candidateId === 'candidate:z')).toMatchObject({
+            displayScore: 6.8,
+            riskBand: 'high_risk',
+        });
+        expect(result.find(row => row.candidateId === 'candidate:a')?.riskBand).toBe('caution');
     });
 
     it('keeps a large weak set monotonic with at least one high and two cautions', () => {

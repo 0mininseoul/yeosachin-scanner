@@ -301,7 +301,7 @@ function candidateRows(input: {
         feature: {
             appearanceGrade: 4,
             exposureScore: 2,
-            accountContext: 'personal',
+            isBusinessAccount: false,
             featurePartnerEvidenceStrong: false,
             oneLineOverview: '\uC694\uC57D',
         },
