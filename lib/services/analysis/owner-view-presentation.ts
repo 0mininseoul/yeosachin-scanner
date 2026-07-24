@@ -76,34 +76,125 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
         || '서버에서 판독을 진행하고 있습니다.';
 }
 
-export function paginatedCountLabel(loadedCount: number, hasNextPage: boolean): string {
-    if (!Number.isSafeInteger(loadedCount) || loadedCount < 0) return '0';
-    return `${loadedCount}${hasNextPage ? '+' : ''}`;
-}
-
 export const OWNER_RESULT_PAGE_SIZE = 50;
 
 export function boundedOwnerResultPage<T>(items: readonly T[]): T[] {
     return items.slice(0, OWNER_RESULT_PAGE_SIZE);
 }
 
-export function paginatedRangeLabel(
-    pageIndex: number,
-    visibleCount: number,
-    hasNextPage: boolean
-): string {
+/* ---- result summary counts ---- */
+
+export interface ResultSummaryCounts {
+    mutual: number;
+    publicCount: number;
+    privateCount: number;
+    screened: number;
+}
+
+// The contract guarantees publicMutuals + privateMutuals === detectedMutuals and
+// that the gender totals sum to screenedMutuals (the screened public count). These
+// are surfaced verbatim so the header numbers stay internally consistent.
+export function resultSummaryCounts(summary: {
+    detectedMutuals: number;
+    publicMutuals: number;
+    privateMutuals: number;
+    screenedMutuals: number;
+}): ResultSummaryCounts {
+    return {
+        mutual: summary.detectedMutuals,
+        publicCount: summary.publicMutuals,
+        privateCount: summary.privateMutuals,
+        screened: summary.screenedMutuals,
+    };
+}
+
+/* ---- cursor-safe page-number pagination ---- */
+
+export interface ResultPageCursorState {
+    cursors: ReadonlyArray<string | null>;
+    frontierNextCursor: string | null;
+}
+
+export type ResultPageCursorResolution =
+    | { kind: 'known'; cursor: string | null }
+    | { kind: 'frontier'; cursor: string }
+    | { kind: 'unreachable' };
+
+// The result API is cursor-paginated, so we can only land on a page whose fetch
+// cursor we already hold: any visited page (cursors[i]) or exactly one page past
+// the furthest visited page (the frontier cursor). Everything else is unreachable.
+export function resolveResultPageCursor(
+    state: ResultPageCursorState,
+    targetPageIndex: number,
+): ResultPageCursorResolution {
+    if (!Number.isSafeInteger(targetPageIndex) || targetPageIndex < 0) {
+        return { kind: 'unreachable' };
+    }
+    if (targetPageIndex < state.cursors.length) {
+        return { kind: 'known', cursor: state.cursors[targetPageIndex] };
+    }
+    if (targetPageIndex === state.cursors.length && state.frontierNextCursor !== null) {
+        return { kind: 'frontier', cursor: state.frontierNextCursor };
+    }
+    return { kind: 'unreachable' };
+}
+
+export type ResultPaginationItem =
+    | { type: 'page'; pageIndex: number; label: string; current: boolean }
+    | { type: 'ellipsis'; key: string };
+
+export interface ResultPaginationView {
+    items: ResultPaginationItem[];
+    hasPrevious: boolean;
+    hasNext: boolean;
+}
+
+// Builds a compact numbered pager. Reachable pages are the visited pages plus,
+// when a frontier cursor exists, one page beyond them. Far pages collapse into a
+// single ellipsis so the control stays compact on the 480px mobile layout.
+export function resultPaginationModel(input: {
+    pageIndex: number;
+    knownPageCount: number;
+    hasFrontier: boolean;
+}): ResultPaginationView | null {
+    const { pageIndex, knownPageCount, hasFrontier } = input;
     if (
         !Number.isSafeInteger(pageIndex)
         || pageIndex < 0
-        || !Number.isSafeInteger(visibleCount)
-        || visibleCount <= 0
-        || visibleCount > OWNER_RESULT_PAGE_SIZE
+        || !Number.isSafeInteger(knownPageCount)
+        || knownPageCount < 1
     ) {
-        return '0';
+        return null;
     }
-    const first = pageIndex * OWNER_RESULT_PAGE_SIZE + 1;
-    const last = first + visibleCount - 1;
-    return `${first}-${last}${hasNextPage ? '+' : ''}`;
+    const lastIndex = knownPageCount - 1 + (hasFrontier ? 1 : 0);
+    if (lastIndex <= 0) return null;
+
+    const anchors = new Set<number>();
+    for (const candidate of [0, lastIndex, pageIndex - 1, pageIndex, pageIndex + 1]) {
+        if (candidate >= 0 && candidate <= lastIndex) anchors.add(candidate);
+    }
+    const ordered = [...anchors].sort((a, b) => a - b);
+
+    const items: ResultPaginationItem[] = [];
+    let previous = -1;
+    for (const index of ordered) {
+        if (previous >= 0 && index - previous > 1) {
+            items.push({ type: 'ellipsis', key: `gap-${previous}-${index}` });
+        }
+        items.push({
+            type: 'page',
+            pageIndex: index,
+            label: String(index + 1),
+            current: index === pageIndex,
+        });
+        previous = index;
+    }
+
+    return {
+        items,
+        hasPrevious: pageIndex > 0,
+        hasNext: pageIndex < lastIndex,
+    };
 }
 
 type OwnerRiskGrade = 'high_risk' | 'caution' | 'normal';

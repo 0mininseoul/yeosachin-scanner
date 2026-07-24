@@ -73,7 +73,7 @@ describe('V1 route isolation from durable V2 requests', () => {
         expect(resultPage).toContain("result.code === 'V2_ROUTE_REQUIRED'");
         expect(resultPage).toContain("result.resultUrl.startsWith('/api/analysis/v2/result/')");
         expect(resultPage).toContain('v2ResultFailureAction({');
-        expect(resultPage).toContain('paginatedCountLabel(');
+        expect(resultPage).toContain('resultPaginationModel({');
         expect(resultPage).toContain('boundedOwnerResultPage(result.femaleAccounts)');
         expect(resultPage).toContain('? next.femaleAccounts');
         expect(resultPage).toContain('setPageError(action)');

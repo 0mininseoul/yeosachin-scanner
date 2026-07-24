@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, use } from 'react';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { CircleHelp, Mars, Venus } from 'lucide-react';
 import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { shareResult } from '@/lib/services/result-share';
@@ -16,8 +17,9 @@ import {
     genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
     OWNER_RESULT_PAGE_SIZE,
-    paginatedCountLabel,
-    paginatedRangeLabel,
+    resolveResultPageCursor,
+    resultPaginationModel,
+    resultSummaryCounts,
     roundedOwnerScore,
     v2ResultFailureAction,
     type OwnerProgressStatus,
@@ -32,6 +34,7 @@ import {
     DeepRiskAnalysis,
     PrimaryButton,
 } from '@/components/case-ui';
+import { ResultPagination } from '@/components/result-pagination';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
@@ -133,6 +136,9 @@ interface ResultData {
         v2?: {
             followers: AnalysisResultPageV1['summary']['followers'];
             following: AnalysisResultPageV1['summary']['following'];
+            publicMutuals: number;
+            privateMutuals: number;
+            screenedMutuals: number;
             highRiskCount: number;
         };
     };
@@ -153,24 +159,29 @@ interface V2ProgressStatusResponse {
 }
 
 type ResultAccountKind = 'public' | 'private';
-type ResultPageDirection = 'previous' | 'next';
 
 interface ResultPageAction {
     kind: ResultAccountKind;
-    direction: ResultPageDirection;
+    targetPageIndex: number;
 }
 
 interface ResultPageNavigation {
     pageIndex: number;
-    pageCursors: Array<string | null>;
+    // cursors[i] is the fetch cursor for page i (cursors[0] is always null).
+    cursors: Array<string | null>;
+    // fetch cursor for the page just past the furthest visited page, or null.
+    frontierNextCursor: string | null;
 }
 
 type ResultPageNavigationState = Record<ResultAccountKind, ResultPageNavigation>;
 
-function initialResultPageNavigation(): ResultPageNavigationState {
+function initialResultPageNavigation(
+    femaleNextCursor?: string | null,
+    privateNextCursor?: string | null,
+): ResultPageNavigationState {
     return {
-        public: { pageIndex: 0, pageCursors: [null] },
-        private: { pageIndex: 0, pageCursors: [null] },
+        public: { pageIndex: 0, cursors: [null], frontierNextCursor: femaleNextCursor ?? null },
+        private: { pageIndex: 0, cursors: [null], frontierNextCursor: privateNextCursor ?? null },
     };
 }
 
@@ -205,13 +216,13 @@ function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
 
             <div className="mt-4 grid grid-cols-3 gap-3">
                 {[
-                    { label: OWNER_GENDER_LABELS.male, c: gr.male, dot: 'bg-fg-dim', txt: 'text-fg' },
-                    { label: OWNER_GENDER_LABELS.female, c: gr.female, dot: 'bg-blood', txt: 'text-blood' },
-                    { label: OWNER_GENDER_LABELS.unknown, c: gr.unknown, dot: 'bg-line-2', txt: 'text-fg-dim' },
+                    { label: OWNER_GENDER_LABELS.male, c: gr.male, Icon: Mars, txt: 'text-fg' },
+                    { label: OWNER_GENDER_LABELS.female, c: gr.female, Icon: Venus, txt: 'text-blood' },
+                    { label: OWNER_GENDER_LABELS.unknown, c: gr.unknown, Icon: CircleHelp, txt: 'text-fg-dim' },
                 ].map((row) => (
                     <div key={row.label} className="border-l border-line pl-3">
                         <div className="flex items-center gap-1.5">
-                            <span className={`h-2 w-2 ${row.dot}`} />
+                            <row.Icon aria-hidden="true" className={`h-3.5 w-3.5 ${row.txt}`} strokeWidth={2.25} />
                             <span className="text-[12px] text-fg-dim">{row.label}</span>
                         </div>
                         <div className={`num mt-1 text-[18px] font-extrabold ${row.txt}`}>{row.c.count}</div>
@@ -241,6 +252,9 @@ function mapV2Result(result: AnalysisResultPageV1): ResultData {
             v2: {
                 followers: result.summary.followers,
                 following: result.summary.following,
+                publicMutuals: result.summary.publicMutuals,
+                privateMutuals: result.summary.privateMutuals,
+                screenedMutuals: result.summary.screenedMutuals,
                 highRiskCount: result.femaleAccounts.filter(
                     account => account.riskBand === 'high_risk'
                 ).length,
@@ -269,70 +283,6 @@ function mapV2Result(result: AnalysisResultPageV1): ResultData {
         femaleNextCursor: result.femaleNextCursor,
         privateNextCursor: result.privateNextCursor,
     };
-}
-
-function ResultPaginationControls({
-    kind,
-    label,
-    pageIndex,
-    hasNextPage,
-    activeAction,
-    failedAction,
-    onPage,
-}: {
-    kind: ResultAccountKind;
-    label: string;
-    pageIndex: number;
-    hasNextPage: boolean;
-    activeAction: ResultPageAction | null;
-    failedAction: ResultPageAction | null;
-    onPage: (kind: ResultAccountKind, direction: ResultPageDirection) => void;
-}) {
-    const hasPreviousPage = pageIndex > 0;
-    if (!hasPreviousPage && !hasNextPage) return null;
-
-    const activeDirection = activeAction?.kind === kind ? activeAction.direction : null;
-    const failedDirection = failedAction?.kind === kind ? failedAction.direction : null;
-
-    return (
-        <div className="mt-4">
-            <div className={`grid gap-2 ${hasPreviousPage && hasNextPage ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                {hasPreviousPage && (
-                    <button
-                        type="button"
-                        onClick={() => onPage(kind, 'previous')}
-                        disabled={activeAction !== null}
-                        className="border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
-                    >
-                        {activeDirection === 'previous'
-                            ? '이전 목록 불러오는 중…'
-                            : failedDirection === 'previous'
-                                ? '이전 목록 다시 불러오기'
-                                : `이전 ${OWNER_RESULT_PAGE_SIZE}명`}
-                    </button>
-                )}
-                {hasNextPage && (
-                    <button
-                        type="button"
-                        onClick={() => onPage(kind, 'next')}
-                        disabled={activeAction !== null}
-                        className="border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
-                    >
-                        {activeDirection === 'next'
-                            ? '불러오는 중…'
-                            : failedDirection === 'next'
-                                ? `${label} 다시 불러오기`
-                                : `${label} 더 보기`}
-                    </button>
-                )}
-            </div>
-            {failedDirection && (
-                <p className="mt-2 text-center text-[11px] text-blood" role="alert">
-                    {failedDirection === 'previous' ? '이전' : '다음'} {label}을 불러오지 못했습니다. 다시 시도해 주세요.
-                </p>
-            )}
-        </div>
-    );
 }
 
 export default function ResultPage({ params }: PageProps) {
@@ -419,7 +369,10 @@ export default function ResultPage({ params }: PageProps) {
                     ? mapV2Result(result as AnalysisResultPageV1)
                     : { ...result, pipelineVersion: 'v1' as const };
                 setData(displayResult);
-                setPageNavigation(initialResultPageNavigation());
+                setPageNavigation(initialResultPageNavigation(
+                    displayResult.femaleNextCursor,
+                    displayResult.privateNextCursor,
+                ));
                 setPageAction(null);
                 setPageError(null);
                 setError(null);
@@ -446,22 +399,24 @@ export default function ResultPage({ params }: PageProps) {
         return () => abortController.abort();
     }, [requestId, requestedPipeline, resultRetry, router]);
 
-    const handleResultPage = async (
+    const goToResultPage = async (
         kind: ResultAccountKind,
-        direction: ResultPageDirection
+        targetPageIndex: number
     ) => {
         if (!data || data.pipelineVersion !== 'v2' || pageAction) return;
         const navigation = pageNavigation[kind];
-        const cursor = direction === 'next'
-            ? kind === 'public' ? data.femaleNextCursor : data.privateNextCursor
-            : navigation.pageCursors[navigation.pageIndex - 1];
-        if (direction === 'next' && !cursor) return;
-        if (
-            direction === 'previous'
-            && (navigation.pageIndex === 0 || cursor === undefined)
-        ) return;
+        if (targetPageIndex === navigation.pageIndex) return;
 
-        const action = { kind, direction } as const;
+        // Only land on a page whose cursor we already hold (a visited page or the
+        // single frontier page); never guess a cursor for a far page.
+        const resolution = resolveResultPageCursor(
+            { cursors: navigation.cursors, frontierNextCursor: navigation.frontierNextCursor },
+            targetPageIndex,
+        );
+        if (resolution.kind === 'unreachable') return;
+        const cursor = resolution.cursor;
+
+        const action = { kind, targetPageIndex } as const;
         setPageAction(action);
         setPageError(null);
         try {
@@ -474,6 +429,9 @@ export default function ResultPage({ params }: PageProps) {
             );
             if (!response.ok) throw new Error(`V2 result page failed (${response.status}).`);
             const next = mapV2Result(await response.json() as AnalysisResultPageV1);
+            const nextCursor = kind === 'public'
+                ? next.femaleNextCursor ?? null
+                : next.privateNextCursor ?? null;
             setData(current => current && current.pipelineVersion === 'v2'
                 ? {
                     ...current,
@@ -492,23 +450,21 @@ export default function ResultPage({ params }: PageProps) {
                 }
                 : current);
             setPageNavigation(current => {
-                const currentNavigation = current[kind];
-                const pageIndex = direction === 'next'
-                    ? currentNavigation.pageIndex + 1
-                    : currentNavigation.pageIndex - 1;
-                const pageCursors = direction === 'next'
-                    ? [
-                        ...currentNavigation.pageCursors.slice(
-                            0,
-                            currentNavigation.pageIndex + 1
-                        ),
-                        cursor!,
-                    ]
-                    : currentNavigation.pageCursors;
-                return {
-                    ...current,
-                    [kind]: { pageIndex, pageCursors },
-                };
+                const nav = current[kind];
+                if (resolution.kind === 'frontier') {
+                    // Extend the visited set by exactly one page and advance the frontier.
+                    return {
+                        ...current,
+                        [kind]: {
+                            pageIndex: targetPageIndex,
+                            cursors: [...nav.cursors, resolution.cursor],
+                            frontierNextCursor: nextCursor,
+                        },
+                    };
+                }
+                // Revisiting a known page: cursors/frontier already reflect the
+                // furthest progress, so only the current page moves.
+                return { ...current, [kind]: { ...nav, pageIndex: targetPageIndex } };
             });
             window.requestAnimationFrame(() => {
                 const section = kind === 'public'
@@ -647,6 +603,14 @@ export default function ResultPage({ params }: PageProps) {
 
     const { summary, femaleAccounts, privateAccounts } = data;
     const gr = summary.genderRatio;
+    const counts = summary.v2
+        ? resultSummaryCounts({
+            detectedMutuals: summary.mutualFollows,
+            publicMutuals: summary.v2.publicMutuals,
+            privateMutuals: summary.v2.privateMutuals,
+            screenedMutuals: summary.v2.screenedMutuals,
+        })
+        : null;
     const highCount = summary.v2?.highRiskCount
         ?? femaleAccounts.filter((a) => a.riskGrade === 'high_risk').length;
 
@@ -692,16 +656,33 @@ export default function ResultPage({ params }: PageProps) {
                 )}
 
                 {/* pipeline-specific summary */}
-                {summary.v2 ? (
+                {summary.v2 && counts ? (
                     <CaseCard className="mt-6 p-5">
-                        <div className="mb-4 flex items-center justify-between">
-                            <span className="eyebrow">맞팔 계정 분석</span>
-                            <span className="num text-[12px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
+                        <span className="eyebrow">맞팔 계정 분석</span>
+                        <div className="num mt-3 flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[13px]">
+                            <span className="text-fg-dim">맞팔</span>
+                            <span className="font-bold text-fg">{counts.mutual.toLocaleString()}</span>
+                            <span className="px-1 text-fg-mute">·</span>
+                            <span className="text-fg-dim">공개</span>
+                            <span className="font-bold text-fg">{counts.publicCount.toLocaleString()}</span>
+                            <span className="px-1 text-fg-mute">·</span>
+                            <span className="text-fg-dim">비공개</span>
+                            <span className="font-bold text-fg">{counts.privateCount.toLocaleString()}</span>
                         </div>
 
-                        {gr && <GenderRatioBreakdown gr={gr} />}
+                        {gr && (
+                            <div className="mt-5 border-t border-line pt-4">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-[12px] font-semibold text-fg-dim">공개 계정 판독 분포</span>
+                                    <span className="num text-[11px] text-fg-mute">판독 {counts.screened.toLocaleString()}명</span>
+                                </div>
+                                <div className="mt-3">
+                                    <GenderRatioBreakdown gr={gr} />
+                                </div>
+                            </div>
+                        )}
 
-                        <div className={`grid grid-cols-2 gap-px bg-line ${gr ? 'mt-4' : ''}`}>
+                        <div className={`grid grid-cols-2 gap-px bg-line ${gr ? 'mt-5' : 'mt-4'}`}>
                             {[
                                 { label: '팔로워', value: summary.v2.followers.declared },
                                 { label: '팔로잉', value: summary.v2.following.declared },
@@ -732,24 +713,16 @@ export default function ResultPage({ params }: PageProps) {
                         {
                             key: 'public',
                             label: '공개 계정',
-                            count: data.pipelineVersion === 'v2'
-                                ? paginatedRangeLabel(
-                                    pageNavigation.public.pageIndex,
-                                    femaleAccounts.length,
-                                    Boolean(data.femaleNextCursor)
-                                )
-                                : paginatedCountLabel(femaleAccounts.length, false),
+                            count: summary.v2
+                                ? summary.v2.publicMutuals.toLocaleString()
+                                : String(femaleAccounts.length),
                         },
                         {
                             key: 'private',
                             label: '비공개 계정',
-                            count: data.pipelineVersion === 'v2'
-                                ? paginatedRangeLabel(
-                                    pageNavigation.private.pageIndex,
-                                    privateAccounts.length,
-                                    Boolean(data.privateNextCursor)
-                                )
-                                : paginatedCountLabel(privateAccounts.length, false),
+                            count: summary.v2
+                                ? summary.v2.privateMutuals.toLocaleString()
+                                : String(privateAccounts.length),
                         },
                     ] as const).map((t) => (
                         <button
@@ -845,14 +818,16 @@ export default function ResultPage({ params }: PageProps) {
                         </div>
                     )}
                     {data.pipelineVersion === 'v2' && (
-                        <ResultPaginationControls
-                            kind="public"
+                        <ResultPagination
+                            view={resultPaginationModel({
+                                pageIndex: pageNavigation.public.pageIndex,
+                                knownPageCount: pageNavigation.public.cursors.length,
+                                hasFrontier: pageNavigation.public.frontierNextCursor !== null,
+                            })}
+                            busy={pageAction?.kind === 'public'}
+                            failed={pageError?.kind === 'public'}
                             label="공개 계정"
-                            pageIndex={pageNavigation.public.pageIndex}
-                            hasNextPage={Boolean(data.femaleNextCursor)}
-                            activeAction={pageAction}
-                            failedAction={pageError}
-                            onPage={handleResultPage}
+                            onGoto={(pageIndex) => goToResultPage('public', pageIndex)}
                         />
                     )}
                 </section>
@@ -897,14 +872,16 @@ export default function ResultPage({ params }: PageProps) {
                         </div>
                     )}
                     {data.pipelineVersion === 'v2' && (
-                        <ResultPaginationControls
-                            kind="private"
+                        <ResultPagination
+                            view={resultPaginationModel({
+                                pageIndex: pageNavigation.private.pageIndex,
+                                knownPageCount: pageNavigation.private.cursors.length,
+                                hasFrontier: pageNavigation.private.frontierNextCursor !== null,
+                            })}
+                            busy={pageAction?.kind === 'private'}
+                            failed={pageError?.kind === 'private'}
                             label="비공개 계정"
-                            pageIndex={pageNavigation.private.pageIndex}
-                            hasNextPage={Boolean(data.privateNextCursor)}
-                            activeAction={pageAction}
-                            failedAction={pageError}
-                            onPage={handleResultPage}
+                            onGoto={(pageIndex) => goToResultPage('private', pageIndex)}
                         />
                     )}
                     <p className="mt-3 text-[11px] text-fg-mute">
