@@ -12,6 +12,7 @@ const migration = readFileSync(
 
 const REQUEST_ID = '123e4567-e89b-42d3-a456-426614174000';
 const CLAIM_TOKEN = '323e4567-e89b-42d3-a456-426614174000';
+const RETRY_CLAIM_TOKEN = '423e4567-e89b-42d3-a456-426614174000';
 const INPUT_HASH = 'a'.repeat(64);
 const MANIFEST_HASH = 'b'.repeat(64);
 const SOURCE_HASH = 'c'.repeat(64);
@@ -83,21 +84,28 @@ afterEach(async () => {
     await db.close();
 });
 
-async function beginManifest(expectedRows: number) {
+async function beginManifest(
+    expectedRows: number,
+    claimToken = CLAIM_TOKEN,
+    manifestHash = MANIFEST_HASH
+) {
     return db.query(
         `SELECT public.begin_analysis_v2_result_image_manifest(
             $1, 'coordinator:finalize', $2, $3, $4, $5
         )`,
-        [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH, MANIFEST_HASH, expectedRows]
+        [REQUEST_ID, claimToken, INPUT_HASH, manifestHash, expectedRows]
     );
 }
 
-async function registerOutcome(outcome: Record<string, unknown>) {
+async function registerOutcome(
+    outcome: Record<string, unknown>,
+    claimToken = CLAIM_TOKEN
+) {
     return db.query(
         `SELECT public.register_analysis_v2_result_image_outcome(
             $1, 'coordinator:finalize', $2, $3, $4::JSONB
         )`,
-        [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH, JSON.stringify(outcome)]
+        [REQUEST_ID, claimToken, INPUT_HASH, JSON.stringify(outcome)]
     );
 }
 
@@ -157,6 +165,44 @@ describe('analysis_v2_result_image_coverage_ok', () => {
 });
 
 describe('retained result image registry', () => {
+    it('hands an exact manifest to a fresh live retry lease', async () => {
+        const outcome = readyOutcome({
+            kind: 'target',
+            locator: 'target',
+            ordinal: 0,
+            mandatory: true,
+        });
+        await beginManifest(1);
+        await registerOutcome(outcome);
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET lease_token = $2,
+                 lease_expires_at = clock_timestamp() + INTERVAL '1 hour'
+             WHERE request_id = $1
+               AND job_key = 'coordinator:finalize'`,
+            [REQUEST_ID, RETRY_CLAIM_TOKEN]
+        );
+
+        await expect(beginManifest(1, RETRY_CLAIM_TOKEN))
+            .resolves.toBeDefined();
+        await expect(registerOutcome(outcome, RETRY_CLAIM_TOKEN))
+            .resolves.toBeDefined();
+        const manifest = await db.query<{ producer_claim_token: string }>(
+            `SELECT producer_claim_token::TEXT
+             FROM public.analysis_v2_result_image_manifests
+             WHERE request_id = $1`,
+            [REQUEST_ID]
+        );
+        expect(manifest.rows[0]?.producer_claim_token)
+            .toBe(RETRY_CLAIM_TOKEN);
+
+        await expect(beginManifest(
+            1,
+            RETRY_CLAIM_TOKEN,
+            'e'.repeat(64)
+        )).rejects.toThrow('ANALYSIS_V2_RESULT_IMAGE_CONFLICT');
+    });
+
     it('registers exact idempotent outcomes and rejects conflicting replay', async () => {
         await beginManifest(1);
         const outcome = readyOutcome({

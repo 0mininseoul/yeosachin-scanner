@@ -344,7 +344,6 @@ BEGIN
     IF FOUND THEN
         IF v_existing.producer_job_key IS DISTINCT FROM p_job_key
            OR v_existing.producer_input_hash IS DISTINCT FROM p_job_input_hash
-           OR v_existing.producer_claim_token IS DISTINCT FROM p_claim_token
            OR v_existing.ordered_manifest_hash IS DISTINCT FROM
                 p_ordered_manifest_hash
            OR v_existing.expected_rows IS DISTINCT FROM p_expected_rows THEN
@@ -352,6 +351,10 @@ BEGIN
                 MESSAGE = 'ANALYSIS_V2_RESULT_IMAGE_CONFLICT',
                 ERRCODE = 'P0001';
         END IF;
+        UPDATE public.analysis_v2_result_image_manifests AS manifest
+        SET producer_claim_token = p_claim_token
+        WHERE manifest.request_id = p_request_id
+          AND manifest.producer_claim_token IS DISTINCT FROM p_claim_token;
         RETURN pg_catalog.jsonb_build_object(
             'requestId', p_request_id,
             'orderedManifestHash', v_existing.ordered_manifest_hash,

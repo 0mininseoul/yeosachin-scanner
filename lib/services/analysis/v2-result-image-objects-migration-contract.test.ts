@@ -94,6 +94,12 @@ describe('analysis V2 retained result image migration contract', () => {
         }
         expect(migration).toContain('ordered_manifest_hash');
         expect(migration).toContain('producer_claim_token');
+        expect(migration).toContain(
+            'SET producer_claim_token = p_claim_token'
+        );
+        expect(migration).toContain(
+            'manifest.producer_claim_token IS DISTINCT FROM p_claim_token'
+        );
         expect(migration).toContain('lease_expires_at');
         expect(migration).toContain('ON CONFLICT');
         expect(migration).toContain(

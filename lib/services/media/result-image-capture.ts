@@ -290,11 +290,17 @@ export async function captureResultImages(
         jobInputHash: input.jobInputHash,
     };
 
-    await input.registry.beginManifest({
+    const manifest = await input.registry.beginManifest({
         ...claim,
         orderedManifestHash: input.orderedManifestHash,
         expectedRows: input.expectedRows,
     });
+    if (manifest.sealed) {
+        return input.registry.sealManifest({
+            ...claim,
+            orderedManifestHash: input.orderedManifestHash,
+        });
+    }
 
     let afterOrdinal = -1;
     let observedRows = 0;

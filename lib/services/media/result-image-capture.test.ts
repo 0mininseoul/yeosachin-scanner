@@ -75,6 +75,48 @@ function registry(overrides: Record<string, unknown> = {}) {
 }
 
 describe('captureResultImages', () => {
+    it('replays a sealed manifest without mutating tolerated gaps', async () => {
+        const imageRegistry = registry({
+            beginManifest: vi.fn(async () => ({
+                requestId: CLAIM.requestId,
+                orderedManifestHash: MANIFEST_HASH,
+                expectedRows: 2,
+                sealed: true,
+            })),
+            sealManifest: vi.fn(async () => ({
+                orderedManifestHash: MANIFEST_HASH,
+                expectedRows: 2,
+                durableRows: 2,
+                sourcedImages: 2,
+                readyImages: 1,
+                captureFailedImages: 1,
+            })),
+        });
+        const loadSourcePage = vi.fn();
+        const store = { put: vi.fn(), head: vi.fn() };
+
+        const result = await captureResultImages({
+            ...CLAIM,
+            orderedManifestHash: MANIFEST_HASH,
+            expectedRows: 2,
+            loadSourcePage,
+            registry: imageRegistry,
+            store,
+            hmacSecret: HMAC_SECRET,
+            download: vi.fn(),
+            normalize: vi.fn(),
+            now: () => NOW,
+        });
+
+        expect(result.captureFailedImages).toBe(1);
+        expect(loadSourcePage).not.toHaveBeenCalled();
+        expect(imageRegistry.loadManifestPage).not.toHaveBeenCalled();
+        expect(imageRegistry.registerOutcome).not.toHaveBeenCalled();
+        expect(store.put).not.toHaveBeenCalled();
+        expect(store.head).not.toHaveBeenCalled();
+        expect(imageRegistry.sealManifest).toHaveBeenCalledOnce();
+    });
+
     it('captures a mixed manifest with at most eight concurrent image buffers', async () => {
         const rows = [
             source(0),
