@@ -4,6 +4,7 @@ import {
     AnalysisV2AiCapacityPendingError,
     AnalysisV2AiDeadlineTooShortError,
     AnalysisV2AiQuarantineActiveError,
+    AnalysisV2AiResolverCapacitySkippedError,
     AnalysisV2GeminiLeaseFenceError,
     createAnalysisV2GeminiLeaseStore,
     type AnalysisV2GeminiLeaseDependencies,
@@ -141,5 +142,182 @@ describe('deployment-wide Gemini lease store', () => {
             fence: 7,
             expiresAt,
         })).rejects.toBeInstanceOf(AnalysisV2GeminiLeaseFenceError);
+    });
+
+    it('uses operation-aware v2 admission for a v2.7 resolver without queueing', async () => {
+        const operationKey = `gender-resolution:${'a'.repeat(64)}`;
+        const { rpc, store } = setup([{
+            outcome: 'acquired',
+            slot: 2,
+            lease_claim_token: claimToken,
+            fence: 9,
+            expires_at: expiresAt,
+        }]);
+
+        await expect(store.acquire({
+            ...input(),
+            operationKey,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7',
+        })).resolves.toMatchObject({
+            slot: 2,
+            operationKey,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireV2Rpc,
+            {
+                p_request_id: requestId,
+                p_job_key: 'track:profile-ai:batch:0',
+                p_operation_key: operationKey,
+                p_stage: 'genderResolution',
+                p_attempt: 1,
+                p_claim_token: claimToken,
+                p_lease_seconds: 240,
+            }
+        );
+    });
+
+    it('maps resolver-only deployment capacity to an internal skip signal', async () => {
+        const { store } = setup([{
+            outcome: 'resolver_capacity_pending',
+            slot: null,
+            lease_claim_token: null,
+            fence: null,
+            expires_at: null,
+        }]);
+
+        await expect(store.acquire({
+            ...input(),
+            operationKey: `gender-resolution:${'a'.repeat(64)}`,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7',
+        })).rejects.toBeInstanceOf(AnalysisV2AiResolverCapacitySkippedError);
+    });
+
+    it('quarantines a cutoff v2 resolver lease instead of making it immediately available', async () => {
+        const operationKey = `gender-resolution:${'a'.repeat(64)}`;
+        const { rpc, store } = setup([{
+            cutoff: true,
+            lease_state: 'quarantined',
+            fence: 9,
+            expires_at: expiresAt,
+        }]);
+
+        await expect(store.cutoff({
+            slot: 2,
+            claimToken,
+            fence: 9,
+            expiresAt,
+            operationKey,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7',
+        })).resolves.toBeUndefined();
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.cutoffV2Rpc,
+            {
+                p_slot: 2,
+                p_claim_token: claimToken,
+                p_fence: 9,
+                p_operation_key: operationKey,
+            }
+        );
+    });
+
+    it('atomically terminalizes a resolver cutoff and quarantines its exact lease', async () => {
+        const operationKey = `gender-resolution:${'a'.repeat(64)}`;
+        const { rpc, store } = setup({
+            outcome: 'cutoff',
+            attempt_status: 'cutoff',
+            lease_state: 'quarantined',
+            fence: 9,
+            expires_at: expiresAt,
+        });
+        const lease = {
+            slot: 2,
+            claimToken,
+            fence: 9,
+            expiresAt,
+            operationKey,
+            stage: 'genderResolution' as const,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7' as const,
+        };
+
+        await expect(store.cutoffAttempt({
+            lease,
+            attempt: {
+                requestId,
+                jobKey: 'track:profile-ai:batch:0',
+                claimToken: '323e4567-e89b-42d3-a456-426614174000',
+                operationKey,
+                attempt: 1,
+                retryCount: 0,
+                reservationToken: '423e4567-e89b-42d3-a456-426614174000',
+                modelName: 'gemini-3-flash-preview',
+                location: 'global',
+                stage: 'genderResolution',
+                thinkingLevel: 'LOW',
+                mediaCount: 5,
+                mediaResolution: 'MEDIUM',
+                promptVersion: 'gender-resolution-v1',
+                schemaVersion: 1,
+                maxOutputTokens: 512,
+                status: 'cutoff',
+                usageMetadataStatus: 'missing',
+                usageComplete: false,
+                tokenUsage: null,
+                latencyMs: 12,
+                estimatedCostUsd: null,
+                finishReason: null,
+            },
+        })).resolves.toBe('cutoff');
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.cutoffAttemptV2Rpc,
+            {
+                p_request_id: requestId,
+                p_job_key: 'track:profile-ai:batch:0',
+                p_job_claim_token: '323e4567-e89b-42d3-a456-426614174000',
+                p_operation_key: operationKey,
+                p_attempt: 1,
+                p_reservation_token: '423e4567-e89b-42d3-a456-426614174000',
+                p_telemetry: expect.objectContaining({
+                    stage: 'genderResolution',
+                    usage_metadata_status: 'missing',
+                    usage_complete: false,
+                }),
+                p_slot: 2,
+                p_lease_claim_token: claimToken,
+                p_lease_fence: 9,
+            }
+        );
+    });
+
+    it('reaps only a bounded number of expired resolver cutoff leases', async () => {
+        const { rpc, store } = setup(2);
+
+        await expect(store.reapCutoff({ limit: 2 })).resolves.toBe(2);
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.reapCutoffV2Rpc,
+            { p_limit: 2 }
+        );
+        await expect(store.reapCutoff({ limit: 0 })).rejects.toThrow(
+            'ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR'
+        );
+        expect(rpc).toHaveBeenCalledOnce();
+    });
+
+    it('recovers reserved resolver cutoff attempts before reaping their leases', async () => {
+        const { rpc, store } = setup(2);
+
+        await expect(store.recoverCutoffAttempts({ limit: 2 })).resolves.toBe(2);
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.recoverCutoffAttemptsV2Rpc,
+            { p_limit: 2 }
+        );
+        await expect(store.recoverCutoffAttempts({ limit: 9 })).rejects.toThrow(
+            'ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR'
+        );
+        expect(rpc).toHaveBeenCalledOnce();
     });
 });

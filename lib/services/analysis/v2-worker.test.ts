@@ -19,6 +19,7 @@ import type {
     ClaimedAnalysisV2Job,
 } from './v2-job-store';
 import { AnalysisV2JobFenceError } from './v2-job-store';
+import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 import {
     ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS,
     ANALYSIS_V2_JOB_MAX_ATTEMPTS,
@@ -1063,6 +1064,7 @@ describe('analysis V2 durable DAG worker', () => {
         'ANALYSIS_V2_AI_CAPACITY_PENDING',
         'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
         'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+        'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
     ] as const)('defers %s without consuming the job failure budget', async code => {
         const claimed = {
             ...bootstrapClaim,
@@ -1083,6 +1085,45 @@ describe('analysis V2 durable DAG worker', () => {
         });
         expect(jobStore.deferAiCapacity).toHaveBeenCalledWith(claimed, code);
         expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+    });
+
+    it('defers a resolver recovery race and resumes after durable recovery settles it', async () => {
+        const claimed = {
+            ...bootstrapClaim,
+            attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        };
+        const jobStore = store(claimed);
+        const handler = vi.fn()
+            .mockRejectedValueOnce(new AnalysisV2AiResultRecoveryPendingError())
+            .mockResolvedValueOnce([]);
+        const terminalFailureFinalizer = vi.fn();
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler,
+            terminalFailureFinalizer,
+        })).resolves.toEqual({
+            status: 'retry',
+            errorCode: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+        });
+        expect(jobStore.deferAiCapacity).toHaveBeenCalledWith(
+            claimed,
+            'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'
+        );
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler,
+            terminalFailureFinalizer,
+        })).resolves.toEqual({
+            status: 'completed',
+            successorCount: 0,
+            pendingRecoveryCount: 0,
+        });
+        expect(jobStore.completeAndFanout).toHaveBeenCalledWith(claimed, []);
         expect(terminalFailureFinalizer).not.toHaveBeenCalled();
     });
 

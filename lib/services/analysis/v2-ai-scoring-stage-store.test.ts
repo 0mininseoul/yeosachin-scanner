@@ -210,6 +210,14 @@ describe('analysis V2 AI/scoring stage store', () => {
             'fetch_unavailable',
         ]);
         expect(loaded.every(row => row.mediaCoverage.selectedCount === 0)).toBe(true);
+        expect(loaded.map(row => ({
+            baseline: row.baselineClassification,
+            source: row.classificationSource,
+            resolver: row.genderResolutionStatus,
+        }))).toEqual([
+            { baseline: 'media_unavailable', source: 'unavailable', resolver: 'disabled' },
+            { baseline: 'fetch_unavailable', source: 'unavailable', resolver: 'disabled' },
+        ]);
     });
 
     it('round-trips an analysis-unavailable profile without AI or media data', async () => {
@@ -236,6 +244,11 @@ describe('analysis V2 AI/scoring stage store', () => {
             genderResultHash: null,
             featureOperationKey: null,
             featureResultHash: null,
+            baselineClassification: 'analysis_unavailable' as const,
+            classificationSource: 'unavailable' as const,
+            genderResolutionStatus: 'disabled' as const,
+            genderResolutionOperationKey: null,
+            genderResolutionResultHash: null,
             mediaBundlePersisted: false,
         };
         const envelope = {
@@ -267,6 +280,16 @@ describe('analysis V2 AI/scoring stage store', () => {
             ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
             expect.objectContaining({ p_payload: { outcomes: [outcome] } })
         );
+
+        const invalid = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
+        await expect(invalid.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [{
+                ...outcome,
+                genderResolutionStatus: 'ready_inconclusive',
+            }],
+        })).rejects.toThrow('Ready gender resolution provenance is incomplete');
     });
 
     it('rejects inconsistent analysis-unavailable outcomes before persistence', async () => {
@@ -292,6 +315,11 @@ describe('analysis V2 AI/scoring stage store', () => {
             genderResultHash: null,
             featureOperationKey: null,
             featureResultHash: null,
+            baselineClassification: 'analysis_unavailable' as const,
+            classificationSource: 'unavailable' as const,
+            genderResolutionStatus: 'disabled' as const,
+            genderResolutionOperationKey: null,
+            genderResolutionResultHash: null,
             mediaBundlePersisted: false,
         };
 

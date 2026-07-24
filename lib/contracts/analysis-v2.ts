@@ -657,14 +657,10 @@ export const analysisResultSummaryV1Schema = z.object({
         female: z.number().int().nonnegative(),
         unknown: z.number().int().nonnegative(),
     }).strict(),
-    successfullyScreenedMutuals: z.number().int().nonnegative(),
-    fetchUnavailableMutuals: z.number().int().nonnegative(),
-    mediaUnavailableMutuals: z.number().int().nonnegative(),
-    analysisUnavailableMutuals: z.number().int().nonnegative().default(0),
     notScreenedMutuals: z.number().int().nonnegative(),
     exclusionApplied: z.boolean(),
     scorePolicyVersion: z.enum(['risk-policy-v2.2', RISK_POLICY_VERSION]),
-}).strict().superRefine((value, context) => {
+}).strip().superRefine((value, context) => {
     for (const side of ['followers', 'following'] as const) {
         if (!value[side].meetsCoverageGate) {
             context.addIssue({
@@ -736,19 +732,6 @@ export const analysisResultSummaryV1Schema = z.object({
             code: 'custom',
             message: 'Gender totals must equal the screened public mutual count.',
             path: ['genderStats'],
-        });
-    }
-    if (
-        value.successfullyScreenedMutuals
-            + value.fetchUnavailableMutuals
-            + value.mediaUnavailableMutuals
-            + value.analysisUnavailableMutuals
-        !== value.screenedMutuals
-    ) {
-        context.addIssue({
-            code: 'custom',
-            message: 'Successful and unavailable screening counts must equal the selected scope.',
-            path: ['successfullyScreenedMutuals'],
         });
     }
 });

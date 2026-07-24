@@ -4,7 +4,7 @@ import { z } from 'zod';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
-const OPERATION_KEY_PATTERN = /^(gender-triage|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
+const OPERATION_KEY_PATTERN = /^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 const LOCATION_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 const VERSION_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
@@ -20,6 +20,7 @@ export const ANALYSIS_V2_AI_ATTEMPT_DATABASE_NAMES = Object.freeze({
 
 export const ANALYSIS_V2_AI_STAGES = [
     'genderTriage',
+    'genderResolution',
     'featureAnalysis',
     'highRiskNarrative',
     'privateAccountName',
@@ -33,6 +34,7 @@ export const ANALYSIS_V2_AI_ATTEMPT_STATUSES = [
     'ambiguous',
     'rejected',
     'response_rejected',
+    'cutoff',
 ] as const;
 
 const TERMINAL_STATUSES = [
@@ -41,6 +43,7 @@ const TERMINAL_STATUSES = [
     'ambiguous',
     'rejected',
     'response_rejected',
+    'cutoff',
 ] as const;
 
 export type AnalysisV2AiStage = typeof ANALYSIS_V2_AI_STAGES[number];
@@ -52,6 +55,7 @@ export type AnalysisV2AiUsageMetadataStatus = 'complete' | 'missing' | 'malforme
 
 const OPERATION_PREFIX_BY_STAGE: Readonly<Record<AnalysisV2AiStage, string>> = {
     genderTriage: 'gender-triage',
+    genderResolution: 'gender-resolution',
     featureAnalysis: 'feature-analysis',
     highRiskNarrative: 'high-risk-narrative',
     privateAccountName: 'private-account-name',

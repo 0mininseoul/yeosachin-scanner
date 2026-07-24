@@ -25,12 +25,15 @@ import {
     classifyGeminiGenerationError,
 } from './gemini-generation-policy';
 import {
+    AI_STAGE_POLICY_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
     AI_GEMINI_SDK_TIMEOUT_MS,
+    assertSupportedAiStagePolicyVersion,
     getAiStagePolicy,
     isAiStageName,
     type AiMediaResolution,
     type AiStageName,
+    type AiStagePolicyVersion,
     type AiThinkingLevel,
 } from './stage-policy';
 
@@ -52,6 +55,17 @@ class AsyncSemaphore {
         } finally {
             this.release();
         }
+    }
+
+    tryAcquire(): (() => void) | null {
+        if (this.active >= this.limit) return null;
+        this.active++;
+        let released = false;
+        return () => {
+            if (released) return;
+            released = true;
+            this.release();
+        };
     }
 
     private acquire(): Promise<void> {
@@ -76,7 +90,7 @@ class AsyncSemaphore {
 
 interface GeminiGenerationLimiterState {
     shared: AsyncSemaphore;
-    stages: Map<AiStageName, AsyncSemaphore>;
+    stages: Map<string, AsyncSemaphore>;
 }
 
 const processScope = globalThis as typeof globalThis & {
@@ -84,30 +98,54 @@ const processScope = globalThis as typeof globalThis & {
 };
 const generationLimiterState = processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ ?? {
     shared: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT),
-    stages: new Map<AiStageName, AsyncSemaphore>(),
+    stages: new Map<string, AsyncSemaphore>(),
 };
 processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ = generationLimiterState;
 
-function getStageGenerationSemaphore(stage: AiStageName): AsyncSemaphore {
-    const existing = generationLimiterState.stages.get(stage);
+function getStageGenerationSemaphore(
+    policyVersion: AiStagePolicyVersion,
+    stage: AiStageName,
+): AsyncSemaphore {
+    const key = `${policyVersion}:${stage}`;
+    const existing = generationLimiterState.stages.get(key);
     if (existing) return existing;
 
-    const semaphore = new AsyncSemaphore(getAiStagePolicy(stage).concurrency);
-    generationLimiterState.stages.set(stage, semaphore);
+    const semaphore = new AsyncSemaphore(getAiStagePolicy(policyVersion, stage).concurrency);
+    generationLimiterState.stages.set(key, semaphore);
     return semaphore;
 }
 
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
+    policyVersion: AiStagePolicyVersion,
     task: () => Promise<T>
 ): Promise<T> {
     if (!stage) {
         return generationLimiterState.shared.run(task);
     }
 
+    const stageSemaphore = getStageGenerationSemaphore(policyVersion, stage);
+    if (stage === 'genderResolution') {
+        const releaseStage = stageSemaphore.tryAcquire();
+        if (!releaseStage) {
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        }
+        const releaseShared = generationLimiterState.shared.tryAcquire();
+        if (!releaseShared) {
+            releaseStage();
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        }
+        try {
+            return await task();
+        } finally {
+            releaseShared();
+            releaseStage();
+        }
+    }
+
     // Acquire the narrower stage slot first so queued stage work cannot occupy
     // otherwise-available shared capacity.
-    return getStageGenerationSemaphore(stage).run(() => generationLimiterState.shared.run(task));
+    return stageSemaphore.run(() => generationLimiterState.shared.run(task));
 }
 
 function getGenAIClient(): GoogleGenAI {
@@ -142,6 +180,7 @@ const AI_ADMISSION_SIGNAL_CODES = new Set([
     'ANALYSIS_V2_AI_CAPACITY_PENDING',
     'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
     'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED',
 ]);
 
 // 토큰 사용량 타입
@@ -211,6 +250,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     requestId?: string;
     skipTokenLog?: boolean;
     stage?: AiStageName;
+    aiStagePolicyVersion?: AiStagePolicyVersion;
+    abortSignal?: AbortSignal;
     model?: string;
     thinkingLevel?: AiThinkingLevel;
     mediaResolution?: AiMediaResolution;
@@ -605,6 +646,8 @@ export async function analyzeWithGemini<T>(
         requestId,
         skipTokenLog = false,
         stage,
+        aiStagePolicyVersion,
+        abortSignal,
         model,
         thinkingLevel,
         mediaResolution,
@@ -651,7 +694,10 @@ export async function analyzeWithGemini<T>(
     }
 
     const costOptimized = isVertexAICostOptimized();
-    const stagePolicy = stage ? getAiStagePolicy(stage) : null;
+    const resolvedPolicyVersion = stage
+        ? assertSupportedAiStagePolicyVersion(aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION)
+        : AI_STAGE_POLICY_VERSION;
+    const stagePolicy = stage ? getAiStagePolicy(resolvedPolicyVersion, stage) : null;
     const modelName = explicitModel
         ?? stagePolicy?.model
         ?? resolveVertexAIModel(process.env.VERTEX_AI_MODEL, costOptimized);
@@ -720,6 +766,7 @@ export async function analyzeWithGemini<T>(
                     httpOptions: {
                         timeout: AI_GEMINI_SDK_TIMEOUT_MS,
                     },
+                    ...(abortSignal ? { abortSignal } : {}),
                     ...(resolvedMaxOutputTokens !== undefined
                         ? { maxOutputTokens: resolvedMaxOutputTokens }
                         : {}),
@@ -734,44 +781,48 @@ export async function analyzeWithGemini<T>(
                         }
                         : {}),
                 };
-                response = await runWithGenerationSlot(stage ?? null, async () => {
-                    attemptStartedAt = performance.now();
-                    if (stage && requestId && stagePolicy && onBeforeAttempt) {
-                        try {
-                            await onBeforeAttempt({
-                                requestId,
-                                modelName,
-                                location: GOOGLE_CLOUD_LOCATION,
-                                stage,
-                                thinkingLevel: resolvedThinkingLevel,
-                                mediaCount: selectedImages.length,
-                                mediaResolution: resolvedMediaResolution,
-                                promptVersion: stagePolicy.promptVersion,
-                                schemaVersion: stagePolicy.schemaVersion,
-                                maxOutputTokens: resolvedMaxOutputTokens
-                                    ?? stagePolicy.maxOutputTokens,
-                                attempt: attemptNumber,
-                                retryCount: attemptNumber - 1,
-                            });
-                        } catch (error) {
-                            if (
-                                error instanceof Error
-                                && AI_ADMISSION_SIGNAL_CODES.has(error.message)
-                            ) {
-                                throw error;
+                response = await runWithGenerationSlot(
+                    stage ?? null,
+                    resolvedPolicyVersion,
+                    async () => {
+                        attemptStartedAt = performance.now();
+                        if (stage && requestId && stagePolicy && onBeforeAttempt) {
+                            try {
+                                await onBeforeAttempt({
+                                    requestId,
+                                    modelName,
+                                    location: GOOGLE_CLOUD_LOCATION,
+                                    stage,
+                                    thinkingLevel: resolvedThinkingLevel,
+                                    mediaCount: selectedImages.length,
+                                    mediaResolution: resolvedMediaResolution,
+                                    promptVersion: stagePolicy.promptVersion,
+                                    schemaVersion: stagePolicy.schemaVersion,
+                                    maxOutputTokens: resolvedMaxOutputTokens
+                                        ?? stagePolicy.maxOutputTokens,
+                                    attempt: attemptNumber,
+                                    retryCount: attemptNumber - 1,
+                                });
+                            } catch (error) {
+                                if (
+                                    error instanceof Error
+                                    && AI_ADMISSION_SIGNAL_CODES.has(error.message)
+                                ) {
+                                    throw error;
+                                }
+                                throw new Error(
+                                    'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
+                                );
                             }
-                            throw new Error(
-                                'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
-                            );
                         }
-                    }
 
-                    return client.models.generateContent({
-                        model: modelName,
-                        contents: [{ role: 'user', parts }],
-                        config,
-                    });
-                });
+                        return client.models.generateContent({
+                            model: modelName,
+                            contents: [{ role: 'user', parts }],
+                            config,
+                        });
+                    }
+                );
             } catch (generationError) {
                 if (
                     generationError instanceof Error

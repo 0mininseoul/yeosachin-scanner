@@ -837,4 +837,34 @@ describe('analyzeWithGemini process concurrency', () => {
         await expect(Promise.all(calls)).resolves.toHaveLength(5);
         expect(deferred.maximumActive()).toBe(3);
     });
+
+    it('never queues a resolver when either bounded slot is unavailable', async () => {
+        const deferred = deferredGenerations();
+        const resolverOptions = {
+            schema: responseSchema,
+            stage: 'genderResolution' as const,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7' as const,
+            ...stageAuditOptions(),
+        };
+        const first = analyzeWithGemini('prompt', undefined, resolverOptions);
+        const second = analyzeWithGemini('prompt', undefined, resolverOptions);
+
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(2));
+        await expect(analyzeWithGemini('prompt', undefined, resolverOptions))
+            .rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+
+        deferred.releases.splice(0).forEach(release => release());
+        await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    });
+
+    it('rejects resolver use under the frozen v2.6 policy', async () => {
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.6',
+            ...stageAuditOptions(),
+        })).rejects.toThrow('Unsupported AI stage');
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
 });

@@ -421,7 +421,10 @@ describe('analysis V2 job store', () => {
         );
     });
 
-    it('defers AI capacity without consuming the claimed attempt', async () => {
+    it.each([
+        'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+    ] as const)('defers %s without consuming the claimed attempt', async errorCode => {
         const job = { ...claimedJob(), attemptCount: 3 };
         const rpc = vi.fn().mockResolvedValue({
             data: [{
@@ -437,7 +440,7 @@ describe('analysis V2 job store', () => {
 
         await expect(store.deferAiCapacity(
             job,
-            'ANALYSIS_V2_AI_CAPACITY_PENDING'
+            errorCode
         )).resolves.toEqual({
             released: true,
             status: 'pending',
@@ -450,7 +453,7 @@ describe('analysis V2 job store', () => {
                 p_request_id: requestId,
                 p_job_key: jobKey,
                 p_claim_token: job.claimToken,
-                p_error_code: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+                p_error_code: errorCode,
             }
         );
     });
