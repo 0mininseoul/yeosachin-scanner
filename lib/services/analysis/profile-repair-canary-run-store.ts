@@ -1,15 +1,20 @@
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import {
-    isApifyCredentialSlot,
-    type ApifyCredentialSlot,
-} from '@/lib/services/instagram/providers/types';
 
 export const PROFILE_REPAIR_CANARY_VERSION = 'profile-repair-canary-v1' as const;
 export const PROFILE_REPAIR_CANARY_ACTOR_ID =
     'apify/instagram-profile-scraper' as const;
 export const PROFILE_REPAIR_CANARY_REQUESTED_COUNT = 15 as const;
 export const PROFILE_REPAIR_CANARY_MAX_CHARGE_USD = 0.05 as const;
+export const PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS = [
+    'primary',
+    'secondary',
+    'tertiary',
+    'quaternary',
+    'quinary',
+] as const;
+export type ProfileRepairCanaryCredentialSlot =
+    typeof PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS[number];
 
 const UUID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -41,7 +46,7 @@ export interface StoredProfileRepairCanaryRun {
     canaryVersion: typeof PROFILE_REPAIR_CANARY_VERSION;
     repetition: ProfileRepairCanaryRepetition;
     actorId: typeof PROFILE_REPAIR_CANARY_ACTOR_ID;
-    credentialSlot: ApifyCredentialSlot;
+    credentialSlot: ProfileRepairCanaryCredentialSlot;
     requestedCount: typeof PROFILE_REPAIR_CANARY_REQUESTED_COUNT;
     maxChargeUsd: typeof PROFILE_REPAIR_CANARY_MAX_CHARGE_USD;
     reservationToken: string;
@@ -89,7 +94,9 @@ export interface ProfileRepairCanaryTerminalInput extends ReservedRunKey {
 
 export interface ProfileRepairCanaryRunStore {
     load(input: RunKey): Promise<StoredProfileRepairCanaryRun | null>;
-    reserve(input: RunKey & { credentialSlot: ApifyCredentialSlot }): Promise<{
+    reserve(input: RunKey & {
+        credentialSlot: ProfileRepairCanaryCredentialSlot;
+    }): Promise<{
         created: boolean;
         run: StoredProfileRepairCanaryRun;
     }>;
@@ -126,6 +133,15 @@ function validationError(): never {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isProfileRepairCanaryCredentialSlot(
+    value: unknown
+): value is ProfileRepairCanaryCredentialSlot {
+    return typeof value === 'string'
+        && PROFILE_REPAIR_CANARY_CREDENTIAL_SLOTS.includes(
+            value as ProfileRepairCanaryCredentialSlot
+        );
 }
 
 function runKey(input: RunKey): RunKey {
@@ -208,7 +224,7 @@ function parseStoredRun(value: unknown): StoredProfileRepairCanaryRun {
         || (repetition !== 1 && repetition !== 2)
         || value.canaryVersion !== PROFILE_REPAIR_CANARY_VERSION
         || value.actorId !== PROFILE_REPAIR_CANARY_ACTOR_ID
-        || !isApifyCredentialSlot(credentialSlot)
+        || !isProfileRepairCanaryCredentialSlot(credentialSlot)
         || value.requestedCount !== PROFILE_REPAIR_CANARY_REQUESTED_COUNT
         || !['starting', 'running', 'succeeded', 'failed', 'ambiguous'].includes(String(state))
         || !['actual', 'conservative', 'unknown'].includes(String(costStatus))
@@ -418,7 +434,9 @@ export function createProfileRepairCanaryRunStore(
 
         async reserve(input) {
             const key = runKey(input);
-            if (!isApifyCredentialSlot(input.credentialSlot)) validationError();
+            if (!isProfileRepairCanaryCredentialSlot(input.credentialSlot)) {
+                validationError();
+            }
             const proposedReservationToken = reservationToken(
                 (dependencies.randomUUID ?? nodeRandomUUID)()
             );

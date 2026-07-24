@@ -1,11 +1,28 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { ANALYSIS_PLAN_CATALOG } from '@/lib/domain/analysis/plan-catalog';
+import {
+    CANDIDATE_INTERACTION_POST_LIMIT,
+    CANDIDATE_LIKER_LIMIT_PER_POST,
+    MAX_INTERACTION_CANDIDATES,
+    TARGET_COMMENT_LIMIT_PER_POST,
+    TARGET_COMMENT_POST_LIMIT,
+    TARGET_LIKER_LIMIT_PER_POST,
+    TARGET_LIKER_POST_LIMIT,
+} from '@/lib/services/analysis/interaction-stage';
+import { REPLACEMENT_PROFILE_ACTOR } from '@/lib/services/instagram/providers/apify-profile-details';
+import { APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD } from '@/lib/services/instagram/providers/apify';
 
 const root = new URL('../../', import.meta.url);
 
 function source(relativePath: string): string {
     const url = new URL(relativePath, root);
     return existsSync(url) ? readFileSync(url, 'utf8') : '';
+}
+
+function dotenvNumber(document: string, key: string): number {
+    const value = document.match(new RegExp(`^${key}=([0-9.]+)$`, 'm'))?.[1];
+    return value === undefined ? Number.NaN : Number(value);
 }
 
 describe('analytics and observability disclosure contract', () => {
@@ -212,5 +229,211 @@ describe('analytics and observability disclosure contract', () => {
             expect(document).not.toMatch(/최종 정가[^\n]*(확정|결정)/);
             expect(document).not.toMatch(/자동 public launch|자동 공개 출시/);
         }
+    });
+
+    it('documents the exact same-named senary authorized E2E boundary and teardown', () => {
+        const runbook = source('docs/authorized-apify-sharded-e2e-runbook.md');
+        const plan = source(
+            'docs/superpowers/plans/2026-07-24-expand-authorized-senary-e2e-slot.md'
+        );
+        const exampleEnv = source('.env.example');
+
+        expect(runbook).toMatch(/runtime slot[^\n]*`primary`[^\n]*`senary`/);
+        expect(runbook).toMatch(/`septenary`[^\n]*(unsupported|지원하지 않)/);
+        expect(runbook).toContain('APIFY_SENARY_API_TOKEN');
+        expect(runbook).toMatch(/ai-baram-v2-apify-senary:<numeric-version>/);
+        for (const binding of [
+            'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=senary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=senary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=senary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=senary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=tertiary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=quinary',
+        ]) {
+            expect(runbook).toContain(binding);
+        }
+        expect(exampleEnv).toMatch(
+            /staging[^\n]*senary[^\n]*teardown[^\n]*primary/i
+        );
+        expect(exampleEnv).toContain('ANALYSIS_V2_APIFY_API_TOKEN_SLOT=senary');
+        expect(plan).toContain('target profile and profile fallback/repair: senary');
+        for (const document of [runbook, plan]) {
+            expect(document).toContain(
+                '--prune-apify-secret-refs=tertiary,quinary,senary'
+            );
+            expect(document).toMatch(/primary:3/);
+            expect(document).toMatch(/active/i);
+            expect(document).toMatch(/unreconciled|미정산/i);
+            expect(document).toMatch(/profile-repair/i);
+        }
+        expect(runbook).toContain(
+            'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3'
+        );
+        for (const mode of ['--dry-run', '--check']) {
+            expect(runbook).toContain(
+                `bash scripts/deploy-analysis-v2-worker.sh ${mode}`
+            );
+        }
+        expect(runbook).toMatch(
+            /bash scripts\/deploy-analysis-v2-worker\.sh \\\n\s+--prune-apify-secret-refs=tertiary,quinary,senary/
+        );
+        expect(runbook).toMatch(/staging 전과 promotion 직전/);
+        expect(runbook).toMatch(/일반 deploy[\s\S]{0,120}보존/);
+        expect(runbook).toMatch(/prune flag 없이 일반 deploy/);
+        expect(runbook).toMatch(/deploy lock[\s\S]{0,80}정확히 300초/);
+        expect(runbook).toMatch(/metadata\.generation[\s\S]{0,100}status\.observedGeneration/);
+        expect(runbook).toMatch(/revision 생성 시각은 실제 serving 시간을 증명하지 않으므로/);
+        expect(runbook).toMatch(
+            /build manifest[\s\S]{0,100}Supabase URL[\s\S]{0,100}latest\/active Cloud Run/
+        );
+        expect(runbook).toContain(
+            '--clear-apify-secret-ref-prune-fence=tertiary,quinary,senary'
+        );
+        expect(runbook).toMatch(
+            /durable singleton DB fence[\s\S]{0,180}성공[\s\S]{0,120}실패[\s\S]{0,120}rollback[\s\S]{0,120}자동으로 해제하지 않는다/
+        );
+        expect(runbook).toMatch(
+            /latest와 active inventory[\s\S]{0,180}compare-and-clear/
+        );
+        expect(runbook).toMatch(
+            /owner, slot,[\s\S]{0,80}inventory가 바뀌면 실패[\s\S]{0,80}fence를 유지/
+        );
+        expect(plan).toMatch(/ordinary-deploy exact primary:3[\s\S]{0,240}300-second drain/);
+
+        const standard = ANALYSIS_PLAN_CATALOG.standard;
+        const relationshipRate = dotenvNumber(
+            exampleEnv,
+            'APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD'
+        );
+        const fallbackRate = dotenvNumber(
+            exampleEnv,
+            'APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD'
+        );
+        const likerRate = dotenvNumber(
+            exampleEnv,
+            'APIFY_LIKERS_ESTIMATED_COST_PER_RESULT_USD'
+        );
+        const commentRate = dotenvNumber(
+            exampleEnv,
+            'APIFY_COMMENTS_ESTIMATED_COST_PER_RESULT_USD'
+        );
+        const followerRelationshipExposure = (
+            standard.relationshipCapacity.followers * relationshipRate
+        );
+        const followingRelationshipExposure = (
+            standard.relationshipCapacity.following * relationshipRate
+        );
+        const fallbackExposure = standard.detailedMutualLimit * fallbackRate;
+        const repairExposure = (
+            standard.detailedMutualLimit
+            * REPLACEMENT_PROFILE_ACTOR.estimatedResultCostUsd
+        );
+        const targetLikerExposure = (
+            TARGET_LIKER_POST_LIMIT * TARGET_LIKER_LIMIT_PER_POST * likerRate
+        );
+        const commentExposure = (
+            TARGET_COMMENT_POST_LIMIT * TARGET_COMMENT_LIMIT_PER_POST * commentRate
+        );
+        const candidateLikerExposure = (
+            MAX_INTERACTION_CANDIDATES
+            * CANDIDATE_INTERACTION_POST_LIMIT
+            * CANDIDATE_LIKER_LIMIT_PER_POST
+            * likerRate
+        );
+        const targetProfileAcquisitionExposure = (
+            APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD * 2
+        );
+        const senaryExposure = (
+            followerRelationshipExposure
+            + fallbackExposure
+            + repairExposure
+            + targetProfileAcquisitionExposure
+            + targetLikerExposure
+        );
+        const quinaryExposure = followingRelationshipExposure + candidateLikerExposure;
+        const tertiaryExposure = commentExposure;
+        const liveBalanceMargin = 1.1;
+
+        expect({
+            followerRelationshipExposure: Number(followerRelationshipExposure.toFixed(6)),
+            followingRelationshipExposure: Number(followingRelationshipExposure.toFixed(6)),
+            fallbackExposure: Number(fallbackExposure.toFixed(6)),
+            repairExposure: Number(repairExposure.toFixed(6)),
+            targetProfileAcquisitionExposure: Number(
+                targetProfileAcquisitionExposure.toFixed(6)
+            ),
+            targetLikerExposure: Number(targetLikerExposure.toFixed(6)),
+            commentExposure: Number(commentExposure.toFixed(6)),
+            candidateLikerExposure: Number(candidateLikerExposure.toFixed(6)),
+            senaryExposure: Number(senaryExposure.toFixed(6)),
+            quinaryExposure: Number(quinaryExposure.toFixed(6)),
+            tertiaryExposure: Number(tertiaryExposure.toFixed(6)),
+            senaryMinimumBalance: Number((senaryExposure * liveBalanceMargin).toFixed(6)),
+            quinaryMinimumBalance: Number((quinaryExposure * liveBalanceMargin).toFixed(6)),
+            tertiaryMinimumBalance: Number((tertiaryExposure * liveBalanceMargin).toFixed(6)),
+        }).toEqual({
+            followerRelationshipExposure: 0.68,
+            followingRelationshipExposure: 0.68,
+            fallbackExposure: 1.56,
+            repairExposure: 1.62,
+            targetProfileAcquisitionExposure: 0.0052,
+            targetLikerExposure: 0.93,
+            commentExposure: 0.234,
+            candidateLikerExposure: 1.55,
+            senaryExposure: 4.7952,
+            quinaryExposure: 2.23,
+            tertiaryExposure: 0.234,
+            senaryMinimumBalance: 5.27472,
+            quinaryMinimumBalance: 2.453,
+            tertiaryMinimumBalance: 0.2574,
+        });
+        for (const formula of [
+            '800 × $0.00085 = $0.68',
+            '600 × $0.0026 = $1.56',
+            '600 × $0.0027 = $1.62',
+            'initial + fresh target profiles `2 × $0.0026 = $0.0052`',
+            '4 × 150 × $0.00155 = $0.93',
+            '6 × 15 × $0.0026 = $0.234',
+            '10 × 1 × 100 × $0.00155 = $1.55',
+        ]) {
+            expect(runbook).toContain(formula);
+        }
+        for (const [slot, total, minimum] of [
+            ['senary', '4.7952', '5.27472'],
+            ['quinary', '2.23', '2.453'],
+            ['tertiary', '0.234', '0.2574'],
+        ]) {
+            expect(runbook).toMatch(new RegExp(
+                `\\| \`${slot}\` \\|[^\\n]*\\| \`\\$${total}\` \\| \`\\$${minimum}\` \\|`
+            ));
+        }
+        expect(runbook).toMatch(/110%[^\n]*(balance|잔액)/i);
+        expect(runbook).toMatch(/Actor[^\n]*(daily|일일)[^\n]*(quota|할당량|한도)/i);
+        expect(runbook).toMatch(/quota[^\n]*(balance|잔액)[^\n]*(대체|갈음)[^\n]*(금지|않)/i);
+        expect(runbook).toMatch(/baseline[^\n]*primary:3/i);
+        expect(runbook).toMatch(/selected[^\n]*senary[^\n]*numeric/i);
+        expect(runbook).toMatch(/selected plan[^\n]*Standard/i);
+        expect(runbook).toMatch(/Standard[^\n]*(800|600)/i);
+        expect(plan).toMatch(/authorized Standard E2E/i);
+        expect(plan).not.toMatch(/authorized Plus E2E/i);
+        expect(runbook).toMatch(/additional[^\n]*quinary[^\n]*tertiary/i);
+        expect(runbook).toMatch(/false[^\n]*→[^\n]*true[^\n]*(유일|only)/i);
+        expect(runbook).toMatch(
+            /ANALYSIS_V2_ADMISSION_ENABLED=true[\s\S]{0,240}(ordinary|일반)[^\n]*(preflight|work)/i
+        );
+        expect(runbook).toMatch(
+            /(ordinary|일반)[^\n]*(preflight|work)[^\n]*(중단|stop)[^\n]*(empty-work|empty work)/i
+        );
+        expect(runbook).toMatch(
+            /live[\s\S]{0,80}(credit|크레딧)[\s\S]{0,80}Actor[\s\S]{0,80}(allowance|허용량|quota)/i
+        );
+        expect(runbook).toMatch(
+            /profile-repair microcanary[\s\S]{0,100}senary[\s\S]{0,80}(지원하지 않|사용하지 않)/i
+        );
+        expect(runbook).toMatch(/signed `test_entitlement`[^\n]*(owner|소유자)[^\n]*(target|대상)/i);
+        expect(runbook).toMatch(/sharding[^\n]*`false`/i);
+        expect(runbook).toMatch(/temporary[^\n]*(reference|ref|참조)[^\n]*(제거|remove)/i);
+        expect(runbook).toMatch(/teardown[^\n]*primary:3/i);
     });
 });

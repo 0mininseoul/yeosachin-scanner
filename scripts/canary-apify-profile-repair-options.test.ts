@@ -58,6 +58,7 @@ describe('profile repair canary arguments', () => {
         ['--critical-job-key', 'track:profiles:batch:07'],
         ['--critical-job-key', 'track:profiles:batch:0:extra'],
         ['--credential-slot', 'rotating-pool'],
+        ['--credential-slot', 'senary'],
     ])('rejects an invalid %s value', (flag, value) => {
         const args = requiredArgs();
         const index = args.indexOf(flag);
