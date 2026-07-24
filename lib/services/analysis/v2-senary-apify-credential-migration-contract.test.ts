@@ -12,6 +12,8 @@ const historicalExpansion = readFileSync(join(
     process.cwd(),
     'supabase/migrations/20260713204500_expand_analysis_v2_apify_credential_slots.sql'
 ), 'utf8');
+const PRUNE_OWNER_SHA = 'a'.repeat(40);
+const OTHER_PRUNE_OWNER_SHA = 'b'.repeat(40);
 
 function functionDefinition(name: string): string {
     const match = migration.match(new RegExp(
@@ -81,7 +83,7 @@ describe('analysis V2 senary Apify credential migration contract', () => {
         );
         expect(readiness).toContain('SECURITY DEFINER');
         expect(readiness).toContain("SET search_path = ''");
-        expect(readiness).toContain("slot = 'primary'");
+        expect(migration).toContain("requested.slot = 'primary'");
         expect(readiness).toContain('analysis_v2_provider_runs');
         expect(readiness).toContain('analysis_preflight_provider_runs');
         expect(readiness).toContain('analysis_v2_profile_repair_canary_runs');
@@ -103,7 +105,9 @@ describe('analysis V2 senary Apify credential migration contract', () => {
             /execution_policy\.operation_slot_map->>'profile-fallback'\s+= source_run\.credential_slot/
         );
         expect(readiness).toContain("analysis_request.status IN ('pending', 'processing')");
-        expect(readiness).toContain("preflight.status IN ('pending', 'processing')");
+        expect(readiness).toMatch(
+            /preflight\.status IN \('pending', 'processing'\)[\s\S]*?OR \([\s\S]*?preflight\.status = 'ready'[\s\S]*?preflight\.admission_status IN \('pending', 'processing'\)/
+        );
         expect(readiness).toContain(
             "experiment.source_kvs_cleanup_state IS DISTINCT FROM 'verified_absent'"
         );
@@ -115,11 +119,69 @@ describe('analysis V2 senary Apify credential migration contract', () => {
         );
         expect(readiness).toContain("'starting', 'running', 'ambiguous'");
         expect(readiness).toContain('usage_reconciled_at IS NULL');
+        expect(readiness).toContain('analysis_v2_apify_secret_ref_prune_guard');
+        expect(readiness).toContain('FOR UPDATE');
+        expect(readiness).toContain('p_owner_source_commit_sha');
         expect(migration).toMatch(
-            /REVOKE ALL ON FUNCTION public\.analysis_v2_apify_secret_ref_prune_readiness\(TEXT\[\]\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+            /REVOKE ALL ON FUNCTION public\.analysis_v2_apify_secret_ref_prune_readiness\(\s*TEXT\[\], TEXT\s*\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
         );
         expect(migration).toMatch(
-            /GRANT EXECUTE ON FUNCTION public\.analysis_v2_apify_secret_ref_prune_readiness\(TEXT\[\]\)[\s\S]*?TO service_role/
+            /GRANT EXECUTE ON FUNCTION public\.analysis_v2_apify_secret_ref_prune_readiness\(\s*TEXT\[\], TEXT\s*\)[\s\S]*?TO service_role/
+        );
+    });
+
+    it('adds a durable singleton prune fence and serializes both canary reserves', () => {
+        expect(migration).toContain(
+            'CREATE TABLE public.analysis_v2_apify_secret_ref_prune_guard'
+        );
+        expect(migration).toMatch(
+            /ALTER TABLE public\.analysis_v2_apify_secret_ref_prune_guard\s+FORCE ROW LEVEL SECURITY/
+        );
+        expect(migration).toMatch(
+            /REVOKE ALL ON TABLE public\.analysis_v2_apify_secret_ref_prune_guard[\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(migration).toContain(
+            'acquire_analysis_v2_apify_secret_ref_prune_fence'
+        );
+        expect(migration).toContain(
+            'load_analysis_v2_apify_secret_ref_prune_fence'
+        );
+        expect(migration).toContain(
+            'clear_analysis_v2_apify_secret_ref_prune_fence'
+        );
+        for (const functionName of [
+            'acquire_analysis_v2_apify_secret_ref_prune_fence',
+            'load_analysis_v2_apify_secret_ref_prune_fence',
+            'clear_analysis_v2_apify_secret_ref_prune_fence',
+        ]) {
+            expect(migration).toMatch(new RegExp(
+                `REVOKE ALL ON FUNCTION public\\.${functionName}\\([\\s\\S]*?`
+                + 'FROM PUBLIC, anon, authenticated, service_role'
+            ));
+            expect(migration).toMatch(new RegExp(
+                `GRANT EXECUTE ON FUNCTION public\\.${functionName}\\([\\s\\S]*?`
+                + 'TO service_role'
+            ));
+        }
+
+        const repairReserve = functionDefinition(
+            'reserve_analysis_v2_profile_repair_canary_run'
+        );
+        const providerReserve = functionDefinition(
+            'reserve_analysis_v2_profile_provider_canary_run'
+        );
+        for (const definition of [repairReserve, providerReserve]) {
+            expect(definition).toContain(
+                'analysis_v2_apify_secret_ref_prune_guard'
+            );
+            expect(definition).toContain('FOR UPDATE');
+            expect(definition).toContain(
+                'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCED'
+            );
+        }
+        expect(repairReserve).toContain('p_credential_slot = ANY');
+        expect(providerReserve).toContain(
+            'source_run.credential_slot = ANY'
         );
     });
 });
@@ -130,6 +192,40 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
     const REQUEST_ID = '10000000-0000-4000-8000-000000000001';
     const RESERVATION_TOKEN = '20000000-0000-4000-8000-000000000001';
     let db: PGlite;
+
+    const acquirePruneFence = async (
+        slots = ['senary', 'quinary', 'tertiary'],
+        owner = PRUNE_OWNER_SHA
+    ) => {
+        await db.exec('SET ROLE service_role');
+        try {
+            return await db.query<{ result: Record<string, unknown> }>(`
+                SELECT public.acquire_analysis_v2_apify_secret_ref_prune_fence(
+                    $1::TEXT[],
+                    $2
+                ) AS result
+            `, [slots, owner]);
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    };
+
+    const clearPruneFence = async (
+        slots = ['senary', 'quinary', 'tertiary'],
+        owner = PRUNE_OWNER_SHA
+    ) => {
+        await db.exec('SET ROLE service_role');
+        try {
+            return await db.query<{ result: Record<string, unknown> }>(`
+                SELECT public.clear_analysis_v2_apify_secret_ref_prune_fence(
+                    $1::TEXT[],
+                    $2
+                ) AS result
+            `, [slots, owner]);
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    };
 
     beforeAll(async () => {
         db = await PGlite.create();
@@ -189,7 +285,8 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
 
             CREATE TABLE public.analysis_preflights (
                 id UUID PRIMARY KEY,
-                status TEXT NOT NULL
+                status TEXT NOT NULL,
+                admission_status TEXT NOT NULL DEFAULT 'idle'
             );
 
             CREATE TABLE public.analysis_v2_provider_execution_policies (
@@ -237,6 +334,51 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
                     'credentialSlot', p_run.credential_slot,
                     'status', p_run.status,
                     'actualUsageUsd', p_run.actual_usage_usd
+                );
+            $$;
+
+            CREATE OR REPLACE FUNCTION public.reserve_analysis_v2_profile_repair_canary_run(
+                p_source_request_id UUID,
+                p_repetition INTEGER,
+                p_credential_slot TEXT,
+                p_reservation_token UUID
+            )
+            RETURNS JSONB
+            LANGUAGE sql
+            SECURITY DEFINER
+            SET search_path = ''
+            AS $$
+                SELECT pg_catalog.jsonb_build_object(
+                    'created', TRUE,
+                    'kind', 'profile-repair',
+                    'credentialSlot', p_credential_slot
+                );
+            $$;
+
+            CREATE OR REPLACE FUNCTION public.reserve_analysis_v2_profile_provider_canary_run(
+                p_source_request_id UUID,
+                p_repetition INTEGER,
+                p_source_run_count INTEGER,
+                p_candidate_count INTEGER,
+                p_unique_candidate_count INTEGER,
+                p_public_candidate_count INTEGER,
+                p_incomplete_candidate_count INTEGER,
+                p_unavailable_candidate_count INTEGER,
+                p_primary_success_candidate_count INTEGER,
+                p_critical_candidate_count INTEGER,
+                p_ordered_set_hmac TEXT,
+                p_restricted_access_verified BOOLEAN,
+                p_reservation_token UUID
+            )
+            RETURNS JSONB
+            LANGUAGE sql
+            SECURITY DEFINER
+            SET search_path = ''
+            AS $$
+                SELECT pg_catalog.jsonb_build_object(
+                    'created', TRUE,
+                    'kind', 'profile-provider',
+                    'sourceRequestId', p_source_request_id
                 );
             $$;
         `);
@@ -310,7 +452,209 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
         }
     });
 
+    it('keeps one constrained guard row with crash-safe acquire and compare-and-clear', async () => {
+        const initial = await db.query<{
+            row_count: number;
+            drop_slots: string[] | null;
+            owner_source_commit_sha: string | null;
+            fenced_at: string | null;
+        }>(`
+            SELECT pg_catalog.count(*) OVER ()::INTEGER AS row_count,
+                drop_slots, owner_source_commit_sha, fenced_at
+            FROM public.analysis_v2_apify_secret_ref_prune_guard
+        `);
+        expect(initial.rows).toEqual([{
+            row_count: 1,
+            drop_slots: null,
+            owner_source_commit_sha: null,
+            fenced_at: null,
+        }]);
+        await expect(db.query(`
+            UPDATE public.analysis_v2_apify_secret_ref_prune_guard
+            SET drop_slots = ARRAY['senary'],
+                owner_source_commit_sha = NULL,
+                fenced_at = pg_catalog.clock_timestamp()
+        `)).rejects.toThrow();
+
+        await db.exec('SET ROLE service_role');
+        try {
+            await expect(db.query(`
+                SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
+                    ARRAY['senary', 'quinary', 'tertiary']::TEXT[],
+                    '${PRUNE_OWNER_SHA}'
+                )
+            `)).rejects.toThrow(
+                'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_CONFLICT'
+            );
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+
+        const acquired = await acquirePruneFence();
+        expect(acquired.rows[0].result).toMatchObject({
+            active: true,
+            acquired: true,
+            dropSlots: ['quinary', 'senary', 'tertiary'],
+        });
+        const adopted = await acquirePruneFence([
+            'tertiary', 'senary', 'quinary',
+        ]);
+        expect(adopted.rows[0].result).toMatchObject({
+            active: true,
+            acquired: false,
+            dropSlots: ['quinary', 'senary', 'tertiary'],
+        });
+        await expect(acquirePruneFence(
+            ['senary', 'quinary', 'tertiary'],
+            OTHER_PRUNE_OWNER_SHA
+        )).rejects.toThrow(
+            'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_CONFLICT'
+        );
+        await expect(clearPruneFence(
+            ['senary', 'quinary', 'tertiary'],
+            OTHER_PRUNE_OWNER_SHA
+        )).rejects.toThrow(
+            'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_CONFLICT'
+        );
+
+        const cleared = await clearPruneFence();
+        expect(cleared.rows[0].result).toMatchObject({
+            active: false,
+            cleared: true,
+            dropSlots: ['quinary', 'senary', 'tertiary'],
+        });
+        const retry = await clearPruneFence();
+        expect(retry.rows[0].result).toMatchObject({
+            active: false,
+            cleared: false,
+        });
+
+        await db.exec('SET ROLE authenticated');
+        try {
+            await expect(db.query(`
+                SELECT * FROM public.analysis_v2_apify_secret_ref_prune_guard
+            `)).rejects.toThrow(/permission denied/i);
+            await expect(db.query(`
+                SELECT public.load_analysis_v2_apify_secret_ref_prune_fence()
+            `)).rejects.toThrow(/permission denied/i);
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('serializes both canary reserves and blocks only overlapping slots', async () => {
+        const sourceRequestId = '90000000-0000-4000-8000-000000000001';
+        await db.query(`
+            INSERT INTO public.analysis_requests (id, status)
+            VALUES ($1, 'failed')
+        `, [sourceRequestId]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_execution_policies (
+                request_id, operation_slot_map
+            ) VALUES (
+                $1,
+                '{"profile-fallback":"quinary"}'::JSONB
+            )
+        `, [sourceRequestId]);
+        for (let index = 0; index < 8; index += 1) {
+            const suffix = String(index + 1).padStart(12, '0');
+            await db.query(`
+                INSERT INTO public.analysis_v2_provider_runs (
+                    request_id, job_key, operation_key, input_hash,
+                    job_claim_token, reservation_token, logical_provider,
+                    actor_id, credential_slot, max_charge_usd, status, run_id,
+                    actual_usage_usd, reserved_at, run_started_at,
+                    terminalized_at, usage_reconciled_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, 'apify',
+                    'apify/instagram-profile-scraper', 'quinary', 0.02,
+                    'succeeded', $7, 0.01, pg_catalog.clock_timestamp(),
+                    pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(),
+                    pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp()
+                )
+            `, [
+                sourceRequestId,
+                `track:profiles:batch:${index}`,
+                `profile-fallback:${index.toString(16).repeat(64)}`,
+                (index + 1).toString(16).repeat(64),
+                `91000000-0000-4000-8000-${suffix}`,
+                `92000000-0000-4000-8000-${suffix}`,
+                `FenceSourceRun${index}`,
+            ]);
+        }
+        await acquirePruneFence(['quinary']);
+
+        await db.exec('SET ROLE service_role');
+        try {
+            await expect(db.query(`
+                SELECT public.reserve_analysis_v2_profile_repair_canary_run(
+                    $1, 1, 'quinary',
+                    '93000000-0000-4000-8000-000000000001'
+                )
+            `, [sourceRequestId])).rejects.toThrow(
+                'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCED'
+            );
+            const repairNonOverlap = await db.query<{
+                result: Record<string, unknown>;
+            }>(`
+                SELECT public.reserve_analysis_v2_profile_repair_canary_run(
+                    $1, 1, 'primary',
+                    '93000000-0000-4000-8000-000000000002'
+                ) AS result
+            `, [sourceRequestId]);
+            expect(repairNonOverlap.rows[0].result).toMatchObject({
+                created: true,
+                kind: 'profile-repair',
+                credentialSlot: 'primary',
+            });
+
+            await expect(db.query(`
+                SELECT public.reserve_analysis_v2_profile_provider_canary_run(
+                    $1, 1, 8, 15, 15, 15, 15, 0, 0, 3,
+                    '${'c'.repeat(64)}', TRUE,
+                    '94000000-0000-4000-8000-000000000001'
+                )
+            `, [sourceRequestId])).rejects.toThrow(
+                'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCED'
+            );
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+
+        await db.query(`
+            UPDATE public.analysis_v2_provider_runs
+            SET credential_slot = 'primary'
+            WHERE request_id = $1
+        `, [sourceRequestId]);
+        await db.query(`
+            UPDATE public.analysis_v2_provider_execution_policies
+            SET operation_slot_map = '{"profile-fallback":"primary"}'::JSONB
+            WHERE request_id = $1
+        `, [sourceRequestId]);
+        await db.exec('SET ROLE service_role');
+        try {
+            const providerNonOverlap = await db.query<{
+                result: Record<string, unknown>;
+            }>(`
+                SELECT public.reserve_analysis_v2_profile_provider_canary_run(
+                    $1, 1, 8, 15, 15, 15, 15, 0, 0, 3,
+                    '${'c'.repeat(64)}', TRUE,
+                    '94000000-0000-4000-8000-000000000002'
+                ) AS result
+            `, [sourceRequestId]);
+            expect(providerNonOverlap.rows[0].result).toMatchObject({
+                created: true,
+                kind: 'profile-provider',
+                sourceRequestId,
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+        await clearPruneFence(['quinary']);
+    });
+
     it('blocks future provider reservations while request or preflight work is active', async () => {
+        await acquirePruneFence();
         const callReadiness = () => db.query<{
             result: {
                 ready: boolean;
@@ -320,7 +664,8 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
             };
         }>(`
             SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
-                ARRAY['senary', 'quinary', 'tertiary']::TEXT[]
+                ARRAY['senary', 'quinary', 'tertiary']::TEXT[],
+                '${PRUNE_OWNER_SHA}'
             ) AS result
         `);
 
@@ -331,10 +676,15 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
                 ('70000000-0000-4000-8000-000000000003', 'failed')
         `);
         await db.query(`
-            INSERT INTO public.analysis_preflights (id, status) VALUES
-                ('71000000-0000-4000-8000-000000000001', 'pending'),
-                ('71000000-0000-4000-8000-000000000002', 'processing'),
-                ('71000000-0000-4000-8000-000000000003', 'consumed')
+            INSERT INTO public.analysis_preflights (
+                id, status, admission_status
+            ) VALUES
+                ('71000000-0000-4000-8000-000000000001', 'pending', 'idle'),
+                ('71000000-0000-4000-8000-000000000002', 'processing', 'idle'),
+                ('71000000-0000-4000-8000-000000000003', 'consumed', 'idle'),
+                ('71000000-0000-4000-8000-000000000004', 'ready', 'processing'),
+                ('71000000-0000-4000-8000-000000000005', 'ready', 'idle'),
+                ('71000000-0000-4000-8000-000000000006', 'ready', 'ready')
         `);
         await db.query(`
             INSERT INTO public.analysis_v2_provider_execution_policies (
@@ -354,7 +704,7 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
             expect(blocked.rows[0].result).toMatchObject({
                 ready: false,
                 activeRequests: 2,
-                activePreflights: 2,
+                activePreflights: 3,
                 activeDropSlotPolicies: 1,
             });
         } finally {
@@ -370,6 +720,11 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
             UPDATE public.analysis_preflights
             SET status = 'consumed'
             WHERE status IN ('pending', 'processing')
+        `);
+        await db.query(`
+            UPDATE public.analysis_preflights
+            SET admission_status = 'ready'
+            WHERE admission_status = 'processing'
         `);
 
         await db.exec('SET ROLE service_role');
@@ -387,6 +742,7 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
     });
 
     it('blocks incomplete official-canary source cleanup on a dropped source slot', async () => {
+        await acquirePruneFence();
         const sourceRequestId = '80000000-0000-4000-8000-000000000001';
         await db.query(`
             INSERT INTO public.analysis_requests (id, status)
@@ -461,7 +817,8 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
             };
         }>(`
             SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
-                ARRAY['senary', 'quinary', 'tertiary']::TEXT[]
+                ARRAY['senary', 'quinary', 'tertiary']::TEXT[],
+                '${PRUNE_OWNER_SHA}'
             ) AS result
         `);
 
@@ -520,6 +877,7 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
     });
 
     it('returns ready only after affected request, preflight, and repair-canary runs drain', async () => {
+        await acquirePruneFence();
         const callReadiness = () => db.query<{
             result: {
                 ready: boolean;
@@ -532,7 +890,8 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
             };
         }>(`
             SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
-                ARRAY['senary', 'quinary', 'tertiary']::TEXT[]
+                ARRAY['senary', 'quinary', 'tertiary']::TEXT[],
+                '${PRUNE_OWNER_SHA}'
             ) AS result
         `);
 
@@ -639,10 +998,11 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
             ]) {
                 await expect(db.query(`
                     SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
-                        ${expression}
+                        ${expression},
+                        '${PRUNE_OWNER_SHA}'
                     )
                 `)).rejects.toThrow(
-                    'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_SLOTS_INVALID'
+                    'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_INVALID'
                 );
             }
         } finally {
@@ -655,7 +1015,8 @@ describeDatabase('analysis V2 senary Apify credential migration PGlite contract'
         try {
             await expect(db.query(`
                 SELECT public.analysis_v2_apify_secret_ref_prune_readiness(
-                    ARRAY['senary']::TEXT[]
+                    ARRAY['senary']::TEXT[],
+                    '${PRUNE_OWNER_SHA}'
                 )
             `)).rejects.toThrow(/permission denied/i);
         } finally {

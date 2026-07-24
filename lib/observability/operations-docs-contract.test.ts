@@ -287,6 +287,18 @@ describe('analytics and observability disclosure contract', () => {
         expect(runbook).toMatch(
             /build manifest[\s\S]{0,100}Supabase URL[\s\S]{0,100}latest\/active Cloud Run/
         );
+        expect(runbook).toContain(
+            '--clear-apify-secret-ref-prune-fence=tertiary,quinary,senary'
+        );
+        expect(runbook).toMatch(
+            /durable singleton DB fence[\s\S]{0,180}성공[\s\S]{0,120}실패[\s\S]{0,120}rollback[\s\S]{0,120}자동으로 해제하지 않는다/
+        );
+        expect(runbook).toMatch(
+            /latest와 active inventory[\s\S]{0,180}compare-and-clear/
+        );
+        expect(runbook).toMatch(
+            /owner, slot,[\s\S]{0,80}inventory가 바뀌면 실패[\s\S]{0,80}fence를 유지/
+        );
         expect(plan).toMatch(/ordinary-deploy exact primary:3[\s\S]{0,240}300-second drain/);
 
         const standard = ANALYSIS_PLAN_CATALOG.standard;
@@ -329,11 +341,14 @@ describe('analytics and observability disclosure contract', () => {
             * CANDIDATE_LIKER_LIMIT_PER_POST
             * likerRate
         );
+        const targetProfileAcquisitionExposure = (
+            APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD * 2
+        );
         const senaryExposure = (
             followerRelationshipExposure
             + fallbackExposure
             + repairExposure
-            + APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD
+            + targetProfileAcquisitionExposure
             + targetLikerExposure
         );
         const quinaryExposure = followingRelationshipExposure + candidateLikerExposure;
@@ -345,7 +360,9 @@ describe('analytics and observability disclosure contract', () => {
             followingRelationshipExposure: Number(followingRelationshipExposure.toFixed(6)),
             fallbackExposure: Number(fallbackExposure.toFixed(6)),
             repairExposure: Number(repairExposure.toFixed(6)),
-            freshTargetProfileExposure: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
+            targetProfileAcquisitionExposure: Number(
+                targetProfileAcquisitionExposure.toFixed(6)
+            ),
             targetLikerExposure: Number(targetLikerExposure.toFixed(6)),
             commentExposure: Number(commentExposure.toFixed(6)),
             candidateLikerExposure: Number(candidateLikerExposure.toFixed(6)),
@@ -360,14 +377,14 @@ describe('analytics and observability disclosure contract', () => {
             followingRelationshipExposure: 0.68,
             fallbackExposure: 1.56,
             repairExposure: 1.62,
-            freshTargetProfileExposure: 0.0026,
+            targetProfileAcquisitionExposure: 0.0052,
             targetLikerExposure: 0.93,
             commentExposure: 0.234,
             candidateLikerExposure: 1.55,
-            senaryExposure: 4.7926,
+            senaryExposure: 4.7952,
             quinaryExposure: 2.23,
             tertiaryExposure: 0.234,
-            senaryMinimumBalance: 5.27186,
+            senaryMinimumBalance: 5.27472,
             quinaryMinimumBalance: 2.453,
             tertiaryMinimumBalance: 0.2574,
         });
@@ -375,7 +392,7 @@ describe('analytics and observability disclosure contract', () => {
             '800 × $0.00085 = $0.68',
             '600 × $0.0026 = $1.56',
             '600 × $0.0027 = $1.62',
-            'fresh target profile `$0.0026`',
+            'initial + fresh target profiles `2 × $0.0026 = $0.0052`',
             '4 × 150 × $0.00155 = $0.93',
             '6 × 15 × $0.0026 = $0.234',
             '10 × 1 × 100 × $0.00155 = $1.55',
@@ -383,7 +400,7 @@ describe('analytics and observability disclosure contract', () => {
             expect(runbook).toContain(formula);
         }
         for (const [slot, total, minimum] of [
-            ['senary', '4.7926', '5.27186'],
+            ['senary', '4.7952', '5.27472'],
             ['quinary', '2.23', '2.453'],
             ['tertiary', '0.234', '0.2574'],
         ]) {

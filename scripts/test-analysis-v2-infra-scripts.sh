@@ -42,6 +42,7 @@ set -euo pipefail
 args=("$@")
 proto_pinned='false'
 redirects_disabled='false'
+request_url=''
 for ((index = 0; index < ${#args[@]}; index++)); do
   if [[ "${args[$index]}" == '--proto' \
     && "${args[$((index + 1))]:-}" == '=https' ]]; then
@@ -49,6 +50,8 @@ for ((index = 0; index < ${#args[@]}; index++)); do
   elif [[ "${args[$index]}" == '--max-redirs' \
     && "${args[$((index + 1))]:-}" == '0' ]]; then
     redirects_disabled='true'
+  elif [[ "${args[$index]}" == '--url' ]]; then
+    request_url="${args[$((index + 1))]:-}"
   fi
 done
 [[ "$proto_pinned" == 'true' && "$redirects_disabled" == 'true' ]] || {
@@ -60,13 +63,20 @@ config="$(cat)"
   || exit 89
 [[ "$config" == *'Authorization: Bearer SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'* ]] \
   || exit 89
-if [[ -n "${FAKE_PRUNE_READINESS_COUNT_FILE:-}" ]]; then
+
+increment_count_file() {
+  local path="$1"
   count='0'
-  [[ ! -f "$FAKE_PRUNE_READINESS_COUNT_FILE" ]] \
-    || count="$(<"$FAKE_PRUNE_READINESS_COUNT_FILE")"
-  printf '%s\n' "$((10#$count + 1))" >"$FAKE_PRUNE_READINESS_COUNT_FILE"
-fi
-case "${FAKE_PRUNE_READINESS_MODE:-ready}" in
+  [[ ! -f "$path" ]] || count="$(<"$path")"
+  printf '%s\n' "$((10#$count + 1))" >"$path"
+}
+
+case "${request_url##*/}" in
+analysis_v2_apify_secret_ref_prune_readiness)
+  if [[ -n "${FAKE_PRUNE_READINESS_COUNT_FILE:-}" ]]; then
+    increment_count_file "$FAKE_PRUNE_READINESS_COUNT_FILE"
+  fi
+  case "${FAKE_PRUNE_READINESS_MODE:-ready}" in
   ready)
     printf '%s\n' "${FAKE_PRUNE_READINESS_JSON:-{\"ready\":true,\"dropSlots\":[\"quinary\",\"senary\",\"tertiary\"],\"activeRequestRuns\":0,\"unreconciledRequestRuns\":0,\"activePreflightRuns\":0,\"unreconciledPreflightRuns\":0,\"activeProfileRepairCanaryRuns\":0,\"unreconciledProfileRepairCanaryRuns\":0,\"activeRequests\":0,\"activePreflights\":0,\"activeDropSlotPolicies\":0,\"incompleteProfileProviderCanaryCleanups\":0}}"
     ;;
@@ -94,6 +104,35 @@ case "${FAKE_PRUNE_READINESS_MODE:-ready}" in
   *)
     exit 90
     ;;
+  esac
+  ;;
+acquire_analysis_v2_apify_secret_ref_prune_fence)
+  if [[ -n "${FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE:-}" ]]; then
+    increment_count_file "$FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE"
+  fi
+  [[ "${FAKE_PRUNE_FENCE_ACQUIRE_MODE:-ready}" == 'ready' ]] || exit 22
+  printf '%s\n' '{"active":true,"acquired":true,"dropSlots":["quinary","senary","tertiary"]}'
+  ;;
+load_analysis_v2_apify_secret_ref_prune_fence)
+  if [[ -n "${FAKE_PRUNE_FENCE_LOAD_COUNT_FILE:-}" ]]; then
+    increment_count_file "$FAKE_PRUNE_FENCE_LOAD_COUNT_FILE"
+  fi
+  if [[ "${FAKE_PRUNE_FENCE_STATE:-active}" == 'inactive' ]]; then
+    printf '%s\n' '{"active":false,"dropSlots":null,"ownerSourceCommitSha":null}'
+  else
+    printf '%s\n' "${FAKE_PRUNE_FENCE_LOAD_JSON:-{\"active\":true,\"dropSlots\":[\"quinary\",\"senary\",\"tertiary\"],\"ownerSourceCommitSha\":\"dddddddddddddddddddddddddddddddddddddddd\"}}"
+  fi
+  ;;
+clear_analysis_v2_apify_secret_ref_prune_fence)
+  if [[ -n "${FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE:-}" ]]; then
+    increment_count_file "$FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE"
+  fi
+  [[ "${FAKE_PRUNE_FENCE_CLEAR_MODE:-ready}" == 'ready' ]] || exit 22
+  printf '%s\n' '{"active":false,"cleared":true,"dropSlots":["quinary","senary","tertiary"]}'
+  ;;
+*)
+  exit 90
+  ;;
 esac
 EOF
 chmod +x "$temp_dir/bin/curl"
@@ -2626,7 +2665,11 @@ assert_contains "$temp_dir/worker-prune-unobserved-generation.out" \
   'requires an exactly observed Cloud Run service generation before the drain'
 
 # The prune command owns the 300-second unchanged-service drain. Dry-run prints
-# it; apply executes it before requesting bounded service-role evidence.
+# it without mutating or auditing the durable fence; apply acquires the fence
+# before requesting bounded service-role evidence.
+printf '0\n' >"$temp_dir/prune-dry-run-acquire-count"
+printf '0\n' >"$temp_dir/prune-dry-run-clear-count"
+printf '0\n' >"$temp_dir/prune-dry-run-readiness-count"
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
   'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
@@ -2635,12 +2678,15 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE=$temp_dir/prune-dry-run-acquire-count" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/prune-dry-run-clear-count" \
+  "FAKE_PRUNE_READINESS_COUNT_FILE=$temp_dir/prune-dry-run-readiness-count" \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
     --prune-apify-secret-refs=tertiary,quinary,senary \
   >"$temp_dir/worker-prune-ready.out"
 assert_contains "$temp_dir/worker-prune-ready.out" \
-  'verified: authoritative quiet-work, cleanup, and ledger evidence for exact Apify refs'
+  'dry-run: apply will acquire and audit the durable exact-slot prune fence'
 assert_contains "$temp_dir/worker-prune-ready.out" \
   'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3'
 for removed_assignment in \
@@ -2652,6 +2698,12 @@ done
 assert_not_contains "$temp_dir/worker-prune-ready.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 assert_contains "$temp_dir/worker-prune-ready.out" 'sleep 300'
+[[ "$(<"$temp_dir/prune-dry-run-acquire-count")" == "0" ]] \
+  || fail "prune dry-run mutated the durable fence"
+[[ "$(<"$temp_dir/prune-dry-run-clear-count")" == "0" ]] \
+  || fail "prune dry-run cleared the durable fence"
+[[ "$(<"$temp_dir/prune-dry-run-readiness-count")" == "0" ]] \
+  || fail "prune dry-run audited a fence that it must not acquire"
 
 for invalid_prune_build in build-prune-http.yaml build-prune-arbitrary-host.yaml; do
   if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
@@ -2732,27 +2784,42 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
     --prune-apify-secret-refs=tertiary,quinary,senary \
   >"$temp_dir/worker-prune-primary-retained-retry.out"
 assert_contains "$temp_dir/worker-prune-primary-retained-retry.out" \
-  'verified: authoritative quiet-work, cleanup, and ledger evidence for exact Apify refs'
+  'dry-run: apply will acquire and audit the durable exact-slot prune fence'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-clear-mutually-exclusive.out" 2>&1; then
+  fail "prune and explicit fence clear were accepted together"
+fi
+assert_contains "$temp_dir/worker-prune-clear-mutually-exclusive.out" \
+  '--prune-apify-secret-refs and --clear-apify-secret-ref-prune-fence are mutually exclusive'
 
 printf '0\n' >"$temp_dir/prune-trace-readiness-count"
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
   'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
-  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
   'FAKE_PRUNE_READINESS_MODE=invalid' \
   "FAKE_PRUNE_READINESS_COUNT_FILE=$temp_dir/prune-trace-readiness-count" \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
-  bash -x "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
     --prune-apify-secret-refs=tertiary,quinary,senary \
   >"$temp_dir/worker-prune-trace.out" 2>&1; then
   fail "trace-mode explicit pruning accepted invalid evidence"
 fi
-[[ "$(<"$temp_dir/prune-trace-readiness-count")" == "1" ]] \
-  || fail "trace-mode prune did not reach the secret-bearing readiness boundary"
+[[ "$(<"$temp_dir/prune-trace-readiness-count")" == "1" ]] || {
+  tail -n 220 "$temp_dir/worker-prune-trace.out" >&2
+  fail "trace-mode prune did not reach the secret-bearing readiness boundary"
+}
 assert_not_contains "$temp_dir/worker-prune-trace.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 
@@ -2767,14 +2834,14 @@ for blocked_mode in \
   if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
     'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
     'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
-    'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
-    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+    'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary' \
+    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary' \
     'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
     'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
     'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
     "FAKE_PRUNE_READINESS_MODE=$blocked_mode" \
     "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
-    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
       --prune-apify-secret-refs=tertiary,quinary,senary \
     >"$temp_dir/worker-prune-$blocked_mode.out" 2>&1; then
     fail "explicit pruning accepted blocked readiness: $blocked_mode"
@@ -2898,6 +2965,8 @@ assert_contains "$temp_dir/worker-prune-traffic-drift.out" \
 printf 'ready\n' >"$temp_dir/prune-apply-state"
 printf '42\n' >"$temp_dir/prune-apply-generation"
 printf '0\n' >"$temp_dir/prune-readiness-count"
+printf '0\n' >"$temp_dir/prune-fence-acquire-count"
+printf '0\n' >"$temp_dir/prune-fence-clear-count"
 : >"$temp_dir/prune-apply-sleep"
 env "${common_env[@]}" \
   "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
@@ -2914,6 +2983,8 @@ env "${common_env[@]}" \
   "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
   "FAKE_SLEEP_LOG=$temp_dir/prune-apply-sleep" \
   "FAKE_PRUNE_READINESS_COUNT_FILE=$temp_dir/prune-readiness-count" \
+  "FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE=$temp_dir/prune-fence-acquire-count" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/prune-fence-clear-count" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
   bash "$script_dir/deploy-analysis-v2-worker.sh" \
@@ -2921,12 +2992,228 @@ env "${common_env[@]}" \
   >"$temp_dir/worker-prune-apply.out"
 [[ "$(<"$temp_dir/prune-readiness-count")" == "2" ]] \
   || fail "explicit prune apply did not recheck readiness before promotion"
+[[ "$(<"$temp_dir/prune-fence-acquire-count")" == "1" ]] \
+  || fail "explicit prune apply did not acquire the durable fence exactly once"
+[[ "$(<"$temp_dir/prune-fence-clear-count")" == "0" ]] \
+  || fail "explicit prune apply cleared its durable fence"
 [[ "$(<"$temp_dir/prune-apply-state")" == "promoted" ]] \
   || fail "explicit prune apply did not promote the primary-only revision"
 [[ "$(<"$temp_dir/prune-apply-sleep")" == "300" ]] \
   || fail "explicit prune apply did not execute exactly one 300-second drain"
 assert_not_contains "$temp_dir/worker-prune-apply.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+
+# A post-promotion verification failure rolls traffic back but deliberately
+# leaves the acquired database fence active for an exact-owner retry.
+printf 'ready\n' >"$temp_dir/prune-rollback-fence-state"
+printf '0\n' >"$temp_dir/prune-rollback-fence-acquire-count"
+printf '0\n' >"$temp_dir/prune-rollback-fence-clear-count"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_PRUNE_PRIMARY_ONLY=true' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/prune-rollback-fence-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE=$temp_dir/prune-rollback-fence-acquire-count" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/prune-rollback-fence-clear-count" \
+  'FAKE_GCLOUD_POST_PROMOTION_QUEUE_FAILURE=true' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-rollback-fence.out" 2>&1; then
+  fail "post-promotion prune failure did not fail closed"
+fi
+[[ "$(<"$temp_dir/prune-rollback-fence-state")" == "rolled_back" ]] \
+  || fail "post-promotion prune failure did not restore known-good traffic"
+[[ "$(<"$temp_dir/prune-rollback-fence-acquire-count")" == "1" ]] \
+  || fail "failed prune did not first acquire the durable fence"
+[[ "$(<"$temp_dir/prune-rollback-fence-clear-count")" == "0" ]] \
+  || fail "failed prune or rollback cleared the durable fence"
+assert_contains "$temp_dir/worker-prune-rollback-fence.out" \
+  'rollback verified: analysis-worker-00002 serves 100% of traffic'
+
+# Dry-run and check describe or validate reattachment without mutating the
+# durable fence. Check may read the exact identity, but never clears it.
+printf '0\n' >"$temp_dir/fence-clear-dry-run-load-count"
+printf '0\n' >"$temp_dir/fence-clear-dry-run-count"
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_PRUNE_FENCE_LOAD_COUNT_FILE=$temp_dir/fence-clear-dry-run-load-count" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/fence-clear-dry-run-count" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:3,quinary:3,senary:3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/worker-fence-clear-dry-run.out"
+[[ "$(<"$temp_dir/fence-clear-dry-run-load-count")" == "0" ]] \
+  || fail "fence-clear dry-run read the durable fence"
+[[ "$(<"$temp_dir/fence-clear-dry-run-count")" == "0" ]] \
+  || fail "fence-clear dry-run mutated the durable fence"
+assert_contains "$temp_dir/worker-fence-clear-dry-run.out" \
+  'dry-run: apply will compare-and-clear only after exact ref promotion'
+
+printf '0\n' >"$temp_dir/fence-clear-check-load-count"
+printf '0\n' >"$temp_dir/fence-clear-check-count"
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_PRUNE_FENCE_LOAD_COUNT_FILE=$temp_dir/fence-clear-check-load-count" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/fence-clear-check-count" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:3,quinary:3,senary:3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/worker-fence-clear-check.out"
+[[ "$(<"$temp_dir/fence-clear-check-load-count")" == "1" ]] \
+  || fail "fence-clear check did not read the exact durable fence identity"
+[[ "$(<"$temp_dir/fence-clear-check-count")" == "0" ]] \
+  || fail "fence-clear check mutated the durable fence"
+assert_contains "$temp_dir/worker-fence-clear-check.out" \
+  'check mode left the durable fence active'
+
+# Any latest/active inventory mismatch fails before a clear mutation.
+printf '0\n' >"$temp_dir/fence-clear-inventory-drift-count"
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/fence-clear-inventory-drift-count" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:3,quinary:3,senary:3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/worker-fence-clear-inventory-drift.out" 2>&1; then
+  fail "fence clear accepted latest/active reattachment inventory drift"
+fi
+[[ "$(<"$temp_dir/fence-clear-inventory-drift-count")" == "0" ]] \
+  || fail "inventory drift reached the fence clear mutation"
+assert_contains "$temp_dir/worker-fence-clear-inventory-drift.out" \
+  'fence clear requires every exact same-named numeric ref in latest and active Cloud Run inventories'
+
+# A future ordinary deploy may explicitly reattach every fenced same-named
+# numeric ref and clear only after the promoted latest/active inventories match.
+printf 'ready\n' >"$temp_dir/fence-clear-state"
+printf '0\n' >"$temp_dir/fence-clear-load-count"
+printf '0\n' >"$temp_dir/fence-clear-count"
+printf '0\n' >"$temp_dir/fence-clear-acquire-count"
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/fence-clear-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_PRUNE_FENCE_LOAD_COUNT_FILE=$temp_dir/fence-clear-load-count" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/fence-clear-count" \
+  "FAKE_PRUNE_FENCE_ACQUIRE_COUNT_FILE=$temp_dir/fence-clear-acquire-count" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:3,quinary:3,senary:3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/worker-fence-clear.out"
+[[ "$(<"$temp_dir/fence-clear-state")" == "promoted" ]] \
+  || fail "fence-clear deploy did not promote the ordinary reattachment"
+[[ "$(<"$temp_dir/fence-clear-load-count")" == "1" ]] \
+  || fail "fence-clear deploy did not capture the old fence identity exactly once"
+[[ "$(<"$temp_dir/fence-clear-count")" == "1" ]] \
+  || fail "fence-clear deploy did not compare-and-clear exactly once"
+[[ "$(<"$temp_dir/fence-clear-acquire-count")" == "0" ]] \
+  || fail "fence-clear deploy acquired a new prune fence"
+assert_contains "$temp_dir/worker-fence-clear.out" \
+  'verified: durable Apify prune fence cleared after exact ref reattachment'
+assert_not_contains "$temp_dir/worker-fence-clear.out" \
+  'dddddddddddddddddddddddddddddddddddddddd'
+assert_not_contains "$temp_dir/worker-fence-clear.out" \
+  'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+
+# A compare-and-clear conflict (including owner drift) fails closed and rolls
+# traffic back while leaving the database fence active.
+printf 'ready\n' >"$temp_dir/fence-clear-owner-drift-state"
+printf '0\n' >"$temp_dir/fence-clear-owner-drift-count"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/fence-clear-owner-drift-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/fence-clear-owner-drift-count" \
+  'FAKE_PRUNE_FENCE_CLEAR_MODE=conflict' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:3,quinary:3,senary:3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/worker-fence-clear-owner-drift.out" 2>&1; then
+  fail "fence clear accepted a compare-and-clear owner conflict"
+fi
+[[ "$(<"$temp_dir/fence-clear-owner-drift-state")" == "rolled_back" ]] \
+  || fail "fence-clear owner conflict did not restore known-good traffic"
+[[ "$(<"$temp_dir/fence-clear-owner-drift-count")" == "1" ]] \
+  || fail "fence-clear owner conflict did not issue one compare-and-clear"
+assert_contains "$temp_dir/worker-fence-clear-owner-drift.out" \
+  'durable Apify prune fence compare-and-clear failed'
+assert_not_contains "$temp_dir/worker-fence-clear-owner-drift.out" \
+  'dddddddddddddddddddddddddddddddddddddddd'
+
+# A crash after the clear commit is retry-safe: inactive state is success and
+# no second clear mutation is attempted.
+printf 'ready\n' >"$temp_dir/fence-clear-retry-state"
+printf '0\n' >"$temp_dir/fence-clear-retry-count"
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/fence-clear-retry-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_PRUNE_FENCE_STATE=inactive' \
+  "FAKE_PRUNE_FENCE_CLEAR_COUNT_FILE=$temp_dir/fence-clear-retry-count" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:3,quinary:3,senary:3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/worker-fence-clear-retry.out"
+[[ "$(<"$temp_dir/fence-clear-retry-count")" == "0" ]] \
+  || fail "inactive fence retry issued a second clear mutation"
+assert_contains "$temp_dir/worker-fence-clear-retry.out" \
+  'verified: durable Apify prune fence was already inactive'
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_RUNTIME_SLOT=primary' \

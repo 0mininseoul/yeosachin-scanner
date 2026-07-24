@@ -35,10 +35,11 @@ mode="apply"
 reconcile_iam="false"
 reconcile_jobs="false"
 prune_apify_secret_refs_raw=""
+clear_apify_secret_ref_prune_fence_raw=""
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-analysis-v2-worker.sh [--dry-run | --check] [--reconcile-iam] [--reconcile-jobs] [--prune-apify-secret-refs=SLOTS]
+Usage: scripts/deploy-analysis-v2-worker.sh [--dry-run | --check] [--reconcile-iam] [--reconcile-jobs] [--prune-apify-secret-refs=SLOTS | --clear-apify-secret-ref-prune-fence=SLOTS]
 
 Source-deploys or verifies the private V2 Cloud Run worker, then composes with
 configure-analysis-v2-tasks-queue.sh for queue, OIDC, and recovery IAM setup.
@@ -132,6 +133,10 @@ Options:
               Opt-in removal of the exact comma-separated non-primary refs.
               Requires selected primary version 3, no additional refs, and
               authoritative zero-active/zero-unreconciled DB evidence twice.
+  --clear-apify-secret-ref-prune-fence=SLOTS
+              Explicit ordinary-deploy reattachment of every fenced same-named
+              numeric ref. Apply clears only after verified promotion; dry-run
+              and check never mutate the durable database fence.
   -h, --help Show this help.
 EOF
 }
@@ -305,6 +310,36 @@ parse_prune_apify_secret_refs() {
     seen="$seen$slot,"
     prune_apify_secret_refs_json="$(jq -cn \
       --argjson slots "$prune_apify_secret_refs_json" \
+      --arg slot "$slot" \
+      '$slots + [$slot] | sort')"
+  done
+}
+
+parse_clear_apify_secret_ref_prune_fence() {
+  local raw="$clear_apify_secret_ref_prune_fence_raw"
+  local slot
+  local seen=','
+  local -a slots=()
+
+  clear_apify_secret_ref_prune_fence_json='[]'
+  clear_apify_secret_ref_prune_fence_enabled="false"
+  [[ -n "$raw" ]] || return 0
+  clear_apify_secret_ref_prune_fence_enabled="true"
+  IFS=',' read -r -a slots <<<"$raw"
+  ((${#slots[@]} > 0 && ${#slots[@]} <= 5)) \
+    || die "--clear-apify-secret-ref-prune-fence requires one through five exact non-primary slots"
+  for slot in "${slots[@]}"; do
+    [[ -n "$slot" && "$slot" != "primary" ]] \
+      || die "--clear-apify-secret-ref-prune-fence must contain only non-primary slots"
+    validate_slot "$slot"
+    case "$seen" in
+      *",$slot,"*)
+        die "--clear-apify-secret-ref-prune-fence contains a duplicate slot"
+        ;;
+    esac
+    seen="$seen$slot,"
+    clear_apify_secret_ref_prune_fence_json="$(jq -cn \
+      --argjson slots "$clear_apify_secret_ref_prune_fence_json" \
       --arg slot "$slot" \
       '$slots + [$slot] | sort')"
   done
@@ -1155,14 +1190,10 @@ prepare_apify_secret_assignments() {
     ' <<<"$expected_apify_secret_refs_json")"
 }
 
-verify_apify_secret_ref_prune_readiness() {
-  local request_json
+call_apify_prune_fence_rpc() {
+  local rpc_name="$1"
+  local request_json="$2"
   local response
-  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
-
-  request_json="$(jq -cn \
-    --argjson slots "$prune_apify_secret_refs_json" \
-    '{p_drop_slots: $slots}')"
   response="$(
     gcloud secrets versions access "$supabase_secret_version" \
       "--secret=$SUPABASE_SECRET_ID" \
@@ -1185,9 +1216,187 @@ verify_apify_secret_ref_prune_readiness() {
           --header 'Content-Type: application/json' \
           --proto '=https' \
           --max-redirs 0 \
-          --url "${supabase_public_url%/}/rest/v1/rpc/analysis_v2_apify_secret_ref_prune_readiness" \
+          --url "${supabase_public_url%/}/rest/v1/rpc/$rpc_name" \
           --data-binary "$request_json"
-  )" || die "authoritative Apify secret-ref prune readiness could not be obtained"
+  )" || return 1
+  printf '%s\n' "$response"
+}
+
+acquire_apify_secret_ref_prune_fence() {
+  local request_json
+  local response
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+  if [[ "$mode" == "dry-run" ]]; then
+    log "dry-run: apply will acquire and audit the durable exact-slot prune fence"
+    return 0
+  fi
+  if [[ "$mode" == "check" ]]; then
+    capture_apify_secret_ref_prune_fence \
+      "$prune_apify_secret_refs_json" \
+      || die "durable Apify prune fence could not be loaded for check"
+    [[ "$captured_prune_fence_active" == "true" ]] \
+      || die "explicit prune check requires the durable exact-slot fence to remain active"
+    prune_fence_owner_identity="$captured_prune_fence_owner_identity"
+    return 0
+  fi
+
+  prune_fence_owner_identity="$source_commit_sha"
+  request_json="$(jq -cn \
+    --argjson slots "$prune_apify_secret_refs_json" \
+    --arg owner "$prune_fence_owner_identity" '
+      {
+        p_drop_slots: $slots,
+        p_owner_source_commit_sha: $owner
+      }
+    ')"
+  response="$(call_apify_prune_fence_rpc \
+    acquire_analysis_v2_apify_secret_ref_prune_fence \
+    "$request_json")" \
+    || die "durable Apify secret-ref prune fence could not be acquired"
+  jq -e \
+    --argjson requested_slots "$prune_apify_secret_refs_json" '
+      (keys | sort) == (["acquired", "active", "dropSlots"] | sort)
+      and .active == true
+      and (.acquired | type == "boolean")
+      and .dropSlots == $requested_slots
+    ' <<<"$response" >/dev/null \
+    || die "durable Apify secret-ref prune fence response is invalid"
+  log "verified: durable exact-slot Apify prune fence is active"
+}
+
+capture_apify_secret_ref_prune_fence() {
+  local expected_slots="$1"
+  local request_json='{}'
+  local response
+  captured_prune_fence_active="false"
+  captured_prune_fence_owner_identity=""
+  response="$(call_apify_prune_fence_rpc \
+    load_analysis_v2_apify_secret_ref_prune_fence \
+    "$request_json")" \
+    || return 1
+  jq -e '
+      (keys | sort) == ([
+        "active", "dropSlots", "ownerSourceCommitSha"
+      ] | sort)
+      and (
+        (
+          .active == false
+          and .dropSlots == null
+          and .ownerSourceCommitSha == null
+        ) or (
+          .active == true
+          and (.dropSlots | type == "array")
+          and (.ownerSourceCommitSha | test("^[0-9a-f]{40}$"))
+        )
+      )
+    ' <<<"$response" >/dev/null \
+    || return 1
+  if [[ "$(jq -r '.active' <<<"$response")" == "false" ]]; then
+    return 0
+  fi
+  jq -e \
+    --argjson expected "$expected_slots" \
+    '.dropSlots == $expected' <<<"$response" >/dev/null \
+    || return 1
+  captured_prune_fence_active="true"
+  captured_prune_fence_owner_identity="$(
+    jq -er '.ownerSourceCommitSha' <<<"$response"
+  )" || return 1
+}
+
+clear_apify_secret_ref_prune_fence_after_reattachment() {
+  local request_json
+  local response
+  [[ "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]] || return 0
+  if [[ "$mode" == "dry-run" ]]; then
+    log "dry-run: apply will compare-and-clear only after exact ref promotion"
+    return 0
+  fi
+  [[ "$mode" == "apply" ]] || return 0
+  if [[ "$captured_prune_fence_active" != "true" ]]; then
+    log "verified: durable Apify prune fence was already inactive"
+    return 0
+  fi
+  [[ "$captured_prune_fence_owner_identity" =~ ^[0-9a-f]{40}$ ]] \
+    || die "captured durable Apify prune fence owner is invalid"
+  request_json="$(jq -cn \
+    --argjson slots "$clear_apify_secret_ref_prune_fence_json" \
+    --arg owner "$captured_prune_fence_owner_identity" '
+      {
+        p_drop_slots: $slots,
+        p_expected_owner_source_commit_sha: $owner
+      }
+    ')"
+  response="$(call_apify_prune_fence_rpc \
+    clear_analysis_v2_apify_secret_ref_prune_fence \
+    "$request_json")" \
+    || die "durable Apify prune fence compare-and-clear failed"
+  jq -e \
+    --argjson requested_slots "$clear_apify_secret_ref_prune_fence_json" '
+      (keys | sort) == (["active", "cleared", "dropSlots"] | sort)
+      and .active == false
+      and .cleared == true
+      and .dropSlots == $requested_slots
+    ' <<<"$response" >/dev/null \
+    || die "durable Apify prune fence clear response is invalid"
+  captured_prune_fence_active="false"
+  captured_prune_fence_owner_identity=""
+  log "verified: durable Apify prune fence cleared after exact ref reattachment"
+}
+
+verify_reattached_apify_prune_fence_refs() {
+  local latest_config="$1"
+  local active_config="$2"
+  local latest_identity
+  local active_identity
+  [[ "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]] || return 0
+  latest_identity="$(apify_identity_for_existing_config "$latest_config")" \
+    || die "latest Cloud Run Apify identity is invalid during fence clear"
+  active_identity="$(apify_identity_for_existing_config "$active_config")" \
+    || die "active Cloud Run Apify identity is invalid during fence clear"
+  jq -ne \
+    --argjson slots "$clear_apify_secret_ref_prune_fence_json" \
+    --argjson latest "$latest_identity" \
+    --argjson active "$active_identity" '
+      def exact_ref($identity; $slot):
+        ($slot | ascii_upcase) as $upper
+        | [
+            $identity.refs[]
+            | select(
+                .env == ("APIFY_" + $upper + "_API_TOKEN")
+                and .secret == ("ai-baram-v2-apify-" + $slot)
+                and (.version | test("^[1-9][0-9]*$"))
+            )
+          ];
+      all($slots[]; . as $slot
+        | (exact_ref($latest; $slot) | length) == 1
+        and (exact_ref($active; $slot) | length) == 1
+        and exact_ref($latest; $slot) == exact_ref($active; $slot)
+      )
+    ' >/dev/null \
+    || die "fence clear requires every exact same-named numeric ref in latest and active Cloud Run inventories"
+}
+
+verify_apify_secret_ref_prune_readiness() {
+  local request_json
+  local response
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+  [[ "$mode" != "dry-run" ]] || return 0
+  [[ "${prune_fence_owner_identity:-}" =~ ^[0-9a-f]{40}$ ]] \
+    || die "durable Apify prune fence owner is unavailable"
+
+  request_json="$(jq -cn \
+    --argjson slots "$prune_apify_secret_refs_json" \
+    --arg owner "$prune_fence_owner_identity" '
+      {
+        p_drop_slots: $slots,
+        p_owner_source_commit_sha: $owner
+      }
+    ')"
+  response="$(call_apify_prune_fence_rpc \
+    analysis_v2_apify_secret_ref_prune_readiness \
+    "$request_json")" \
+    || die "authoritative Apify secret-ref prune readiness could not be obtained"
 
   jq -e \
     --argjson requested_slots "$prune_apify_secret_refs_json" '
@@ -1677,6 +1886,13 @@ deploy_or_verify_service() {
       verify_prune_apify_secret_inventory "$config" "$known_good_config"
       verify_prune_supabase_destination "$config" "$known_good_config"
       perform_prune_primary_drain "$config"
+      acquire_apify_secret_ref_prune_fence
+    fi
+    if [[ "$clear_apify_secret_ref_prune_fence_enabled" == "true" \
+      && "$mode" != "dry-run" ]]; then
+      capture_apify_secret_ref_prune_fence \
+        "$clear_apify_secret_ref_prune_fence_json" \
+        || die "durable Apify prune fence identity could not be captured"
     fi
     verify_existing_service_secret_identity "$config" "$known_good_config"
     prepare_apify_secret_assignments "$config"
@@ -1700,6 +1916,14 @@ deploy_or_verify_service() {
     latest_ready="$(jq -er '.status.latestReadyRevisionName' <<<"$config")" \
       || die "Cloud Run worker has no ready revision"
     verify_revision_provenance "$latest_ready" "$source_commit_sha"
+    verify_reattached_apify_prune_fence_refs "$config" "$known_good_config"
+    if [[ "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
+      if [[ "$captured_prune_fence_active" == "true" ]]; then
+        log "verified: exact refs are reattached; check mode left the durable fence active"
+      else
+        log "verified: durable Apify prune fence was already inactive"
+      fi
+    fi
     log "verified: private worker runtime, bounded scaling, and default dynamic egress"
     if [[ -n "$worker_build_env_file" ]]; then
       log "verified: supplied source-build manifest contains exactly the two public Supabase values"
@@ -2178,6 +2402,13 @@ while (($# > 0)); do
       [[ -n "$prune_apify_secret_refs_raw" ]] \
         || die "--prune-apify-secret-refs requires a comma-separated slot list"
       ;;
+    --clear-apify-secret-ref-prune-fence=*)
+      [[ -z "$clear_apify_secret_ref_prune_fence_raw" ]] \
+        || die "--clear-apify-secret-ref-prune-fence may be supplied only once"
+      clear_apify_secret_ref_prune_fence_raw="${1#*=}"
+      [[ -n "$clear_apify_secret_ref_prune_fence_raw" ]] \
+        || die "--clear-apify-secret-ref-prune-fence requires a comma-separated slot list"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -2287,6 +2518,14 @@ prune_apify_secret_refs_enabled="false"
 prune_primary_drain_baseline_verified="false"
 prune_promotion_generation_identity=""
 parse_prune_apify_secret_refs
+clear_apify_secret_ref_prune_fence_json='[]'
+clear_apify_secret_ref_prune_fence_enabled="false"
+captured_prune_fence_active="false"
+captured_prune_fence_owner_identity=""
+parse_clear_apify_secret_ref_prune_fence
+[[ "$prune_apify_secret_refs_enabled" != "true" \
+  || "$clear_apify_secret_ref_prune_fence_enabled" != "true" ]] \
+  || die "--prune-apify-secret-refs and --clear-apify-secret-ref-prune-fence are mutually exclusive"
 if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
   [[ "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" == "primary" ]] \
     || die "--prune-apify-secret-refs requires ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary"
@@ -2296,6 +2535,30 @@ if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
     || die "--prune-apify-secret-refs forbids ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS"
   [[ -n "$worker_build_env_file" ]] \
     || die "--prune-apify-secret-refs requires ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE for the authoritative Supabase URL"
+fi
+if [[ "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
+  [[ "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" == "primary" ]] \
+    || die "--clear-apify-secret-ref-prune-fence requires ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary"
+  [[ "$apify_secret_version" == "3" ]] \
+    || die "--clear-apify-secret-ref-prune-fence requires ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3"
+  [[ -n "$worker_build_env_file" ]] \
+    || die "--clear-apify-secret-ref-prune-fence requires ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE for the authoritative Supabase URL"
+  jq -ne \
+    --argjson slots "$clear_apify_secret_ref_prune_fence_json" \
+    --argjson refs "$explicit_additional_apify_refs_json" '
+      all($slots[]; . as $slot
+        | ($slot | ascii_upcase) as $upper
+        | [
+            $refs[]
+            | select(
+                .env == ("APIFY_" + $upper + "_API_TOKEN")
+                and .secret == ("ai-baram-v2-apify-" + $slot)
+                and (.version | test("^[1-9][0-9]*$"))
+            )
+          ] | length == 1
+      )
+    ' >/dev/null \
+    || die "--clear-apify-secret-ref-prune-fence requires every exact same-named numeric ref in ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS"
 fi
 [[ "$worker_enabled" == "true" || "$worker_enabled" == "false" ]] \
   || die "ANALYSIS_V2_WORKER_ENABLED must be true or false"
@@ -2404,15 +2667,19 @@ if [[ -n "$worker_build_env_file" ]]; then
   write_env_snapshot "$build_env_json" build worker_build_env_deploy_file
 fi
 supabase_public_url=""
-if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
+if [[ "$prune_apify_secret_refs_enabled" == "true" \
+  || "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
   supabase_public_url="$(jq -er '.NEXT_PUBLIC_SUPABASE_URL' <<<"$build_env_json")" \
-    || die "build env file must expose the authoritative Supabase URL for pruning"
+    || die "build env file must expose the authoritative Supabase URL for prune-fence operations"
   [[ "$supabase_public_url" =~ ^https://[a-z0-9]{20}\.supabase\.co$ ]] \
-    || die "explicit pruning requires the canonical https://<20-lowercase-project-ref>.supabase.co origin"
+    || die "prune-fence operations require the canonical https://<20-lowercase-project-ref>.supabase.co origin"
   if [[ -n "$worker_env_file" ]]; then
     env_json_value_equals "$runtime_env_json" NEXT_PUBLIC_SUPABASE_URL \
       "$supabase_public_url" \
-      || die "explicit pruning runtime env must preserve the canonical NEXT_PUBLIC_SUPABASE_URL"
+      || die "prune-fence runtime env must preserve the canonical NEXT_PUBLIC_SUPABASE_URL"
+  fi
+  if [[ "$prune_apify_secret_refs_enabled" == "true" \
+    && -n "$worker_env_file" ]]; then
     env_json_value_equals "$runtime_env_json" \
       ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED false \
       || die "explicit pruning runtime env must preserve ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false"
@@ -2472,6 +2739,7 @@ deploy_lock_payload_file=""
 deploy_lock_url=""
 observed_lock_generation=""
 observed_lock_owner=""
+prune_fence_owner_identity=""
 
 observe_deploy_lock_generation_owner() {
   local attempt
@@ -2625,8 +2893,14 @@ if [[ "$mode" == "apply" ]]; then
     && service_traffic_matches_revision "$final_config" "$staged_revision" \
     || die "post-promotion Cloud Run configuration or traffic verification failed"
   verify_revision_provenance "$staged_revision" "$source_commit_sha"
+  final_active_config="$(revision_json "$staged_revision")" \
+    || die "promoted Cloud Run revision was not observable for prune-fence verification"
+  verify_reattached_apify_prune_fence_refs "$final_config" "$final_active_config"
+  clear_apify_secret_ref_prune_fence_after_reattachment
   rollback_armed="false"
   log "verified: post-promotion queue, IAM, Scheduler, runtime, and traffic contracts"
+elif [[ "$mode" == "dry-run" ]]; then
+  clear_apify_secret_ref_prune_fence_after_reattachment
 fi
 
 if [[ "$mode" == "dry-run" ]]; then

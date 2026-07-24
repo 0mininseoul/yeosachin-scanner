@@ -126,13 +126,158 @@ GRANT EXECUTE ON FUNCTION public.settle_analysis_v2_provider_run_for_cleanup(
 COMMENT ON FUNCTION public.analysis_v2_valid_apify_credential_slot(TEXT) IS
     'Exact same-named credential identities supported by the general Analysis V2 worker; no token pooling or aliases.';
 
--- Return authoritative, bounded evidence before a deploy intentionally removes
--- non-primary Secret Manager references. Official profile-provider canary runs
--- use primary, but cleanup of their eight retained source runs uses each source
--- run's stored credential slot. Both canary journals must therefore be drained.
-CREATE OR REPLACE FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(
-    p_drop_slots TEXT[]
+CREATE OR REPLACE FUNCTION public.analysis_v2_valid_apify_secret_ref_prune_slots(
+    p_slots TEXT[]
 )
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT COALESCE(
+        pg_catalog.cardinality(p_slots) BETWEEN 1 AND 5
+        AND pg_catalog.cardinality(p_slots) = (
+            SELECT pg_catalog.count(DISTINCT requested.slot)
+            FROM pg_catalog.unnest(p_slots) AS requested(slot)
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM pg_catalog.unnest(p_slots) AS requested(slot)
+            WHERE requested.slot IS NULL
+               OR requested.slot = 'primary'
+               OR NOT public.analysis_v2_valid_apify_credential_slot(
+                    requested.slot
+               )
+        ),
+        FALSE
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION public.analysis_v2_normalize_apify_secret_ref_prune_slots(
+    p_slots TEXT[]
+)
+RETURNS TEXT[]
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = ''
+AS $$
+    SELECT pg_catalog.array_agg(requested.slot ORDER BY requested.slot)
+    FROM pg_catalog.unnest(p_slots) AS requested(slot);
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_valid_apify_secret_ref_prune_slots(TEXT[])
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.analysis_v2_normalize_apify_secret_ref_prune_slots(TEXT[])
+    FROM PUBLIC, anon, authenticated, service_role;
+
+-- One permanent row is the serialization point shared by destructive pruning
+-- and both manual canary reservation paths. Clearing updates the row back to
+-- the constrained inactive shape; no privileged RPC ever deletes it.
+CREATE TABLE public.analysis_v2_apify_secret_ref_prune_guard (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    drop_slots TEXT[],
+    owner_source_commit_sha VARCHAR(40),
+    fenced_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+        DEFAULT pg_catalog.clock_timestamp(),
+    CONSTRAINT analysis_v2_apify_secret_ref_prune_guard_singleton_check CHECK (
+        singleton IS TRUE
+    ),
+    CONSTRAINT analysis_v2_apify_secret_ref_prune_guard_state_check CHECK (
+        (
+            drop_slots IS NULL
+            AND owner_source_commit_sha IS NULL
+            AND fenced_at IS NULL
+        ) OR (
+            public.analysis_v2_valid_apify_secret_ref_prune_slots(drop_slots)
+            AND drop_slots =
+                public.analysis_v2_normalize_apify_secret_ref_prune_slots(
+                    drop_slots
+                )
+            AND owner_source_commit_sha ~ '^[0-9a-f]{40}$'
+            AND fenced_at IS NOT NULL
+            AND updated_at >= fenced_at
+        )
+    )
+);
+
+INSERT INTO public.analysis_v2_apify_secret_ref_prune_guard(singleton)
+VALUES (TRUE);
+
+ALTER TABLE public.analysis_v2_apify_secret_ref_prune_guard
+    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.analysis_v2_apify_secret_ref_prune_guard
+    FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.analysis_v2_apify_secret_ref_prune_guard
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.acquire_analysis_v2_apify_secret_ref_prune_fence(
+    p_drop_slots TEXT[],
+    p_owner_source_commit_sha TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_drop_slots TEXT[];
+    v_guard public.analysis_v2_apify_secret_ref_prune_guard%ROWTYPE;
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+BEGIN
+    IF NOT public.analysis_v2_valid_apify_secret_ref_prune_slots(p_drop_slots)
+       OR p_owner_source_commit_sha IS NULL
+       OR p_owner_source_commit_sha !~ '^[0-9a-f]{40}$' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    v_drop_slots :=
+        public.analysis_v2_normalize_apify_secret_ref_prune_slots(p_drop_slots);
+
+    SELECT guard.*
+    INTO v_guard
+    FROM public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    WHERE guard.singleton IS TRUE
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_GUARD_CORRUPT',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF v_guard.drop_slots IS NOT NULL THEN
+        IF v_guard.drop_slots IS DISTINCT FROM v_drop_slots
+           OR v_guard.owner_source_commit_sha
+                IS DISTINCT FROM p_owner_source_commit_sha THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_CONFLICT',
+                ERRCODE = 'P0001';
+        END IF;
+        RETURN pg_catalog.jsonb_build_object(
+            'active', TRUE,
+            'acquired', FALSE,
+            'dropSlots', pg_catalog.to_jsonb(v_drop_slots)
+        );
+    END IF;
+
+    UPDATE public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    SET drop_slots = v_drop_slots,
+        owner_source_commit_sha = p_owner_source_commit_sha,
+        fenced_at = v_now,
+        updated_at = v_now
+    WHERE guard.singleton IS TRUE;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'active', TRUE,
+        'acquired', TRUE,
+        'dropSlots', pg_catalog.to_jsonb(v_drop_slots)
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.load_analysis_v2_apify_secret_ref_prune_fence()
 RETURNS JSONB
 LANGUAGE plpgsql
 STABLE
@@ -140,7 +285,268 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+    v_guard public.analysis_v2_apify_secret_ref_prune_guard%ROWTYPE;
+BEGIN
+    SELECT guard.*
+    INTO v_guard
+    FROM public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    WHERE guard.singleton IS TRUE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_GUARD_CORRUPT',
+            ERRCODE = 'P0001';
+    END IF;
+    RETURN pg_catalog.jsonb_build_object(
+        'active', v_guard.drop_slots IS NOT NULL,
+        'dropSlots', pg_catalog.to_jsonb(v_guard.drop_slots),
+        'ownerSourceCommitSha', v_guard.owner_source_commit_sha
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.clear_analysis_v2_apify_secret_ref_prune_fence(
+    p_drop_slots TEXT[],
+    p_expected_owner_source_commit_sha TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
     v_drop_slots TEXT[];
+    v_guard public.analysis_v2_apify_secret_ref_prune_guard%ROWTYPE;
+BEGIN
+    IF NOT public.analysis_v2_valid_apify_secret_ref_prune_slots(p_drop_slots)
+       OR p_expected_owner_source_commit_sha IS NULL
+       OR p_expected_owner_source_commit_sha !~ '^[0-9a-f]{40}$' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    v_drop_slots :=
+        public.analysis_v2_normalize_apify_secret_ref_prune_slots(p_drop_slots);
+
+    SELECT guard.*
+    INTO v_guard
+    FROM public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    WHERE guard.singleton IS TRUE
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_GUARD_CORRUPT',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_guard.drop_slots IS NULL THEN
+        RETURN pg_catalog.jsonb_build_object(
+            'active', FALSE,
+            'cleared', FALSE,
+            'dropSlots', pg_catalog.to_jsonb(v_drop_slots)
+        );
+    END IF;
+    IF v_guard.drop_slots IS DISTINCT FROM v_drop_slots
+       OR v_guard.owner_source_commit_sha
+            IS DISTINCT FROM p_expected_owner_source_commit_sha THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_CONFLICT',
+            ERRCODE = 'P0001';
+    END IF;
+
+    UPDATE public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    SET drop_slots = NULL,
+        owner_source_commit_sha = NULL,
+        fenced_at = NULL,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE guard.singleton IS TRUE;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'active', FALSE,
+        'cleared', TRUE,
+        'dropSlots', pg_catalog.to_jsonb(v_drop_slots)
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.acquire_analysis_v2_apify_secret_ref_prune_fence(
+    TEXT[], TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.acquire_analysis_v2_apify_secret_ref_prune_fence(
+    TEXT[], TEXT
+) TO service_role;
+REVOKE ALL ON FUNCTION public.load_analysis_v2_apify_secret_ref_prune_fence()
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_apify_secret_ref_prune_fence()
+    TO service_role;
+REVOKE ALL ON FUNCTION public.clear_analysis_v2_apify_secret_ref_prune_fence(
+    TEXT[], TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.clear_analysis_v2_apify_secret_ref_prune_fence(
+    TEXT[], TEXT
+) TO service_role;
+
+-- Preserve the reviewed canary implementations behind private names and put
+-- the durable guard in front of every reservation attempt, including retries.
+ALTER FUNCTION public.reserve_analysis_v2_profile_repair_canary_run(
+    UUID, INTEGER, TEXT, UUID
+) RENAME TO analysis_v2_profile_repair_canary_reserve_unfenced;
+REVOKE ALL ON FUNCTION public.analysis_v2_profile_repair_canary_reserve_unfenced(
+    UUID, INTEGER, TEXT, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.reserve_analysis_v2_profile_repair_canary_run(
+    p_source_request_id UUID,
+    p_repetition INTEGER,
+    p_credential_slot TEXT,
+    p_reservation_token UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_guard public.analysis_v2_apify_secret_ref_prune_guard%ROWTYPE;
+BEGIN
+    SELECT guard.*
+    INTO v_guard
+    FROM public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    WHERE guard.singleton IS TRUE
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_GUARD_CORRUPT',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_guard.drop_slots IS NOT NULL
+       AND p_credential_slot = ANY(v_guard.drop_slots) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCED',
+            ERRCODE = 'P0001';
+    END IF;
+    RETURN public.analysis_v2_profile_repair_canary_reserve_unfenced(
+        p_source_request_id,
+        p_repetition,
+        p_credential_slot,
+        p_reservation_token
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.reserve_analysis_v2_profile_repair_canary_run(
+    UUID, INTEGER, TEXT, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.reserve_analysis_v2_profile_repair_canary_run(
+    UUID, INTEGER, TEXT, UUID
+) TO service_role;
+
+ALTER FUNCTION public.reserve_analysis_v2_profile_provider_canary_run(
+    UUID, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER,
+    INTEGER, TEXT, BOOLEAN, UUID
+) RENAME TO analysis_v2_profile_provider_canary_reserve_unfenced;
+REVOKE ALL ON FUNCTION public.analysis_v2_profile_provider_canary_reserve_unfenced(
+    UUID, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER,
+    INTEGER, TEXT, BOOLEAN, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.reserve_analysis_v2_profile_provider_canary_run(
+    p_source_request_id UUID,
+    p_repetition INTEGER,
+    p_source_run_count INTEGER,
+    p_candidate_count INTEGER,
+    p_unique_candidate_count INTEGER,
+    p_public_candidate_count INTEGER,
+    p_incomplete_candidate_count INTEGER,
+    p_unavailable_candidate_count INTEGER,
+    p_primary_success_candidate_count INTEGER,
+    p_critical_candidate_count INTEGER,
+    p_ordered_set_hmac TEXT,
+    p_restricted_access_verified BOOLEAN,
+    p_reservation_token UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_guard public.analysis_v2_apify_secret_ref_prune_guard%ROWTYPE;
+BEGIN
+    SELECT guard.*
+    INTO v_guard
+    FROM public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    WHERE guard.singleton IS TRUE
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_GUARD_CORRUPT',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_guard.drop_slots IS NOT NULL
+       AND EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_provider_runs AS source_run
+            JOIN public.analysis_v2_provider_execution_policies AS execution_policy
+              ON execution_policy.request_id = source_run.request_id
+            WHERE source_run.request_id = p_source_request_id
+              AND source_run.status = 'succeeded'
+              AND source_run.run_id ~ '^[A-Za-z0-9]{8,64}$'
+              AND source_run.actor_id = 'apify/instagram-profile-scraper'
+              AND source_run.job_key ~ '^track:profiles:batch:(?:0|[1-7])$'
+              AND source_run.operation_key ~
+                    '^profile-fallback:[0-9a-f]{64}$'
+              AND execution_policy.mode = 'test_operation_split'
+              AND execution_policy.policy_version = 'authorized-free-e2e-v1'
+              AND execution_policy.operation_slot_map->>'profile-fallback'
+                    = source_run.credential_slot
+              AND source_run.credential_slot = ANY(v_guard.drop_slots)
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCED',
+            ERRCODE = 'P0001';
+    END IF;
+    RETURN public.analysis_v2_profile_provider_canary_reserve_unfenced(
+        p_source_request_id,
+        p_repetition,
+        p_source_run_count,
+        p_candidate_count,
+        p_unique_candidate_count,
+        p_public_candidate_count,
+        p_incomplete_candidate_count,
+        p_unavailable_candidate_count,
+        p_primary_success_candidate_count,
+        p_critical_candidate_count,
+        p_ordered_set_hmac,
+        p_restricted_access_verified,
+        p_reservation_token
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.reserve_analysis_v2_profile_provider_canary_run(
+    UUID, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER,
+    INTEGER, TEXT, BOOLEAN, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.reserve_analysis_v2_profile_provider_canary_run(
+    UUID, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER,
+    INTEGER, TEXT, BOOLEAN, UUID
+) TO service_role;
+
+-- Return authoritative, bounded evidence before a deploy intentionally removes
+-- non-primary Secret Manager references. Official profile-provider canary runs
+-- use primary, but cleanup of their eight retained source runs uses each source
+-- run's stored credential slot. Both canary journals must therefore be drained.
+CREATE OR REPLACE FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(
+    p_drop_slots TEXT[],
+    p_owner_source_commit_sha TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_drop_slots TEXT[];
+    v_guard public.analysis_v2_apify_secret_ref_prune_guard%ROWTYPE;
     v_active_request_runs BIGINT;
     v_unreconciled_request_runs BIGINT;
     v_active_preflight_runs BIGINT;
@@ -152,25 +558,31 @@ DECLARE
     v_active_drop_slot_policies BIGINT;
     v_incomplete_profile_provider_canary_cleanups BIGINT;
 BEGIN
-    SELECT pg_catalog.array_agg(slot ORDER BY slot)
-    INTO v_drop_slots
-    FROM pg_catalog.unnest(p_drop_slots) AS requested(slot);
-
-    IF p_drop_slots IS NULL
-       OR pg_catalog.cardinality(p_drop_slots) NOT BETWEEN 1 AND 5
-       OR pg_catalog.cardinality(v_drop_slots) <> (
-            SELECT pg_catalog.count(DISTINCT slot)
-            FROM pg_catalog.unnest(p_drop_slots) AS requested(slot)
-       )
-       OR EXISTS (
-            SELECT 1
-            FROM pg_catalog.unnest(p_drop_slots) AS requested(slot)
-            WHERE slot IS NULL
-               OR slot = 'primary'
-               OR NOT public.analysis_v2_valid_apify_credential_slot(slot)
-       ) THEN
+    IF NOT public.analysis_v2_valid_apify_secret_ref_prune_slots(p_drop_slots)
+       OR p_owner_source_commit_sha IS NULL
+       OR p_owner_source_commit_sha !~ '^[0-9a-f]{40}$' THEN
         RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_SLOTS_INVALID',
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    v_drop_slots :=
+        public.analysis_v2_normalize_apify_secret_ref_prune_slots(p_drop_slots);
+
+    SELECT guard.*
+    INTO v_guard
+    FROM public.analysis_v2_apify_secret_ref_prune_guard AS guard
+    WHERE guard.singleton IS TRUE
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_GUARD_CORRUPT',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_guard.drop_slots IS DISTINCT FROM v_drop_slots
+       OR v_guard.owner_source_commit_sha
+            IS DISTINCT FROM p_owner_source_commit_sha THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_APIFY_SECRET_REF_PRUNE_FENCE_CONFLICT',
             ERRCODE = 'P0001';
     END IF;
 
@@ -215,9 +627,10 @@ BEGIN
 
     -- A provider reservation can still be created before any provider ledger
     -- row exists. Reserve is fenced by an active request, while target-profile
-    -- acquisition is fenced by an active preflight. Requiring global quiet
-    -- state prevents an old drained worker invocation from materializing a
-    -- drop-slot run after this point-in-time audit.
+    -- acquisition is fenced by either the main preflight state or the
+    -- independent fresh-admission state. Requiring global quiet state prevents
+    -- an old drained worker invocation from materializing a drop-slot run after
+    -- this point-in-time audit.
     SELECT pg_catalog.count(*)
     INTO v_active_requests
     FROM public.analysis_requests AS analysis_request
@@ -226,7 +639,11 @@ BEGIN
     SELECT pg_catalog.count(*)
     INTO v_active_preflights
     FROM public.analysis_preflights AS preflight
-    WHERE preflight.status IN ('pending', 'processing');
+    WHERE preflight.status IN ('pending', 'processing')
+       OR (
+            preflight.status = 'ready'
+            AND preflight.admission_status IN ('pending', 'processing')
+       );
 
     -- Keep the policy-specific count as diagnostic evidence. Terminal requests
     -- retain immutable policies but can no longer reserve provider runs.
@@ -300,10 +717,16 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TEXT[])
+REVOKE ALL ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(
+    TEXT[], TEXT
+)
     FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TEXT[])
+GRANT EXECUTE ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(
+    TEXT[], TEXT
+)
     TO service_role;
 
-COMMENT ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(TEXT[]) IS
+COMMENT ON FUNCTION public.analysis_v2_apify_secret_ref_prune_readiness(
+    TEXT[], TEXT
+) IS
     'Service-only global quiet-work, drop-slot ledger, policy, and source-cleanup evidence before a primary-only Cloud Run promotion.';

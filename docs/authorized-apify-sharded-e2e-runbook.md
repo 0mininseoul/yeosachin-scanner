@@ -82,7 +82,7 @@ slot total의 110% 이상이어야 한다.
 
 | slot | 고정 계산식 | total | 110% minimum live balance |
 |---|---|---:|---:|
-| `senary` | followers `800 × $0.00085 = $0.68`; profile fallback `600 × $0.0026 = $1.56`; worst repair `600 × $0.0027 = $1.62`; fresh target profile `$0.0026`; target likers `4 × 150 × $0.00155 = $0.93` | `$4.7926` | `$5.27186` |
+| `senary` | followers `800 × $0.00085 = $0.68`; profile fallback `600 × $0.0026 = $1.56`; worst repair `600 × $0.0027 = $1.62`; initial + fresh target profiles `2 × $0.0026 = $0.0052`; target likers `4 × 150 × $0.00155 = $0.93` | `$4.7952` | `$5.27472` |
 | `quinary` | following `800 × $0.00085 = $0.68`; candidate likers `10 × 1 × 100 × $0.00155 = $1.55` | `$2.23` | `$2.453` |
 | `tertiary` | target comments `6 × 15 × $0.0026 = $0.234` | `$0.234` | `$0.2574` |
 
@@ -101,7 +101,7 @@ intake와 worker의 모든 runtime에서 유지한다.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy while authorized-test sharding remains disabled.
 4. staging 변경 전 baseline에서 intake와 worker의 effective normal selected slot이 모두 `primary`이고 Cloud Run이 exact `ai-baram-v2-apify-primary:3` secret reference를 사용하는지 확인한다. numeric secret version은 교체하지 않는다.
 5. 정책에 등장할 각 named slot이 `.env.local`과 Secret Manager의 same-named physical account로 해석되는지 token 값을 표시하지 않고 확인한다. cross-name alias가 하나라도 있으면 중단한다.
-6. 09:00 KST reset 뒤 senary, quinary, tertiary의 live remaining balance가 각각 `$5.27186`, `$2.453`, `$0.2574` 이상인지 읽고, 각 배정 Actor의 UTC 일일 item/run quota와 active job을 별도로 확인한다. quota를 balance로 대체하지 않는다.
+6. 09:00 KST reset 뒤 senary, quinary, tertiary의 live remaining balance가 각각 `$5.27472`, `$2.453`, `$0.2574` 이상인지 읽고, 각 배정 Actor의 UTC 일일 item/run quota와 active job을 별도로 확인한다. quota를 balance로 대체하지 않는다.
 7. sharding을 `false`로 유지한 채 selected `senary` same-named exact numeric secret과 additional `quinary`, `tertiary` same-named exact numeric refs를 staging 배치한다. `latest`를 사용하지 않고 설치 뒤 effective config와 Vercel/Cloud Run deployed SHA를 다시 확인한다.
 8. 관계 수집은 `senary`와 `quinary`에 각각 한 방향만 배정되고, target profile과 profile fallback/repair는 `senary`, target liker는 `senary`, target comment는 `tertiary`, candidate liker는 `quinary`이며, 어떤 단일 operation도 여러 account를 쓰지 않는지 확인한다.
 9. 정상 공개 preflight/얼리버드 intake는 staging 전체에서 `ANALYSIS_V2_ADMISSION_ENABLED=true`이고 normal no-header 요청은 `production`에 남는지 확인한다. paid webhook은 `awaiting_operator`까지만 만들고 outbox/operator approval 전에는 분석 요청이나 task를 자동 생성하지 않아야 한다. 별도의 signed `test_entitlement`는 exact owner/target 한 건만 허용해야 한다. 예상 밖 ordinary preflight 또는 work가 관측되면 시작을 중단하고 그 작업이 terminal/empty가 된 뒤 empty-work gate를 처음부터 다시 실행한다.
@@ -342,6 +342,30 @@ Supabase service-role 값을 argv, stdout, stderr, shell trace에 넣지 않고 
 staging 전과 promotion 직전에 각각 다시 호출한다. 어느 ledger count가 0이 아니거나 evidence가
 누락·변조됐거나 slot set이 다르면 staging/promotion을 중단한다. 성공 후 prune `--check`는
 exact `APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3` 하나만 허용한다.
+
+300초 drain 뒤 apply가 획득한 durable singleton DB fence는 prune 성공, 프로세스 실패,
+traffic rollback 어느 경우에도 자동으로 해제하지 않는다. fence와 겹치는 credential slot의
+profile-repair canary 및 8개 source run 중 하나라도 겹치는 official profile-provider canary
+예약은 fence가 유지되는 동안 차단된다. prune dry-run은 fence를 읽거나 쓰지 않고, prune
+`--check`는 exact slot/owner fence identity와 readiness만 읽어 검증하며 acquire/clear하지 않는다.
+
+나중에 제거한 ref를 되붙여야 할 때만 아래의 별도 ordinary-deploy 경로를 사용한다. 각 version은
+실제 same-named Secret Manager numeric version으로 바꾸고, fenced slot 전부를 exact하게
+열거한다. dry-run과 check는 clear하지 않는다. apply는 no-traffic staging과 promotion을 끝낸 뒤
+latest와 active inventory 모두에서 같은 이름·같은 numeric version을 확인하고, 시작 시 읽은
+slot/owner identity로 compare-and-clear한다. 이미 inactive인 재시도는 성공하지만 owner, slot,
+inventory가 바뀌면 실패하고 rollback하며 fence를 유지한다.
+
+```bash
+export ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS='tertiary:<N>,quinary:<N>,senary:<N>'
+
+bash scripts/deploy-analysis-v2-worker.sh --dry-run \
+  --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary
+bash scripts/deploy-analysis-v2-worker.sh \
+  --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary
+bash scripts/deploy-analysis-v2-worker.sh --check \
+  --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary
+```
 
 5. script가 DB의 모든 `pending|processing` 분석 요청과 preflight가 0이고, 제거 대상 slot을 가진 활성 execution policy도 0인지 확인했는지 본다. 또한 `analysis_v2_provider_runs`, `analysis_preflight_provider_runs`, 5-slot `analysis_v2_profile_repair_canary_runs`에서 제거 대상 `tertiary`, `quinary`, `senary`의 active/ambiguous 실행과 종료 후 미정산 실행이 모두 0이어야 한다. Official profile-provider canary 자체 run은 primary 전용이지만 원본 8개 source run의 Apify storage 삭제는 각 source run에 저장된 `credential_slot`을 사용하므로, 제거 대상 slot의 source run을 가진 experiment는 source KVS/dataset/request queue cleanup 세 상태가 모두 `verified_absent`여야 한다.
 6. 선택 secret reference가 exact `ai-baram-v2-apify-primary:3`이고 Cloud Run inventory에 다른 Apify ref가 없음을 확인한다. token 값은 출력하지 않는다.

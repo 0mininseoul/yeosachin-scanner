@@ -4,7 +4,7 @@
 
 **Goal:** Add a true, same-named `senary` Apify credential slot for the single authorized Standard E2E while keeping `septenary` rejected and leaving the separate profile-repair microcanary at its existing five-slot boundary. Plus remains out of scope because it is not launch-ready.
 
-**Architecture:** Extend the shared V2 credential-slot vocabulary, exact environment-to-secret identity maps, and helper-backed database policy with one append-only migration. Recreate the cleanup settlement RPC so a failed senary-backed run can be settled safely. Do not alias a token, edit an applied migration, or widen the profile-repair microcanary.
+**Architecture:** Extend the shared V2 credential-slot vocabulary, exact environment-to-secret identity maps, and helper-backed database policy with one append-only migration. Recreate the cleanup settlement RPC so a failed senary-backed run can be settled safely. Use a durable singleton database guard to serialize destructive ref pruning with both manual canary reservation paths, and clear it only through an explicit post-reattachment deployment path. Do not alias a token, edit an applied migration, or widen the profile-repair microcanary.
 
 **Stack:** TypeScript, Next.js, Vitest, PGlite, Bash, Supabase Postgres, Cloud Run, Secret Manager, Vercel.
 
@@ -123,7 +123,8 @@ Run the Bash contract suites and focused TypeScript tests.
   - target comments: tertiary
   - candidate likers: quinary
 - Fix the Standard worst-case exposure from the catalog and current Actor
-  rates: senary `$4.7926` with 110% balance `$5.27186`; quinary `$2.23`
+  rates: senary `$4.7952` (including initial + fresh target profiles
+  `2 × $0.0026 = $0.0052`) with 110% balance `$5.27472`; quinary `$2.23`
   with 110% balance `$2.453`; tertiary `$0.234` with 110% balance
   `$0.2574`.
 - Preserve the deployment sequence: verify the initial `primary:3` baseline, stage the exact
@@ -148,7 +149,57 @@ Run the Bash contract suites and focused TypeScript tests.
   inventory.
 - Explicitly say profile-repair microcanary does not support senary.
 
-## Task 6: Verification and commit
+## Task 6: Add a durable database fence around secret-ref pruning
+
+**Files:**
+
+- Modify: `supabase/migrations/20260724220000_expand_analysis_v2_apify_senary_slot.sql`
+- Modify: `lib/services/analysis/v2-senary-apify-credential-migration-contract.test.ts`
+- Modify: `lib/services/analysis/profile-provider-canary-run-pglite.test.ts`
+- Modify: `lib/services/analysis/profile-repair-canary-run-pglite.test.ts`
+- Modify: `scripts/deploy-analysis-v2-worker.sh`
+- Modify: `scripts/test-analysis-v2-infra-scripts.sh`
+- Modify: `docs/authorized-apify-sharded-e2e-runbook.md`
+
+**Required lifecycle:**
+
+- Add one always-present singleton guard row whose constraint permits exactly
+  inactive (all fence columns null) or active (normalized non-empty drop slots,
+  40-hex source commit owner, and timestamps) state. Force RLS and revoke all
+  direct access.
+- Add service-role-only acquire, load, readiness, and compare-and-clear RPCs.
+  Acquire and both canary reserve RPCs must lock the same singleton row
+  `FOR UPDATE`. Identical owner and slots are idempotent; every other active
+  acquire conflicts.
+- Acquire the fence after the 300-second unchanged-service drain and before the
+  first ledger audit. Re-run readiness with the exact same owner immediately
+  before traffic promotion. Never clear the fence automatically after prune
+  success, rollback, or process failure.
+- Rewrite the latest profile-repair canary reserve function to reject an
+  overlapping requested credential slot. Rewrite the latest official
+  profile-provider reserve function to reject when any of the eight validated
+  source-run credential slots overlaps. Existing reservation retries are also
+  blocked while overlapping; non-overlapping calls retain their prior behavior.
+- Add explicit `--clear-apify-secret-ref-prune-fence=SLOTS`, mutually exclusive
+  with pruning. It may mutate only in apply mode, after ordinary no-traffic
+  staging and promotion, and only when latest and active Cloud Run inventories
+  both contain every fenced same-named numeric secret reference. Use the
+  previously loaded owner and exact slots for compare-and-clear. An already
+  inactive retry succeeds; owner or slot drift fails.
+- Dry-run and check must never acquire or clear the database fence. Never log
+  the service-role credential or fence owner.
+
+**Test sequence:**
+
+1. Add failing PGlite tests for inactive/active row constraints, exact acquire
+   identity, idempotent retry, conflicting acquire, exact readiness identity,
+   compare-and-clear, and both overlapping/non-overlapping canary reserves.
+2. Add failing Bash tests for apply acquire order and two readiness calls,
+   dry-run/check non-mutation, persistent fence on failed promotion, idempotent
+   apply retry, explicit reattach clear, and owner/inventory drift rejection.
+3. Implement the SQL and Bash paths minimally until those focused tests pass.
+
+## Task 7: Verification and commit
 
 Run:
 
