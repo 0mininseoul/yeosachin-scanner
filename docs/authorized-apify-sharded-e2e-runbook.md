@@ -84,7 +84,7 @@ effective normal slot을 사용한다. 따라서 이 slot은 request의 `target-
 `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false`를 아래 1~14번이 모두 통과할 때까지
 intake와 worker의 모든 runtime에서 유지한다.
 
-1. 로컬의 ordered migration 파일과 linked remote migration history가 `20260724123500_add_analysis_v2_result_image_objects.sql`까지 정확히 일치하는지 확인한다. pending migration은 reviewed ordered path로만 적용하고 `--include-all`이나 ad hoc skip을 사용하지 않는다. `20260719190000`은 수동 reconciliation된 예외이므로 해당 파일과 migration history가 parity 증거에 존재하는지 확인하되, 이미 반영된 SQL을 맹목적으로 재실행하지 않는다.
+1. 로컬의 ordered migration 파일과 linked remote migration history가 `20260724203500_set_dashboard_postgres_timezone_kst.sql`까지 정확히 일치하는지 확인한다. pending migration은 reviewed ordered path로만 적용하고 `--include-all`이나 ad hoc skip을 사용하지 않는다. `20260719190000`은 수동 reconciliation된 예외이므로 해당 파일과 migration history가 parity 증거에 존재하는지 확인하되, 이미 반영된 SQL을 맹목적으로 재실행하지 않는다.
 2. sharding을 `false`로 유지한 채 reviewed commit을 Vercel과 Cloud Run에 배포하고 두 deployed SHA가 일치하는지 확인한다.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy while authorized-test sharding remains disabled.
 4. intake와 worker의 effective normal selected slot이 모두 `primary`이고 Cloud Run이 exact `ai-baram-v2-apify-primary:3` secret reference를 사용하는지 확인한다. numeric secret version은 교체하지 않는다.
