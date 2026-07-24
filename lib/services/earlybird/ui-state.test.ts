@@ -173,6 +173,10 @@ describe('earlybird analyze UI state', () => {
             GROBLE_STANDARD_PRODUCT_ID: 'standard_product-01',
             GROBLE_BASIC_PAYMENT_ADDRESS: 'basic-checkout-a1',
             GROBLE_STANDARD_PAYMENT_ADDRESS: 'standard-checkout-b2',
+            GROBLE_V2_BASIC_PRODUCT_ID: 'basic_product-v2',
+            GROBLE_V2_STANDARD_PRODUCT_ID: 'standard_product-v2',
+            GROBLE_V2_BASIC_PAYMENT_ADDRESS: 'basic-checkout-v2',
+            GROBLE_V2_STANDARD_PAYMENT_ADDRESS: 'standard-checkout-v2',
             GROBLE_WEBHOOK_SECRET: 'test-secret',
         });
 
@@ -562,10 +566,44 @@ describe('earlybird analyze UI state', () => {
             new URL('../../../app/earlybird/earlybird-status.tsx', import.meta.url),
             'utf8'
         );
-        expect(source).toContain("order.systemStatus === 'payment_pending'");
+        expect(source).toContain("order.checkoutAction === 'continue'");
         expect(source).toContain('order.preflightId');
         expect(source).toContain('recoverPendingEarlybirdCheckout(');
         expect(source).toContain('disabled={checkoutRecoveryPending}');
         expect(source).toContain('결제 계속하기');
+        expect(source).toContain("order.checkoutAction === 'refresh_pricing'");
+        expect(source).toContain('legacyDisclosureAccepted');
+        expect(source).toContain('새 할인가로 다시 구매');
+    });
+
+    it('refreshes a retired checkout with only the legacy order id and fresh consent', async () => {
+        const refresh = earlybirdUiState.refreshLegacyEarlybirdCheckout;
+        const legacyOrderId = '20000000-0000-4000-8000-000000000001';
+        const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+            orderId: '20000000-0000-4000-8000-000000000002',
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-v2'
+                + '?ref=ord.0123456789abcdef0123456789abcdef',
+        }), {
+            status: 201,
+            headers: { 'content-type': 'application/json' },
+        }));
+        const redirectCheckout = vi.fn();
+
+        await expect(refresh(legacyOrderId, { inFlight: false }, {
+            request,
+            redirectCheckout,
+            setPending: vi.fn(),
+            showError: vi.fn(),
+        })).resolves.toBe('checkout_refreshed');
+
+        expect(request).toHaveBeenCalledWith('/api/earlybird/checkout', {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                legacyOrderId,
+                disclosureAccepted: true,
+            }),
+        });
+        expect(redirectCheckout).toHaveBeenCalledOnce();
     });
 });

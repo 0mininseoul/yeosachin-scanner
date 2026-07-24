@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     from: vi.fn(),
     orderQuery: null as ReturnType<typeof queryBuilder> | null,
     resultQuery: null as ReturnType<typeof queryBuilder> | null,
+    retirementQuery: null as ReturnType<typeof queryBuilder> | null,
 }));
 
 function queryBuilder(data: unknown) {
@@ -58,12 +59,16 @@ function orderRow(overrides: Record<string, unknown> = {}) {
     };
 }
 
-function installQueries(order: unknown, result: unknown = null) {
+function installQueries(order: unknown, result: unknown = null, retirement: unknown = null) {
     mocks.orderQuery = queryBuilder(order);
     mocks.resultQuery = queryBuilder(result);
+    mocks.retirementQuery = queryBuilder(retirement);
     mocks.from.mockImplementation((table: string) => {
         if (table === 'earlybird_orders') return mocks.orderQuery;
         if (table === 'analysis_requests') return mocks.resultQuery;
+        if (table === 'earlybird_checkout_retirements') {
+            return mocks.retirementQuery;
+        }
         throw new Error(`unexpected table: ${table}`);
     });
 }
@@ -119,6 +124,7 @@ describe('earlybird owner order status route', () => {
                 systemStatus: 'paid',
                 displayStatus: '판독 대기',
                 resultUrl: null,
+                checkoutAction: null,
             },
         });
         expect(JSON.stringify(body)).not.toMatch(/payment_id|product|disclosure|buyer|card/);
@@ -163,8 +169,36 @@ describe('earlybird owner order status route', () => {
             order: {
                 acceptedAt: null,
                 displayStatus: '결제 확인',
+                checkoutAction: 'continue',
             },
         });
+    });
+
+    it('offers a fresh-price checkout only for an audited retired v1 order', async () => {
+        installQueries(orderRow({
+            status: 'cancelled',
+            actual_amount_krw: null,
+            paid_at: null,
+            due_at: null,
+            plan_sequence: null,
+        }), null, {
+            legacy_order_id: ORDER_ID,
+            reason: 'pricing_v2_product_separation',
+        });
+
+        const response = await GET(new Request(
+            'https://example.com/api/earlybird/orders/latest'
+        ));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                orderId: ORDER_ID,
+                systemStatus: 'cancelled',
+                checkoutAction: 'refresh_pricing',
+            },
+        });
+        expect(mocks.retirementQuery?.eq)
+            .toHaveBeenCalledWith('legacy_order_id', ORDER_ID);
     });
 
     it('rejects invalid plan filters instead of widening the query', async () => {

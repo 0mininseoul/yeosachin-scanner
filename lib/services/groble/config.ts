@@ -13,6 +13,8 @@ const secretSchema = z.string().min(1).max(1_024);
 export type GrobleConfig = Readonly<{
     productIds: Readonly<Record<PaidEarlybirdPlanId, string>>;
     paymentAddresses: Readonly<Record<PaidEarlybirdPlanId, string>>;
+    legacyProductIds: Readonly<Record<PaidEarlybirdPlanId, string>>;
+    legacyPaymentAddresses: Readonly<Record<PaidEarlybirdPlanId, string>>;
     webhookSecret: string;
     webhookPreviousSecret: string | null;
 }>;
@@ -56,12 +58,62 @@ export function readGrobleConfig(env: Environment = process.env): GrobleConfig {
         throw new Error('GROBLE_PAYMENT_ADDRESSES_MUST_BE_DISTINCT');
     }
 
+    const v2BasicProductId = requiredValue(
+        env,
+        'GROBLE_V2_BASIC_PRODUCT_ID',
+        productIdSchema
+    );
+    const v2StandardProductId = requiredValue(
+        env,
+        'GROBLE_V2_STANDARD_PRODUCT_ID',
+        productIdSchema
+    );
+    if (v2BasicProductId === v2StandardProductId) {
+        throw new Error('GROBLE_PRODUCT_IDS_MUST_BE_DISTINCT');
+    }
+    if (
+        [basicProductId, standardProductId].includes(v2BasicProductId)
+        || [basicProductId, standardProductId].includes(v2StandardProductId)
+    ) {
+        throw new Error('GROBLE_PRODUCT_VERSION_REUSE');
+    }
+
+    const v2BasicPaymentAddress = requiredValue(
+        env,
+        'GROBLE_V2_BASIC_PAYMENT_ADDRESS',
+        productIdSchema
+    );
+    const v2StandardPaymentAddress = requiredValue(
+        env,
+        'GROBLE_V2_STANDARD_PAYMENT_ADDRESS',
+        productIdSchema
+    );
+    if (v2BasicPaymentAddress === v2StandardPaymentAddress) {
+        throw new Error('GROBLE_PAYMENT_ADDRESSES_MUST_BE_DISTINCT');
+    }
+    if (
+        [basicPaymentAddress, standardPaymentAddress]
+            .includes(v2BasicPaymentAddress)
+        || [basicPaymentAddress, standardPaymentAddress]
+            .includes(v2StandardPaymentAddress)
+    ) {
+        throw new Error('GROBLE_PAYMENT_ADDRESS_VERSION_REUSE');
+    }
+
     return Object.freeze({
         productIds: Object.freeze({
+            basic: v2BasicProductId,
+            standard: v2StandardProductId,
+        }),
+        paymentAddresses: Object.freeze({
+            basic: v2BasicPaymentAddress,
+            standard: v2StandardPaymentAddress,
+        }),
+        legacyProductIds: Object.freeze({
             basic: basicProductId,
             standard: standardProductId,
         }),
-        paymentAddresses: Object.freeze({
+        legacyPaymentAddresses: Object.freeze({
             basic: basicPaymentAddress,
             standard: standardPaymentAddress,
         }),

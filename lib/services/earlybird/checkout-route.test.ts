@@ -78,15 +78,35 @@ async function recoverCheckout(body: unknown, origin = 'https://example.com'): P
     }));
 }
 
+async function refreshLegacyCheckout(
+    body: unknown,
+    origin = 'https://example.com'
+): Promise<Response> {
+    const handler = (
+        checkoutRoute as unknown as {
+            PATCH?: (request: Request) => Promise<Response>;
+        }
+    ).PATCH;
+    expect(handler).toBeTypeOf('function');
+    return handler!(new Request('https://example.com/api/earlybird/checkout', {
+        method: 'PATCH',
+        headers: {
+            'content-type': 'application/json',
+            origin,
+        },
+        body: JSON.stringify(body),
+    }));
+}
+
 function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
     return {
         id: ORDER_ID,
         user_id: USER_ID,
         preflight_id: PREFLIGHT_ID,
         plan_id: 'basic',
-        pricing_version: 'earlybird-2026-07-v1',
-        expected_amount_krw: 14_900,
-        expected_groble_product_id: 'basic_product-01',
+        pricing_version: 'earlybird-2026-07-v2',
+        expected_amount_krw: 6_900,
+        expected_groble_product_id: 'basic_product-v2',
         buyer_match_policy: 'verified_kakao_phone',
         expected_buyer_phone_number_normalized: '+821012345678',
         expected_buyer_phone_verification_source: 'kakao_rest_api',
@@ -159,14 +179,15 @@ function authenticate(userId: string | null = USER_ID): void {
 
 function mockCheckoutRecord(created: boolean): void {
     mocks.rpc.mockImplementation(async (name: string) => {
-        if (name === 'create_earlybird_checkout') {
+        if (name === 'create_earlybird_checkout_v2') {
             return {
-                data: [{ order_id: ORDER_ID, created }],
+                data: [{
+                    order_id: ORDER_ID,
+                    created,
+                    seller_reference: SELLER_REFERENCE,
+                }],
                 error: null,
             };
-        }
-        if (name === 'issue_earlybird_groble_seller_reference') {
-            return { data: SELLER_REFERENCE, error: null };
         }
         return { data: null, error: { message: 'unexpected rpc' } };
     });
@@ -189,6 +210,10 @@ describe('earlybird checkout and waitlist routes', () => {
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';
         process.env.GROBLE_BASIC_PAYMENT_ADDRESS = 'basic-checkout-a1';
         process.env.GROBLE_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-b2';
+        process.env.GROBLE_V2_BASIC_PRODUCT_ID = 'basic_product-v2';
+        process.env.GROBLE_V2_STANDARD_PRODUCT_ID = 'standard_product-v2';
+        process.env.GROBLE_V2_BASIC_PAYMENT_ADDRESS = 'basic-checkout-v2';
+        process.env.GROBLE_V2_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-v2';
         process.env.GROBLE_WEBHOOK_SECRET = 'webhook-secret';
         mocks.flush.mockResolvedValue(undefined);
         mocks.findForOwner.mockResolvedValue({
@@ -272,22 +297,20 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-v2'
                 + `?ref=${SELLER_REFERENCE}`,
         });
-        expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout', expect.objectContaining({
+        expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout_v2', expect.objectContaining({
             p_user_id: USER_ID,
             p_preflight_id: PREFLIGHT_ID,
             p_plan_id: 'basic',
-            p_expected_product_id: 'basic_product-01',
+            p_expected_product_id: 'basic_product-v2',
+            p_payment_address: 'basic-checkout-v2',
             p_expected_amount_krw: 6_900,
             p_pricing_version: 'earlybird-2026-07-v2',
             p_disclosure_version: 'earlybird-24h-v1',
         }));
-        expect(mocks.rpc).toHaveBeenCalledWith(
-            'issue_earlybird_groble_seller_reference',
-            { p_order_id: ORDER_ID }
-        );
+        expect(mocks.rpc).toHaveBeenCalledTimes(1);
         expect(mocks.emit.mock.calls.some(([entry]) => (
             entry as { event?: string }).event === 'earlybird.checkout_created'
         )).toBe(false);
@@ -364,7 +387,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-v2'
                 + `?ref=${SELLER_REFERENCE}`,
         });
         expect(mocks.from).toHaveBeenCalledWith('earlybird_orders');
@@ -420,6 +443,101 @@ describe('earlybird checkout and waitlist routes', () => {
             });
             expect(JSON.stringify(body)).not.toContain(SELLER_REFERENCE);
         }
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('never reopens a legacy v1 payment link after the product price changed', async () => {
+        installRecoveryOrder(recoveryOrderRow({
+            pricing_version: 'earlybird-2026-07-v1',
+            expected_amount_krw: 14_900,
+            expected_groble_product_id: 'basic_product-01',
+        }));
+
+        const response = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+
+        expect(response.status).toBe(409);
+        const body = await response.json();
+        expect(body).toEqual({
+            code: 'EARLYBIRD_LEGACY_REFRESH_REQUIRED',
+            error: '가격이 변경된 주문입니다. 새 할인가로 다시 구매해주세요.',
+        });
+        expect(JSON.stringify(body)).not.toContain(SELLER_REFERENCE);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('creates a new v2 checkout from an eligible retired v1 order with fresh consent', async () => {
+        mocks.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+            if (name !== 'refresh_legacy_earlybird_checkout') {
+                return { data: null, error: { message: 'unexpected rpc' } };
+            }
+            expect(args).toMatchObject({
+                p_user_id: USER_ID,
+                p_legacy_order_id: ORDER_ID,
+                p_disclosure_version: 'earlybird-24h-v1',
+                p_launch_status_snapshot: {
+                    basic: 'production',
+                    standard: 'production',
+                    plus: 'production',
+                },
+            });
+            expect(args.p_plan_catalog_snapshot).toEqual(expect.objectContaining({
+                basic: expect.objectContaining({
+                    relationshipCapacity: { followers: 400, following: 400 },
+                }),
+            }));
+            expect(args.p_pricing_snapshot).toEqual(expect.objectContaining({
+                basic: { currency: 'KRW', status: 'quoted', amountKrw: 6_900 },
+                standard: { currency: 'KRW', status: 'quoted', amountKrw: 9_900 },
+            }));
+            return {
+                data: [{
+                    order_id: ORDER_ID,
+                    preflight_id: PREFLIGHT_ID,
+                    created: true,
+                    seller_reference: SELLER_REFERENCE,
+                    plan_id: 'basic',
+                    payment_address: 'basic-checkout-v2',
+                }],
+                error: null,
+            };
+        });
+
+        const response = await refreshLegacyCheckout({
+            legacyOrderId: ORDER_ID,
+            disclosureAccepted: true,
+        });
+
+        expect(response.status).toBe(201);
+        await expect(response.json()).resolves.toEqual({
+            orderId: ORDER_ID,
+            preflightId: PREFLIGHT_ID,
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-v2'
+                + `?ref=${SELLER_REFERENCE}`,
+        });
+        expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    });
+
+    it('requires same-origin authenticated exact reconsent for a legacy price refresh', async () => {
+        authenticate(null);
+        expect((await refreshLegacyCheckout({
+            legacyOrderId: ORDER_ID,
+            disclosureAccepted: true,
+        })).status).toBe(401);
+
+        authenticate();
+        expect((await refreshLegacyCheckout({
+            legacyOrderId: ORDER_ID,
+            disclosureAccepted: true,
+        }, 'https://attacker.example')).status).toBe(403);
+        expect((await refreshLegacyCheckout({
+            legacyOrderId: ORDER_ID,
+            disclosureAccepted: false,
+        })).status).toBe(400);
+        expect((await refreshLegacyCheckout({
+            legacyOrderId: ORDER_ID,
+            disclosureAccepted: true,
+            productId: 'attacker-product',
+        })).status).toBe(400);
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
@@ -499,7 +617,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-v2'
                 + `?ref=${SELLER_REFERENCE}`,
         });
         expect(mocks.findForOwner).not.toHaveBeenCalled();
@@ -538,7 +656,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/standard-checkout-b2'
+            checkoutUrl: 'https://groble.im/payment/standard-checkout-v2'
                 + `?ref=${SELLER_REFERENCE}`,
         });
         expect(mocks.findForOwner).not.toHaveBeenCalled();
@@ -606,7 +724,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-v2'
                 + `?ref=${SELLER_REFERENCE}`,
         });
     });
@@ -626,7 +744,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
+            checkoutUrl: 'https://groble.im/payment/basic-checkout-v2'
                 + `?ref=${SELLER_REFERENCE}`,
         });
     });

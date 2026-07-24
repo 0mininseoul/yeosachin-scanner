@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 const checkoutResultSchema = z.array(z.object({
     order_id: z.string().uuid(),
     created: z.boolean(),
+    seller_reference: z.string().regex(/^ord\.[a-f0-9]{32}$/),
 })).length(1);
 
 const sellerReferenceResultSchema = z.string()
@@ -54,6 +55,15 @@ const waitlistResultSchema = z.array(z.object({
     created: z.boolean(),
 })).length(1);
 
+const legacyRefreshResultSchema = z.array(z.object({
+    order_id: z.string().uuid(),
+    preflight_id: z.string().uuid(),
+    created: z.boolean(),
+    seller_reference: sellerReferenceResultSchema,
+    plan_id: z.enum(['basic', 'standard']),
+    payment_address: z.string().min(1).max(128),
+})).length(1);
+
 export class EarlybirdPersistenceError extends Error {
     readonly code: string;
 
@@ -81,6 +91,11 @@ function boundedDatabaseCode(error: unknown): string {
         'CHECKOUT_PHONE_REQUIRED',
         'EARLYBIRD_PRICE_SNAPSHOT_INVALID',
         'EARLYBIRD_PRICING_REFRESH_REQUIRED',
+        'EARLYBIRD_PRODUCT_CONFIGURATION_REQUIRED',
+        'EARLYBIRD_LEGACY_REFRESH_NOT_FOUND',
+        'EARLYBIRD_LEGACY_REFRESH_NOT_ELIGIBLE',
+        'EARLYBIRD_LEGACY_REFRESH_CONFLICT',
+        'EARLYBIRD_SOLD_OUT',
     ].find(code => message.includes(code));
     return knownCode ?? 'EARLYBIRD_PERSISTENCE_FAILED';
 }
@@ -90,6 +105,7 @@ export interface CreateCheckoutRecordInput {
     preflightId: string;
     planId: 'basic' | 'standard';
     productId: string;
+    paymentAddress: string;
     amountKrw: number;
     pricingVersion: string;
     disclosureVersion: string;
@@ -97,13 +113,25 @@ export interface CreateCheckoutRecordInput {
     disclosureAcceptedAt: string;
 }
 
+export interface RefreshLegacyCheckoutRecordInput {
+    userId: string;
+    legacyOrderId: string;
+    disclosureVersion: string;
+    disclosureText: string;
+    disclosureAcceptedAt: string;
+    launchStatusSnapshot: unknown;
+    planCatalogSnapshot: unknown;
+    pricingSnapshot: unknown;
+}
+
 export const earlybirdStore = {
     async createCheckout(input: CreateCheckoutRecordInput) {
-        const { data, error } = await supabaseAdmin.rpc('create_earlybird_checkout', {
+        const { data, error } = await supabaseAdmin.rpc('create_earlybird_checkout_v2', {
             p_user_id: input.userId,
             p_preflight_id: input.preflightId,
             p_plan_id: input.planId,
             p_expected_product_id: input.productId,
+            p_payment_address: input.paymentAddress,
             p_expected_amount_krw: input.amountKrw,
             p_pricing_version: input.pricingVersion,
             p_disclosure_version: input.disclosureVersion,
@@ -115,28 +143,10 @@ export const earlybirdStore = {
         if (!parsed.success) {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
         }
-        const { data: referenceData, error: referenceError } =
-            await supabaseAdmin.rpc(
-                'issue_earlybird_groble_seller_reference',
-                { p_order_id: parsed.data[0].order_id }
-            );
-        if (referenceError) {
-            throw new EarlybirdPersistenceError(
-                boundedDatabaseCode(referenceError)
-            );
-        }
-        const sellerReference = sellerReferenceResultSchema.safeParse(
-            referenceData
-        );
-        if (!sellerReference.success) {
-            throw new EarlybirdPersistenceError(
-                'EARLYBIRD_PERSISTENCE_FAILED'
-            );
-        }
         return Object.freeze({
             orderId: parsed.data[0].order_id,
             created: parsed.data[0].created,
-            sellerReference: sellerReference.data,
+            sellerReference: parsed.data[0].seller_reference,
         });
     },
 
@@ -185,6 +195,37 @@ export const earlybirdStore = {
             paymentId: parsed.data.payment_id,
             actualAmountKrw: parsed.data.actual_amount_krw,
             paidAt: parsed.data.paid_at,
+        });
+    },
+
+    async refreshLegacyCheckout(input: RefreshLegacyCheckoutRecordInput) {
+        const { data, error } = await supabaseAdmin.rpc(
+            'refresh_legacy_earlybird_checkout',
+            {
+                p_user_id: input.userId,
+                p_legacy_order_id: input.legacyOrderId,
+                p_disclosure_version: input.disclosureVersion,
+                p_disclosure_text: input.disclosureText,
+                p_disclosure_accepted_at: input.disclosureAcceptedAt,
+                p_launch_status_snapshot: input.launchStatusSnapshot,
+                p_plan_catalog_snapshot: input.planCatalogSnapshot,
+                p_pricing_snapshot: input.pricingSnapshot,
+            }
+        );
+        if (error) {
+            throw new EarlybirdPersistenceError(boundedDatabaseCode(error));
+        }
+        const parsed = legacyRefreshResultSchema.safeParse(data);
+        if (!parsed.success) {
+            throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+        }
+        return Object.freeze({
+            orderId: parsed.data[0].order_id,
+            preflightId: parsed.data[0].preflight_id,
+            created: parsed.data[0].created,
+            sellerReference: parsed.data[0].seller_reference,
+            planId: parsed.data[0].plan_id,
+            paymentAddress: parsed.data[0].payment_address,
         });
     },
 
