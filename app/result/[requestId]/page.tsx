@@ -6,6 +6,13 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { CircleHelp, Mars, Venus } from 'lucide-react';
 import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import {
+    analysisCompletedEventKey,
+    availableAnalyticsStorage,
+    readAnalysisStartedAt,
+    trustedDurationMs,
+    tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
 import { shareResult } from '@/lib/services/result-share';
 import {
     availablePendingTargetStorage,
@@ -385,6 +392,23 @@ export default function ResultPage({ params }: PageProps) {
                         result_count: displayResult.femaleAccounts.length + displayResult.privateAccounts.length,
                         is_shared: false,
                     });
+                    // 완료 순간 progress 페이지에 없던 owner가 결과 링크로 복귀한 경우
+                    // analysis_completed가 누락된다. 여기서 동일한 dedup claim으로 보완한다.
+                    // (같은 세션에서 progress가 이미 발화했으면 sessionStorage claim이 막는다.)
+                    const analyticsStorage = availableAnalyticsStorage();
+                    if (tryClaimAnalyticsEvent(
+                        analyticsStorage,
+                        analysisCompletedEventKey(requestId),
+                    )) {
+                        const durationMs = trustedDurationMs(
+                            readAnalysisStartedAt(analyticsStorage, requestId),
+                            Date.now(),
+                        );
+                        trackEvent(EVENTS.ANALYSIS_COMPLETED, {
+                            request_id: requestId,
+                            ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+                        });
+                    }
                 }
             } catch (err) {
                 if (err instanceof Error && err.name === 'AbortError') return;
