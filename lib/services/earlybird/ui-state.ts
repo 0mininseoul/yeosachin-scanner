@@ -3,6 +3,7 @@ import {
     EARLYBIRD_PLAN_CATALOG,
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
+import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
 
 interface PlanCardAvailability {
     planId: PlanId;
@@ -74,12 +75,21 @@ export function buildEarlybirdPlanPresentation(planId: PlanId) {
 export function isSafeGrobleCheckoutUrl(value: string): boolean {
     try {
         const url = new URL(value);
+        const queryEntries = Array.from(url.searchParams.entries());
+        const [queryKey, queryValue] = queryEntries[0] ?? [];
+        const canonicalReference = parseGrobleSellerReference(queryValue);
+        const rawQuery = url.search.slice(1);
+
         return url.origin === 'https://groble.im'
             && url.username === ''
             && url.password === ''
-            && url.search === ''
             && url.hash === ''
-            && /^\/payment\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname);
+            && /^\/payment\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)
+            && queryEntries.length === 1
+            && queryKey === 'ref'
+            && url.searchParams.getAll('ref').length === 1
+            && canonicalReference !== null
+            && rawQuery === `ref=${canonicalReference}`;
     } catch {
         return false;
     }

@@ -10,6 +10,7 @@ import {
     resolveAvailableEarlybirdPlan,
 } from './ui-state';
 import { EARLYBIRD_DISCLOSURE_TEXT } from '@/lib/domain/earlybird/catalog';
+import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
 
 const planCards = [
     { planId: 'basic', selectionState: 'unavailable' },
@@ -99,12 +100,48 @@ describe('earlybird analyze UI state', () => {
         });
     });
 
-    it('allows browser navigation only to Groble payment URLs', () => {
-        expect(isSafeGrobleCheckoutUrl('https://groble.im/payment/basic_product-01')).toBe(true);
-        expect(isSafeGrobleCheckoutUrl('https://www.groble.im/payment/basic_product-01')).toBe(false);
-        expect(isSafeGrobleCheckoutUrl('https://groble.im/products/basic_product-01')).toBe(false);
-        expect(isSafeGrobleCheckoutUrl('javascript:alert(1)')).toBe(false);
-        expect(isSafeGrobleCheckoutUrl('https://groble.im.evil.example/payment/basic')).toBe(false);
+    it('allows browser navigation to Basic and Standard checkout URLs emitted by the server', () => {
+        const config = readGrobleConfig({
+            GROBLE_BASIC_PRODUCT_ID: 'basic_product-01',
+            GROBLE_STANDARD_PRODUCT_ID: 'standard_product-01',
+            GROBLE_BASIC_PAYMENT_ADDRESS: 'basic-checkout-a1',
+            GROBLE_STANDARD_PAYMENT_ADDRESS: 'standard-checkout-b2',
+            GROBLE_WEBHOOK_SECRET: 'test-secret',
+        });
+
+        expect(isSafeGrobleCheckoutUrl(getGrobleCheckoutUrl(
+            'basic',
+            'ord.0123456789abcdef0123456789abcdef',
+            config
+        ))).toBe(true);
+        expect(isSafeGrobleCheckoutUrl(getGrobleCheckoutUrl(
+            'standard',
+            'ord.fedcba9876543210fedcba9876543210',
+            config
+        ))).toBe(true);
+    });
+
+    it.each([
+        ['a missing seller reference', 'https://groble.im/payment/basic-checkout-a1'],
+        ['a duplicate seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&ref=ord.fedcba9876543210fedcba9876543210'],
+        ['an extra query parameter', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&utm_source=test'],
+        ['the wrong query key casing', 'https://groble.im/payment/basic-checkout-a1?Ref=ord.0123456789abcdef0123456789abcdef'],
+        ['an encoded query key', 'https://groble.im/payment/basic-checkout-a1?%72ef=ord.0123456789abcdef0123456789abcdef'],
+        ['an encoded seller-reference value', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcde%66'],
+        ['a trailing query separator', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&'],
+        ['repeated trailing query separators', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&&'],
+        ['a malformed seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=buyer%40example.com'],
+        ['an uppercase seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789ABCDEF0123456789ABCDEF'],
+        ['a short seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef'],
+        ['the wrong origin', 'https://www.groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
+        ['a deceptive subdomain', 'https://groble.im.evil.example/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
+        ['the wrong path', 'https://groble.im/products/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
+        ['the wrong protocol', 'http://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
+        ['embedded credentials', 'https://buyer:secret@groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
+        ['a hash', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef#receipt'],
+        ['a non-URL protocol', 'javascript:alert(1)'],
+    ])('rejects a Groble checkout URL with %s', (_case, url) => {
+        expect(isSafeGrobleCheckoutUrl(url)).toBe(false);
     });
 
     it('removes the old automatic-analysis action and banned copy from the purchase page', () => {
