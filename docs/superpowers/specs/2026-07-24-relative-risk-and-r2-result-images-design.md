@@ -34,12 +34,13 @@ retention period. At a normalized 60–100 KB per image, that is approximately 3
   ten-segment meter internally consistent.
 - Demote official group, brand, institution, and band accounts when their apparent risk
   comes only from appearance, promotion, or recency rather than direct interactions.
-- Produce one evidence-grounded, account-specific Korean overview per public female row
-  in the requested playful examiner voice without inventing a relationship fact.
-- Snapshot every scraped target, public, and private profile image into private Cloudflare
-  R2 storage and make it owner-readable for no more than 30 days.
-- Make row completeness and image-snapshot completeness prerequisites for successful
-  finalization.
+- Produce one account-specific Korean overview per public female row in the requested
+  playful, provocative examiner voice, with room for imaginative interpretation.
+- Snapshot scraped target, public, and private profile images into private Cloudflare R2
+  storage, make them owner-readable for no more than 30 days, and continue repairing a
+  small tolerated failure set after result completion.
+- Require high but bounded row and image coverage instead of blocking completion on every
+  single missing item.
 - Re-run the authorized target as a fresh E2E after the code and infrastructure are
   deployed, then retain the new completed result as the trustworthy sample.
 
@@ -125,19 +126,23 @@ as relative risk tiers within the analyzed account set.
 
 The existing feature-analysis generation call is reused; no extra Gemini call is added
 per account. Its prompt, response schema, prompt version, and cache identity change.
+Visible profile and feed context is a creative starting point rather than a requirement
+that every phrase map to a stored evidence reference.
 
 `oneLineOverview` must:
 
 - be one Korean sentence of 25–110 characters;
-- cite at least one selected evidence ID through a new `overview` evidence selection;
-- mention a concrete visible profile, fashion, occupation, hobby, feed, caption, or
-  visual-composition detail;
+- feel specific to the account rather than interchangeable boilerplate;
+- freely exaggerate or imaginatively interpret profile, fashion, occupation, hobby,
+  feed, caption, visual-composition, or overall-vibe cues;
 - use a playful, nosy, slightly conspiratorial examiner voice;
 - avoid the repeated endings “개인 계정입니다” and “일반 단계로 판독됐어요”; and
 - remain different from every other overview in the same result.
 
 Allowed tone includes light observations such as a polished outfit being likely to draw
-attention or a difficult-looking startup path being an unusual choice. It must not:
+attention or a difficult-looking startup path being an unusual choice. Speculation can
+be bold, but confirmed-fact wording is reserved for information actually present in the
+profile or feed. It must not:
 
 - claim or imply that cheating, dating, secret messaging, or sexual conduct is a fact;
 - identify a person by account name inside the sentence;
@@ -145,10 +150,11 @@ attention or a difficult-looking startup path being an unusual choice. It must n
 - infer protected traits, diagnose health, demean a body, or sexualize a minor; or
 - follow instructions embedded in scraped bio or caption text.
 
-If the model output is invalid, a deterministic fallback uses the row's actual selected
-evidence category. A profile with no safe visible detail receives an uncertainty-specific
-sentence rather than an invented trait. Duplicate fallback text is made distinct by
-another evidence-backed attribute, never by appending an identifier.
+If the model output is invalid, a deterministic fallback uses the row's broad account
+vibe or visible category when available. A sparse profile may receive a deliberately
+mysterious examiner reaction rather than a dry neutral description. Duplicate fallback
+text is made distinct by varying the commentary pattern, never by appending an
+identifier.
 
 ### 3. Private R2 result-image store
 
@@ -188,14 +194,16 @@ Supabase stores metadata only in a force-RLS table:
 - `request_id`
 - `kind` (`target`, `female`, `private`)
 - nullable `candidate_id` only for the target row
-- opaque `object_key`
-- `status` (`ready`, `source_missing`)
+- nullable opaque `object_key`
+- `status` (`ready`, `source_missing`, `capture_failed`)
 - nullable `sha256` and `byte_size`
-- `captured_at`
+- `observed_at` and nullable `captured_at`
 - `expires_at`
 
 The table rejects raw HTTP URLs and requires `expires_at = captured_at + 30 days` within
-a small clock tolerance. It is not directly readable by `anon` or `authenticated`.
+a small clock tolerance for ready objects. Non-ready rows use
+`expires_at = observed_at + 30 days` and have no object key, content hash, byte size, or
+capture timestamp. It is not directly readable by `anon` or `authenticated`.
 Service-role functions have explicit grants and revoke `PUBLIC` execution.
 
 Before result finalization, the worker:
@@ -204,15 +212,30 @@ Before result finalization, the worker:
 2. snapshots each non-null scraped profile image to R2;
 3. records a `ready` metadata row only after `HeadObject` confirms size and hash;
 4. records `source_missing` only when the scraped source genuinely had no image URL; and
-5. submits the image-manifest hash to the finalizer.
+5. records `capture_failed` with a bounded internal reason after transient retries are
+   exhausted, enqueues it for post-completion repair, and submits the image-manifest hash
+   to the finalizer.
 
 Finalization fails closed unless:
 
-- stored public and private row counts equal the summary counts;
+- durable result-row coverage is at least 98% of the expected finalized rows and no more
+  than five expected rows are missing;
 - every finalized row and the target have exactly one image metadata row;
-- every non-null scraped source is `ready`;
+- among rows whose scraped source had an image URL, at least 95% are `ready` and no more
+  than ten are `capture_failed`;
+- the target image and the first three relative-risk rows are `ready` whenever their
+  scraped source had an image URL;
 - every `ready` object is unexpired and belongs to the same request manifest; and
 - the ordered row, summary, and image-manifest hashes agree.
+
+`source_missing` is an explicit upstream absence and is not counted as a capture failure.
+Expected result rows mean one female row per terminal verified-female classification plus
+one private row per detected private mutual; public male and unknown classifications do
+not have owner result rows. A zero expected count passes without division.
+The result summary persists expected and durable row counts internally so an accepted
+small mismatch is observable without exposing detailed screening counts in the owner UI.
+Missing result rows are not fabricated. `capture_failed` images render the existing
+fallback while the repair outbox retries the same opaque locator.
 
 An uploaded object whose database transaction later fails is harmless and is removed by
 the R2 lifecycle.
@@ -262,9 +285,9 @@ policy v2.3, R2 snapshots, row-count fences, and the frontend PR are deployed:
    the eligible count is at least three;
 3. verify the official group account receives the new context adjustment if it is still
    present;
-4. verify every scraped profile image has a ready R2 object or an explicit genuine
-   `source_missing` outcome;
-5. verify account overviews are evidence-specific and non-duplicated; and
+4. verify image and row coverage satisfy the bounded completion thresholds, with target
+   and top-three images ready when their sources exist;
+5. verify account overviews are account-specific, varied, and non-duplicated; and
 6. mark the new completed result as the canonical archive example after owner
    verification. Retiring the previous sample is a separate owner-approved deletion.
 
@@ -273,13 +296,16 @@ login verification code is requested only if the owner session has expired.
 
 ## Failure handling
 
-- R2 unavailable: retry with exponential backoff; do not finalize the result.
+- R2 unavailable: retry with exponential backoff; finalize only when the bounded coverage
+  threshold and required target/top-three images still pass.
 - Source image unavailable: retry the bounded source fetch; distinguish genuine missing
   source from transient failure.
 - Partial upload batch: retain the durable manifest checkpoint and resume only missing
   objects.
-- Hash or count mismatch: fail with a bounded internal code and no result identifiers in
-  logs.
+- Hash mismatch or count coverage below the threshold: fail with a bounded internal code
+  and no result identifiers in logs.
+- Tolerated `capture_failed` image: complete the result, render the owner-safe fallback,
+  and keep retrying through the durable repair outbox.
 - Expired image: return a non-cacheable not-found response; never fall back to the raw CDN
   URL.
 - Narrative generation unavailable: use an evidence-specific safe fallback and preserve
@@ -298,8 +324,9 @@ login verification code is requested only if the owner session has expired.
   evidence.
 - Score, band, featured rank, integer owner score, and ten-segment meter remain
   consistent.
-- Prompt and schema tests require grounded overview evidence and reject identifiers,
-  metrics, factual relationship accusations, generic repeated copy, and prompt injection.
+- Prompt and schema tests preserve wide stylistic variation while rejecting identifiers,
+  metrics, confirmed-fact relationship accusations, generic repeated copy, and prompt
+  injection.
 
 ### R2 and persistence
 
@@ -307,8 +334,9 @@ login verification code is requested only if the owner session has expired.
   credential separation, and redaction.
 - Image tests verify WebP normalization, 256×256 bounds, 128 KiB maximum, metadata
   stripping, animation flattening, malformed image rejection, and SSRF boundaries.
-- PGlite tests prove force-RLS metadata, exact grants, manifest completeness, row-count
-  equality, expiry checks, idempotent replay, and deletion outbox behavior.
+- PGlite tests prove force-RLS metadata, exact grants, the 98%/five-row and
+  95%/ten-image thresholds, mandatory target/top-three images, expiry checks, idempotent
+  replay, repair outbox behavior, and deletion outbox behavior.
 - Route tests prove owner-only image access, exact 30-day denial, no raw URL fallback, and
   safe cache headers.
 - Infrastructure script tests prove a private R2 bucket, disabled public URL, exact
