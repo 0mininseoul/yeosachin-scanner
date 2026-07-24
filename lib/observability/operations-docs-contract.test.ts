@@ -280,6 +280,14 @@ describe('analytics and observability disclosure contract', () => {
         );
         expect(runbook).toMatch(/staging 전과 promotion 직전/);
         expect(runbook).toMatch(/일반 deploy[\s\S]{0,120}보존/);
+        expect(runbook).toMatch(/prune flag 없이 일반 deploy/);
+        expect(runbook).toMatch(/deploy lock[\s\S]{0,80}정확히 300초/);
+        expect(runbook).toMatch(/metadata\.generation[\s\S]{0,100}status\.observedGeneration/);
+        expect(runbook).toMatch(/revision 생성 시각은 실제 serving 시간을 증명하지 않으므로/);
+        expect(runbook).toMatch(
+            /build manifest[\s\S]{0,100}Supabase URL[\s\S]{0,100}latest\/active Cloud Run/
+        );
+        expect(plan).toMatch(/ordinary-deploy exact primary:3[\s\S]{0,240}300-second drain/);
 
         const plus = ANALYSIS_PLAN_CATALOG.plus;
         const relationshipRate = dotenvNumber(

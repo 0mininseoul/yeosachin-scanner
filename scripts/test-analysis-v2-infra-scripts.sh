@@ -35,6 +35,26 @@ cat >"$temp_dir/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+[[ "${1:-}" == '--disable' ]] || {
+  printf 'curl did not disable user config as its first option\n' >&2
+  exit 88
+}
+args=("$@")
+proto_pinned='false'
+redirects_disabled='false'
+for ((index = 0; index < ${#args[@]}; index++)); do
+  if [[ "${args[$index]}" == '--proto' \
+    && "${args[$((index + 1))]:-}" == '=https' ]]; then
+    proto_pinned='true'
+  elif [[ "${args[$index]}" == '--max-redirs' \
+    && "${args[$((index + 1))]:-}" == '0' ]]; then
+    redirects_disabled='true'
+  fi
+done
+[[ "$proto_pinned" == 'true' && "$redirects_disabled" == 'true' ]] || {
+  printf 'curl did not pin HTTPS and disable redirects\n' >&2
+  exit 86
+}
 config="$(cat)"
 [[ "$config" == *'apikey: SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'* ]] \
   || exit 89
@@ -82,6 +102,17 @@ if [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" \
   && -f "$FAKE_GCLOUD_STATE_FILE" ]]; then
   state="$(<"$FAKE_GCLOUD_STATE_FILE")"
 fi
+
+increment_service_generation() {
+  local generation
+  [[ -n "${FAKE_GCLOUD_SERVICE_GENERATION_FILE:-}" ]] || return 0
+  [[ -f "$FAKE_GCLOUD_SERVICE_GENERATION_FILE" ]] || exit 98
+  generation="$(<"$FAKE_GCLOUD_SERVICE_GENERATION_FILE")"
+  [[ "$generation" =~ ^[1-9][0-9]*$ ]] || exit 98
+  printf '%s\n' "$((10#$generation + 1))" \
+    >"$FAKE_GCLOUD_SERVICE_GENERATION_FILE"
+}
+
 identity_ready="false"
 vertex_ready="false"
 build_identity_ready="false"
@@ -393,6 +424,16 @@ case "$command_line" in
       '{name: $name, state: "ENABLED"}'
     ;;
   "secrets versions access"*)
+    for required_flag in '--no-log-http' '--verbosity=error' '--quiet'; do
+      case " $command_line " in
+        *" $required_flag "*) ;;
+        *)
+          printf 'secret access did not disable ambient gcloud diagnostics: %s\n' \
+            "$required_flag" >&2
+          exit 87
+          ;;
+      esac
+    done
     printf '%s\n' 'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
     ;;
   "secrets versions list"*)
@@ -612,6 +653,7 @@ case "$command_line" in
     else
       printf 'staged_build_inherited_slot\n' >"$FAKE_GCLOUD_STATE_FILE"
     fi
+    increment_service_generation
     ;;
   "run services update-traffic"*)
     [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
@@ -629,6 +671,7 @@ case "$command_line" in
     else
       exit 98
     fi
+    increment_service_generation
     if [[ -n "${FAKE_GCLOUD_TRAFFIC_LOG:-}" ]]; then
       printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_TRAFFIC_LOG"
     fi
@@ -650,6 +693,7 @@ case "$command_line" in
       printf '%s\n' "$command_line" >"$FAKE_GCLOUD_ENDPOINT_UPDATE_LOG"
     fi
     printf 'staged_final\n' >"$FAKE_GCLOUD_STATE_FILE"
+    increment_service_generation
     ;;
   "run services list"*)
     [[ "$command_line" == *"--project=test-project"* \
@@ -716,6 +760,19 @@ case "$command_line" in
         latest_ready="$latest_created"
         traffic_revision="$latest_created"
       fi
+      service_generation='42'
+      case "$state" in
+        staged_build|staged_build_inherited_slot) service_generation='43' ;;
+        staged_final) service_generation='44' ;;
+        promoted) service_generation='45' ;;
+        rolled_back|rolled_back_bootstrap|foreign_promoted) service_generation='46' ;;
+      esac
+      if [[ -n "${FAKE_GCLOUD_SERVICE_GENERATION_FILE:-}" ]]; then
+        [[ -f "$FAKE_GCLOUD_SERVICE_GENERATION_FILE" ]] || exit 98
+        service_generation="$(<"$FAKE_GCLOUD_SERVICE_GENERATION_FILE")"
+      fi
+      [[ "$service_generation" =~ ^[1-9][0-9]*$ ]] || exit 98
+      observed_generation="${FAKE_GCLOUD_OBSERVED_GENERATION:-$service_generation}"
       runtime_queue='analysis-v2-pipeline'
       credential_name=''
       runtime_slot="${FAKE_GCLOUD_RUNTIME_SLOT:-quinary}"
@@ -724,12 +781,14 @@ case "$command_line" in
       selfhosted_global_gate='true'
       selfhosted_global_interval='750'
       selfhosted_response_guard='100'
+      authorized_test_sharding="${FAKE_GCLOUD_SHARDING_ENABLED:-false}"
       apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-quinary}"
       apify_secret_version="${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}"
       apify_plaintext_slot="${FAKE_GCLOUD_APIFY_PLAINTEXT_SLOT:-}"
       apify_bad_ref_slot="${FAKE_GCLOUD_APIFY_BAD_REF_SLOT:-}"
       identity_hmac_mode="${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}"
       identity_hmac_version="${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}"
+      supabase_public_url="${FAKE_GCLOUD_SUPABASE_URL:-https://abcdefghijklmnopqrst.supabase.co}"
       supabase_plaintext='false'
       sidecar='false'
       placement='false'
@@ -785,6 +844,8 @@ case "$command_line" in
         --arg latest_created "$latest_created" \
         --arg latest_ready "$latest_ready" \
         --arg traffic_revision "$traffic_revision" \
+        --arg service_generation "$service_generation" \
+        --arg observed_generation "$observed_generation" \
         --arg source_commit "$source_commit" \
         --arg runtime_queue "$runtime_queue" \
         --arg credential_name "$credential_name" \
@@ -794,12 +855,14 @@ case "$command_line" in
         --arg selfhosted_global_gate "$selfhosted_global_gate" \
         --arg selfhosted_global_interval "$selfhosted_global_interval" \
         --arg selfhosted_response_guard "$selfhosted_response_guard" \
+        --arg authorized_test_sharding "$authorized_test_sharding" \
         --arg apify_secret_slots "$apify_secret_slots" \
         --arg apify_secret_version "$apify_secret_version" \
         --arg apify_plaintext_slot "$apify_plaintext_slot" \
         --arg apify_bad_ref_slot "$apify_bad_ref_slot" \
         --arg identity_hmac_mode "$identity_hmac_mode" \
         --arg identity_hmac_version "$identity_hmac_version" \
+        --arg supabase_public_url "$supabase_public_url" \
         --argjson supabase_plaintext "$supabase_plaintext" \
         --argjson sidecar "$sidecar" \
         --argjson placement "$placement" \
@@ -810,6 +873,7 @@ case "$command_line" in
         {
           metadata: {
             name: "analysis-worker",
+            generation: $service_generation,
             labels: {"analysis-v2-source-commit": $source_commit},
             annotations: {
               "run.googleapis.com/ingress": "all",
@@ -839,7 +903,9 @@ case "$command_line" in
                   {name: "SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED", value: $selfhosted_global_gate},
                   {name: "SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS", value: $selfhosted_global_interval},
                   {name: "SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS", value: $selfhosted_response_guard},
+                  {name: "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED", value: $authorized_test_sharding},
                   {name: "ANALYSIS_V2_RESULT_IMAGES_ENABLED", value: "false"},
+                  {name: "NEXT_PUBLIC_SUPABASE_URL", value: $supabase_public_url},
                   {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
                   {name: "ANALYSIS_V2_WORKER_ENABLED", value: $worker_gate},
                   {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $recovery_gate},
@@ -917,6 +983,7 @@ case "$command_line" in
           }},
           status: {
             url: "https://analysis-worker-test.asia-northeast3.run.app",
+            observedGeneration: $observed_generation,
             latestCreatedRevisionName: $latest_created,
             latestReadyRevisionName: $latest_ready,
             conditions: [{type: "Ready", status: "True"}],
@@ -984,6 +1051,8 @@ case "$command_line" in
     active_apify_secret_version="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION:-${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}}"
     active_identity_hmac_mode="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE:-${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}}"
     active_identity_hmac_version="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_VERSION:-${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}}"
+    active_supabase_public_url="${FAKE_GCLOUD_ACTIVE_SUPABASE_URL:-${FAKE_GCLOUD_SUPABASE_URL:-https://abcdefghijklmnopqrst.supabase.co}}"
+    active_authorized_test_sharding="${FAKE_GCLOUD_ACTIVE_SHARDING_ENABLED:-${FAKE_GCLOUD_SHARDING_ENABLED:-false}}"
     revision_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     bootstrap_revision='false'
     if [[ "$revision" == analysis-worker-b* \
@@ -999,6 +1068,8 @@ case "$command_line" in
       --arg active_apify_secret_version "$active_apify_secret_version" \
       --arg active_identity_hmac_mode "$active_identity_hmac_mode" \
       --arg active_identity_hmac_version "$active_identity_hmac_version" \
+      --arg active_supabase_public_url "$active_supabase_public_url" \
+      --arg active_authorized_test_sharding "$active_authorized_test_sharding" \
       --arg revision_image "$revision_image" \
       --arg revision_ready "$revision_ready" \
       --argjson bootstrap_revision "$bootstrap_revision" '{
@@ -1010,12 +1081,16 @@ case "$command_line" in
         containers: [{image: $revision_image, env: ((
           if $bootstrap_revision then [
             {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: "false"},
-            {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot}
+            {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot},
+            {name: "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED", value: $active_authorized_test_sharding},
+            {name: "NEXT_PUBLIC_SUPABASE_URL", value: $active_supabase_public_url}
           ] else [
             {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
             {name: "ANALYSIS_V2_WORKER_ENABLED", value: "false"},
             {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $known_good_recovery},
             {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot},
+            {name: "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED", value: $active_authorized_test_sharding},
+            {name: "NEXT_PUBLIC_SUPABASE_URL", value: $active_supabase_public_url},
             {name: "PREFLIGHT_TASKS_ENABLED", value: "true"},
             {name: "PREFLIGHT_LOCAL_AFTER_ENABLED", value: "false"}
           ] end)
@@ -1301,6 +1376,18 @@ set -euo pipefail
 if [[ -n "${FAKE_SLEEP_LOG:-}" ]]; then
   printf '%s\n' "$1" >>"$FAKE_SLEEP_LOG"
 fi
+if [[ "${FAKE_SLEEP_MUTATE_GENERATION:-false}" == "true" ]]; then
+  [[ -n "${FAKE_GCLOUD_SERVICE_GENERATION_FILE:-}" \
+    && -f "$FAKE_GCLOUD_SERVICE_GENERATION_FILE" ]] || exit 98
+  generation="$(<"$FAKE_GCLOUD_SERVICE_GENERATION_FILE")"
+  [[ "$generation" =~ ^[1-9][0-9]*$ ]] || exit 98
+  printf '%s\n' "$((10#$generation + 1))" \
+    >"$FAKE_GCLOUD_SERVICE_GENERATION_FILE"
+fi
+if [[ -n "${FAKE_SLEEP_MUTATE_STATE:-}" ]]; then
+  [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 98
+  printf '%s\n' "$FAKE_SLEEP_MUTATE_STATE" >"$FAKE_GCLOUD_STATE_FILE"
+fi
 EOF
 chmod +x "$temp_dir/bin/sleep"
 
@@ -1356,14 +1443,26 @@ EOF
 cat >"$temp_dir/runtime-primary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="primary"
+ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED="false"
+NEXT_PUBLIC_SUPABASE_URL="https://abcdefghijklmnopqrst.supabase.co"
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
 EOF
 
 cat >"$temp_dir/build.yaml" <<'EOF'
-NEXT_PUBLIC_SUPABASE_URL: "https://fixture.example.test"
+NEXT_PUBLIC_SUPABASE_URL: "https://abcdefghijklmnopqrst.supabase.co"
 NEXT_PUBLIC_SUPABASE_ANON_KEY: "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
+EOF
+
+cat >"$temp_dir/build-prune-http.yaml" <<'EOF'
+NEXT_PUBLIC_SUPABASE_URL: "http://abcdefghijklmnopqrst.supabase.co"
+NEXT_PUBLIC_SUPABASE_ANON_KEY: "public-anon"
+EOF
+
+cat >"$temp_dir/build-prune-arbitrary-host.yaml" <<'EOF'
+NEXT_PUBLIC_SUPABASE_URL: "https://attacker.example.test"
+NEXT_PUBLIC_SUPABASE_ANON_KEY: "public-anon"
 EOF
 
 cat >"$temp_dir/build-secret.yaml" <<'EOF'
@@ -2442,14 +2541,92 @@ assert_contains "$temp_dir/worker-secondary-slot-recovery.out" \
 assert_not_contains "$temp_dir/worker-secondary-slot-recovery.out" \
   'APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:6'
 
-# Explicit pruning is the only path that may remove valid recovery refs. It is
-# primary:3-only, exact-slot, and backed by bounded service-role evidence.
+# Teardown first uses the ordinary preserving deploy to cut normal work from
+# senary to primary:3 without dropping any temporary recovery reference.
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
   'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
   'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=7' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-primary-retained-cutover.out"
+for retained_cutover_assignment in \
+  'APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3' \
+  'APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:7' \
+  'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7' \
+  'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7'; do
+  assert_contains "$temp_dir/worker-primary-retained-cutover.out" \
+    "$retained_cutover_assignment"
+done
+
+# Explicit pruning cannot perform the normal-slot cutover itself. The ordinary
+# preserving deploy must first put primary:3 with sharding off at 100% traffic.
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION=7' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-direct-senary.out" 2>&1; then
+  fail "explicit pruning accepted an active senary normal slot"
+fi
+assert_contains "$temp_dir/worker-prune-direct-senary.out" \
+  'requires latest and active Cloud Run normal slot to already be exact primary:3'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_SHARDING_ENABLED=true' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-sharding-enabled.out" 2>&1; then
+  fail "explicit pruning accepted active authorized-test sharding"
+fi
+assert_contains "$temp_dir/worker-prune-sharding-enabled.out" \
+  'authorized-test sharding to be exactly false'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_OBSERVED_GENERATION=41' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-unobserved-generation.out" 2>&1; then
+  fail "explicit pruning accepted an unobserved service generation"
+fi
+assert_contains "$temp_dir/worker-prune-unobserved-generation.out" \
+  'requires an exactly observed Cloud Run service generation before the drain'
+
+# The prune command owns the 300-second unchanged-service drain. Dry-run prints
+# it; apply executes it before requesting bounded service-role evidence.
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
@@ -2468,11 +2645,53 @@ for removed_assignment in \
 done
 assert_not_contains "$temp_dir/worker-prune-ready.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+assert_contains "$temp_dir/worker-prune-ready.out" 'sleep 300'
 
-# A failed post-promotion verification can safely roll traffic back to the old
-# temporary-slot revision while leaving the latest template primary-only. Only
-# the audited prune retry may recover from that intentionally divergent state.
-env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+for invalid_prune_build in build-prune-http.yaml build-prune-arbitrary-host.yaml; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+    'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+    'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+    'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+    'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+    'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+    "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/$invalid_prune_build" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+      --prune-apify-secret-refs=tertiary,quinary,senary \
+    >"$temp_dir/worker-prune-invalid-destination.out" 2>&1; then
+    fail "explicit pruning accepted a non-canonical Supabase destination"
+  fi
+  assert_contains "$temp_dir/worker-prune-invalid-destination.out" \
+    'canonical https://<20-lowercase-project-ref>.supabase.co origin'
+  assert_not_contains "$temp_dir/worker-prune-invalid-destination.out" \
+    'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_ACTIVE_SUPABASE_URL=https://zyxwvutsrqponmlkjihg.supabase.co' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-active-destination-mismatch.out" 2>&1; then
+  fail "explicit pruning accepted a mismatched active Supabase destination"
+fi
+assert_contains "$temp_dir/worker-prune-active-destination-mismatch.out" \
+  'latest and active Cloud Run to expose exactly one matching canonical NEXT_PUBLIC_SUPABASE_URL'
+assert_not_contains "$temp_dir/worker-prune-active-destination-mismatch.out" \
+  'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
+
+# A failed prune that rolled back to an old senary revision must restore the
+# ordinary primary-retained baseline and drain again before retrying.
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
   'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary' \
@@ -2484,33 +2703,60 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
     --prune-apify-secret-refs=tertiary,quinary,senary \
-  >"$temp_dir/worker-prune-rollback-retry.out"
+  >"$temp_dir/worker-prune-rollback-retry.out" 2>&1; then
+  fail "explicit pruning accepted rollback traffic on the old senary revision"
+fi
 assert_contains "$temp_dir/worker-prune-rollback-retry.out" \
+  'requires latest and active Cloud Run normal slot to already be exact primary:3'
+
+# A failed prune stage may leave latest primary-only while traffic remains on
+# the old-enough primary-retained revision. That exact drained baseline is the
+# only divergent latest/active retry accepted.
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-primary-retained-retry.out"
+assert_contains "$temp_dir/worker-prune-primary-retained-retry.out" \
   'verified: authoritative zero-active/zero-unreconciled evidence for exact Apify refs'
 
+printf '0\n' >"$temp_dir/prune-trace-readiness-count"
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
-  'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
-  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
-  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
   'FAKE_PRUNE_READINESS_MODE=invalid' \
+  "FAKE_PRUNE_READINESS_COUNT_FILE=$temp_dir/prune-trace-readiness-count" \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
   bash -x "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
     --prune-apify-secret-refs=tertiary,quinary,senary \
   >"$temp_dir/worker-prune-trace.out" 2>&1; then
   fail "trace-mode explicit pruning accepted invalid evidence"
 fi
+[[ "$(<"$temp_dir/prune-trace-readiness-count")" == "1" ]] \
+  || fail "trace-mode prune did not reach the secret-bearing readiness boundary"
 assert_not_contains "$temp_dir/worker-prune-trace.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 
 for blocked_mode in active unreconciled-request unreconciled-preflight invalid missing; do
   if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
-    'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
-    'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
-    'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
-    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+    'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+    'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+    'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+    'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+    'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
     'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
     'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
     "FAKE_PRUNE_READINESS_MODE=$blocked_mode" \
@@ -2584,19 +2830,76 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
 assert_contains "$temp_dir/worker-prune-primary-only-check.out" \
   'verified: private worker runtime, bounded scaling, and default dynamic egress'
 
+# Apply refuses any update during its own 300-second drain, even if the final
+# service shape would otherwise still look valid.
+printf 'ready\n' >"$temp_dir/prune-generation-drift-state"
+printf '42\n' >"$temp_dir/prune-generation-drift-generation"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/prune-generation-drift-state" \
+  "FAKE_GCLOUD_SERVICE_GENERATION_FILE=$temp_dir/prune-generation-drift-generation" \
+  'FAKE_SLEEP_MUTATE_GENERATION=true' \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-generation-drift.out" 2>&1; then
+  fail "explicit prune apply accepted generation drift during its drain"
+fi
+assert_contains "$temp_dir/worker-prune-generation-drift.out" \
+  'Cloud Run service generation changed during the 300-second prune drain'
+
+printf 'ready\n' >"$temp_dir/prune-traffic-drift-state"
+printf '42\n' >"$temp_dir/prune-traffic-drift-generation"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/prune-traffic-drift-state" \
+  "FAKE_GCLOUD_SERVICE_GENERATION_FILE=$temp_dir/prune-traffic-drift-generation" \
+  'FAKE_SLEEP_MUTATE_STATE=foreign_promoted' \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/worker-prune-traffic-drift.out" 2>&1; then
+  fail "explicit prune apply accepted active-revision drift during its drain"
+fi
+assert_contains "$temp_dir/worker-prune-traffic-drift.out" \
+  'active Cloud Run traffic changed during the 300-second prune drain'
+
 printf 'ready\n' >"$temp_dir/prune-apply-state"
+printf '42\n' >"$temp_dir/prune-apply-generation"
 printf '0\n' >"$temp_dir/prune-readiness-count"
+: >"$temp_dir/prune-apply-sleep"
 env "${common_env[@]}" \
   "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
-  'FAKE_GCLOUD_RUNTIME_SLOT=senary' \
-  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=senary' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
-  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=tertiary,quinary,senary' \
+  'FAKE_GCLOUD_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=primary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
   'FAKE_GCLOUD_PRUNE_PRIMARY_ONLY=true' \
   "FAKE_GCLOUD_STATE_FILE=$temp_dir/prune-apply-state" \
+  "FAKE_GCLOUD_SERVICE_GENERATION_FILE=$temp_dir/prune-apply-generation" \
   "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_SLEEP_LOG=$temp_dir/prune-apply-sleep" \
   "FAKE_PRUNE_READINESS_COUNT_FILE=$temp_dir/prune-readiness-count" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
@@ -2607,6 +2910,8 @@ env "${common_env[@]}" \
   || fail "explicit prune apply did not recheck readiness before promotion"
 [[ "$(<"$temp_dir/prune-apply-state")" == "promoted" ]] \
   || fail "explicit prune apply did not promote the primary-only revision"
+[[ "$(<"$temp_dir/prune-apply-sleep")" == "300" ]] \
+  || fail "explicit prune apply did not execute exactly one 300-second drain"
 assert_not_contains "$temp_dir/worker-prune-apply.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 

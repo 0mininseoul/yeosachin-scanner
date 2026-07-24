@@ -673,6 +673,23 @@ service_traffic_matches_revision() {
   ' <<<"$config" >/dev/null
 }
 
+service_generation_identity() {
+  local config="$1"
+  jq -cer '
+    ((.metadata.generation // "") | tostring) as $generation
+    | ((.status.observedGeneration // "") | tostring) as $observed
+    | if ($generation | test("^[1-9][0-9]*$"))
+        and ($observed | test("^[1-9][0-9]*$"))
+        and $generation == $observed
+      then {
+        generation: $generation,
+        observedGeneration: $observed
+      }
+      else error("invalid or unobserved generation")
+      end
+  ' <<<"$config"
+}
+
 service_has_no_traffic_tags() {
   local config="$1"
   jq -e '
@@ -826,7 +843,7 @@ verify_existing_service_secret_identity() {
     --arg requested_env "$apify_env_key" \
     --arg requested_secret "$apify_secret_id" \
     --arg requested_version "$apify_secret_version" \
-    --argjson allow_prune_retry "$prune_apify_secret_refs_enabled" \
+    --argjson allow_verified_prune_retry "$prune_primary_drain_baseline_verified" \
     --argjson latest "$latest_identity" \
     --argjson active "$active_identity" '
       def requested_ref($identity):
@@ -837,7 +854,7 @@ verify_existing_service_secret_identity() {
           secret: $requested_secret,
           version: $requested_version
         }];
-      ($allow_prune_retry
+      ($allow_verified_prune_retry
         or ([$active.refs[]
           | select(. as $ref | $latest.refs | index($ref) | not)] | length) == 0)
         and ($latest.runtimeSlot == $active.runtimeSlot
@@ -866,6 +883,19 @@ verify_prune_apify_secret_inventory() {
   active_identity="$(apify_identity_for_existing_config "$active_config")" \
     || die "active Cloud Run Apify inventory is invalid for explicit pruning"
 
+  jq -ne \
+    --argjson latest "$latest_config" \
+    --argjson active "$active_config" '
+      def sharding:
+        [(.spec.template.spec.containers // .spec.containers // [])[0].env[]?
+          | select(.name == "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED")
+          | select(has("value"))
+          | .value];
+      ($latest | sharding) == ["false"]
+      and ($active | sharding) == ["false"]
+    ' >/dev/null \
+    || die "explicit pruning requires latest and active Cloud Run authorized-test sharding to be exactly false"
+
   if [[ "$mode" == "check" ]]; then
     jq -ne \
       --argjson latest "$latest_identity" \
@@ -883,6 +913,22 @@ verify_prune_apify_secret_inventory() {
     return 0
   fi
 
+  jq -ne \
+    --argjson latest "$latest_identity" \
+    --argjson active "$active_identity" '
+      def has_primary_v3:
+        [.refs[] | select(.env == "APIFY_PRIMARY_API_TOKEN")] == [{
+          env: "APIFY_PRIMARY_API_TOKEN",
+          secret: "ai-baram-v2-apify-primary",
+          version: "3"
+        }];
+      $latest.runtimeSlot == "primary"
+      and $active.runtimeSlot == "primary"
+      and ($latest | has_primary_v3)
+      and ($active | has_primary_v3)
+    ' >/dev/null \
+    || die "explicit pruning requires latest and active Cloud Run normal slot to already be exact primary:3"
+
   observed_drop_slots="$(jq -cn \
     --argjson latest "$latest_identity" \
     --argjson active "$active_identity" '
@@ -897,6 +943,118 @@ verify_prune_apify_secret_inventory() {
     ')"
   [[ "$observed_drop_slots" == "$prune_apify_secret_refs_json" ]] \
     || die "--prune-apify-secret-refs must exactly name every observed non-primary ref in latest and active Cloud Run inventory"
+}
+
+verify_prune_supabase_destination() {
+  local latest_config="$1"
+  local active_config="$2"
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+
+  [[ "$supabase_public_url" =~ ^https://[a-z0-9]{20}\.supabase\.co$ ]] \
+    || die "explicit pruning requires the canonical https://<20-lowercase-project-ref>.supabase.co origin"
+  jq -ne \
+    --arg expected "$supabase_public_url" \
+    --argjson latest "$latest_config" \
+    --argjson active "$active_config" '
+      def urls:
+        [(.spec.template.spec.containers // .spec.containers // [])[0].env[]?
+          | select(.name == "NEXT_PUBLIC_SUPABASE_URL")
+          | select(has("value"))
+          | .value];
+      ($latest | urls) == [$expected]
+      and ($active | urls) == [$expected]
+    ' >/dev/null \
+    || die "explicit pruning requires latest and active Cloud Run to expose exactly one matching canonical NEXT_PUBLIC_SUPABASE_URL"
+}
+
+perform_prune_primary_drain() {
+  local start_config="$1"
+  local start_generation
+  local end_config
+  local end_active_config
+  local end_generation
+
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+  [[ "$mode" != "check" ]] || return 0
+  start_generation="$(service_generation_identity "$start_config")" \
+    || die "explicit pruning requires an exactly observed Cloud Run service generation before the drain"
+  service_traffic_matches_revision "$start_config" "$known_good_revision" \
+    || die "explicit pruning requires one unchanged active primary revision at exactly 100% traffic"
+
+  if [[ "$mode" == "dry-run" ]]; then
+    print_command sleep "$DEFAULT_TIMEOUT_SECONDS"
+    log "[dry-run] apply will re-read generation, traffic, active revision, refs, sharding, and destination after the 300-second drain"
+    prune_primary_drain_baseline_verified="true"
+    return 0
+  fi
+
+  sleep "$DEFAULT_TIMEOUT_SECONDS"
+  end_config="$(service_json)" \
+    || die "Cloud Run service was not observable after the 300-second prune drain"
+  end_generation="$(service_generation_identity "$end_config")" \
+    || die "explicit pruning requires an exactly observed Cloud Run service generation after the drain"
+  [[ "$end_generation" == "$start_generation" ]] \
+    || die "Cloud Run service generation changed during the 300-second prune drain"
+  service_has_no_traffic_tags "$end_config" \
+    || die "Cloud Run traffic tags appeared during the 300-second prune drain"
+  service_traffic_matches_revision "$end_config" "$known_good_revision" \
+    || die "active Cloud Run traffic changed during the 300-second prune drain"
+  end_active_config="$(revision_json "$known_good_revision")" \
+    || die "active Cloud Run revision was not observable after the 300-second prune drain"
+  revision_is_ready "$end_active_config" "$known_good_revision" \
+    || die "active Cloud Run revision was not Ready after the 300-second prune drain"
+  verify_prune_apify_secret_inventory "$end_config" "$end_active_config"
+  verify_prune_supabase_destination "$end_config" "$end_active_config"
+
+  known_good_config="$end_active_config"
+  prune_primary_drain_baseline_verified="true"
+}
+
+record_prune_promotion_fence() {
+  local config="$1"
+  local active_config
+
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+  service_has_no_traffic_tags "$config" \
+    || die "Cloud Run traffic tags appeared while staging the primary-only prune revision"
+  service_traffic_matches_revision "$config" "$known_good_revision" \
+    || die "live traffic changed while staging the primary-only prune revision"
+  active_config="$(revision_json "$known_good_revision")" \
+    || die "active Cloud Run revision was not observable after prune staging"
+  revision_is_ready "$active_config" "$known_good_revision" \
+    || die "active Cloud Run revision was not Ready after prune staging"
+  verify_prune_apify_secret_inventory "$config" "$active_config"
+  verify_existing_service_secret_identity "$config" "$active_config"
+  verify_prune_supabase_destination "$config" "$active_config"
+  prune_promotion_generation_identity="$(service_generation_identity "$config")" \
+    || die "prune staging did not expose an exactly observed Cloud Run service generation"
+  known_good_config="$active_config"
+}
+
+verify_prune_promotion_fence() {
+  local config="$1"
+  local active_config
+  local generation
+
+  [[ "$prune_apify_secret_refs_enabled" == "true" ]] || return 0
+  [[ -n "$prune_promotion_generation_identity" ]] \
+    || die "prune promotion generation fence was not recorded"
+  generation="$(service_generation_identity "$config")" \
+    || die "Cloud Run service generation was not exactly observed immediately before prune promotion"
+  [[ "$generation" == "$prune_promotion_generation_identity" ]] \
+    || die "Cloud Run service generation changed after prune staging"
+  service_has_no_traffic_tags "$config" \
+    || die "Cloud Run traffic tags appeared after prune staging"
+  service_traffic_matches_revision "$config" "$known_good_revision" \
+    || die "live traffic changed after prune staging"
+  active_config="$(revision_json "$known_good_revision")" \
+    || die "active Cloud Run revision was not observable immediately before prune promotion"
+  revision_is_ready "$active_config" "$known_good_revision" \
+    || die "active Cloud Run revision was not Ready immediately before prune promotion"
+  verify_prune_apify_secret_inventory "$config" "$active_config"
+  verify_existing_service_secret_identity "$config" "$active_config"
+  verify_prune_supabase_destination "$config" "$active_config"
+  known_good_config="$active_config"
 }
 
 prepare_apify_secret_assignments() {
@@ -1009,6 +1167,9 @@ verify_apify_secret_ref_prune_readiness() {
     gcloud secrets versions access "$supabase_secret_version" \
       "--secret=$SUPABASE_SECRET_ID" \
       "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+      --no-log-http \
+      --verbosity=error \
+      --quiet \
       | awk '
           NR == 1 && length($0) > 0 {
             printf "apikey: %s\\n", $0
@@ -1018,10 +1179,12 @@ verify_apify_secret_ref_prune_readiness() {
           { exit 42 }
           END { if (NR != 1) exit 42 }
         ' \
-      | curl --silent --show-error --fail-with-body \
+      | curl --disable --silent --show-error --fail-with-body \
           --header @- \
           --request POST \
           --header 'Content-Type: application/json' \
+          --proto '=https' \
+          --max-redirs 0 \
           --url "${supabase_public_url%/}/rest/v1/rpc/analysis_v2_apify_secret_ref_prune_readiness" \
           --data-binary "$request_json"
   )" || die "authoritative Apify secret-ref prune readiness could not be obtained"
@@ -1261,6 +1424,7 @@ ensure_worker_endpoint_env() {
       service_traffic_matches_revision "$config" "$known_good_revision" \
         || die "staging changed live traffic before promotion"
     fi
+    record_prune_promotion_fence "$config"
     verify_revision_provenance "$staged_revision" "$source_commit_sha"
     config="$verified_revision_config"
     [[ "$(jq -er '.spec.containers[0].image' <<<"$config")" \
@@ -1501,8 +1665,12 @@ deploy_or_verify_service() {
     service_has_no_traffic_tags "$config" \
       || die "Cloud Run traffic tags are forbidden while Gemini concurrency is process-local"
     resolve_known_good_service_revision "$config"
+    if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
+      verify_prune_apify_secret_inventory "$config" "$known_good_config"
+      verify_prune_supabase_destination "$config" "$known_good_config"
+      perform_prune_primary_drain "$config"
+    fi
     verify_existing_service_secret_identity "$config" "$known_good_config"
-    verify_prune_apify_secret_inventory "$config" "$known_good_config"
     prepare_apify_secret_assignments "$config"
     verify_apify_secret_ref_prune_readiness
   else
@@ -1958,6 +2126,7 @@ promote_staged_revision() {
     || die "Cloud Run service was not observable immediately before promotion"
   service_traffic_matches_revision "$config" "$known_good_revision" \
     || die "live traffic changed after staging; refusing a concurrent promotion"
+  verify_prune_promotion_fence "$config"
   verify_apify_secret_ref_prune_readiness
   rollback_armed="true"
   gcloud run services update-traffic \
@@ -2107,6 +2276,8 @@ explicit_additional_apify_refs_json='[]'
 parse_additional_apify_secret_versions
 prune_apify_secret_refs_json='[]'
 prune_apify_secret_refs_enabled="false"
+prune_primary_drain_baseline_verified="false"
+prune_promotion_generation_identity=""
 parse_prune_apify_secret_refs
 if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
   [[ "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" == "primary" ]] \
@@ -2228,6 +2399,16 @@ supabase_public_url=""
 if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
   supabase_public_url="$(jq -er '.NEXT_PUBLIC_SUPABASE_URL' <<<"$build_env_json")" \
     || die "build env file must expose the authoritative Supabase URL for pruning"
+  [[ "$supabase_public_url" =~ ^https://[a-z0-9]{20}\.supabase\.co$ ]] \
+    || die "explicit pruning requires the canonical https://<20-lowercase-project-ref>.supabase.co origin"
+  if [[ -n "$worker_env_file" ]]; then
+    env_json_value_equals "$runtime_env_json" NEXT_PUBLIC_SUPABASE_URL \
+      "$supabase_public_url" \
+      || die "explicit pruning runtime env must preserve the canonical NEXT_PUBLIC_SUPABASE_URL"
+    env_json_value_equals "$runtime_env_json" \
+      ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED false \
+      || die "explicit pruning runtime env must preserve ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false"
+  fi
   command -v curl >/dev/null 2>&1 || die "curl is required for authoritative pruning"
 fi
 validate_service_account_email "$worker_build_service_account" \
