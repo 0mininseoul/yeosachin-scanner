@@ -31,6 +31,19 @@ const reusableTargetProfileMigration = readFileSync(
     ),
     'utf8'
 );
+const senaryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260724220000_expand_analysis_v2_apify_senary_slot.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const senaryHelperMigration = senaryMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.analysis_v2_valid_apify_credential_slot\([\s\S]*?\n\$\$;/
+)?.[0];
+if (!senaryHelperMigration) {
+    throw new Error('senary credential helper migration is missing');
+}
 
 const INPUT_HASH = 'a'.repeat(64);
 const OTHER_INPUT_HASH = 'b'.repeat(64);
@@ -316,6 +329,7 @@ describe('preflight Apify provider-run PGlite contract', () => {
         await db.exec(splitFreshAdmissionLedgerMigration);
         await db.exec(reusableTargetProfileBootstrap);
         await db.exec(reusableTargetProfileMigration);
+        await db.exec(senaryHelperMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -332,8 +346,15 @@ describe('preflight Apify provider-run PGlite contract', () => {
         await db.close();
     });
 
-    it('reserves all five credential slots without exposing direct service-role DML', async () => {
-        const slots = ['primary', 'secondary', 'tertiary', 'quaternary', 'quinary'];
+    it('reserves all six credential slots without exposing direct service-role DML', async () => {
+        const slots = [
+            'primary',
+            'secondary',
+            'tertiary',
+            'quaternary',
+            'quinary',
+            'senary',
+        ];
 
         for (const [index, slot] of slots.entries()) {
             const preflightId = `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
@@ -359,6 +380,11 @@ describe('preflight Apify provider-run PGlite contract', () => {
         await expect(serviceQuery(
             'SELECT * FROM public.analysis_preflight_acquisition_cost_events'
         )).rejects.toThrow(/permission denied/i);
+        const unsupportedPreflightId = '00000000-0000-4000-8000-000000000007';
+        await seedPreflight(unsupportedPreflightId);
+        await expect(reserve(unsupportedPreflightId, 'septenary')).rejects.toThrow(
+            /PREFLIGHT_PROVIDER_RUN_INVALID/
+        );
         await expect(serviceQuery(
             `SELECT public.record_analysis_preflight_provider_cost_event(
                 $1, 'apify', 'apify/instagram-profile-scraper', 'primary',

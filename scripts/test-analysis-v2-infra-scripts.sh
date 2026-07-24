@@ -2320,7 +2320,7 @@ assert_not_contains "$temp_dir/worker-secondary-slot.out" \
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:6,quaternary:6,quinary:6' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:6,quaternary:6,quinary:6,senary:6' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-secondary-slot-additional-refs.out"
@@ -2328,7 +2328,8 @@ for additional_assignment in \
   'APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7' \
   'APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:6' \
   'APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:6' \
-  'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6'; do
+  'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6' \
+  'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:6'; do
   assert_contains "$temp_dir/worker-secondary-slot-additional-refs.out" \
     "$additional_assignment"
 done
@@ -2339,7 +2340,7 @@ for invalid_additional_refs in \
   'secondary:7' \
   'tertiary:latest' \
   'tertiary:6,tertiary:6' \
-  'senary:6'; do
+  'septenary:6'; do
   if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
     'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
     "ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=$invalid_additional_refs" \
@@ -2546,10 +2547,10 @@ assert_not_contains "$temp_dir/worker-hmac-plaintext.out" \
   'PLAINTEXT_HMAC_SENTINEL_MUST_NOT_BE_PRINTED'
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary' \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
-  >"$temp_dir/worker-five-slot-recovery-check.out"
-assert_contains "$temp_dir/worker-five-slot-recovery-check.out" \
+  >"$temp_dir/worker-six-slot-recovery-check.out"
+assert_contains "$temp_dir/worker-six-slot-recovery-check.out" \
   'verified: private worker runtime, bounded scaling, and default dynamic egress'
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
@@ -2588,7 +2589,7 @@ assert_contains "$temp_dir/worker-recovery-latest-ref.out" \
   'existing worker Apify references are invalid or the selected slot version changed'
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary,septenary' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-recovery-unallowlisted.out" 2>&1; then

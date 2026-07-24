@@ -135,7 +135,7 @@ if (location !== 'global') {
 if (!/^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$/.test(bucket)) {
   throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET is invalid');
 }
-if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary'].includes(slot)) {
+if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary'].includes(slot)) {
   throw new Error('ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be explicit and valid');
 }
 if (globalGateEnabled !== 'true') {

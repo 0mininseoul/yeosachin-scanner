@@ -33,40 +33,32 @@ slot 이름은 물리 계정의 고정 identity이며 다른 계정의 alias가 
 | `senary` | `SENARY` | 월간 약 `$9.45` 잔여; reset 전 daily allowance 일부만 남음 |
 | `septenary` | `SEPTENARY` | 월간 allowance 소진 |
 
-현행 authorized operation policy가 허용하는 runtime slot은 `primary`부터 `quinary`까지다.
-`senary`와 `septenary`는 현재 계정 inventory 관측값이며, reviewed implementation 없이
-operation에 배정하거나 `primary`/`secondary` 이름으로 위장하지 않는다.
+현행 authorized operation policy가 허용하는 runtime slot은 `primary`부터 `senary`까지다.
+`septenary`는 계정 inventory 관측값일 뿐 runtime에서 지원하지 않으며, operation에 배정하거나
+다른 slot 이름으로 위장하지 않는다.
 
 Secret Manager의 `ai-baram-v2-apify-primary:3`은 `.env.local`의 실제 `PRIMARY` 계정,
 `ai-baram-v2-apify-secondary:3`은 실제 `SECONDARY` 계정에 대응한다. 다른 이름의 token을
 version 3에 alias하지 않는다. Cloud Run의 normal selected slot은 `primary`이며 선택 secret
-reference는 `primary:3`이다. 점검 과정에서도 token 값은 출력하지 않는다.
+reference는 `primary:3`이다. `senary`를 사용할 때는
+`APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:<numeric-version>`이라는 same-named exact
+reference만 허용한다. 점검 과정에서도 token 값은 출력하지 않는다.
 
-다음 승인 실행은 09:00 KST 일일 reset 뒤 관계 수집 한쪽을 `primary`, 다른 쪽을
-`quinary`에 고정한다. profile fallback과 target liker도 `primary`를 사용한다. 아래 고정값을
-intake와 worker 모두에 넣되, comment/candidate-liker slot을 확정하기 전에는 sharding을
-활성화하지 않는다.
+다음 승인 실행의 아래 map은 09:00 KST reset 뒤 실행 직전 live credit과 정확한 Actor
+allowance/quota 및 active job을 다시 확인해 모두 충분할 때만 허용한다. live gate가 실패하면
+slot을 즉석에서 alias하거나 일부 operation만 시작하지 않고 E2E 전체를 중단한다.
 
 ```dotenv
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false
 ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET=0_min._.00
 ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID=974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary
-ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=primary
+ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=senary
 ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary
 ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=primary
-ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=primary
-```
-
-reset 뒤 실행 직전 quota 확인으로 `target-comments`와 `candidate-likers`의 계정을 각각
-선택한다. `candidate-likers`는 정책 계약상 `target-likers`의 `primary`와 다른 slot이어야
-한다. 아래 두 placeholder는 Pre-run check의 live quota 확인에서 exact slot으로 바꾼다.
-operation map 완성, non-selected exact secret reference 설치, runtime identity와 quota 확인,
-deploy 검증, empty-work 확인이 모두 끝날 때까지 sharding은 계속 `false`다.
-
-```dotenv
-ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=<slot-selected-after-immediate-quota-check>
-ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=<slot-selected-after-immediate-quota-check>
+ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=senary
+ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=tertiary
+ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=quinary
 ```
 
 새 임시 worker 서비스에는 최종 operation map이 참조하는 non-selected slot만
@@ -84,14 +76,14 @@ effective normal slot을 사용한다. 따라서 이 slot은 request의 `target-
 `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false`를 아래 1~14번이 모두 통과할 때까지
 intake와 worker의 모든 runtime에서 유지한다.
 
-1. 로컬의 ordered migration 파일과 linked remote migration history가 `20260724203500_set_dashboard_postgres_timezone_kst.sql`까지 정확히 일치하는지 확인한다. pending migration은 reviewed ordered path로만 적용하고 `--include-all`이나 ad hoc skip을 사용하지 않는다. `20260719190000`은 수동 reconciliation된 예외이므로 해당 파일과 migration history가 parity 증거에 존재하는지 확인하되, 이미 반영된 SQL을 맹목적으로 재실행하지 않는다.
+1. 로컬의 ordered migration 파일과 linked remote migration history가 `20260724220000_expand_analysis_v2_apify_senary_slot.sql`까지 정확히 일치하는지 확인한다. pending migration은 reviewed ordered path로만 적용하고 `--include-all`이나 ad hoc skip을 사용하지 않는다. `20260719190000`은 수동 reconciliation된 예외이므로 해당 파일과 migration history가 parity 증거에 존재하는지 확인하되, 이미 반영된 SQL을 맹목적으로 재실행하지 않는다.
 2. sharding을 `false`로 유지한 채 reviewed commit을 Vercel과 Cloud Run에 배포하고 두 deployed SHA가 일치하는지 확인한다.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy while authorized-test sharding remains disabled.
 4. intake와 worker의 effective normal selected slot이 모두 `primary`이고 Cloud Run이 exact `ai-baram-v2-apify-primary:3` secret reference를 사용하는지 확인한다. numeric secret version은 교체하지 않는다.
 5. 정책에 등장할 각 named slot이 `.env.local`과 Secret Manager의 same-named physical account로 해석되는지 token 값을 표시하지 않고 확인한다. cross-name alias가 하나라도 있으면 중단한다.
-6. 09:00 KST reset 뒤 각 후보 account의 월간 잔액, 정확한 Actor 일일 item/run quota와 active job을 다시 읽고, 그 결과로 comment/candidate-liker slot을 확정해 operation map의 placeholder를 제거한다. 잔액만 보고 daily quota를 추정하지 않는다.
+6. 09:00 KST reset 뒤 map에 포함된 각 account의 월간 잔액, 정확한 Actor 일일 item/run quota와 active job을 다시 읽고, 모두 충분한지 확인한다. 잔액만 보고 daily quota를 추정하지 않는다.
 7. sharding을 `false`로 유지한 채 최종 operation map이 참조하는 모든 non-selected slot의 same-named exact numeric secret reference를 worker에 설치한다. selected `primary:3`은 additional reference 목록에 반복하지 않고 `latest`를 사용하지 않는다. 설치 뒤 effective config와 Vercel/Cloud Run deployed SHA를 다시 확인한다.
-8. 관계 수집은 `primary`와 `quinary`에 각각 한 방향만 배정되고, profile fallback과 target liker는 `primary`이며, 어떤 단일 operation도 여러 account를 쓰지 않는지 확인한다.
+8. 관계 수집은 `senary`와 `quinary`에 각각 한 방향만 배정되고, target profile과 profile fallback은 `primary`, target liker는 `senary`, target comment는 `tertiary`, candidate liker는 `quinary`이며, 어떤 단일 operation도 여러 account를 쓰지 않는지 확인한다.
 9. 정상 공개 preflight/얼리버드 intake는 pre-run 상태인 `ANALYSIS_V2_ADMISSION_ENABLED=true`이고 normal no-header 요청은 `production`에 남는지 확인한다. paid webhook은 `awaiting_operator`까지만 만들고 outbox/operator approval 전에는 분석 요청이나 task를 자동 생성하지 않아야 한다. 별도의 signed `test_entitlement`는 exact owner/target 한 건만 허용해야 한다.
 10. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
 11. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
@@ -122,6 +114,9 @@ final gate가 전부 통과한 뒤에만 exact owner/target signed admission을 
 시작한다.
 
 ### Profile-repair micro-canary
+
+Profile-repair microcanary는 별도 역사적 5-slot 계약이므로 `senary`를 지원하지 않고 사용하지
+않는다. general V2 worker의 슬롯 확장을 이 canary의 CLI·테이블·RPC에 전파하지 않는다.
 
 Use `npm run canary:apify-profile-repair` only to measure the bounded repair of the failed V2
 profile-fallback batches from one reviewed source request. Keep the source request UUID, expected

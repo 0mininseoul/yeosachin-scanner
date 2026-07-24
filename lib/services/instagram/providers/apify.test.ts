@@ -132,6 +132,7 @@ describe('apifyProvider', () => {
             APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
             APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
+            APIFY_SENARY_API_TOKEN: 'senary-token',
         };
         expect(selectApifyApiToken(env)).toBe('primary-token');
         expect(selectApifyCredentialSlot(env)).toBe('primary');
@@ -145,11 +146,15 @@ describe('apifyProvider', () => {
         )).toBe('secondary-token');
         expect(() => selectApifyApiToken({ ...env, APIFY_API_TOKEN_SLOT: 'pool' }))
             .toThrow('APIFY_API_TOKEN_SLOT');
-        for (const slot of ['tertiary', 'quaternary', 'quinary'] as const) {
+        for (const slot of ['tertiary', 'quaternary', 'quinary', 'senary'] as const) {
             const selected = { ...env, ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot };
             expect(selectAnalysisV2ApifyCredentialSlot(selected)).toBe(slot);
             expect(selectApifyApiToken(selected, slot)).toBe(`${slot}-token`);
         }
+        expect(() => selectAnalysisV2ApifyCredentialSlot({
+            ...env,
+            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'septenary',
+        })).toThrow('ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
         expect(() => selectAnalysisV2ApifyCredentialSlot({
             ...env,
             ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'pool',

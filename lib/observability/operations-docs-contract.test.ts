@@ -213,4 +213,33 @@ describe('analytics and observability disclosure contract', () => {
             expect(document).not.toMatch(/자동 public launch|자동 공개 출시/);
         }
     });
+
+    it('documents the exact same-named senary authorized E2E boundary and teardown', () => {
+        const runbook = source('docs/authorized-apify-sharded-e2e-runbook.md');
+
+        expect(runbook).toMatch(/runtime slot[^\n]*`primary`[^\n]*`senary`/);
+        expect(runbook).toMatch(/`septenary`[^\n]*(unsupported|지원하지 않)/);
+        expect(runbook).toContain('APIFY_SENARY_API_TOKEN');
+        expect(runbook).toMatch(/ai-baram-v2-apify-senary:<numeric-version>/);
+        for (const binding of [
+            'ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=senary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=primary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=senary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=tertiary',
+            'ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=quinary',
+        ]) {
+            expect(runbook).toContain(binding);
+        }
+        expect(runbook).toMatch(
+            /live[\s\S]{0,80}(credit|크레딧)[\s\S]{0,80}Actor[\s\S]{0,80}(allowance|허용량|quota)/i
+        );
+        expect(runbook).toMatch(
+            /profile-repair microcanary[\s\S]{0,100}senary[\s\S]{0,80}(지원하지 않|사용하지 않)/i
+        );
+        expect(runbook).toMatch(/signed `test_entitlement`[^\n]*(owner|소유자)[^\n]*(target|대상)/i);
+        expect(runbook).toMatch(/sharding[^\n]*`false`/i);
+        expect(runbook).toMatch(/temporary[^\n]*(reference|ref|참조)[^\n]*(제거|remove)/i);
+        expect(runbook).toMatch(/normal selected slot[^\n]*`primary`/i);
+    });
 });

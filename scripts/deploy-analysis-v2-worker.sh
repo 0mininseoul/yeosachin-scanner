@@ -28,6 +28,7 @@ readonly -a APIFY_TOKEN_SLOTS=(
   tertiary
   quaternary
   quinary
+  senary
 )
 
 mode="apply"
@@ -224,7 +225,7 @@ validate_slot() {
   for allowed in "${APIFY_TOKEN_SLOTS[@]}"; do
     [[ "$1" != "$allowed" ]] || return 0
   done
-  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, or quinary"
+  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, or senary"
 }
 
 validate_numeric_version() {
@@ -500,7 +501,8 @@ service_runtime_config_matches() {
         {env: "APIFY_SECONDARY_API_TOKEN", secret: "ai-baram-v2-apify-secondary"},
         {env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
         {env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
-        {env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"}
+        {env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
+        {env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"}
       ];
       def apify_env_names: [apify_specs[].env];
       def apify_refs:
@@ -576,7 +578,7 @@ service_runtime_config_matches() {
         and result_image_config_matches
         and (apify_refs == ($expected_apify_refs | sort_by(.env)))
         and (apify_refs | length) >= 1
-        and (apify_refs | length) <= 5
+        and (apify_refs | length) <= 6
         and ([env[]
           | select(.name as $name | apify_env_names | index($name))
           | select(has("value"))] | length) == 0
@@ -667,7 +669,8 @@ service_has_forbidden_plaintext_credential() {
       "APIFY_SECONDARY_API_TOKEN",
       "APIFY_TERTIARY_API_TOKEN",
       "APIFY_QUATERNARY_API_TOKEN",
-      "APIFY_QUINARY_API_TOKEN"
+      "APIFY_QUINARY_API_TOKEN",
+      "APIFY_SENARY_API_TOKEN"
     ];
     [containers[]?.env[]?
       | select(
@@ -724,7 +727,8 @@ apify_identity_for_existing_config() {
         {slot: "secondary", env: "APIFY_SECONDARY_API_TOKEN", secret: "ai-baram-v2-apify-secondary"},
         {slot: "tertiary", env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
         {slot: "quaternary", env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
-        {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"}
+        {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
+        {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"}
       ];
       [env[] | select(.name | test("^APIFY_.*_API_TOKEN$"))] as $entries
       | [$entries[].name] as $names
@@ -735,7 +739,7 @@ apify_identity_for_existing_config() {
       | [$entries[] | select(.name == ($runtime_specs[0].env // ""))]
           as $runtime_refs
       | if (containers | length) != 1 then error("invalid container count")
-        elif ($entries | length) < 1 or ($entries | length) > 5
+        elif ($entries | length) < 1 or ($entries | length) > 6
           then error("invalid Apify ref count")
         elif ($names | length) != ($names | unique | length)
           then error("duplicate Apify ref")
@@ -827,7 +831,8 @@ prepare_apify_secret_assignments() {
           {slot: "secondary", env: "APIFY_SECONDARY_API_TOKEN", secret: "ai-baram-v2-apify-secondary"},
           {slot: "tertiary", env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
           {slot: "quaternary", env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
-          {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"}
+          {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
+          {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"}
         ];
         def entries($name): [env[] | select(.name == $name)];
         if (specs | all(entries(.env) | length <= 1)) then
