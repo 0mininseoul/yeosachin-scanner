@@ -39,10 +39,11 @@ slot 이름은 물리 계정의 고정 identity이며 다른 계정의 alias가 
 
 Secret Manager의 `ai-baram-v2-apify-primary:3`은 `.env.local`의 실제 `PRIMARY` 계정,
 `ai-baram-v2-apify-secondary:3`은 실제 `SECONDARY` 계정에 대응한다. 다른 이름의 token을
-version 3에 alias하지 않는다. Cloud Run의 normal selected slot은 `primary`이며 선택 secret
-reference는 `primary:3`이다. `senary`를 사용할 때는
+version 3에 alias하지 않는다. 실행 전 baseline과 teardown baseline의 normal selected binding은
+exact `primary:3`이다. E2E staging에서는 normal selected slot을 `senary`로 바꾸되
 `APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:<numeric-version>`이라는 same-named exact
-reference만 허용한다. 점검 과정에서도 token 값은 출력하지 않는다.
+reference만 허용한다. 이 numeric version은 live gate를 통과한 실제 SENARY 계정이어야 하며,
+점검 과정에서도 token 값은 출력하지 않는다.
 
 다음 승인 실행의 아래 map은 09:00 KST reset 뒤 실행 직전 live credit과 정확한 Actor
 allowance/quota 및 active job을 다시 확인해 모두 충분할 때만 허용한다. live gate가 실패하면
@@ -52,24 +53,41 @@ slot을 즉석에서 alias하거나 일부 operation만 시작하지 않고 E2E 
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false
 ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET=0_min._.00
 ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID=974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd
-ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT=senary
 ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=senary
 ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary
-ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=primary
+ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=senary
 ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT=senary
 ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=tertiary
 ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=quinary
 ```
 
-새 임시 worker 서비스에는 최종 operation map이 참조하는 non-selected slot만
-`ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS`에 중복 없이 넣는다. 각 reference는 같은 이름의
-물리 계정임을 검증한 exact numeric version이어야 한다. selected `primary:3`을 반복하거나
-`latest`를 사용하지 않고, 기존 numeric secret version을 덮어쓰지 않는다.
+sharding을 계속 `false`로 둔 staging deploy에서 selected slot은 `senary`이고 same-named
+exact numeric secret을 사용한다. additional refs에는 `quinary`, `tertiary` 순서로 각각
+same-named exact numeric version을 중복 없이 넣는다. selected senary reference를 additional에
+반복하거나 `latest`를 사용하지 않고, 기존 numeric secret version을 덮어쓰지 않는다.
 
 Fresh-admission/preflight target-profile fallback은 request-bound sharding보다 먼저 실행되므로
 effective normal slot을 사용한다. 따라서 이 slot은 request의 `target-profile`과
-`profile-fallback`과 같은 `primary`여야 하며, schema-v1로 증명된 preflight run을 요청 생성
+`profile-fallback`과 같은 `senary`여야 하며, schema-v1로 증명된 preflight run을 요청 생성
 후에도 일관되게 재사용한다.
+
+### Plus 최악 비용 노출 상한
+
+아래 값은 Plus 코드 상수의 최악 결과 수와 현재 고정 단가로 계산한 한 번의 E2E 상한이다.
+성공 예상 비용이나 잔액 추정치가 아니다. 시작 직전 각 계정의 live remaining balance는 해당
+slot total의 110% 이상이어야 한다.
+
+| slot | 고정 계산식 | total | 110% minimum live balance |
+|---|---|---:|---:|
+| `senary` | followers `1200 × $0.00085 = $1.02`; profile fallback `900 × $0.0026 = $2.34`; worst repair `900 × $0.0027 = $2.43`; fresh target profile `$0.0026`; target likers `4 × 150 × $0.00155 = $0.93` | `$6.7226` | `$7.39486` |
+| `quinary` | following `1200 × $0.00085 = $1.02`; candidate likers `10 × 1 × 100 × $0.00155 = $1.55` | `$2.57` | `$2.827` |
+| `tertiary` | target comments `6 × 15 × $0.0026 = $0.234` | `$0.234` | `$0.2574` |
+
+각 slot은 이 balance margin과 별개로 배정된 각 Actor의 UTC 일일 item/run quota와 active-job
+여유를 모두 충족해야 한다. Actor daily quota를 balance로 대체하지 않으며, balance를 quota로
+갈음하지도 않는다. 어느 하나라도 확인할 수 없거나 부족하면 어떤 paid operation도 시작하지
+않는다.
 
 ## Pre-run checks
 
@@ -79,12 +97,12 @@ intake와 worker의 모든 runtime에서 유지한다.
 1. 로컬의 ordered migration 파일과 linked remote migration history가 `20260724220000_expand_analysis_v2_apify_senary_slot.sql`까지 정확히 일치하는지 확인한다. pending migration은 reviewed ordered path로만 적용하고 `--include-all`이나 ad hoc skip을 사용하지 않는다. `20260719190000`은 수동 reconciliation된 예외이므로 해당 파일과 migration history가 parity 증거에 존재하는지 확인하되, 이미 반영된 SQL을 맹목적으로 재실행하지 않는다.
 2. sharding을 `false`로 유지한 채 reviewed commit을 Vercel과 Cloud Run에 배포하고 두 deployed SHA가 일치하는지 확인한다.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy while authorized-test sharding remains disabled.
-4. intake와 worker의 effective normal selected slot이 모두 `primary`이고 Cloud Run이 exact `ai-baram-v2-apify-primary:3` secret reference를 사용하는지 확인한다. numeric secret version은 교체하지 않는다.
+4. staging 변경 전 baseline에서 intake와 worker의 effective normal selected slot이 모두 `primary`이고 Cloud Run이 exact `ai-baram-v2-apify-primary:3` secret reference를 사용하는지 확인한다. numeric secret version은 교체하지 않는다.
 5. 정책에 등장할 각 named slot이 `.env.local`과 Secret Manager의 same-named physical account로 해석되는지 token 값을 표시하지 않고 확인한다. cross-name alias가 하나라도 있으면 중단한다.
-6. 09:00 KST reset 뒤 map에 포함된 각 account의 월간 잔액, 정확한 Actor 일일 item/run quota와 active job을 다시 읽고, 모두 충분한지 확인한다. 잔액만 보고 daily quota를 추정하지 않는다.
-7. sharding을 `false`로 유지한 채 최종 operation map이 참조하는 모든 non-selected slot의 same-named exact numeric secret reference를 worker에 설치한다. selected `primary:3`은 additional reference 목록에 반복하지 않고 `latest`를 사용하지 않는다. 설치 뒤 effective config와 Vercel/Cloud Run deployed SHA를 다시 확인한다.
-8. 관계 수집은 `senary`와 `quinary`에 각각 한 방향만 배정되고, target profile과 profile fallback은 `primary`, target liker는 `senary`, target comment는 `tertiary`, candidate liker는 `quinary`이며, 어떤 단일 operation도 여러 account를 쓰지 않는지 확인한다.
-9. 정상 공개 preflight/얼리버드 intake는 pre-run 상태인 `ANALYSIS_V2_ADMISSION_ENABLED=true`이고 normal no-header 요청은 `production`에 남는지 확인한다. paid webhook은 `awaiting_operator`까지만 만들고 outbox/operator approval 전에는 분석 요청이나 task를 자동 생성하지 않아야 한다. 별도의 signed `test_entitlement`는 exact owner/target 한 건만 허용해야 한다.
+6. 09:00 KST reset 뒤 senary, quinary, tertiary의 live remaining balance가 각각 `$7.39486`, `$2.827`, `$0.2574` 이상인지 읽고, 각 배정 Actor의 UTC 일일 item/run quota와 active job을 별도로 확인한다. quota를 balance로 대체하지 않는다.
+7. sharding을 `false`로 유지한 채 selected `senary` same-named exact numeric secret과 additional `quinary`, `tertiary` same-named exact numeric refs를 staging 배치한다. `latest`를 사용하지 않고 설치 뒤 effective config와 Vercel/Cloud Run deployed SHA를 다시 확인한다.
+8. 관계 수집은 `senary`와 `quinary`에 각각 한 방향만 배정되고, target profile과 profile fallback/repair는 `senary`, target liker는 `senary`, target comment는 `tertiary`, candidate liker는 `quinary`이며, 어떤 단일 operation도 여러 account를 쓰지 않는지 확인한다.
+9. 정상 공개 preflight/얼리버드 intake는 staging 전체에서 `ANALYSIS_V2_ADMISSION_ENABLED=true`이고 normal no-header 요청은 `production`에 남는지 확인한다. paid webhook은 `awaiting_operator`까지만 만들고 outbox/operator approval 전에는 분석 요청이나 task를 자동 생성하지 않아야 한다. 별도의 signed `test_entitlement`는 exact owner/target 한 건만 허용해야 한다. 예상 밖 ordinary preflight 또는 work가 관측되면 시작을 중단하고 그 작업이 terminal/empty가 된 뒤 empty-work gate를 처음부터 다시 실행한다.
 10. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
 11. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
 12. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
@@ -100,10 +118,10 @@ intake와 worker의 모든 runtime에서 유지한다.
 활성화 deploy가 끝난 뒤 signed admission 전에 아래 final gate를 전부 다시 통과한다.
 
 1. Vercel과 Cloud Run의 deployed source SHA가 reviewed source와 일치하고, 각 runtime이 제공하는 범위에서 expected commit ancestry가 맞는지 확인한다.
-2. 활성화 대상으로 정한 Vercel intake와 Cloud Run worker의 모든 runtime에서 effective `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true`를 확인한다. 이 flag의 `false`→`true`만 pre-activation env snapshot에서 허용되는 유일한 변화다. false, missing 또는 일부 runtime만 true인 partial activation은 final gate 실패다.
-3. sharding flag를 제외한 모든 effective env, owner/target allowlist, operation map, normal selected slot, Secret Manager exact numeric binding, source SHA와 ancestry가 reviewed activation plan과 pre-activation snapshot에 정확히 일치하는지 확인한다. Cloud Run normal selected binding은 계속 exact `ai-baram-v2-apify-primary:3`이어야 한다. activation deploy가 새 revision을 만들므로 revision identity 자체를 pre-activation revision과 같다고 요구하지 않는다.
+2. 활성화 대상으로 정한 Vercel intake와 Cloud Run worker의 모든 runtime에서 effective `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true`를 확인한다. 이 flag의 `false` → `true`가 pre-activation env snapshot에서 허용되는 유일한 변화다. false, missing 또는 일부 runtime만 true인 partial activation은 final gate 실패다.
+3. sharding flag를 제외한 모든 effective env, owner/target allowlist, operation map, normal selected slot, Secret Manager exact numeric binding, source SHA와 ancestry가 reviewed activation plan과 pre-activation snapshot에 정확히 일치하는지 확인한다. Cloud Run normal selected binding은 계속 same-named exact `ai-baram-v2-apify-senary:<numeric-version>`이어야 한다. activation deploy가 새 revision을 만들므로 revision identity 자체를 pre-activation revision과 같다고 요구하지 않는다.
 4. Cloud Run revision identity가 이번 reviewed activation deploy가 새로 만든 exact revision과 일치하는지 확인한다. 그 exact revision이 latest-created이자 latest-ready이고, traffic tag 없이 단독으로 정확히 100% traffic을 받아야 한다.
-5. processing V2 request, claimed/running V2 job, active provider run, 이전 request의 queued task가 모두 0인지 다시 확인한다.
+5. processing V2 request, claimed/running V2 job, active provider run, 이전 request의 queued task가 모두 0인지 다시 확인한다. 예상 밖 ordinary preflight/work가 생겼다면 signed admission을 발급하지 않고 중단한 뒤 terminal/empty 상태를 확인하고 empty-work gate를 다시 실행한다.
 6. 허용된 sharding flag 활성화 외에는 source, ancestry, admission state, owner/target, operation map, env, numeric secret binding, revision readiness, traffic, quota 또는 empty-work snapshot에 activation drift가 하나도 없는지 확인한다.
 
 false/missing flag, partial activation, final gate 실패 또는 drift가 있으면 signed admission을
@@ -285,9 +303,9 @@ paid account instead of rotating free accounts.
 
 ## Teardown
 
-1. `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false`를 Vercel intake와 Cloud Run worker를 포함해 이 값을 설정한 모든 runtime에 적용하고 effective 설정을 확인한다.
+1. teardown에서 `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false`를 Vercel intake와 Cloud Run worker를 포함해 이 값을 설정한 모든 runtime에 적용하고 effective 설정을 확인한다.
 2. policy-bound request가 하나도 남지 않았음을 확인한 뒤 worker의 non-selected temporary Apify secret reference를 제거한다.
-3. Cloud Run의 normal selected slot을 `ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary`로 복원하고, 선택 secret reference가 exact `ai-baram-v2-apify-primary:3`인지 확인한다. token 값은 출력하지 않는다.
+3. teardown baseline으로 Cloud Run의 normal selected slot을 `ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary`로 복원하고, 선택 secret reference가 exact `ai-baram-v2-apify-primary:3`인지 확인한다. token 값은 출력하지 않는다.
 4. Pre-run public admission/access-mode 상태를 정확히 복원해 `ANALYSIS_V2_ADMISSION_ENABLED=true`인지 확인한다. normal no-header 요청은 `production`에 남고 공개 preflight/early-bird intake를 계속 사용할 수 있어야 한다. paid webhook은 계속 `awaiting_operator`까지만 만들며 outbox/operator approval 없이 자동 fulfillment나 공개 분석 dispatch를 시작하지 않는다.
 5. Commercial display terms are defined only by the canonical ["Groble 얼리버드 표시안 (성공 E2E 후 확정)" block](./operations-cost-model.md). Payment integration is outside this E2E's scope and remains on a separate branch; do not implement or enable it as part of this run.
 

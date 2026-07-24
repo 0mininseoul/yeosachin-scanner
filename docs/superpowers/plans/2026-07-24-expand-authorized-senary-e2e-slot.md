@@ -114,12 +114,15 @@ Run the Bash contract suites and focused TypeScript tests.
 - Require the same-named numeric Secret Manager reference for senary.
 - State that the final map is permitted only after an immediate live credit and Actor allowance check.
 - Use the planned map, subject to that live gate:
-  - target profile and profile fallback/repair: primary
+  - normal selected slot, target profile and profile fallback/repair: senary
   - relationship followers: senary
   - relationship following: quinary
   - target likers: senary
   - target comments: tertiary
   - candidate likers: quinary
+- Preserve the deployment sequence: verify the initial `primary:3` baseline, stage the exact
+  same-named senary selected secret plus quinary/tertiary additional secrets with sharding disabled,
+  activate only the sharding flag, then disable sharding and restore `primary:3` during teardown.
 - Retain the one-owner, one-target, signed `test_entitlement` boundary.
 - Retain fail-closed teardown: sharding off, temporary nonselected refs/env removed, normal primary restored.
 - Explicitly say profile-repair microcanary does not support senary.
