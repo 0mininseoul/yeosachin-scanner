@@ -17,7 +17,10 @@ import {
     decodeResultCursor,
     paginateAnalysisResults,
 } from '@/lib/domain/analysis/result-pagination';
-import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
+import {
+    RISK_POLICY_VERSION,
+    isRiskBandCompatibleWithDisplayScore,
+} from '@/lib/domain/analysis/risk-policy';
 import {
     canonicalizeImageProxyUrl,
     createAnalysisV2ResultImageProxyPath,
@@ -624,8 +627,12 @@ const scoreRowSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', path: ['possibleUpperBound'], message: 'Possible upper bound drifted.' });
     }
-    if (Math.abs(value.displayScore * 10 - Math.round(value.publicScore * 10)) > 1e-6) {
-        context.addIssue({ code: 'custom', path: ['displayScore'], message: 'Display score is not rounded public score.' });
+    if (!isRiskBandCompatibleWithDisplayScore(value.displayScore, value.riskBand)) {
+        context.addIssue({
+            code: 'custom',
+            path: ['riskBand'],
+            message: 'Display score and risk band are inconsistent.',
+        });
     }
 });
 

@@ -344,6 +344,122 @@ describe('analysis V2 result checkpoint store', () => {
             }],
         })).resolves.toMatchObject({ rowCount: 1 });
     });
+
+    it('passes relative-tier display scores through validation to the score RPC', async () => {
+        const fake = rpcClient({
+            data: {
+                ...manifest('coordinator:join:final-score', null),
+                itemCount: 3,
+                rowCount: 3,
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+        const relativeRows = [
+            {
+                candidateId: 'candidate-1',
+                publicScore: 3.3,
+                displayScore: 6.8,
+                riskBand: 'high_risk' as const,
+            },
+            {
+                candidateId: 'candidate-2',
+                publicScore: 2.2,
+                displayScore: 4.2,
+                riskBand: 'caution' as const,
+            },
+            {
+                candidateId: 'candidate-3',
+                publicScore: 1.1,
+                displayScore: 4.2,
+                riskBand: 'caution' as const,
+            },
+        ].map((row, index) => {
+            const rawScore = (row.publicScore - 1) * 100 / 9;
+            const possibleUpperBound = rawScore + 3;
+            return {
+                ...row,
+                featuredRank: index + 1,
+                recentMutualRank: null,
+                verificationShortlistRank: null,
+                partnerSafetySource: 'not_collected' as const,
+                partnerSafetyOperationKey: null,
+                partnerSafetyResultHash: null,
+                components: {
+                    candidateToTargetLikes: 0,
+                    candidateToTargetComments: rawScore,
+                    targetToCandidateLike: 0,
+                    tagOrCaptionMention: 0,
+                    recentMutual: 0,
+                    appearanceExposure: 0,
+                },
+                weakPartnerAdjustment: 0 as const,
+                preScore: rawScore,
+                rawScore,
+                possibleUpperBound,
+                possibleUpperPublicScore: 1 + 9 * possibleUpperBound / 100,
+                partnerCapApplied: false,
+                partnerEvidenceSelectionIds: [],
+            };
+        });
+
+        await expect(store.checkpointScores({
+            ...claim('coordinator:join:final-score'),
+            rows: relativeRows,
+        })).resolves.toMatchObject({ rowCount: 3 });
+
+        expect(fake.rpc).toHaveBeenCalledOnce();
+        expect(fake.rpc.mock.calls[0]![0])
+            .toBe(ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointScoreRpc);
+        expect(fake.rpc.mock.calls[0]![1]).toMatchObject({
+            p_risk_policy_version: RISK_POLICY_VERSION,
+            p_rows: [
+                expect.objectContaining({ displayScore: 6.8, publicScore: 3.3 }),
+                expect.objectContaining({ displayScore: 4.2, publicScore: 2.2 }),
+                expect.objectContaining({ displayScore: 4.2, publicScore: 1.1 }),
+            ],
+        });
+    });
+
+    it('still rejects a relative display score whose risk band is incompatible', async () => {
+        const fake = rpcClient({
+            data: manifest('coordinator:join:final-score', null),
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+
+        await expect(store.checkpointScores({
+            ...claim('coordinator:join:final-score'),
+            rows: [{
+                candidateId: 'candidate-1',
+                displayScore: 6.8,
+                riskBand: 'normal',
+                featuredRank: null,
+                recentMutualRank: null,
+                verificationShortlistRank: null,
+                partnerSafetySource: 'not_collected',
+                partnerSafetyOperationKey: null,
+                partnerSafetyResultHash: null,
+                components: {
+                    candidateToTargetLikes: 0,
+                    candidateToTargetComments: 0,
+                    targetToCandidateLike: 0,
+                    tagOrCaptionMention: 0,
+                    recentMutual: 0,
+                    appearanceExposure: 0,
+                },
+                weakPartnerAdjustment: 0,
+                preScore: 0,
+                rawScore: 0,
+                possibleUpperBound: 3,
+                publicScore: 1,
+                possibleUpperPublicScore: 1.3,
+                partnerCapApplied: false,
+                partnerEvidenceSelectionIds: [],
+            }],
+        })).rejects.toThrow('Display score and risk band are inconsistent.');
+        expect(fake.rpc).not.toHaveBeenCalled();
+    });
 });
 
 describe('analysis V2 result finalization and loading', () => {
