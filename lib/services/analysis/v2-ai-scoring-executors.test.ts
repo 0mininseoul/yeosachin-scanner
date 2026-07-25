@@ -29,7 +29,10 @@ import {
     type AnalysisV2ResultSupabaseClient,
 } from './v2-result-store';
 import type { AnalysisV2StageExecutorContext, AnalysisV2StageId } from './v2-worker';
-import type { AnalysisV2AiStageRuntime } from './v2-ai-stage-runtime';
+import {
+    AnalysisV2GenderResolutionCutoffPersistenceError,
+    type AnalysisV2AiStageRuntime,
+} from './v2-ai-stage-runtime';
 import type { AnalysisV2MediaArtifactStore } from './v2-media-artifact-store';
 import type { AnalysisV2DagState } from './v2-dag-planner';
 import { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-result-store';
@@ -913,6 +916,7 @@ describe('V2 AI and scoring executors', () => {
             }),
         )).rejects.toThrow('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
         expect(memoryState.outcomes).toEqual([]);
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
 
     it('preserves ready resolver provenance when feature analysis becomes unavailable', async () => {
@@ -1227,6 +1231,155 @@ describe('V2 AI and scoring executors', () => {
             .map(row => row.classification)).toEqual([
             'unavailable', 'verified_female', 'verified_female',
         ]);
+    });
+
+    it('does not fail a mixed batch when optional resolver cutoff bookkeeping is slow', async () => {
+        const memoryState = memory();
+        const usernames = ['resolver.ambiguous', 'feature.rejected', 'healthy.sibling'];
+        const accounts = usernames.map(username => profile(username));
+        const deps = dependencies(memoryState, {
+            profileAiConcurrency: 1,
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: usernames,
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        deps.ai.features = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['features']>[0]
+        ) => {
+            const ids = input.media.map(row => row.selectionId);
+            if (ids.some(id => id.includes('feature.rejected'))) {
+                throw new Error(
+                    'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+                );
+            }
+            return {
+                result: feature(ids, 'unresolved'),
+                operationKey: `feature-analysis:${digest(ids.join(':'))}`,
+                resultHash: digest(`feature-result:${ids.join(':')}`),
+                source: 'checkpoint' as const,
+            };
+        });
+        deps.ai.startGenderResolution = vi.fn(input => {
+            const account = input.media[0]?.selectionId ?? '';
+            if (account.includes('resolver.ambiguous')) {
+                return {
+                    operationKey: `gender-resolution:${digest(account)}`,
+                    completion: Promise.resolve(),
+                    peek: () => ({ status: 'terminal_unavailable' as const }),
+                    cutoff: vi.fn().mockResolvedValue(undefined),
+                };
+            }
+            let status: 'pending' | 'cutoff' = 'pending';
+            return {
+                operationKey: `gender-resolution:${digest(account)}`,
+                completion: Promise.resolve(),
+                peek: () => ({ status } as const),
+                cutoff: vi.fn(async () => {
+                    status = 'cutoff';
+                    throw new AnalysisV2GenderResolutionCutoffPersistenceError();
+                }),
+            };
+        });
+        const base = state();
+
+        const output = await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 3,
+                            inputHash: digest('mixed-resolver-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 3,
+                        producerInputHash: digest('mixed-resolver-producer'),
+                        revision: 1,
+                        resultHash: digest('mixed-resolver-result'),
+                    }],
+                }),
+            }),
+        );
+
+        expect(output.checkpoint.manifest.itemCount).toBe(3);
+        expect(memoryState.outcomes.map(row => row.status)).toEqual([
+            'unresolved', 'analysis_unavailable', 'unresolved',
+        ]);
+        expect(memoryState.outcomes.map(row => row.genderResolutionStatus)).toEqual([
+            'terminal_unavailable', 'cutoff', 'cutoff',
+        ]);
+        expect(deps.resultStore.checkpointFeatureBatch).toHaveBeenCalledOnce();
+    });
+
+    it('fails closed when optional resolver cutoff bookkeeping rejects immediately', async () => {
+        const memoryState = memory();
+        const account = profile('resolver.persistence.failure');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+        });
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async input => ({
+            result: feature(input.media.map(row => row.selectionId), 'unresolved'),
+            operationKey: `feature-analysis:${digest('cutoff-rejection-feature')}`,
+            resultHash: digest('cutoff-rejection-feature-result'),
+            source: 'checkpoint' as const,
+        }));
+        deps.ai.startGenderResolution = vi.fn(() => ({
+            operationKey: `gender-resolution:${digest('cutoff-rejection-resolver')}`,
+            completion: Promise.resolve(),
+            peek: () => ({ status: 'pending' as const }),
+            cutoff: vi.fn().mockRejectedValue(new Error('DATABASE_FENCE_REJECTED')),
+        }));
+        const base = state();
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('cutoff-rejection-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('cutoff-rejection-producer'),
+                        revision: 1,
+                        resultHash: digest('cutoff-rejection-result'),
+                    }],
+                }),
+            }),
+        )).rejects.toThrow('DATABASE_FENCE_REJECTED');
+
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        expect(memoryState.outcomes).toEqual([]);
     });
 
     it.each([

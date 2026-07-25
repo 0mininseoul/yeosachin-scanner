@@ -68,7 +68,12 @@ import type {
     AnalysisV2StageExecutorContext,
     AnalysisV2StageExecutorRegistry,
 } from './v2-worker';
-import type { AnalysisV2AiStageRuntime } from './v2-ai-stage-runtime';
+import {
+    AnalysisV2GenderResolutionCutoffPersistenceError,
+    type AnalysisV2AiStageRuntime,
+    type AnalysisV2GenderResolutionHandle,
+    type AnalysisV2GenderResolutionState,
+} from './v2-ai-stage-runtime';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
 
@@ -188,6 +193,24 @@ function analysisUnavailableOutcome(
         genderResolutionResultHash,
         mediaBundlePersisted: false,
     };
+}
+
+async function settleOptionalGenderResolution(
+    handle: AnalysisV2GenderResolutionHandle | null
+): Promise<AnalysisV2GenderResolutionState | null> {
+    if (!handle) return null;
+    if (handle.peek().status !== 'pending') return handle.peek();
+    try {
+        await handle.cutoff();
+    } catch (error) {
+        // cutoff() already fences the optional provider call before bounded audit
+        // bookkeeping. A slow ledger write must not discard the required analysis;
+        // finalization still observes and gates any genuinely nonterminal attempt.
+        if (!(error instanceof AnalysisV2GenderResolutionCutoffPersistenceError)) {
+            throw error;
+        }
+    }
+    return handle.peek();
 }
 
 export interface AnalysisV2PrimaryJoinCandidate {
@@ -1350,10 +1373,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     try {
                         features = await featureTask;
                     } catch (error) {
-                        const resolverState = resolverHandle?.peek() ?? null;
-                        if (resolverState?.status === 'pending') {
-                            await resolverHandle!.cutoff();
-                        }
+                        const resolverState = await settleOptionalGenderResolution(
+                            resolverHandle
+                        );
                         if (resolverState?.status === 'recovery_pending') {
                             throw new AnalysisV2AiResultRecoveryPendingError();
                         }
@@ -1390,11 +1412,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             : features.result.finalGenderDecision === 'unresolved_stage_conflict'
                                 ? 'unresolved_stage_conflict' as const
                                 : 'unresolved' as const;
-                    const resolverState = resolverHandle?.peek() ?? null;
-                    if (resolverState?.status === 'pending') {
-                        await resolverHandle!.cutoff();
-                    }
-                    const settledResolverState = resolverHandle?.peek() ?? resolverState;
+                    const settledResolverState = await settleOptionalGenderResolution(
+                        resolverHandle
+                    );
                     if (settledResolverState?.status === 'recovery_pending') {
                         throw new AnalysisV2AiResultRecoveryPendingError();
                     }

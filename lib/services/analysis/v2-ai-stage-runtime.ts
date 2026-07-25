@@ -157,16 +157,10 @@ async function waitForCutoffBookkeeping(
         }),
     ]);
     if (timer) clearTimeout(timer);
-    if (
-        outcome.status === 'rejected'
-        && (
-            outcome.error instanceof AnalysisV2AiResultRecoveryPendingError
-            || outcome.error instanceof AnalysisV2AiResultRecoveredCutoffError
-        )
-    ) {
+    if (outcome.status === 'rejected') {
         throw outcome.error;
     }
-    if (outcome.status !== 'fulfilled') {
+    if (outcome.status === 'timed_out') {
         throw new AnalysisV2GenderResolutionCutoffPersistenceError();
     }
 }
