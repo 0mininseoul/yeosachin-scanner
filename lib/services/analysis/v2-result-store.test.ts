@@ -463,6 +463,63 @@ describe('analysis V2 result checkpoint store', () => {
 });
 
 describe('analysis V2 result finalization and loading', () => {
+    it('loads the image-source subset without rejecting unrelated staged rows', async () => {
+        const { client } = rpcClient({
+            data: {
+                requestId,
+                profileClassifications: [{
+                    candidateId: 'candidate:woman',
+                    classification: 'verified_female',
+                    profileImageUrl: rawImageUrl,
+                    // This unrelated persisted detail is deliberately malformed.
+                    // Result-image capture must not make the entire analysis fail on it.
+                    feature: { unexpected: true },
+                }],
+                finalScores: [{
+                    candidateId: 'candidate:woman',
+                    displayScore: 7.4,
+                    publicScore: 'legacy-shape',
+                }],
+                privateNames: [{
+                    candidateId: 'candidate:private',
+                    instagramId: 'private.account',
+                    profileImageUrl: rawImageUrl,
+                    nameFemaleScore: 0.8,
+                    nameConfidence: 0.7,
+                    nameIsName: true,
+                }],
+                preliminaryScores: [{ unexpected: true }],
+                reverseLikes: [{ unexpected: true }],
+                partnerSafety: [{ unexpected: true }],
+                narratives: [{ unexpected: true }],
+            },
+            error: null,
+        });
+
+        const snapshot = await createSupabaseAnalysisV2ResultStore(client)
+            .loadStageSnapshot({ requestId });
+
+        expect(snapshot).toEqual({
+            requestId,
+            profileClassifications: [{
+                candidateId: 'candidate:woman',
+                classification: 'verified_female',
+                profileImageUrl: canonicalImageUrl,
+            }],
+            finalScores: [{
+                candidateId: 'candidate:woman',
+                displayScore: 7.4,
+            }],
+            privateNames: [{
+                candidateId: 'candidate:private',
+                instagramId: 'private.account',
+                profileImageUrl: canonicalImageUrl,
+                nameFemaleScore: 0.8,
+                nameConfidence: 0.7,
+            }],
+        });
+    });
+
     it('canonicalizes the target URL and fresh-signs the finalization summary', async () => {
         const fake = rpcClient({
             data: { finalized: true, requestStatus: 'completed', summary: rawSummary() },

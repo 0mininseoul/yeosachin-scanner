@@ -358,13 +358,22 @@ export interface AnalysisV2ResultStore {
 
 export interface AnalysisV2ResultStageSnapshot {
     requestId: string;
-    profileClassifications: readonly AnalysisV2ProfileClassificationRow[];
-    preliminaryScores: readonly AnalysisV2PreliminaryScoreRow[];
-    reverseLikes: readonly AnalysisV2ReverseLikeRow[];
-    partnerSafety: readonly AnalysisV2PartnerSafetyRow[];
-    finalScores: readonly AnalysisV2CandidateScoreRow[];
-    privateNames: readonly AnalysisV2PrivateNameRow[];
-    narratives: readonly AnalysisV2NarrativeRow[];
+    profileClassifications: readonly Readonly<Pick<
+        AnalysisV2ProfileClassificationRow,
+        'candidateId' | 'classification' | 'profileImageUrl'
+    >>[];
+    finalScores: readonly Readonly<Pick<
+        AnalysisV2CandidateScoreRow,
+        'candidateId' | 'displayScore'
+    >>[];
+    privateNames: readonly Readonly<Pick<
+        AnalysisV2PrivateNameRow,
+        | 'candidateId'
+        | 'instagramId'
+        | 'profileImageUrl'
+        | 'nameFemaleScore'
+        | 'nameConfidence'
+    >>[];
 }
 
 interface RpcError {
@@ -831,16 +840,31 @@ const finalizedPageSnapshotSchema = z.object({
     }
 });
 
-const stageSnapshotSchema = z.object({
+// Result-image capture uses only source identity and display ordering. Keeping this
+// boundary narrow prevents an unrelated, backward-compatible staging addition from
+// turning a fully persisted analysis into a terminal failure before finalization.
+const resultImageStageSnapshotSchema = z.object({
     requestId: z.string().uuid(),
-    profileClassifications: z.array(featureRowSchema).max(900),
-    preliminaryScores: z.array(preliminaryScoreRowSchema).max(900),
-    reverseLikes: z.array(reverseLikeRowSchema).max(900),
-    partnerSafety: z.array(partnerSafetyRowSchema).max(900),
-    finalScores: z.array(scoreRowSchema).max(900),
-    privateNames: z.array(privateNameRowSchema).max(1_200),
-    narratives: z.array(narrativeRowSchema).max(3),
-}).strict();
+    profileClassifications: z.array(z.object({
+        candidateId: candidateIdSchema,
+        classification: z.enum([
+            'verified_female', 'verified_non_female', 'unresolved',
+            'unresolved_stage_conflict', 'media_unavailable', 'unavailable',
+        ]),
+        profileImageUrl: rawImageUrlSchema,
+    })).max(900),
+    finalScores: z.array(z.object({
+        candidateId: candidateIdSchema,
+        displayScore: femaleResultRowV1Schema.shape.displayScore,
+    })).max(900),
+    privateNames: z.array(z.object({
+        candidateId: candidateIdSchema,
+        instagramId: privateResultRowV1Schema.shape.instagramId,
+        profileImageUrl: rawImageUrlSchema,
+        nameFemaleScore: z.number().finite().min(0).max(1),
+        nameConfidence: z.number().finite().min(0).max(1),
+    })).max(1_200),
+}).strip();
 
 function safeRpcCode(error: RpcError): string {
     return typeof error.code === 'string' && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
@@ -1353,7 +1377,9 @@ export function createSupabaseAnalysisV2ResultStore(
             );
             if (error) throwRpcError(error, 'result stage load');
             if (data === null) return null;
-            const parsed = stageSnapshotSchema.safeParse(rpcPayload(data, 'stage snapshot'));
+            const parsed = resultImageStageSnapshotSchema.safeParse(
+                rpcPayload(data, 'stage snapshot')
+            );
             if (!parsed.success) {
                 throw new Error('ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid stage snapshot.');
             }
