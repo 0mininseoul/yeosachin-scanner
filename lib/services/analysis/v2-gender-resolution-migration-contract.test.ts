@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const stageMigration = readFileSync(
@@ -22,6 +22,17 @@ const recoveryDeferMigration = readFileSync(
     ),
     'utf8'
 );
+const terminalOutcomeMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260720140000_read_analysis_v2_profile_repair_terminal_outcome.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const finalizerSealingMigrationUrl = new URL(
+    '../../../supabase/migrations/20260725033000_allow_analysis_unavailable_finalizer_sealing.sql',
+    import.meta.url
+);
 
 function functionDefinition(migration: string, name: string): string {
     const marker = new RegExp(
@@ -35,6 +46,43 @@ function functionDefinition(migration: string, name: string): string {
 }
 
 describe('gender resolution forward migration contract', () => {
+    it('allows only the finalizer sealing shape for analysis-unavailable provenance', () => {
+        const finalizer = functionDefinition(
+            terminalOutcomeMigration,
+            'complete_analysis_v2_result_and_purge'
+        );
+        expect(finalizer).toContain(
+            "SET terminal_classification = 'media_unavailable',\n"
+            + '        unavailable_reason = NULL'
+        );
+        expect(finalizer).toContain(
+            "AND feature.terminal_classification = 'unavailable'\n"
+            + "      AND feature.unavailable_reason = 'ai_response'"
+        );
+
+        expect(existsSync(finalizerSealingMigrationUrl)).toBe(true);
+        const sealingMigration = readFileSync(
+            finalizerSealingMigrationUrl,
+            'utf8'
+        );
+        expect(sealingMigration).toContain(
+            'DROP CONSTRAINT analysis_v2_candidate_feature_resolution_change_check'
+        );
+        expect(sealingMigration).toContain(
+            "baseline_classification = 'analysis_unavailable'"
+        );
+        expect(sealingMigration).toContain(
+            "terminal_classification = 'media_unavailable'"
+        );
+        expect(sealingMigration).toContain(
+            "classification_source = 'unavailable'"
+        );
+        expect(sealingMigration).toContain('unavailable_reason IS NULL');
+        expect(sealingMigration.match(
+            /baseline_classification = 'analysis_unavailable'/g
+        )).toHaveLength(1);
+    });
+
     it('pins both forward migrations after the paid-price predecessor', () => {
         for (const migration of [stageMigration, provenanceMigration]) {
             expect(migration).toContain('MIGRATION_PREDECESSOR=20260724230000');
