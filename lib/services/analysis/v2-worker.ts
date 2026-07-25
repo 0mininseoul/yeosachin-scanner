@@ -735,10 +735,7 @@ function failureDispositionForCode(
     ) {
         return 'transient';
     }
-    if (
-        code === 'ANALYSIS_V2_COLLECTION_CONTEXT_PERSISTENCE_ERROR'
-        && error.message === `${code}: invalid result.`
-    ) {
+    if (code === 'ANALYSIS_V2_COLLECTION_CONTEXT_INVALID_RESULT') {
         return 'transient';
     }
     if (TRANSIENT_FAILURE_CODES.has(code)) return 'transient';

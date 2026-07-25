@@ -99,14 +99,36 @@ describe('analysis V2 worker error codes', () => {
         });
     });
 
-    it('retries an invalid collection-context response under the live job fence', () => {
-        const code = 'ANALYSIS_V2_COLLECTION_CONTEXT_PERSISTENCE_ERROR';
-        const error = new Error(`${code}: invalid result.`);
+    it.each([
+        'ANALYSIS_V2_COLLECTION_CONTEXT_INVALID_RESULT',
+        'ANALYSIS_V2_COLLECTION_CONTEXT_RPC_PERSISTENCE_ERROR',
+    ] as const)('retries the structural collection-context failure %s', code => {
+        const error = new Error(code);
 
         expect(classifyAnalysisV2JobFailure(error)).toMatchObject({
             code,
             disposition: 'transient',
             retryable: true,
+        });
+    });
+
+    it('keeps a collection-context snapshot drift permanent', () => {
+        const code = 'ANALYSIS_V2_COLLECTION_CONTEXT_SNAPSHOT_DRIFT';
+
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+            code,
+            disposition: 'permanent',
+            retryable: false,
+        });
+    });
+
+    it('keeps a collection-context validation failure permanent', () => {
+        const code = 'ANALYSIS_V2_COLLECTION_CONTEXT_VALIDATION_ERROR';
+
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+            code,
+            disposition: 'permanent',
+            retryable: false,
         });
     });
 

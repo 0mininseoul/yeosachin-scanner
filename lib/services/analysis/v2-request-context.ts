@@ -64,6 +64,12 @@ export const ANALYSIS_V2_COLLECTION_CONTEXT_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_v2_collection_context_with_policy',
 });
 
+export const ANALYSIS_V2_COLLECTION_CONTEXT_FAILURE_CODES = Object.freeze({
+    invalidResult: 'ANALYSIS_V2_COLLECTION_CONTEXT_INVALID_RESULT',
+    rpc: 'ANALYSIS_V2_COLLECTION_CONTEXT_RPC_PERSISTENCE_ERROR',
+    snapshotDrift: 'ANALYSIS_V2_COLLECTION_CONTEXT_SNAPSHOT_DRIFT',
+});
+
 export class AnalysisV2CollectionContextFenceError extends Error {
     constructor() {
         super('ANALYSIS_V2_COLLECTION_CONTEXT_FENCE_MISMATCH');
@@ -80,12 +86,6 @@ function validateClaim(claim: AnalysisV2CollectionJobClaim): void {
     ) {
         throw new Error('ANALYSIS_V2_COLLECTION_CONTEXT_VALIDATION_ERROR');
     }
-}
-
-function safeRpcCode(error: { code?: string }): string {
-    return typeof error.code === 'string' && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
-        ? error.code
-        : 'unknown';
 }
 
 export function createAnalysisV2CollectionRequestContextStore(
@@ -106,16 +106,17 @@ export function createAnalysisV2CollectionRequestContextStore(
             if (error?.message === 'ANALYSIS_V2_COLLECTION_CONTEXT_FENCE_MISMATCH') {
                 throw new AnalysisV2CollectionContextFenceError();
             }
+            if (error?.message === 'ANALYSIS_V2_COLLECTION_CONTEXT_INVALID') {
+                throw new Error('ANALYSIS_V2_COLLECTION_CONTEXT_VALIDATION_ERROR');
+            }
             if (error) {
-                throw new Error(
-                    `ANALYSIS_V2_COLLECTION_CONTEXT_PERSISTENCE_ERROR (${safeRpcCode(error)})`
-                );
+                throw new Error(ANALYSIS_V2_COLLECTION_CONTEXT_FAILURE_CODES.rpc);
             }
             const parsed = contextSchema.safeParse(
                 Array.isArray(data) && data.length === 1 ? data[0] : data
             );
             if (!parsed.success || parsed.data.requestId !== claim.requestId.toLowerCase()) {
-                throw new Error('ANALYSIS_V2_COLLECTION_CONTEXT_PERSISTENCE_ERROR: invalid result.');
+                throw new Error(ANALYSIS_V2_COLLECTION_CONTEXT_FAILURE_CODES.invalidResult);
             }
             const plan = getAnalysisPlan(parsed.data.planId);
             if (
@@ -126,7 +127,7 @@ export function createAnalysisV2CollectionRequestContextStore(
                 || parsed.data.followingDeclaredCount > plan.relationshipCapacity.following
                 || parsed.data.excludedUsername === parsed.data.targetUsername
             ) {
-                throw new Error('ANALYSIS_V2_COLLECTION_CONTEXT_PERSISTENCE_ERROR: snapshot drift.');
+                throw new Error(ANALYSIS_V2_COLLECTION_CONTEXT_FAILURE_CODES.snapshotDrift);
             }
             return Object.freeze(parsed.data);
         },

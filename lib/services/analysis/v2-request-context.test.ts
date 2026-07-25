@@ -80,7 +80,52 @@ describe('analysis V2 collection request context', () => {
             jobKey: 'track:relationships:collect',
             claimToken,
             jobInputHash,
-        })).rejects.toThrow('snapshot drift');
+        })).rejects.toThrow('ANALYSIS_V2_COLLECTION_CONTEXT_SNAPSHOT_DRIFT');
+    });
+
+    it('emits only a structural code when the context RPC payload is invalid', async () => {
+        const invalid = client({ requestId });
+
+        await expect(createAnalysisV2CollectionRequestContextStore(invalid.value).load({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+        })).rejects.toMatchObject({
+            message: 'ANALYSIS_V2_COLLECTION_CONTEXT_INVALID_RESULT',
+        });
+    });
+
+    it('emits only a structural code when the context RPC fails', async () => {
+        const rpcFailure = client(null, {
+            code: '42501',
+            message: 'database detail that must not reach the job ledger',
+        });
+
+        await expect(createAnalysisV2CollectionRequestContextStore(rpcFailure.value).load({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+        })).rejects.toMatchObject({
+            message: 'ANALYSIS_V2_COLLECTION_CONTEXT_RPC_PERSISTENCE_ERROR',
+        });
+    });
+
+    it('fails closed when the context RPC rejects its validated input', async () => {
+        const invalidInput = client(null, {
+            code: 'P0001',
+            message: 'ANALYSIS_V2_COLLECTION_CONTEXT_INVALID',
+        });
+
+        await expect(createAnalysisV2CollectionRequestContextStore(invalidInput.value).load({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+        })).rejects.toMatchObject({
+            message: 'ANALYSIS_V2_COLLECTION_CONTEXT_VALIDATION_ERROR',
+        });
     });
 
     it('loads an immutable operation split only for a signed test access snapshot', async () => {
@@ -131,6 +176,6 @@ describe('analysis V2 collection request context', () => {
             jobKey: 'track:relationships:collect',
             claimToken,
             jobInputHash,
-        })).rejects.toThrow('snapshot drift');
+        })).rejects.toThrow('ANALYSIS_V2_COLLECTION_CONTEXT_SNAPSHOT_DRIFT');
     });
 });
