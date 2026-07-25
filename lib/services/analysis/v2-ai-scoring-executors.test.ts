@@ -916,6 +916,7 @@ describe('V2 AI and scoring executors', () => {
             }),
         )).rejects.toThrow('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
         expect(memoryState.outcomes).toEqual([]);
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
 
     it('preserves ready resolver provenance when feature analysis becomes unavailable', async () => {
@@ -1321,6 +1322,64 @@ describe('V2 AI and scoring executors', () => {
             'terminal_unavailable', 'cutoff', 'cutoff',
         ]);
         expect(deps.resultStore.checkpointFeatureBatch).toHaveBeenCalledOnce();
+    });
+
+    it('fails closed when optional resolver cutoff bookkeeping rejects immediately', async () => {
+        const memoryState = memory();
+        const account = profile('resolver.persistence.failure');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+        });
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async input => ({
+            result: feature(input.media.map(row => row.selectionId), 'unresolved'),
+            operationKey: `feature-analysis:${digest('cutoff-rejection-feature')}`,
+            resultHash: digest('cutoff-rejection-feature-result'),
+            source: 'checkpoint' as const,
+        }));
+        deps.ai.startGenderResolution = vi.fn(() => ({
+            operationKey: `gender-resolution:${digest('cutoff-rejection-resolver')}`,
+            completion: Promise.resolve(),
+            peek: () => ({ status: 'pending' as const }),
+            cutoff: vi.fn().mockRejectedValue(new Error('DATABASE_FENCE_REJECTED')),
+        }));
+        const base = state();
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('cutoff-rejection-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('cutoff-rejection-producer'),
+                        revision: 1,
+                        resultHash: digest('cutoff-rejection-result'),
+                    }],
+                }),
+            }),
+        )).rejects.toThrow('DATABASE_FENCE_REJECTED');
+
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        expect(memoryState.outcomes).toEqual([]);
     });
 
     it.each([
