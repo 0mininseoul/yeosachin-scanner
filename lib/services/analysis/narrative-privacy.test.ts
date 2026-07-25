@@ -28,6 +28,21 @@ describe('public risk narrative privacy', () => {
         expect(containsExposedInteractionMetric('댓글 흔적은 제법 선명합니다.')).toBe(false);
     });
 
+    it('allows an ordinary time expression when it does not expose an interaction count', () => {
+        expect(containsExposedInteractionMetric(
+            '한 번 본 뒤에도 은근히 기억에 남습니다.'
+        )).toBe(false);
+    });
+
+    it('blocks a quantity moved into a neighboring interaction sentence', () => {
+        expect(containsExposedInteractionMetric(
+            '좋아요 흔적은 보입니다. 세 번 확인했습니다. 수집 표본 밖 누락은 가능합니다.'
+        )).toBe(true);
+        expect(containsExposedInteractionMetric(
+            '댓글 흔적은 보입니다. three times 확인했습니다. 수집 표본 밖 누락은 가능합니다.'
+        )).toBe(true);
+    });
+
     it('requires exactly two safe, cynical lines with interactions and a sampling caveat', () => {
         expect(parseSafePublicRiskNarrative([
             '프로필과 피드는 꽤 눈에 띕니다.',
