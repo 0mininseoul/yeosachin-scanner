@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const migration = readFileSync(
@@ -14,6 +14,10 @@ const relativeRiskMigration = readFileSync(
         import.meta.url
     ),
     'utf8'
+);
+const riskPolicyConstraintMigrationUrl = new URL(
+    '../../../supabase/migrations/20260725030000_allow_risk_policy_v23_constraints.sql',
+    import.meta.url
 );
 
 function functionDefinition(name: string, last = false): string {
@@ -64,6 +68,27 @@ const resultTables = [
 ] as const;
 
 describe('analysis V2 result migration contract', () => {
+    it('upgrades persisted score policy constraints without rewriting history', () => {
+        expect(existsSync(riskPolicyConstraintMigrationUrl)).toBe(true);
+        const constraintMigration = readFileSync(
+            riskPolicyConstraintMigrationUrl,
+            'utf8'
+        );
+
+        expect(constraintMigration).toContain(
+            'DROP CONSTRAINT IF EXISTS analysis_v2_candidate_score_manifests_risk_policy_version_check'
+        );
+        expect(constraintMigration).toContain(
+            'DROP CONSTRAINT IF EXISTS analysis_v2_result_summaries_score_policy_version_check'
+        );
+        expect(constraintMigration.match(/'risk-policy-v2\.3'/g)).toHaveLength(2);
+        expect(constraintMigration.match(/'risk-policy-v2\.2'/g)).toHaveLength(2);
+        expect(tableDefinition('analysis_v2_candidate_score_manifests'))
+            .toContain("risk_policy_version = 'risk-policy-v2.2'");
+        expect(tableDefinition('analysis_v2_result_summaries'))
+            .toContain("score_policy_version = 'risk-policy-v2.2'");
+    });
+
     it('upgrades final-score replay to deterministic relative policy v2.3', () => {
         expect(relativeRiskMigration).toContain(
             'CREATE OR REPLACE FUNCTION public.analysis_v2_expected_relative_risk_rows('

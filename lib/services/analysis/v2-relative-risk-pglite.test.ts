@@ -9,6 +9,10 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const riskPolicyConstraintMigrationUrl = new URL(
+    '../../../supabase/migrations/20260725030000_allow_risk_policy_v23_constraints.sql',
+    import.meta.url
+);
 
 function functionDefinition(name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -60,6 +64,67 @@ async function expected(
 }
 
 describe('relative risk policy v2.3 SQL helper', () => {
+    it('allows v2.3 score manifests and summaries while preserving v2.2 rows', async () => {
+        const migrationDb = await PGlite.create();
+        try {
+            await migrationDb.exec(`
+                CREATE TABLE public.analysis_v2_candidate_score_manifests (
+                    request_id UUID PRIMARY KEY,
+                    risk_policy_version TEXT NOT NULL,
+                    CONSTRAINT analysis_v2_candidate_score_manifests_risk_policy_version_check
+                        CHECK (risk_policy_version = 'risk-policy-v2.2')
+                );
+                CREATE TABLE public.analysis_v2_result_summaries (
+                    request_id UUID PRIMARY KEY,
+                    score_policy_version TEXT NOT NULL,
+                    CONSTRAINT analysis_v2_result_summaries_score_policy_version_check
+                        CHECK (score_policy_version = 'risk-policy-v2.2')
+                );
+            `);
+            await migrationDb.exec(readFileSync(
+                riskPolicyConstraintMigrationUrl,
+                'utf8'
+            ));
+
+            await migrationDb.exec(`
+                INSERT INTO public.analysis_v2_candidate_score_manifests
+                    (request_id, risk_policy_version)
+                VALUES
+                    ('10000000-0000-4000-8000-000000000001', 'risk-policy-v2.2'),
+                    ('10000000-0000-4000-8000-000000000002', 'risk-policy-v2.3');
+                INSERT INTO public.analysis_v2_result_summaries
+                    (request_id, score_policy_version)
+                VALUES
+                    ('20000000-0000-4000-8000-000000000001', 'risk-policy-v2.2'),
+                    ('20000000-0000-4000-8000-000000000002', 'risk-policy-v2.3');
+            `);
+
+            const counts = await migrationDb.query<{
+                manifests: number;
+                summaries: number;
+            }>(`
+                SELECT
+                    (
+                        SELECT pg_catalog.count(*)::INTEGER
+                        FROM public.analysis_v2_candidate_score_manifests
+                    ) AS manifests,
+                    (
+                        SELECT pg_catalog.count(*)::INTEGER
+                        FROM public.analysis_v2_result_summaries
+                    ) AS summaries
+            `);
+            expect(counts.rows[0]).toEqual({ manifests: 2, summaries: 2 });
+            await expect(migrationDb.exec(`
+                INSERT INTO public.analysis_v2_candidate_score_manifests
+                    (request_id, risk_policy_version)
+                VALUES
+                    ('10000000-0000-4000-8000-000000000003', 'risk-policy-v2.4')
+            `)).rejects.toThrow();
+        } finally {
+            await migrationDb.close();
+        }
+    });
+
     it.each([
         { scores: [] },
         { scores: [2.1] },
