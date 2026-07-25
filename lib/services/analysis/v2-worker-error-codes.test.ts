@@ -99,6 +99,17 @@ describe('analysis V2 worker error codes', () => {
         });
     });
 
+    it('retries an invalid collection-context response under the live job fence', () => {
+        const code = 'ANALYSIS_V2_COLLECTION_CONTEXT_PERSISTENCE_ERROR';
+        const error = new Error(`${code}: invalid result.`);
+
+        expect(classifyAnalysisV2JobFailure(error)).toMatchObject({
+            code,
+            disposition: 'transient',
+            retryable: true,
+        });
+    });
+
     it('recognizes a divergent profile repair replay as a permanent conflict', () => {
         const code = 'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT';
         expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
