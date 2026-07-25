@@ -3,6 +3,7 @@ export const MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH = 180;
 
 const definitiveAccusationPattern = /(?:바람(?:을)?\s*(?:피우고\s*있(?:다|는)|폈다|피웠다)|불륜\s*(?:이다|관계(?:다|이다)?|중(?:이다)?)|외도\s*(?:했다|중(?:이다)?|하고\s*있(?:다|는))|(?:연인|교제)\s*(?:이다|중(?:이다)?|관계(?:다|이다|로\s*확정))|사귀고\s*있(?:다|는))/u;
 const interactionTermPattern = /(?:좋아요|댓글|상호작용)/u;
+const interactionMetricContextPattern = /(?:좋아요|댓글|상호작용|관측치|집계|횟수|건수|수량)/u;
 const coverageCaveatPattern = /(?:(?:수집|관측|확인)\s*(?:범위|비율)|coverage|커버리지|누락|표본)/iu;
 const cynicalTonePattern = /(?:굳이|공교롭게|하필|제법\s*친절|순진하게|우연치고는|모른\s*척|알아서)/u;
 const koreanQuantityPattern = /(?:하나|한|둘|두|셋|세|넷|네|다섯|여섯|일곱|여덟|아홉|열|한두|두어|두세|서너|너덧|너댓|대여섯|예닐곱|일여덟|스무|스물(?:한|두|세|네)?|서른|마흔|쉰|예순|일흔|여든|아흔|수십|수백|수천|여러|몇몇|몇|[일이삼사오육칠팔구]?(?:십|백|천)(?:여|남짓)?|일|이|삼|사|오|육|칠|팔|구)(?=\s*(?:건|개|회|번|차례|점|퍼센트|%|[이가을를은는만도,.!?。]|$))/u;
@@ -29,10 +30,11 @@ export function containsExposedInteractionMetric(value: string): boolean {
     const normalized = value.normalize('NFKC');
     if (/\p{N}/u.test(value) || /\p{N}/u.test(normalized)) return true;
 
-    const clauses = normalized.split(/[.!?。]/u);
-    return clauses.some(clause => (
-        koreanQuantityPattern.test(clause) || englishQuantityPattern.test(clause)
-    ));
+    // Model copy can split the interaction term and its count across adjacent
+    // sentences. Treat the whole public line as the disclosure boundary, while
+    // still allowing ordinary time expressions with no interaction context.
+    return interactionMetricContextPattern.test(normalized)
+        && (koreanQuantityPattern.test(normalized) || englishQuantityPattern.test(normalized));
 }
 
 export function containsDefinitiveRelationshipAccusation(value: string): boolean {
