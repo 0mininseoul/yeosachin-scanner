@@ -213,6 +213,24 @@ async function settleOptionalGenderResolution(
     return handle.peek();
 }
 
+interface AnalysisV2DeferredProfileAiOutcome {
+    kind: 'resolver_pending';
+    resolverHandle: AnalysisV2GenderResolutionHandle | null;
+    finalize(
+        resolverState: AnalysisV2GenderResolutionState | null
+    ): Promise<AnalysisV2ProfileAiOutcome>;
+}
+
+type AnalysisV2PreparedProfileAiOutcome =
+    | AnalysisV2ProfileAiOutcome
+    | AnalysisV2DeferredProfileAiOutcome;
+
+function isDeferredProfileAiOutcome(
+    value: AnalysisV2PreparedProfileAiOutcome
+): value is AnalysisV2DeferredProfileAiOutcome {
+    return 'kind' in value && value.kind === 'resolver_pending';
+}
+
 export interface AnalysisV2PrimaryJoinCandidate {
     candidateId: string;
     instagramId: string;
@@ -1186,9 +1204,14 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const defaultGenderResolutionStatus = genderResolutionEnabled
                 ? 'not_eligible' as const
                 : 'disabled' as const;
-            const outcomes = await runBounded(results, profileConcurrency, async item => {
-                await context.reportActiveProfile?.(item.username);
-                const outcome = await (async () => {
+            const startedResolverHandles: AnalysisV2GenderResolutionHandle[] = [];
+            let preparedOutcomes: AnalysisV2PreparedProfileAiOutcome[];
+            try {
+                preparedOutcomes = await runBounded(
+                    results,
+                    profileConcurrency,
+                    async (item): Promise<AnalysisV2PreparedProfileAiOutcome> => {
+                        await context.reportActiveProfile?.(item.username);
                     const candidateId = analysisV2CandidateId(item.username);
                     if (item.status !== 'success' || !item.profile || item.profile.isPrivate) {
                         return {
@@ -1218,8 +1241,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
+                    const profile = item.profile;
 
-                    const policy = mediaPolicy(item.profile);
+                    const policy = mediaPolicy(profile);
                     const triageNormalized = await normalizedSelections(
                         policy.triage.media,
                         dependencies.normalizeMedia,
@@ -1369,38 +1393,49 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             media: normalized.media,
                         }, aiFence)
                         : null;
+                    if (resolverHandle) {
+                        startedResolverHandles.push(resolverHandle);
+                    }
                     let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
                     try {
                         features = await featureTask;
                     } catch (error) {
+                        if (isAnalysisV2AiDeterministicFallbackError(error)) {
+                            return {
+                                kind: 'resolver_pending',
+                                resolverHandle,
+                                finalize: async resolverState => {
+                                    const readyResolver =
+                                        resolverState?.status === 'ready'
+                                            ? resolverState.value
+                                            : null;
+                                    const resolverFailureStatus =
+                                        !resolverHandle
+                                            ? defaultGenderResolutionStatus
+                                            : resolverState?.status === 'ready'
+                                                ? 'ready_not_needed' as const
+                                                : resolverState?.status === 'capacity_skipped'
+                                                    ? 'capacity_skipped' as const
+                                                    : resolverState?.status
+                                                        === 'terminal_unavailable'
+                                                        ? 'terminal_unavailable' as const
+                                                        : 'cutoff' as const;
+                                    return analysisUnavailableOutcome(
+                                        candidateId,
+                                        item.username,
+                                        profile,
+                                        resolverFailureStatus,
+                                        readyResolver?.operationKey ?? null,
+                                        readyResolver?.resultHash ?? null,
+                                    );
+                                },
+                            };
+                        }
                         const resolverState = await settleOptionalGenderResolution(
                             resolverHandle
                         );
                         if (resolverState?.status === 'recovery_pending') {
                             throw new AnalysisV2AiResultRecoveryPendingError();
-                        }
-                        if (isAnalysisV2AiDeterministicFallbackError(error)) {
-                            const readyResolver = resolverState?.status === 'ready'
-                                ? resolverState.value
-                                : null;
-                            const resolverFailureStatus =
-                                !resolverHandle
-                                    ? defaultGenderResolutionStatus
-                                    : resolverState?.status === 'ready'
-                                        ? 'ready_not_needed' as const
-                                        : resolverState?.status === 'capacity_skipped'
-                                            ? 'capacity_skipped' as const
-                                            : resolverState?.status === 'terminal_unavailable'
-                                                ? 'terminal_unavailable' as const
-                                                : 'cutoff' as const;
-                            return analysisUnavailableOutcome(
-                                candidateId,
-                                item.username,
-                                item.profile,
-                                resolverFailureStatus,
-                                readyResolver?.operationKey ?? null,
-                                readyResolver?.resultHash ?? null,
-                            );
                         }
                         throw error;
                     }
@@ -1412,45 +1447,27 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             : features.result.finalGenderDecision === 'unresolved_stage_conflict'
                                 ? 'unresolved_stage_conflict' as const
                                 : 'unresolved' as const;
-                    const settledResolverState = await settleOptionalGenderResolution(
-                        resolverHandle
+                    const normalizedSelectionIdList = normalized.media.map(
+                        row => row.selectionId
                     );
-                    if (settledResolverState?.status === 'recovery_pending') {
-                        throw new AnalysisV2AiResultRecoveryPendingError();
-                    }
-                    const readyResolver = settledResolverState?.status === 'ready'
-                        ? settledResolverState.value
-                        : null;
-                    const reconciliation = applyGenderResolution({
-                        baselineClassification,
-                        baselineSource: baselineClassification === 'verified_female'
-                            || baselineClassification === 'verified_non_female'
-                            ? 'feature'
-                            : 'unknown',
-                        triage: gender.result.assessment,
-                        feature: features.result,
-                        resolver: readyResolver?.result ?? null,
-                    });
-                    const status = reconciliation.finalClassification;
-                    const genderResolutionStatus =
-                        !genderResolutionEnabled
-                            ? 'disabled' as const
-                            : !resolverHandle
-                                ? 'not_eligible' as const
-                                : settledResolverState?.status === 'ready'
-                                    ? reconciliation.resolverApplied
-                                        ? 'ready_applied' as const
-                                        : baselineClassification === 'verified_female'
-                                            || baselineClassification === 'verified_non_female'
-                                            ? 'ready_not_needed' as const
-                                            : 'ready_inconclusive' as const
-                                    : settledResolverState?.status === 'capacity_skipped'
-                                        ? 'capacity_skipped' as const
-                                        : settledResolverState?.status === 'terminal_unavailable'
-                                            ? 'terminal_unavailable' as const
-                                            : 'cutoff' as const;
-                    let mediaBundlePersisted = false;
-                    if (status === 'verified_female') {
+                    const normalizedCoverage = normalized.coverage;
+                    const couldResolveFemale = resolverHandle !== null
+                        && (
+                            baselineClassification === 'unresolved'
+                            || baselineClassification === 'unresolved_stage_conflict'
+                        );
+                    const deferredBundleMedia: AnalysisV2NormalizedMediaBundleItem[] =
+                        couldResolveFemale
+                            ? features.result.analyzedSelectionIds.map(selectionId => {
+                                const bytes = normalized.bytes.get(selectionId);
+                                if (!bytes) {
+                                    throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
+                                }
+                                return { selectionId, normalizedJpeg: bytes };
+                            })
+                            : [];
+                    let baselineMediaBundlePersisted = false;
+                    if (baselineClassification === 'verified_female') {
                         const bundleMedia: AnalysisV2NormalizedMediaBundleItem[] =
                             features.result.analyzedSelectionIds.map(selectionId => {
                                 const bytes = normalized.bytes.get(selectionId);
@@ -1466,33 +1483,115 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             bundleId: analysisV2CandidateBundleId(candidateId),
                             media: bundleMedia,
                         });
-                        mediaBundlePersisted = true;
+                        baselineMediaBundlePersisted = true;
                     }
                     return {
-                        candidateId,
-                        instagramId: normalizeUsername(item.username),
-                        status,
-                        unavailableReason: null,
-                        profile: item.profile,
-                        triage: gender.result,
-                        feature: features.result,
-                        normalizedSelectionIds: normalized.media.map(row => row.selectionId),
-                        mediaCoverage: normalized.coverage,
-                        captions,
-                        genderOperationKey: gender.operationKey,
-                        genderResultHash: gender.resultHash,
-                        featureOperationKey: features.operationKey,
-                        featureResultHash: features.resultHash,
-                        baselineClassification,
-                        classificationSource: reconciliation.classificationSource,
-                        genderResolutionStatus,
-                        genderResolutionOperationKey: readyResolver?.operationKey ?? null,
-                        genderResolutionResultHash: readyResolver?.resultHash ?? null,
-                        mediaBundlePersisted,
+                        kind: 'resolver_pending',
+                        resolverHandle,
+                        finalize: async settledResolverState => {
+                            const readyResolver =
+                                settledResolverState?.status === 'ready'
+                                    ? settledResolverState.value
+                                    : null;
+                            const reconciliation = applyGenderResolution({
+                                baselineClassification,
+                                baselineSource: baselineClassification === 'verified_female'
+                                    || baselineClassification === 'verified_non_female'
+                                    ? 'feature'
+                                    : 'unknown',
+                                triage: gender.result.assessment,
+                                feature: features.result,
+                                resolver: readyResolver?.result ?? null,
+                            });
+                            const status = reconciliation.finalClassification;
+                            const genderResolutionStatus =
+                                !genderResolutionEnabled
+                                    ? 'disabled' as const
+                                    : !resolverHandle
+                                        ? 'not_eligible' as const
+                                        : settledResolverState?.status === 'ready'
+                                            ? reconciliation.resolverApplied
+                                                ? 'ready_applied' as const
+                                                : baselineClassification === 'verified_female'
+                                                    || baselineClassification
+                                                        === 'verified_non_female'
+                                                    ? 'ready_not_needed' as const
+                                                    : 'ready_inconclusive' as const
+                                            : settledResolverState?.status
+                                                === 'capacity_skipped'
+                                                ? 'capacity_skipped' as const
+                                                : settledResolverState?.status
+                                                    === 'terminal_unavailable'
+                                                    ? 'terminal_unavailable' as const
+                                                    : 'cutoff' as const;
+                            let mediaBundlePersisted = baselineMediaBundlePersisted;
+                            if (status === 'verified_female' && !mediaBundlePersisted) {
+                                if (deferredBundleMedia.length === 0) {
+                                    throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
+                                }
+                                await dependencies.mediaStore.persistBundle({
+                                    requestId: context.claim.requestId,
+                                    jobKey: context.claim.jobKey,
+                                    claimToken: context.claim.claimToken,
+                                    bundleId: analysisV2CandidateBundleId(candidateId),
+                                    media: deferredBundleMedia,
+                                });
+                                mediaBundlePersisted = true;
+                            }
+                            return {
+                                candidateId,
+                                instagramId: normalizeUsername(item.username),
+                                status,
+                                unavailableReason: null,
+                                profile,
+                                triage: gender.result,
+                                feature: features.result,
+                                normalizedSelectionIds: normalizedSelectionIdList,
+                                mediaCoverage: normalizedCoverage,
+                                captions,
+                                genderOperationKey: gender.operationKey,
+                                genderResultHash: gender.resultHash,
+                                featureOperationKey: features.operationKey,
+                                featureResultHash: features.resultHash,
+                                baselineClassification,
+                                classificationSource: reconciliation.classificationSource,
+                                genderResolutionStatus,
+                                genderResolutionOperationKey:
+                                    readyResolver?.operationKey ?? null,
+                                genderResolutionResultHash:
+                                    readyResolver?.resultHash ?? null,
+                                mediaBundlePersisted,
+                            };
+                        },
                     };
-                })();
-                return outcome;
-            });
+                    },
+                );
+            } catch (error) {
+                const cleanupStates = await Promise.all(
+                    startedResolverHandles.map(settleOptionalGenderResolution)
+                );
+                if (cleanupStates.some(state => state?.status === 'recovery_pending')) {
+                    throw new AnalysisV2AiResultRecoveryPendingError();
+                }
+                throw error;
+            }
+            const resolverStates = await Promise.all(preparedOutcomes.map(outcome => (
+                isDeferredProfileAiOutcome(outcome)
+                    ? settleOptionalGenderResolution(outcome.resolverHandle)
+                    : Promise.resolve(null)
+            )));
+            if (resolverStates.some(state => state?.status === 'recovery_pending')) {
+                throw new AnalysisV2AiResultRecoveryPendingError();
+            }
+            const outcomes = await runBounded(
+                preparedOutcomes,
+                profileConcurrency,
+                async (outcome, index) => (
+                    isDeferredProfileAiOutcome(outcome)
+                        ? outcome.finalize(resolverStates[index] ?? null)
+                        : outcome
+                ),
+            );
             const publicCheckpoint = await dependencies.resultStore.checkpointFeatureBatch({
                 ...checkpointClaim(context),
                 batch: context.job.batch!,

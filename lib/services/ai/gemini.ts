@@ -16,7 +16,11 @@ import {
     getAnalysisImagePolicy,
     imageUrlToNormalizedBase64,
 } from './image-preprocessing';
-import { parseGeminiJsonResponse } from './gemini-response';
+import {
+    GeminiResponseValidationError,
+    parseGeminiJsonResponse,
+    type GeminiResponseValidationDiagnostics,
+} from './gemini-response';
 import { prepareGoogleApplicationCredentials } from '@/lib/services/google/credentials';
 import {
     AI_AMBIGUOUS_GENERATION_ERROR_PREFIX,
@@ -227,6 +231,7 @@ export interface GeminiAttemptTelemetry extends GeminiRequestTelemetry {
     retryCount: number;
     disposition: GeminiAttemptDisposition;
     finishReason: string | null;
+    responseRejection?: GeminiResponseValidationDiagnostics;
 }
 
 export interface GeminiAttemptStartTelemetry {
@@ -307,6 +312,42 @@ function sanitizeGenerationError(error: unknown): Error {
         );
     }
     return new Error('AI_GENERATION_REQUEST_ERROR: Gemini rejected the generation request.');
+}
+
+function responseRejectionDiagnostics(
+    error: Error
+): GeminiResponseValidationDiagnostics {
+    if (error instanceof GeminiResponseValidationError) {
+        return error.diagnostics;
+    }
+    return {
+        category: 'candidate_contract',
+        issues: [],
+        truncated: false,
+    };
+}
+
+function emitResponseRejectionDiagnostic(
+    telemetry: GeminiAttemptTelemetry
+): void {
+    if (
+        telemetry.stage !== 'featureAnalysis'
+        || telemetry.disposition !== 'response_rejected'
+        || !telemetry.responseRejection
+    ) {
+        return;
+    }
+    console.warn(
+        'ANALYSIS_V2_AI_RESPONSE_REJECTION_DIAGNOSTIC',
+        JSON.stringify({
+            stage: telemetry.stage,
+            schemaVersion: telemetry.schemaVersion,
+            finishReason: telemetry.finishReason,
+            category: telemetry.responseRejection.category,
+            issues: telemetry.responseRejection.issues,
+            truncated: telemetry.responseRejection.truncated,
+        })
+    );
 }
 
 const SUPPORTED_RESPONSE_SCHEMA_KEYS = new Set([
@@ -896,6 +937,9 @@ export async function analyzeWithGemini<T>(
                 retryCount: attemptNumber - 1,
                 disposition: completionError ? 'response_rejected' : 'success',
                 finishReason,
+                ...(completionError
+                    ? { responseRejection: responseRejectionDiagnostics(completionError) }
+                    : {}),
             };
 
             // V2 persists the validated result and attempt outcome before any best-effort legacy log.
@@ -904,6 +948,7 @@ export async function analyzeWithGemini<T>(
                 onAttemptTelemetry,
                 completionError ? undefined : parsed
             );
+            emitResponseRejectionDiagnostic(attemptTelemetry);
 
             // The legacy table cannot represent unknown usage. Never persist a fabricated zero.
             if (!skipTokenLog && usage.tokenUsage) {

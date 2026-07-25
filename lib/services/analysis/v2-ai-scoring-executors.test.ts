@@ -796,6 +796,226 @@ describe('V2 AI and scoring executors', () => {
         expect(cutoff).not.toHaveBeenCalled();
     });
 
+    it('keeps an early pending resolver alive until the profile batch barrier', async () => {
+        const memoryState = memory();
+        const usernames = ['resolver.early', 'feature.slow'];
+        const accounts = usernames.map(username => profile(username));
+        const deps = dependencies(memoryState, {
+            profileAiConcurrency: 2,
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: usernames,
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        let releaseSlowFeature!: (value: Awaited<
+            ReturnType<AnalysisV2AiStageRuntime['features']>
+        >) => void;
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async input => {
+            const selectionIds = input.media.map(row => row.selectionId);
+            if (selectionIds.some(id => id.includes('feature.slow'))) {
+                return await new Promise(resolve => {
+                    releaseSlowFeature = resolve;
+                });
+            }
+            return {
+                result: feature(selectionIds, 'unresolved'),
+                operationKey: `feature-analysis:${digest('early-feature')}`,
+                resultHash: digest('early-feature-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+        type ResolverState = ReturnType<
+            ReturnType<AnalysisV2AiStageRuntime['startGenderResolution']>['peek']
+        >;
+        const resolverStates = new Map<string, ResolverState>();
+        const cutoffs = new Map<string, ReturnType<typeof vi.fn>>();
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0]
+        ) => {
+            const username = input.media.some(row => row.selectionId.includes('resolver.early'))
+                ? 'resolver.early'
+                : 'feature.slow';
+            const operationKey = `gender-resolution:${digest(username)}`;
+            resolverStates.set(username, { status: 'pending' });
+            const cutoff = vi.fn(async () => {
+                resolverStates.set(username, { status: 'cutoff' });
+            });
+            cutoffs.set(username, cutoff);
+            return {
+                operationKey,
+                completion: new Promise<void>(() => undefined),
+                peek: () => resolverStates.get(username)!,
+                cutoff,
+            };
+        });
+        const base = state();
+        const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 2,
+                            inputHash: digest('resolver-barrier-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 2,
+                        producerInputHash: digest('resolver-barrier-producer'),
+                        revision: 1,
+                        resultHash: digest('resolver-barrier-result'),
+                    }],
+                }),
+            }),
+        );
+
+        await vi.waitFor(() => {
+            expect(deps.ai.features).toHaveBeenCalledTimes(2);
+            expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(2);
+        });
+        expect(cutoffs.get('resolver.early')).not.toHaveBeenCalled();
+        const earlyFeatureInput = vi.mocked(deps.ai.features).mock.calls
+            .map(([input]) => input)
+            .find(input => input.media.some(row => row.selectionId.includes('resolver.early')))!;
+        resolverStates.set('resolver.early', {
+            status: 'ready',
+            value: {
+                result: {
+                    assessment: {
+                        inferredGender: 'female',
+                        confidence: 'high',
+                        ownerConsistency: 'same_person',
+                        evidenceSelectionIds: earlyFeatureInput.media
+                            .slice(0, 2)
+                            .map(row => row.selectionId),
+                    },
+                    analyzedSelectionIds: earlyFeatureInput.media
+                        .slice(0, 5)
+                        .map(row => row.selectionId),
+                },
+                operationKey: `gender-resolution:${digest('resolver.early')}`,
+                resultHash: digest('resolver.early-result'),
+                source: 'checkpoint',
+            },
+        });
+        const slowFeatureInput = vi.mocked(deps.ai.features).mock.calls
+            .map(([input]) => input)
+            .find(input => input.media.some(row => row.selectionId.includes('feature.slow')))!;
+        releaseSlowFeature({
+            result: feature(
+                slowFeatureInput.media.map(row => row.selectionId),
+                'unresolved',
+            ),
+            operationKey: `feature-analysis:${digest('slow-feature')}`,
+            resultHash: digest('slow-feature-result'),
+            source: 'checkpoint',
+        });
+
+        await execution;
+
+        expect(cutoffs.get('resolver.early')).not.toHaveBeenCalled();
+        expect(cutoffs.get('feature.slow')).toHaveBeenCalledOnce();
+        expect(memoryState.outcomes.map(outcome => ({
+            status: outcome.status,
+            resolver: outcome.genderResolutionStatus,
+        }))).toEqual([
+            { status: 'verified_female', resolver: 'ready_applied' },
+            { status: 'unresolved', resolver: 'cutoff' },
+        ]);
+    });
+
+    it('cuts off every started resolver when a sibling prevents the batch barrier', async () => {
+        const memoryState = memory();
+        const usernames = ['feature.healthy', 'feature.fatal'];
+        const accounts = usernames.map(username => profile(username));
+        const deps = dependencies(memoryState, {
+            profileAiConcurrency: 2,
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: usernames,
+                    results: accounts.map(account => ({
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    })),
+                })),
+            },
+        });
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async input => {
+            const selectionIds = input.media.map(row => row.selectionId);
+            if (selectionIds.some(id => id.includes('feature.fatal'))) {
+                throw new Error('NONRECOVERABLE_PROFILE_AI_FAILURE');
+            }
+            return {
+                result: feature(selectionIds, 'unresolved'),
+                operationKey: `feature-analysis:${digest('healthy-feature')}`,
+                resultHash: digest('healthy-feature-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const cutoffs = new Map<string, ReturnType<typeof vi.fn>>();
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0]
+        ) => {
+            const username = input.media.some(row => row.selectionId.includes('feature.healthy'))
+                ? 'feature.healthy'
+                : 'feature.fatal';
+            let status: 'pending' | 'cutoff' = 'pending';
+            const cutoff = vi.fn(async () => {
+                status = 'cutoff';
+            });
+            cutoffs.set(username, cutoff);
+            return {
+                operationKey: `gender-resolution:${digest(username)}`,
+                completion: new Promise<void>(() => undefined),
+                peek: () => ({ status } as const),
+                cutoff,
+            };
+        });
+        const base = state();
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 2,
+                            inputHash: digest('resolver-failure-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 2,
+                        producerInputHash: digest('resolver-failure-producer'),
+                        revision: 1,
+                        resultHash: digest('resolver-failure-result'),
+                    }],
+                }),
+            }),
+        )).rejects.toThrow('NONRECOVERABLE_PROFILE_AI_FAILURE');
+
+        expect(cutoffs.get('feature.healthy')).toHaveBeenCalledOnce();
+        expect(cutoffs.get('feature.fatal')).toHaveBeenCalledOnce();
+        expect(memoryState.outcomes).toEqual([]);
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
     it('cuts off a pending resolver after feature completion without waiting for it', async () => {
         const memoryState = memory();
         const account = profile('resolver.pending');

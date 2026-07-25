@@ -253,6 +253,43 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).toHaveBeenCalledTimes(1);
     });
 
+    it('emits PII-free feature response rejection diagnostics for aggregation', async () => {
+        const rawSecret = 'private-profile-value';
+        const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const audit = stageAuditOptions();
+        mocks.generateContent.mockResolvedValueOnce(responseWithText(JSON.stringify({
+            value: 123,
+            unexpectedPrivateField: rawSecret,
+        })));
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            analysisType: 'feature_analysis',
+            ...audit,
+        })).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledWith(
+            expect.objectContaining({
+                disposition: 'response_rejected',
+                responseRejection: {
+                    category: 'schema_validation',
+                    issues: [
+                        { path: 'value', code: 'invalid_type' },
+                        { path: '$', code: 'unrecognized_keys' },
+                    ],
+                    truncated: false,
+                },
+            })
+        );
+        expect(consoleWarn).toHaveBeenCalledWith(
+            'ANALYSIS_V2_AI_RESPONSE_REJECTION_DIAGNOSTIC',
+            expect.stringContaining('"stage":"featureAnalysis"')
+        );
+        expect(JSON.stringify(consoleWarn.mock.calls)).not.toContain(rawSecret);
+        expect(JSON.stringify(audit.onAttemptTelemetry.mock.calls)).not.toContain(rawSecret);
+    });
+
     it('rejects multiple candidates and non-natural finish reasons with attempt telemetry', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
         vi.spyOn(console, 'log').mockImplementation(() => undefined);
