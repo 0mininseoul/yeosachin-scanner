@@ -126,26 +126,29 @@ async function handlePOST(
         } catch {
             return failed(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
         }
-        const parsed = preflightRequestV1Schema.safeParse(body);
-        if (!parsed.success) {
-            return failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
-        }
         const rawTargetInstagramId = body && typeof body === 'object'
             ? Reflect.get(body, 'targetInstagramId')
             : undefined;
+        // This is intentionally evaluated before validation failures can be logged. The
+        // demo target is never an operational analytics/logging subject.
+        const demoCandidate = isDemoEligible(user.id, rawTargetInstagramId);
+        const parsed = preflightRequestV1Schema.safeParse(body);
+        if (!parsed.success) {
+            return demoCandidate
+                ? errorResponse(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.')
+                : failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
+        }
         targetInstagramId = parsed.data.targetInstagramId;
 
         const idempotencyKey = request.headers.get('idempotency-key')?.trim();
         if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
-            return failed(
-                400,
-                'INVALID_IDEMPOTENCY_KEY',
-                '올바른 Idempotency-Key가 필요합니다.'
-            );
+            return demoCandidate
+                ? errorResponse(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.')
+                : failed(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.');
         }
         // This check intentionally uses the un-normalized browser value. All production
         // validation continues to receive the canonical parsed value below.
-        if (isDemoEligible(user.id, rawTargetInstagramId)) {
+        if (demoCandidate) {
             const createdDemo = await demoAnalysisStore.createOrReplay({
                 userId: user.id,
                 idempotencyKey,

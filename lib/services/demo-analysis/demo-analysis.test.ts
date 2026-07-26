@@ -8,6 +8,7 @@ import {
     demoResultPage,
     validateDemoAssetManifest,
 } from './demo-analysis';
+import { analysisV2ProgressCopy } from '@/lib/services/analysis/owner-view-presentation';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
 const requestId = '223e4567-e89b-42d3-a456-426614174000';
@@ -70,6 +71,26 @@ describe('synthetic demo fixture', () => {
         expect(done.snapshot.progressBp).toBe(10_000);
         expect(done.snapshot.backgroundProcessing).toBe(false);
         expect([...early.events, ...later.events, ...done.events].every(event => event.eventCode !== 'FINDING_CORRECTED')).toBe(true);
+    });
+
+    it('emits the product progress schedule in order at each phase boundary', () => {
+        const startedAt = new Date('2026-07-01T00:00:00.000Z');
+        const expected = [
+            'TARGET_PROFILE_READY', 'RELATIONSHIPS_COLLECTING', 'PUBLIC_PROFILES_COLLECTING',
+            'PROFILE_SCREENING', 'EVIDENCE_JOINING', 'TARGET_INTERACTIONS_COLLECTING',
+            'CANDIDATES_RANKING', 'HIGH_RISK_NARRATIVES_WRITING', 'RESULT_FINALIZING', 'ANALYSIS_COMPLETED',
+        ];
+        expected.forEach((copyCode, index) => {
+            const result = projectDemoProgress({
+                requestId,
+                startedAt,
+                durationSeconds: 100,
+                now: new Date(+startedAt + [0, 10, 20, 30, 45, 55, 65, 75, 85, 100][index]! * 1_000),
+            });
+            expect(result.events.at(-1)?.copyCode).toBe(copyCode);
+            expect(analysisV2ProgressCopy({ ...result.snapshot, events: result.events }))
+                .not.toBe('서버에서 판독을 진행하고 있습니다.');
+        });
     });
 
     it('walks every public and private cursor page without duplicates', () => {

@@ -9,6 +9,8 @@ describe('demo persistence isolation contract', () => {
         expect(migration).toContain('enable row level security');
         expect(migration).toContain('grant execute');
         expect(migration).toMatch(/to service_role/);
+        expect(migration).toContain('grant select, delete on table public.demo_analysis_runs to service_role');
+        expect(migration).not.toMatch(/grant\s+(insert|update)\s+on table public\.demo_analysis_runs/i);
         expect(migration).not.toMatch(/analysis_preflights|analysis_requests|earlybird_|groble|inventory|provider|gemini|cloud tasks|cost/i);
         expect(migration).not.toContain('junho_dem');
     });

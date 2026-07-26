@@ -99,4 +99,23 @@ describe('Amplitude product funnel caller contract', () => {
             /durationMs === undefined[\s\S]*?\{\}[\s\S]*?\{ duration_ms: durationMs \}/,
         );
     });
+
+    it('honors the disabled analytics capability through preflight, progress, result pagination, and commercial controls', () => {
+        const preflight = source('hooks/useAnalysisV2Preflight.ts');
+        const progress = source('hooks/useAnalysisProgress.ts');
+        const analyze = source('app/analyze/page.tsx');
+        const result = source('app/result/[requestId]/page.tsx');
+
+        expect(preflight).toContain("response.headers.get('x-analytics-eligible') !== '0'");
+        expect(preflight).toMatch(/if \(!analyticsEligibleRef\.current\) return;[\s\S]*?PREFLIGHT_SUCCEEDED/);
+        expect(preflight).toMatch(/if \(analyticsEligibleRef\.current\) trackEvent\(EVENTS\.EXCLUSION_DECIDED/);
+        expect(progress).toMatch(/!analyticsEligibleRef\.current[\s\S]*?ANALYSIS_STARTED/);
+        expect(progress).toMatch(/!analyticsEligibleRef\.current[\s\S]*?ANALYSIS_COMPLETED/);
+        expect(analyze).toMatch(/!readyPreflight[\s\S]*?!analyticsEligible[\s\S]*?PLAN_VIEWED/);
+        expect(analyze).toMatch(/if \(analyticsEligible\) trackEvent\(EVENTS\.CHECKOUT_REDIRECTED/);
+        expect(result).toContain("response.headers.get('x-analytics-eligible') !== '0'");
+        expect(result).toContain("response.headers.get('x-external-profile-links') !== 'disabled'");
+        expect(result).toMatch(/goToResultPage[\s\S]*?x-external-profile-links[\s\S]*?mapV2Result/);
+        expect(result).toContain("data.pipelineVersion === 'v1'");
+    });
 });

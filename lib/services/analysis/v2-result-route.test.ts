@@ -122,6 +122,50 @@ describe('analysis V2 owner result route', () => {
         expect(mocks.loadPage).not.toHaveBeenCalled();
     });
 
+    it('denies a demo result before completion without consulting the production result store', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-result-key-00000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date().toISOString(),
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}`), context());
+        expect(response.status).toBe(404);
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it('returns a completed demo page with capability headers and local images only', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-result-key-00000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date(Date.now() - 80_000).toISOString(),
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}?pageSize=1`), context());
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-external-profile-links')).toBe('disabled');
+        await expect(response.json()).resolves.toMatchObject({ femaleAccounts: [{ profileImage: '/demo-avatars/synthetic-blurred-avatar-1-v1.png' }] });
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it('returns a safe 404 for a demo row that is not owned by the authenticated operator', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: '323e4567-e89b-42d3-a456-426614174000', target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-result-key-00000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date(Date.now() - 80_000).toISOString(),
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}`), context());
+        expect(response.status).toBe(404);
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
     it('owner-scopes cursor reads and returns a validated no-store envelope', async () => {
         const femaleCursor = cursor('public');
         const privateCursor = cursor('private');

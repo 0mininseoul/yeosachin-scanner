@@ -34,7 +34,7 @@ export async function GET(
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
         if (demo) {
-            if (!isDemoOperator(user.id)) return NextResponse.json({ error: '분석 요청을 찾을 수 없습니다.' }, { status: 404 });
+            if (demo.user_id !== user.id || !isDemoOperator(user.id)) return NextResponse.json({ error: '분석 요청을 찾을 수 없습니다.' }, { status: 404 });
             return NextResponse.json({
                 error: 'V2 분석은 전용 결과 경로를 사용합니다.', code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2',
                 resultUrl: `/api/analysis/v2/result/${encodeURIComponent(demo.id)}`,
@@ -203,7 +203,7 @@ export async function DELETE(
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
         if (demo) {
-            if (!isDemoOperator(user.id)) return NextResponse.json({ error: '판독 기록을 찾을 수 없습니다.' }, { status: 404 });
+            if (demo.user_id !== user.id || !isDemoOperator(user.id)) return NextResponse.json({ error: '판독 기록을 찾을 수 없습니다.' }, { status: 404 });
             return await demoAnalysisStore.deleteForOwner(demo.id, user.id)
                 ? new NextResponse(null, { status: 204 })
                 : NextResponse.json({ error: '판독 기록을 찾을 수 없습니다.' }, { status: 404 });

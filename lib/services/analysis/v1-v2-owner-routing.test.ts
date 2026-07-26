@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
     getUser: vi.fn(),
     from: vi.fn(),
     expireStale: vi.fn(),
+    demoFindForOwner: vi.fn(),
+    demoDeleteForOwner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -26,9 +28,15 @@ vi.mock('@/lib/services/analysis/request-lease', () => ({
     acquireAnalysisRequestLease: vi.fn(),
     releaseAnalysisRequestLease: vi.fn(),
 }));
+vi.mock('@/lib/services/demo-analysis/store', () => ({
+    demoAnalysisStore: {
+        findForOwner: mocks.demoFindForOwner,
+        deleteForOwner: mocks.demoDeleteForOwner,
+    },
+}));
 
 import { GET as getLegacyStatus } from '@/app/api/analysis/status/[requestId]/route';
-import { GET as getLegacyResult } from '@/app/api/analysis/result/[requestId]/route';
+import { DELETE as deleteLegacyResult, GET as getLegacyResult } from '@/app/api/analysis/result/[requestId]/route';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -57,6 +65,7 @@ describe('owner-facing V1/V2 route selection', () => {
             data: { user: { id: userId } },
             error: null,
         });
+        mocks.demoFindForOwner.mockResolvedValue(null);
     });
 
     it('routes an owned V2 request from legacy status to the durable progress endpoint', async () => {
@@ -119,5 +128,43 @@ describe('owner-facing V1/V2 route selection', () => {
         });
         expect(mocks.from).toHaveBeenCalledOnce();
         expect(mocks.from).toHaveBeenCalledWith('analysis_requests');
+    });
+
+    it('routes an owner demo through the V2 result requirement without querying legacy tables', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({ id: requestId, user_id: userId });
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`), context()
+        );
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({ code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2' });
+        expect(mocks.from).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it('deletes an owner demo from the demo store only and hides a mismatched owner', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValueOnce({ id: requestId, user_id: userId });
+        mocks.demoDeleteForOwner.mockResolvedValueOnce(true);
+
+        const deleted = await deleteLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`, { method: 'DELETE' }), context()
+        );
+        expect(deleted.status).toBe(204);
+        expect(mocks.demoDeleteForOwner).toHaveBeenCalledWith(requestId, userId);
+        expect(mocks.from).not.toHaveBeenCalled();
+
+        mocks.demoFindForOwner.mockResolvedValueOnce({ id: requestId, user_id: '323e4567-e89b-42d3-a456-426614174000' });
+        const hidden = await deleteLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`, { method: 'DELETE' }), context()
+        );
+        expect(hidden.status).toBe(404);
+        expect(mocks.demoDeleteForOwner).toHaveBeenCalledOnce();
+        expect(mocks.from).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
     });
 });

@@ -3,12 +3,16 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
 import { generateShareToken } from '@/lib/services/share/generate-token';
 import { appOriginForRequest } from '@/lib/constants/app-url';
+import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function POST(request: Request) {
     try {
         const { requestId } = await request.json();
 
-        if (!requestId) {
+        if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) {
             return NextResponse.json(
                 { error: 'requestId가 필요합니다.' },
                 { status: 400 }
@@ -25,6 +29,13 @@ export async function POST(request: Request) {
                 { error: '로그인이 필요합니다.' },
                 { status: 401 }
             );
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
+        if (demo) {
+            return demo.user_id === user.id && isDemoOperator(user.id)
+                ? NextResponse.json({ error: '이 판독 결과는 공유할 수 없습니다.' }, { status: 409 })
+                : NextResponse.json({ error: '분석 요청을 찾을 수 없습니다.' }, { status: 404 });
         }
 
         // 2. 분석 요청 조회 및 소유자 확인

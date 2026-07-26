@@ -792,6 +792,19 @@ describe('earlybird checkout and waitlist routes', () => {
         });
     });
 
+    it('blocks an owner demo waitlist before RPC, inventory, or checkout events', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+        const response = await waitlist(request('/api/earlybird/waitlist', { preflightId: PREFLIGHT_ID, planId: 'plus' }));
+        expect(response.status).toBe(409);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
     it('has no automatic analysis or task dispatcher dependency', () => {
         const source = [
             readFileSync(new URL('../../../app/api/earlybird/checkout/route.ts', import.meta.url), 'utf8'),

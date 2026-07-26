@@ -13,7 +13,8 @@ create table public.demo_analysis_runs (
 );
 
 alter table public.demo_analysis_runs enable row level security;
-revoke all on table public.demo_analysis_runs from anon, authenticated;
+revoke all on table public.demo_analysis_runs from public, anon, authenticated, service_role;
+grant select, delete on table public.demo_analysis_runs to service_role;
 
 create or replace function public.create_demo_analysis_preflight(
   p_user_id uuid,

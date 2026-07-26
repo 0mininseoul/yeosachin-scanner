@@ -230,6 +230,23 @@ function track(progressBp: number, start: number, end: number, code: string) {
     return { state: done === 100 ? 'completed' as const : done === 0 ? 'pending' as const : 'running' as const, stageCode: code, done, total: 100, progressBp: done * 100 };
 }
 
+function demoTrack(
+    progressBp: number,
+    start: number,
+    end: number,
+    runningCode: string,
+    pendingCode: string,
+    completedCode: string,
+) {
+    const projected = track(progressBp, start, end, runningCode);
+    return {
+        ...projected,
+        stageCode: projected.state === 'completed'
+            ? completedCode
+            : projected.state === 'pending' ? pendingCode : runningCode,
+    };
+}
+
 export function projectDemoProgress(input: {
     requestId: string;
     startedAt: Date;
@@ -239,28 +256,36 @@ export function projectDemoProgress(input: {
     const elapsed = Math.max(0, input.now.getTime() - input.startedAt.getTime());
     const progressBp = Math.min(10_000, Math.floor(elapsed / (input.durationSeconds * 1_000) * 10_000));
     const completed = progressBp === 10_000;
+    const schedule = [
+        ['TARGET_PROFILE_READY', 0], ['RELATIONSHIPS_COLLECTING', 1000], ['PUBLIC_PROFILES_COLLECTING', 2000],
+        ['PROFILE_SCREENING', 3000], ['EVIDENCE_JOINING', 4500], ['TARGET_INTERACTIONS_COLLECTING', 5500],
+        ['CANDIDATES_RANKING', 6500], ['HIGH_RISK_NARRATIVES_WRITING', 7500], ['RESULT_FINALIZING', 8500],
+        ['ANALYSIS_COMPLETED', 10000],
+    ] as const;
+    const activeStageCode = [...schedule].reverse().find(([, threshold]) => progressBp >= threshold)![0];
     const tracks = {
-        relationshipAi: track(progressBp, 0, 4_000, 'PROFILE_SCREENING'),
-        interactions: track(progressBp, 3_000, 8_000, 'TARGET_INTERACTIONS_COLLECTING'),
-        finalization: track(progressBp, 7_000, 10_000, 'RESULT_FINALIZING'),
+        relationshipAi: demoTrack(progressBp, 0, 4_500, activeStageCode, 'RELATIONSHIP_AI_QUEUED', 'RELATIONSHIP_AI_COMPLETE'),
+        interactions: demoTrack(progressBp, 4_500, 8_500, activeStageCode, 'INTERACTIONS_QUEUED', 'INTERACTIONS_COMPLETE'),
+        finalization: demoTrack(progressBp, 8_500, 10_000, activeStageCode, 'FINALIZATION_QUEUED', 'FINALIZATION_COMPLETE'),
     };
     if (completed) {
-        tracks.relationshipAi = track(10_000, 0, 4_000, 'PROFILE_SCREENING');
-        tracks.interactions = track(10_000, 3_000, 8_000, 'TARGET_INTERACTIONS_COLLECTING');
-        tracks.finalization = track(10_000, 7_000, 10_000, 'RESULT_FINALIZING');
+        tracks.relationshipAi = demoTrack(10_000, 0, 4_500, activeStageCode, 'RELATIONSHIP_AI_QUEUED', 'RELATIONSHIP_AI_COMPLETE');
+        tracks.interactions = demoTrack(10_000, 4_500, 8_500, activeStageCode, 'INTERACTIONS_QUEUED', 'INTERACTIONS_COMPLETE');
+        tracks.finalization = demoTrack(10_000, 8_500, 10_000, activeStageCode, 'FINALIZATION_QUEUED', 'FINALIZATION_COMPLETE');
     }
-    const events: ProgressEventV1[] = [{
-        schemaVersion: 1, requestId: input.requestId, seq: 1, revision: Math.floor(progressBp / 500),
-        occurredAt: input.startedAt.toISOString(), state: 'confirmed', eventCode: completed ? 'ANALYSIS_COMPLETED' : 'TARGET_PROFILE_READY',
-        copyCode: completed ? 'ANALYSIS_COMPLETED' : progressBp < 2_000 ? 'TARGET_PROFILE_READY' : progressBp < 4_000 ? 'RELATIONSHIPS_COLLECTING' : progressBp < 6_000 ? 'PROFILE_SCREENING' : progressBp < 8_000 ? 'TARGET_INTERACTIONS_COLLECTING' : 'RESULT_FINALIZING', aggregateCount: null,
-    }];
+    const events: ProgressEventV1[] = schedule.filter((entry) => progressBp >= entry[1]).map(([copyCode], index) => ({
+        schemaVersion: 1, requestId: input.requestId, seq: index + 1, revision: Math.floor(progressBp / 500),
+        occurredAt: input.startedAt.toISOString(), state: 'confirmed',
+        eventCode: copyCode === 'ANALYSIS_COMPLETED' ? 'ANALYSIS_COMPLETED' : index === 0 ? 'TARGET_PROFILE_READY' : index === 3 ? 'PROFILE_SCREENED' : 'RELATIONSHIP_PROGRESS',
+        copyCode, aggregateCount: null,
+    }));
     return {
         snapshot: {
             schemaVersion: 1, requestId: input.requestId, revision: Math.floor(progressBp / 500),
             status: completed ? 'completed' : 'processing', progressBp, backgroundProcessing: !completed,
             tracks, activeProfile: completed ? null : { maskedUsername: 'profile.***', imageUrl: avatar(0) },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
-            lastEventSeq: 1,
+            lastEventSeq: events.length,
         },
         events,
     };

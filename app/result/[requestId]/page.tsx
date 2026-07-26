@@ -243,7 +243,7 @@ function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
     );
 }
 
-function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks = true): ResultData {
+export function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks = true): ResultData {
     // genderStats is an additive summary field; tolerate results produced before
     // the backend contract ships it and fall back to hiding the gender breakdown.
     const genderStats = (result.summary as {
@@ -458,7 +458,9 @@ export default function ResultPage({ params }: PageProps) {
                 { cache: 'no-store' }
             );
             if (!response.ok) throw new Error(`V2 result page failed (${response.status}).`);
-            const next = mapV2Result(await response.json() as AnalysisResultPageV1);
+            const linksAllowed = response.headers.get('x-external-profile-links') !== 'disabled';
+            setExternalProfileLinks(linksAllowed);
+            const next = mapV2Result(await response.json() as AnalysisResultPageV1, linksAllowed);
             const nextCursor = kind === 'public'
                 ? next.femaleNextCursor ?? null
                 : next.privateNextCursor ?? null;

@@ -134,6 +134,42 @@ describe('analysis V2 owner progress route', () => {
         });
     });
 
+    it('serves an allowlisted started demo without loading production progress', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date(Date.now() - 20_000).toISOString(),
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        await expect(response.json()).resolves.toMatchObject({ snapshot: { requestId, status: 'processing' } });
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it.each([
+        ['unstarted', { started_at: null }, true],
+        ['flag-off', { started_at: new Date(Date.now() - 20_000).toISOString() }, false],
+        ['other-owner', { user_id: '323e4567-e89b-42d3-a456-426614174000', started_at: new Date(Date.now() - 20_000).toISOString() }, true],
+    ])('returns a safe 404 for a %s demo state without loading production progress', async (_case, overrides, enabled) => {
+        if (enabled) {
+            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+            vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        }
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', ...overrides,
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
+        expect(response.status).toBe(404);
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
     it('maps an owner-hidden row to 404 without leaking existence', async () => {
         mocks.loadForOwner.mockResolvedValue(null);
         const response = await GET(

@@ -875,4 +875,15 @@ describe('preflight owner routes', () => {
         expect(mocks.emit).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });
+
+    it('does not emit an operational failure event for a demo request with an invalid idempotency key', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+
+        const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }, 'too-short'));
+
+        expect(response.status).toBe(400);
+        expect(mocks.demoStore.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+    });
 });

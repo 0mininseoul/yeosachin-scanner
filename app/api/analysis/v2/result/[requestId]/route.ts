@@ -66,7 +66,7 @@ export async function GET(
 
         const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
         if (demo) {
-            if (!isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
+            if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
                 return json({ error: 'Analysis result not found.' }, 404);
             }
             return NextResponse.json(analysisResultPageV1Schema.parse(demoResultPage({
