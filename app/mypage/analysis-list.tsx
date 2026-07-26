@@ -17,18 +17,19 @@ interface Props {
 export default function AnalysisList({ initialAnalyses }: Props) {
     const [analyses] = useState<OwnerAnalysisHistoryItemV1[]>(initialAnalyses);
     const router = useRouter();
+    const visibleAnalyses = analyses.filter((item) =>
+        ['pending', 'processing', 'completed'].includes(item.status)
+    );
 
-    const handleCardClick = (id: string, status: string) => {
+    const handleCardClick = (id: string, status: OwnerAnalysisHistoryItemV1['status']) => {
         if (status === 'completed') {
             router.push(`/result/${id}`);
-        } else if (status === 'processing' || status === 'pending') {
-            router.push(`/progress/${id}`);
         } else {
-            alert('완료되지 않은 판독입니다.');
+            router.push(`/progress/${id}`);
         }
     };
 
-    if (analyses.length === 0) {
+    if (visibleAnalyses.length === 0) {
         return (
             <div className="border border-line bg-ink-2 px-6 py-16 text-center">
                 <p className="mb-6 text-[13px] text-fg-mute">아직 판독 기록이 없습니다.</p>
@@ -41,7 +42,7 @@ export default function AnalysisList({ initialAnalyses }: Props) {
 
     return (
         <div className="space-y-2.5">
-            {analyses.map((item) => {
+            {visibleAnalyses.map((item) => {
                 const planBadge = analysisPlanBadgePresentation(item.planType);
                 return (
                     <div
@@ -73,11 +74,6 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                                 <span className="flex shrink-0 items-center gap-1.5 border border-jade/45 bg-jade/10 px-2 py-1 text-[11px] font-bold text-jade">
                                     <span className="h-1.5 w-1.5 bg-jade" />
                                     판독완료
-                                </span>
-                            ) : item.status === 'failed' ? (
-                                <span className="flex shrink-0 items-center gap-1.5 border border-blood/45 bg-blood/10 px-2 py-1 text-[11px] font-bold text-blood">
-                                    <span className="h-1.5 w-1.5 bg-blood" />
-                                    판독실패
                                 </span>
                             ) : (
                                 <span className="flex shrink-0 items-center gap-1.5 border border-amber/45 bg-amber/10 px-2 py-1 text-[11px] font-bold text-amber">

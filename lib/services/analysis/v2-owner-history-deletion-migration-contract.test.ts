@@ -1,13 +1,21 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const migration = readFileSync(
+const deletionMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260714140011_fix_analysis_v2_owner_history_deletion.sql',
         import.meta.url
     ),
     'utf8'
 );
+
+const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
+const hideFailedHistoryMigrationFilename = readdirSync(migrationsDirectory).find((filename) =>
+    filename.endsWith('_hide_failed_analysis_owner_history.sql')
+);
+const hideFailedHistoryMigration = hideFailedHistoryMigrationFilename
+    ? readFileSync(new URL(hideFailedHistoryMigrationFilename, migrationsDirectory), 'utf8')
+    : '';
 
 const resultImageMigration = readFileSync(
     new URL(
@@ -32,7 +40,7 @@ const analysisList = readFileSync(
     'utf8'
 );
 
-function functionDefinition(name: string): string {
+function functionDefinition(migration: string, name: string): string {
     const start = migration.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
     expect(start, `${name} must exist`).toBeGreaterThanOrEqual(0);
     const end = migration.indexOf('\n$$;', start);
@@ -42,13 +50,13 @@ function functionDefinition(name: string): string {
 
 describe('analysis V2 owner history and deletion migration contract', () => {
     it('cascades a terminal request deletion through its consumed preflight tombstone', () => {
-        expect(migration).toContain(
+        expect(deletionMigration).toContain(
             'DROP CONSTRAINT IF EXISTS analysis_preflights_consumed_request_id_fkey'
         );
-        expect(migration).toMatch(
+        expect(deletionMigration).toMatch(
             /ADD CONSTRAINT analysis_preflights_consumed_request_id_fkey\s+FOREIGN KEY \(consumed_request_id\)\s+REFERENCES public\.analysis_requests\(id\)\s+ON DELETE CASCADE\s+DEFERRABLE INITIALLY DEFERRED/
         );
-        expect(migration).not.toMatch(
+        expect(deletionMigration).not.toMatch(
             /analysis_preflights_consumed_request_id_fkey[\s\S]*?ON DELETE NO ACTION/
         );
     });
@@ -79,31 +87,49 @@ describe('analysis V2 owner history and deletion migration contract', () => {
     });
 
     it('projects only the authenticated owner history through a locked-down function', () => {
-        const loader = functionDefinition('load_analysis_owner_history_v1');
+        const loader = functionDefinition(
+            hideFailedHistoryMigration,
+            'load_analysis_owner_history_v1'
+        );
 
         expect(loader).toContain('SECURITY DEFINER');
         expect(loader).toContain("SET search_path = ''");
         expect(loader).toContain('v_user_id UUID := auth.uid()');
         expect(loader).toContain('IF v_user_id IS NULL THEN');
         expect(loader).toContain('analysis_request.user_id = v_user_id');
-        expect(migration).toMatch(
+        expect(hideFailedHistoryMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.load_analysis_owner_history_v1\(\)\s+FROM PUBLIC, anon, authenticated, service_role/
         );
-        expect(migration).toMatch(
+        expect(hideFailedHistoryMigration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.load_analysis_owner_history_v1\(\)\s+TO authenticated/
         );
-        expect(migration).not.toMatch(
+        expect(hideFailedHistoryMigration).not.toMatch(
             /GRANT EXECUTE ON FUNCTION public\.load_analysis_owner_history_v1\(\)\s+TO (?:anon|service_role)/
         );
     });
 
-    it('uses final V2 summaries, redacts failed V2 rows, and preserves V1 usernames', () => {
-        const loader = functionDefinition('load_analysis_owner_history_v1');
+    it('allowlists visible statuses and keeps failed rows out of the owner RPC', () => {
+        const loader = functionDefinition(
+            hideFailedHistoryMigration,
+            'load_analysis_owner_history_v1'
+        );
+
+        expect(loader).toContain(
+            "analysis_request.status IN ('pending', 'processing', 'completed')"
+        );
+        expect(loader).not.toContain("analysis_request.status = 'failed'");
+        expect(loader).not.toContain("analysis_request.status IN ('completed', 'failed')");
+    });
+
+    it('uses final V2 summaries, redacts V2 tombstones, and preserves V1 usernames', () => {
+        const loader = functionDefinition(
+            hideFailedHistoryMigration,
+            'load_analysis_owner_history_v1'
+        );
 
         expect(loader).toContain('public.analysis_v2_result_summaries AS result_summary');
         expect(loader).toContain("analysis_request.status = 'completed'");
         expect(loader).toContain('THEN result_summary.target_instagram_id');
-        expect(loader).toContain("analysis_request.status = 'failed'");
         expect(loader).toContain("analysis_request.target_instagram_id LIKE 'retained.%'");
         expect(loader).toContain('THEN NULL');
         expect(loader).toContain('ELSE analysis_request.target_instagram_id');
@@ -116,5 +142,13 @@ describe('analysis V2 owner history and deletion migration contract', () => {
         expect(myPage).not.toContain(".from('analysis_requests')");
         expect(analysisList).toContain('ownerHistoryTargetLabel(item)');
         expect(analysisList).not.toContain('target_instagram_id');
+    });
+
+    it('filters stale failed payloads before rendering and has no failure UI copy', () => {
+        expect(analysisList).toContain("['pending', 'processing', 'completed'].includes(item.status)");
+        expect(analysisList).toContain('visibleAnalyses.map');
+        expect(analysisList).not.toContain("item.status === 'failed'");
+        expect(analysisList).not.toContain('판독실패');
+        expect(analysisList).not.toContain('완료되지 않은 판독입니다.');
     });
 });
