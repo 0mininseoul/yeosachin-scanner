@@ -29,7 +29,11 @@ import type {
     NormalizedAiMediaSelection,
     PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
-import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
+import {
+    aiStagePolicySupports,
+    assertSupportedAiStagePolicyVersion,
+    type AiStagePolicyCapability,
+} from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
 import type {
     AnalysisV2CanonicalTargetEvidenceRow,
@@ -661,6 +665,17 @@ function mediaPolicy(profile: AnalysisV2CheckpointProfile) {
     return policy;
 }
 
+function policySupports(
+    version: string,
+    capability: AiStagePolicyCapability,
+): boolean {
+    try {
+        return aiStagePolicySupports(assertSupportedAiStagePolicyVersion(version), capability);
+    } catch {
+        return false;
+    }
+}
+
 async function normalizedSelections(
     selected: readonly SelectedAnalysisMedia[],
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>,
@@ -698,7 +713,7 @@ async function normalizedSelections(
     const successful = prepared.filter(item => item.status === 'success');
     const failures = prepared.flatMap(item => item.status === 'failure' ? [item.failure] : []);
     if (
-        aiStagePolicyVersion !== AI_STAGE_POLICY_LATEST_VERSION
+        !policySupports(aiStagePolicyVersion, 'partialMediaCoverage')
         && failures.some(failure => failure.disposition === 'transient')
     ) {
         const failureReasons = failures.reduce<Record<string, number>>((counts, failure) => {
@@ -732,7 +747,7 @@ function isAnalysisV2StageMediaCoverageUsable(
     coverage: AnalysisV2ProfileMediaCoverage,
     aiStagePolicyVersion: string,
 ): boolean {
-    const usable = aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION
+    const usable = policySupports(aiStagePolicyVersion, 'partialMediaCoverage')
         ? isAnalysisV2PartialMediaCoverageAllowed(coverage)
         : coverage.normalizedCount >= 1 && coverage.failures.length === 0;
     if (!usable && coverage.failures.some(failure => failure.disposition === 'transient')) {
@@ -1215,8 +1230,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 throw new Error('ANALYSIS_V2_PROFILE_AI_ITEM_COUNT_DRIFT');
             }
             const aiFence = aiJobFence(context);
-            const genderResolutionEnabled =
-                aiFence.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+            const genderResolutionEnabled = policySupports(
+                aiFence.aiStagePolicyVersion,
+                'genderResolution',
+            );
             const defaultGenderResolutionStatus = genderResolutionEnabled
                 ? 'not_eligible' as const
                 : 'disabled' as const;

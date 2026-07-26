@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
 
@@ -147,6 +148,43 @@ describe('durable V2 AI stage runtime', () => {
             expect.objectContaining({ abortSignal: expect.any(AbortSignal) }),
         );
         expect(onCutoff).not.toHaveBeenCalled();
+    });
+
+    it('keeps the resolver available for v2.8 instead of coupling it to the old latest label', async () => {
+        const createAudit = vi.fn(options => ({
+            requestId: options.requestId,
+            operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity,
+            resultSchema: options.resultSchema,
+            prepare: vi.fn(),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+            cutoff: vi.fn(),
+        }));
+        const runGenderResolution = vi.fn().mockResolvedValue({
+            assessment: {
+                inferredGender: 'unknown',
+                confidence: 'low',
+                ownerConsistency: 'not_visible',
+                evidenceSelectionIds: [],
+            },
+            analyzedSelectionIds: [],
+        });
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit,
+            runGenderResolution,
+        });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION,
+        });
+        await handle.completion;
+        expect(handle.peek()).toMatchObject({ status: 'ready' });
+        expect(runGenderResolution).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.anything(),
+            expect.objectContaining({ aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION }),
+        );
     });
 
     it('cuts off a pending resolver without waiting for the provider promise', async () => {

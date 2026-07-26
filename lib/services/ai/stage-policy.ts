@@ -30,9 +30,15 @@ export interface AiStagePolicy {
 
 export const AI_STAGE_POLICY_VERSION = 'ai-stage-policy-v2.6';
 export const AI_STAGE_POLICY_LATEST_VERSION = 'ai-stage-policy-v2.7';
+/**
+ * v2.8 is intentionally not the implicit latest policy. New requests reach it only through the
+ * separately gated tone rollout, so v2.7 remains the stable default for existing rollout paths.
+ */
+export const AI_STAGE_POLICY_V28_VERSION = 'ai-stage-policy-v2.8';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_V28_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -127,10 +133,56 @@ const AI_STAGE_POLICIES_V27 = Object.freeze({
     }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+/**
+ * Keep the v2.7 objects and their prompt metadata untouched. v2.8 changes only the two copy
+ * producing stages; all scheduling and model choices deliberately inherit from v2.7.
+ */
+const AI_STAGE_POLICIES_V28 = Object.freeze({
+    ...AI_STAGE_POLICIES_V27,
+    featureAnalysis: Object.freeze({
+        ...AI_STAGE_POLICIES_V27.featureAnalysis,
+        promptVersion: 'feature-analysis-v4',
+    }),
+    highRiskNarrative: Object.freeze({
+        ...AI_STAGE_POLICIES_V27.highRiskNarrative,
+        promptVersion: 'high-risk-narrative-v3',
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
+    [AI_STAGE_POLICY_V28_VERSION]: AI_STAGE_POLICIES_V28,
 });
+
+export type AiStagePolicyCapability =
+    | 'durableGeminiLease'
+    | 'genderResolution'
+    | 'partialMediaCoverage';
+
+const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
+    AiStagePolicyVersion,
+    ReadonlySet<AiStagePolicyCapability>
+>> = Object.freeze({
+    [AI_STAGE_POLICY_VERSION]: new Set<AiStagePolicyCapability>(),
+    [AI_STAGE_POLICY_LATEST_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+    ]),
+    [AI_STAGE_POLICY_V28_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+    ]),
+});
+
+export function aiStagePolicySupports(
+    version: AiStagePolicyVersion,
+    capability: AiStagePolicyCapability,
+): boolean {
+    return AI_STAGE_POLICY_CAPABILITIES[version].has(capability);
+}
 
 export function assertSupportedAiStagePolicyVersion(
     value: unknown,
@@ -173,11 +225,23 @@ export type AiStagePolicyAccessMode = 'test_entitlement' | 'production';
 
 export function selectAiStagePolicyVersion({
     rolloutMode,
+    narrativeV28RolloutMode,
     accessMode,
 }: {
     rolloutMode: string | undefined;
+    narrativeV28RolloutMode?: string | undefined;
     accessMode: AiStagePolicyAccessMode;
 }): AiStagePolicyVersion {
+    const v27Eligible = rolloutMode === 'production'
+        || (rolloutMode === 'test_entitlement' && accessMode === 'test_entitlement');
+    const v28Eligible = narrativeV28RolloutMode === 'production'
+        || (
+            narrativeV28RolloutMode === 'test_entitlement'
+            && accessMode === 'test_entitlement'
+        );
+    if (v27Eligible && v28Eligible) {
+        return AI_STAGE_POLICY_V28_VERSION;
+    }
     if (rolloutMode === 'production') {
         return AI_STAGE_POLICY_LATEST_VERSION;
     }

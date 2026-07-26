@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-    AI_STAGE_POLICY_LATEST_VERSION,
+    aiStagePolicySupports,
     assertSupportedAiStagePolicyVersion,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
@@ -217,7 +217,10 @@ function assertAiStagePolicyVersion(fence: AnalysisV2AiJobFence): AiStagePolicyV
 
 function assertGenderResolutionPolicyVersion(fence: AnalysisV2AiJobFence): void {
     assertAiStagePolicyVersion(fence);
-    if (fence.aiStagePolicyVersion !== AI_STAGE_POLICY_LATEST_VERSION) {
+    if (!aiStagePolicySupports(
+        assertAiStagePolicyVersion(fence),
+        'genderResolution',
+    )) {
         throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
     }
 }
@@ -260,7 +263,8 @@ export function createDurableAnalysisV2AiStageRuntime(
 
         startGenderResolution(input, fence) {
             assertGenderResolutionPolicyVersion(fence);
-            const identity = createGenderResolutionResultIdentity(input);
+            const policyVersion = assertAiStagePolicyVersion(fence);
+            const identity = createGenderResolutionResultIdentity(input, policyVersion);
             const audit = adapter(
                 createAudit,
                 fence,
@@ -275,7 +279,10 @@ export function createDurableAnalysisV2AiStageRuntime(
                     const result = await runGenderResolution(
                         input,
                         audit,
-                        { abortSignal: controller.signal },
+                        {
+                            abortSignal: controller.signal,
+                            aiStagePolicyVersion: policyVersion,
+                        },
                     );
                     if (state.status !== 'pending') return;
                     state = {

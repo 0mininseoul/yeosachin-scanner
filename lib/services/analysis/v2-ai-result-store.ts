@@ -9,7 +9,7 @@ import {
     AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
 } from '@/lib/services/ai/gemini-generation-policy';
 import {
-    AI_STAGE_POLICY_LATEST_VERSION,
+    aiStagePolicySupports,
     AI_STAGE_POLICY_VERSION,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
@@ -1187,7 +1187,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 }
                 const last = attempts.at(-1);
                 const resolverReplay = resultIdentity.stage === 'genderResolution'
-                    && aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+                    && aiStagePolicySupports(aiStagePolicyVersion, 'genderResolution');
                 if (last?.status === 'reserved' && resolverReplay) {
                     throw new AnalysisV2AiResultRecoveryPendingError();
                 }
@@ -1422,7 +1422,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
             if (cutoffStarted) return cutoffStarted;
             if (
                 resultIdentity.stage !== 'genderResolution'
-                || aiStagePolicyVersion !== AI_STAGE_POLICY_LATEST_VERSION
+                || !aiStagePolicySupports(aiStagePolicyVersion, 'genderResolution')
             ) {
                 return Promise.reject(new Error(
                     'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: cutoff is resolver-only.'

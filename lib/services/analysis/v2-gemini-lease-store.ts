@@ -4,8 +4,9 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     AI_GEMINI_LEASE_SECONDS,
     AI_GEMINI_MIN_REMAINING_MS,
-    AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_VERSION,
+    AI_STAGE_POLICY_V28_VERSION,
+    aiStagePolicySupports,
     type AiStageName,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
@@ -81,10 +82,12 @@ const acquireInputSchema = z.object({
     ]).optional(),
     aiStagePolicyVersion: z.enum([
         AI_STAGE_POLICY_VERSION,
-        AI_STAGE_POLICY_LATEST_VERSION,
+        'ai-stage-policy-v2.7',
+        AI_STAGE_POLICY_V28_VERSION,
     ]).optional(),
 }).strict().superRefine((input, context) => {
-    const v2 = input.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+    const v2 = input.aiStagePolicyVersion !== undefined
+        && aiStagePolicySupports(input.aiStagePolicyVersion, 'durableGeminiLease');
     if (v2 !== Boolean(input.operationKey && input.stage)) {
         context.addIssue({
             code: 'custom',
@@ -209,7 +212,8 @@ function parseLease(
         claimToken: value.lease_claim_token,
         fence: value.fence,
         expiresAt: value.expires_at,
-        ...(input.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION ? {
+        ...(input.aiStagePolicyVersion !== undefined
+            && aiStagePolicySupports(input.aiStagePolicyVersion, 'durableGeminiLease') ? {
             operationKey: input.operationKey,
             stage: input.stage,
             aiStagePolicyVersion: input.aiStagePolicyVersion,
@@ -220,9 +224,10 @@ function parseLease(
 function isV2Lease(lease: AnalysisV2GeminiLease): lease is AnalysisV2GeminiLease & {
     operationKey: string;
     stage: AiStageName;
-    aiStagePolicyVersion: typeof AI_STAGE_POLICY_LATEST_VERSION;
+    aiStagePolicyVersion: AiStagePolicyVersion;
 } {
-    return lease.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION
+    return lease.aiStagePolicyVersion !== undefined
+        && aiStagePolicySupports(lease.aiStagePolicyVersion, 'durableGeminiLease')
         && typeof lease.operationKey === 'string'
         && typeof lease.stage === 'string';
 }
@@ -246,7 +251,8 @@ export function createAnalysisV2GeminiLeaseStore(
             if (!UUID_PATTERN.test(proposedToken)) {
                 throw new AnalysisV2GeminiLeasePersistenceError();
             }
-            const usesV2 = input.data.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+            const usesV2 = input.data.aiStagePolicyVersion !== undefined
+                && aiStagePolicySupports(input.data.aiStagePolicyVersion, 'durableGeminiLease');
             const { data, error } = await dependencies.rpc(
                 usesV2
                     ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireV2Rpc

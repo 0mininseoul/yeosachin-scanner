@@ -10,6 +10,9 @@ vi.mock('./gemini', async importOriginal => ({
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: vi.fn() },
+}));
 
 import { parseSafePublicRiskNarrative } from '@/lib/services/analysis/narrative-privacy';
 import {
@@ -22,6 +25,11 @@ import type {
     AnalysisV2AiAttemptStore,
 } from '@/lib/services/analysis/v2-ai-attempt-store';
 import { zodToGeminiResponseJsonSchema } from './gemini';
+import {
+    AI_STAGE_POLICY_VERSION,
+    AI_STAGE_POLICY_V28_VERSION,
+    type AiStagePolicyVersion,
+} from './stage-policy';
 import {
     applyGenderResolution,
     createFeatureAnalysisResultIdentity,
@@ -76,37 +84,38 @@ function audit(
     stage: 'genderTriage' | 'genderResolution' | 'featureAnalysis'
     | 'partnerSafety' | 'highRiskNarrative'
     = 'genderTriage',
-    rawInput?: unknown
+    rawInput?: unknown,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
 ): StagedAiAuditContext {
     const resultIdentity = stage === 'genderTriage'
         ? createGenderTriageResultIdentity(
             (rawInput ?? { media: media() }) as Parameters<
                 typeof createGenderTriageResultIdentity
-            >[0]
+            >[0], policyVersion
         )
         : stage === 'genderResolution'
             ? createGenderResolutionResultIdentity(
                 (rawInput ?? { media: media() }) as Parameters<
                     typeof createGenderResolutionResultIdentity
-                >[0]
+                >[0], policyVersion === AI_STAGE_POLICY_VERSION ? undefined : policyVersion
             )
             : stage === 'featureAnalysis'
             ? createFeatureAnalysisResultIdentity(
                 (rawInput ?? featureInput()) as Parameters<
                     typeof createFeatureAnalysisResultIdentity
-                >[0]
+            >[0], policyVersion
             )
             : stage === 'partnerSafety'
                 ? createPartnerSafetyResultIdentity(
                     (rawInput ?? {
                         feature: verifiedFeatureResult(),
                         contactSheet: contactSheet(),
-                    }) as Parameters<typeof createPartnerSafetyResultIdentity>[0]
+                    }) as Parameters<typeof createPartnerSafetyResultIdentity>[0], policyVersion
                 )
                 : createHighRiskNarrativeResultIdentity(
                     (rawInput ?? narrativeInput()) as Parameters<
                         typeof createHighRiskNarrativeResultIdentity
-                    >[0]
+                    >[0], policyVersion
                 );
     if (!resultIdentity) throw new Error('Test audit requires a generated stage identity.');
     return {
@@ -909,6 +918,53 @@ describe('V2 staged AI services', () => {
         }))).toThrow('too_big');
     });
 
+    it('keeps legacy feature identities stable while v2.8 requests concrete non-self-referential copy', async () => {
+        const input = featureInput();
+        expect(createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_VERSION).operationKey)
+            .toBe(createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_VERSION).operationKey);
+        expect(createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_V28_VERSION).operationKey)
+            .not.toBe(createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_VERSION).operationKey);
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            oneLineOverview: '여행 사진과 짧은 기록이 같은 방향을 봅니다. 일정표를 몰래 본 것처럼 정돈됐네요?',
+        })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).not.toMatch(/판독관|제가|저는|나는/u);
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('실제 보이는 단서를 한 가지 이상 콕 집어');
+        expect(prompt).toContain('official_group_or_brand면 로고·팀명·발매');
+        expect(prompt).toContain('물음표나 ㅋㅋ은');
+    });
+
+    it('normalizes v2.8 self-reference to a forward-only fallback without changing legacy copy', async () => {
+        const input = featureInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            oneLineOverview: '판독관은 여행 사진이 정돈된 흐름을 보며 일정표까지 궁금해집니다.',
+        })));
+        const v28 = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+        expect(v28.features.oneLineOverview).not.toMatch(/판독관|제가|저는|나는/u);
+
+        expect(featureAnalysisModelResponseSchema.parse(featureResponse()).oneLineOverview)
+            .toContain('판독관');
+    });
+
     it('normalizes unsupported feature evidence and unsafe claims to strict grounded values', async () => {
         const response = featureResponse({
             appearanceGrade: 5,
@@ -1531,6 +1587,35 @@ describe('V2 staged AI services', () => {
             onBeforeAttempt: hooks.onBeforeAttempt,
             onAttemptTelemetry: hooks.onAttemptTelemetry,
         });
+    });
+
+    it('rejects playful tokens in v2.8 high-risk narrative while retaining evidence requirements', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '여행 사진을 꾸준히 올리는 흐름이 꽤 선명하네요 ㅋㅋ',
+                evidenceRefs: ['profile:bio', 'post:1:thumbnail'],
+            }, {
+                text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+        const input = narrativeInput();
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+        expect(result.source).toBe('safe_fallback');
+        expect(result.lines.join(' ')).not.toContain('ㅋㅋ');
     });
 
     it('uses a sanitized carousel caption dossier only as first-line persona evidence', async () => {
