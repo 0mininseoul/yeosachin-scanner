@@ -100,6 +100,10 @@ describe('signed Groble webhook route', () => {
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';
         process.env.GROBLE_BASIC_PAYMENT_ADDRESS = 'basic-checkout-a1';
         process.env.GROBLE_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-b2';
+        process.env.GROBLE_V2_BASIC_PRODUCT_ID = 'basic_product-v2';
+        process.env.GROBLE_V2_STANDARD_PRODUCT_ID = 'standard_product-v2';
+        process.env.GROBLE_V2_BASIC_PAYMENT_ADDRESS = 'basic-checkout-v2';
+        process.env.GROBLE_V2_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-v2';
         process.env.GROBLE_WEBHOOK_SECRET = SECRET;
         delete process.env.GROBLE_WEBHOOK_PREVIOUS_SECRET;
         mocks.rpc.mockResolvedValue({

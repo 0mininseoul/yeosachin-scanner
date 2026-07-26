@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import {
     earlybirdCheckoutRecoveryRequestSchema,
     earlybirdCheckoutRequestSchema,
+    earlybirdLegacyRefreshRequestSchema,
     isJsonRequest,
     isSameOriginMutation,
 } from '@/lib/services/earlybird/contracts';
@@ -13,6 +14,7 @@ import {
     EarlybirdWaitlistRequiredError,
     loadCurrentEarlybirdCheckoutPhone,
     recoverEarlybirdCheckout,
+    refreshLegacyEarlybirdCheckout,
 } from '@/lib/services/earlybird/checkout';
 import { EarlybirdPersistenceError } from '@/lib/services/earlybird/store';
 import {
@@ -54,6 +56,13 @@ function persistenceErrorResponse(error: EarlybirdPersistenceError): NextRespons
             409,
             error.code,
             '가격이 변경되어 대상 계정을 다시 확인해주세요.'
+        );
+    }
+    if (error.code === 'EARLYBIRD_SOLD_OUT') {
+        return errorResponse(
+            409,
+            error.code,
+            '이 플랜의 얼리버드 물량이 모두 소진되었습니다.'
         );
     }
     if (error.code === 'PLAN_UPGRADE_REQUIRED'
@@ -314,6 +323,13 @@ async function handlePUT(request: Request): Promise<NextResponse> {
             if (error.code === 'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND') {
                 return errorResponse(404, error.code, '복구할 결제창이 없습니다.');
             }
+            if (error.code === 'EARLYBIRD_LEGACY_REFRESH_REQUIRED') {
+                return errorResponse(
+                    409,
+                    error.code,
+                    '가격이 변경된 주문입니다. 새 할인가로 다시 구매해주세요.'
+                );
+            }
             return errorResponse(
                 409,
                 error.code,
@@ -331,6 +347,66 @@ async function handlePUT(request: Request): Promise<NextResponse> {
     }
 }
 
+async function handlePATCH(request: Request): Promise<NextResponse> {
+    if (!isSameOriginMutation(request)) {
+        return errorResponse(403, 'FORBIDDEN_ORIGIN', '허용되지 않은 요청입니다.');
+    }
+    if (!isJsonRequest(request)) {
+        return errorResponse(415, 'UNSUPPORTED_MEDIA_TYPE', 'JSON 요청이 필요합니다.');
+    }
+
+    const supabase = await createClient();
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+        return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+    }
+
+    let body: unknown;
+    try {
+        body = await request.json();
+    } catch {
+        return errorResponse(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
+    }
+    const parsed = earlybirdLegacyRefreshRequestSchema.safeParse(body);
+    if (!parsed.success) {
+        return errorResponse(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
+    }
+
+    try {
+        const result = await refreshLegacyEarlybirdCheckout({
+            userId: user.id,
+            legacyOrderId: parsed.data.legacyOrderId,
+        });
+        return NextResponse.json({
+            orderId: result.orderId,
+            preflightId: result.preflightId,
+            checkoutUrl: result.checkoutUrl,
+        }, { status: result.created ? 201 : 200 });
+    } catch (error) {
+        if (error instanceof EarlybirdPersistenceError) {
+            if (error.code === 'EARLYBIRD_LEGACY_REFRESH_NOT_FOUND') {
+                return errorResponse(404, error.code, '새로 구매할 주문을 찾지 못했습니다.');
+            }
+            if (
+                error.code === 'EARLYBIRD_LEGACY_REFRESH_NOT_ELIGIBLE'
+                || error.code === 'EARLYBIRD_LEGACY_REFRESH_CONFLICT'
+            ) {
+                return errorResponse(
+                    409,
+                    error.code,
+                    '이 주문은 새 할인가로 다시 구매할 수 없습니다.'
+                );
+            }
+            return persistenceErrorResponse(error);
+        }
+        return errorResponse(
+            503,
+            'EARLYBIRD_UNAVAILABLE',
+            '새 결제창을 준비하지 못했습니다.'
+        );
+    }
+}
+
 export async function POST(request: Request): Promise<NextResponse> {
     return observeRoute(
         request,
@@ -344,5 +420,13 @@ export async function PUT(request: Request): Promise<NextResponse> {
         request,
         '/api/earlybird/checkout',
         () => handlePUT(request),
+    );
+}
+
+export async function PATCH(request: Request): Promise<NextResponse> {
+    return observeRoute(
+        request,
+        '/api/earlybird/checkout',
+        () => handlePATCH(request),
     );
 }

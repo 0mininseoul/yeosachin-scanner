@@ -36,6 +36,11 @@ const resultRowSchema = z.object({
     status: z.literal('completed'),
 });
 
+const retirementRowSchema = z.object({
+    legacy_order_id: z.string().uuid(),
+    reason: z.literal('pricing_v2_product_separation'),
+});
+
 const DISPLAY_STATUS: Readonly<Record<EarlybirdOrderSystemStatus, string>> = {
     payment_pending: '결제 확인',
     payment_failed: '결제 확인 실패',
@@ -63,6 +68,7 @@ export interface EarlybirdOrderStatusDto {
     systemStatus: EarlybirdOrderSystemStatus;
     displayStatus: string;
     resultUrl: string | null;
+    checkoutAction: 'continue' | 'refresh_pricing' | null;
 }
 
 export class EarlybirdOrderLookupError extends Error {
@@ -95,6 +101,9 @@ export async function loadLatestEarlybirdOrder(
     const order = parsed.data;
 
     let resultUrl: string | null = null;
+    let displayStatus = DISPLAY_STATUS[order.status];
+    let checkoutAction: EarlybirdOrderStatusDto['checkoutAction'] =
+        order.status === 'payment_pending' ? 'continue' : null;
     if (order.status === 'completed' && order.result_request_id) {
         const result = await supabaseAdmin
             .from('analysis_requests')
@@ -109,6 +118,22 @@ export async function loadLatestEarlybirdOrder(
             resultUrl = `/result/${encodeURIComponent(parsedResult.data.id)}`;
         }
     }
+    if (order.status === 'cancelled') {
+        const retirement = await supabaseAdmin
+            .from('earlybird_checkout_retirements')
+            .select('legacy_order_id, reason')
+            .eq('legacy_order_id', order.id)
+            .maybeSingle();
+        if (retirement.error) throw new EarlybirdOrderLookupError();
+        const parsedRetirement = retirementRowSchema.safeParse(retirement.data);
+        if (
+            parsedRetirement.success
+            && parsedRetirement.data.legacy_order_id === order.id
+        ) {
+            checkoutAction = 'refresh_pricing';
+            displayStatus = '새 할인가 구매 필요';
+        }
+    }
 
     return Object.freeze({
         orderId: order.id,
@@ -121,7 +146,8 @@ export async function loadLatestEarlybirdOrder(
         dueAt: order.due_at,
         planSequence: order.plan_sequence,
         systemStatus: order.status,
-        displayStatus: DISPLAY_STATUS[order.status],
+        displayStatus,
         resultUrl,
+        checkoutAction,
     });
 }

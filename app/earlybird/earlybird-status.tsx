@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { BrandMark, CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
+import { EARLYBIRD_DISCLOSURE_TEXT } from '@/lib/domain/earlybird/catalog';
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
@@ -14,7 +15,10 @@ import {
     earlybirdStatusEventKey,
     paymentConfirmationEventKey,
 } from '@/lib/services/earlybird/analytics-state';
-import { recoverPendingEarlybirdCheckout } from '@/lib/services/earlybird/ui-state';
+import {
+    recoverPendingEarlybirdCheckout,
+    refreshLegacyEarlybirdCheckout,
+} from '@/lib/services/earlybird/ui-state';
 
 function formatTimestamp(value: string): string {
     return new Intl.DateTimeFormat('ko-KR', {
@@ -39,6 +43,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     const [notifyModalOpen, setNotifyModalOpen] = useState(false);
     const [checkoutRecoveryPending, setCheckoutRecoveryPending] = useState(false);
     const [checkoutRecoveryError, setCheckoutRecoveryError] = useState<string | null>(null);
+    const [legacyDisclosureAccepted, setLegacyDisclosureAccepted] = useState(false);
     const checkoutRecoveryGuardRef = useRef({ inFlight: false });
 
     useEffect(() => {
@@ -87,6 +92,21 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
         );
     };
 
+    const handleLegacyCheckoutRefresh = async () => {
+        if (!legacyDisclosureAccepted) return;
+        setCheckoutRecoveryError(null);
+        await refreshLegacyEarlybirdCheckout(
+            order.orderId,
+            checkoutRecoveryGuardRef.current,
+            {
+                request: fetch,
+                redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl),
+                setPending: setCheckoutRecoveryPending,
+                showError: setCheckoutRecoveryError,
+            }
+        );
+    };
+
     return (
         <>
             <Eyebrow>얼리버드 사전 구매 현황</Eyebrow>
@@ -94,9 +114,19 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 {order.displayStatus}
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-                위장여사친 판독기를 이용해주셔서 감사합니다.
-                <br />
-                결제 확정 후 실제 24시간 이내에 이메일로 판독 결과를 전달합니다.
+                {order.checkoutAction === 'refresh_pricing' ? (
+                    <>
+                        기존 결제창은 가격 변경으로 종료되었습니다.
+                        <br />
+                        현재 할인 가격에 다시 동의하면 새 결제창을 준비합니다.
+                    </>
+                ) : (
+                    <>
+                        위장여사친 판독기를 이용해주셔서 감사합니다.
+                        <br />
+                        결제 확정 후 실제 24시간 이내에 이메일로 판독 결과를 전달합니다.
+                    </>
+                )}
             </p>
 
             <CaseCard className="mt-8 p-5">
@@ -126,7 +156,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 >
                     판독 결과 확인하기
                 </Link>
-            ) : order.systemStatus === 'payment_pending' ? (
+            ) : order.checkoutAction === 'continue' ? (
                 <>
                     <PrimaryButton
                         className="mt-5"
@@ -150,6 +180,35 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                     >
                         이메일 알림 받기
                     </button>
+                </>
+            ) : order.checkoutAction === 'refresh_pricing' ? (
+                <>
+                    <label className="mt-5 flex items-start gap-3 border border-line p-4 text-[12px] leading-relaxed text-fg-dim">
+                        <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={legacyDisclosureAccepted}
+                            onChange={event => setLegacyDisclosureAccepted(event.target.checked)}
+                        />
+                        <span>{EARLYBIRD_DISCLOSURE_TEXT}</span>
+                    </label>
+                    <PrimaryButton
+                        className="mt-4"
+                        disabled={!legacyDisclosureAccepted || checkoutRecoveryPending}
+                        onClick={handleLegacyCheckoutRefresh}
+                    >
+                        {checkoutRecoveryPending
+                            ? '새 결제창 준비 중…'
+                            : '새 할인가로 다시 구매'}
+                    </PrimaryButton>
+                    {checkoutRecoveryError && (
+                        <p
+                            className="mt-3 text-center text-[12px] leading-relaxed text-blood"
+                            role="alert"
+                        >
+                            {checkoutRecoveryError}
+                        </p>
+                    )}
                 </>
             ) : (
                 <PrimaryButton className="mt-5" onClick={() => setNotifyModalOpen(true)}>

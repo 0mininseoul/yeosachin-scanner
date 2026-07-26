@@ -12,6 +12,11 @@ export const earlybirdCheckoutRecoveryRequestSchema = z.object({
     preflightId: uuidSchema,
 }).strict();
 
+export const earlybirdLegacyRefreshRequestSchema = z.object({
+    legacyOrderId: uuidSchema,
+    disclosureAccepted: z.literal(true),
+}).strict();
+
 export const earlybirdWaitlistRequestSchema = z.object({
     preflightId: uuidSchema,
     planId: z.literal('plus'),
@@ -20,6 +25,8 @@ export const earlybirdWaitlistRequestSchema = z.object({
 export type EarlybirdCheckoutRequest = z.infer<typeof earlybirdCheckoutRequestSchema>;
 export type EarlybirdCheckoutRecoveryRequest =
     z.infer<typeof earlybirdCheckoutRecoveryRequestSchema>;
+export type EarlybirdLegacyRefreshRequest =
+    z.infer<typeof earlybirdLegacyRefreshRequestSchema>;
 export type EarlybirdWaitlistRequest = z.infer<typeof earlybirdWaitlistRequestSchema>;
 
 export function isSameOriginMutation(request: Request): boolean {
