@@ -55,6 +55,24 @@ interface PendingEarlybirdRecoveryDependencies {
     showError: (message: string) => void;
 }
 
+export function pendingEarlybirdCheckoutStatusPath(
+    status: number,
+    payload: unknown,
+    planId: PlanId
+): string | null {
+    if (
+        status !== 409
+        || !isPaidEarlybirdPlanId(planId)
+        || !payload
+        || typeof payload !== 'object'
+        || !('code' in payload)
+        || payload.code !== 'EARLYBIRD_CHECKOUT_ALREADY_PENDING'
+    ) {
+        return null;
+    }
+    return `/earlybird?plan=${planId}`;
+}
+
 interface PlanCardAvailability {
     planId: PlanId;
     selectionState: 'required' | 'available_upgrade' | 'unavailable';

@@ -9,6 +9,7 @@ import {
     isEarlybirdPlanSoldOut,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
+    pendingEarlybirdCheckoutStatusPath,
     resolveAvailableEarlybirdPlan,
     resolveEarlybirdPricingBoundary,
 } from './ui-state';
@@ -505,6 +506,26 @@ describe('earlybird analyze UI state', () => {
         expect(guard.inFlight).toBe(false);
     });
 
+    it('routes only the exact unresolved-payment conflict to owner status for the selected plan', () => {
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+        }, 'standard')).toBe('/earlybird?plan=standard');
+
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_PRICING_REFRESH_REQUIRED',
+        }, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_ORDER_CONFLICT',
+        }, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(503, {
+            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+        }, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(409, null, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+        }, 'plus')).toBeNull();
+    });
+
     it.each([
         [
             409,
@@ -567,5 +588,45 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('recoverPendingEarlybirdCheckout(');
         expect(source).toContain('disabled={checkoutRecoveryPending}');
         expect(source).toContain('결제 계속하기');
+    });
+
+    it('wires only the exact checkout conflict on analyze to owner status without replaying checkout', () => {
+        const source = readFileSync(
+            new URL('../../../app/analyze/page.tsx', import.meta.url),
+            'utf8'
+        );
+        expect(source).toContain('pendingEarlybirdCheckoutStatusPath(');
+        expect(source).toContain('router.push(activeCheckoutStatusCta.path)');
+        expect(source).toContain('기존 결제창 확인하기');
+        expect(source).not.toContain('recoverPendingEarlybirdCheckout(');
+        expect(source).not.toContain('checkoutRecoveryPreflightId');
+    });
+
+    it('derives stale owner-status CTA visibility without synchronous effect state cleanup', () => {
+        const source = readFileSync(
+            new URL('../../../app/analyze/page.tsx', import.meta.url),
+            'utf8'
+        );
+        expect(source).toContain(
+            'checkoutStatusCta.preflightId === readyPreflight?.preflightId'
+        );
+        expect(source).toContain(
+            'checkoutStatusCta.targetInstagramId === targetInstagramId'
+        );
+        expect(source).not.toMatch(
+            /useEffect\(\(\) => \{\s*setCheckoutStatus(?:Path|Navigating)/
+        );
+
+        const submitIndex = source.indexOf('const handleEarlybirdAction');
+        const submitClearIndex = source.indexOf('setCheckoutStatusCta(null)', submitIndex);
+        const requestIndex = source.indexOf('const response = await fetch(', submitIndex);
+        expect(submitClearIndex).toBeGreaterThan(submitIndex);
+        expect(submitClearIndex).toBeLessThan(requestIndex);
+
+        const resetIndex = source.indexOf('const handleReset');
+        const resetClearIndex = source.indexOf('setCheckoutStatusCta(null)', resetIndex);
+        const resetRouteIndex = source.indexOf("router.replace('/analyze')", resetIndex);
+        expect(resetClearIndex).toBeGreaterThan(resetIndex);
+        expect(resetClearIndex).toBeLessThan(resetRouteIndex);
     });
 });

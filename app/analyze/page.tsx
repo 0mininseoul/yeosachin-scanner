@@ -18,6 +18,7 @@ import {
     isEarlybirdPlanSoldOut,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
+    pendingEarlybirdCheckoutStatusPath,
     recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
@@ -48,6 +49,13 @@ const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     plus: 'Plus',
 };
 
+interface CheckoutStatusCta {
+    path: string;
+    preflightId: string;
+    targetInstagramId: string | null;
+    navigating: boolean;
+}
+
 function relationshipCapacityLabel(
     capacity: { followers: number; following: number },
     lowerBound?: { followers: number; following: number } | null
@@ -71,6 +79,7 @@ export default function AnalyzePage() {
     const [disclosureModalOpen, setDisclosureModalOpen] = useState(false);
     const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
     const [waitlistComplete, setWaitlistComplete] = useState(false);
+    const [checkoutStatusCta, setCheckoutStatusCta] = useState<CheckoutStatusCta | null>(null);
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
     const initializedRef = useRef(false);
@@ -113,6 +122,11 @@ export default function AnalyzePage() {
             plan => isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
         )
         : false;
+    const activeCheckoutStatusCta = checkoutStatusCta
+        && checkoutStatusCta.preflightId === readyPreflight?.preflightId
+        && checkoutStatusCta.targetInstagramId === targetInstagramId
+        ? checkoutStatusCta
+        : null;
 
     useEffect(() => {
         if (
@@ -273,8 +287,17 @@ export default function AnalyzePage() {
     };
 
     const handlePlanSelection = (planId: PlanId) => {
+        setCheckoutStatusCta(null);
         setSelectedPlan(planId);
         trackPlanSelection(planId);
+    };
+
+    const handleCheckoutStatusNavigation = () => {
+        if (!activeCheckoutStatusCta || activeCheckoutStatusCta.navigating) return;
+        setCheckoutStatusCta(current => current === activeCheckoutStatusCta
+            ? { ...current, navigating: true }
+            : current);
+        router.push(activeCheckoutStatusCta.path);
     };
 
     const handleEarlybirdAction = async () => {
@@ -291,6 +314,7 @@ export default function AnalyzePage() {
 
         setPurchaseSubmitting(true);
         setWaitlistComplete(false);
+        setCheckoutStatusCta(null);
         setError(null);
         try {
             const paidPlan = isPaidEarlybirdPlanId(effectiveSelectedPlan);
@@ -327,6 +351,21 @@ export default function AnalyzePage() {
             );
             const payload: unknown = await response.json().catch(() => null);
             if (!response.ok) {
+                const pendingStatusPath = pendingEarlybirdCheckoutStatusPath(
+                    response.status,
+                    payload,
+                    effectiveSelectedPlan
+                );
+                if (pendingStatusPath) {
+                    setCheckoutStatusCta({
+                        path: pendingStatusPath,
+                        preflightId: readyPreflight.preflightId,
+                        targetInstagramId,
+                        navigating: false,
+                    });
+                    setError('기존 결제 처리 상태를 먼저 확인해주세요.');
+                    return;
+                }
                 const message = payload && typeof payload === 'object' && 'error' in payload
                     && typeof payload.error === 'string' && payload.error.length <= 200
                     ? payload.error
@@ -398,6 +437,7 @@ export default function AnalyzePage() {
         setDisclosureAccepted(false);
         setPurchaseSubmitting(false);
         setWaitlistComplete(false);
+        setCheckoutStatusCta(null);
         initializedRef.current = true;
         router.replace('/analyze');
     };
@@ -783,8 +823,28 @@ export default function AnalyzePage() {
                                     )}
 
                                     {error && (
-                                        <div className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood" role="alert">
+                                        <div
+                                            id="checkout-recovery-message"
+                                            className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood"
+                                            role="alert"
+                                        >
                                             {error}
+                                        </div>
+                                    )}
+                                    {activeCheckoutStatusCta && (
+                                        <div className="mt-3">
+                                            <PrimaryButton
+                                                type="button"
+                                                onClick={handleCheckoutStatusNavigation}
+                                                disabled={activeCheckoutStatusCta.navigating}
+                                                aria-describedby={error
+                                                    ? 'checkout-recovery-message'
+                                                    : undefined}
+                                            >
+                                                {activeCheckoutStatusCta.navigating
+                                                    ? '결제 상태 불러오는 중…'
+                                                    : '기존 결제창 확인하기'}
+                                            </PrimaryButton>
                                         </div>
                                     )}
                                     {waitlistComplete && (
