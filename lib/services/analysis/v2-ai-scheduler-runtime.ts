@@ -1,4 +1,7 @@
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
+import { AI_GEMINI_SDK_TIMEOUT_MS } from '@/lib/services/ai/stage-policy';
+
+export const ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS = 15_000;
 
 export const ANALYSIS_V2_SCHEDULER_V1_POLICY = Object.freeze({
     sharedConcurrency: 8,
@@ -6,7 +9,8 @@ export const ANALYSIS_V2_SCHEDULER_V1_POLICY = Object.freeze({
     featureAnalysisConcurrency: 3,
     privateAccountNameConcurrency: 2,
     /** Do not start a paid operation unless this much handler time remains. */
-    admissionReserveMs: 75_000,
+    // A newly admitted provider call must fit its full SDK timeout plus durable terminalization.
+    admissionReserveMs: AI_GEMINI_SDK_TIMEOUT_MS + ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS,
 } as const);
 
 export type AnalysisV2SchedulerStage =
@@ -21,17 +25,26 @@ export interface AnalysisV2SchedulerTask<T> {
     /** Original deterministic topology order. */
     ordinal: number;
     run(): Promise<T>;
+    /** Checkpoint-only reconstruction after DB proves the paid result already exists. */
+    recover?(): Promise<T>;
+    /** Deterministic safe fallback after the bounded recovery window expires. */
+    terminalFallback?(): Promise<T>;
 }
 
 export type AnalysisV2SchedulerOperationClaim<T> =
-    | Readonly<{ decision: 'execute'; claimToken: string }>
+    | Readonly<{
+        decision: 'execute';
+        claimToken: string;
+        recoveryOnly?: boolean;
+        terminalUnavailable?: boolean;
+    }>
     | Readonly<{ decision: 'ready'; value: T }>
-    | Readonly<{ decision: 'ambiguous' }>;
+    | Readonly<{ decision: 'deferred'; notBeforeAtMs: number }>;
 
 /**
  * This protocol must be implemented by the existing durable AI attempt/result stores before
  * scheduler execution is wired to production. `claim` is atomic: a repeated in-flight claim must
- * return `ambiguous`, while a committed result must return `ready`.
+ * return a durable `deferred` timestamp, while a committed result must return `ready`.
  */
 export interface AnalysisV2SchedulerOperationStore<T> {
     claim(input: Readonly<{
@@ -44,6 +57,14 @@ export interface AnalysisV2SchedulerOperationStore<T> {
         claimToken: string;
         value: T;
     }>): Promise<void>;
+    defer?(input: Readonly<{
+        key: string;
+        stage: AnalysisV2SchedulerStage;
+        claimToken: string;
+        reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+            | 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+            | 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE';
+    }>): Promise<number>;
 }
 
 interface AnalysisV2SchedulerArbiterLease {
@@ -58,7 +79,9 @@ interface AnalysisV2SchedulerArbiter {
     tryAcquire(
         stage: AnalysisV2SchedulerStage,
         limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
+        waiter: object,
     ): AnalysisV2SchedulerArbiterAcquire;
+    cancel(waiter: object): void;
     waitForChange(
         ifUnchangedGeneration: number,
         maxWaitMs: number,
@@ -78,6 +101,8 @@ export type AnalysisV2SchedulerRunResult<T> = Readonly<{
     /** Results are always returned in topology order, never completion order. */
     completed: readonly Readonly<{ key: string; stage: AnalysisV2SchedulerStage; value: T }>[];
     remainingKeys: readonly string[];
+    recoveryPendingKeys: readonly string[];
+    continuationDelayMs: number;
 }>;
 
 export interface AnalysisV2SchedulerRuntimeOptions<T> {
@@ -93,6 +118,33 @@ export interface AnalysisV2SchedulerRuntimeOptions<T> {
     policy?: Partial<AnalysisV2SchedulerRuntimePolicy>;
     /** Deterministic race hook for tests; production callers must omit it. */
     onBeforeArbiterWait?: () => Promise<void> | void;
+}
+
+type SchedulerAdmissionReason =
+    | 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+    | 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+    | 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE';
+
+export class AnalysisV2SchedulerAdmissionDeferredError extends Error {
+    constructor(
+        readonly reason: SchedulerAdmissionReason,
+        readonly notBeforeAtMs: number,
+    ) {
+        super(reason);
+        this.name = 'AnalysisV2SchedulerAdmissionDeferredError';
+    }
+}
+
+function schedulerAdmissionReason(error: unknown): SchedulerAdmissionReason | null {
+    if (!(error instanceof Error)) return null;
+    switch (error.message) {
+    case 'ANALYSIS_V2_AI_CAPACITY_PENDING':
+    case 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT':
+    case 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE':
+        return error.message;
+    default:
+        return null;
+    }
 }
 
 function stageLimit(
@@ -158,28 +210,80 @@ function boundedPolicy(
 class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbiter {
     private activeTotal = 0;
     private generation = 0;
+    private sequence = 0;
+    private stageCursor = 0;
     private readonly activeByStage = new Map<AnalysisV2SchedulerStage, number>();
     private readonly waiters = new Set<() => void>();
+    private readonly pending = new Map<object, Readonly<{
+        stage: AnalysisV2SchedulerStage;
+        limits: Readonly<AnalysisV2SchedulerRuntimePolicy>;
+        sequence: number;
+    }>>();
+    private readonly stages: readonly AnalysisV2SchedulerStage[] = [
+        'genderTriage',
+        'featureAnalysis',
+        'privateAccountName',
+    ];
+
+    private signalChange(): void {
+        this.generation++;
+        const waiters = [...this.waiters];
+        this.waiters.clear();
+        waiters.forEach(resolve => resolve());
+    }
+
+    private canAcquire(
+        stage: AnalysisV2SchedulerStage,
+        limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
+    ): boolean {
+        return this.activeTotal < Math.min(8, limits.sharedConcurrency)
+            && (this.activeByStage.get(stage) ?? 0) < Math.min(
+                stageLimit(stage, limits),
+                stageLimit(stage, ANALYSIS_V2_SCHEDULER_V1_POLICY),
+            );
+    }
+
+    private nextPending(): object | null {
+        if (this.activeTotal >= 8) return null;
+        for (let offset = 0; offset < this.stages.length; offset++) {
+            const stageIndex = (this.stageCursor + offset) % this.stages.length;
+            const stage = this.stages[stageIndex]!;
+            const candidate = [...this.pending.entries()]
+                .filter(([, pending]) => (
+                    pending.stage === stage
+                    && this.canAcquire(pending.stage, pending.limits)
+                ))
+                .sort((left, right) => left[1].sequence - right[1].sequence)[0];
+            if (candidate) return candidate[0];
+        }
+        return null;
+    }
 
     tryAcquire(
         stage: AnalysisV2SchedulerStage,
         limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
+        waiter: object,
     ): AnalysisV2SchedulerArbiterAcquire {
-        const activeStage = this.activeByStage.get(stage) ?? 0;
-        if (
-            this.activeTotal >= Math.min(8, limits.sharedConcurrency)
-            || activeStage >= Math.min(stageLimit(stage, limits), stageLimit(
+        if (!this.pending.has(waiter)) {
+            this.pending.set(waiter, Object.freeze({
                 stage,
-                ANALYSIS_V2_SCHEDULER_V1_POLICY,
-            ))
-        ) {
+                limits,
+                sequence: this.sequence++,
+            }));
+            this.signalChange();
+        }
+        if (!this.canAcquire(stage, limits) || this.nextPending() !== waiter) {
             return Object.freeze({
                 status: 'blocked' as const,
                 generation: this.generation,
             });
         }
+        this.pending.delete(waiter);
+        const activeStage = this.activeByStage.get(stage) ?? 0;
         this.activeTotal++;
         this.activeByStage.set(stage, activeStage + 1);
+        this.stageCursor = (this.stages.indexOf(stage) + 1) % this.stages.length;
+        this.signalChange();
         let released = false;
         return Object.freeze({
             status: 'acquired' as const,
@@ -189,13 +293,14 @@ class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbite
                     released = true;
                     this.activeTotal--;
                     this.activeByStage.set(stage, this.activeByStage.get(stage)! - 1);
-                    this.generation++;
-                    const waiters = [...this.waiters];
-                    this.waiters.clear();
-                    waiters.forEach(resolve => resolve());
+                    this.signalChange();
                 },
             }),
         });
+    }
+
+    cancel(waiter: object): void {
+        if (this.pending.delete(waiter)) this.signalChange();
     }
 
     waitForChange(
@@ -236,7 +341,7 @@ schedulerProcessScope.__AI_BARAM_ANALYSIS_V2_SCHEDULER_ARBITER_V1__ =
 /**
  * A deliberately small scheduler seam used only after a request has persisted the exact
  * scheduler-v1 snapshot. Paid work is refused unless `operationStore.claim` atomically returns
- * `execute`; ready results are skipped and ambiguous operations fail closed for durable recovery.
+ * `execute`; ready results are skipped and uncertain operations defer to bounded durable recovery.
  *
  * Fairness is deterministic round-robin over the three stage queues. A queue rotates only when a
  * slot is admitted, so completion timing cannot change result ordering.
@@ -263,13 +368,19 @@ export async function runAnalysisV2FairAiScheduler<T>(
         value: T;
     }>>();
     const remaining = new Set(input.tasks.map(task => task.key));
+    const recoveryPending = new Set<string>();
+    let nextNotBeforeAtMs = Number.POSITIVE_INFINITY;
     input.tasks.forEach(task => queues.get(task.stage)!.push(task));
 
     const stages: readonly AnalysisV2SchedulerStage[] = [
         'genderTriage', 'featureAnalysis', 'privateAccountName',
     ];
+    const arbiterWaiters = new Map(
+        stages.map(stage => [stage, Object.freeze({})] as const),
+    );
     let cursor = 0;
     const active = new Set<Promise<void>>();
+    let fatalError: unknown;
     const mayAdmit = () => nowMs() + policy.admissionReserveMs < input.handlerDeadlineAtMs;
 
     const admitOne = async (): Promise<
@@ -284,7 +395,8 @@ export async function runAnalysisV2FairAiScheduler<T>(
             const queue = queues.get(stage)!;
             const task = queue[0];
             if (!task) continue;
-            const acquire = arbiter.tryAcquire(stage, policy);
+            const waiter = arbiterWaiters.get(stage)!;
+            const acquire = arbiter.tryAcquire(stage, policy, waiter);
             if (acquire.status === 'blocked') {
                 blockedGeneration = acquire.generation;
                 continue;
@@ -297,11 +409,19 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 lease.release();
                 throw error;
             });
-            if (claim.decision === 'ambiguous') {
+            if (claim.decision === 'deferred') {
+                queue.shift();
+                arbiter.cancel(waiter);
+                recoveryPending.add(task.key);
+                nextNotBeforeAtMs = Math.min(
+                    nextNotBeforeAtMs,
+                    claim.notBeforeAtMs,
+                );
                 lease.release();
-                throw new Error('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+                return { status: 'handled' };
             }
             queue.shift();
+            arbiter.cancel(waiter);
             cursor = (index + 1) % stages.length;
             if (claim.decision === 'ready') {
                 results.set(task.key, {
@@ -313,8 +433,19 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 lease.release();
                 return { status: 'handled' };
             }
+            if (claim.terminalUnavailable && !task.terminalFallback) {
+                lease.release();
+                throw new Error('ANALYSIS_V2_SCHEDULER_TERMINAL_HANDLER_MISSING');
+            }
+            if (claim.recoveryOnly && !claim.terminalUnavailable && !task.recover) {
+                lease.release();
+                throw new Error('ANALYSIS_V2_SCHEDULER_RECOVERY_HANDLER_MISSING');
+            }
+            const operation = claim.terminalUnavailable
+                ? task.terminalFallback!
+                : claim.recoveryOnly ? task.recover! : task.run;
             const execution = Promise.resolve()
-                .then(task.run)
+                .then(operation)
                 .then(async value => {
                     await input.operationStore.commitReady({
                         key: task.key,
@@ -324,6 +455,23 @@ export async function runAnalysisV2FairAiScheduler<T>(
                     });
                     results.set(task.key, { key: task.key, stage: task.stage, value });
                     remaining.delete(task.key);
+                })
+                .catch(async error => {
+                    const reason = schedulerAdmissionReason(error);
+                    if (reason && input.operationStore.defer) {
+                        const notBeforeAtMs = await input.operationStore.defer({
+                            key: task.key,
+                            stage: task.stage,
+                            claimToken: claim.claimToken,
+                            reason,
+                        });
+                        fatalError ??= new AnalysisV2SchedulerAdmissionDeferredError(
+                            reason,
+                            notBeforeAtMs,
+                        );
+                        return;
+                    }
+                    fatalError ??= error;
                 })
                 .finally(() => {
                     lease.release();
@@ -335,31 +483,36 @@ export async function runAnalysisV2FairAiScheduler<T>(
         return { status: 'blocked', generation: blockedGeneration };
     };
 
-    while (remaining.size > 0) {
-        let admittedOrHandled = false;
-        let blockedGeneration: number | null = null;
-        while (mayAdmit()) {
-            const admission = await admitOne();
-            if (admission.status === 'blocked') {
-                blockedGeneration = admission.generation;
-                break;
+    try {
+        while (remaining.size > 0) {
+            let admittedOrHandled = false;
+            let blockedGeneration: number | null = null;
+            while (mayAdmit() && fatalError === undefined) {
+                const admission = await admitOne();
+                if (admission.status === 'blocked') {
+                    blockedGeneration = admission.generation;
+                    break;
+                }
+                admittedOrHandled = true;
             }
-            admittedOrHandled = true;
+            if (active.size > 0) {
+                await Promise.race(active);
+                continue;
+            }
+            if (fatalError !== undefined) throw fatalError;
+            if (!mayAdmit()) break;
+            if (!admittedOrHandled) {
+                if (blockedGeneration === null) break;
+                await input.onBeforeArbiterWait?.();
+                const waitOutcome = await arbiter.waitForChange(
+                    blockedGeneration,
+                    input.handlerDeadlineAtMs - policy.admissionReserveMs - nowMs(),
+                );
+                if (waitOutcome === 'cutoff') break;
+            }
         }
-        if (active.size > 0) {
-            await Promise.race(active);
-            continue;
-        }
-        if (!mayAdmit()) break;
-        if (!admittedOrHandled) {
-            if (blockedGeneration === null) break;
-            await input.onBeforeArbiterWait?.();
-            const waitOutcome = await arbiter.waitForChange(
-                blockedGeneration,
-                input.handlerDeadlineAtMs - policy.admissionReserveMs - nowMs(),
-            );
-            if (waitOutcome === 'cutoff') break;
-        }
+    } finally {
+        arbiterWaiters.forEach(waiter => arbiter.cancel(waiter));
     }
 
     const completed = input.tasks
@@ -371,5 +524,11 @@ export async function runAnalysisV2FairAiScheduler<T>(
         remainingKeys: Object.freeze(input.tasks
             .filter(task => remaining.has(task.key))
             .map(task => task.key)),
+        recoveryPendingKeys: Object.freeze(input.tasks
+            .filter(task => recoveryPending.has(task.key))
+            .map(task => task.key)),
+        continuationDelayMs: Number.isFinite(nextNotBeforeAtMs)
+            ? Math.min(300_000, Math.max(1_000, nextNotBeforeAtMs - nowMs()))
+            : 1_000,
     });
 }

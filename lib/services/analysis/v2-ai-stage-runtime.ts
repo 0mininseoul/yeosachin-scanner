@@ -6,6 +6,7 @@ import {
 } from '@/lib/services/ai/stage-policy';
 import {
     analyzePrivateAccountNames,
+    createPrivateNameBatchIdentity,
     createPrivateNameBatchResponseSchema,
     type PrivateNameAccountInput,
     type PrivateNameAnalysisAudit,
@@ -17,12 +18,14 @@ import {
     createGenderTriageResultIdentity,
     createHighRiskNarrativeResultIdentity,
     createPartnerSafetyResultIdentity,
+    featureAnalysisResultSchema,
     featureAnalysis,
     featureAnalysisModelResponseSchema,
     genderResolution,
     genderResolutionCheckpointAssessment,
     genderResolutionModelResponseSchema,
     genderTriage,
+    genderTriageResultSchema,
     genderTriageModelResponseSchema,
     highRiskNarrative,
     highRiskNarrativeModelResponseSchema,
@@ -47,13 +50,32 @@ import {
     type AnalysisV2AiAuditAdapter,
     type AnalysisV2AiResultIdentity,
 } from './v2-ai-result-store';
+import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
+import {
+    AnalysisV2SchedulerAdmissionDeferredError,
+    runAnalysisV2FairAiScheduler,
+    type AnalysisV2SchedulerStage,
+    type AnalysisV2SchedulerTask,
+} from './v2-ai-scheduler-runtime';
+import {
+    createAnalysisV2SchedulerOperationStore,
+} from './v2-ai-scheduler-operation-store';
+import {
+    AnalysisV2SchedulerContinuationError,
+    schedulerContinuationReason,
+} from './v2-ai-scheduler-continuation';
 
 export interface AnalysisV2AiJobFence {
     requestId: string;
     jobKey: string;
     claimToken: string;
     aiStagePolicyVersion: string;
+    schedulerCapability?: AiSchedulerCapability;
     handlerDeadlineAtMs?: number;
+    /** Internal checkpoint-only replay fence; production callers must not set it. */
+    schedulerRecoveryOnly?: boolean;
+    /** Internal terminal safe-fallback fence; production callers must not set it. */
+    schedulerTerminalUnavailable?: boolean;
 }
 
 export interface AnalysisV2AuditedResult<T> {
@@ -126,6 +148,8 @@ export interface AnalysisV2AiStageRuntimeDependencies {
     runPrivateNames?: typeof analyzePrivateAccountNames;
     runPartnerSafety?: typeof partnerSafetyAnalysis;
     runNarrative?: typeof highRiskNarrative;
+    runScheduler?: typeof runAnalysisV2FairAiScheduler;
+    createSchedulerOperationStore?: typeof createAnalysisV2SchedulerOperationStore;
 }
 
 const GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS = 25;
@@ -204,6 +228,8 @@ function adapter<T>(
         resultIdentity,
         resultSchema,
         handlerDeadlineAtMs: fence.handlerDeadlineAtMs,
+        schedulerRecoveryOnly: fence.schedulerRecoveryOnly,
+        schedulerTerminalUnavailable: fence.schedulerTerminalUnavailable,
     });
 }
 
@@ -225,6 +251,162 @@ function assertGenderResolutionPolicyVersion(fence: AnalysisV2AiJobFence): void 
     }
 }
 
+const AI_RESULT_HASH_PATTERN = /^[0-9a-f]{64}$/;
+
+function exactSchedulerEnabled(fence: AnalysisV2AiJobFence): boolean {
+    return fence.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        && fence.schedulerCapability === 'scheduler-v1';
+}
+
+interface PendingSchedulerPlan<T> {
+    key: string;
+    stage: AnalysisV2SchedulerStage;
+    schema: z.ZodType<T>;
+    run(): Promise<T>;
+    recover(): Promise<T>;
+    terminalFallback(): Promise<T>;
+    resolve(value: T): void;
+    reject(error: unknown): void;
+}
+
+function schedulerBatchKey(fence: AnalysisV2AiJobFence): string {
+    return [
+        fence.requestId,
+        fence.jobKey,
+        fence.claimToken,
+        String(fence.handlerDeadlineAtMs ?? ''),
+    ].join(':');
+}
+
+function createSchedulerMicrobatch(
+    dependencies: Pick<
+        AnalysisV2AiStageRuntimeDependencies,
+        'runScheduler' | 'createSchedulerOperationStore'
+    >,
+) {
+    const runScheduler = dependencies.runScheduler ?? runAnalysisV2FairAiScheduler;
+    const createStore = dependencies.createSchedulerOperationStore
+        ?? createAnalysisV2SchedulerOperationStore;
+    const groups = new Map<string, {
+        fence: AnalysisV2AiJobFence;
+        plans: PendingSchedulerPlan<unknown>[];
+        scheduled: boolean;
+    }>();
+
+    const flush = async (groupKey: string): Promise<void> => {
+        const group = groups.get(groupKey);
+        if (!group) return;
+        groups.delete(groupKey);
+        const plans = [...group.plans].sort((left, right) => (
+            left.key.localeCompare(right.key)
+        ));
+        try {
+            if (
+                group.fence.handlerDeadlineAtMs === undefined
+                || !Number.isFinite(group.fence.handlerDeadlineAtMs)
+            ) {
+                throw new AnalysisV2SchedulerContinuationError(
+                    'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+                );
+            }
+            const schemas = new Map<string, z.ZodType<unknown>>();
+            const uniquePlans: PendingSchedulerPlan<unknown>[] = [];
+            const seen = new Map<string, AnalysisV2SchedulerStage>();
+            for (const plan of plans) {
+                const existingStage = seen.get(plan.key);
+                if (existingStage && existingStage !== plan.stage) {
+                    throw new Error('ANALYSIS_V2_SCHEDULER_OPERATION_STAGE_DRIFT');
+                }
+                if (existingStage) {
+                    continue;
+                }
+                seen.set(plan.key, plan.stage);
+                uniquePlans.push(plan);
+                schemas.set(plan.key, plan.schema);
+            }
+            const operationStore = createStore<unknown>({
+                requestId: group.fence.requestId,
+                jobKey: group.fence.jobKey,
+                jobClaimToken: group.fence.claimToken,
+                schemas,
+            });
+            const tasks: AnalysisV2SchedulerTask<unknown>[] = uniquePlans.map((
+                plan,
+                ordinal,
+            ) => ({
+                key: plan.key,
+                stage: plan.stage,
+                ordinal,
+                run: plan.run,
+                recover: plan.recover,
+                terminalFallback: plan.terminalFallback,
+            }));
+            const result = await runScheduler<unknown>({
+                capability: 'scheduler-v1',
+                tasks,
+                operationStore,
+                handlerDeadlineAtMs: group.fence.handlerDeadlineAtMs,
+            });
+            const completed = new Map(result.completed.map(item => [item.key, item.value]));
+            const recoveryPending = new Set(result.recoveryPendingKeys);
+            for (const plan of plans) {
+                if (completed.has(plan.key)) {
+                    plan.resolve(plan.schema.parse(completed.get(plan.key)));
+                } else {
+                    plan.reject(new AnalysisV2SchedulerContinuationError(
+                        recoveryPending.has(plan.key)
+                            ? 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'
+                            : 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+                        Math.min(300, Math.max(
+                            1,
+                            Math.ceil(result.continuationDelayMs / 1_000),
+                        )),
+                    ));
+                }
+            }
+        } catch (error) {
+            if (error instanceof AnalysisV2SchedulerAdmissionDeferredError) {
+                const delaySeconds = Math.min(300, Math.max(
+                    1,
+                    Math.ceil((error.notBeforeAtMs - performance.now()) / 1_000),
+                ));
+                plans.forEach(plan => plan.reject(
+                    new AnalysisV2SchedulerContinuationError(error.reason, delaySeconds),
+                ));
+                return;
+            }
+            const continuation = schedulerContinuationReason(error);
+            const rejected = continuation
+                ? new AnalysisV2SchedulerContinuationError(continuation)
+                : error;
+            plans.forEach(plan => plan.reject(rejected));
+        }
+    };
+
+    return function schedule<T>(
+        fence: AnalysisV2AiJobFence,
+        plan: Omit<PendingSchedulerPlan<T>, 'resolve' | 'reject'>,
+    ): Promise<T> {
+        const groupKey = schedulerBatchKey(fence);
+        let group = groups.get(groupKey);
+        if (!group) {
+            group = { fence, plans: [], scheduled: false };
+            groups.set(groupKey, group);
+        }
+        return new Promise<T>((resolve, reject) => {
+            group!.plans.push({
+                ...plan,
+                resolve: value => resolve(value as T),
+                reject,
+            } as PendingSchedulerPlan<unknown>);
+            if (!group!.scheduled) {
+                group!.scheduled = true;
+                setTimeout(() => void flush(groupKey), 0);
+            }
+        });
+    };
+}
+
 /**
  * Production runtime for the already-defined staged AI functions. Provider calls stay behind this
  * interface, so executor tests never need Vertex credentials and retry replay remains auditable.
@@ -239,26 +421,49 @@ export function createDurableAnalysisV2AiStageRuntime(
     const runPrivateNames = dependencies.runPrivateNames ?? analyzePrivateAccountNames;
     const runPartnerSafety = dependencies.runPartnerSafety ?? partnerSafetyAnalysis;
     const runNarrative = dependencies.runNarrative ?? highRiskNarrative;
+    const schedule = createSchedulerMicrobatch(dependencies);
 
     return {
         async gender(input, fence) {
             const policyVersion = assertAiStagePolicyVersion(fence);
             const identity = createGenderTriageResultIdentity(input, policyVersion);
-            const audit = adapter(
-                createAudit,
-                fence,
-                identity,
-                genderTriageModelResponseSchema
-            );
-            const result = await runGender(input, audit, {
-                aiStagePolicyVersion: policyVersion,
-            });
-            return {
-                result,
-                operationKey: identity.operationKey,
-                resultHash: analysisV2CanonicalAiResultHash(result.assessment),
-                source: 'checkpoint',
+            const execute = async (
+                activeFence: AnalysisV2AiJobFence,
+            ): Promise<AnalysisV2AuditedResult<GenderTriageResult>> => {
+                const audit = adapter(
+                    createAudit,
+                    activeFence,
+                    identity,
+                    genderTriageModelResponseSchema
+                );
+                const result = await runGender(input, audit, {
+                    aiStagePolicyVersion: policyVersion,
+                });
+                return {
+                    result,
+                    operationKey: identity.operationKey,
+                    resultHash: analysisV2CanonicalAiResultHash(result.assessment),
+                    source: 'checkpoint',
+                };
             };
+            if (!exactSchedulerEnabled(fence)) return execute(fence);
+            const envelopeSchema = z.object({
+                result: genderTriageResultSchema,
+                operationKey: z.literal(identity.operationKey),
+                resultHash: z.string().regex(AI_RESULT_HASH_PATTERN),
+                source: z.literal('checkpoint'),
+            }).strict();
+            return schedule(fence, {
+                key: identity.operationKey,
+                stage: 'genderTriage',
+                schema: envelopeSchema,
+                run: () => execute(fence),
+                recover: () => execute({ ...fence, schedulerRecoveryOnly: true }),
+                terminalFallback: () => execute({
+                    ...fence,
+                    schedulerTerminalUnavailable: true,
+                }),
+            });
         },
 
         startGenderResolution(input, fence) {
@@ -345,88 +550,139 @@ export function createDurableAnalysisV2AiStageRuntime(
         async features(input, fence) {
             const policyVersion = assertAiStagePolicyVersion(fence);
             const identity = createFeatureAnalysisResultIdentity(input, policyVersion);
-            const audit = adapter(
-                createAudit,
-                fence,
-                identity,
-                featureAnalysisModelResponseSchema
-            );
-            const result = await runFeatures(input, audit, {
-                aiStagePolicyVersion: policyVersion,
-            });
-            return {
-                result,
-                operationKey: identity.operationKey,
-                resultHash: analysisV2CanonicalAiResultHash(result.features),
-                source: 'checkpoint',
+            const execute = async (
+                activeFence: AnalysisV2AiJobFence,
+            ): Promise<AnalysisV2AuditedResult<FeatureAnalysisResult>> => {
+                const audit = adapter(
+                    createAudit,
+                    activeFence,
+                    identity,
+                    featureAnalysisModelResponseSchema
+                );
+                const result = await runFeatures(input, audit, {
+                    aiStagePolicyVersion: policyVersion,
+                });
+                return {
+                    result,
+                    operationKey: identity.operationKey,
+                    resultHash: analysisV2CanonicalAiResultHash(result.features),
+                    source: 'checkpoint',
+                };
             };
+            if (!exactSchedulerEnabled(fence)) return execute(fence);
+            const envelopeSchema = z.object({
+                result: featureAnalysisResultSchema,
+                operationKey: z.literal(identity.operationKey),
+                resultHash: z.string().regex(AI_RESULT_HASH_PATTERN),
+                source: z.literal('checkpoint'),
+            }).strict();
+            return schedule(fence, {
+                key: identity.operationKey,
+                stage: 'featureAnalysis',
+                schema: envelopeSchema,
+                run: () => execute(fence),
+                recover: () => execute({ ...fence, schedulerRecoveryOnly: true }),
+                terminalFallback: () => execute({
+                    ...fence,
+                    schedulerTerminalUnavailable: true,
+                }),
+            });
         },
 
         async privateNames(input, fence) {
             const policyVersion = assertAiStagePolicyVersion(fence);
-            let operationKey: string | null = null;
-            let envelopeHash: string | null = null;
-            let checkpointed = false;
             const responseSchema = createPrivateNameBatchResponseSchema(
                 input.map(account => account.id)
             );
-            const envelopeSchema = z.object({ results: responseSchema }).strict();
-            const audit: PrivateNameAnalysisAudit = {
-                forChunk(identity) {
-                    if (identity.chunkIndex !== 0 || operationKey !== null) {
-                        throw new Error('ANALYSIS_V2_PRIVATE_NAME_BATCH_IDENTITY_DRIFT');
-                    }
-                    operationKey = identity.operationKey;
-                    const durable = adapter(
-                        createAudit,
-                        fence,
-                        identity.resultIdentity,
-                        envelopeSchema
-                    );
-                    return {
-                        requestId: durable.requestId,
-                        operationKey: durable.operationKey,
-                        resultIdentity: durable.resultIdentity,
-                        async prepare() {
-                            const prepared = await durable.prepare();
-                            if (prepared.result) {
-                                checkpointed = true;
-                                envelopeHash = analysisV2CanonicalAiResultHash(prepared.result);
+            const identity = createPrivateNameBatchIdentity(input, policyVersion);
+            const execute = async (
+                activeFence: AnalysisV2AiJobFence,
+            ): Promise<AnalysisV2PrivateNameAuditedResult> => {
+                let operationKey: string | null = null;
+                let envelopeHash: string | null = null;
+                let checkpointed = false;
+                const checkpointSchema = z.object({ results: responseSchema }).strict();
+                const audit: PrivateNameAnalysisAudit = {
+                    forChunk(chunkIdentity) {
+                        if (
+                            chunkIdentity.chunkIndex !== 0
+                            || operationKey !== null
+                            || chunkIdentity.operationKey !== identity.operationKey
+                        ) {
+                            throw new Error('ANALYSIS_V2_PRIVATE_NAME_BATCH_IDENTITY_DRIFT');
+                        }
+                        operationKey = chunkIdentity.operationKey;
+                        const durable = adapter(
+                            createAudit,
+                            activeFence,
+                            chunkIdentity.resultIdentity,
+                            checkpointSchema
+                        );
+                        return {
+                            requestId: durable.requestId,
+                            operationKey: durable.operationKey,
+                            resultIdentity: durable.resultIdentity,
+                            async prepare() {
+                                const prepared = await durable.prepare();
+                                if (prepared.result) {
+                                    checkpointed = true;
+                                    envelopeHash = analysisV2CanonicalAiResultHash(
+                                        prepared.result
+                                    );
+                                }
+                                return {
+                                    ...prepared,
+                                    result: prepared.result?.results ?? null,
+                                };
+                            },
+                            onBeforeAttempt: telemetry => durable.onBeforeAttempt(telemetry),
+                            async onAttemptTelemetry(telemetry, parsedResult) {
+                                const envelope = parsedResult === undefined
+                                    ? undefined
+                                    : { results: responseSchema.parse(parsedResult) };
+                                await durable.onAttemptTelemetry(telemetry, envelope);
+                                if (telemetry.disposition === 'success' && envelope) {
+                                    checkpointed = true;
+                                    envelopeHash = analysisV2CanonicalAiResultHash(envelope);
+                                }
                             }
-                            return {
-                                ...prepared,
-                                result: prepared.result?.results ?? null,
-                            };
-                        },
-                        onBeforeAttempt: telemetry => durable.onBeforeAttempt(telemetry),
-                        async onAttemptTelemetry(telemetry, parsedResult) {
-                            const envelope = parsedResult === undefined
-                                ? undefined
-                                : { results: responseSchema.parse(parsedResult) };
-                            await durable.onAttemptTelemetry(telemetry, envelope);
-                            if (telemetry.disposition === 'success' && envelope) {
-                                checkpointed = true;
-                                envelopeHash = analysisV2CanonicalAiResultHash(envelope);
-                            }
-                        },
-                    };
-                },
+                        };
+                    },
+                };
+                const results = await runPrivateNames(
+                    [...input],
+                    activeFence.requestId,
+                    audit,
+                    { aiStagePolicyVersion: policyVersion },
+                );
+                if (operationKey === null) {
+                    throw new Error('ANALYSIS_V2_PRIVATE_NAME_OPERATION_MISSING');
+                }
+                return {
+                    results,
+                    operationKey,
+                    resultHash: checkpointed ? envelopeHash : null,
+                    source: checkpointed ? 'checkpoint' : 'safe_fallback',
+                };
             };
-            const results = await runPrivateNames(
-                [...input],
-                fence.requestId,
-                audit,
-                { aiStagePolicyVersion: policyVersion },
-            );
-            if (operationKey === null) {
-                throw new Error('ANALYSIS_V2_PRIVATE_NAME_OPERATION_MISSING');
-            }
-            return {
-                results,
-                operationKey,
-                resultHash: checkpointed ? envelopeHash : null,
-                source: checkpointed ? 'checkpoint' : 'safe_fallback',
-            };
+            if (!exactSchedulerEnabled(fence)) return execute(fence);
+            const resultSchema = z.object({
+                results: responseSchema,
+                operationKey: z.literal(identity.operationKey),
+                resultHash: z.string().regex(AI_RESULT_HASH_PATTERN).nullable(),
+                source: z.enum(['checkpoint', 'safe_fallback']),
+            }).strict();
+            return schedule(fence, {
+                key: identity.operationKey,
+                stage: 'privateAccountName',
+                schema: resultSchema,
+                run: () => execute(fence),
+                recover: () => execute({ ...fence, schedulerRecoveryOnly: true }),
+                terminalFallback: () => execute({
+                    ...fence,
+                    schedulerTerminalUnavailable: true,
+                }),
+            });
         },
 
         async partnerSafety(input, fence) {

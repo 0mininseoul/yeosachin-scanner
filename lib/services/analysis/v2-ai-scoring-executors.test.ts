@@ -40,6 +40,7 @@ import {
     analysisV2CandidateBundleId,
     analysisV2CandidateId,
     analysisV2PartnerSafetyBundleId,
+    analysisV2ProfilePipelineConcurrency,
     createAnalysisV2AiScoringExecutorRegistry,
     isAnalysisV2PartialMediaCoverageAllowed,
     type AnalysisV2AiScoringExecutorDependencies,
@@ -59,6 +60,28 @@ import {
 } from './v2-candidate-scoring';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+describe('analysis V2 profile AI scheduler concurrency', () => {
+    it('opens six candidate pipelines only for the exact persisted scheduler-v1 policy', () => {
+        expect(analysisV2ProfilePipelineConcurrency(
+            'ai-stage-policy-v2.8',
+            'scheduler-v1',
+        )).toBe(6);
+        expect(analysisV2ProfilePipelineConcurrency(
+            'ai-stage-policy-v2.8',
+            'legacy',
+        )).toBe(4);
+        expect(analysisV2ProfilePipelineConcurrency(
+            AI_STAGE_POLICY_VERSION,
+            'scheduler-v1',
+        )).toBe(4);
+        expect(analysisV2ProfilePipelineConcurrency(
+            'ai-stage-policy-v2.8',
+            'scheduler-v1',
+            2,
+        )).toBe(2);
+    });
+});
 
 const REQUEST_ID = '123e4567-e89b-42d3-a456-426614174000';
 const CLAIM_TOKEN = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow

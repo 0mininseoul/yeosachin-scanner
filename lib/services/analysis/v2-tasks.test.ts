@@ -11,6 +11,7 @@ import {
     analysisV2TaskId,
     assertAnalysisV2TasksConfigured,
     dispatchAnalysisV2Job,
+    dispatchReservedAnalysisV2Job,
     enqueueAnalysisV2Task,
     getAnalysisV2TasksConfig,
     lookupAnalysisV2Task,
@@ -80,6 +81,7 @@ function mockStore(
         claim: vi.fn(),
         deferTerminalCleanup: vi.fn(),
         deferAiCapacity: vi.fn(),
+        continueScheduler: vi.fn(),
         releaseClaim: vi.fn(),
         completeAndFanout: vi.fn(),
         listDispatchable: vi.fn(),
@@ -313,6 +315,24 @@ describe('analysis V2 Cloud Tasks', () => {
             store: alreadyDispatched,
         })).resolves.toBe('already_dispatched');
         expect(client.createTask).not.toHaveBeenCalled();
+    });
+
+    it('dispatches an existing atomic continuation reservation without reserving again', async () => {
+        const reservation = dispatchReservation();
+        const store = mockStore(reservation);
+        const client = queueClient();
+
+        await expect(dispatchReservedAnalysisV2Job(reservation, {
+            config,
+            client,
+            store,
+        })).resolves.toBe('enqueued');
+
+        expect(store.reserveDispatch).not.toHaveBeenCalled();
+        expect(store.markDispatched).toHaveBeenCalledWith(expect.objectContaining({
+            generation: reservation.generation,
+            reservationToken: reservation.reservationToken,
+        }));
     });
 
     it('accepts only the verified configured task service account', async () => {

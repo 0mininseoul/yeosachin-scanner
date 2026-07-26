@@ -21,6 +21,7 @@ import type {
 } from './v2-job-store';
 import { AnalysisV2JobFenceError } from './v2-job-store';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
+import { AnalysisV2SchedulerContinuationError } from './v2-ai-scheduler-continuation';
 import {
     ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS,
     ANALYSIS_V2_JOB_MAX_ATTEMPTS,
@@ -140,6 +141,18 @@ function store(
         deferAiCapacity: vi.fn(async () => ({
             released: true,
             status: 'pending' as const,
+            attemptCount: claimed.attemptCount - 1,
+            requestStatus: 'processing',
+        })),
+        continueScheduler: vi.fn(async () => ({
+            requestId: claimed.requestId,
+            jobKey: claimed.jobKey,
+            reserved: true,
+            generation: claimed.generation + 1,
+            reservationToken,
+            status: 'pending' as const,
+            dispatchState: 'reserved' as const,
+            taskName: null,
             attemptCount: claimed.attemptCount - 1,
             requestStatus: 'processing',
         })),
@@ -1170,6 +1183,66 @@ describe('analysis V2 durable DAG worker', () => {
         expect(jobStore.deferAiCapacity).toHaveBeenCalledWith(claimed, code);
         expect(jobStore.releaseClaim).not.toHaveBeenCalled();
         expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+    });
+
+    it('atomically continues scheduler admission without returning a Cloud Tasks retry', async () => {
+        const claimed = { ...bootstrapClaim, attemptCount: 3 };
+        const jobStore = store(claimed);
+        const dispatchReservedContinuation = vi.fn().mockRejectedValue(
+            new Error('queue temporarily unavailable')
+        );
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new AnalysisV2SchedulerContinuationError(
+                    'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+                );
+            },
+            dispatchReservedContinuation,
+        })).resolves.toEqual({
+            status: 'continuation',
+            errorCode: 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+            pendingRecoveryCount: 1,
+        });
+        expect(jobStore.continueScheduler).toHaveBeenCalledWith(
+            claimed,
+            'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+            1,
+        );
+        expect(dispatchReservedContinuation).toHaveBeenCalledOnce();
+        expect(jobStore.deferAiCapacity).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it('reports no pending recovery after a delayed continuation is enqueued', async () => {
+        const claimed = { ...bootstrapClaim, attemptCount: 3 };
+        const jobStore = store(claimed);
+        const dispatchReservedContinuation = vi.fn().mockResolvedValue('enqueued');
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new AnalysisV2SchedulerContinuationError(
+                    'ANALYSIS_V2_AI_CAPACITY_PENDING',
+                    37,
+                );
+            },
+            dispatchReservedContinuation,
+        })).resolves.toEqual({
+            status: 'continuation',
+            errorCode: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            pendingRecoveryCount: 0,
+        });
+        expect(dispatchReservedContinuation).toHaveBeenCalledWith(
+            expect.any(Object),
+            37,
+        );
+        expect(jobStore.continueScheduler).toHaveBeenCalledWith(
+            claimed,
+            'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            37,
+        );
     });
 
     it('defers a resolver recovery race and resumes after durable recovery settles it', async () => {

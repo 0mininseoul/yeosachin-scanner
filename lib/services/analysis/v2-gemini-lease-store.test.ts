@@ -179,6 +179,36 @@ describe('deployment-wide Gemini lease store', () => {
         );
     });
 
+    it('uses deployment-wide scheduler-stage admission only for v2.8 scheduled stages', async () => {
+        const operationKey = `feature-analysis:${'b'.repeat(64)}`;
+        const { rpc, store } = setup([{
+            outcome: 'acquired',
+            slot: 2,
+            lease_claim_token: claimToken,
+            fence: 9,
+            expires_at: expiresAt,
+        }]);
+
+        await expect(store.acquire({
+            ...input(),
+            operationKey,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+        })).resolves.toMatchObject({
+            operationKey,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc,
+            expect.objectContaining({
+                p_request_id: requestId,
+                p_operation_key: operationKey,
+                p_stage: 'featureAnalysis',
+            })
+        );
+    });
+
     it('maps resolver-only deployment capacity to an internal skip signal', async () => {
         const { store } = setup([{
             outcome: 'resolver_capacity_pending',

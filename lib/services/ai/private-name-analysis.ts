@@ -256,6 +256,26 @@ function privateNameChunkIdentity(
     });
 }
 
+/**
+ * Returns the durable identity used by the single private-name chunk owned by one V2 DAG job.
+ * Scheduler callers use this before admission; the provider path derives the same identity again
+ * and the audit sink rejects any drift.
+ */
+export function createPrivateNameBatchIdentity(
+    rawAccounts: readonly PrivateNameAccountInput[],
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+): PrivateNameAnalysisChunkIdentity {
+    const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
+    if (accounts.length < 1 || accounts.length > PRIVATE_NAME_BATCH_SIZE) {
+        throw new Error('ANALYSIS_V2_PRIVATE_NAME_SCHEDULER_BATCH_INVALID');
+    }
+    return privateNameChunkIdentity(
+        buildPrivateNamePrompt(accounts),
+        0,
+        policyVersion,
+    );
+}
+
 function chunkAuditSink(
     audit: PrivateNameAnalysisAudit | undefined,
     prompt: string,

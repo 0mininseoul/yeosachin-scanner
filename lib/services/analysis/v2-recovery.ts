@@ -23,6 +23,10 @@ import {
     type EarlybirdFulfillmentRecoverySummary,
 } from '@/lib/services/earlybird/fulfillment-store';
 import { analysisV2GeminiLeaseStore } from './v2-gemini-lease-store';
+import {
+    reapAnalysisV2SchedulerGeminiLeases,
+    recoverAnalysisV2SchedulerOperations,
+} from './v2-ai-scheduler-operation-store';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -43,6 +47,8 @@ export interface AnalysisV2RecoverySummary {
     fulfillmentsFailed: number;
     geminiCutoffAttemptsRecovered: number;
     geminiCutoffLeasesReaped: number;
+    schedulerOperationsRecovered: number;
+    schedulerGeminiLeasesReaped: number;
 }
 
 type RecoveryLookup = (job: {
@@ -58,6 +64,8 @@ type ProviderUsageReconciliation = () => Promise<AnalysisV2ProviderReconciliatio
 type FulfillmentRecovery = () => Promise<EarlybirdFulfillmentRecoverySummary>;
 type GeminiCutoffAttemptRecovery = () => Promise<number>;
 type GeminiCutoffLeaseReaper = () => Promise<number>;
+type SchedulerOperationRecovery = () => Promise<number>;
+type SchedulerGeminiLeaseReaper = () => Promise<number>;
 
 type RecoveryOutcome =
     | 'dispatched'
@@ -156,6 +164,8 @@ export async function recoverAnalysisV2Jobs(
         recoverFulfillments?: FulfillmentRecovery;
         recoverGeminiCutoffAttempts?: GeminiCutoffAttemptRecovery;
         reapGeminiCutoffLeases?: GeminiCutoffLeaseReaper;
+        recoverSchedulerOperations?: SchedulerOperationRecovery;
+        reapSchedulerGeminiLeases?: SchedulerGeminiLeaseReaper;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -187,6 +197,8 @@ export async function recoverAnalysisV2Jobs(
         fulfillmentsFailed: 0,
         geminiCutoffAttemptsRecovered: 0,
         geminiCutoffLeasesReaped: 0,
+        schedulerOperationsRecovered: 0,
+        schedulerGeminiLeasesReaped: 0,
     };
     try {
         summary.geminiCutoffAttemptsRecovered = await (
@@ -200,6 +212,22 @@ export async function recoverAnalysisV2Jobs(
         summary.geminiCutoffLeasesReaped = await (
             dependencies.reapGeminiCutoffLeases
             ?? (() => analysisV2GeminiLeaseStore.reapCutoff({ limit: 8 }))
+        )();
+    } catch {
+        summary.failed += 1;
+    }
+    try {
+        summary.schedulerOperationsRecovered = await (
+            dependencies.recoverSchedulerOperations
+            ?? (() => recoverAnalysisV2SchedulerOperations({ limit: 8 }))
+        )();
+    } catch {
+        summary.failed += 1;
+    }
+    try {
+        summary.schedulerGeminiLeasesReaped = await (
+            dependencies.reapSchedulerGeminiLeases
+            ?? (() => reapAnalysisV2SchedulerGeminiLeases({ limit: 8 }))
         )();
     } catch {
         summary.failed += 1;

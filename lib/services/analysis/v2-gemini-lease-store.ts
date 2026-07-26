@@ -24,6 +24,7 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     table: 'analysis_v2_gemini_leases',
     acquireRpc: 'acquire_analysis_v2_gemini_lease',
     acquireV2Rpc: 'acquire_analysis_v2_gemini_lease_v2',
+    acquireSchedulerV1Rpc: 'acquire_analysis_v2_scheduler_gemini_lease_v1',
     renewRpc: 'renew_analysis_v2_gemini_lease',
     renewV2Rpc: 'renew_analysis_v2_gemini_lease_v2',
     releaseRpc: 'release_analysis_v2_gemini_lease',
@@ -253,8 +254,17 @@ export function createAnalysisV2GeminiLeaseStore(
             }
             const usesV2 = input.data.aiStagePolicyVersion !== undefined
                 && aiStagePolicySupports(input.data.aiStagePolicyVersion, 'durableGeminiLease');
+            const usesSchedulerV1Admission =
+                input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V28_VERSION
+                && (
+                    input.data.stage === 'genderTriage'
+                    || input.data.stage === 'featureAnalysis'
+                    || input.data.stage === 'privateAccountName'
+                );
             const { data, error } = await dependencies.rpc(
-                usesV2
+                usesSchedulerV1Admission
+                    ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc
+                    : usesV2
                     ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireV2Rpc
                     : ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireRpc,
                 usesV2 ? {

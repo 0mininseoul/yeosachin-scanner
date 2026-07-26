@@ -60,7 +60,13 @@ import {
 import { prepareAnalysisV2ProviderRunsForTerminalFailure } from './v2-provider-lifecycle';
 import { analysisV2ProviderRunStore } from './v2-provider-run-store';
 import { getAnalysisV2ProductionExecutorRegistry } from './v2-production-executors';
-import { dispatchAnalysisV2Job } from './v2-tasks';
+import {
+    dispatchAnalysisV2Job,
+    dispatchReservedAnalysisV2Job,
+} from './v2-tasks';
+import {
+    AnalysisV2SchedulerContinuationError,
+} from './v2-ai-scheduler-continuation';
 import {
     ANALYSIS_V2_GENERIC_JOB_FAILURE_CODE,
     isAnalysisV2WorkerErrorCode,
@@ -175,6 +181,11 @@ export type AnalysisV2WorkerOutcome =
     | Readonly<{ status: 'already_terminal' }>
     | Readonly<{ status: 'retry'; errorCode: string }>
     | Readonly<{ status: 'failed'; errorCode: string }>
+    | Readonly<{
+        status: 'continuation';
+        errorCode: AnalysisV2AiAdmissionErrorCode;
+        pendingRecoveryCount: number;
+    }>
     | Readonly<{
         status: 'completed';
         successorCount: number;
@@ -901,6 +912,10 @@ export async function processAnalysisV2TaskDelivery(
         aiPolicyStore?: AnalysisV2AiPolicyStore;
         handler?: AnalysisV2JobHandler;
         dispatch?: AnalysisV2JobDispatcher;
+        dispatchReservedContinuation?: (
+            reservation: Awaited<ReturnType<AnalysisV2JobStore['continueScheduler']>>,
+            delaySeconds: number,
+        ) => Promise<unknown>;
         terminalFailureFinalizer?: AnalysisV2TerminalFailureFinalizer;
         terminalMediaCleanup?: AnalysisV2TerminalMediaCleanup;
         terminalFailureIntentLoader?: AnalysisV2TerminalFailureIntentLoader;
@@ -950,6 +965,32 @@ export async function processAnalysisV2TaskDelivery(
     try {
         successors = await handler(claim);
     } catch (error) {
+        if (error instanceof AnalysisV2SchedulerContinuationError) {
+            const reservation = await store.continueScheduler(
+                claim,
+                error.reason,
+                error.delaySeconds,
+            );
+            let pendingRecoveryCount = 0;
+            try {
+                await (
+                    dependencies.dispatchReservedContinuation
+                    ?? ((reserved, delaySeconds) => dispatchReservedAnalysisV2Job(
+                        reserved,
+                        { delaySeconds },
+                    ))
+                )(reservation, error.delaySeconds);
+            } catch {
+                // The atomic reservation remains redispatchable. Recovery will replay the same
+                // deterministic generation/task identity without re-opening provider admission.
+                pendingRecoveryCount = 1;
+            }
+            return Object.freeze({
+                status: 'continuation',
+                errorCode: error.reason,
+                pendingRecoveryCount,
+            });
+        }
         const failure = classifyAnalysisV2JobFailure(error);
         if (failure.disposition === 'fence') {
             throw new AnalysisV2JobFenceError();

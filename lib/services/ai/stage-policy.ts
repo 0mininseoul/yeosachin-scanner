@@ -134,18 +134,25 @@ const AI_STAGE_POLICIES_V27 = Object.freeze({
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
 /**
- * Keep the v2.7 objects and their prompt metadata untouched. v2.8 versions only prompts whose
- * bytes changed; all scheduling, model choices, schemas, and thresholds inherit from v2.7.
+ * V2.8 retains its intended copy-prompt updates while keeping the v2.7 policy metadata intact.
+ * Its scheduler-managed provider caps match scheduler-v1 exactly, so an admitted operation never
+ * waits in a hidden stage queue.
  */
 const AI_STAGE_POLICIES_V28 = Object.freeze({
     ...AI_STAGE_POLICIES_V27,
     genderTriage: Object.freeze({
         ...AI_STAGE_POLICIES_V27.genderTriage,
         promptVersion: 'gender-triage-v3',
+        concurrency: 6,
     }),
     featureAnalysis: Object.freeze({
         ...AI_STAGE_POLICIES_V27.featureAnalysis,
+        concurrency: 3,
         promptVersion: 'feature-analysis-v4',
+    }),
+    privateAccountName: Object.freeze({
+        ...AI_STAGE_POLICIES_V27.privateAccountName,
+        concurrency: 2,
     }),
     highRiskNarrative: Object.freeze({
         ...AI_STAGE_POLICIES_V27.highRiskNarrative,

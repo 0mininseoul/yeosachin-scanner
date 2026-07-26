@@ -16,7 +16,10 @@ function operationStore<T = string>(
                 decision: 'ready' as const,
                 value: key as T,
             };
-            if (state === 'claimed') return { decision: 'ambiguous' as const };
+            if (state === 'claimed') return {
+                decision: 'deferred' as const,
+                notBeforeAtMs: 360_000,
+            };
             states.set(key, 'claimed');
             return { decision: 'execute' as const, claimToken: `claim:${key}` };
         }),
@@ -179,7 +182,7 @@ describe('analysis V2 scheduler-v1 runtime', () => {
             capability: 'scheduler-v1',
             tasks: [task('waiting', 'featureAnalysis', 0, waitingPaidCall)],
             operationStore: operationStore(),
-            handlerDeadlineAtMs: 75_050,
+            handlerDeadlineAtMs: 225_050,
             nowMs: () => performance.now() - startedAt,
         });
         const elapsedMs = performance.now() - startedAt;
@@ -227,7 +230,7 @@ describe('analysis V2 scheduler-v1 runtime', () => {
             capability: 'scheduler-v1',
             tasks: [task('race:waiting', 'featureAnalysis', 0, paidCall)],
             operationStore: operationStore(),
-            handlerDeadlineAtMs: 75_500,
+            handlerDeadlineAtMs: 225_500,
             nowMs: () => performance.now() - startedAt,
             onBeforeArbiterWait: beforeWait,
         });
@@ -256,6 +259,73 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         expect(started.slice(0, 6)).toEqual(['g0', 'f0', 'g1', 'f1', 'g2', 'f2']);
     });
 
+    it('fairly arbitrates stages across concurrent scheduler invocations', async () => {
+        const releases = new Map<string, () => void>();
+        const held = (key: string) => vi.fn(async () => {
+            await new Promise<void>(resolve => releases.set(key, resolve));
+            return key;
+        });
+        const blockers = [
+            ...Array.from({ length: 6 }, (_, index) => task(
+                `fair-held:g${index}`,
+                'genderTriage',
+                index,
+                held(`g${index}`),
+            )),
+            ...Array.from({ length: 2 }, (_, index) => task(
+                `fair-held:p${index}`,
+                'privateAccountName',
+                20 + index,
+                held(`p${index}`),
+            )),
+        ];
+        const blockerExecution = runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: blockers,
+            operationStore: operationStore(),
+            handlerDeadlineAtMs: 1_000_000,
+            nowMs: () => 0,
+        });
+        await vi.waitFor(() => expect(releases.size).toBe(8));
+
+        const started: string[] = [];
+        const waiting = (
+            key: string,
+            stage: AnalysisV2SchedulerTask<string>['stage'],
+        ) => runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: [task(key, stage, 0, vi.fn(async () => {
+                started.push(key);
+                return key;
+            }))],
+            operationStore: operationStore(),
+            handlerDeadlineAtMs: 1_000_000,
+            nowMs: () => 0,
+        });
+        const feature = waiting('fair-feature', 'featureAnalysis');
+        await Promise.resolve();
+        const privateName = waiting('fair-private', 'privateAccountName');
+        await Promise.resolve();
+        const gender = waiting('fair-gender', 'genderTriage');
+        await Promise.resolve();
+
+        try {
+            releases.get('g0')!();
+            await vi.waitFor(() => expect(started[0]).toBe('fair-feature'));
+            releases.get('p0')!();
+            await vi.waitFor(() => expect(started).toContain('fair-private'));
+            expect(started.indexOf('fair-feature')).toBeLessThan(
+                started.indexOf('fair-gender'),
+            );
+            await Promise.all([feature, privateName, gender]);
+        } finally {
+            [...releases.entries()]
+                .filter(([key]) => !['g0', 'p0'].includes(key))
+                .forEach(([, release]) => release());
+            await blockerExecution;
+        }
+    });
+
     it('returns a successful continuation before the admission reserve and resumes without repeating committed work', async () => {
         let now = 0;
         const store = operationStore();
@@ -263,7 +333,7 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         const second = task('second', 'featureAnalysis', 1);
         const initial = await runAnalysisV2FairAiScheduler({
             capability: 'scheduler-v1', tasks: [first, second], operationStore: store,
-            handlerDeadlineAtMs: 75_000, nowMs: () => now,
+            handlerDeadlineAtMs: 225_000, nowMs: () => now,
         });
         expect(initial).toMatchObject({ status: 'continuation', remainingKeys: ['first', 'second'] });
         expect(first.run).not.toHaveBeenCalled();
@@ -308,8 +378,46 @@ describe('analysis V2 scheduler-v1 runtime', () => {
             operationStore: store,
             handlerDeadlineAtMs: 1_000_000,
             nowMs: () => 0,
-        })).rejects.toThrow('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+        })).resolves.toMatchObject({
+            status: 'continuation',
+            remainingKeys: ['paid'],
+            recoveryPendingKeys: ['paid'],
+        });
         expect(paidCall).toHaveBeenCalledOnce();
+    });
+
+    it('uses only checkpoint recovery when the durable claim proves a result exists', async () => {
+        const run = vi.fn(async () => 'paid');
+        const recover = vi.fn(async () => 'checkpoint');
+        const commitReady = vi.fn();
+        const result = await runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: [{
+                ...task('recoverable', 'genderTriage', 0, run),
+                recover,
+            }],
+            operationStore: {
+                claim: vi.fn(async () => ({
+                    decision: 'execute' as const,
+                    claimToken: 'recovery-claim',
+                    recoveryOnly: true,
+                })),
+                commitReady,
+            },
+            handlerDeadlineAtMs: 1_000_000,
+            nowMs: () => 0,
+        });
+
+        expect(result).toMatchObject({
+            status: 'completed',
+            completed: [{ key: 'recoverable', value: 'checkpoint' }],
+        });
+        expect(run).not.toHaveBeenCalled();
+        expect(recover).toHaveBeenCalledOnce();
+        expect(commitReady).toHaveBeenCalledWith(expect.objectContaining({
+            claimToken: 'recovery-claim',
+            value: 'checkpoint',
+        }));
     });
 
     it('keeps returned output in topology order even when provider completion is inverted', async () => {

@@ -94,11 +94,27 @@ import {
 } from './v2-official-account-screening';
 
 const PROFILE_BATCH_JOB_PREFIX = 'track:profiles:batch:';
-const MAX_PROFILE_AI_CONCURRENCY = 4;
+const LEGACY_MAX_PROFILE_AI_CONCURRENCY = 4;
+const SCHEDULER_V1_PROFILE_PIPELINE_CONCURRENCY = 6;
 const MAX_PARTNER_SAFETY_CONCURRENCY = 3;
 const MAX_NARRATIVE_CONCURRENCY = 3;
 const REVERSE_LIKE_LIMIT = 100;
 export const ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS = 2;
+
+export function analysisV2ProfilePipelineConcurrency(
+    aiStagePolicyVersion: string,
+    schedulerCapability: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>[
+        'schedulerCapability'
+    ],
+    configured?: number,
+): number {
+    return configured ?? (
+        aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        && schedulerCapability === 'scheduler-v1'
+            ? SCHEDULER_V1_PROFILE_PIPELINE_CONCURRENCY
+            : LEGACY_MAX_PROFILE_AI_CONCURRENCY
+    );
+}
 
 export type AnalysisV2ProfileAiTerminalStatus =
     | 'verified_female'
@@ -1248,6 +1264,7 @@ function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSub
     return {
         ...checkpointClaim(context),
         aiStagePolicyVersion: context.aiStagePolicyVersion,
+        schedulerCapability: context.schedulerCapability,
         handlerDeadlineAtMs: context.handlerDeadlineAtMs,
     };
 }
@@ -1323,8 +1340,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
 ): AnalysisV2StageExecutorRegistry {
     const createContactSheet = dependencies.createContactSheet
         ?? createPartnerSafetyContactSheet;
-    const profileConcurrency = dependencies.profileAiConcurrency
-        ?? MAX_PROFILE_AI_CONCURRENCY;
+    const configuredProfileConcurrency = dependencies.profileAiConcurrency;
     const partnerConcurrency = dependencies.partnerSafetyConcurrency
         ?? MAX_PARTNER_SAFETY_CONCURRENCY;
     const narrativeConcurrency = dependencies.narrativeConcurrency
@@ -1355,6 +1371,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 throw new Error('ANALYSIS_V2_PROFILE_AI_ITEM_COUNT_DRIFT');
             }
             const aiFence = aiJobFence(context);
+            const profileConcurrency = analysisV2ProfilePipelineConcurrency(
+                aiFence.aiStagePolicyVersion,
+                aiFence.schedulerCapability,
+                configuredProfileConcurrency,
+            );
             const genderResolutionEnabled = policySupports(
                 aiFence.aiStagePolicyVersion,
                 'genderResolution',

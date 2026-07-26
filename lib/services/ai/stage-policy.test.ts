@@ -202,14 +202,15 @@ describe('V2 AI stage policy', () => {
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
             promptVersion: 'feature-analysis-v4',
-            concurrency: 4,
+            concurrency: 3,
         });
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'genderTriage')).toMatchObject({
             model: 'gemini-3.1-flash-lite',
             promptVersion: 'gender-triage-v3',
             schemaVersion: 2,
-            concurrency: 4,
+            concurrency: 6,
         });
+        expect(getAiStagePolicy('ai-stage-policy-v2.8', 'privateAccountName').concurrency).toBe(2);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'highRiskNarrative')).toMatchObject({
             promptVersion: 'high-risk-narrative-v3',
             concurrency: 3,

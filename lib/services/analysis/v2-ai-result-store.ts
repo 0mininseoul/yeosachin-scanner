@@ -24,7 +24,10 @@ import {
     type AnalysisV2GeminiLease,
     type AnalysisV2GeminiLeaseStore,
 } from '@/lib/services/analysis/v2-gemini-lease-store';
-import { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-fallback-policy';
+import {
+    AnalysisV2AiResultRateLimitExhaustedError,
+    AnalysisV2AiTerminalUnavailableError,
+} from './v2-ai-fallback-policy';
 import { z } from 'zod';
 
 export { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-fallback-policy';
@@ -378,6 +381,10 @@ export interface CreateAnalysisV2AiAuditAdapterOptions<T> {
     resultStore?: AnalysisV2AiResultStore;
     leaseStore?: AnalysisV2GeminiLeaseStore;
     handlerDeadlineAtMs?: number;
+    /** A scheduler recovery may read checkpoints but can never reserve a new paid attempt. */
+    schedulerRecoveryOnly?: boolean;
+    /** A bounded scheduler recovery expired; force the stage's deterministic safe fallback. */
+    schedulerTerminalUnavailable?: boolean;
 }
 
 export class AnalysisV2AiResultConflictError extends Error {
@@ -1188,7 +1195,11 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 const last = attempts.at(-1);
                 const resolverReplay = resultIdentity.stage === 'genderResolution'
                     && aiStagePolicySupports(aiStagePolicyVersion, 'genderResolution');
-                if (last?.status === 'reserved' && resolverReplay) {
+                if (options.schedulerTerminalUnavailable) {
+                    terminal = true;
+                    throw new AnalysisV2AiTerminalUnavailableError();
+                }
+                if (last?.status === 'reserved' || last?.status === 'ambiguous') {
                     throw new AnalysisV2AiResultRecoveryPendingError();
                 }
                 if (last?.status === 'cutoff' && resolverReplay) {
@@ -1231,6 +1242,9 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     }
                 }
 
+                if (options.schedulerRecoveryOnly) {
+                    throw new AnalysisV2AiResultRecoveryPendingError();
+                }
                 if (!last) {
                     expectedAttempt = 1;
                 } else if (last.status === 'rate_limited' && last.attempt < 4) {

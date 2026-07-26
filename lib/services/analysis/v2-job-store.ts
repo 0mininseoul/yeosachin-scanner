@@ -22,6 +22,7 @@ export const ANALYSIS_V2_DATABASE_NAMES = Object.freeze({
     claimRpc: 'claim_analysis_v2_job',
     deferTerminalCleanupRpc: 'defer_analysis_v2_terminal_cleanup',
     deferAiCapacityRpc: 'defer_analysis_v2_job_for_ai_capacity',
+    continueSchedulerRpc: 'continue_analysis_v2_scheduler_job',
     releaseClaimRpc: 'release_analysis_v2_job_claim',
     completeAndFanoutRpc: 'complete_analysis_v2_job_and_fanout',
     listDispatchableRpc: 'list_analysis_v2_dispatchable_jobs',
@@ -143,6 +144,14 @@ export interface AnalysisV2JobStore {
         claim: ClaimedAnalysisV2Job,
         errorCode: AnalysisV2AiAdmissionErrorCode
     ): Promise<AnalysisV2JobReleaseResult>;
+    continueScheduler(
+        claim: ClaimedAnalysisV2Job,
+        errorCode: AnalysisV2AiAdmissionErrorCode,
+        delaySeconds: number,
+    ): Promise<AnalysisV2JobDispatchReservation & {
+        attemptCount: number;
+        requestStatus: string;
+    }>;
     releaseClaim(claim: ClaimedAnalysisV2Job, failure?: {
         errorCode?: string | null;
         retryable?: boolean;
@@ -759,6 +768,63 @@ export function createSupabaseAnalysisV2JobStore(
                 attemptCount,
                 requestStatus,
             };
+        },
+
+        async continueScheduler(claim, errorCode, delaySeconds) {
+            const identity = assertAnalysisV2JobIdentity(claim);
+            if (![
+                'ANALYSIS_V2_AI_CAPACITY_PENDING',
+                'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+                'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+                'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+            ].includes(errorCode)) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid scheduler continuation code.'
+                );
+            }
+            if (
+                !Number.isSafeInteger(delaySeconds)
+                || delaySeconds < 1
+                || delaySeconds > 300
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid scheduler continuation delay.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_DATABASE_NAMES.continueSchedulerRpc,
+                {
+                    p_request_id: identity.requestId,
+                    p_job_key: identity.jobKey,
+                    p_claim_token: requiredUuid(claim.claimToken, 'claim token'),
+                    p_dispatch_token: randomUUID(),
+                    p_error_code: errorCode,
+                    p_delay_seconds: delaySeconds,
+                }
+            );
+            if (error) throwRpcError(error, 'scheduler continuation');
+            const row = singleRpcRow(data, 'scheduler continuation');
+            const reservation = reservationFromRow(row, identity);
+            const attemptCount = requiredSafeInteger(
+                row.attempt_count,
+                'attempt count',
+                0,
+                100
+            );
+            const requestStatus = row.request_status;
+            if (
+                !reservation.reserved
+                || reservation.status !== 'pending'
+                || reservation.dispatchState !== 'reserved'
+                || reservation.taskName !== null
+                || attemptCount !== claim.attemptCount - 1
+                || requestStatus !== 'processing'
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_PERSISTENCE_ERROR: invalid scheduler continuation.'
+                );
+            }
+            return { ...reservation, attemptCount, requestStatus };
         },
 
         async completeAndFanout(claim, successors) {

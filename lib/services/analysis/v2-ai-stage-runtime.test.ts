@@ -4,6 +4,7 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
+import type { GenderTriageInput } from '@/lib/services/ai/v2-staged-analysis';
 
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: vi.fn() },
@@ -16,6 +17,7 @@ import {
     AnalysisV2AiResultRecoveredCutoffError,
     AnalysisV2AiResultRecoveryPendingError,
 } from './v2-ai-result-store';
+import type { AnalysisV2SchedulerRuntimeOptions } from './v2-ai-scheduler-runtime';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -417,5 +419,85 @@ describe('durable V2 AI stage runtime', () => {
         expect(analyzed.operationKey).toMatch(/^private-account-name:[a-f0-9]{64}$/);
         expect(analyzed.resultHash).toMatch(/^[a-f0-9]{64}$/);
         expect(cached.beforeAttempt).not.toHaveBeenCalled();
+    });
+
+    it('microbatches concurrent v2.8 gender operations behind one durable scheduler', async () => {
+        const runGender = vi.fn(async (input: GenderTriageInput) => ({
+            assessment: {
+                inferredGender: 'unknown' as const,
+                confidence: 'low' as const,
+                ownerConsistency: 'not_visible' as const,
+                evidenceSelectionIds: [],
+            },
+            routingDecision: 'route_to_feature_analysis' as const,
+            routingReason: 'conserve_female_recall' as const,
+            analyzedSelectionIds: input.media.map(item => item.selectionId),
+        }));
+        const schedulerCalls: AnalysisV2SchedulerRuntimeOptions<unknown>[] = [];
+        const runScheduler = vi.fn(async (
+            options: AnalysisV2SchedulerRuntimeOptions<unknown>,
+        ) => {
+            schedulerCalls.push(options);
+            const completed = await Promise.all(options.tasks.map(async item => ({
+                key: item.key,
+                stage: item.stage,
+                value: await item.run(),
+            })));
+            return {
+                status: 'completed' as const,
+                completed,
+                remainingKeys: [],
+                recoveryPendingKeys: [],
+                continuationDelayMs: 1_000,
+            };
+        });
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            runGender,
+            runScheduler: runScheduler as typeof import(
+                './v2-ai-scheduler-runtime'
+            ).runAnalysisV2FairAiScheduler,
+            createSchedulerOperationStore: vi.fn(() => ({
+                claim: vi.fn(),
+                commitReady: vi.fn(),
+            })) as typeof import(
+                './v2-ai-scheduler-operation-store'
+            ).createAnalysisV2SchedulerOperationStore,
+            createAudit: vi.fn(options => ({
+                requestId: options.requestId,
+                operationKey: options.resultIdentity.operationKey,
+                resultIdentity: options.resultIdentity,
+                resultSchema: options.resultSchema,
+                prepare: vi.fn(),
+                onBeforeAttempt: vi.fn(),
+                onAttemptTelemetry: vi.fn(),
+            })),
+        });
+        const scheduledFence = {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION,
+            schedulerCapability: 'scheduler-v1' as const,
+            handlerDeadlineAtMs: performance.now() + 300_000,
+        };
+        const media = (suffix: string) => ({
+            media: [{
+                selectionId: `profile:${suffix}`,
+                kind: 'profile' as const,
+                normalizedJpegBase64: '/9j/2Q==',
+            }],
+        });
+
+        const [first, second] = await Promise.all([
+            runtime.gender(media('first'), scheduledFence),
+            runtime.gender(media('second'), scheduledFence),
+        ]);
+
+        expect(schedulerCalls).toHaveLength(1);
+        expect(schedulerCalls[0]!.tasks).toHaveLength(2);
+        expect(schedulerCalls[0]!.tasks.every(item => (
+            typeof item.recover === 'function'
+            && typeof item.terminalFallback === 'function'
+        ))).toBe(true);
+        expect(runGender).toHaveBeenCalledTimes(2);
+        expect(first.operationKey).not.toBe(second.operationKey);
     });
 });

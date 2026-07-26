@@ -52,6 +52,7 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
         claim: vi.fn(),
         deferTerminalCleanup: vi.fn(),
         deferAiCapacity: vi.fn(),
+        continueScheduler: vi.fn(),
         releaseClaim: vi.fn(),
         completeAndFanout: vi.fn(),
         listDispatchable: vi.fn(async () => jobs),
@@ -62,6 +63,8 @@ function providerRecovery() {
     return {
         recoverGeminiCutoffAttempts: vi.fn(async () => 0),
         reapGeminiCutoffLeases: vi.fn(async () => 0),
+        recoverSchedulerOperations: vi.fn(async () => 0),
+        reapSchedulerGeminiLeases: vi.fn(async () => 0),
         recoverFulfillments: vi.fn(async () => ({
             reconciled: {
                 scanned: 0,
@@ -122,6 +125,8 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsFailed: 0,
             geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
+            schedulerOperationsRecovered: 0,
+            schedulerGeminiLeasesReaped: 0,
         });
         expect(dispatch).toHaveBeenCalledTimes(2);
         expect(jobStore.deferRecovery).toHaveBeenCalledWith({
@@ -254,6 +259,8 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsFailed: 0,
             geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
+            schedulerOperationsRecovered: 0,
+            schedulerGeminiLeasesReaped: 0,
         });
     });
 
@@ -294,6 +301,8 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsFailed: 0,
             geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
+            schedulerOperationsRecovered: 0,
+            schedulerGeminiLeasesReaped: 0,
         });
         expect(cleanupProviderRuns).toHaveBeenCalledOnce();
         expect(reconcileProviderUsage).toHaveBeenCalledOnce();
@@ -344,6 +353,25 @@ describe('analysis V2 dispatch recovery', () => {
         expect(reapGeminiCutoffLeases).toHaveBeenCalledOnce();
         expect(recoverGeminiCutoffAttempts).toHaveBeenCalledBefore(
             reapGeminiCutoffLeases
+        );
+    });
+
+    it('terminalizes expired scheduler operations before reaping their leases', async () => {
+        const recoverSchedulerOperations = vi.fn(async () => 2);
+        const reapSchedulerGeminiLeases = vi.fn(async () => 1);
+
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverSchedulerOperations,
+            reapSchedulerGeminiLeases,
+        })).resolves.toMatchObject({
+            failed: 0,
+            schedulerOperationsRecovered: 2,
+            schedulerGeminiLeasesReaped: 1,
+        });
+        expect(recoverSchedulerOperations).toHaveBeenCalledBefore(
+            reapSchedulerGeminiLeases,
         );
     });
 });

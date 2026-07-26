@@ -151,6 +151,29 @@ async function runWithGenerationSlot<T>(
         }
     }
 
+    if (
+        policyVersion === 'ai-stage-policy-v2.8'
+        && (
+            stage === 'genderTriage'
+            || stage === 'featureAnalysis'
+            || stage === 'privateAccountName'
+        )
+    ) {
+        const releaseStage = stageSemaphore.tryAcquire();
+        if (!releaseStage) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        const releaseShared = generationLimiterState.shared.tryAcquire();
+        if (!releaseShared) {
+            releaseStage();
+            throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        }
+        try {
+            return await task();
+        } finally {
+            releaseShared();
+            releaseStage();
+        }
+    }
+
     // Acquire the narrower stage slot first so queued stage work cannot occupy
     // otherwise-available shared capacity.
     return stageSemaphore.run(() => generationLimiterState.shared.run(task));
