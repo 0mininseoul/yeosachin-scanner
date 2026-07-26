@@ -13,7 +13,9 @@ describe('analysis V2 AI scheduler policy snapshot migration contract', () => {
         );
         expect(migration).toContain("p_snapshot ? 'scheduler'");
         expect(migration).toContain("p_snapshot->>'scheduler' IS DISTINCT FROM 'ai-scheduler-v1'");
-        expect(migration).toContain("p_snapshot - ARRAY['pipeline', 'risk', 'aiStage', 'scheduler'] <> '{}'::JSONB");
+        expect(migration).toContain('item_count > 16');
+        expect(migration).not.toContain("NOT (p_snapshot ?& ARRAY['pipeline', 'risk', 'aiStage'])");
+        expect(migration).not.toContain("p_snapshot - ARRAY['pipeline', 'risk', 'aiStage', 'scheduler']");
     });
 
     it('preserves the existing validator security boundary and grants', () => {

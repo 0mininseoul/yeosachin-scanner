@@ -13,9 +13,7 @@ BEGIN
     IF p_snapshot IS NULL
        OR pg_catalog.jsonb_typeof(p_snapshot) <> 'object'
        OR p_snapshot = '{}'::JSONB
-       OR pg_catalog.octet_length(p_snapshot::TEXT) > 8192
-       OR NOT (p_snapshot ?& ARRAY['pipeline', 'risk', 'aiStage'])
-       OR p_snapshot - ARRAY['pipeline', 'risk', 'aiStage', 'scheduler'] <> '{}'::JSONB THEN
+       OR pg_catalog.octet_length(p_snapshot::TEXT) > 8192 THEN
         RETURN FALSE;
     END IF;
 
@@ -26,7 +24,7 @@ BEGIN
 
     FOR item IN SELECT key, value FROM pg_catalog.jsonb_each(p_snapshot) LOOP
         item_count := item_count + 1;
-        IF item_count > 4
+        IF item_count > 16
            OR item.key !~ '^[A-Za-z][A-Za-z0-9._:-]{0,63}$'
            OR pg_catalog.jsonb_typeof(item.value) <> 'string'
            OR pg_catalog.char_length(item.value #>> '{}') < 1

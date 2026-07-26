@@ -38,6 +38,16 @@ describe('analysis V2 AI scheduler policy snapshot validator', () => {
         expect(await validates(legacySnapshot)).toBe(true);
     });
 
+    it('preserves generic historical one-key and arbitrary-key snapshots', async () => {
+        expect(await validates({ legacyPolicy: 'v1' })).toBe(true);
+        expect(await validates({
+            pipeline: 'v2',
+            risk: 'risk-policy-v2.4',
+            aiStage: 'ai-stage-policy-v2.7',
+            futurePolicy: 'v1',
+        })).toBe(true);
+    });
+
     it('accepts only the exact optional scheduler value', async () => {
         expect(await validates({ ...legacySnapshot, scheduler: 'ai-scheduler-v1' })).toBe(true);
         expect(await validates({ ...legacySnapshot, scheduler: 'ai-scheduler-v2' })).toBe(false);
@@ -45,7 +55,4 @@ describe('analysis V2 AI scheduler policy snapshot validator', () => {
         expect(await validates({ ...legacySnapshot, scheduler: { version: 'ai-scheduler-v1' } })).toBe(false);
     });
 
-    it('rejects unknown policy fields', async () => {
-        expect(await validates({ ...legacySnapshot, futurePolicy: 'v1' })).toBe(false);
-    });
 });

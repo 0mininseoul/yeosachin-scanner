@@ -5,6 +5,19 @@ export type AiSchedulerPolicyRolloutMode = 'off' | 'test_entitlement' | 'product
 export type AiSchedulerPolicyAccessMode = 'test_entitlement' | 'production';
 export type AiSchedulerCapability = 'legacy' | 'scheduler-v1';
 
+const APPLICATION_POLICY_KEYS = Object.freeze([
+    'pipeline',
+    'risk',
+    'aiStage',
+    'scheduler',
+] as const);
+const REQUIRED_APPLICATION_POLICY_KEYS = Object.freeze([
+    'pipeline',
+    'risk',
+    'aiStage',
+] as const);
+const POLICY_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
 export function selectAiSchedulerPolicyVersion({
     rolloutMode,
     accessMode,
@@ -25,7 +38,21 @@ export function parseAiSchedulerPolicySnapshot(snapshot: unknown): Readonly<{
     if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
         throw new Error('Invalid AI scheduler policy snapshot');
     }
-    const scheduler = (snapshot as Record<string, unknown>).scheduler;
+    const record = snapshot as Record<string, unknown>;
+    const keys = Object.keys(record);
+    if (
+        keys.some(key => !APPLICATION_POLICY_KEYS.includes(
+            key as typeof APPLICATION_POLICY_KEYS[number]
+        ))
+        || REQUIRED_APPLICATION_POLICY_KEYS.some(key => (
+            !Object.prototype.hasOwnProperty.call(record, key)
+            || typeof record[key] !== 'string'
+            || !POLICY_VERSION_PATTERN.test(record[key])
+        ))
+    ) {
+        throw new Error('Invalid AI scheduler policy snapshot');
+    }
+    const scheduler = record.scheduler;
     if (scheduler === undefined) return Object.freeze({ capability: 'legacy' as const });
     if (scheduler === AI_SCHEDULER_POLICY_ID) {
         return Object.freeze({ capability: 'scheduler-v1' as const });

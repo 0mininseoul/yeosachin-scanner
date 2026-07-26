@@ -44,9 +44,44 @@ describe('AI scheduler policy', () => {
     });
 
     it('rejects unknown scheduler values', () => {
-        expect(() => parseAiSchedulerPolicySnapshot({ scheduler: 'ai-scheduler-v9' }))
+        const legacySnapshot = {
+            pipeline: 'v2',
+            risk: 'risk-policy-v2.4',
+            aiStage: 'ai-stage-policy-v2.7',
+        };
+        expect(() => parseAiSchedulerPolicySnapshot({
+            ...legacySnapshot,
+            scheduler: 'ai-scheduler-v9',
+        }))
             .toThrow('Unsupported AI scheduler policy version');
-        expect(() => parseAiSchedulerPolicySnapshot({ scheduler: null }))
+        expect(() => parseAiSchedulerPolicySnapshot({ ...legacySnapshot, scheduler: null }))
             .toThrow('Unsupported AI scheduler policy version');
+    });
+
+    it('rejects unexpected-only application snapshot keys', () => {
+        expect(() => parseAiSchedulerPolicySnapshot({ futurePolicy: 'v1' }))
+            .toThrow('Invalid AI scheduler policy snapshot');
+    });
+
+    it('rejects unexpected keys even with the valid scheduler policy', () => {
+        expect(() => parseAiSchedulerPolicySnapshot({
+            pipeline: 'v2',
+            risk: 'risk-policy-v2.4',
+            aiStage: 'ai-stage-policy-v2.7',
+            scheduler: 'ai-scheduler-v1',
+            futurePolicy: 'v1',
+        })).toThrow('Invalid AI scheduler policy snapshot');
+    });
+
+    it('requires the complete known application key shape and version strings', () => {
+        expect(() => parseAiSchedulerPolicySnapshot({
+            pipeline: 'v2',
+            aiStage: 'ai-stage-policy-v2.7',
+        })).toThrow('Invalid AI scheduler policy snapshot');
+        expect(() => parseAiSchedulerPolicySnapshot({
+            pipeline: 'v2',
+            risk: 'risk policy with spaces',
+            aiStage: 'ai-stage-policy-v2.7',
+        })).toThrow('Invalid AI scheduler policy snapshot');
     });
 });
