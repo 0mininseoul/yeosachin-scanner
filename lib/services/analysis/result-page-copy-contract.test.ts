@@ -10,6 +10,31 @@ const presentation = readFileSync(
     join(root, 'lib', 'services', 'analysis', 'owner-view-presentation.ts'),
     'utf8',
 );
+const globals = readFileSync(join(root, 'app', 'globals.css'), 'utf8');
+
+function relativeLuminance(hex: string): number {
+    const channels = [1, 3, 5].map(index => Number.parseInt(hex.slice(index, index + 2), 16) / 255);
+    const [red, green, blue] = channels.map(channel => (
+        channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+    ));
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function contrastRatio(foreground: string, background: string): number {
+    const values = [relativeLuminance(foreground), relativeLuminance(background)].sort((a, b) => b - a);
+    return (values[0] + 0.05) / (values[1] + 0.05);
+}
+
+function themeHex(name: string): string {
+    const match = globals.match(new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6})`, 'i'));
+    if (!match) throw new Error(`Missing theme color: ${name}`);
+    return match[1];
+}
+
+const compactSummary = resultPage.slice(
+    resultPage.indexOf('{summary.v2 && counts ? ('),
+    resultPage.indexOf(') : gr ? ('),
+);
 
 describe('result page pagination copy contract', () => {
     it('drops the range/plus counters and the old load-more buttons', () => {
@@ -56,5 +81,36 @@ describe('result page pagination copy contract', () => {
 
     it('keeps the signed image proxy boundary for profile images', () => {
         expect(resultPage).toContain("url.startsWith('/api/image-proxy?')");
+    });
+
+    it('keeps V2 owner results out of the legacy share action', () => {
+        expect(resultPage).toContain("data.pipelineVersion === 'v1'");
+        expect(resultPage).not.toContain("data.pipelineVersion === 'v2' && <div className=\"mt-9\">");
+    });
+
+    it('keeps the compact result summary limited to user-facing Instagram metrics', () => {
+        expect(resultPage).toContain("{ label: '맞팔', value: counts.mutual }");
+        expect(resultPage).toContain("{ label: '공개', value: counts.publicCount }");
+        expect(resultPage).toContain("{ label: '비공개', value: counts.privateCount }");
+        expect(resultPage).toContain("{ label: '팔로워', value: summary.v2.followers.declared }");
+        expect(resultPage).toContain("{ label: '팔로잉', value: summary.v2.following.declared }");
+        expect(resultPage).not.toContain('summary.v2.screenedMutuals.toLocaleString()');
+    });
+
+    it('renders primary summary metrics as one compact desktop strip instead of stacked cells', () => {
+        expect(compactSummary).toContain('data-summary-primary-metrics');
+        expect(compactSummary).toContain('sm:h-6 sm:flex-nowrap sm:py-0');
+        expect(compactSummary).toContain('inline-flex items-baseline');
+        expect(compactSummary).not.toContain('mt-2 grid grid-cols-3');
+        expect(compactSummary).not.toContain('block text-[10px]');
+    });
+
+    it('uses WCAG-AA text colors for every essential summary metric', () => {
+        expect(compactSummary).not.toMatch(/text-\[10px\][^"]*text-fg-mute/);
+        expect(resultPage).toContain("txt: 'text-blood-2'");
+        for (const foreground of ['fg', 'fg-dim', 'blood-2']) {
+            expect(contrastRatio(themeHex(foreground), themeHex('ink-2'))).toBeGreaterThanOrEqual(4.5);
+            expect(contrastRatio(themeHex(foreground), themeHex('panel'))).toBeGreaterThanOrEqual(4.5);
+        }
     });
 });

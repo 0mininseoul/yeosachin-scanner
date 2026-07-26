@@ -10,6 +10,10 @@ import {
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
 
+function isLegacySharePipeline(pipelineVersion: unknown): pipelineVersion is 'v1' | null {
+    return pipelineVersion === null || pipelineVersion === 'v1';
+}
+
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ token: string }> }
@@ -33,6 +37,15 @@ export async function GET(
             .single();
 
         if (requestError || !analysisRequest) {
+            return NextResponse.json(
+                { error: '공유 링크를 찾을 수 없거나 비활성화되었습니다.' },
+                { status: 404 }
+            );
+        }
+
+        // A V2 owner result is intentionally not represented by the legacy
+        // share DTO or legacy result tables. Fail closed for any stale token.
+        if (!isLegacySharePipeline(analysisRequest.pipeline_version)) {
             return NextResponse.json(
                 { error: '공유 링크를 찾을 수 없거나 비활성화되었습니다.' },
                 { status: 404 }

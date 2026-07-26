@@ -7,6 +7,91 @@ import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysi
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHARE_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const SHARE_REQUEST_SELECT = 'id, user_id, pipeline_version, status, share_token, share_enabled';
+const LEGACY_PIPELINE_FILTER = 'pipeline_version.eq.v1,pipeline_version.is.null';
+
+interface ShareRequestRecord {
+    id: string;
+    user_id: string;
+    pipeline_version: string | null;
+    status: string;
+    share_token: string | null;
+    share_enabled: boolean | null;
+}
+
+function isLegacySharePipeline(pipelineVersion: unknown): pipelineVersion is 'v1' | null {
+    return pipelineVersion === null || pipelineVersion === 'v1';
+}
+
+function isStoredShareToken(value: unknown): value is string {
+    return typeof value === 'string' && SHARE_TOKEN_PATTERN.test(value);
+}
+
+function unsupportedPipelineResponse(pipelineVersion: unknown) {
+    return NextResponse.json(
+        {
+            code: pipelineVersion === 'v2'
+                ? 'V2_SHARE_UNSUPPORTED'
+                : 'SHARE_PIPELINE_UNSUPPORTED',
+            error: '이 판독 결과는 아직 공유할 수 없습니다.',
+        },
+        { status: 409 }
+    );
+}
+
+async function readEnabledLegacyWinner(requestId: string, userId: string) {
+    return supabaseAdmin
+        .from('analysis_requests')
+        .select(SHARE_REQUEST_SELECT)
+        .eq('id', requestId)
+        .eq('user_id', userId)
+        .eq('status', 'completed')
+        .eq('share_enabled', true)
+        .or(LEGACY_PIPELINE_FILTER)
+        .maybeSingle();
+}
+
+async function compareAndSetShareEnabled(
+    requestId: string,
+    userId: string,
+    expectedToken: string | null,
+) {
+    const candidateToken = expectedToken ?? generateShareToken();
+    const baseMutation = supabaseAdmin
+        .from('analysis_requests')
+        .update({
+            share_token: candidateToken,
+            share_enabled: true,
+        })
+        .eq('id', requestId)
+        .eq('user_id', userId)
+        .eq('status', 'completed')
+        .or(LEGACY_PIPELINE_FILTER);
+    const conditionalMutation = expectedToken === null
+        ? baseMutation.is('share_token', null)
+        : baseMutation
+            .eq('share_token', expectedToken)
+            .or('share_enabled.eq.false,share_enabled.is.null');
+
+    const mutation = await conditionalMutation
+        .select(SHARE_REQUEST_SELECT)
+        .maybeSingle();
+    if (mutation.error) return { data: null, error: mutation.error };
+    if (
+        mutation.data
+        && isLegacySharePipeline(mutation.data.pipeline_version)
+        && mutation.data.status === 'completed'
+        && mutation.data.share_enabled === true
+        && isStoredShareToken(mutation.data.share_token)
+    ) {
+        return { data: mutation.data as ShareRequestRecord, error: null };
+    }
+
+    // A concurrent request may have won the compare-and-set. Always return
+    // the committed winner rather than the losing request's candidate token.
+    return readEnabledLegacyWinner(requestId, userId);
+}
 
 export async function POST(request: Request) {
     let demoRecognized = false;
@@ -49,7 +134,7 @@ export async function POST(request: Request) {
         // 2. 분석 요청 조회 및 소유자 확인
         const { data: analysisRequest, error: requestError } = await supabaseAdmin
             .from('analysis_requests')
-            .select('id, user_id, status, share_token, share_enabled')
+            .select(SHARE_REQUEST_SELECT)
             .eq('id', requestId)
             .eq('user_id', user.id)
             .single();
@@ -69,6 +154,12 @@ export async function POST(request: Request) {
             );
         }
 
+        // V2 results have an owner-only DTO backed by dedicated tables. They
+        // must never fall through this V1 share path or create a legacy token.
+        if (!isLegacySharePipeline(analysisRequest.pipeline_version)) {
+            return unsupportedPipelineResponse(analysisRequest.pipeline_version);
+        }
+
         // 4. 분석 완료 상태 확인
         if (analysisRequest.status !== 'completed') {
             return NextResponse.json(
@@ -77,43 +168,41 @@ export async function POST(request: Request) {
             );
         }
 
-        // 5. 이미 공유 토큰이 있으면 재사용
-        let shareToken = analysisRequest.share_token;
-
-        if (!shareToken) {
-            // 새 토큰 생성
-            shareToken = generateShareToken();
-
-            // DB 업데이트 (admin 클라이언트 사용)
-            const { error: updateError } = await supabaseAdmin
-                .from('analysis_requests')
-                .update({
-                    share_token: shareToken,
-                    share_enabled: true,
-                })
-                .eq('id', requestId);
-
-            if (updateError) {
-                console.error('Share token update error:', updateError);
+        // 5. 활성 토큰은 그대로 사용하고, 생성/재활성화는 완성 상태와
+        // legacy 파이프라인 및 이전 토큰 상태를 모두 묶은 CAS로 수행한다.
+        let shareRecord = analysisRequest as ShareRequestRecord;
+        if (!analysisRequest.share_enabled || !isStoredShareToken(analysisRequest.share_token)) {
+            const expectedToken = isStoredShareToken(analysisRequest.share_token)
+                ? analysisRequest.share_token
+                : null;
+            const mutation = await compareAndSetShareEnabled(requestId, user.id, expectedToken);
+            if (mutation.error) {
+                console.error('Share compare-and-set failed');
                 return NextResponse.json(
-                    { error: '공유 토큰 생성에 실패했습니다.' },
+                    { error: '공유 링크 생성에 실패했습니다.' },
                     { status: 500 }
                 );
             }
-        } else if (!analysisRequest.share_enabled) {
-            // 토큰은 있지만 비활성화된 경우 활성화
-            const { error: updateError } = await supabaseAdmin
-                .from('analysis_requests')
-                .update({ share_enabled: true })
-                .eq('id', requestId);
-
-            if (updateError) {
-                console.error('Share enable error:', updateError);
+            if (!mutation.data || !isStoredShareToken(mutation.data.share_token)) {
                 return NextResponse.json(
-                    { error: '공유 활성화에 실패했습니다.' },
-                    { status: 500 }
+                    {
+                        code: 'SHARE_STATE_CHANGED',
+                        error: '공유 상태가 변경되었습니다. 다시 시도해 주세요.',
+                    },
+                    { status: 409 }
                 );
             }
+            shareRecord = mutation.data as ShareRequestRecord;
+        }
+        const shareToken = shareRecord.share_token;
+        if (!isStoredShareToken(shareToken)) {
+            return NextResponse.json(
+                {
+                    code: 'SHARE_STATE_CHANGED',
+                    error: '공유 상태가 변경되었습니다. 다시 시도해 주세요.',
+                },
+                { status: 409 }
+            );
         }
 
         // 6. 공유 URL 생성

@@ -217,25 +217,33 @@ const BRACKET_BY_GRADE: Record<string, string> = {
 function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
     return (
         <>
-            <div className="flex h-2.5 w-full overflow-hidden bg-line">
+            <div className="flex h-2 w-full overflow-hidden bg-line">
                 <div className="h-full bg-fg-dim" style={{ width: `${gr.male.percentage}%` }} />
                 <div className="h-full bg-blood" style={{ width: `${gr.female.percentage}%` }} />
                 <div className="h-full bg-line-2" style={{ width: `${gr.unknown.percentage}%` }} />
             </div>
 
-            <div className="mt-3 grid grid-cols-3 gap-3">
+            <div className="mt-1.5 grid grid-cols-3 gap-2 sm:gap-3">
                 {[
                     { label: OWNER_GENDER_LABELS.male, c: gr.male, Icon: Mars, txt: 'text-fg' },
-                    { label: OWNER_GENDER_LABELS.female, c: gr.female, Icon: Venus, txt: 'text-blood' },
+                    { label: OWNER_GENDER_LABELS.female, c: gr.female, Icon: Venus, txt: 'text-blood-2' },
                     { label: OWNER_GENDER_LABELS.unknown, c: gr.unknown, Icon: CircleHelp, txt: 'text-fg-dim' },
                 ].map((row) => (
-                    <div key={row.label} className="border-l border-line pl-3">
-                        <div className="flex items-center gap-1.5">
-                            <row.Icon aria-hidden="true" className={`h-3.5 w-3.5 ${row.txt}`} strokeWidth={2.25} />
-                            <span className="text-[12px] text-fg-dim">{row.label}</span>
-                        </div>
-                        <div className={`num mt-0.5 text-[16px] font-extrabold ${row.txt}`}>{row.c.count}</div>
-                        <div className="num text-[11px] text-fg-mute">{row.c.percentage}%</div>
+                    <div
+                        key={row.label}
+                        className="flex min-w-0 flex-wrap items-baseline gap-x-1 border-l border-line pl-2 sm:flex-nowrap sm:pl-3"
+                    >
+                        <row.Icon aria-hidden="true"
+                            className={`h-3 w-3 shrink-0 self-center ${row.txt}`}
+                            strokeWidth={2.25}
+                        />
+                        <span className="shrink-0 text-[11px] text-fg-dim">{row.label}</span>
+                        <span className={`num text-[15px] font-extrabold leading-tight ${row.txt}`}>
+                            {row.c.count}
+                        </span>
+                        <span className="num text-[10px] leading-tight text-fg-dim">
+                            {row.c.percentage}%
+                        </span>
                     </div>
                 ))}
             </div>
@@ -689,40 +697,56 @@ export default function ResultPage({ params }: PageProps) {
 
                 {/* pipeline-specific summary */}
                 {summary.v2 && counts ? (
-                    <CaseCard className="mt-6 p-4">
-                        <span className="eyebrow">맞팔 계정 분석</span>
-                        <div className="num mt-2.5 flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[13px]">
-                            <span className="text-fg-dim">맞팔</span>
-                            <span className="font-bold text-fg">{counts.mutual.toLocaleString()}</span>
-                            <span className="px-1 text-fg-mute">·</span>
-                            <span className="text-fg-dim">공개</span>
-                            <span className="font-bold text-fg">{counts.publicCount.toLocaleString()}</span>
-                            <span className="px-1 text-fg-mute">·</span>
-                            <span className="text-fg-dim">비공개</span>
-                            <span className="font-bold text-fg">{counts.privateCount.toLocaleString()}</span>
+                    <CaseCard className="mt-5 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <span className="eyebrow">맞팔 계정 분석</span>
+                            <span className="text-[10px] font-medium tracking-wide text-fg-dim">INSTAGRAM 원지표</span>
+                        </div>
+                        <div
+                            data-summary-primary-metrics
+                            className="num mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 border-y border-line py-1 sm:h-6 sm:flex-nowrap sm:py-0"
+                        >
+                            {[
+                                { label: '맞팔', value: counts.mutual },
+                                { label: '공개', value: counts.publicCount },
+                                { label: '비공개', value: counts.privateCount },
+                            ].map((item, index) => (
+                                <div key={item.label} className="inline-flex items-baseline gap-1 whitespace-nowrap">
+                                    <span className="text-[10px] leading-tight text-fg-dim">{item.label}</span>
+                                    <span className="text-[16px] font-extrabold leading-tight text-fg">
+                                        {item.value.toLocaleString()}
+                                    </span>
+                                    {index < 2 && (
+                                        <span aria-hidden="true" className="ml-1 text-[10px] text-fg-dim">·</span>
+                                    )}
+                                </div>
+                            ))}
                         </div>
 
                         {gr && (
-                            <div className="mt-3.5 border-t border-line pt-3.5">
+                            <div className="mt-2.5">
                                 <div className="flex items-center justify-between">
-                                    <span className="text-[12px] font-semibold text-fg-dim">공개 계정 판독 분포</span>
+                                    <span className="text-[11px] font-semibold text-fg-dim">공개 계정 판독 분포</span>
                                 </div>
-                                <div className="mt-2.5">
+                                <div className="mt-1.5">
                                     <GenderRatioBreakdown gr={gr} />
                                 </div>
                             </div>
                         )}
 
-                        <div className={`grid grid-cols-2 gap-px bg-line ${gr ? 'mt-3.5' : 'mt-3'}`}>
+                        <div className="mt-2.5 grid grid-cols-2 gap-px bg-line">
                             {[
                                 { label: '팔로워', value: summary.v2.followers.declared },
                                 { label: '팔로잉', value: summary.v2.following.declared },
                             ].map((item) => (
-                                <div key={item.label} className="bg-ink-2 px-3 py-2.5">
-                                    <span className="text-[11px] text-fg-mute">{item.label}</span>
-                                    <p className="num mt-0.5 text-[16px] font-bold text-fg">
+                                <div
+                                    key={item.label}
+                                    className="flex items-baseline justify-between gap-2 bg-ink-2 px-2.5 py-1 sm:px-3"
+                                >
+                                    <span className="text-[10px] leading-tight text-fg-dim">{item.label}</span>
+                                    <span className="num text-[15px] font-bold leading-tight text-fg">
                                         {item.value.toLocaleString()}
-                                    </p>
+                                    </span>
                                 </div>
                             ))}
                         </div>
