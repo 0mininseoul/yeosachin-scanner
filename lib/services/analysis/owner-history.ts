@@ -8,7 +8,7 @@ const instagramUsernameSchema = z.string()
 const ownerAnalysisHistoryItemV1Schema = z.object({
     id: z.string().uuid(),
     targetInstagramId: instagramUsernameSchema.nullable(),
-    status: z.enum(['pending', 'processing', 'completed', 'failed']),
+    status: z.enum(['pending', 'processing', 'completed']),
     createdAt: z.string().datetime({ offset: true }).nullable(),
     planType: z.string().min(1).max(20).regex(/^[a-z0-9_-]+$/).nullable(),
     pipelineVersion: z.enum(['v1', 'v2']),

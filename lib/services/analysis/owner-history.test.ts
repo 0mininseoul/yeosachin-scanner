@@ -23,8 +23,8 @@ describe('owner analysis history contract', () => {
         expect(ownerHistoryTargetLabel(parsed.items[0])).toBe('@0_min._.00');
     });
 
-    it('keeps a failed V2 request redacted without rendering a tombstone as a username', () => {
-        const parsed = ownerAnalysisHistoryV1Schema.parse({
+    it('rejects failed requests so they cannot reach owner history rendering', () => {
+        const parsed = ownerAnalysisHistoryV1Schema.safeParse({
             ...completedV2History,
             items: [{
                 ...completedV2History.items[0],
@@ -33,7 +33,7 @@ describe('owner analysis history contract', () => {
             }],
         });
 
-        expect(ownerHistoryTargetLabel(parsed.items[0])).toBe('보호 처리된 계정');
+        expect(parsed.success).toBe(false);
     });
 
     it('preserves a legacy V1 username while rejecting a leaked V2 retained tombstone', () => {
