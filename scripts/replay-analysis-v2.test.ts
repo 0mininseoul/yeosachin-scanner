@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -87,12 +87,28 @@ describe('analysis V2 replay CLI', () => {
         '--confirm-paid-ai=confirmed',
         '--dry-run=false',
         '--run=true',
+        '--paid-ai=',
+        '--confirm-paid-ai=',
+        '--dry-run=',
+        '--run=',
+        '--capture=',
+        '--cleanup=',
     ])('rejects value-bearing boolean flag %s', flag => {
         expect(() => parseReplayCliArgs([
             '--run',
             '--paid-ai',
             '--confirm-paid-ai',
             flag,
+            '--bundle=a.enc',
+            '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    });
+
+    it('rejects empty assignments for both paid-AI confirmations', () => {
+        expect(() => parseReplayCliArgs([
+            '--run',
+            '--paid-ai=',
+            '--confirm-paid-ai=',
             '--bundle=a.enc',
             '--key=a.key',
         ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
@@ -115,6 +131,27 @@ describe('analysis V2 replay CLI', () => {
 
         await expect(stat(paths.bundlePath)).rejects.toThrow();
         await expect(stat(paths.keyPath)).rejects.toThrow();
+    });
+
+    it('preserves replacement inodes swapped in after authenticated run read', async () => {
+        const paths = await artifacts(Date.now());
+        const originalBundlePath = `${paths.bundlePath}.original`;
+        const originalKeyPath = `${paths.keyPath}.original`;
+        await runReplayCli([
+            '--run',
+            `--bundle=${paths.bundlePath}`,
+            `--key=${paths.keyPath}`,
+        ], {
+            beforeOwnedArtifactRemoval: async () => {
+                await rename(paths.bundlePath, originalBundlePath);
+                await rename(paths.keyPath, originalKeyPath);
+                await writeFile(paths.bundlePath, 'replacement bundle', { mode: 0o600 });
+                await writeFile(paths.keyPath, 'replacement key', { mode: 0o600 });
+            },
+        });
+
+        await expect(readFile(paths.bundlePath, 'utf8')).resolves.toBe('replacement bundle');
+        await expect(readFile(paths.keyPath, 'utf8')).resolves.toBe('replacement key');
     });
 
     it('removes the exact pair when run rejects an expired bundle', async () => {

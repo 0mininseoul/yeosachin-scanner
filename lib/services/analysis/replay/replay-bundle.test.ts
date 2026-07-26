@@ -252,4 +252,35 @@ describe('analysis V2 replay bundle', () => {
         await expect(stat(bundlePath)).rejects.toThrow();
         await expect(stat(keyPath)).rejects.toThrow();
     });
+
+    it('preserves replacement inodes swapped in after an authenticated TTL read', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'stale.key');
+        const bundlePath = join(directory, 'stale.enc');
+        const originalKeyPath = join(directory, 'stale-original.key');
+        const originalBundlePath = join(directory, 'stale-original.enc');
+        await createReplayKeyFile(keyPath);
+        await writeReplayBundle({
+            bundle: bundle(),
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+
+        await expect(removeExpiredReplayArtifacts({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T01:01:00.000Z'),
+            beforeOwnedArtifactRemoval: async () => {
+                await rename(bundlePath, originalBundlePath);
+                await rename(keyPath, originalKeyPath);
+                await writeFile(bundlePath, 'replacement bundle', { mode: 0o600 });
+                await writeFile(keyPath, 'replacement key', { mode: 0o600 });
+            },
+        })).resolves.toBe(true);
+
+        await expect(readFile(bundlePath, 'utf8')).resolves.toBe('replacement bundle');
+        await expect(readFile(keyPath, 'utf8')).resolves.toBe('replacement key');
+    });
 });

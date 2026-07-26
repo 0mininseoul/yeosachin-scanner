@@ -8,7 +8,7 @@ import { captureAnalysisV2ReplayBundle } from '../lib/services/analysis/replay/r
 import {
     createReplayArtifactCreationScope,
     createReplayKeyFile,
-    readReplayBundle,
+    readAuthenticatedReplayBundle,
     removeExpiredReplayArtifacts,
     removeOwnedReplayArtifacts,
     removeReplayArtifacts,
@@ -44,6 +44,12 @@ const VALUELESS_FLAGS = new Set([
 ]);
 
 export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
+    if (args.some(arg => {
+        const equalsIndex = arg.indexOf('=');
+        return equalsIndex >= 0 && VALUELESS_FLAGS.has(arg.slice(0, equalsIndex));
+    })) {
+        throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    }
     const parsed = values(args);
     if ([...parsed].some(([key, value]) => VALUELESS_FLAGS.has(key) && value !== '')) {
         throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
@@ -180,15 +186,37 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
     }
 }
 
-export async function runReplayCli(args: readonly string[]): Promise<{ exitCode: 0 | 1 }> {
+export async function runReplayCli(
+    args: readonly string[],
+    dependencies: {
+        beforeOwnedArtifactRemoval?: () => Promise<void>;
+    } = {},
+): Promise<{ exitCode: 0 | 1 }> {
     const options = parseReplayCliArgs(args);
     if (options.command === 'cleanup') { await removeReplayArtifacts(options); process.stdout.write(`${JSON.stringify({ status: 'ok', command: 'cleanup', removed: 2 })}\n`); return { exitCode: 0 }; }
     if (options.command === 'capture') { await capture(options); return { exitCode: 0 }; }
-    const cleanup = () => removeReplayArtifacts(options);
+    const ownership: Parameters<typeof removeOwnedReplayArtifacts>[0] = {
+        bundlePath: options.bundlePath,
+        keyPath: options.keyPath,
+    };
+    let beforeRemovalCalled = false;
+    const cleanup = async () => {
+        if (!ownership.ownedBundle || !ownership.ownedKey) return;
+        if (!beforeRemovalCalled) {
+            beforeRemovalCalled = true;
+            await dependencies.beforeOwnedArtifactRemoval?.();
+        }
+        await removeOwnedReplayArtifacts(ownership);
+    };
     const uninstallSignals = installReplayArtifactSignalCleanup({ cleanup });
     try {
-        const bundle = await readReplayBundle(options);
-        await runAnalysisV2AiReplay({ bundle, runner: options.mode === 'paid-ai' ? createReplayStagedAiAdapter() : {}, mode: options.mode, paidAiOptIn: options.mode === 'paid-ai', write: line => process.stdout.write(`${line}\n`) });
+        const authenticated = await readAuthenticatedReplayBundle(options);
+        ownership.ownedBundle = authenticated.ownedBundle;
+        ownership.ownedKey = authenticated.ownedKey;
+        if (authenticated.expired) {
+            throw new Error('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
+        }
+        await runAnalysisV2AiReplay({ bundle: authenticated.bundle, runner: options.mode === 'paid-ai' ? createReplayStagedAiAdapter() : {}, mode: options.mode, paidAiOptIn: options.mode === 'paid-ai', write: line => process.stdout.write(`${line}\n`) });
         return { exitCode: 0 };
     } finally {
         uninstallSignals();
