@@ -15,6 +15,16 @@ ALTER TABLE public.analysis_v2_result_summaries
     ADD CONSTRAINT analysis_v2_result_summaries_score_policy_version_check
     CHECK (score_policy_version IN ('risk-policy-v2.2', 'risk-policy-v2.3', 'risk-policy-v2.4'));
 
+ALTER TABLE public.analysis_v2_preliminary_score_rows
+    DROP CONSTRAINT IF EXISTS analysis_v2_preliminary_score_rows_possible_upper_bound_check;
+
+ALTER TABLE public.analysis_v2_preliminary_score_rows
+    ADD CONSTRAINT analysis_v2_preliminary_score_rows_possible_upper_bound_check
+    CHECK (
+        possible_upper_bound BETWEEN pre_score AND pre_score + 5
+        AND possible_upper_bound <= 100
+    );
+
 ALTER TABLE public.analysis_v2_reverse_like_rows
     DROP CONSTRAINT IF EXISTS analysis_v2_reverse_like_rows_component_score_check;
 

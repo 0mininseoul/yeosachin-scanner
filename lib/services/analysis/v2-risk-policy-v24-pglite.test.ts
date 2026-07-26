@@ -106,6 +106,15 @@ describe('risk-policy v2.4 database replay', () => {
                     CONSTRAINT analysis_v2_result_summaries_score_policy_version_check
                         CHECK (score_policy_version IN ('risk-policy-v2.2', 'risk-policy-v2.3'))
                 );
+                CREATE TABLE public.analysis_v2_preliminary_score_rows (
+                    candidate_id TEXT PRIMARY KEY,
+                    pre_score NUMERIC NOT NULL CHECK (pre_score BETWEEN 0 AND 97),
+                    possible_upper_bound NUMERIC NOT NULL CONSTRAINT
+                        analysis_v2_preliminary_score_rows_possible_upper_bound_check CHECK (
+                        possible_upper_bound BETWEEN pre_score AND pre_score + 3
+                        AND possible_upper_bound <= 100
+                    )
+                );
                 CREATE OR REPLACE FUNCTION public.analysis_v2_result_valid_ref_list(TEXT[], INTEGER)
                 RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $function$ SELECT TRUE $function$;
                 CREATE TABLE public.analysis_v2_reverse_like_rows (
@@ -127,15 +136,34 @@ describe('risk-policy v2.4 database replay', () => {
                 END;
                 $function$;
                 CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_preliminary_scores(
-                    UUID, TEXT, UUID, TEXT, JSONB, TEXT
+                    p_request_id UUID,
+                    p_job_key TEXT,
+                    p_claim_token UUID,
+                    p_job_input_hash TEXT,
+                    p_rows JSONB,
+                    p_risk_policy_version TEXT
                 ) RETURNS JSONB LANGUAGE plpgsql AS $function$
-                DECLARE v_note TEXT := $note$
+                DECLARE
+                    v_row JSONB := p_rows->0;
+                    v_note TEXT := $note$
                     + (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
                     + (item.value->'components'->>'recentMutual')::NUMERIC
-                    NOT BETWEEN 0 AND 97
-                    + 3, 100$note$;
+                    $note$;
                 BEGIN
-                    IF v_note = 'risk-policy-v2.3' THEN NULL; END IF;
+                    IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.3' THEN
+                        RAISE EXCEPTION 'policy';
+                    END IF;
+                    IF (v_row->>'preScore')::NUMERIC NOT BETWEEN 0 AND 97
+                       OR (v_row->>'possibleUpperBound')::NUMERIC
+                            <> LEAST((v_row->>'preScore')::NUMERIC + 3, 100) THEN
+                        RAISE EXCEPTION 'bounds';
+                    END IF;
+                    INSERT INTO public.analysis_v2_preliminary_score_rows(
+                        candidate_id, pre_score, possible_upper_bound
+                    ) VALUES (
+                        v_row->>'candidateId', (v_row->>'preScore')::NUMERIC,
+                        (v_row->>'possibleUpperBound')::NUMERIC
+                    );
                     RETURN '{}'::JSONB;
                 END;
                 $function$;
@@ -166,6 +194,36 @@ describe('risk-policy v2.4 database replay', () => {
             `);
 
             await expect(migrationDb.exec(migration)).resolves.toBeDefined();
+            await expect(migrationDb.exec(`
+                INSERT INTO public.analysis_v2_preliminary_score_rows(
+                    candidate_id, pre_score, possible_upper_bound
+                ) VALUES ('boundary', 95, 100)
+            `)).resolves.toBeDefined();
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_preliminary_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:candidate-screening',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    '[{"candidateId":"normal","preScore":50,"possibleUpperBound":55}]'::JSONB,
+                    'risk-policy-v2.4'
+                )`
+            )).resolves.toBeDefined();
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_preliminary_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:candidate-screening',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    '[{"candidateId":"invalid","preScore":50,"possibleUpperBound":54}]'::JSONB,
+                    'risk-policy-v2.4'
+                )`
+            )).rejects.toThrow('bounds');
+            await expect(migrationDb.exec(`
+                INSERT INTO public.analysis_v2_preliminary_score_rows(
+                    candidate_id, pre_score, possible_upper_bound
+                ) VALUES ('over-cap', 95, 101)
+            `)).rejects.toThrow();
             const definitions = await migrationDb.query<{ definition: string }>(
                 `SELECT pg_catalog.pg_get_functiondef(
                     'public.analysis_v2_complete_result_and_purge_internal(uuid,text,uuid,text,text)'
