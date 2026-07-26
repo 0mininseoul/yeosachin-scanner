@@ -22,7 +22,7 @@ import {
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
 import { insertLandingLead } from '@/lib/services/leads/store';
-import { demoReadyPreflight, demoResponseCapabilities, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoPreflightLifecycle, demoReadyPreflight, demoResponseCapabilities, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -111,6 +111,19 @@ async function handleGET(
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
             if (!isDemoOperator(user.id)) return suppressOperationalObservation(errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
+            const lifecycle = demoPreflightLifecycle(demo);
+            if (lifecycle === 'consumed') {
+                return suppressOperationalObservation(NextResponse.json(preflightStatusV1Schema.parse({
+                    schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                    preflightId: demo.id,
+                    status: 'consumed',
+                    exclusionDecision: 'skip',
+                    requestId: demo.id,
+                }), { headers: { ...demoResponseCapabilities(), 'Cache-Control': 'private, no-store' } }));
+            }
+            if (lifecycle === 'expired') {
+                return suppressOperationalObservation(errorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.'));
+            }
             return suppressOperationalObservation(NextResponse.json(
                 demoReadyPreflight(demo),
                 { headers: { ...demoResponseCapabilities(), 'Cache-Control': 'private, no-store' } }
@@ -179,6 +192,9 @@ async function handlePATCH(
             }
             if (!preflightExclusionRequestV1Schema.safeParse(demoBody).success) {
                 return suppressOperationalObservation(errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.'));
+            }
+            if (demoPreflightLifecycle(demo) !== 'ready') {
+                return suppressOperationalObservation(errorResponse(409, 'PREFLIGHT_IMMUTABLE', '이 사전 점검 요청은 변경할 수 없습니다.'));
             }
             // Synthetic runs do not persist an exclusion or create a lead; this preserves
             // the existing UI's compatible acknowledgement without mutating production rows.

@@ -17,6 +17,7 @@ import { ANALYSIS_PLAN_CATALOG, PLAN_PRICING_VERSION, buildPlanSelectionCards } 
 export const DEMO_TARGET_USERNAME = 'junho_dem' as const;
 export const DEMO_FIXTURE_VERSION = 'synthetic-fixture-v1' as const;
 export const DEMO_ASSET_PREFIX = '/demo-avatars/synthetic-blurred-avatar-' as const;
+export const DEMO_PREFLIGHT_TTL_MS = 30 * 60_000;
 
 export function demoResponseCapabilities() {
     return {
@@ -61,6 +62,16 @@ export function demoDurationSeconds(env: DemoEnvironment = process.env as DemoEn
     const value = Number.parseInt(env.DEMO_ANALYSIS_DURATION_SECONDS ?? '', 10);
     if (!Number.isFinite(value)) return 75;
     return Math.max(60, Math.min(90, value));
+}
+
+export function demoPreflightLifecycle(
+    run: { created_at: string; started_at: string | null },
+    now: Date = new Date(),
+): 'ready' | 'expired' | 'consumed' {
+    if (run.started_at) return 'consumed';
+    return new Date(run.created_at).getTime() + DEMO_PREFLIGHT_TTL_MS <= now.getTime()
+        ? 'expired'
+        : 'ready';
 }
 
 export function isDemoEligible(
@@ -141,7 +152,7 @@ export function demoReadyPreflight(run: { id: string; created_at: string }) {
     return {
         schemaVersion: 1 as const,
         preflightId: run.id,
-        expiresAt: new Date(new Date(run.created_at).getTime() + 30 * 60_000).toISOString(),
+        expiresAt: new Date(new Date(run.created_at).getTime() + DEMO_PREFLIGHT_TTL_MS).toISOString(),
         status: 'ready' as const,
         exclusionDecision: 'skip' as const,
         target: {
@@ -270,6 +281,8 @@ export function projectDemoProgress(input: {
     startedAt: Date;
     durationSeconds: number;
     now: Date;
+    afterSequence?: number;
+    eventLimit?: number;
 }): { snapshot: ProgressSnapshotV1; events: ProgressEventV1[] } {
     const elapsed = Math.max(0, input.now.getTime() - input.startedAt.getTime());
     const progressBp = Math.min(10_000, Math.floor(elapsed / (input.durationSeconds * 1_000) * 10_000));
@@ -286,19 +299,22 @@ export function projectDemoProgress(input: {
         tracks.interactions = demoTrack(10_000, 1_500, 7_500, activeStageCode, 'INTERACTIONS_QUEUED', 'INTERACTIONS_COMPLETE');
         tracks.finalization = demoTrack(10_000, 7_500, 10_000, activeStageCode, 'FINALIZATION_QUEUED', 'FINALIZATION_COMPLETE');
     }
-    const events: ProgressEventV1[] = DEMO_PROGRESS_STAGE_SCHEDULE.filter((entry) => progressBp >= entry[1]).map(([copyCode], index) => ({
-        schemaVersion: 1, requestId: input.requestId, seq: index + 1, revision: Math.floor(progressBp / 500),
-        occurredAt: input.startedAt.toISOString(), state: 'confirmed',
-        eventCode: copyCode === 'ANALYSIS_COMPLETED' ? 'ANALYSIS_COMPLETED' : index === 0 ? 'TARGET_PROFILE_READY' : index === 3 ? 'PROFILE_SCREENED' : 'RELATIONSHIP_PROGRESS',
+    const allEvents: ProgressEventV1[] = DEMO_PROGRESS_STAGE_SCHEDULE.filter((entry) => progressBp >= entry[1]).map(([copyCode, threshold], index) => ({
+        schemaVersion: 1, requestId: input.requestId, seq: index + 1, revision: index + 1,
+        occurredAt: new Date(input.startedAt.getTime() + input.durationSeconds * 1_000 * threshold / 10_000).toISOString(), state: 'confirmed',
+        eventCode: copyCode === 'ANALYSIS_COMPLETED' ? 'ANALYSIS_COMPLETED' : index === 0 ? 'TARGET_PROFILE_READY' : index === 4 ? 'PROFILE_SCREENED' : 'RELATIONSHIP_PROGRESS',
         copyCode, aggregateCount: null,
     }));
+    const afterSequence = Math.max(0, input.afterSequence ?? 0);
+    const eventLimit = Math.max(1, input.eventLimit ?? 100);
+    const events = allEvents.filter(event => event.seq > afterSequence).slice(0, eventLimit);
     return {
         snapshot: {
-            schemaVersion: 1, requestId: input.requestId, revision: Math.floor(progressBp / 500),
+            schemaVersion: 1, requestId: input.requestId, revision: allEvents.length,
             status: completed ? 'completed' : 'processing', progressBp, backgroundProcessing: !completed,
             tracks, activeProfile: completed ? null : { maskedUsername: 'profile.***', imageUrl: avatar(0) },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
-            lastEventSeq: events.length,
+            lastEventSeq: allEvents.length,
         },
         events,
     };

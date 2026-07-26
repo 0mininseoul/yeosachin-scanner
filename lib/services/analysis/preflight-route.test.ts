@@ -959,6 +959,28 @@ describe('preflight owner routes', () => {
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(hidden);
     });
 
+    it('presents expired and started demo preflights as terminal lifecycle states', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.findForOwner.mockResolvedValueOnce({
+            id: preflightId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'preflight-key-000000000000', duration_seconds: 75,
+            created_at: new Date(Date.now() - 30 * 60_000 - 1_000).toISOString(), started_at: null,
+        });
+        const expired = await getPreflight(new Request('https://example.com'), context());
+        expect(expired.status).toBe(410);
+        await expect(expired.json()).resolves.toMatchObject({ code: 'PREFLIGHT_EXPIRED' });
+
+        mocks.demoStore.findForOwner.mockResolvedValueOnce({
+            id: preflightId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'preflight-key-000000000000', duration_seconds: 75,
+            created_at: expiresAt, started_at: new Date().toISOString(),
+        });
+        const consumed = await getPreflight(new Request('https://example.com'), context());
+        expect(consumed.status).toBe(200);
+        await expect(consumed.json()).resolves.toMatchObject({ status: 'consumed', requestId: preflightId });
+    });
+
     it.each([
         new Request('https://example.com', {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{',

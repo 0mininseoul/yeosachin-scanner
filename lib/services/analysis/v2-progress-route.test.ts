@@ -150,6 +150,35 @@ describe('analysis V2 owner progress route', () => {
         vi.unstubAllEnvs();
     });
 
+    it('returns only the requested contiguous demo event window across refreshes', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-01T00:00:20.000Z'));
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-07-01T00:00:00.000Z', started_at: '2026-07-01T00:00:00.000Z',
+        });
+        try {
+            const first = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}?afterSeq=1&limit=2`), context());
+            const firstPayload = await first.json() as { snapshot: { lastEventSeq: number }; events: Array<{ seq: number; revision: number; occurredAt: string }> };
+            expect(firstPayload.snapshot.lastEventSeq).toBeGreaterThanOrEqual(4);
+            expect(firstPayload.events.map(event => event.seq)).toEqual([2, 3]);
+            expect(firstPayload.events[1]!.revision).toBeGreaterThan(firstPayload.events[0]!.revision);
+            expect(Date.parse(firstPayload.events[1]!.occurredAt)).toBeGreaterThan(Date.parse(firstPayload.events[0]!.occurredAt));
+
+            const refreshed = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}?afterSeq=3&limit=2`), context());
+            const refreshedPayload = await refreshed.json() as { events: Array<{ seq: number; revision: number; occurredAt: string }> };
+            expect(refreshedPayload.events.map(event => event.seq)).toEqual([4]);
+            expect(refreshedPayload.events[0]!.revision).toBeGreaterThan(firstPayload.events[1]!.revision);
+            expect(Date.parse(refreshedPayload.events[0]!.occurredAt)).toBeGreaterThan(Date.parse(firstPayload.events[1]!.occurredAt));
+        } finally {
+            vi.useRealTimers();
+            vi.unstubAllEnvs();
+        }
+    });
+
     it.each([
         ['unstarted', { started_at: null }, true],
         ['flag-off', { started_at: new Date(Date.now() - 20_000).toISOString() }, false],

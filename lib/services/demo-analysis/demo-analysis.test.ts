@@ -3,6 +3,7 @@ import {
     DEMO_TARGET_USERNAME,
     createDemoFixture,
     demoDurationSeconds,
+    demoPreflightLifecycle,
     isDemoEligible,
     projectDemoProgress,
     demoResultPage,
@@ -30,6 +31,15 @@ describe('synthetic demo analysis policy', () => {
         expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(60);
         expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '999' })).toBe(90);
         expect(demoDurationSeconds({})).toBe(75);
+    });
+
+    it('expires an unstarted preflight exactly at its boundary but preserves a started replay', () => {
+        const createdAt = new Date('2026-07-01T00:00:00.000Z');
+        const run = { id: requestId, created_at: createdAt.toISOString(), started_at: null };
+        expect(demoPreflightLifecycle(run, new Date(+createdAt + 30 * 60_000 - 1))).toBe('ready');
+        expect(demoPreflightLifecycle(run, new Date(+createdAt + 30 * 60_000))).toBe('expired');
+        expect(demoPreflightLifecycle({ ...run, started_at: new Date(+createdAt + 1).toISOString() }, new Date(+createdAt + 31 * 60_000)))
+            .toBe('consumed');
     });
 });
 
@@ -89,6 +99,9 @@ describe('synthetic demo fixture', () => {
                 now: new Date(+startedAt + [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 94, 100][index]! * 1_000),
             });
             expect(result.events.at(-1)?.copyCode).toBe(copyCode);
+            if (copyCode === 'PROFILE_SCREENING') {
+                expect(result.events.at(-1)?.eventCode).toBe('PROFILE_SCREENED');
+            }
             expect(analysisV2ProgressCopy({ ...result.snapshot, events: result.events }))
                 .not.toBe('서버에서 판독을 진행하고 있습니다.');
         });

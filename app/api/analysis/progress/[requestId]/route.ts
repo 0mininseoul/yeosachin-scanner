@@ -50,7 +50,14 @@ export async function GET(
         const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
         if (demo) {
             if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at) return json({ error: 'Analysis progress not found.' }, 404);
-            const progress = projectDemoProgress({ requestId: demo.id, startedAt: new Date(demo.started_at), durationSeconds: demo.duration_seconds, now: new Date() });
+            const progress = projectDemoProgress({
+                requestId: demo.id,
+                startedAt: new Date(demo.started_at),
+                durationSeconds: demo.duration_seconds,
+                now: new Date(),
+                afterSequence: afterSequence.data,
+                eventLimit: eventLimit.data,
+            });
             return NextResponse.json({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, ...progress }, {
                 status: 200,
                 headers: { ...PRIVATE_NO_STORE_HEADERS, ...demoResponseCapabilities() },
