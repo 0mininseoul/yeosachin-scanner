@@ -1,15 +1,9 @@
 const UNKNOWN_DATE_LABEL = '날짜 미상';
 
 const KST_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('ko-KR', {
-    calendar: 'gregory',
-    numberingSystem: 'latn',
+    dateStyle: 'medium',
+    timeStyle: 'short',
     timeZone: 'Asia/Seoul',
-    year: 'numeric',
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
 });
 
 export function formatKstDateTime(value: unknown): string {
