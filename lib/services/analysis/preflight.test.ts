@@ -5,6 +5,7 @@ import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify
 import { makeWebProfileFetcher } from '@/lib/services/instagram/providers/selfhosted/web-client';
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
 import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
+import { AI_SCHEDULER_POLICY_ID } from '@/lib/services/ai/scheduler-policy';
 
 import {
     PREFLIGHT_DATABASE_NAMES,
@@ -13,6 +14,7 @@ import {
     buildReadyPreflightSnapshot,
     classifyPreflightError,
     createSupabasePreflightStore,
+    preflightPolicyVersions,
     processPreflight,
     publicPreflightStatusDto,
     trustedPreflightAccessMode,
@@ -204,8 +206,45 @@ function workerStore(claimed: ClaimedPreflight | null = claim()) {
 }
 
 describe('preflight persistence adapter', () => {
+    it.each([
+        ['off', 'production', {
+            pipeline: 'v2', risk: RISK_POLICY_VERSION, aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+        }],
+        ['test_entitlement', 'production', {
+            pipeline: 'v2', risk: RISK_POLICY_VERSION, aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+        }],
+        ['test_entitlement', 'test_entitlement', {
+            pipeline: 'v2', risk: RISK_POLICY_VERSION, aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+            scheduler: AI_SCHEDULER_POLICY_ID,
+        }],
+        ['production', 'production', {
+            pipeline: 'v2', risk: RISK_POLICY_VERSION, aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+            scheduler: AI_SCHEDULER_POLICY_ID,
+        }],
+        ['production', 'test_entitlement', {
+            pipeline: 'v2', risk: RISK_POLICY_VERSION, aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+            scheduler: AI_SCHEDULER_POLICY_ID,
+        }],
+        [undefined, 'production', {
+            pipeline: 'v2', risk: RISK_POLICY_VERSION, aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+        }],
+        ['invalid', 'production', {
+            pipeline: 'v2', risk: RISK_POLICY_VERSION, aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+        }],
+    ] as const)('builds the exact scheduler snapshot for %s rollout and %s access', (
+        rolloutMode,
+        accessMode,
+        expected,
+    ) => {
+        vi.stubEnv('ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT', 'production');
+        vi.stubEnv('ANALYSIS_V2_AI_SCHEDULER_ROLLOUT', rolloutMode ?? '');
+
+        expect(preflightPolicyVersions(accessMode)).toStrictEqual(expected);
+    });
+
     it('keeps RPC names centralized and sends authenticated identity to create/replay', async () => {
         vi.stubEnv('ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT', 'test_entitlement');
+        vi.stubEnv('ANALYSIS_V2_AI_SCHEDULER_ROLLOUT', 'off');
         const rpc = vi.fn(async () => ({
             data: [{
                 preflight_id: preflightId,

@@ -34,6 +34,10 @@ import { CURRENT_ANALYSIS_PIPELINE_VERSION } from '@/lib/domain/analysis/pipelin
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
 import { selectAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
+    selectAiSchedulerPolicyVersion,
+    type AiSchedulerPolicyVersion,
+} from '@/lib/services/ai/scheduler-policy';
+import {
     analysisTestEntitlementsEnabled,
     assertAnalysisTestEntitlementConfiguration,
 } from './test-entitlement';
@@ -79,8 +83,15 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     exclusionRpc: 'set_analysis_v2_preflight_exclusion',
 });
 
-function preflightPolicyVersions(accessMode: PlanAccessMode) {
-    return Object.freeze({
+export type PreflightPolicyVersionsSnapshot = Readonly<{
+    pipeline: typeof CURRENT_ANALYSIS_PIPELINE_VERSION;
+    risk: typeof RISK_POLICY_VERSION;
+    aiStage: ReturnType<typeof selectAiStagePolicyVersion>;
+    scheduler?: AiSchedulerPolicyVersion;
+}>;
+
+export function preflightPolicyVersions(accessMode: PlanAccessMode): PreflightPolicyVersionsSnapshot {
+    const legacySnapshot = Object.freeze({
         pipeline: CURRENT_ANALYSIS_PIPELINE_VERSION,
         risk: RISK_POLICY_VERSION,
         aiStage: selectAiStagePolicyVersion({
@@ -88,6 +99,13 @@ function preflightPolicyVersions(accessMode: PlanAccessMode) {
             accessMode,
         }),
     });
+    const scheduler = selectAiSchedulerPolicyVersion({
+        rolloutMode: process.env.ANALYSIS_V2_AI_SCHEDULER_ROLLOUT,
+        accessMode,
+    });
+    return scheduler
+        ? Object.freeze({ ...legacySnapshot, scheduler })
+        : legacySnapshot;
 }
 
 export type PreflightAuthProvider = 'google' | 'kakao';
