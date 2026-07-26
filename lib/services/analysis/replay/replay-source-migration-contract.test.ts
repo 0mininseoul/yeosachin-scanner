@@ -16,6 +16,7 @@ describe('analysis V2 replay source migration', () => {
         expect(sql).toContain('LIMIT 4');
         expect(sql).toContain("request.plan_access_mode_snapshot = 'production'");
         expect(sql).toContain("request.selected_plan_id_snapshot = 'standard'");
+        expect(sql).toMatch(/v_preflight_runs[\s\S]*jsonb_agg\([\s\S]*ORDER BY run\.operation_key/);
         expect(sql).toContain('REVOKE ALL ON FUNCTION public.read_analysis_v2_replay_capture_source');
         expect(sql).toContain('TO service_role');
         expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE)\b/);

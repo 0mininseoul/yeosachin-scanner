@@ -98,6 +98,7 @@ BEGIN
                 'status', run.status,
                 'operationKey', run.operation_key
             )
+            ORDER BY run.operation_key
         ),
         '[]'::JSONB
     )
