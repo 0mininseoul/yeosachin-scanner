@@ -285,6 +285,26 @@ describe('analysis V2 durable DAG worker', () => {
         expect(executor).toHaveBeenCalledWith(expect.objectContaining({
             schedulerCapability: 'scheduler-v1',
         }));
+
+        const malformedExecutor = vi.fn();
+        await expect(executeAnalysisV2DagJob(claim, {
+            stateStore: stateStore(initial),
+            executors: { profile_ai: malformedExecutor },
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+                loadPolicyVersionsSnapshot: vi.fn(async () => ({
+                    pipeline: 'v2',
+                    risk: 'risk-policy-v2.4',
+                    aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+                    scheduler: 'ai-scheduler-v2',
+                })),
+            },
+        })).rejects.toMatchObject({
+            code: 'ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH',
+            disposition: 'permanent',
+        });
+        expect(malformedExecutor).not.toHaveBeenCalled();
     });
 
     it('confirms provider cleanup before invoking the request failure RPC', async () => {

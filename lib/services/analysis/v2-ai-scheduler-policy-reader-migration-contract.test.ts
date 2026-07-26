@@ -9,6 +9,11 @@ const migration = fs.readFileSync(path.join(
 
 describe('analysis V2 scheduler policy snapshot reader migration', () => {
     it('exposes only a validated V2 snapshot to the service-role worker', () => {
+        expect(migration).toContain('ANALYSIS_V2_SCHEDULER_POLICY_PREDECESSOR_DRIFT');
+        expect(migration).toContain('pg_catalog.pg_get_functiondef');
+        expect(migration).toContain("p_snapshot ? ''scheduler''");
+        expect(migration).toContain('analysis_v2_valid_scheduler_policy_snapshot_v1');
+        expect(migration).toContain("p_snapshot->>'scheduler' = 'ai-scheduler-v1'");
         expect(migration).toContain('load_analysis_v2_policy_versions_snapshot');
         expect(migration).toContain("analysis_request.pipeline_version = 'v2'");
         expect(migration).toContain('analysis_v2_valid_policy_versions_snapshot');

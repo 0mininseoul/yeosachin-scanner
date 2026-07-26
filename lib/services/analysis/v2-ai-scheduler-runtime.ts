@@ -23,9 +23,47 @@ export interface AnalysisV2SchedulerTask<T> {
     run(): Promise<T>;
 }
 
-export interface AnalysisV2SchedulerCheckpoint<T> {
-    hasCommitted(key: string): Promise<boolean>;
-    commit(input: Readonly<{ key: string; stage: AnalysisV2SchedulerStage; value: T }>): Promise<void>;
+export type AnalysisV2SchedulerOperationClaim =
+    | Readonly<{ decision: 'execute'; claimToken: string }>
+    | Readonly<{ decision: 'ready' }>
+    | Readonly<{ decision: 'ambiguous' }>;
+
+/**
+ * This protocol must be implemented by the existing durable AI attempt/result stores before
+ * scheduler execution is wired to production. `claim` is atomic: a repeated in-flight claim must
+ * return `ambiguous`, while a committed result must return `ready`.
+ */
+export interface AnalysisV2SchedulerOperationStore<T> {
+    claim(input: Readonly<{
+        key: string;
+        stage: AnalysisV2SchedulerStage;
+    }>): Promise<AnalysisV2SchedulerOperationClaim>;
+    commitReady(input: Readonly<{
+        key: string;
+        stage: AnalysisV2SchedulerStage;
+        claimToken: string;
+        value: T;
+    }>): Promise<void>;
+}
+
+interface AnalysisV2SchedulerArbiterLease {
+    release(): void;
+}
+
+interface AnalysisV2SchedulerArbiter {
+    tryAcquire(
+        stage: AnalysisV2SchedulerStage,
+        limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
+    ): AnalysisV2SchedulerArbiterLease | null;
+    waitForChange(): Promise<void>;
+}
+
+export interface AnalysisV2SchedulerRuntimePolicy {
+    sharedConcurrency: number;
+    genderTriageConcurrency: number;
+    featureAnalysisConcurrency: number;
+    privateAccountNameConcurrency: number;
+    admissionReserveMs: number;
 }
 
 export type AnalysisV2SchedulerRunResult<T> = Readonly<{
@@ -38,15 +76,19 @@ export type AnalysisV2SchedulerRunResult<T> = Readonly<{
 export interface AnalysisV2SchedulerRuntimeOptions<T> {
     capability: AiSchedulerCapability;
     tasks: readonly AnalysisV2SchedulerTask<T>[];
-    checkpoint: AnalysisV2SchedulerCheckpoint<T>;
+    operationStore: AnalysisV2SchedulerOperationStore<T>;
     handlerDeadlineAtMs: number;
     nowMs?: () => number;
-    policy?: Partial<typeof ANALYSIS_V2_SCHEDULER_V1_POLICY>;
+    /**
+     * Test/rollout overrides may only lower concurrency or increase the admission reserve.
+     * Values are clamped against the hard scheduler-v1 ceiling.
+     */
+    policy?: Partial<AnalysisV2SchedulerRuntimePolicy>;
 }
 
 function stageLimit(
     stage: AnalysisV2SchedulerStage,
-    policy: typeof ANALYSIS_V2_SCHEDULER_V1_POLICY,
+    policy: Readonly<AnalysisV2SchedulerRuntimePolicy>,
 ): number {
     switch (stage) {
     case 'genderTriage': return policy.genderTriageConcurrency;
@@ -68,13 +110,98 @@ function assertTasks(tasks: readonly AnalysisV2SchedulerTask<unknown>[]): void {
     }
 }
 
+function boundedPolicy(
+    override: Partial<AnalysisV2SchedulerRuntimePolicy> | undefined,
+): Readonly<AnalysisV2SchedulerRuntimePolicy> {
+    if (
+        override
+        && Object.values(override).some(value => (
+            value !== undefined && (!Number.isSafeInteger(value) || value < 1)
+        ))
+    ) {
+        throw new Error('ANALYSIS_V2_SCHEDULER_INVALID_POLICY');
+    }
+    const hard = ANALYSIS_V2_SCHEDULER_V1_POLICY;
+    return Object.freeze({
+        sharedConcurrency: Math.min(
+            hard.sharedConcurrency,
+            override?.sharedConcurrency ?? hard.sharedConcurrency,
+        ),
+        genderTriageConcurrency: Math.min(
+            hard.genderTriageConcurrency,
+            override?.genderTriageConcurrency ?? hard.genderTriageConcurrency,
+        ),
+        featureAnalysisConcurrency: Math.min(
+            hard.featureAnalysisConcurrency,
+            override?.featureAnalysisConcurrency ?? hard.featureAnalysisConcurrency,
+        ),
+        privateAccountNameConcurrency: Math.min(
+            hard.privateAccountNameConcurrency,
+            override?.privateAccountNameConcurrency ?? hard.privateAccountNameConcurrency,
+        ),
+        admissionReserveMs: Math.max(
+            hard.admissionReserveMs,
+            override?.admissionReserveMs ?? hard.admissionReserveMs,
+        ),
+    });
+}
+
+class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbiter {
+    private activeTotal = 0;
+    private readonly activeByStage = new Map<AnalysisV2SchedulerStage, number>();
+    private readonly waiters = new Set<() => void>();
+
+    tryAcquire(
+        stage: AnalysisV2SchedulerStage,
+        limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
+    ): AnalysisV2SchedulerArbiterLease | null {
+        const activeStage = this.activeByStage.get(stage) ?? 0;
+        if (
+            this.activeTotal >= Math.min(8, limits.sharedConcurrency)
+            || activeStage >= Math.min(stageLimit(stage, limits), stageLimit(
+                stage,
+                ANALYSIS_V2_SCHEDULER_V1_POLICY,
+            ))
+        ) {
+            return null;
+        }
+        this.activeTotal++;
+        this.activeByStage.set(stage, activeStage + 1);
+        let released = false;
+        return Object.freeze({
+            release: () => {
+                if (released) return;
+                released = true;
+                this.activeTotal--;
+                this.activeByStage.set(stage, this.activeByStage.get(stage)! - 1);
+                const waiters = [...this.waiters];
+                this.waiters.clear();
+                waiters.forEach(resolve => resolve());
+            },
+        });
+    }
+
+    waitForChange(): Promise<void> {
+        return new Promise(resolve => this.waiters.add(resolve));
+    }
+}
+
+const schedulerProcessScope = globalThis as typeof globalThis & {
+    __AI_BARAM_ANALYSIS_V2_SCHEDULER_ARBITER_V1__?: AnalysisV2SchedulerArbiter;
+};
+const processWideSchedulerArbiter =
+    schedulerProcessScope.__AI_BARAM_ANALYSIS_V2_SCHEDULER_ARBITER_V1__
+    ?? new ProcessWideAnalysisV2SchedulerArbiter();
+schedulerProcessScope.__AI_BARAM_ANALYSIS_V2_SCHEDULER_ARBITER_V1__ =
+    processWideSchedulerArbiter;
+
 /**
- * A deliberately small, in-process scheduler used only after a request has persisted the exact
- * scheduler-v1 snapshot. Checkpoint ownership is supplied by the durable stage store: this helper
- * never treats a returned model value as committed until `checkpoint.commit` resolves.
+ * A deliberately small scheduler seam used only after a request has persisted the exact
+ * scheduler-v1 snapshot. Paid work is refused unless `operationStore.claim` atomically returns
+ * `execute`; ready results are skipped and ambiguous operations fail closed for durable recovery.
  *
  * Fairness is deterministic round-robin over the three stage queues. A queue rotates only when a
- * slot is admitted, so completion timing cannot change the next stage selection or result order.
+ * slot is admitted, so completion timing cannot change result ordering.
  */
 export async function runAnalysisV2FairAiScheduler<T>(
     input: AnalysisV2SchedulerRuntimeOptions<T>,
@@ -86,69 +213,92 @@ export async function runAnalysisV2FairAiScheduler<T>(
     if (!Number.isFinite(input.handlerDeadlineAtMs) || input.handlerDeadlineAtMs < 0) {
         throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
     }
-    const policy = Object.freeze({ ...ANALYSIS_V2_SCHEDULER_V1_POLICY, ...input.policy });
-    if (Object.values(policy).some(value => !Number.isSafeInteger(value) || value < 1)) {
-        throw new Error('ANALYSIS_V2_SCHEDULER_INVALID_POLICY');
-    }
+    const policy = boundedPolicy(input.policy);
+    const arbiter = processWideSchedulerArbiter;
     const nowMs = input.nowMs ?? (() => performance.now());
     const queues = new Map<AnalysisV2SchedulerStage, AnalysisV2SchedulerTask<T>[]>([
         ['genderTriage', []], ['featureAnalysis', []], ['privateAccountName', []],
     ]);
-    const results = new Map<string, Readonly<{ key: string; stage: AnalysisV2SchedulerStage; value: T }>>();
-    const remaining = new Set<string>();
-    for (const task of input.tasks) {
-        if (await input.checkpoint.hasCommitted(task.key)) continue;
-        queues.get(task.stage)!.push(task);
-        remaining.add(task.key);
-    }
+    const results = new Map<string, Readonly<{
+        key: string;
+        stage: AnalysisV2SchedulerStage;
+        value: T;
+    }>>();
+    const remaining = new Set(input.tasks.map(task => task.key));
+    input.tasks.forEach(task => queues.get(task.stage)!.push(task));
 
     const stages: readonly AnalysisV2SchedulerStage[] = [
         'genderTriage', 'featureAnalysis', 'privateAccountName',
     ];
-    const activeByStage = new Map<AnalysisV2SchedulerStage, number>(
-        stages.map(stage => [stage, 0]),
-    );
-    let activeTotal = 0;
     let cursor = 0;
     const active = new Set<Promise<void>>();
-
     const mayAdmit = () => nowMs() + policy.admissionReserveMs < input.handlerDeadlineAtMs;
-    const admitOne = (): boolean => {
-        if (!mayAdmit() || activeTotal >= policy.sharedConcurrency) return false;
+
+    const admitOne = async (): Promise<'admitted' | 'handled' | 'blocked'> => {
+        if (!mayAdmit()) return 'blocked';
         for (let offset = 0; offset < stages.length; offset++) {
             const index = (cursor + offset) % stages.length;
             const stage = stages[index]!;
             const queue = queues.get(stage)!;
-            if (queue.length === 0 || activeByStage.get(stage)! >= stageLimit(stage, policy)) continue;
-            const task = queue.shift()!;
+            const task = queue[0];
+            if (!task) continue;
+            const lease = arbiter.tryAcquire(stage, policy);
+            if (!lease) continue;
+            const claim = await input.operationStore.claim({
+                key: task.key,
+                stage: task.stage,
+            }).catch(error => {
+                lease.release();
+                throw error;
+            });
+            if (claim.decision === 'ambiguous') {
+                lease.release();
+                throw new Error('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+            }
+            queue.shift();
             cursor = (index + 1) % stages.length;
-            activeTotal++;
-            activeByStage.set(stage, activeByStage.get(stage)! + 1);
+            if (claim.decision === 'ready') {
+                remaining.delete(task.key);
+                lease.release();
+                return 'handled';
+            }
             const execution = Promise.resolve()
                 .then(task.run)
                 .then(async value => {
-                    await input.checkpoint.commit({ key: task.key, stage: task.stage, value });
+                    await input.operationStore.commitReady({
+                        key: task.key,
+                        stage: task.stage,
+                        claimToken: claim.claimToken,
+                        value,
+                    });
                     results.set(task.key, { key: task.key, stage: task.stage, value });
                     remaining.delete(task.key);
                 })
                 .finally(() => {
-                    activeTotal--;
-                    activeByStage.set(stage, activeByStage.get(stage)! - 1);
+                    lease.release();
                     active.delete(execution);
                 });
             active.add(execution);
-            return true;
+            return 'admitted';
         }
-        return false;
+        return 'blocked';
     };
 
-    while (true) {
-        let admitted = false;
-        while (admitOne()) admitted = true;
-        if (active.size === 0) break;
-        // Wait for one operation only; the loop immediately admits its fair successor.
-        await Promise.race(active);
-        if (!admitted && !mayAdmit() && active.size === 0) break;
+    while (remaining.size > 0) {
+        let admittedOrHandled = false;
+        while (mayAdmit()) {
+            const admission = await admitOne();
+            if (admission === 'blocked') break;
+            admittedOrHandled = true;
+        }
+        if (active.size > 0) {
+            await Promise.race(active);
+            continue;
+        }
+        if (!mayAdmit()) break;
+        if (!admittedOrHandled) {
+            await arbiter.waitForChange();
+        }
     }
 
     const completed = input.tasks
