@@ -18,6 +18,64 @@ import {
     selectAiStagePolicyVersion,
 } from './stage-policy';
 
+const V26_POLICY_SNAPSHOT = {
+    genderTriage: {
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MINIMAL',
+        mediaResolution: 'LOW',
+        profileImageLimit: 1,
+        feedImageLimit: 4,
+        maxOutputTokens: 512,
+        concurrency: 8,
+        promptVersion: 'gender-triage-v2',
+        schemaVersion: 2,
+    },
+    featureAnalysis: {
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MEDIUM',
+        mediaResolution: 'MEDIUM',
+        profileImageLimit: 1,
+        feedImageLimit: 10,
+        maxOutputTokens: 2_048,
+        concurrency: 8,
+        promptVersion: 'feature-analysis-v3',
+        schemaVersion: 3,
+    },
+    partnerSafety: {
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MEDIUM',
+        mediaResolution: 'LOW',
+        profileImageLimit: 0,
+        feedImageLimit: 1,
+        maxOutputTokens: 768,
+        concurrency: 5,
+        promptVersion: 'partner-safety-v2',
+        schemaVersion: 2,
+    },
+    highRiskNarrative: {
+        model: 'gemini-3-flash-preview',
+        thinkingLevel: 'HIGH',
+        mediaResolution: 'MEDIUM',
+        profileImageLimit: 1,
+        feedImageLimit: 10,
+        maxOutputTokens: 4_096,
+        concurrency: 3,
+        promptVersion: 'high-risk-narrative-v2',
+        schemaVersion: 2,
+    },
+    privateAccountName: {
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MINIMAL',
+        mediaResolution: 'LOW',
+        profileImageLimit: 0,
+        feedImageLimit: 0,
+        maxOutputTokens: 8_192,
+        concurrency: 4,
+        promptVersion: 'private-account-name-v1',
+        schemaVersion: 1,
+    },
+} as const;
+
 describe('V2 AI stage policy', () => {
     it('uses cheap minimal triage and medium feature analysis', () => {
         expect(getAiStagePolicy('genderTriage')).toMatchObject({
@@ -123,11 +181,30 @@ describe('V2 AI stage policy', () => {
         expect(Object.keys(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6']))
             .toEqual([...AI_STAGE_NAMES]);
         expect(JSON.stringify(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6']))
-            .toBe(JSON.stringify(AI_STAGE_POLICIES));
+            .toBe(JSON.stringify(V26_POLICY_SNAPSHOT));
         expect(AI_STAGE_NAMES_V27).toEqual([...AI_STAGE_NAMES, 'genderResolution']);
-        for (const stage of AI_STAGE_NAMES) {
+        for (const stage of ['partnerSafety', 'highRiskNarrative'] as const) {
             expect(getAiStagePolicy('ai-stage-policy-v2.7', stage))
                 .toBe(getAiStagePolicy('ai-stage-policy-v2.6', stage));
+        }
+    });
+
+    it('lowers only v2.7 scheduling concurrency for rate-limited early stages', () => {
+        const v26 = AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6'];
+        const v27 = AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.7'];
+
+        expect(v26.genderTriage.concurrency).toBe(8);
+        expect(v26.featureAnalysis.concurrency).toBe(8);
+        expect(v26.privateAccountName.concurrency).toBe(4);
+        expect(AI_SHARED_CONCURRENCY_LIMIT).toBe(8);
+
+        expect(v27.genderTriage.concurrency).toBe(4);
+        expect(v27.featureAnalysis.concurrency).toBe(4);
+        expect(v27.privateAccountName.concurrency).toBe(2);
+
+        for (const stage of ['genderTriage', 'featureAnalysis', 'privateAccountName'] as const) {
+            expect({ ...v27[stage], concurrency: undefined })
+                .toEqual({ ...v26[stage], concurrency: undefined });
         }
     });
 

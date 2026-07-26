@@ -875,6 +875,32 @@ describe('analyzeWithGemini process concurrency', () => {
         expect(deferred.maximumActive()).toBe(3);
     });
 
+    it.each([
+        ['genderTriage', 4],
+        ['featureAnalysis', 4],
+        ['privateAccountName', 2],
+    ] as const)('enforces the v2.7 %s stage semaphore at %i', async (stage, concurrency) => {
+        const deferred = deferredGenerations();
+        const options = {
+            schema: responseSchema,
+            stage,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.7' as const,
+            ...stageAuditOptions(),
+        };
+        const calls = Array.from({ length: concurrency + 1 }, () =>
+            analyzeWithGemini('prompt', undefined, options)
+        );
+
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(concurrency));
+        expect(deferred.maximumActive()).toBe(concurrency);
+        deferred.releases.splice(0, concurrency).forEach(release => release());
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(concurrency + 1));
+        deferred.releases.splice(0).forEach(release => release());
+
+        await expect(Promise.all(calls)).resolves.toHaveLength(concurrency + 1);
+        expect(deferred.maximumActive()).toBe(concurrency);
+    });
+
     it('never queues a resolver when either bounded slot is unavailable', async () => {
         const deferred = deferredGenerations();
         const resolverOptions = {

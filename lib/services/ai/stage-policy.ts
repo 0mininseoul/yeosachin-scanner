@@ -102,6 +102,18 @@ export const AI_STAGE_POLICIES = Object.freeze({
 
 const AI_STAGE_POLICIES_V27 = Object.freeze({
     ...AI_STAGE_POLICIES,
+    genderTriage: Object.freeze({
+        ...AI_STAGE_POLICIES.genderTriage,
+        concurrency: 4,
+    }),
+    featureAnalysis: Object.freeze({
+        ...AI_STAGE_POLICIES.featureAnalysis,
+        concurrency: 4,
+    }),
+    privateAccountName: Object.freeze({
+        ...AI_STAGE_POLICIES.privateAccountName,
+        concurrency: 2,
+    }),
     genderResolution: Object.freeze({
         model: 'gemini-3-flash-preview',
         thinkingLevel: 'LOW',
