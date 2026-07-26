@@ -45,4 +45,47 @@ describe('v2.3 legacy recovery scorer', () => {
             .toBe(3);
         expect(final.filter(row => row.riskBand === 'caution' && row.featuredRank !== null)).toHaveLength(15);
     });
+
+    it('excludes every strong-partner account from v2.3 relative eligibility, even below the cap', () => {
+        const base = (candidateId: string, strong = false) => ({
+            candidateId, username: candidateId.replace(':', '.'),
+            appearanceGrade: 1 as const, exposureScore: 0, accountContext: 'personal' as const,
+            hasWeakPartnerEvidence: false, hasStrongPartnerEvidence: strong,
+            uniqueTargetPostsLikedByCandidate: 0, boundedCandidateCommentsOnTarget: 0,
+            hasTagOrCaptionMention: false, recentFemaleMutualRank: null,
+            recentMutualBadgeRank: null, preScore: 0, verificationShortlistRank: null,
+        });
+        const final = calculateLegacyV23FinalScores({
+            preliminary: [base('strong:low', true), base('eligible:one'), base('eligible:two')],
+            observedReverseLikeCandidateIds: new Set(),
+        });
+        const strong = final.find(row => row.candidateId === 'strong:low')!;
+        expect(strong.risk.publicScore).toBe(1);
+        expect(strong.riskBand).toBe('normal');
+        expect(strong.relativeTierApplied).toBe(false);
+        expect(final.filter(row => row.relativeTierApplied)).toHaveLength(0);
+    });
+
+    it('assigns v2.3 relative-watch ranks to the two best non-featured candidates at 20 rows', () => {
+        const final = calculateLegacyV23FinalScores({
+            preliminary: Array.from({ length: 20 }, (_, index) => ({
+                candidateId: `watch:${String(index).padStart(2, '0')}`,
+                username: `watch.${index}`, appearanceGrade: 1 as const,
+                exposureScore: 0, accountContext: 'personal' as const,
+                hasWeakPartnerEvidence: false, hasStrongPartnerEvidence: false,
+                uniqueTargetPostsLikedByCandidate: index < 18 ? 4 : 0,
+                boundedCandidateCommentsOnTarget: index < 3 ? 12 : index < 18 ? 6 : 0,
+                hasTagOrCaptionMention: index < 18, recentFemaleMutualRank: null,
+                recentMutualBadgeRank: null, preScore: 0,
+                verificationShortlistRank: index < 10 ? index + 1 : null,
+            })),
+            observedReverseLikeCandidateIds: new Set(),
+        });
+        expect(final.filter(row => row.relativeWatchRank !== null).map(row => ({
+            candidateId: row.candidateId, rank: row.relativeWatchRank,
+        }))).toEqual([
+            { candidateId: 'watch:16', rank: 1 },
+            { candidateId: 'watch:17', rank: 2 },
+        ]);
+    });
 });

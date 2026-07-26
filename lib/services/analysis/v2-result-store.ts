@@ -335,6 +335,7 @@ export interface AnalysisV2ResultStore {
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointReverseLikes(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2ReverseLikeRow[];
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointPartnerSafety(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2PartnerSafetyRow[];
@@ -578,6 +579,18 @@ const reverseLikeRowSchema = z.object({
         context.addIssue({ code: 'custom', message: 'Observed reverse likes require evidence.' });
     }
 });
+const legacyReverseLikeRowSchema = z.object({
+    candidateId: candidateIdSchema,
+    status: z.enum(['observed', 'not_observed', 'not_collected']),
+    componentScore: z.union([z.literal(0), z.literal(3)]),
+    evidenceRefIds: z.array(evidenceRefIdSchema).max(8),
+}).strict().superRefine((value, context) => {
+    if ((value.status === 'observed') !== (value.componentScore === 3)
+        || (value.status === 'observed') !== (value.evidenceRefIds.length > 0)) {
+        context.addIssue({ code: 'custom', message: 'Legacy observed reverse likes must score three with evidence.' });
+    }
+});
+const reverseCheckpointRowSchema = z.union([reverseLikeRowSchema, legacyReverseLikeRowSchema]);
 
 const partnerSafetyRowSchema = z.object({
     candidateId: candidateIdSchema,
@@ -1285,7 +1298,9 @@ export function createSupabaseAnalysisV2ResultStore(
         },
 
         async checkpointReverseLikes(input) {
-            const rows = uniqueSortedRows(input.rows, reverseLikeRowSchema);
+            const rows = uniqueSortedRows(
+                input.rows, reverseCheckpointRowSchema as unknown as typeof reverseLikeRowSchema
+            );
             return checkpoint(
                 ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointReverseRpc,
                 input,

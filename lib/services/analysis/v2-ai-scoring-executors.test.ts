@@ -3022,7 +3022,7 @@ describe('V2 AI and scoring executors', () => {
                     >[0]
                 ) => ({
                     operationKey,
-                    results: input.candidates.map(candidate => ({
+                    results: input.candidates.map((candidate: { candidateId: string }) => ({
                         candidateId: candidate.candidateId,
                         status: 'not_observed' as const,
                     })),
@@ -3456,16 +3456,34 @@ describe('V2 final score invariants', () => {
         } as unknown as AnalysisV2ScreeningSnapshot;
         memoryState.reverse = { revision: 1, resultHash: digest('legacy-reverse'), rows: [] };
         memoryState.partner = { revision: 1, resultHash: digest('legacy-partner'), rows: [] };
-        const deps = dependencies(memoryState);
+        const deps = dependencies(memoryState, {
+            reverseLikes: {
+                collect: vi.fn(async (input: { candidates: readonly { candidateId: string }[] }) => ({
+                    operationKey: `candidate-likers:${digest('legacy-observed')}`,
+                    results: input.candidates.map(candidate => ({
+                        candidateId: candidate.candidateId,
+                        status: 'observed' as const,
+                    })),
+                })),
+            },
+        });
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
 
+        await registry.reverse_likes!(context('reverse_likes', { jobKey: 'track:reverse-likes:collect' }));
+        expect(deps.resultStore.checkpointReverseLikes).toHaveBeenCalledWith(expect.objectContaining({
+            riskPolicyVersion: 'risk-policy-v2.3',
+            rows: [expect.objectContaining({ status: 'observed', componentScore: 3 })],
+        }));
         await expect(registry.final_score!(context('final_score', {
             jobKey: 'track:final-score',
         }))).resolves.toMatchObject({ checkpoint: { kind: 'final_score' } });
         expect(deps.resultStore.checkpointScores).toHaveBeenCalledWith(expect.objectContaining({
             riskPolicyVersion: 'risk-policy-v2.3',
             rows: [expect.objectContaining({
-                components: expect.objectContaining({ tagOrCaptionMention: 14 }),
+                components: expect.objectContaining({
+                    tagOrCaptionMention: 14,
+                    targetToCandidateLike: 3,
+                }),
                 possibleUpperBound: expect.any(Number),
             })],
         }));

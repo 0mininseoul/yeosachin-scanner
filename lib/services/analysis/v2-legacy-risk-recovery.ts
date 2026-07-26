@@ -106,7 +106,7 @@ function calculateRisk(candidate: LegacyV23PreliminaryCandidate, reverseLikeStat
 }
 
 function relativeAssignments(candidates: readonly Omit<LegacyV23FinalCandidate, 'featuredRank' | 'relativeWatchRank'>[]) {
-    const eligible = candidates.filter(row => !row.risk.partnerCapApplied).slice().sort((a, b) =>
+    const eligible = candidates.filter(row => !row.hasStrongPartnerEvidence).slice().sort((a, b) =>
         b.risk.publicScore - a.risk.publicScore || a.candidateId.localeCompare(b.candidateId));
     const assignments = new Map<string, { displayScore: number; riskBand: RiskBand; relativeTierApplied: boolean }>();
     if (eligible.length >= 3) {
@@ -123,6 +123,22 @@ function relativeAssignments(candidates: readonly Omit<LegacyV23FinalCandidate, 
     return candidates.map(row => assignments.get(row.candidateId) ?? ({
         displayScore: row.risk.displayScore, riskBand: row.risk.riskBand, relativeTierApplied: false,
     }));
+}
+
+function relativeWatchAssignments(
+    candidates: readonly Omit<LegacyV23FinalCandidate, 'relativeWatchRank'>[]
+): Map<string, number> {
+    if (candidates.length < 20) return new Map();
+    const featured = new Set(candidates
+        .filter(candidate => candidate.featuredRank !== null)
+        .map(candidate => candidate.candidateId));
+    return new Map(candidates
+        .filter(candidate => !featured.has(candidate.candidateId))
+        .slice()
+        .sort((left, right) => right.displayScore - left.displayScore
+            || left.candidateId.localeCompare(right.candidateId))
+        .slice(0, 2)
+        .map((candidate, index) => [candidate.candidateId, index + 1]));
 }
 
 export function calculateLegacyV23FinalScores(input: {
@@ -144,8 +160,12 @@ export function calculateLegacyV23FinalScores(input: {
         .slice(0, limit).map((row, index) => [row.candidateId, index + 1]));
     const high = rankFor('high_risk', 3);
     const caution = rankFor('caution', 15);
-    return calibrated.map(candidate => ({ ...candidate,
+    const ranked = calibrated.map(candidate => ({ ...candidate,
         featuredRank: high.get(candidate.candidateId) ?? caution.get(candidate.candidateId) ?? null,
-        relativeWatchRank: null,
+    }));
+    const relativeWatch = relativeWatchAssignments(ranked);
+    return ranked.map(candidate => ({
+        ...candidate,
+        relativeWatchRank: relativeWatch.get(candidate.candidateId) ?? null,
     }));
 }

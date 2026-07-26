@@ -1836,6 +1836,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 dependencies.targetProfiles.loadTargetProfile(checkpointClaim(context)),
             ]);
             if (!screening) throw new Error('ANALYSIS_V2_SCREENING_NOT_READY');
+            const legacyRecovery = screening.riskPolicyVersion === 'risk-policy-v2.3';
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const shortlist = screening.candidates
                 .filter(row => row.verificationShortlistRank !== null)
@@ -1877,7 +1878,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     return {
                         candidateId: candidate.candidateId,
                         status: status === 'observed_not_found' ? 'not_observed' : status,
-                        componentScore: status === 'observed' ? 5 : 0,
+                        componentScore: status === 'observed' ? (legacyRecovery ? 3 : 5) : 0,
                         evidenceRefIds: status === 'observed'
                             ? [evidenceRef(
                                 'analysis-v2-reverse-like-ref-v1',
@@ -1890,6 +1891,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const publicCheckpoint = await dependencies.resultStore.checkpointReverseLikes({
                 ...checkpointClaim(context),
                 rows: publicRows,
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             assertCheckpointCount(
                 publicCheckpoint,
