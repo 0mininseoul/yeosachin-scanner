@@ -908,4 +908,24 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
         expect(mocks.from).not.toHaveBeenCalled();
     });
+
+    it.each([
+        [{ preflightId: PREFLIGHT_ID, planId: 'standard', disclosureAccepted: false }],
+        [{ preflightId: PREFLIGHT_ID, unexpected: true }],
+    ])('recognizes a UUID-owned demo before malformed checkout validation: %o', async body => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+
+        const response = await checkout(request('/api/earlybird/checkout', body));
+
+        expect(response.status).toBe(400);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.demoStore.startForOwner).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
+    });
 });

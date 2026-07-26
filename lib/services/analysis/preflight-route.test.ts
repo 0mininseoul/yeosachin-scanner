@@ -958,4 +958,28 @@ describe('preflight owner routes', () => {
         expect(hidden.status).toBe(404);
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(hidden);
     });
+
+    it.each([
+        new Request('https://example.com', {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{',
+        }),
+        new Request('https://example.com', {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'invalid' }),
+        }),
+    ])('marks malformed demo PATCH bodies before production exclusion work', async request => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.findForOwner.mockResolvedValue({
+            id: preflightId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'preflight-key-000000000000', duration_seconds: 75, created_at: expiresAt, started_at: null,
+        });
+
+        const response = await patchPreflight(request, context());
+
+        expect(response.status).toBe(400);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.insertLandingLead).not.toHaveBeenCalled();
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
+    });
 });

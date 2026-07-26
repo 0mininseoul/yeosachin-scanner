@@ -168,6 +168,23 @@ async function handlePATCH(
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
         }
 
+        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id)) return suppressOperationalObservation(errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
+            let demoBody: unknown;
+            try {
+                demoBody = await request.json();
+            } catch {
+                return suppressOperationalObservation(errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.'));
+            }
+            if (!preflightExclusionRequestV1Schema.safeParse(demoBody).success) {
+                return suppressOperationalObservation(errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.'));
+            }
+            // Synthetic runs do not persist an exclusion or create a lead; this preserves
+            // the existing UI's compatible acknowledgement without mutating production rows.
+            return suppressOperationalObservation(new NextResponse(null, { status: 204 }));
+        }
+
         let body: unknown;
         try {
             body = await request.json();
@@ -177,14 +194,6 @@ async function handlePATCH(
         const parsed = preflightExclusionRequestV1Schema.safeParse(body);
         if (!parsed.success) {
             return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
-        }
-
-        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
-        if (demo) {
-            if (!isDemoOperator(user.id)) return suppressOperationalObservation(errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
-            // Synthetic runs do not persist an exclusion or create a lead; this preserves
-            // the existing UI's compatible acknowledgement without mutating production rows.
-            return suppressOperationalObservation(new NextResponse(null, { status: 204 }));
         }
 
         await preflightStore.setExclusion({
