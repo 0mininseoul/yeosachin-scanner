@@ -23,6 +23,7 @@ import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { preflightStore } from '@/lib/services/analysis/preflight';
 import {
     observeRoute,
+    suppressOperationalObservation,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import {
@@ -211,17 +212,26 @@ async function handlePOST(
     const demo = await demoAnalysisStore.findForOwner(parsed.data.preflightId, user.id);
     if (demo) {
         if (!isDemoOperator(user.id)) {
-            return silentDemoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
+            return suppressOperationalObservation(silentDemoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
         }
         if (parsed.data.planId !== 'standard') {
-            return silentDemoErrorResponse(409, 'PLAN_SELECTION_UNAVAILABLE', '선택한 플랜으로 사전 구매할 수 없습니다.');
+            return suppressOperationalObservation(silentDemoErrorResponse(409, 'PLAN_SELECTION_UNAVAILABLE', '선택한 플랜으로 사전 구매할 수 없습니다.'));
         }
-        const started = await demoAnalysisStore.startForOwner(demo.id, user.id);
+        let started: Awaited<ReturnType<typeof demoAnalysisStore.startForOwner>>;
+        try {
+            started = await demoAnalysisStore.startForOwner(demo.id, user.id);
+        } catch {
+            return suppressOperationalObservation(silentDemoErrorResponse(
+                409,
+                'PREFLIGHT_NOT_VALID',
+                '최신 사전 점검을 다시 확인해주세요.'
+            ));
+        }
         if (!started) {
-            return silentDemoErrorResponse(409, 'PREFLIGHT_NOT_VALID', '최신 사전 점검을 다시 확인해주세요.');
+            return suppressOperationalObservation(silentDemoErrorResponse(409, 'PREFLIGHT_NOT_VALID', '최신 사전 점검을 다시 확인해주세요.'));
         }
         // Deliberately before checkout/order/event code: this has no commercial side effect.
-        return NextResponse.json({ nextUrl: `/progress/${started.id}` }, { status: 200 });
+        return suppressOperationalObservation(NextResponse.json({ nextUrl: `/progress/${started.id}` }, { status: 200 }));
     }
 
     try {

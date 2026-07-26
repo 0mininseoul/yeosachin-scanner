@@ -17,6 +17,7 @@ import { fetchEarlybirdRemainingSlots } from '@/lib/services/earlybird/inventory
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     observeRoute,
+    suppressOperationalObservation,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
@@ -109,8 +110,11 @@ async function handleGET(
 
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
-            if (!isDemoOperator(user.id)) return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
-            return NextResponse.json(demoReadyPreflight(demo), { headers: { ...demoResponseCapabilities(), 'Cache-Control': 'private, no-store' } });
+            if (!isDemoOperator(user.id)) return suppressOperationalObservation(errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
+            return suppressOperationalObservation(NextResponse.json(
+                demoReadyPreflight(demo),
+                { headers: { ...demoResponseCapabilities(), 'Cache-Control': 'private, no-store' } }
+            ));
         }
 
         const stored = await preflightStore.findForOwner(preflightId, user.id);
@@ -177,10 +181,10 @@ async function handlePATCH(
 
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
-            if (!isDemoOperator(user.id)) return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
+            if (!isDemoOperator(user.id)) return suppressOperationalObservation(errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
             // Synthetic runs do not persist an exclusion or create a lead; this preserves
             // the existing UI's compatible acknowledgement without mutating production rows.
-            return new NextResponse(null, { status: 204 });
+            return suppressOperationalObservation(new NextResponse(null, { status: 204 }));
         }
 
         await preflightStore.setExclusion({

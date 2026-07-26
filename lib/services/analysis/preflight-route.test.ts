@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
         method: _request.method,
     })),
     process: vi.fn(),
+    suppressOperationalObservation: vi.fn((response: Response) => response),
     insertLandingLead: vi.fn(),
     resolveDispatch: vi.fn(),
     trustedAccessMode: vi.fn(),
@@ -52,7 +53,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
-vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/request', () => ({
+    observeRoute: mocks.observeRoute,
+    suppressOperationalObservation: mocks.suppressOperationalObservation,
+}));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
     flushOperationalLogs: mocks.flush,
@@ -873,6 +877,7 @@ describe('preflight owner routes', () => {
         expect(mocks.process).not.toHaveBeenCalled();
         expect(mocks.resolveDispatch).not.toHaveBeenCalled();
         expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
         vi.unstubAllEnvs();
     });
 
@@ -885,5 +890,72 @@ describe('preflight owner routes', () => {
         expect(response.status).toBe(400);
         expect(mocks.demoStore.createOrReplay).not.toHaveBeenCalled();
         expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+    });
+
+    it('marks every other bounded exact-demo preflight error without marking production', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        const invalid = await createPreflight(postRequest({ targetInstagramId: 'junho_dem', extra: true }));
+        expect(invalid.status).toBe(400);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(invalid);
+
+        mocks.suppressOperationalObservation.mockClear();
+        const production = await createPreflight(postRequest({ targetInstagramId: 'target.name', extra: true }));
+        expect(production.status).toBe(400);
+        expect(mocks.suppressOperationalObservation).not.toHaveBeenCalled();
+    });
+
+    it('marks a demo persistence rejection and leaves a production preflight observable', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.createOrReplay.mockResolvedValue(null);
+        const rejected = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
+        expect(rejected.status).toBe(503);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(rejected);
+
+        mocks.suppressOperationalObservation.mockClear();
+        const production = await createPreflight(postRequest({ targetInstagramId: 'target.name' }));
+        expect(production.status).toBe(202);
+        expect(mocks.suppressOperationalObservation).not.toHaveBeenCalled();
+    });
+
+    it('marks a thrown demo persistence failure without emitting the target', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.createOrReplay.mockRejectedValue(new Error('demo persistence unavailable'));
+
+        const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
+
+        expect(response.status).toBe(503);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.emit).not.toHaveBeenCalled();
+    });
+
+    it('marks demo preflight GET and PATCH responses, including a revoked operator response', async () => {
+        const demo = {
+            id: preflightId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'preflight-key-000000000000', duration_seconds: 75, created_at: expiresAt, started_at: null,
+        };
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.findForOwner.mockResolvedValue(demo);
+
+        const ready = await getPreflight(new Request('https://example.com'), context());
+        expect(ready.status).toBe(200);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(ready);
+
+        mocks.suppressOperationalObservation.mockClear();
+        const acknowledged = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+        expect(acknowledged.status).toBe(204);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(acknowledged);
+
+        mocks.suppressOperationalObservation.mockClear();
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'false');
+        const hidden = await getPreflight(new Request('https://example.com'), context());
+        expect(hidden.status).toBe(404);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(hidden);
     });
 });

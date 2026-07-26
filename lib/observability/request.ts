@@ -23,6 +23,13 @@ const METHODS = new Set([
     'PUT',
     'TRACE',
 ]);
+const SUPPRESSED_OPERATIONAL_RESPONSES = new WeakSet<Response>();
+
+/** Server-only marker for responses that must not enter the operational log pipeline. */
+export function suppressOperationalObservation<T extends Response>(response: T): T {
+    SUPPRESSED_OPERATIONAL_RESPONSES.add(response);
+    return response;
+}
 
 export interface OperationalRequestContext {
     request_id: string;
@@ -115,20 +122,24 @@ export async function observeRoute<T extends Response>(
 ): Promise<T> {
     const context = requestContext(request, route);
     const startedAt = performance.now();
+    let suppressObservation = false;
     try {
         const response = await operation(context);
-        try {
-            operationalLogger.emit({
-                event: 'http.route_completed',
-                severity: 'info',
-                fields: {
-                    ...context,
-                    status: response.status,
-                    duration_ms: elapsedMilliseconds(startedAt),
-                },
-            });
-        } catch {
-            // Observability must never change the product outcome.
+        suppressObservation = SUPPRESSED_OPERATIONAL_RESPONSES.has(response);
+        if (!suppressObservation) {
+            try {
+                operationalLogger.emit({
+                    event: 'http.route_completed',
+                    severity: 'info',
+                    fields: {
+                        ...context,
+                        status: response.status,
+                        duration_ms: elapsedMilliseconds(startedAt),
+                    },
+                });
+            } catch {
+                // Observability must never change the product outcome.
+            }
         }
         return response;
     } catch (error) {
@@ -148,6 +159,6 @@ export async function observeRoute<T extends Response>(
         }
         throw error;
     } finally {
-        scheduleOperationalFlush();
+        if (!suppressObservation) scheduleOperationalFlush();
     }
 }

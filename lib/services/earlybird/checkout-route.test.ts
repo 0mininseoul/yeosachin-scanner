@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
         startForOwner: vi.fn(),
     },
     emit: vi.fn(),
+    suppressOperationalObservation: vi.fn((response: Response) => response),
     observeRoute: vi.fn((
         _request: Request,
         _route: string,
@@ -31,7 +32,10 @@ vi.mock('@/lib/supabase/server', () => ({
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: mocks.rpc, from: mocks.from },
 }));
-vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/request', () => ({
+    observeRoute: mocks.observeRoute,
+    suppressOperationalObservation: mocks.suppressOperationalObservation,
+}));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
     flushOperationalLogs: mocks.flush,
@@ -323,6 +327,7 @@ describe('earlybird checkout and waitlist routes', () => {
             /basic_product-01|basic-checkout-a1|ord\.[a-f0-9]{32}/
         );
         expect(mocks.flush).toHaveBeenCalledOnce();
+        expect(mocks.suppressOperationalObservation).not.toHaveBeenCalled();
     });
 
     it('restores the same pending order on idempotent checkout replay', async () => {
@@ -837,6 +842,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.from).not.toHaveBeenCalled();
         expect(mocks.after).not.toHaveBeenCalled();
         expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
         vi.unstubAllEnvs();
     });
 
@@ -853,7 +859,9 @@ describe('earlybird checkout and waitlist routes', () => {
         expectedStatus,
         expectedCode,
     ) => {
-        if (operatorMode !== 'off') {
+        if (operatorMode === 'off') {
+            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'false');
+        } else {
             vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
             vi.stubEnv(
                 'DEMO_ANALYSIS_OPERATOR_USER_IDS',
@@ -879,6 +887,25 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.demoStore.startForOwner).toHaveBeenCalledTimes(
             planId === 'standard' && operatorMode === 'operator' ? 1 : 0
         );
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
         vi.unstubAllEnvs();
+    });
+
+    it('keeps a thrown demo start failure silent and marked', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+        mocks.demoStore.startForOwner.mockRejectedValue(new Error('demo start unavailable'));
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID, planId: 'standard', disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 });
