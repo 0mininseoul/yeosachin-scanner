@@ -56,32 +56,62 @@ SET search_path = ''
 AS $$
     SELECT p_value IS NOT NULL
        AND pg_catalog.jsonb_typeof(p_value) = 'object'
-       AND p_value ?& ARRAY[
-            'candidateToTargetLikes', 'candidateToTargetComments',
-            'candidateToTargetTagOrCaptionMention',
-            'targetToCandidateTagOrCaptionMention',
-            'targetToCandidateLike', 'recentMutual', 'appearanceExposure'
-       ]
-       AND p_value - ARRAY[
-            'candidateToTargetLikes', 'candidateToTargetComments',
-            'candidateToTargetTagOrCaptionMention',
-            'targetToCandidateTagOrCaptionMention',
-            'targetToCandidateLike', 'recentMutual', 'appearanceExposure'
-       ] = '{}'::JSONB
-       AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetLikes') = 'number'
-       AND (p_value->>'candidateToTargetLikes')::NUMERIC BETWEEN 0 AND 24
-       AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetComments') = 'number'
-       AND (p_value->>'candidateToTargetComments')::NUMERIC BETWEEN 0 AND 30
-       AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetTagOrCaptionMention') = 'number'
-       AND (p_value->>'candidateToTargetTagOrCaptionMention')::NUMERIC BETWEEN 0 AND 12
-       AND pg_catalog.jsonb_typeof(p_value->'targetToCandidateTagOrCaptionMention') = 'number'
-       AND (p_value->>'targetToCandidateTagOrCaptionMention')::NUMERIC BETWEEN 0 AND 8
-       AND pg_catalog.jsonb_typeof(p_value->'targetToCandidateLike') = 'number'
-       AND (p_value->>'targetToCandidateLike')::NUMERIC BETWEEN 0 AND 5
-       AND pg_catalog.jsonb_typeof(p_value->'recentMutual') = 'number'
-       AND (p_value->>'recentMutual')::NUMERIC BETWEEN 0 AND 5
-       AND pg_catalog.jsonb_typeof(p_value->'appearanceExposure') = 'number'
-       AND (p_value->>'appearanceExposure')::NUMERIC BETWEEN 0 AND 16;
+       AND (
+            -- The candidate checkpoint fences requests by risk-policy snapshot. Keep this
+            -- legacy shape valid only long enough for a v2.3 finalizer to drain.
+            (
+                p_value ?& ARRAY[
+                    'candidateToTargetLikes', 'candidateToTargetComments',
+                    'targetToCandidateLike', 'tagOrCaptionMention',
+                    'recentMutual', 'appearanceExposure'
+                ]
+                AND p_value - ARRAY[
+                    'candidateToTargetLikes', 'candidateToTargetComments',
+                    'targetToCandidateLike', 'tagOrCaptionMention',
+                    'recentMutual', 'appearanceExposure'
+                ] = '{}'::JSONB
+                AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetLikes') = 'number'
+                AND (p_value->>'candidateToTargetLikes')::NUMERIC BETWEEN 0 AND 20
+                AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetComments') = 'number'
+                AND (p_value->>'candidateToTargetComments')::NUMERIC BETWEEN 0 AND 26
+                AND pg_catalog.jsonb_typeof(p_value->'targetToCandidateLike') = 'number'
+                AND (p_value->>'targetToCandidateLike')::NUMERIC BETWEEN 0 AND 3
+                AND pg_catalog.jsonb_typeof(p_value->'tagOrCaptionMention') = 'number'
+                AND (p_value->>'tagOrCaptionMention')::NUMERIC BETWEEN 0 AND 14
+                AND pg_catalog.jsonb_typeof(p_value->'recentMutual') = 'number'
+                AND (p_value->>'recentMutual')::NUMERIC BETWEEN 0 AND 17
+                AND pg_catalog.jsonb_typeof(p_value->'appearanceExposure') = 'number'
+                AND (p_value->>'appearanceExposure')::NUMERIC BETWEEN 0 AND 20
+            )
+            OR (
+                p_value ?& ARRAY[
+                    'candidateToTargetLikes', 'candidateToTargetComments',
+                    'candidateToTargetTagOrCaptionMention',
+                    'targetToCandidateTagOrCaptionMention',
+                    'targetToCandidateLike', 'recentMutual', 'appearanceExposure'
+                ]
+                AND p_value - ARRAY[
+                    'candidateToTargetLikes', 'candidateToTargetComments',
+                    'candidateToTargetTagOrCaptionMention',
+                    'targetToCandidateTagOrCaptionMention',
+                    'targetToCandidateLike', 'recentMutual', 'appearanceExposure'
+                ] = '{}'::JSONB
+                AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetLikes') = 'number'
+                AND (p_value->>'candidateToTargetLikes')::NUMERIC BETWEEN 0 AND 24
+                AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetComments') = 'number'
+                AND (p_value->>'candidateToTargetComments')::NUMERIC BETWEEN 0 AND 30
+                AND pg_catalog.jsonb_typeof(p_value->'candidateToTargetTagOrCaptionMention') = 'number'
+                AND (p_value->>'candidateToTargetTagOrCaptionMention')::NUMERIC BETWEEN 0 AND 12
+                AND pg_catalog.jsonb_typeof(p_value->'targetToCandidateTagOrCaptionMention') = 'number'
+                AND (p_value->>'targetToCandidateTagOrCaptionMention')::NUMERIC BETWEEN 0 AND 8
+                AND pg_catalog.jsonb_typeof(p_value->'targetToCandidateLike') = 'number'
+                AND (p_value->>'targetToCandidateLike')::NUMERIC BETWEEN 0 AND 5
+                AND pg_catalog.jsonb_typeof(p_value->'recentMutual') = 'number'
+                AND (p_value->>'recentMutual')::NUMERIC BETWEEN 0 AND 5
+                AND pg_catalog.jsonb_typeof(p_value->'appearanceExposure') = 'number'
+                AND (p_value->>'appearanceExposure')::NUMERIC BETWEEN 0 AND 16
+            )
+        );
 $$;
 
 CREATE OR REPLACE FUNCTION public.analysis_v2_expected_relative_risk_rows(
@@ -284,6 +314,8 @@ DECLARE
     v_expected_pre_score_pattern TEXT := $pattern$GREATEST\(\s*0\s*,\s*LEAST\(\s*component_sum\.preliminary_component_total\s*\+\s*\(item\.value->>'weakPartnerAdjustment'\)::NUMERIC\s*,\s*97\s*\)\s*\)\s+AS\s+expected_pre_score$pattern$;
     v_possible_upper_pattern TEXT := $pattern$expected_score\.expected_pre_score\s*\+\s*3\s*,\s*100$pattern$;
     v_caution_pattern TEXT := $pattern$ranked\.risk_band\s*=\s*'caution'\s+AND\s+ranked\.expected_rank\s*<=\s*15$pattern$;
+    v_reverse_component_pattern TEXT := $pattern$pg_catalog\.jsonb_set\(\s*preliminary\.components\s*,\s*ARRAY\['targetToCandidateLike'\]\s*,\s*pg_catalog\.to_jsonb\(reverse_like\.component_score\)\s*,\s*TRUE\s*\)$pattern$;
+    v_policy_guard_pattern TEXT := $pattern$p_risk_policy_version\s+IS\s+DISTINCT\s+FROM\s+'risk-policy-v2\.3'$pattern$;
 BEGIN
     SELECT pg_catalog.pg_get_functiondef(
         'public.checkpoint_analysis_v2_candidate_scores(uuid,text,uuid,text,jsonb,text)'
@@ -293,14 +325,20 @@ BEGIN
        OR v_definition !~ v_tag_component_pattern
        OR v_definition !~ v_expected_pre_score_pattern
        OR v_definition !~ v_possible_upper_pattern
-       OR v_definition !~ v_caution_pattern THEN
+       OR v_definition !~ v_caution_pattern
+       OR v_definition !~ v_reverse_component_pattern
+       OR v_definition !~ v_policy_guard_pattern THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_FINAL_DRIFT', ERRCODE = 'P0001';
     END IF;
     v_definition := pg_catalog.regexp_replace(
         v_definition,
         v_tag_component_pattern,
-        $replacement$(item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC$replacement$,
+        $replacement$CASE
+                        WHEN p_risk_policy_version = 'risk-policy-v2.3'
+                            THEN (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
+                        ELSE (item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
+                            + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC
+                    END$replacement$,
         'g'
     );
     v_definition := pg_catalog.regexp_replace(
@@ -309,18 +347,47 @@ BEGIN
         $replacement$GREATEST(0, LEAST(
                     component_sum.preliminary_component_total
                         + (item.value->>'weakPartnerAdjustment')::NUMERIC,
-                    95
+                    CASE WHEN p_risk_policy_version = 'risk-policy-v2.3'
+                        THEN 97 ELSE 95 END
                 )) AS expected_pre_score$replacement$
     );
     v_definition := pg_catalog.regexp_replace(
         v_definition,
         v_possible_upper_pattern,
-        $replacement$expected_score.expected_pre_score + 5, 100$replacement$
+        $replacement$expected_score.expected_pre_score
+                    + CASE WHEN p_risk_policy_version = 'risk-policy-v2.3'
+                        THEN 3 ELSE 5 END, 100$replacement$
     );
-    v_definition := pg_catalog.replace(v_definition, 'risk-policy-v2.3', 'risk-policy-v2.4');
+    v_definition := pg_catalog.regexp_replace(
+        v_definition,
+        v_reverse_component_pattern,
+        $replacement$pg_catalog.jsonb_set(
+                preliminary.components,
+                ARRAY['targetToCandidateLike'],
+                pg_catalog.to_jsonb(
+                    CASE
+                        WHEN p_risk_policy_version = 'risk-policy-v2.4'
+                            AND reverse_like.reverse_like_status = 'observed'
+                            AND reverse_like.component_score = 3
+                        THEN 5::NUMERIC
+                        ELSE reverse_like.component_score
+                    END
+                ),
+                TRUE
+            )$replacement$
+    );
+    v_definition := pg_catalog.regexp_replace(
+        v_definition,
+        v_policy_guard_pattern,
+        $replacement$p_risk_policy_version NOT IN ('risk-policy-v2.3', 'risk-policy-v2.4')$replacement$
+    );
     v_definition := pg_catalog.regexp_replace(
         v_definition, v_caution_pattern,
-        $replacement$ranked.risk_band = 'caution' AND ranked.expected_rank <= 10$replacement$
+        $replacement$ranked.risk_band = 'caution'
+                            AND ranked.expected_rank <= CASE
+                                WHEN p_risk_policy_version = 'risk-policy-v2.3' THEN 15
+                                ELSE 10
+                            END$replacement$
     );
     EXECUTE v_definition;
 END;

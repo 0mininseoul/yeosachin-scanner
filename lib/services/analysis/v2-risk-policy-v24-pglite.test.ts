@@ -103,7 +103,8 @@ describe('risk-policy v2.4 database replay', () => {
         expect(migration).toContain("candidateToTargetTagOrCaptionMention");
         expect(migration).toContain("targetToCandidateTagOrCaptionMention");
         expect(migration).toContain("+ 5, 100");
-        expect(migration).toContain("expected_rank <= 10");
+        expect(migration).toContain("WHEN p_risk_policy_version = 'risk-policy-v2.3' THEN 15");
+        expect(migration).toContain('ELSE 10');
         expect(predecessor).toContain('component_sum.preliminary_component_total');
         expect(predecessor).toContain('                    97\n                )) AS expected_pre_score');
         expect(predecessor).toContain('                    100\n                )) AS expected_raw_score');
@@ -136,6 +137,7 @@ describe('risk-policy v2.4 database replay', () => {
                 CREATE TABLE public.analysis_v2_preliminary_score_rows (
                     candidate_id TEXT PRIMARY KEY,
                     pre_score NUMERIC NOT NULL CHECK (pre_score BETWEEN 0 AND 97),
+                    components JSONB NOT NULL DEFAULT '{}'::JSONB,
                     possible_upper_bound NUMERIC NOT NULL CONSTRAINT
                         analysis_v2_preliminary_score_rows_possible_upper_bound_check CHECK (
                         possible_upper_bound BETWEEN pre_score AND pre_score + 3
@@ -145,6 +147,7 @@ describe('risk-policy v2.4 database replay', () => {
                 CREATE OR REPLACE FUNCTION public.analysis_v2_result_valid_ref_list(TEXT[], INTEGER)
                 RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $function$ SELECT TRUE $function$;
                 CREATE TABLE public.analysis_v2_reverse_like_rows (
+                    candidate_id TEXT NOT NULL,
                     reverse_like_status TEXT NOT NULL,
                     component_score NUMERIC NOT NULL CHECK (component_score IN (0, 3)),
                     evidence_ref_ids TEXT[] NOT NULL DEFAULT '{}',
@@ -220,6 +223,23 @@ describe('risk-policy v2.4 database replay', () => {
                     IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.3' THEN
                         RAISE EXCEPTION 'policy';
                     END IF;
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+                        INNER JOIN public.analysis_v2_preliminary_score_rows AS preliminary
+                            ON preliminary.candidate_id = item.value->>'candidateId'
+                        INNER JOIN public.analysis_v2_reverse_like_rows AS reverse_like
+                            ON reverse_like.candidate_id = preliminary.candidate_id
+                        WHERE item.value->>'candidateId' = 'mixed'
+                          AND item.value->'components' IS DISTINCT FROM pg_catalog.jsonb_set(
+                            preliminary.components,
+                            ARRAY['targetToCandidateLike'],
+                            pg_catalog.to_jsonb(reverse_like.component_score),
+                            TRUE
+                          )
+                    ) THEN
+                        RAISE EXCEPTION 'reverse like component';
+                    END IF;
                     DELETE FROM public.analysis_v2_candidate_score_rows;
                     INSERT INTO public.analysis_v2_candidate_score_rows(
                         candidate_id, risk_band, display_score, featured_rank
@@ -257,33 +277,139 @@ describe('risk-policy v2.4 database replay', () => {
 
             await migrationDb.exec(`
                 INSERT INTO public.analysis_v2_reverse_like_rows(
-                    reverse_like_status, component_score, evidence_ref_ids
-                ) VALUES ('observed', 3, ARRAY['like:legacy'])
+                    candidate_id, reverse_like_status, component_score, evidence_ref_ids
+                ) VALUES ('mixed', 'observed', 3, ARRAY['like:legacy'])
             `);
 
             await expect(migrationDb.exec(migration)).resolves.toBeDefined();
+            const componentSchemas = await migrationDb.query<{ valid: boolean }>(
+                `SELECT public.analysis_v2_result_valid_score_components($1::JSONB) AS valid`,
+                [JSON.stringify({
+                    candidateToTargetLikes: 0,
+                    candidateToTargetComments: 0,
+                    targetToCandidateLike: 3,
+                    tagOrCaptionMention: 0,
+                    recentMutual: 0,
+                    appearanceExposure: 0,
+                })]
+            );
+            expect(componentSchemas.rows).toEqual([{ valid: true }]);
+            const directionalComponents = await migrationDb.query<{ valid: boolean }>(
+                `SELECT public.analysis_v2_result_valid_score_components($1::JSONB) AS valid`,
+                [JSON.stringify({
+                    candidateToTargetLikes: 0,
+                    candidateToTargetComments: 0,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0,
+                    targetToCandidateLike: 5,
+                    recentMutual: 0,
+                    appearanceExposure: 0,
+                })]
+            );
+            expect(directionalComponents.rows).toEqual([{ valid: true }]);
+            const mixedComponentSchema = await migrationDb.query<{ valid: boolean }>(
+                `SELECT public.analysis_v2_result_valid_score_components($1::JSONB) AS valid`,
+                [JSON.stringify({
+                    candidateToTargetLikes: 0,
+                    candidateToTargetComments: 0,
+                    tagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0,
+                    targetToCandidateLike: 3,
+                    recentMutual: 0,
+                    appearanceExposure: 0,
+                })]
+            );
+            expect(mixedComponentSchema.rows).toEqual([{ valid: false }]);
             await expect(migrationDb.exec(`
                 INSERT INTO public.analysis_v2_reverse_like_rows(
-                    reverse_like_status, component_score, evidence_ref_ids
+                    candidate_id, reverse_like_status, component_score, evidence_ref_ids
                 ) VALUES
-                    ('observed', 3, ARRAY['like:rolling-old']),
-                    ('observed', 5, ARRAY['like:v24'])
+                    ('rolling-old', 'observed', 3, ARRAY['like:rolling-old']),
+                    ('v24', 'observed', 5, ARRAY['like:v24'])
             `)).resolves.toBeDefined();
             await expect(migrationDb.exec(`
                 INSERT INTO public.analysis_v2_reverse_like_rows(
-                    reverse_like_status, component_score, evidence_ref_ids
-                ) VALUES ('observed', 4, ARRAY['like:invalid'])
+                    candidate_id, reverse_like_status, component_score, evidence_ref_ids
+                ) VALUES ('invalid', 'observed', 4, ARRAY['like:invalid'])
             `)).rejects.toThrow();
             await expect(migrationDb.exec(`
                 INSERT INTO public.analysis_v2_reverse_like_rows(
-                    reverse_like_status, component_score, evidence_ref_ids
-                ) VALUES ('not_observed', 3, ARRAY[]::TEXT[])
+                    candidate_id, reverse_like_status, component_score, evidence_ref_ids
+                ) VALUES ('invalid', 'not_observed', 3, ARRAY[]::TEXT[])
             `)).rejects.toThrow();
             await expect(migrationDb.exec(`
                 INSERT INTO public.analysis_v2_preliminary_score_rows(
                     candidate_id, pre_score, possible_upper_bound
                 ) VALUES ('boundary', 95, 100)
             `)).resolves.toBeDefined();
+            await migrationDb.exec(`
+                INSERT INTO public.analysis_v2_preliminary_score_rows(
+                    candidate_id, pre_score, components, possible_upper_bound
+                ) VALUES ('mixed', 50, '{}'::JSONB, 55)
+            `);
+            const canonicalMixedRow = [{
+                candidateId: 'mixed',
+                riskBand: 'normal',
+                displayScore: 55,
+                featuredRank: null,
+                components: { targetToCandidateLike: 5 },
+            }];
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.4'
+                )`,
+                [JSON.stringify(canonicalMixedRow)]
+            )).resolves.toBeDefined();
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.4'
+                )`,
+                [JSON.stringify([{
+                    ...canonicalMixedRow[0],
+                    components: { targetToCandidateLike: 3 },
+                }])]
+            )).rejects.toThrow('reverse like component');
+            const legacyReverse = await migrationDb.query<{ component_score: number }>(`
+                SELECT component_score
+                FROM public.analysis_v2_reverse_like_rows
+                WHERE candidate_id = 'mixed'
+            `);
+            expect(legacyReverse.rows).toEqual([{ component_score: '3' }]);
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.3'
+                )`,
+                [JSON.stringify([{
+                    ...canonicalMixedRow[0],
+                    components: { targetToCandidateLike: 3 },
+                }])]
+            )).resolves.toBeDefined();
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.3'
+                )`,
+                [JSON.stringify(canonicalMixedRow)]
+            )).rejects.toThrow('reverse like component');
             await expect(migrationDb.query(
                 `SELECT public.checkpoint_analysis_v2_preliminary_scores(
                     '10000000-0000-4000-8000-000000000001'::UUID,
@@ -352,9 +478,12 @@ describe('risk-policy v2.4 database replay', () => {
                         ::pg_catalog.regprocedure
                 ) AS definition`
             );
-            expect(patchedDefinition.rows[0]!.definition).toContain('95\n                )) AS expected_pre_score');
+            expect(patchedDefinition.rows[0]!.definition).toContain(
+                "CASE WHEN p_risk_policy_version = 'risk-policy-v2.3'"
+            );
+            expect(patchedDefinition.rows[0]!.definition).toContain('THEN 97 ELSE 95 END');
             expect(patchedDefinition.rows[0]!.definition).toContain('100\n                    )) AS expected_raw_score');
-            expect(patchedDefinition.rows[0]!.definition).toContain('expected_rank <= 10');
+            expect(patchedDefinition.rows[0]!.definition).toContain("THEN 15\n                                ELSE 10");
             expect(patchedDefinition.rows[0]!.definition).toContain('expected_rank <= 3');
             expect(patchedDefinition.rows[0]!.definition).not.toContain('expected_rank <= 15');
         } finally {

@@ -87,7 +87,7 @@ function recentAssignmentIndex(
     return new Map(assignments.map(assignment => [assignment.username, assignment]));
 }
 
-/** Freeze the global Top 10 before the three-point reverse-like lookup runs. */
+/** Freeze the global Top 10 before the five-point reverse-like lookup runs. */
 export function calculateV2PreliminaryScores(input: {
     candidates: readonly V2FemaleCandidateEvidence[];
     orderedMutualUsernames: readonly string[];

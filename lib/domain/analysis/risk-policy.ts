@@ -360,7 +360,7 @@ function compareFeatureCandidates(
 /**
  * Freezes the global reverse-like verification scope before the paid liker lookup runs.
  * This is deliberately named a shortlist because uncollected candidates can still have
- * a possible upper bound three points above their preliminary score.
+ * a possible upper bound five points above their preliminary score.
  */
 export function assignVerificationShortlist<T extends VerificationShortlistCandidate>(
     candidates: readonly T[]
