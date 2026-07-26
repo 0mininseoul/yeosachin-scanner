@@ -3481,7 +3481,8 @@ describe('V2 AI and scoring executors', () => {
         };
         const deps = dependencies(memoryState);
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
-        await registry.final_score!(context('final_score'));
+        await expect(registry.final_score!(context('final_score')))
+            .resolves.toMatchObject({ checkpoint: { kind: 'final_score' } });
 
         expect(memoryState.final?.candidates[0].reverseLikeStatus).toBe('not_collected');
         expect(memoryState.final?.candidates[0].risk.possibleUpperBound)

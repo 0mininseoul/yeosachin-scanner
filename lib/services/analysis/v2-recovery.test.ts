@@ -89,6 +89,7 @@ function providerRecovery() {
             failed: 0,
             hasMore: false,
         })),
+        recoverScoreAudits: vi.fn(async () => undefined),
     };
 }
 
@@ -373,5 +374,76 @@ describe('analysis V2 dispatch recovery', () => {
         expect(recoverSchedulerOperations).toHaveBeenCalledBefore(
             reapSchedulerGeminiLeases,
         );
+    });
+
+    it('drains score audits only after media and provider safety cleanup', async () => {
+        const order: string[] = [];
+        await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            cleanupTerminalMedia: vi.fn(async () => {
+                order.push('media');
+            }),
+            cleanupProviderRuns: vi.fn(async () => {
+                order.push('provider');
+                return {
+                    scanned: 0, settled: 0, failed: 0,
+                    unconfirmedStarts: 0, hasMore: false,
+                };
+            }),
+            reconcileProviderUsage: vi.fn(async () => {
+                order.push('usage');
+                return {
+                    eligible: 0, reconciled: 0, failed: 0, hasMore: false,
+                };
+            }),
+            recoverScoreAudits: vi.fn(async () => {
+                order.push('audit');
+            }),
+        });
+        expect(order).toEqual(['media', 'provider', 'usage', 'audit']);
+    });
+
+    it('bounds a hung score-audit drain without changing recovery success', async () => {
+        const order: string[] = [];
+        const startedAt = performance.now();
+        const summary = await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            cleanupTerminalMedia: vi.fn(async () => {
+                order.push('media');
+            }),
+            cleanupProviderRuns: vi.fn(async () => {
+                order.push('provider');
+                return {
+                    scanned: 0, settled: 0, failed: 0,
+                    unconfirmedStarts: 0, hasMore: false,
+                };
+            }),
+            reconcileProviderUsage: vi.fn(async () => {
+                order.push('usage');
+                return {
+                    eligible: 0, reconciled: 0, failed: 0, hasMore: false,
+                };
+            }),
+            recoverScoreAudits: vi.fn(() => {
+                order.push('audit');
+                return new Promise<void>(() => undefined);
+            }),
+            scoreAuditTimeoutMs: 25,
+        });
+        expect(order).toEqual(['media', 'provider', 'usage', 'audit']);
+        expect(performance.now() - startedAt).toBeLessThan(250);
+        expect(summary.failed).toBe(0);
+    });
+
+    it('isolates a score-audit failure from analysis recovery', async () => {
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverScoreAudits: async () => {
+                throw new Error('audit service unavailable');
+            },
+        })).resolves.toMatchObject({ failed: 0 });
     });
 });
