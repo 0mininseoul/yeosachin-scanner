@@ -247,6 +247,24 @@ function demoTrack(
     };
 }
 
+/** Canonical synthetic progression; the sequence mirrors the production V2 DAG. */
+export const DEMO_PROGRESS_STAGE_SCHEDULE = [
+    ['TARGET_PROFILE_READY', 0],
+    ['RELATIONSHIPS_COLLECTING', 750],
+    ['TARGET_INTERACTIONS_COLLECTING', 1500],
+    ['PUBLIC_PROFILES_COLLECTING', 2250],
+    ['PROFILE_SCREENING', 3000],
+    ['PRIVATE_NAMES_SCREENING', 3750],
+    ['EVIDENCE_JOINING', 4500],
+    ['CANDIDATES_RANKING', 5250],
+    ['SHORTLIST_INTERACTIONS_COLLECTING', 6000],
+    ['PARTNER_CONTEXT_CHECKING', 6750],
+    ['FINAL_SCORE_CALCULATING', 7500],
+    ['HIGH_RISK_NARRATIVES_WRITING', 8250],
+    ['RESULT_FINALIZING', 9000],
+    ['ANALYSIS_COMPLETED', 10000],
+] as const;
+
 export function projectDemoProgress(input: {
     requestId: string;
     startedAt: Date;
@@ -256,24 +274,19 @@ export function projectDemoProgress(input: {
     const elapsed = Math.max(0, input.now.getTime() - input.startedAt.getTime());
     const progressBp = Math.min(10_000, Math.floor(elapsed / (input.durationSeconds * 1_000) * 10_000));
     const completed = progressBp === 10_000;
-    const schedule = [
-        ['TARGET_PROFILE_READY', 0], ['RELATIONSHIPS_COLLECTING', 1000], ['PUBLIC_PROFILES_COLLECTING', 2000],
-        ['PROFILE_SCREENING', 3000], ['EVIDENCE_JOINING', 4500], ['TARGET_INTERACTIONS_COLLECTING', 5500],
-        ['CANDIDATES_RANKING', 6500], ['HIGH_RISK_NARRATIVES_WRITING', 7500], ['RESULT_FINALIZING', 8500],
-        ['ANALYSIS_COMPLETED', 10000],
-    ] as const;
-    const activeStageCode = [...schedule].reverse().find(([, threshold]) => progressBp >= threshold)![0];
+    const activeStageCode = [...DEMO_PROGRESS_STAGE_SCHEDULE].reverse()
+        .find(([, threshold]) => progressBp >= threshold)![0];
     const tracks = {
-        relationshipAi: demoTrack(progressBp, 0, 4_500, activeStageCode, 'RELATIONSHIP_AI_QUEUED', 'RELATIONSHIP_AI_COMPLETE'),
-        interactions: demoTrack(progressBp, 4_500, 8_500, activeStageCode, 'INTERACTIONS_QUEUED', 'INTERACTIONS_COMPLETE'),
-        finalization: demoTrack(progressBp, 8_500, 10_000, activeStageCode, 'FINALIZATION_QUEUED', 'FINALIZATION_COMPLETE'),
+        relationshipAi: demoTrack(progressBp, 0, 5_250, activeStageCode, 'RELATIONSHIP_AI_QUEUED', 'RELATIONSHIP_AI_COMPLETE'),
+        interactions: demoTrack(progressBp, 1_500, 7_500, activeStageCode, 'INTERACTIONS_QUEUED', 'INTERACTIONS_COMPLETE'),
+        finalization: demoTrack(progressBp, 7_500, 10_000, activeStageCode, 'FINALIZATION_QUEUED', 'FINALIZATION_COMPLETE'),
     };
     if (completed) {
-        tracks.relationshipAi = demoTrack(10_000, 0, 4_500, activeStageCode, 'RELATIONSHIP_AI_QUEUED', 'RELATIONSHIP_AI_COMPLETE');
-        tracks.interactions = demoTrack(10_000, 4_500, 8_500, activeStageCode, 'INTERACTIONS_QUEUED', 'INTERACTIONS_COMPLETE');
-        tracks.finalization = demoTrack(10_000, 8_500, 10_000, activeStageCode, 'FINALIZATION_QUEUED', 'FINALIZATION_COMPLETE');
+        tracks.relationshipAi = demoTrack(10_000, 0, 5_250, activeStageCode, 'RELATIONSHIP_AI_QUEUED', 'RELATIONSHIP_AI_COMPLETE');
+        tracks.interactions = demoTrack(10_000, 1_500, 7_500, activeStageCode, 'INTERACTIONS_QUEUED', 'INTERACTIONS_COMPLETE');
+        tracks.finalization = demoTrack(10_000, 7_500, 10_000, activeStageCode, 'FINALIZATION_QUEUED', 'FINALIZATION_COMPLETE');
     }
-    const events: ProgressEventV1[] = schedule.filter((entry) => progressBp >= entry[1]).map(([copyCode], index) => ({
+    const events: ProgressEventV1[] = DEMO_PROGRESS_STAGE_SCHEDULE.filter((entry) => progressBp >= entry[1]).map(([copyCode], index) => ({
         schemaVersion: 1, requestId: input.requestId, seq: index + 1, revision: Math.floor(progressBp / 500),
         occurredAt: input.startedAt.toISOString(), state: 'confirmed',
         eventCode: copyCode === 'ANALYSIS_COMPLETED' ? 'ANALYSIS_COMPLETED' : index === 0 ? 'TARGET_PROFILE_READY' : index === 3 ? 'PROFILE_SCREENED' : 'RELATIONSHIP_PROGRESS',

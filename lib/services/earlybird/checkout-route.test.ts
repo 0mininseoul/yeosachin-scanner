@@ -839,4 +839,46 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.emit).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });
+
+    it.each([
+        ['flag-off', 'off', 'standard', true, 404, 'NOT_FOUND'],
+        ['allowlist-revoked', 'revoked', 'standard', true, 404, 'NOT_FOUND'],
+        ['non-Standard plan', 'operator', 'basic', true, 409, 'PLAN_SELECTION_UNAVAILABLE'],
+        ['start failure', 'operator', 'standard', false, 409, 'PREFLIGHT_NOT_VALID'],
+    ] as const)('keeps the %s demo checkout rejection entirely silent', async (
+        _case,
+        operatorMode,
+        planId,
+        startSucceeds,
+        expectedStatus,
+        expectedCode,
+    ) => {
+        if (operatorMode !== 'off') {
+            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+            vi.stubEnv(
+                'DEMO_ANALYSIS_OPERATOR_USER_IDS',
+                operatorMode === 'operator' ? USER_ID : '223e4567-e89b-42d3-a456-426614174000'
+            );
+        }
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+        mocks.demoStore.startForOwner.mockResolvedValue(startSucceeds ? { id: PREFLIGHT_ID, user_id: USER_ID } : null);
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId,
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(expectedStatus);
+        await expect(response.json()).resolves.toMatchObject({ code: expectedCode });
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
+        expect(mocks.demoStore.startForOwner).toHaveBeenCalledTimes(
+            planId === 'standard' && operatorMode === 'operator' ? 1 : 0
+        );
+        vi.unstubAllEnvs();
+    });
 });

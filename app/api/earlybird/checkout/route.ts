@@ -36,6 +36,14 @@ function errorResponse(status: number, code: string, error: string): NextRespons
     return NextResponse.json({ code, error }, { status });
 }
 
+/** Demo rejections intentionally bypass operational and commercial instrumentation. */
+function silentDemoErrorResponse(status: number, code: string, error: string): NextResponse {
+    return NextResponse.json({
+        code: code.slice(0, 64),
+        error: error.slice(0, 200),
+    }, { status });
+}
+
 function persistenceErrorResponse(error: EarlybirdPersistenceError): NextResponse {
     if (error.code === 'CHECKOUT_PHONE_REQUIRED') {
         return errorResponse(
@@ -203,14 +211,14 @@ async function handlePOST(
     const demo = await demoAnalysisStore.findForOwner(parsed.data.preflightId, user.id);
     if (demo) {
         if (!isDemoOperator(user.id)) {
-            return failed(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
+            return silentDemoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
         }
         if (parsed.data.planId !== 'standard') {
-            return failed(409, 'PLAN_SELECTION_UNAVAILABLE', '선택한 플랜으로 사전 구매할 수 없습니다.');
+            return silentDemoErrorResponse(409, 'PLAN_SELECTION_UNAVAILABLE', '선택한 플랜으로 사전 구매할 수 없습니다.');
         }
         const started = await demoAnalysisStore.startForOwner(demo.id, user.id);
         if (!started) {
-            return failed(409, 'PREFLIGHT_NOT_VALID', '최신 사전 점검을 다시 확인해주세요.');
+            return silentDemoErrorResponse(409, 'PREFLIGHT_NOT_VALID', '최신 사전 점검을 다시 확인해주세요.');
         }
         // Deliberately before checkout/order/event code: this has no commercial side effect.
         return NextResponse.json({ nextUrl: `/progress/${started.id}` }, { status: 200 });

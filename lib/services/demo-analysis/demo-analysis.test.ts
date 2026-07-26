@@ -76,16 +76,17 @@ describe('synthetic demo fixture', () => {
     it('emits the product progress schedule in order at each phase boundary', () => {
         const startedAt = new Date('2026-07-01T00:00:00.000Z');
         const expected = [
-            'TARGET_PROFILE_READY', 'RELATIONSHIPS_COLLECTING', 'PUBLIC_PROFILES_COLLECTING',
-            'PROFILE_SCREENING', 'EVIDENCE_JOINING', 'TARGET_INTERACTIONS_COLLECTING',
-            'CANDIDATES_RANKING', 'HIGH_RISK_NARRATIVES_WRITING', 'RESULT_FINALIZING', 'ANALYSIS_COMPLETED',
+            'TARGET_PROFILE_READY', 'RELATIONSHIPS_COLLECTING', 'TARGET_INTERACTIONS_COLLECTING',
+            'PUBLIC_PROFILES_COLLECTING', 'PROFILE_SCREENING', 'PRIVATE_NAMES_SCREENING', 'EVIDENCE_JOINING',
+            'CANDIDATES_RANKING', 'SHORTLIST_INTERACTIONS_COLLECTING', 'PARTNER_CONTEXT_CHECKING',
+            'FINAL_SCORE_CALCULATING', 'HIGH_RISK_NARRATIVES_WRITING', 'RESULT_FINALIZING', 'ANALYSIS_COMPLETED',
         ];
         expected.forEach((copyCode, index) => {
             const result = projectDemoProgress({
                 requestId,
                 startedAt,
                 durationSeconds: 100,
-                now: new Date(+startedAt + [0, 10, 20, 30, 45, 55, 65, 75, 85, 100][index]! * 1_000),
+                now: new Date(+startedAt + [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 94, 100][index]! * 1_000),
             });
             expect(result.events.at(-1)?.copyCode).toBe(copyCode);
             expect(analysisV2ProgressCopy({ ...result.snapshot, events: result.events }))
