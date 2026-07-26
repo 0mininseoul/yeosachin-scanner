@@ -125,9 +125,28 @@ describe('V2 AI stage policy', () => {
         expect(JSON.stringify(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6']))
             .toBe(JSON.stringify(AI_STAGE_POLICIES));
         expect(AI_STAGE_NAMES_V27).toEqual([...AI_STAGE_NAMES, 'genderResolution']);
-        for (const stage of AI_STAGE_NAMES) {
+        for (const stage of ['partnerSafety', 'highRiskNarrative'] as const) {
             expect(getAiStagePolicy('ai-stage-policy-v2.7', stage))
                 .toBe(getAiStagePolicy('ai-stage-policy-v2.6', stage));
+        }
+    });
+
+    it('lowers only v2.7 scheduling concurrency for rate-limited early stages', () => {
+        const v26 = AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6'];
+        const v27 = AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.7'];
+
+        expect(v26.genderTriage.concurrency).toBe(8);
+        expect(v26.featureAnalysis.concurrency).toBe(8);
+        expect(v26.privateAccountName.concurrency).toBe(4);
+        expect(AI_SHARED_CONCURRENCY_LIMIT).toBe(8);
+
+        expect(v27.genderTriage.concurrency).toBe(4);
+        expect(v27.featureAnalysis.concurrency).toBe(4);
+        expect(v27.privateAccountName.concurrency).toBe(2);
+
+        for (const stage of ['genderTriage', 'featureAnalysis', 'privateAccountName'] as const) {
+            expect({ ...v27[stage], concurrency: undefined })
+                .toEqual({ ...v26[stage], concurrency: undefined });
         }
     });
 
