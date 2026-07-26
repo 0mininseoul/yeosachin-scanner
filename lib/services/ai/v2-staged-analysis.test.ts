@@ -976,6 +976,23 @@ describe('V2 staged AI services', () => {
         '저는요 이 사진의 숨은 사정을 다 안다고 말하고 싶네요.',
         '제가요 이 피드의 속뜻을 전부 읽었다고 주장합니다.',
         '나는요 공개 자료보다 먼저 결론을 내렸습니다.',
+        '내 눈엔 이 피드의 속뜻이 전부 보이네요.',
+        '“내 눈엔, 이 계정의 의도가 너무 뻔합니다.”',
+        '제가보기엔 이 계정의 의도가 너무 뻔합니다.',
+        '(제가 보기에는? 이 피드의 속뜻이 전부 보입니다.)',
+        '저라면 이런 사진은 올리지 않았겠네요.',
+        '저라면, 공개 자료보다 먼저 결론을 내렸겠네요.',
+        '결론:내 눈엔 이 계정의 의도가 너무 뻔합니다.',
+        '[제가보기엔 이 피드의 속뜻이 전부 보입니다.]',
+        '—저라면 공개 자료보다 먼저 결론을 내렸겠네요.',
+        'bio에 여행이라고 적혀 있고 둘이 사귀는 것 같다고 적혀 있습니다.',
+        'bio에 결혼했다고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        '소개글에는 배우자가 있다고 적혀 있습니다. 더 추측하지 않겠습니다.',
+        'bio에 boyfriend라고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        'caption에 MARRIED라고 적혀 있습니다. 더 추측하지 않겠습니다.',
+        'bio에 fiancée라고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        '소개글에는 동거 중이라고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        'bio에 이혼했다고 적혀 있습니다. 더 추측하지 않겠습니다.',
     ])('rejects prohibited v2.8 public style at the output boundary: %s', async unsafeCopy => {
         const input = featureInput();
         mocks.analyzeWithGemini.mockImplementationOnce(async (
@@ -992,9 +1009,11 @@ describe('V2 staged AI services', () => {
 
         expect(result.features.oneLineOverview)
             .toBe('개인 계정 맥락으로 분류됐지만, 더 구체적인 총평을 뒷받침할 공개 단서는 부족합니다.');
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('bio·caption 인용을 포함해 관계 관련 용어 자체를 쓰지 마세요');
     });
 
-    it('allows attributed neutral bio evidence without turning it into a relationship claim', async () => {
+    it('rejects relationship terms even when copy claims bio attribution', async () => {
         const input = featureInput();
         const attributed =
             'bio에 남자친구가 있다고 적혀 있습니다. 공개 문구 그 이상은 추측하지 않겠습니다.';
@@ -1010,7 +1029,46 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
         );
 
-        expect(result.features.oneLineOverview).toBe(attributed);
+        expect(result.features.oneLineOverview)
+            .toBe('개인 계정 맥락으로 분류됐지만, 더 구체적인 총평을 뒷받침할 공개 단서는 부족합니다.');
+    });
+
+    it('does not mistake an ordinary possessive phrase for v2.8 narrator self-reference', async () => {
+        const input = featureInput();
+        const grounded =
+            '캡션에 내 사진 보관함이라는 표현이 반복되고, 기록 방식도 꽤 구체적이네요.';
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: grounded })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toBe(grounded);
+    });
+
+    it('does not reject a longer English word that only contains a relationship substring', async () => {
+        const input = featureInput();
+        const grounded =
+            '캡션에 relationshipcore 프로젝트가 반복되고, 작업 기록도 꽤 구체적이네요.';
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: grounded })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toBe(grounded);
     });
 
     it('uses only parsed account context in v2.8 fallback copy', async () => {
@@ -1699,6 +1757,23 @@ describe('V2 staged AI services', () => {
         '저는요 이 관계의 숨은 사정을 다 안다고 말하고 싶네요.',
         '제가요 이 피드의 속뜻을 전부 읽었다고 주장합니다.',
         '나는요 공개 자료보다 먼저 결론을 내렸습니다.',
+        '내 눈엔 이 피드의 속뜻이 전부 보이네요.',
+        '“내 눈엔, 이 계정의 의도가 너무 뻔합니다.”',
+        '제가보기엔 이 계정의 의도가 너무 뻔합니다.',
+        '(제가 보기에는? 이 피드의 속뜻이 전부 보입니다.)',
+        '저라면 이런 사진은 올리지 않았겠네요.',
+        '저라면, 공개 자료보다 먼저 결론을 내렸겠네요.',
+        '결론:내 눈엔 이 계정의 의도가 너무 뻔합니다.',
+        '[제가보기엔 이 피드의 속뜻이 전부 보입니다.]',
+        '—저라면 공개 자료보다 먼저 결론을 내렸겠네요.',
+        'bio에 여행이라고 적혀 있고 둘이 사귀는 것 같다고 적혀 있습니다.',
+        'bio에 결혼했다고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        '소개글에는 배우자가 있다고 적혀 있습니다. 더 추측하지 않겠습니다.',
+        'bio에 boyfriend라고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        'caption에 MARRIED라고 적혀 있습니다. 더 추측하지 않겠습니다.',
+        'bio에 fiancée라고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        '소개글에는 동거 중이라고 적혀 있습니다. 공개 문구만 옮겼습니다.',
+        'bio에 이혼했다고 적혀 있습니다. 더 추측하지 않겠습니다.',
     ])('falls back when v2.8 high-risk output violates public style: %s', async unsafeLine => {
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
@@ -1729,7 +1804,7 @@ describe('V2 staged AI services', () => {
         expect(result.lines.join(' ')).not.toMatch(/판독관|못생|사귀|커플/u);
     });
 
-    it('accepts v2.8 neutral relationship evidence explicitly attributed to bio', async () => {
+    it('rejects v2.8 relationship terms even when explicitly attributed to bio', async () => {
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
             _images: string[],
@@ -1755,10 +1830,11 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
         );
 
-        expect(result.source).toBe('gemini');
-        expect(result.lines[0]).toContain('bio에 남자친구가 있다고 적혀');
+        expect(result.source).toBe('safe_fallback');
+        expect(result.lines.join(' ')).not.toContain('남자친구');
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
         expect(prompt).toContain('보호 특성·신체·외모를 조롱하지 마세요');
+        expect(prompt).toContain('bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요');
     });
 
     it('uses a sanitized carousel caption dossier only as first-line persona evidence', async () => {

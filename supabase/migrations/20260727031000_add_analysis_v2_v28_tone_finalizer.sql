@@ -1,5 +1,67 @@
 -- v2.8 is a forward-only presentation policy. Historical v2.6/v2.7 rows never enter this
 -- function: their persisted copy remains byte-for-byte untouched.
+CREATE OR REPLACE FUNCTION public.analysis_v2_v28_safe_overview_fallback(
+    p_sort_ordinal INTEGER
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = ''
+AS $$
+DECLARE
+    v_prefixes CONSTANT TEXT[] := ARRAY[
+        '확인된 공개 단서가 제한적이고, ',
+        '공개된 소개와 피드만으로는 맥락이 부족하고, ',
+        '수집된 공개 범위에서는 정보가 많지 않고, ',
+        '현재 보이는 공개 자료에는 빈칸이 남고, ',
+        '소개와 피드에서 확인되는 내용이 제한적이고, ',
+        '공개 화면에 드러난 단서만으로는 정보가 부족하고, ',
+        '확인 가능한 공개 기록의 범위가 좁고, ',
+        '지금 확보된 공개 자료에는 설명이 적고, ',
+        '공개 프로필과 피드만 보면 단서가 많지 않고, ',
+        '확인된 공개 정보 사이에 빈칸이 남고, '
+    ];
+    v_middles CONSTANT TEXT[] := ARRAY[
+        '계정 성격을 더 단정하기 어렵습니다. ',
+        '세부 맥락까지 확정하기는 어렵습니다. ',
+        '구체적인 배경을 읽어 내기 어렵습니다. ',
+        '보이지 않는 사정까지 알 수는 없습니다. ',
+        '확실한 특징을 더 붙이기 어렵습니다. ',
+        '하나의 성격으로 묶기에는 근거가 부족합니다. ',
+        '공개되지 않은 맥락은 판단할 수 없습니다. ',
+        '뚜렷한 결론까지 가기에는 근거가 모자랍니다. ',
+        '세부적인 해석을 더하기에는 자료가 부족합니다. ',
+        '확인되지 않은 이야기를 보탤 수는 없습니다. '
+    ];
+    v_suffixes CONSTANT TEXT[] := ARRAY[
+        '보이는 범위까지만 확인하는 편이 낫겠네요.',
+        '빈칸을 추측으로 채울 이유는 없겠네요.',
+        '없는 디테일까지 만들어 낼 필요는 없습니다.',
+        '확인된 내용만 두고 보는 것이 안전합니다.',
+        '공개 자료가 더 생기기 전에는 여기까지입니다.',
+        '지금은 확인 가능한 내용만 남기는 편이 낫습니다.',
+        '근거가 없는 해석은 붙이지 않는 게 맞겠네요.',
+        '현재 자료만으로는 이 정도가 가장 정확합니다.',
+        '보이지 않는 부분은 그대로 남겨 두는 게 낫습니다.'
+    ];
+    v_zero_based INTEGER;
+BEGIN
+    IF p_sort_ordinal IS NULL OR p_sort_ordinal NOT BETWEEN 1 AND 900 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_V28_SAFE_OVERVIEW_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    v_zero_based := p_sort_ordinal - 1;
+    RETURN
+        v_prefixes[1 + (v_zero_based % 10)]
+        || v_middles[1 + ((v_zero_based / 10) % 10)]
+        || v_suffixes[1 + ((v_zero_based / 100) % 9)];
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_v28_safe_overview_fallback(INTEGER)
+FROM PUBLIC, anon, authenticated, service_role;
+
 CREATE OR REPLACE FUNCTION public.analysis_v2_apply_v28_summary_tone(
     p_request_id UUID
 )
@@ -25,6 +87,58 @@ BEGIN
     ) THEN
         RETURN;
     END IF;
+
+    -- The predecessor finalizer made duplicate copy unique by appending an Instagram
+    -- identity/risk label, and a later predecessor used examiner-style generated fallbacks.
+    -- Repair those values after the predecessor has completed. Exact duplicates are also
+    -- assigned a stable identifier-free variant based only on the already-public ordering.
+    WITH analyzed AS (
+        SELECT
+            female.candidate_id,
+            female.sort_ordinal,
+            female.one_line_overview,
+            pg_catalog.count(*) OVER (
+                PARTITION BY female.one_line_overview
+            ) AS duplicate_count
+        FROM public.analysis_v2_female_results AS female
+        WHERE female.request_id = p_request_id
+    ),
+    repair AS (
+        SELECT analyzed.candidate_id, analyzed.sort_ordinal
+        FROM analyzed
+        WHERE analyzed.duplicate_count > 1
+           OR analyzed.one_line_overview ~ '[[:digit:]@]'
+           OR analyzed.one_line_overview ~* (
+                'risk[-_ ]?(?:policy|band)|score|스코어|점수|위험도|'
+                || '(?:일반|주의|고위험)[[:space:]]*단계|정책[[:space:]]*버전|'
+                || '계정[[:space:]]*(?:ID|아이디)'
+           )
+           OR analyzed.one_line_overview ~ (
+                '판독관|내[[:space:]]*눈(?:엔|에는)|제가[[:space:]]*보기(?:엔|에는)|저라면'
+           )
+           OR analyzed.one_line_overview ~ (
+                '^(피드가 말을 아끼는 편이네요|사진 배치가 지나치게 단정하네요|'
+                || '전체 분위기가 묘하게 계산돼 있네요|첫인상은 얌전한데 여운이 길게 남네요|'
+                || '취향을 슬쩍만 보여 주는 구성이네요|일상 기록이 의외로 빈틈없이 이어지네요|'
+                || '꾸민 듯 안 꾸민 듯한 장면이 많네요|프로필이 정답을 쉽게 주지 않네요|'
+                || '피드의 온도가 은근히 사람을 붙잡네요|설명보다 분위기가 먼저 말을 거네요)'
+           )
+           OR analyzed.one_line_overview ~ (
+                '^(확인된 공개 단서가 제한적이고|공개된 소개와 피드만으로는 맥락이 부족하고|'
+                || '수집된 공개 범위에서는 정보가 많지 않고|현재 보이는 공개 자료에는 빈칸이 남고|'
+                || '소개와 피드에서 확인되는 내용이 제한적이고|'
+                || '공개 화면에 드러난 단서만으로는 정보가 부족하고|'
+                || '확인 가능한 공개 기록의 범위가 좁고|지금 확보된 공개 자료에는 설명이 적고|'
+                || '공개 프로필과 피드만 보면 단서가 많지 않고|'
+                || '확인된 공개 정보 사이에 빈칸이 남고)'
+           )
+    )
+    UPDATE public.analysis_v2_female_results AS female
+    SET one_line_overview =
+        public.analysis_v2_v28_safe_overview_fallback(repair.sort_ordinal)
+    FROM repair
+    WHERE female.request_id = p_request_id
+      AND female.candidate_id = repair.candidate_id;
 
     SELECT pg_catalog.count(*)::INTEGER INTO v_total
     FROM public.analysis_v2_female_results AS female
@@ -129,7 +243,7 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.analysis_v2_complete_result_and_purge(
+REVOKE ALL ON FUNCTION public.complete_analysis_v2_result_and_purge(
     UUID, TEXT, UUID, TEXT, TEXT
 ) FROM PUBLIC, anon, authenticated, service_role;
 
