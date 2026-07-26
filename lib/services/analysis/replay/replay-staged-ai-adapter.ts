@@ -12,14 +12,36 @@ import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
-import {
-    bindReplayAiRunnerPolicy,
-    type ReplayAiRunner,
-    type ReplayInvocation,
-    type ReplayMedia,
-    type ReplayOutcome,
-} from './replay-runner';
+import type { ReplayAiRunner, ReplayInvocation, ReplayMedia, ReplayOutcome } from './replay-runner';
 import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineage';
+
+interface IssuedReplayRunner {
+    policyVersion: ReplaySupportedAiStagePolicyVersion;
+    triage: ReplayAiRunner['triage'];
+    feature: ReplayAiRunner['feature'];
+    privateNames: ReplayAiRunner['privateNames'];
+    resolveGender: ReplayAiRunner['resolveGender'];
+}
+
+const issuedReplayRunners = new WeakMap<ReplayAiRunner, IssuedReplayRunner>();
+
+/** Non-issuing lookup used by the paid runner admission check. */
+export function lookupReplayStagedAiAdapterPolicy(
+    runner: ReplayAiRunner,
+): ReplaySupportedAiStagePolicyVersion | undefined {
+    const issued = issuedReplayRunners.get(runner);
+    if (
+        !issued
+        || !Object.isFrozen(runner)
+        || runner.triage !== issued.triage
+        || runner.feature !== issued.feature
+        || runner.privateNames !== issued.privateNames
+        || runner.resolveGender !== issued.resolveGender
+    ) {
+        return undefined;
+    }
+    return issued.policyVersion;
+}
 
 interface InvocationTelemetry {
     calls: number;
@@ -133,7 +155,7 @@ export function createReplayStagedAiAdapter(
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
-    return bindReplayAiRunnerPolicy(aiStagePolicyVersion, {
+    const runner: ReplayAiRunner = {
         triage: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderTriageResultIdentity(aiInput, aiStagePolicyVersion);
@@ -178,5 +200,14 @@ export function createReplayStagedAiAdapter(
             };
             return analyzePrivateAccountNames([...accounts], requestId, audit, { aiStagePolicyVersion, replayCapability });
         }),
+    };
+    Object.freeze(runner);
+    issuedReplayRunners.set(runner, {
+        policyVersion: aiStagePolicyVersion,
+        triage: runner.triage,
+        feature: runner.feature,
+        privateNames: runner.privateNames,
+        resolveGender: runner.resolveGender,
     });
+    return runner;
 }

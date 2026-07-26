@@ -3,8 +3,8 @@ import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-ana
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
     replayAiStagePolicyVersion,
-    type ReplaySupportedAiStagePolicyVersion,
 } from './replay-source-lineage';
+import { lookupReplayStagedAiAdapterPolicy } from './replay-staged-ai-adapter';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -42,29 +42,11 @@ export interface ReplayAiRunner {
     }): Promise<ReplayInvocation<GenderResolutionResult>>;
 }
 
-const replayAiRunnerPolicies = new WeakMap<
-    ReplayAiRunner,
-    ReplaySupportedAiStagePolicyVersion
->();
-
-/**
- * Issues an opaque policy binding that callers cannot forge by adding a public
- * property. The runner is frozen before its policy capability is registered.
- */
-export function bindReplayAiRunnerPolicy(
-    policyVersion: ReplaySupportedAiStagePolicyVersion,
-    operations: ReplayAiRunner,
-): ReplayAiRunner {
-    const runner = Object.freeze({ ...operations });
-    replayAiRunnerPolicies.set(runner, policyVersion);
-    return runner;
-}
-
 function assertReplayAiRunnerPolicy(
     runner: ReplayAiRunner | undefined,
-    expected: ReplaySupportedAiStagePolicyVersion,
+    expected: ReturnType<typeof replayAiStagePolicyVersion>,
 ): ReplayAiRunner {
-    if (!runner || replayAiRunnerPolicies.get(runner) !== expected) {
+    if (!runner || lookupReplayStagedAiAdapterPolicy(runner) !== expected) {
         throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
     }
     return runner;

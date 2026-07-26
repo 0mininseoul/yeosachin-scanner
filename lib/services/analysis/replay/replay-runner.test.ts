@@ -1,13 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
-import {
-    bindReplayAiRunnerPolicy,
-    runAnalysisV2AiReplay,
-    type ReplayAiRunner,
-} from './replay-runner';
+const testRunnerPolicies = vi.hoisted(() => new WeakMap<object, string>());
+
+vi.mock('./replay-staged-ai-adapter', () => ({
+    lookupReplayStagedAiAdapterPolicy: (runner: object) => (
+        testRunnerPolicies.get(runner)
+    ),
+}));
+
+import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
 
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
-    return bindReplayAiRunnerPolicy('ai-stage-policy-v2.7', operations);
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.7');
+    return runner;
 }
 
 const bundle = {
