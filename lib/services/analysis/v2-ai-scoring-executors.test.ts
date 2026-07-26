@@ -3078,6 +3078,7 @@ describe('V2 AI and scoring executors', () => {
         });
         expect(publicScoreStrong?.partnerEvidenceSelectionIds)
             .toEqual(publicPartnerStrong?.evidenceSelectionIds);
+        expect(publicScoreStrong?.accountContext).toBe('personal');
         const weakCandidate = memoryState.outcomes[0];
         const publicPartnerWeak = publicPartner.find(
             row => row.candidateId === weakCandidate.candidateId

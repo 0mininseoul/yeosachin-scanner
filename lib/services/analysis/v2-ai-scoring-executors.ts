@@ -8,6 +8,7 @@ import { applyGenderResolution } from '@/lib/services/ai/v2-staged-analysis';
 import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import {
     calculateRiskPolicy,
+    type AccountContext,
     type AppearanceGrade,
     type RiskBand,
 } from '@/lib/domain/analysis/risk-policy';
@@ -2102,6 +2103,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 }
                 return {
                     candidateId: candidate.candidateId,
+                    accountContext: candidate.accountContext as AccountContext,
                     displayScore: candidate.displayScore,
                     riskBand: candidate.riskBand as RiskBand,
                     featuredRank: candidate.featuredRank,

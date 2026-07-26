@@ -20,6 +20,7 @@ import {
 import {
     RISK_POLICY_VERSION,
     isRiskBandCompatibleWithDisplayScore,
+    type AccountContext,
 } from '@/lib/domain/analysis/risk-policy';
 import {
     canonicalizeImageProxyUrl,
@@ -228,6 +229,8 @@ export type AnalysisV2PartnerSafetySource =
 
 export interface AnalysisV2CandidateScoreRow {
     candidateId: string;
+    /** Internal checkpoint-only input for v2.4 relative-risk replay. */
+    accountContext: AccountContext;
     displayScore: number;
     riskBand: FemaleResultRowV1['riskBand'];
     featuredRank: number | null;
@@ -566,6 +569,9 @@ const partnerSafetyRowSchema = z.object({
 
 const scoreRowSchema = z.object({
     candidateId: candidateIdSchema,
+    accountContext: z.enum([
+        'personal', 'individual_creator', 'official_group_or_brand', 'uncertain',
+    ]),
     displayScore: femaleResultRowV1Schema.shape.displayScore,
     riskBand: femaleResultRowV1Schema.shape.riskBand,
     featuredRank: femaleResultRowV1Schema.shape.featuredRank,

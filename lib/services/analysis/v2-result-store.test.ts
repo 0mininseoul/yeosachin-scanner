@@ -255,7 +255,8 @@ describe('analysis V2 result checkpoint store', () => {
         await store.checkpointScores({
             ...claim('track:score'),
             rows: [{
-                candidateId: 'candidate-1', displayScore: 1, riskBand: 'normal',
+                candidateId: 'candidate-1', accountContext: 'personal',
+                displayScore: 1, riskBand: 'normal',
                 featuredRank: null, recentMutualRank: null,
                 verificationShortlistRank: null,
                 partnerSafetySource: 'not_collected',
@@ -300,6 +301,9 @@ describe('analysis V2 result checkpoint store', () => {
             ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointNarrativeRpc,
         ]);
         expect(fake.rpc.mock.calls[3]![1].p_risk_policy_version).toBe(RISK_POLICY_VERSION);
+        expect(fake.rpc.mock.calls[3]![1].p_rows).toEqual([expect.objectContaining({
+            accountContext: 'personal',
+        })]);
         expect(fake.rpc.mock.calls[5]![1].p_rows).toEqual([expect.objectContaining({
             source: 'checkpoint',
             operationKey: `high-risk-narrative:${hashA}`,
@@ -328,7 +332,8 @@ describe('analysis V2 result checkpoint store', () => {
         await expect(store.checkpointScores({
             ...claim('coordinator:join:final-score'),
             rows: [{
-                candidateId: 'candidate-1', displayScore: 1, riskBand: 'normal',
+                candidateId: 'candidate-1', accountContext: 'personal',
+                displayScore: 1, riskBand: 'normal',
                 featuredRank: null, recentMutualRank: null,
                 verificationShortlistRank: 1,
                 partnerSafetySource: 'not_collected',
@@ -381,6 +386,7 @@ describe('analysis V2 result checkpoint store', () => {
             const possibleUpperBound = rawScore + 5;
             return {
                 ...row,
+                accountContext: 'personal' as const,
                 featuredRank: index + 1,
                 recentMutualRank: null,
                 verificationShortlistRank: null,
@@ -435,6 +441,7 @@ describe('analysis V2 result checkpoint store', () => {
             ...claim('coordinator:join:final-score'),
             rows: [{
                 candidateId: 'candidate-1',
+                accountContext: 'personal',
                 displayScore: 6.8,
                 riskBand: 'normal',
                 featuredRank: null,

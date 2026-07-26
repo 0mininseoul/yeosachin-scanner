@@ -254,6 +254,151 @@ SELECT * FROM expected_excluded
 ORDER BY candidate_id;
 $$;
 
+-- Keep the exact v2.3 replay separate from the directional v2.4 helper. The
+-- candidate checkpoint supplies the request snapshot version; missing fields
+-- never select a policy.
+CREATE OR REPLACE FUNCTION public.analysis_v2_expected_relative_risk_rows_v23(
+    p_rows JSONB,
+    p_strong_partner_candidate_ids TEXT[]
+)
+RETURNS TABLE (
+    candidate_id TEXT,
+    display_score NUMERIC,
+    risk_band TEXT,
+    relative_tier_applied BOOLEAN
+)
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+WITH source_rows AS (
+    SELECT
+        item.value->>'candidateId' AS candidate_id,
+        (item.value->>'publicScore')::NUMERIC AS public_score,
+        (item.value->>'candidateId') = ANY(
+            COALESCE(p_strong_partner_candidate_ids, ARRAY[]::TEXT[])
+        ) AS strong_partner
+    FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+),
+natural_rows AS (
+    SELECT
+        source.candidate_id,
+        source.public_score,
+        pg_catalog.round(source.public_score, 1) AS natural_display_score,
+        CASE
+            WHEN source.public_score < 4.2 THEN 'normal'
+            WHEN source.public_score < 6.8 THEN 'caution'
+            ELSE 'high_risk'
+        END AS natural_risk_band,
+        source.strong_partner
+    FROM source_rows AS source
+),
+eligible_rows AS (
+    SELECT
+        natural_row.*,
+        pg_catalog.row_number() OVER (
+            ORDER BY natural_row.public_score DESC, natural_row.candidate_id
+        )::INTEGER AS eligible_rank,
+        pg_catalog.count(*) OVER ()::INTEGER AS eligible_count,
+        pg_catalog.count(*) FILTER (
+            WHERE natural_row.natural_risk_band = 'high_risk'
+        ) OVER ()::INTEGER AS natural_high_count,
+        pg_catalog.count(*) FILTER (
+            WHERE natural_row.natural_risk_band <> 'normal'
+        ) OVER ()::INTEGER AS natural_non_normal_count
+    FROM natural_rows AS natural_row
+    WHERE NOT natural_row.strong_partner
+),
+eligible_counts AS (
+    SELECT
+        eligible.*,
+        CASE
+            WHEN eligible.eligible_count < 3 THEN 0
+            ELSE GREATEST(
+                1,
+                LEAST(
+                    eligible.eligible_count - 2,
+                    eligible.natural_high_count
+                )
+            )
+        END AS high_count
+    FROM eligible_rows AS eligible
+),
+eligible_tiers AS (
+    SELECT
+        counted.*,
+        CASE
+            WHEN counted.eligible_count < 3 THEN counted.natural_risk_band
+            WHEN counted.eligible_rank <= counted.high_count THEN 'high_risk'
+            WHEN counted.eligible_rank <= counted.high_count + LEAST(
+                counted.eligible_count - counted.high_count,
+                GREATEST(
+                    2,
+                    counted.natural_non_normal_count - counted.high_count
+                )
+            ) THEN 'caution'
+            ELSE 'normal'
+        END AS expected_risk_band
+    FROM eligible_counts AS counted
+),
+expected_eligible AS (
+    SELECT
+        tiered.candidate_id,
+        CASE tiered.expected_risk_band
+            WHEN 'high_risk' THEN
+                LEAST(10.0, GREATEST(6.8, tiered.natural_display_score))
+            WHEN 'caution' THEN
+                LEAST(6.7, GREATEST(4.2, tiered.natural_display_score))
+            ELSE LEAST(4.1, GREATEST(1.0, tiered.natural_display_score))
+        END::NUMERIC AS display_score,
+        tiered.expected_risk_band AS risk_band,
+        tiered.eligible_count >= 3 AS relative_tier_applied
+    FROM eligible_tiers AS tiered
+),
+expected_strong_partner AS (
+    SELECT
+        natural_row.candidate_id,
+        natural_row.natural_display_score AS display_score,
+        natural_row.natural_risk_band AS risk_band,
+        FALSE AS relative_tier_applied
+    FROM natural_rows AS natural_row
+    WHERE natural_row.strong_partner
+)
+SELECT * FROM expected_eligible
+UNION ALL
+SELECT * FROM expected_strong_partner
+ORDER BY candidate_id;
+$$;
+
+CREATE OR REPLACE FUNCTION public.analysis_v2_expected_relative_risk_rows(
+    p_rows JSONB,
+    p_strong_partner_candidate_ids TEXT[],
+    p_risk_policy_version TEXT
+)
+RETURNS TABLE (
+    candidate_id TEXT,
+    display_score NUMERIC,
+    risk_band TEXT,
+    relative_tier_applied BOOLEAN
+)
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT *
+    FROM public.analysis_v2_expected_relative_risk_rows_v23(
+        p_rows, p_strong_partner_candidate_ids
+    )
+    WHERE p_risk_policy_version = 'risk-policy-v2.3'
+    UNION ALL
+    SELECT *
+    FROM public.analysis_v2_expected_relative_risk_rows(
+        p_rows, p_strong_partner_candidate_ids
+    )
+    WHERE p_risk_policy_version = 'risk-policy-v2.4'
+    ORDER BY candidate_id;
+$$;
+
 DO $migration$
 DECLARE v_definition TEXT;
 BEGIN
@@ -316,6 +461,31 @@ DECLARE
     v_caution_pattern TEXT := $pattern$ranked\.risk_band\s*=\s*'caution'\s+AND\s+ranked\.expected_rank\s*<=\s*15$pattern$;
     v_reverse_component_pattern TEXT := $pattern$pg_catalog\.jsonb_set\(\s*preliminary\.components\s*,\s*ARRAY\['targetToCandidateLike'\]\s*,\s*pg_catalog\.to_jsonb\(reverse_like\.component_score\)\s*,\s*TRUE\s*\)$pattern$;
     v_policy_guard_pattern TEXT := $pattern$p_risk_policy_version\s+IS\s+DISTINCT\s+FROM\s+'risk-policy-v2\.3'$pattern$;
+    v_allowed_fields_pattern TEXT := $pattern$'partnerEvidenceSelectionIds'\s*\]$pattern$;
+    v_row_count_marker TEXT := '    v_count := pg_catalog.jsonb_array_length(v_rows);';
+    v_relative_helper_marker TEXT := 'JOIN public.analysis_v2_expected_relative_risk_rows(';
+    v_relative_helper_close_marker TEXT := '        ) AS expected';
+    v_account_context_validation TEXT := $replacement$    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value)
+        WHERE (
+            p_risk_policy_version = 'risk-policy-v2.3'
+            AND item.value ? 'accountContext'
+        ) OR (
+            p_risk_policy_version = 'risk-policy-v2.4'
+            AND (
+                NOT (item.value ? 'accountContext')
+                OR pg_catalog.jsonb_typeof(item.value->'accountContext') <> 'string'
+                OR item.value->>'accountContext' NOT IN (
+                    'personal', 'individual_creator', 'official_group_or_brand', 'uncertain'
+                )
+            )
+        )
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RESULT_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+$replacement$;
 BEGIN
     SELECT pg_catalog.pg_get_functiondef(
         'public.checkpoint_analysis_v2_candidate_scores(uuid,text,uuid,text,jsonb,text)'
@@ -327,7 +497,11 @@ BEGIN
        OR v_definition !~ v_possible_upper_pattern
        OR v_definition !~ v_caution_pattern
        OR v_definition !~ v_reverse_component_pattern
-       OR v_definition !~ v_policy_guard_pattern THEN
+       OR v_definition !~ v_policy_guard_pattern
+       OR v_definition !~ v_allowed_fields_pattern
+       OR pg_catalog.strpos(v_definition, v_row_count_marker) = 0
+       OR pg_catalog.strpos(v_definition, v_relative_helper_marker) = 0
+       OR pg_catalog.strpos(v_definition, v_relative_helper_close_marker) = 0 THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_FINAL_DRIFT', ERRCODE = 'P0001';
     END IF;
     v_definition := pg_catalog.regexp_replace(
@@ -382,6 +556,24 @@ BEGIN
         $replacement$p_risk_policy_version NOT IN ('risk-policy-v2.3', 'risk-policy-v2.4')$replacement$
     );
     v_definition := pg_catalog.regexp_replace(
+        v_definition,
+        v_allowed_fields_pattern,
+        $replacement$'partnerEvidenceSelectionIds', 'accountContext'
+               ]$replacement$,
+        'g'
+    );
+    v_definition := pg_catalog.replace(
+        v_definition,
+        v_row_count_marker,
+        v_account_context_validation || v_row_count_marker
+    );
+    v_definition := pg_catalog.replace(
+        v_definition,
+        v_relative_helper_close_marker,
+        $replacement$        , p_risk_policy_version
+        ) AS expected$replacement$
+    );
+    v_definition := pg_catalog.regexp_replace(
         v_definition, v_caution_pattern,
         $replacement$ranked.risk_band = 'caution'
                             AND ranked.expected_rank <= CASE
@@ -394,6 +586,10 @@ END;
 $migration$;
 
 REVOKE ALL ON FUNCTION public.analysis_v2_expected_relative_risk_rows(JSONB, TEXT[])
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.analysis_v2_expected_relative_risk_rows(JSONB, TEXT[], TEXT)
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.analysis_v2_expected_relative_risk_rows_v23(JSONB, TEXT[])
     FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.analysis_v2_result_valid_score_components(JSONB)
     FROM PUBLIC, anon, authenticated, service_role;

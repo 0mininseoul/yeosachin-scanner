@@ -203,6 +203,8 @@ describe('risk-policy v2.4 database replay', () => {
                     p_risk_policy_version TEXT
                 ) RETURNS JSONB LANGUAGE plpgsql AS $function$
                 DECLARE
+                    v_rows JSONB := p_rows;
+                    v_count INTEGER;
                     v_note TEXT := $note$
                     + (item.value->'components'->>'targetToCandidateLike')::NUMERIC
                     + (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
@@ -218,10 +220,34 @@ describe('risk-policy v2.4 database replay', () => {
                         component_sum.component_total,
                         100
                     )) AS expected_raw_score
-                    expected_score.expected_pre_score + 3, 100$note$;
+                    expected_score.expected_pre_score + 3, 100
+                    'partnerEvidenceSelectionIds'
+                    ]
+                    'partnerEvidenceSelectionIds'
+                    ]$note$;
                 BEGIN
                     IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.3' THEN
                         RAISE EXCEPTION 'policy';
+                    END IF;
+                    v_count := pg_catalog.jsonb_array_length(v_rows);
+                    IF v_count < 0 THEN RAISE EXCEPTION 'count'; END IF;
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value)
+                        JOIN public.analysis_v2_expected_relative_risk_rows(
+                            v_rows,
+                            ARRAY[]::TEXT[]
+                        ) AS expected
+                          ON expected.candidate_id = item.value->>'candidateId'
+                        WHERE item.value->>'candidateId' LIKE 'relative:%'
+                          AND (
+                            pg_catalog.abs(
+                                (item.value->>'displayScore')::NUMERIC - expected.display_score
+                            ) > 0.0001
+                            OR item.value->>'riskBand' IS DISTINCT FROM expected.risk_band
+                          )
+                    ) THEN
+                        RAISE EXCEPTION 'relative replay';
                     END IF;
                     IF EXISTS (
                         SELECT 1
@@ -349,6 +375,7 @@ describe('risk-policy v2.4 database replay', () => {
             `);
             const canonicalMixedRow = [{
                 candidateId: 'mixed',
+                accountContext: 'personal',
                 riskBand: 'normal',
                 displayScore: 55,
                 featuredRank: null,
@@ -385,6 +412,8 @@ describe('risk-policy v2.4 database replay', () => {
                 WHERE candidate_id = 'mixed'
             `);
             expect(legacyReverse.rows).toEqual([{ component_score: '3' }]);
+            const { accountContext, ...legacyMixedRow } = canonicalMixedRow[0]!;
+            expect(accountContext).toBe('personal');
             await expect(migrationDb.query(
                 `SELECT public.checkpoint_analysis_v2_candidate_scores(
                     '10000000-0000-4000-8000-000000000001'::UUID,
@@ -395,7 +424,7 @@ describe('risk-policy v2.4 database replay', () => {
                     'risk-policy-v2.3'
                 )`,
                 [JSON.stringify([{
-                    ...canonicalMixedRow[0],
+                    ...legacyMixedRow,
                     components: { targetToCandidateLike: 3 },
                 }])]
             )).resolves.toBeDefined();
@@ -408,8 +437,64 @@ describe('risk-policy v2.4 database replay', () => {
                     $1::JSONB,
                     'risk-policy-v2.3'
                 )`,
-                [JSON.stringify(canonicalMixedRow)]
+                [JSON.stringify([legacyMixedRow])]
             )).rejects.toThrow('reverse like component');
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.4'
+                )`,
+                [JSON.stringify([{
+                    candidateId: 'relative:official',
+                    accountContext: 'official_group_or_brand',
+                    riskBand: 'normal',
+                    displayScore: 4.1,
+                    publicScore: 9,
+                    featuredRank: null,
+                    components: {},
+                }])]
+            )).resolves.toBeDefined();
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.4'
+                )`,
+                [JSON.stringify([{
+                    candidateId: 'relative:official',
+                    riskBand: 'normal',
+                    displayScore: 4.1,
+                    publicScore: 9,
+                    featuredRank: null,
+                    components: {},
+                }])]
+            )).rejects.toThrow('ANALYSIS_V2_RESULT_INVALID');
+            const legacyRelativeRows = Array.from({ length: 10 }, (_, index) => ({
+                candidateId: `relative:v23-${String(index + 1).padStart(2, '0')}`,
+                riskBand: index < 8 ? 'high_risk' : 'caution',
+                displayScore: index < 8 ? 9.9 - index / 10 : 6.7,
+                publicScore: 9.9 - index / 10,
+                featuredRank: index < 3 ? index + 1 : index < 8 ? null : index - 7,
+                components: {},
+            }));
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.3'
+                )`,
+                [JSON.stringify(legacyRelativeRows)]
+            )).resolves.toBeDefined();
             await expect(migrationDb.query(
                 `SELECT public.checkpoint_analysis_v2_preliminary_scores(
                     '10000000-0000-4000-8000-000000000001'::UUID,
@@ -436,12 +521,14 @@ describe('risk-policy v2.4 database replay', () => {
             const featuredRows = [
                 ...Array.from({ length: 4 }, (_, index) => ({
                     candidateId: `high-${index + 1}`,
+                    accountContext: 'personal',
                     riskBand: 'high_risk',
                     displayScore: 10 - index / 10,
                     featuredRank: index < 3 ? index + 1 : null,
                 })),
                 ...Array.from({ length: 11 }, (_, index) => ({
                     candidateId: `caution-${String(index + 1).padStart(2, '0')}`,
+                    accountContext: 'personal',
                     riskBand: 'caution',
                     displayScore: 6.7 - index / 10,
                     featuredRank: index < 10 ? index + 1 : null,
@@ -484,6 +571,15 @@ describe('risk-policy v2.4 database replay', () => {
             expect(patchedDefinition.rows[0]!.definition).toContain('THEN 97 ELSE 95 END');
             expect(patchedDefinition.rows[0]!.definition).toContain('100\n                    )) AS expected_raw_score');
             expect(patchedDefinition.rows[0]!.definition).toContain("THEN 15\n                                ELSE 10");
+            expect(patchedDefinition.rows[0]!.definition).toContain(
+                "p_risk_policy_version = 'risk-policy-v2.4'"
+            );
+            expect(patchedDefinition.rows[0]!.definition).toContain(
+                'analysis_v2_expected_relative_risk_rows(\n                            v_rows,'
+            );
+            expect(patchedDefinition.rows[0]!.definition).toContain(
+                ', p_risk_policy_version\n        ) AS expected'
+            );
             expect(patchedDefinition.rows[0]!.definition).toContain('expected_rank <= 3');
             expect(patchedDefinition.rows[0]!.definition).not.toContain('expected_rank <= 15');
         } finally {
