@@ -19,6 +19,7 @@ interface InvocationTelemetry {
     retries: number;
     attempts: number;
     rateLimited: number;
+    failureDisposition: Record<string, number>;
 }
 
 function normalized(media: readonly ReplayMedia[]) {
@@ -51,6 +52,10 @@ function recordTerminal(state: InvocationTelemetry, value: GeminiAttemptTelemetr
     state.attempts = Math.max(state.attempts, value.attempt);
     state.retries = Math.max(state.retries, value.retryCount);
     if (value.disposition === 'rate_limited') state.rateLimited++;
+    if (value.disposition !== 'success') {
+        state.failureDisposition[value.disposition] =
+            (state.failureDisposition[value.disposition] ?? 0) + 1;
+    }
 }
 
 function statelessAudit(
@@ -70,15 +75,31 @@ function statelessAudit(
 
 async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Promise<ReplayInvocation<T>> {
     const started = performance.now();
-    const state: InvocationTelemetry = { calls: 0, retries: 0, attempts: 0, rateLimited: 0 };
+    const state: InvocationTelemetry = {
+        calls: 0,
+        retries: 0,
+        attempts: 0,
+        rateLimited: 0,
+        failureDisposition: {},
+    };
     try {
         const value = await task(state);
-        return { outcome: 'ok', value, calls: state.calls, rateLimited: state.rateLimited, attempts: state.attempts || 1, retries: state.retries, elapsedMs: Math.round(performance.now() - started) };
+        return {
+            outcome: 'ok',
+            value,
+            calls: state.calls,
+            rateLimited: state.rateLimited,
+            failureDisposition: state.failureDisposition,
+            attempts: state.attempts || 1,
+            retries: state.retries,
+            elapsedMs: Math.round(performance.now() - started),
+        };
     } catch (error) {
         return {
             outcome: outcome(error, state),
             calls: state.calls,
             rateLimited: state.rateLimited,
+            failureDisposition: state.failureDisposition,
             attempts: state.attempts || (state.calls ? 1 : 0),
             retries: state.retries,
             elapsedMs: Math.round(performance.now() - started),

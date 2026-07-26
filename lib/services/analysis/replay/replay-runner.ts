@@ -10,6 +10,7 @@ export interface ReplayInvocation<T> {
     value?: T;
     calls?: number;
     rateLimited?: number;
+    failureDisposition?: Readonly<Record<string, number>>;
     attempts: number;
     retries: number;
     elapsedMs: number;
@@ -86,7 +87,13 @@ function collect(stage: ReplayStageMetrics, durations: number[], invocation: Rep
     durations.push(Math.max(0, invocation.elapsedMs));
     stage.rateLimited += invocation.rateLimited
         ?? (invocation.outcome === 'rate_limited' ? 1 : 0);
-    if (invocation.outcome !== 'ok') {
+    const recordedFailureEntries = Object.entries(invocation.failureDisposition ?? {})
+        .filter(([, count]) => Number.isInteger(count) && count > 0);
+    for (const [disposition, count] of recordedFailureEntries) {
+        stage.failureDisposition[disposition] =
+            (stage.failureDisposition[disposition] ?? 0) + count;
+    }
+    if (invocation.outcome !== 'ok' && recordedFailureEntries.length === 0) {
         stage.failureDisposition[invocation.outcome] =
             (stage.failureDisposition[invocation.outcome] ?? 0) + 1;
     }

@@ -50,7 +50,14 @@ describe('AI-only replay runner', () => {
         const runner: ReplayAiRunner = {
             triage: vi.fn(async () => ({ outcome: 'ok' as const, value: { assessment: { inferredGender: 'female' as const, confidence: 'medium' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1'] }, routingDecision: 'route_to_feature_analysis' as const, routingReason: 'conserve_female_recall' as const, analyzedSelectionIds: ['m1'] }, attempts: 2, retries: 1, elapsedMs: 20 })),
             feature: vi.fn(async () => ({ outcome: 'rate_limited' as const, attempts: 1, retries: 0, elapsedMs: 30 })),
-            privateNames: vi.fn(async () => ({ outcome: 'ok' as const, calls: 1, attempts: 1, retries: 0, elapsedMs: 10 })),
+            privateNames: vi.fn(async () => ({
+                outcome: 'ok' as const,
+                calls: 1,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 10,
+                failureDisposition: { response_rejected: 1 },
+            })),
         };
         await expect(runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai' })).rejects.toThrow('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
         const report = await runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai', paidAiOptIn: true });
@@ -58,6 +65,8 @@ describe('AI-only replay runner', () => {
         expect(report.stages.featureAnalysis).toMatchObject({ calls: 1, rateLimited: 1, failureDisposition: { rate_limited: 1 } });
         expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
         expect(report.stages.privateAccountName.calls).toBe(1);
+        expect(report.stages.privateAccountName.failureDisposition)
+            .toEqual({ response_rejected: 1 });
     });
 
     it('excludes only a high-confidence same-owner male before feature work', async () => {
