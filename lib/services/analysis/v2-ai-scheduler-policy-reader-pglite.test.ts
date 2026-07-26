@@ -59,7 +59,15 @@ describe('analysis V2 scheduler policy reader migration', () => {
             IMMUTABLE
             SECURITY INVOKER
             SET search_path = ''
-            AS $$ SELECT TRUE $$;
+            AS $$
+                SELECT TRUE
+                /* deceptive markers:
+                   p_snapshot ? 'scheduler'
+                   ai-scheduler-v1
+                   item_count > 16
+                   jsonb_typeof
+                */
+            $$;
         `);
         await expect(db.exec(migration)).rejects.toThrow(
             'ANALYSIS_V2_SCHEDULER_POLICY_PREDECESSOR_DRIFT',

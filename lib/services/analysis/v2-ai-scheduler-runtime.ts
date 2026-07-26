@@ -23,9 +23,9 @@ export interface AnalysisV2SchedulerTask<T> {
     run(): Promise<T>;
 }
 
-export type AnalysisV2SchedulerOperationClaim =
+export type AnalysisV2SchedulerOperationClaim<T> =
     | Readonly<{ decision: 'execute'; claimToken: string }>
-    | Readonly<{ decision: 'ready' }>
+    | Readonly<{ decision: 'ready'; value: T }>
     | Readonly<{ decision: 'ambiguous' }>;
 
 /**
@@ -37,7 +37,7 @@ export interface AnalysisV2SchedulerOperationStore<T> {
     claim(input: Readonly<{
         key: string;
         stage: AnalysisV2SchedulerStage;
-    }>): Promise<AnalysisV2SchedulerOperationClaim>;
+    }>): Promise<AnalysisV2SchedulerOperationClaim<T>>;
     commitReady(input: Readonly<{
         key: string;
         stage: AnalysisV2SchedulerStage;
@@ -55,7 +55,7 @@ interface AnalysisV2SchedulerArbiter {
         stage: AnalysisV2SchedulerStage,
         limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
     ): AnalysisV2SchedulerArbiterLease | null;
-    waitForChange(): Promise<void>;
+    waitForChange(maxWaitMs: number): Promise<'changed' | 'cutoff'>;
 }
 
 export interface AnalysisV2SchedulerRuntimePolicy {
@@ -181,8 +181,23 @@ class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbite
         });
     }
 
-    waitForChange(): Promise<void> {
-        return new Promise(resolve => this.waiters.add(resolve));
+    waitForChange(maxWaitMs: number): Promise<'changed' | 'cutoff'> {
+        if (!Number.isFinite(maxWaitMs) || maxWaitMs <= 0) {
+            return Promise.resolve('cutoff');
+        }
+        return new Promise(resolve => {
+            let settled = false;
+            const done = (outcome: 'changed' | 'cutoff') => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                this.waiters.delete(changed);
+                resolve(outcome);
+            };
+            const changed = () => done('changed');
+            this.waiters.add(changed);
+            const timer = setTimeout(() => done('cutoff'), maxWaitMs);
+        });
     }
 }
 
@@ -258,6 +273,11 @@ export async function runAnalysisV2FairAiScheduler<T>(
             queue.shift();
             cursor = (index + 1) % stages.length;
             if (claim.decision === 'ready') {
+                results.set(task.key, {
+                    key: task.key,
+                    stage: task.stage,
+                    value: claim.value,
+                });
                 remaining.delete(task.key);
                 lease.release();
                 return 'handled';
@@ -297,7 +317,10 @@ export async function runAnalysisV2FairAiScheduler<T>(
         }
         if (!mayAdmit()) break;
         if (!admittedOrHandled) {
-            await arbiter.waitForChange();
+            const waitOutcome = await arbiter.waitForChange(
+                input.handlerDeadlineAtMs - policy.admissionReserveMs - nowMs(),
+            );
+            if (waitOutcome === 'cutoff') break;
         }
     }
 

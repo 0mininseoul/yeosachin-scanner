@@ -12,7 +12,10 @@ function operationStore<T = string>(
     return {
         claim: vi.fn(async ({ key }) => {
             const state = states.get(key);
-            if (state === 'ready') return { decision: 'ready' as const };
+            if (state === 'ready') return {
+                decision: 'ready' as const,
+                value: key as T,
+            };
             if (state === 'claimed') return { decision: 'ambiguous' as const };
             states.set(key, 'claimed');
             return { decision: 'execute' as const, claimToken: `claim:${key}` };
@@ -147,6 +150,51 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         expect(peakByStage.get('privateAccountName')).toBeLessThanOrEqual(2);
     });
 
+    it('returns continuation at admission cutoff while all process slots remain held', async () => {
+        const releases: Array<() => void> = [];
+        const held = (value: string) => vi.fn(async () => {
+            await new Promise<void>(resolve => releases.push(resolve));
+            return value;
+        });
+        const blockers = [
+            ...Array.from({ length: 6 }, (_, index) => task(
+                `held:g${index}`, 'genderTriage', index, held(`held:g${index}`),
+            )),
+            ...Array.from({ length: 2 }, (_, index) => task(
+                `held:p${index}`, 'privateAccountName', 20 + index, held(`held:p${index}`),
+            )),
+        ];
+        const blockerExecution = runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: blockers,
+            operationStore: operationStore(),
+            handlerDeadlineAtMs: 1_000_000,
+            nowMs: () => 0,
+        });
+        await vi.waitFor(() => expect(releases).toHaveLength(8));
+
+        const startedAt = performance.now();
+        const waitingPaidCall = vi.fn(async () => 'waiting');
+        const waitingResult = await runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: [task('waiting', 'featureAnalysis', 0, waitingPaidCall)],
+            operationStore: operationStore(),
+            handlerDeadlineAtMs: 75_050,
+            nowMs: () => performance.now() - startedAt,
+        });
+        const elapsedMs = performance.now() - startedAt;
+        expect(waitingResult).toMatchObject({
+            status: 'continuation',
+            remainingKeys: ['waiting'],
+        });
+        expect(waitingPaidCall).not.toHaveBeenCalled();
+        expect(elapsedMs).toBeGreaterThanOrEqual(30);
+        expect(elapsedMs).toBeLessThan(250);
+
+        releases.splice(0).forEach(release => release());
+        await expect(blockerExecution).resolves.toMatchObject({ status: 'completed' });
+    });
+
     it('round-robins ready stages so feature work is not starved by triage', async () => {
         const started: string[] = [];
         const tasks = [
@@ -186,6 +234,7 @@ describe('analysis V2 scheduler-v1 runtime', () => {
             handlerDeadlineAtMs: 1_000_000, nowMs: () => now,
         });
         expect(replay.status).toBe('completed');
+        expect(replay.completed.map(row => row.key)).toEqual(['first', 'second']);
         expect(first.run).toHaveBeenCalledOnce();
         expect(second.run).toHaveBeenCalledOnce();
     });

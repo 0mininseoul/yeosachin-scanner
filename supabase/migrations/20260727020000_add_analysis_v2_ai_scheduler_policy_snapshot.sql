@@ -1,5 +1,7 @@
 -- Add the immutable scheduler policy marker without changing existing canonical snapshots.
-CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot(p_snapshot JSONB)
+CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot_v2(
+    p_snapshot JSONB
+)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 IMMUTABLE
@@ -36,6 +38,40 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.analysis_v2_policy_validator_contract_version()
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+    SELECT 'analysis-v2-policy-validator-v2'::TEXT;
+$$;
+
+-- Keep the historical public function name as the stable constraint/RPC compatibility wrapper.
+CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot(
+    p_snapshot JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+    SELECT public.analysis_v2_valid_policy_versions_snapshot_v2(p_snapshot);
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_valid_policy_versions_snapshot_v2(JSONB)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.analysis_v2_valid_policy_versions_snapshot_v2(JSONB)
+    TO service_role;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_policy_validator_contract_version()
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.analysis_v2_policy_validator_contract_version()
+    TO service_role;
+
 REVOKE ALL ON FUNCTION public.analysis_v2_valid_policy_versions_snapshot(JSONB)
     FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.analysis_v2_valid_policy_versions_snapshot(JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.analysis_v2_valid_policy_versions_snapshot(JSONB)
+    TO service_role;

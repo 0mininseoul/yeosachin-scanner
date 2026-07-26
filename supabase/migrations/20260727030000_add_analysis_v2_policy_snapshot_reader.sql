@@ -2,32 +2,45 @@
 DO $migration$
 DECLARE
     v_validator OID;
-    v_definition TEXT;
+    v_version_function OID;
+    v_contract_version TEXT;
     v_is_immutable BOOLEAN;
     v_is_security_definer BOOLEAN;
+    v_version_is_immutable BOOLEAN;
+    v_version_is_security_definer BOOLEAN;
 BEGIN
     v_validator := pg_catalog.to_regprocedure(
-        'public.analysis_v2_valid_policy_versions_snapshot(jsonb)'
+        'public.analysis_v2_valid_policy_versions_snapshot_v2(jsonb)'
     );
-    IF v_validator IS NULL THEN
+    v_version_function := pg_catalog.to_regprocedure(
+        'public.analysis_v2_policy_validator_contract_version()'
+    );
+    IF v_validator IS NULL OR v_version_function IS NULL THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_V2_SCHEDULER_POLICY_PREDECESSOR_DRIFT',
             ERRCODE = 'P0001';
     END IF;
     SELECT
-        pg_catalog.pg_get_functiondef(proc.oid),
         proc.provolatile = 'i',
         proc.prosecdef
-    INTO v_definition, v_is_immutable, v_is_security_definer
+    INTO v_is_immutable, v_is_security_definer
     FROM pg_catalog.pg_proc AS proc
     WHERE proc.oid = v_validator;
 
+    SELECT public.analysis_v2_policy_validator_contract_version()
+    INTO v_contract_version;
+    SELECT
+        proc.provolatile = 'i',
+        proc.prosecdef
+    INTO v_version_is_immutable, v_version_is_security_definer
+    FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid = v_version_function;
+
     IF NOT v_is_immutable
        OR v_is_security_definer
-       OR pg_catalog.strpos(v_definition, 'p_snapshot ? ''scheduler''') = 0
-       OR pg_catalog.strpos(v_definition, 'ai-scheduler-v1') = 0
-       OR pg_catalog.strpos(v_definition, 'item_count > 16') = 0
-       OR pg_catalog.strpos(v_definition, 'jsonb_typeof') = 0 THEN
+       OR NOT v_version_is_immutable
+       OR v_version_is_security_definer
+       OR v_contract_version IS DISTINCT FROM 'analysis-v2-policy-validator-v2' THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_V2_SCHEDULER_POLICY_PREDECESSOR_DRIFT',
             ERRCODE = 'P0001';
@@ -46,7 +59,7 @@ IMMUTABLE
 SECURITY INVOKER
 SET search_path = ''
 AS $$
-    SELECT public.analysis_v2_valid_policy_versions_snapshot(p_snapshot)
+    SELECT public.analysis_v2_valid_policy_versions_snapshot_v2(p_snapshot)
        AND pg_catalog.jsonb_typeof(p_snapshot) = 'object'
        AND p_snapshot ?& ARRAY['pipeline', 'risk', 'aiStage', 'scheduler']
        AND NOT EXISTS (
@@ -77,7 +90,7 @@ AS $$
     FROM public.analysis_requests AS analysis_request
     WHERE analysis_request.id = p_request_id
       AND analysis_request.pipeline_version = 'v2'
-      AND public.analysis_v2_valid_policy_versions_snapshot(
+      AND public.analysis_v2_valid_policy_versions_snapshot_v2(
           analysis_request.policy_versions_snapshot
       );
 $$;

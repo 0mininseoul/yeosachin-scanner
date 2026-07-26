@@ -9,7 +9,13 @@ const migration = readFileSync(new URL(
 describe('analysis V2 AI scheduler policy snapshot migration contract', () => {
     it('keeps the policy validator fail-closed for the exact optional scheduler id', () => {
         expect(migration).toContain(
-            'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot(p_snapshot JSONB)'
+            'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot('
+        );
+        expect(migration).toContain(
+            'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot_v2'
+        );
+        expect(migration).toContain(
+            "'analysis-v2-policy-validator-v2'::TEXT"
         );
         expect(migration).toContain("p_snapshot ? 'scheduler'");
         expect(migration).toContain("p_snapshot->>'scheduler' IS DISTINCT FROM 'ai-scheduler-v1'");
