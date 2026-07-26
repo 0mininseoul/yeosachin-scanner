@@ -3,6 +3,7 @@ import {
     createDecipheriv,
     createHash,
     createHmac,
+    createPublicKey,
     generateKeyPairSync,
     privateDecrypt,
 } from 'node:crypto';
@@ -22,6 +23,26 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', {
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 });
 const PUBLIC_KEY_B64 = Buffer.from(publicKey).toString('base64');
+
+function syntheticRsaPublicKeyBase64(modulusBytes: number): string {
+    const modulus = Buffer.alloc(modulusBytes, 0x7b);
+    modulus[0] = 0x80;
+    modulus[modulus.length - 1] |= 1;
+    const key = createPublicKey({
+        key: {
+            kty: 'RSA',
+            n: modulus.toString('base64url'),
+            e: 'AQAB',
+        },
+        format: 'jwk',
+    });
+    return Buffer.from(
+        key.export({ type: 'spki', format: 'pem' }),
+    ).toString('base64');
+}
+
+const RSA_8192_PUBLIC_KEY_B64 = syntheticRsaPublicKeyBase64(1024);
+const RSA_8200_PUBLIC_KEY_B64 = syntheticRsaPublicKeyBase64(1025);
 const ENV = {
     ANALYSIS_V2_REPLAY_CAPTURE_ENABLED: 'true',
     ANALYSIS_V2_REPLAY_CAPTURE_R2_BUCKET: 'private-replay-captures',
@@ -111,6 +132,35 @@ describe('replay capture configuration', () => {
             ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: ENV.ANALYSIS_V2_REPLAY_CAPTURE_R2_BUCKET,
         })).toThrow('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     });
+
+    it('accepts configured RSA keys at the exact 2048-bit and 8192-bit bounds', () => {
+        expect(loadReplayCaptureConfig(ENV)).toMatchObject({ enabled: true });
+        expect(loadReplayCaptureConfig({
+            ...ENV,
+            ANALYSIS_V2_REPLAY_CAPTURE_RECIPIENT_PUBLIC_KEY_B64:
+                RSA_8192_PUBLIC_KEY_B64,
+        })).toMatchObject({ enabled: true });
+        const maximum = encryptReplayCaptureFragment(fragmentInput({
+            recipientPublicKeyBase64: RSA_8192_PUBLIC_KEY_B64,
+        }));
+        const envelope = JSON.parse(maximum.ciphertext.toString('utf8')) as {
+            ek: string;
+        };
+        expect(Buffer.from(envelope.ek, 'base64')).toHaveLength(1024);
+    });
+
+    it('rejects an RSA key above 8192 bits before creating a transport', () => {
+        const createTransport = vi.fn();
+        expect(() => createReplayCaptureStore({
+            ...ENV,
+            ANALYSIS_V2_REPLAY_CAPTURE_RECIPIENT_PUBLIC_KEY_B64:
+                RSA_8200_PUBLIC_KEY_B64,
+        }, { createTransport })).toThrow('REPLAY_CAPTURE_INVALID_CONFIGURATION');
+        expect(createTransport).not.toHaveBeenCalled();
+        expect(() => encryptReplayCaptureFragment(fragmentInput({
+            recipientPublicKeyBase64: RSA_8200_PUBLIC_KEY_B64,
+        }))).toThrow('REPLAY_CAPTURE_INVALID_CONFIGURATION');
+    });
 });
 
 describe('replay capture envelope', () => {
@@ -174,6 +224,10 @@ describe('replay capture exact-key transport', () => {
         expect(command.input).toMatchObject({
             Key: encrypted.objectKey,
             IfNoneMatch: '*',
+            Metadata: {
+                sha256: encrypted.ciphertextSha256,
+                envelopeAuthenticator: encrypted.envelopeAuthenticator,
+            },
         });
     });
 
@@ -227,6 +281,7 @@ describe('replay capture exact-key transport', () => {
             key: encrypted.objectKey,
             bytes: encrypted.ciphertext,
             sha256: encrypted.ciphertextSha256,
+            envelopeAuthenticator: encrypted.envelopeAuthenticator,
         });
         expect(replayCaptureObjectKey(encrypted.identity)).not.toContain('opaque-a');
     });
@@ -369,6 +424,45 @@ describe('replay capture create-only retry', () => {
         await expect(store.put(changed)).rejects.toThrow('REPLAY_CAPTURE_CONFLICT');
         expect(changed.contentCommitment).not.toBe(original.contentCommitment);
         expect(changed.contentCommitment).not.toContain('private-payload');
+    });
+
+    it.each(['ek', 'iv', 'tag', 'ct'] as const)(
+        'rejects a one-byte %s mutation in an existing immutable envelope',
+        async (field) => {
+            const original = encryptReplayCaptureFragment(fragmentInput());
+            const envelope = JSON.parse(original.ciphertext.toString('utf8')) as
+                Record<'ek' | 'iv' | 'tag' | 'ct' | 'mac', string>;
+            const payload = Buffer.from(envelope[field], 'base64');
+            payload[0] ^= 1;
+            envelope[field] = payload.toString('base64');
+            const tampered = Buffer.from(JSON.stringify(envelope), 'utf8');
+            const store = createReplayCaptureStore(ENV, {
+                createTransport: () => ({
+                    putCreateOnly: vi.fn(async () => 'exists' as const),
+                    get: vi.fn(async () => tampered),
+                }),
+            });
+
+            await expect(store.put(encryptReplayCaptureFragment(fragmentInput())))
+                .rejects.toThrow('REPLAY_CAPTURE_CONFLICT');
+        },
+    );
+
+    it('rejects a metadata MAC mutation in an existing immutable envelope', async () => {
+        const original = encryptReplayCaptureFragment(fragmentInput());
+        const envelope = JSON.parse(original.ciphertext.toString('utf8')) as {
+            mac: string;
+        };
+        envelope.mac = `${envelope.mac[0] === '0' ? '1' : '0'}${envelope.mac.slice(1)}`;
+        const store = createReplayCaptureStore(ENV, {
+            createTransport: () => ({
+                putCreateOnly: vi.fn(async () => 'exists' as const),
+                get: vi.fn(async () => Buffer.from(JSON.stringify(envelope), 'utf8')),
+            }),
+        });
+
+        await expect(store.put(encryptReplayCaptureFragment(fragmentInput())))
+            .rejects.toThrow('REPLAY_CAPTURE_CONFLICT');
     });
 });
 

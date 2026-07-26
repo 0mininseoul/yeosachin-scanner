@@ -16,6 +16,8 @@ const MAX_PLAINTEXT_BYTES = (6 * 1024 * 1024) - 4096;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const MAX_FRAGMENT_COUNT = 128;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
+const MIN_RSA_MODULUS_BITS = 2048;
+const MAX_RSA_MODULUS_BITS = 8192;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
@@ -71,6 +73,7 @@ export type EncryptedReplayFragment = {
     ciphertextByteSize: number;
     recipientKeyFingerprint: string;
     contentCommitment: string;
+    envelopeAuthenticator: string;
     storeAuthenticator: string;
     envelopeVersion: 1;
 };
@@ -84,12 +87,14 @@ type Envelope = {
     iv: string;
     tag: string;
     ct: string;
+    mac: string;
 };
 export type ReplayCaptureTransport = {
     putCreateOnly(input: {
         key: string;
         bytes: Buffer;
         sha256: string;
+        envelopeAuthenticator: string;
     }): Promise<'created' | 'exists'>;
     get(key: string): Promise<Buffer>;
 };
@@ -110,6 +115,12 @@ function fail(code: ReplayCaptureError['code']): never {
     throw new ReplayCaptureError(code);
 }
 
+function validRsaModulusLength(modulusLength: number | undefined): boolean {
+    return typeof modulusLength === 'number'
+        && modulusLength >= MIN_RSA_MODULUS_BITS
+        && modulusLength <= MAX_RSA_MODULUS_BITS;
+}
+
 function validR2Config(input: Omit<ReplayCaptureConfig, 'enabled' | 'recipientKeyFingerprint'>): Omit<ReplayCaptureConfig, 'enabled'> {
     let endpoint: URL;
     try { endpoint = new URL(input.endpoint); } catch { return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION'); }
@@ -127,7 +138,8 @@ function validR2Config(input: Omit<ReplayCaptureConfig, 'enabled' | 'recipientKe
     try {
         const pem = Buffer.from(input.recipientPublicKeyBase64, 'base64').toString('utf8');
         const key = createPublicKey(pem);
-        if (key.asymmetricKeyType !== 'rsa' || (key.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) {
+        if (key.asymmetricKeyType !== 'rsa'
+            || !validRsaModulusLength(key.asymmetricKeyDetails?.modulusLength)) {
             return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
         }
         recipientKeyFingerprint = createHash('sha256')
@@ -185,12 +197,56 @@ function aad(identity: ReplayFragmentIdentity, contentCommitment: string): Buffe
     );
 }
 
+type EncryptedEnvelopePayload = {
+    ek: Buffer;
+    iv: Buffer;
+    tag: Buffer;
+    ct: Buffer;
+};
+
+function updateLengthPrefixed(
+    authenticator: ReturnType<typeof createHmac>,
+    value: string | Buffer,
+): void {
+    const bytes = typeof value === 'string' ? Buffer.from(value, 'utf8') : value;
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(bytes.length));
+    authenticator.update(length);
+    authenticator.update(bytes);
+}
+
+function authenticateEnvelope(
+    secret: string,
+    envelope: Pick<
+        Envelope,
+        'v' | 'identity' | 'recipientKeyFingerprint' | 'contentCommitment'
+    >,
+    payload: EncryptedEnvelopePayload,
+): string {
+    const authenticator = createHmac('sha256', secret);
+    for (const value of [
+        'replay-object-envelope-auth-v1',
+        String(envelope.v),
+        canonicalIdentity(envelope.identity),
+        envelope.recipientKeyFingerprint,
+        envelope.contentCommitment,
+        payload.ek,
+        payload.iv,
+        payload.tag,
+        payload.ct,
+    ]) {
+        updateLengthPrefixed(authenticator, value);
+    }
+    return authenticator.digest('hex');
+}
+
 function authenticateFragmentForStore(
     secret: string,
     fragment: Pick<
         EncryptedReplayFragment,
         'identity' | 'contentCommitment' | 'ciphertextSha256'
-        | 'ciphertextByteSize' | 'recipientKeyFingerprint' | 'envelopeVersion'
+        | 'ciphertextByteSize' | 'recipientKeyFingerprint'
+        | 'envelopeAuthenticator' | 'envelopeVersion'
     >,
 ): string {
     return createHmac('sha256', secret)
@@ -201,6 +257,7 @@ function authenticateFragmentForStore(
             fragment.ciphertextSha256,
             String(fragment.ciphertextByteSize),
             fragment.recipientKeyFingerprint,
+            fragment.envelopeAuthenticator,
             String(fragment.envelopeVersion),
         ].join('\n'))
         .digest('hex');
@@ -257,7 +314,10 @@ export function encryptReplayCaptureFragment(input: ReplayFragmentInput): Encryp
     validateInput(input);
     let publicKey;
     try { publicKey = createPublicKey(Buffer.from(input.recipientPublicKeyBase64, 'base64').toString('utf8')); } catch { return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION'); }
-    if (publicKey.asymmetricKeyType !== 'rsa' || (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
+    if (publicKey.asymmetricKeyType !== 'rsa'
+        || !validRsaModulusLength(publicKey.asymmetricKeyDetails?.modulusLength)) {
+        fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
+    }
     const recipientKeyFingerprint = createHash('sha256')
         .update(publicKey.export({ type: 'spki', format: 'der' }))
         .digest('hex');
@@ -285,13 +345,30 @@ export function encryptReplayCaptureFragment(input: ReplayFragmentInput): Encryp
     const cipher = createCipheriv('aes-256-gcm', key, iv);
     cipher.setAAD(aad(identity, contentCommitment));
     const ciphertext = Buffer.concat([cipher.update(input.plaintext), cipher.final()]);
-    const envelope: Envelope = {
+    const encryptedKey = publicEncrypt({
+        key: publicKey,
+        padding: constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+    }, key);
+    const tag = cipher.getAuthTag();
+    const envelopeWithoutAuthenticator = {
         v: 1,
         identity,
         recipientKeyFingerprint,
         contentCommitment,
-        ek: publicEncrypt({ key: publicKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, key).toString('base64'),
-        iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ct: ciphertext.toString('base64'),
+        ek: encryptedKey.toString('base64'),
+        iv: iv.toString('base64'),
+        tag: tag.toString('base64'),
+        ct: ciphertext.toString('base64'),
+    } as const;
+    const envelopeAuthenticator = authenticateEnvelope(
+        input.contentCommitmentSecret,
+        envelopeWithoutAuthenticator,
+        { ek: encryptedKey, iv, tag, ct: ciphertext },
+    );
+    const envelope: Envelope = {
+        ...envelopeWithoutAuthenticator,
+        mac: envelopeAuthenticator,
     };
     const bytes = Buffer.from(JSON.stringify(envelope), 'utf8');
     if (bytes.length > MAX_OBJECT_BYTES) fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
@@ -303,6 +380,7 @@ export function encryptReplayCaptureFragment(input: ReplayFragmentInput): Encryp
         ciphertextByteSize: bytes.length,
         recipientKeyFingerprint,
         contentCommitment,
+        envelopeAuthenticator,
         envelopeVersion: 1,
     } satisfies Omit<EncryptedReplayFragment, 'storeAuthenticator'>;
     return {
@@ -319,9 +397,17 @@ function createR2Transport(config: ReplayCaptureConfig, client: CommandClient = 
         try { return await operation(); } catch (error) { if (error instanceof ReplayCaptureError) throw error; return fail('REPLAY_CAPTURE_TRANSPORT_FAILURE'); }
     };
     return {
-        putCreateOnly: async ({ key, bytes, sha256 }) => {
+        putCreateOnly: async ({
+            key,
+            bytes,
+            sha256,
+            envelopeAuthenticator,
+        }) => {
             validateExactKey(key);
-            if (!SHA256.test(sha256) || bytes.length < 1 || bytes.length > MAX_OBJECT_BYTES) {
+            if (!SHA256.test(sha256)
+                || !SHA256.test(envelopeAuthenticator)
+                || bytes.length < 1
+                || bytes.length > MAX_OBJECT_BYTES) {
                 fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
             }
             try {
@@ -332,7 +418,10 @@ function createR2Transport(config: ReplayCaptureConfig, client: CommandClient = 
                     ContentLength: bytes.length,
                     ContentType: 'application/octet-stream',
                     CacheControl: `private, max-age=${MAX_TTL_SECONDS}`,
-                    Metadata: { sha256 },
+                    Metadata: {
+                        sha256,
+                        envelopeAuthenticator,
+                    },
                     IfNoneMatch: '*',
                 }));
                 return 'created' as const;
@@ -372,6 +461,12 @@ function createR2Transport(config: ReplayCaptureConfig, client: CommandClient = 
 }
 function validateExactKey(key: string): void { if (!OBJECT_KEY.test(key)) fail('REPLAY_CAPTURE_INVALID_FRAGMENT'); }
 
+function decodeCanonicalBase64(value: unknown): Buffer | undefined {
+    if (typeof value !== 'string' || value.length < 1) return undefined;
+    const decoded = Buffer.from(value, 'base64');
+    return decoded.toString('base64') === value ? decoded : undefined;
+}
+
 function parseAndValidateEnvelope(
     bytes: Buffer,
     expectedIdentity: ReplayFragmentIdentity,
@@ -393,22 +488,42 @@ function parseAndValidateEnvelope(
     } catch {
         return reject();
     }
+    const encryptedKey = decodeCanonicalBase64(envelope.ek);
+    const iv = decodeCanonicalBase64(envelope.iv);
+    const tag = decodeCanonicalBase64(envelope.tag);
+    const ciphertext = decodeCanonicalBase64(envelope.ct);
     if (envelope.v !== 1
+        || !SHA256.test(envelope.recipientKeyFingerprint)
+        || !SHA256.test(envelope.contentCommitment)
+        || !SHA256.test(envelope.mac)) {
+        reject();
+    }
+    if (!encryptedKey) return reject();
+    if (!iv) return reject();
+    if (!tag) return reject();
+    if (!ciphertext) return reject();
+    if (encryptedKey.length < 256
+        || encryptedKey.length > 1024
+        || iv.length !== 12
+        || tag.length !== 16
+        || ciphertext.length < 1
+        || ciphertext.length > MAX_PLAINTEXT_BYTES) {
+        reject();
+    }
+    const expectedEnvelopeAuthenticator = authenticateEnvelope(
+        contentCommitmentSecret,
+        envelope,
+        {
+            ek: encryptedKey,
+            iv,
+            tag,
+            ct: ciphertext,
+        },
+    );
+    if (!authenticatedHexEquals(envelope.mac, expectedEnvelopeAuthenticator)
         || canonicalIdentity(envelope.identity) !== canonicalIdentity(expectedIdentity)
         || envelope.recipientKeyFingerprint !== recipientKeyFingerprint
-        || !SHA256.test(envelope.recipientKeyFingerprint)
-        || envelope.contentCommitment !== expectedContentCommitment
-        || !SHA256.test(envelope.contentCommitment)
-        || typeof envelope.ek !== 'string'
-        || typeof envelope.iv !== 'string'
-        || typeof envelope.tag !== 'string'
-        || typeof envelope.ct !== 'string'
-        || Buffer.from(envelope.iv, 'base64').length !== 12
-        || Buffer.from(envelope.tag, 'base64').length !== 16
-        || Buffer.from(envelope.ek, 'base64').length < 256
-        || Buffer.from(envelope.ek, 'base64').length > 1024
-        || Buffer.from(envelope.ct, 'base64').length < 1
-        || Buffer.from(envelope.ct, 'base64').length > MAX_PLAINTEXT_BYTES) {
+        || envelope.contentCommitment !== expectedContentCommitment) {
         reject();
     }
     const objectKey = replayCaptureObjectKey(expectedIdentity);
@@ -420,6 +535,7 @@ function parseAndValidateEnvelope(
         ciphertextByteSize: bytes.length,
         recipientKeyFingerprint,
         contentCommitment: envelope.contentCommitment,
+        envelopeAuthenticator: envelope.mac,
         envelopeVersion: 1,
     } satisfies Omit<EncryptedReplayFragment, 'storeAuthenticator'>;
     return {
@@ -457,11 +573,13 @@ function assertFragmentIntegrity(
         || !SHA256.test(fragment.ciphertextSha256)
         || !SHA256.test(fragment.recipientKeyFingerprint)
         || !SHA256.test(fragment.contentCommitment)
+        || !SHA256.test(fragment.envelopeAuthenticator)
         || !authenticatedHexEquals(
             fragment.storeAuthenticator,
             authenticateFragmentForStore(contentCommitmentSecret, fragment),
         )
         || fragment.recipientKeyFingerprint !== recipientKeyFingerprint
+        || fragment.envelopeAuthenticator !== parsed.envelopeAuthenticator
         || fragment.objectKey !== parsed.objectKey
         || createHash('sha256').update(fragment.ciphertext).digest('hex') !== fragment.ciphertextSha256) {
         fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
@@ -490,6 +608,7 @@ export function createReplayCaptureStore(env: Readonly<Record<string, string | u
                 key: fragment.objectKey,
                 bytes: fragment.ciphertext,
                 sha256: fragment.ciphertextSha256,
+                envelopeAuthenticator: fragment.envelopeAuthenticator,
             });
             if (outcome === 'created') return fragment;
             const existing = await transport.get(fragment.objectKey);
