@@ -255,7 +255,30 @@ describe('risk-policy v2.4 database replay', () => {
                 $function$;
             `);
 
+            await migrationDb.exec(`
+                INSERT INTO public.analysis_v2_reverse_like_rows(
+                    reverse_like_status, component_score, evidence_ref_ids
+                ) VALUES ('observed', 3, ARRAY['like:legacy'])
+            `);
+
             await expect(migrationDb.exec(migration)).resolves.toBeDefined();
+            await expect(migrationDb.exec(`
+                INSERT INTO public.analysis_v2_reverse_like_rows(
+                    reverse_like_status, component_score, evidence_ref_ids
+                ) VALUES
+                    ('observed', 3, ARRAY['like:rolling-old']),
+                    ('observed', 5, ARRAY['like:v24'])
+            `)).resolves.toBeDefined();
+            await expect(migrationDb.exec(`
+                INSERT INTO public.analysis_v2_reverse_like_rows(
+                    reverse_like_status, component_score, evidence_ref_ids
+                ) VALUES ('observed', 4, ARRAY['like:invalid'])
+            `)).rejects.toThrow();
+            await expect(migrationDb.exec(`
+                INSERT INTO public.analysis_v2_reverse_like_rows(
+                    reverse_like_status, component_score, evidence_ref_ids
+                ) VALUES ('not_observed', 3, ARRAY[]::TEXT[])
+            `)).rejects.toThrow();
             await expect(migrationDb.exec(`
                 INSERT INTO public.analysis_v2_preliminary_score_rows(
                     candidate_id, pre_score, possible_upper_bound

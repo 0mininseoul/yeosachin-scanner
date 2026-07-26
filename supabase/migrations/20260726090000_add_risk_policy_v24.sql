@@ -30,7 +30,9 @@ ALTER TABLE public.analysis_v2_reverse_like_rows
 
 ALTER TABLE public.analysis_v2_reverse_like_rows
     ADD CONSTRAINT analysis_v2_reverse_like_rows_component_score_check
-    CHECK (component_score IN (0, 5));
+    -- Expand-safe: v2.3 workers and in-flight rows legitimately use observed=3.
+    -- A later gated contraction may remove 3 only after those requests have drained.
+    CHECK (component_score IN (0, 3, 5));
 
 ALTER TABLE public.analysis_v2_reverse_like_rows
     DROP CONSTRAINT IF EXISTS analysis_v2_reverse_like_evidence_check;
@@ -39,7 +41,7 @@ ALTER TABLE public.analysis_v2_reverse_like_rows
     ADD CONSTRAINT analysis_v2_reverse_like_evidence_check CHECK (
         public.analysis_v2_result_valid_ref_list(evidence_ref_ids, 8)
         AND (
-            (reverse_like_status = 'observed' AND component_score = 5
+            (reverse_like_status = 'observed' AND component_score IN (3, 5)
                 AND pg_catalog.cardinality(evidence_ref_ids) > 0)
             OR (reverse_like_status <> 'observed' AND component_score = 0
                 AND pg_catalog.cardinality(evidence_ref_ids) = 0)
@@ -238,11 +240,11 @@ BEGIN
     v_definition := pg_catalog.replace(
         v_definition,
         $reverse$componentScore' NOT IN ('0', '3')$reverse$,
-        $reverse$componentScore' NOT IN ('0', '5')$reverse$
+        $reverse$componentScore' NOT IN ('0', '3', '5')$reverse$
     );
     v_definition := pg_catalog.replace(
         v_definition, $reverse$componentScore' <> '3'$reverse$,
-        $reverse$componentScore' <> '5'$reverse$
+        $reverse$componentScore' NOT IN ('3', '5')$reverse$
     );
     EXECUTE v_definition;
 END;
