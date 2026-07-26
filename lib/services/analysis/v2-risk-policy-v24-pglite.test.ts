@@ -127,6 +127,10 @@ describe('risk-policy v2.4 database replay', () => {
         expect(migration).toContain("targetToCandidateTagOrCaptionMention");
         expect(migration).toContain("+ 5, 100");
         expect(migration).toContain("WHEN p_risk_policy_version = 'risk-policy-v2.3' THEN 15");
+        expect(migration).toContain('FUNCTION public.load_analysis_v2_risk_policy_version');
+        expect(migration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.load_analysis_v2_risk_policy_version\(UUID\)\s+TO service_role;/
+        );
         expect(migration).toContain('ELSE 10');
         expect(predecessor).toContain('component_sum.preliminary_component_total');
         expect(predecessor).toContain('                    97\n                )) AS expected_pre_score');

@@ -23,6 +23,8 @@ export interface LegacyV23PreliminaryCandidate {
     preScore: number;
     verificationShortlistRank: number | null;
 }
+export type LegacyV23CandidateEvidence = Omit<LegacyV23PreliminaryCandidate,
+    'recentFemaleMutualRank' | 'recentMutualBadgeRank' | 'preScore' | 'verificationShortlistRank'>;
 
 export interface LegacyV23RiskResult {
     policyVersion: typeof LEGACY_RISK_POLICY_VERSION;
@@ -103,6 +105,50 @@ function calculateRisk(candidate: LegacyV23PreliminaryCandidate, reverseLikeStat
         riskBand: scoreBand(naturalPublic),
         partnerCapApplied: candidate.hasStrongPartnerEvidence && publicScore(rawScore, false) > 3.4,
     };
+}
+
+export function calculateLegacyV23PreliminaryRisk(
+    candidate: LegacyV23PreliminaryCandidate
+): LegacyV23RiskResult {
+    return calculateRisk({
+        ...candidate,
+        hasWeakPartnerEvidence: false,
+        hasStrongPartnerEvidence: false,
+    }, 'not_collected');
+}
+
+export function calculateLegacyV23PreliminaryScores(input: {
+    candidates: readonly LegacyV23CandidateEvidence[];
+    orderedMutualUsernames: readonly string[];
+    excludedUsername: string | null;
+}): LegacyV23PreliminaryCandidate[] {
+    const normalize = (value: string) => value.trim().replace(/^@/, '').toLowerCase();
+    const candidateNames = new Set(input.candidates.map(row => normalize(row.username)));
+    const excluded = input.excludedUsername === null ? null : normalize(input.excludedUsername);
+    const ordered = [...new Set(input.orderedMutualUsernames.map(normalize))]
+        .filter(username => username !== excluded && candidateNames.has(username))
+        .slice(0, 10);
+    const rankByName = new Map(ordered.map((username, index) => [username, index + 1]));
+    const preliminary = input.candidates.map(candidate => {
+        const recentFemaleMutualRank = rankByName.get(normalize(candidate.username)) ?? null;
+        const base = {
+            ...candidate,
+            username: normalize(candidate.username),
+            recentFemaleMutualRank,
+            recentMutualBadgeRank: recentFemaleMutualRank !== null && recentFemaleMutualRank <= 5
+                ? recentFemaleMutualRank : null,
+            preScore: 0,
+            verificationShortlistRank: null,
+        };
+        return { ...base, preScore: calculateLegacyV23PreliminaryRisk(base).preScore };
+    });
+    const shortlist = new Map(preliminary.slice().sort((left, right) =>
+        right.preScore - left.preScore || left.candidateId.localeCompare(right.candidateId))
+        .slice(0, 10).map((row, index) => [row.candidateId, index + 1]));
+    return preliminary.map(row => ({
+        ...row,
+        verificationShortlistRank: shortlist.get(row.candidateId) ?? null,
+    }));
 }
 
 function relativeAssignments(candidates: readonly Omit<LegacyV23FinalCandidate, 'featuredRank' | 'relativeWatchRank'>[]) {

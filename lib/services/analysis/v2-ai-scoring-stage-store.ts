@@ -704,7 +704,8 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointScreening(input) {
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'screening', null, input.candidates.length, {
-                riskPolicyVersion: 'risk-policy-v2.4',
+                ...(input.riskPolicyVersion === 'risk-policy-v2.3'
+                    ? {} : { riskPolicyVersion: 'risk-policy-v2.4' }),
                 shortlistHash: input.shortlistHash,
                 candidates: input.candidates,
             });
@@ -712,7 +713,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
                 shortlistHash: envelope.payload.shortlistHash,
-                riskPolicyVersion: 'risk-policy-v2.4',
+                riskPolicyVersion: input.riskPolicyVersion ?? 'risk-policy-v2.4',
                 candidates: envelope.payload.candidates,
             }) as AnalysisV2ScreeningSnapshot;
         },

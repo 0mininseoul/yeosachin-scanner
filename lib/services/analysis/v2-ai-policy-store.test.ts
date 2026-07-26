@@ -18,6 +18,15 @@ describe('analysis V2 AI policy store', () => {
         });
     });
 
+    it('loads the immutable request risk-policy snapshot through its bounded RPC', async () => {
+        const rpc = vi.fn(async () => ({ data: 'risk-policy-v2.3', error: null }));
+        const store = createSupabaseAnalysisV2AiPolicyStore({ rpc });
+        await expect(store.loadRiskPolicyVersion(requestId)).resolves.toBe('risk-policy-v2.3');
+        expect(rpc).toHaveBeenCalledWith('load_analysis_v2_risk_policy_version', {
+            p_request_id: requestId,
+        });
+    });
+
     it('rejects invalid input and malformed policy values without leaking database details', async () => {
         const rpc = vi.fn(async () => ({ data: 'invalid policy value', error: null }));
         const store = createSupabaseAnalysisV2AiPolicyStore({ rpc });

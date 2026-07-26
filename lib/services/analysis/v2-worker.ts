@@ -95,6 +95,9 @@ const AI_PROVIDER_STAGES: ReadonlySet<AnalysisV2StageId> = new Set([
     'partner_safety',
     'narrative',
 ]);
+const RISK_POLICY_STAGES: ReadonlySet<AnalysisV2StageId> = new Set([
+    'screening', 'reverse_likes', 'partner_safety', 'final_score', 'narrative',
+]);
 
 type CheckpointWithKind<K extends AnalysisV2DagManifestCheckpoint['kind']> = Extract<
     AnalysisV2DagManifestCheckpoint extends infer Checkpoint
@@ -128,6 +131,7 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     job: AnalysisV2DagJob;
     state: AnalysisV2DagState;
     aiStagePolicyVersion: string | null;
+    riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null;
     handlerDeadlineAtMs?: number;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
     reportActiveProfile?: (username: string) => Promise<void>;
@@ -542,6 +546,14 @@ export async function executeAnalysisV2DagJob(
             executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
         }
     }
+    let riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null = null;
+    if (RISK_POLICY_STAGES.has(current.stage)) {
+        const loaded = await aiPolicyStore.loadRiskPolicyVersion(claim.requestId);
+        if (loaded !== 'risk-policy-v2.3' && loaded !== 'risk-policy-v2.4') {
+            executionError('ANALYSIS_V2_LEGACY_POLICY_INVALID', 'permanent');
+        }
+        riskPolicyVersion = loaded;
+    }
 
     const activeProfileStage = current.stage === 'profile_fetch'
         || current.stage === 'profile_ai'
@@ -560,6 +572,7 @@ export async function executeAnalysisV2DagJob(
         job: current.job,
         state,
         aiStagePolicyVersion,
+        riskPolicyVersion,
         handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
             reportActiveProfile: async (username: string) => {

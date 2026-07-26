@@ -213,7 +213,10 @@ describe('analysis V2 durable DAG worker', () => {
         await expect(executeAnalysisV2DagJob(profileAiClaim, {
             stateStore: stateStore(initial),
             executors: { profile_ai: executor },
-            aiPolicyStore: { loadAiStagePolicyVersion },
+            aiPolicyStore: {
+                loadAiStagePolicyVersion,
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+            },
         })).rejects.toMatchObject({
             code: 'ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH',
             disposition: 'permanent',

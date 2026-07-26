@@ -120,6 +120,7 @@ function context<S extends AnalysisV2StageId>(
         state?: AnalysisV2DagState;
         reportActiveProfile?: (username: string) => Promise<void>;
         aiStagePolicyVersion?: string;
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     } = {}
 ): AnalysisV2StageExecutorContext<S> {
     const jobKey = options.jobKey ?? `test:${stage}`;
@@ -149,6 +150,7 @@ function context<S extends AnalysisV2StageId>(
         },
         state: options.state ?? state(),
         aiStagePolicyVersion: options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION,
+        riskPolicyVersion: options.riskPolicyVersion ?? 'risk-policy-v2.4',
         ...(options.reportActiveProfile
             ? { reportActiveProfile: options.reportActiveProfile }
             : {}),
@@ -289,6 +291,7 @@ function memoryStageStore(memory: MemoryState): AnalysisV2AiScoringStageStore {
             memory.screening = {
                 revision: 1,
                 resultHash: digest('screening'),
+                riskPolicyVersion: input.riskPolicyVersion,
                 shortlistHash: input.shortlistHash,
                 candidates: input.candidates,
             };
@@ -3432,28 +3435,15 @@ describe('V2 final score invariants', () => {
         const memoryState = memory();
         const outcome = verifiedOutcome('woman.one');
         memoryState.outcomes = [outcome];
-        memoryState.screening = {
+        memoryState.primary = {
             revision: 1,
-            resultHash: digest('legacy-screening'),
-            riskPolicyVersion: 'risk-policy-v2.3',
-            shortlistHash: digest('legacy-shortlist'),
+            resultHash: digest('legacy-primary'),
             candidates: [{
                 candidateId: outcome.candidateId,
-                username: outcome.instagramId,
-                appearanceGrade: 4,
-                exposureScore: 2,
-                accountContext: 'personal',
-                hasWeakPartnerEvidence: false,
-                hasStrongPartnerEvidence: false,
-                uniqueTargetPostsLikedByCandidate: 1,
-                boundedCandidateCommentsOnTarget: 2,
-                hasTagOrCaptionMention: true,
-                recentFemaleMutualRank: 1,
-                recentMutualBadgeRank: 1,
-                preScore: 53.66666666666667,
-                verificationShortlistRank: 1,
+                instagramId: outcome.instagramId,
+                interactions: [],
             }],
-        } as unknown as AnalysisV2ScreeningSnapshot;
+        };
         memoryState.reverse = { revision: 1, resultHash: digest('legacy-reverse'), rows: [] };
         memoryState.partner = { revision: 1, resultHash: digest('legacy-partner'), rows: [] };
         const deps = dependencies(memoryState, {
@@ -3469,19 +3459,35 @@ describe('V2 final score invariants', () => {
         });
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
 
-        await registry.reverse_likes!(context('reverse_likes', { jobKey: 'track:reverse-likes:collect' }));
+        const legacyContext = { riskPolicyVersion: 'risk-policy-v2.3' as const };
+        await registry.screening!(context('screening', {
+            jobKey: 'coordinator:candidate-screening', ...legacyContext,
+        }));
+        expect(deps.resultStore.checkpointPreliminaryScores).toHaveBeenCalledWith(
+            expect.objectContaining({
+                riskPolicyVersion: 'risk-policy-v2.3',
+                rows: [expect.objectContaining({
+                    components: expect.objectContaining({ tagOrCaptionMention: 0 }),
+                    possibleUpperBound: expect.any(Number),
+                })],
+            })
+        );
+        expect(memoryState.screening?.riskPolicyVersion).toBe('risk-policy-v2.3');
+        await registry.reverse_likes!(context('reverse_likes', {
+            jobKey: 'track:reverse-likes:collect', ...legacyContext,
+        }));
         expect(deps.resultStore.checkpointReverseLikes).toHaveBeenCalledWith(expect.objectContaining({
             riskPolicyVersion: 'risk-policy-v2.3',
             rows: [expect.objectContaining({ status: 'observed', componentScore: 3 })],
         }));
         await expect(registry.final_score!(context('final_score', {
-            jobKey: 'track:final-score',
+            jobKey: 'track:final-score', ...legacyContext,
         }))).resolves.toMatchObject({ checkpoint: { kind: 'final_score' } });
         expect(deps.resultStore.checkpointScores).toHaveBeenCalledWith(expect.objectContaining({
             riskPolicyVersion: 'risk-policy-v2.3',
             rows: [expect.objectContaining({
                 components: expect.objectContaining({
-                    tagOrCaptionMention: 14,
+                    tagOrCaptionMention: 0,
                     targetToCandidateLike: 3,
                 }),
                 possibleUpperBound: expect.any(Number),

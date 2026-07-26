@@ -19,6 +19,7 @@ export interface AnalysisV2AiPolicySupabaseClient {
 
 export interface AnalysisV2AiPolicyStore {
     loadAiStagePolicyVersion(requestId: string): Promise<string | null>;
+    loadRiskPolicyVersion(requestId: string): Promise<string | null>;
 }
 
 function safeRpcCode(error: RpcError): string {
@@ -30,38 +31,32 @@ function safeRpcCode(error: RpcError): string {
 export function createSupabaseAnalysisV2AiPolicyStore(
     client: AnalysisV2AiPolicySupabaseClient = supabaseAdmin
 ): AnalysisV2AiPolicyStore {
+    const loadVersion = async (requestId: string, rpcName: string): Promise<string | null> => {
+        if (!UUID_PATTERN.test(requestId)) {
+            throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_VALIDATION_ERROR');
+        }
+        let response: RpcResult;
+        try {
+            response = await client.rpc(rpcName, { p_request_id: requestId.toLowerCase() });
+        } catch {
+            throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: policy load failed (transport).');
+        }
+        if (response.error) {
+            throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: '
+                + `policy load failed (${safeRpcCode(response.error)}).`);
+        }
+        const parsed = z.string().regex(VERSION_PATTERN).nullable().safeParse(response.data);
+        if (!parsed.success) {
+            throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: invalid policy response.');
+        }
+        return parsed.data;
+    };
     return {
         async loadAiStagePolicyVersion(requestId) {
-            if (!UUID_PATTERN.test(requestId)) {
-                throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_VALIDATION_ERROR');
-            }
-            let response: RpcResult;
-            try {
-                response = await client.rpc(
-                    'load_analysis_v2_ai_stage_policy_version',
-                    { p_request_id: requestId.toLowerCase() }
-                );
-            } catch {
-                throw new Error(
-                    'ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: '
-                    + 'policy load failed (transport).'
-                );
-            }
-            const { data, error } = response;
-            if (error) {
-                throw new Error(
-                    'ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: '
-                    + `policy load failed (${safeRpcCode(error)}).`
-                );
-            }
-            const parsed = z.string().regex(VERSION_PATTERN).nullable().safeParse(data);
-            if (!parsed.success) {
-                throw new Error(
-                    'ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: '
-                    + 'invalid policy response.'
-                );
-            }
-            return parsed.data;
+            return loadVersion(requestId, 'load_analysis_v2_ai_stage_policy_version');
+        },
+        async loadRiskPolicyVersion(requestId) {
+            return loadVersion(requestId, 'load_analysis_v2_risk_policy_version');
         },
     };
 }

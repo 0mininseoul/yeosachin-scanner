@@ -45,6 +45,8 @@ import {
 } from './v2-candidate-scoring';
 import {
     calculateLegacyV23FinalScores,
+    calculateLegacyV23PreliminaryRisk,
+    calculateLegacyV23PreliminaryScores,
     type LegacyV23PreliminaryCandidate,
 } from './v2-legacy-risk-recovery';
 import {
@@ -348,6 +350,7 @@ export interface AnalysisV2AiScoringStageStore {
         jobInputHash: string;
         candidates: readonly V2PreliminaryCandidateScore[];
         shortlistHash: string;
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     }): Promise<AnalysisV2ScreeningSnapshot>;
     loadScreening(input: AnalysisV2StageReadClaim): Promise<AnalysisV2ScreeningSnapshot | null>;
     checkpointReverseLikes(input: {
@@ -1762,8 +1765,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const summaryByUsername = new Map(
                 summaries.map(summary => [summary.candidateUsername, summary])
             );
-            const preliminary = calculateV2PreliminaryScores({
-                candidates: verified.map(outcome => {
+            const candidateEvidence = verified.map(outcome => {
                     const summary = summaryByUsername.get(outcome.instagramId);
                     const tagEvidence = hasCandidateTargetMention({
                         targetUsername: target.username,
@@ -1788,13 +1790,28 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         hasTargetToCandidateTagOrCaptionMention:
                             tagEvidence.targetToCandidateTagOrCaptionMention,
                     };
-                }),
-                orderedMutualUsernames: relationship.mutualRows
-                    .slice()
-                    .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal)
-                    .map(row => row.username),
-                excludedUsername: relationship.excludedUsername,
-            });
+                });
+            const orderedMutualUsernames = relationship.mutualRows
+                .slice()
+                .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal)
+                .map(row => row.username);
+            const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
+            const preliminary = legacyRecovery
+                ? calculateLegacyV23PreliminaryScores({
+                    candidates: candidateEvidence.map(row => ({
+                        ...row,
+                        hasTagOrCaptionMention:
+                            row.hasCandidateToTargetTagOrCaptionMention
+                            || row.hasTargetToCandidateTagOrCaptionMention,
+                    })),
+                    orderedMutualUsernames,
+                    excludedUsername: relationship.excludedUsername,
+                })
+                : calculateV2PreliminaryScores({
+                    candidates: candidateEvidence,
+                    orderedMutualUsernames,
+                    excludedUsername: relationship.excludedUsername,
+                });
             const shortlistIds = preliminary
                 .filter(row => row.verificationShortlistRank !== null)
                 .sort((left, right) => (
@@ -1804,13 +1821,28 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const shortlistHash = sha256('analysis-v2-verification-shortlist-v1', shortlistIds);
             const publicCheckpoint = await dependencies.resultStore.checkpointPreliminaryScores({
                 ...checkpointClaim(context),
-                rows: preliminary.map(preliminaryStoreRow),
+                rows: legacyRecovery
+                    ? (preliminary as readonly LegacyV23PreliminaryCandidate[]).map(candidate => {
+                        const risk = calculateLegacyV23PreliminaryRisk(candidate);
+                        return {
+                            candidateId: candidate.candidateId,
+                            components: risk.components,
+                            preScore: risk.preScore,
+                            possibleUpperBound: risk.possibleUpperBound,
+                            recentMutualRank: candidate.recentFemaleMutualRank,
+                            verificationShortlistRank: candidate.verificationShortlistRank,
+                        };
+                    })
+                    : (preliminary as readonly V2PreliminaryCandidateScore[])
+                        .map(preliminaryStoreRow),
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             assertCheckpointCount(publicCheckpoint, preliminary.length, 'SCREENING');
             const stored = await dependencies.stageStore.checkpointScreening({
                 ...checkpointClaim(context),
-                candidates: preliminary,
+                candidates: preliminary as readonly V2PreliminaryCandidateScore[],
                 shortlistHash,
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             if (stored.shortlistHash !== shortlistHash) {
                 throw new Error('ANALYSIS_V2_SHORTLIST_HASH_DRIFT');
@@ -1836,7 +1868,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 dependencies.targetProfiles.loadTargetProfile(checkpointClaim(context)),
             ]);
             if (!screening) throw new Error('ANALYSIS_V2_SCREENING_NOT_READY');
-            const legacyRecovery = screening.riskPolicyVersion === 'risk-policy-v2.3';
+            if ((screening.riskPolicyVersion ?? 'risk-policy-v2.4') !== context.riskPolicyVersion) {
+                throw new Error('ANALYSIS_V2_LEGACY_POLICY_INVALID');
+            }
+            const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const shortlist = screening.candidates
                 .filter(row => row.verificationShortlistRank !== null)
@@ -2071,7 +2106,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (!screening || !reverse || !partner) {
                 throw new Error('ANALYSIS_V2_FINAL_SCORE_DEPENDENCY_MISSING');
             }
-            const legacyRecovery = screening.riskPolicyVersion === 'risk-policy-v2.3';
+            if ((screening.riskPolicyVersion ?? 'risk-policy-v2.4') !== context.riskPolicyVersion) {
+                throw new Error('ANALYSIS_V2_LEGACY_POLICY_INVALID');
+            }
+            const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
             const partnerById = new Map(partner.rows.map(row => [row.candidateId, row]));
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const preliminary = screening.candidates.map(candidate => {
@@ -2183,6 +2221,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             ]);
             if (!finalScores || !reverse) {
                 throw new Error('ANALYSIS_V2_NARRATIVE_DEPENDENCY_MISSING');
+            }
+            if ((finalScores.riskPolicyVersion ?? 'risk-policy-v2.4') !== context.riskPolicyVersion) {
+                throw new Error('ANALYSIS_V2_LEGACY_POLICY_INVALID');
             }
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const reverseById = new Map(reverse.rows.map(row => [row.candidateId, row]));

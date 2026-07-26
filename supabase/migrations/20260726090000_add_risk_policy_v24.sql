@@ -48,6 +48,24 @@ ALTER TABLE public.analysis_v2_reverse_like_rows
         )
     );
 
+CREATE OR REPLACE FUNCTION public.load_analysis_v2_risk_policy_version(p_request_id UUID)
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT analysis_request.policy_versions_snapshot->>'risk'
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id
+      AND analysis_request.pipeline_version = 'v2';
+$$;
+
+REVOKE ALL ON FUNCTION public.load_analysis_v2_risk_policy_version(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_risk_policy_version(UUID)
+    TO service_role;
+
 CREATE OR REPLACE FUNCTION public.analysis_v2_result_valid_score_components(p_value JSONB)
 RETURNS BOOLEAN
 LANGUAGE sql
