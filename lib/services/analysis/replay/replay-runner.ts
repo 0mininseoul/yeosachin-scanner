@@ -78,6 +78,32 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
     });
 }
 
+function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
+    const ordinals = new Set<number>();
+    for (const profile of bundle.profiles) {
+        if (ordinals.has(profile.ordinal)) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        ordinals.add(profile.ordinal);
+        const selectionIds = new Set<string>();
+        for (const media of profile.media) {
+            const jpeg = Buffer.from(media.jpegBase64, 'base64');
+            if (
+                selectionIds.has(media.selectionId)
+                || jpeg.length < 4
+                || jpeg[0] !== 0xff
+                || jpeg[1] !== 0xd8
+                || jpeg[jpeg.length - 2] !== 0xff
+                || jpeg[jpeg.length - 1] !== 0xd9
+            ) {
+                throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+            }
+            selectionIds.add(media.selectionId);
+        }
+        if (!profile.isPrivate && profile.media.length === 0) {
+            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        }
+    }
+}
+
 /**
  * AI-only runner: accepts an already decrypted in-memory bundle and injected staged AI functions.
  * It intentionally imports no provider, database, R2, archive, job, or result-store module.
@@ -89,6 +115,7 @@ export async function runAnalysisV2AiReplay(input: {
     paidAiOptIn?: boolean;
     write?: (line: string) => void;
 }): Promise<AnalysisV2AiReplayReport> {
+    assertReplayInput(input.bundle);
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }

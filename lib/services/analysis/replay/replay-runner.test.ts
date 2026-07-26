@@ -22,6 +22,15 @@ describe('AI-only replay runner', () => {
         expect(lines.join('\n')).not.toContain('a'.repeat(64));
     });
 
+    it('rejects malformed normalized input during dry-run before invoking AI', async () => {
+        const triage = vi.fn();
+        await expect(runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: [{ ...bundle.profiles[0], media: [{ selectionId: 'm1', caption: null, jpegBase64: 'aGVsbG8=' }] }] },
+            runner: { triage }, mode: 'dry-run',
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        expect(triage).not.toHaveBeenCalled();
+    });
+
     it('requires explicit paid-ai mode, summarizes retry/rate-limit/outcome metrics, and has no persistence dependency', async () => {
         const runner: ReplayAiRunner = {
             triage: vi.fn(async () => ({ outcome: 'ok' as const, value: { inferredGender: 'female' as const, routeToFeature: true }, attempts: 2, retries: 1, elapsedMs: 20 })),
