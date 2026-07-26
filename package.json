@@ -21,7 +21,8 @@
     "canary:instagram-profile-provider": "tsx --env-file=.env.local scripts/canary-instagram-profile-provider.ts",
     "canary:instagram-profile-provider:resolve": "tsx --env-file=.env.local scripts/resolve-profile-provider-canary-ambiguous-start.ts",
     "canary:instagram-profile-provider:finalize": "tsx --env-file=.env.local scripts/finalize-profile-provider-canary.ts",
-    "verify:gender-resolution-e2e": "tsx --env-file=.env.local scripts/verify-analysis-v2-gender-resolution-e2e.ts"
+    "verify:gender-resolution-e2e": "tsx --env-file=.env.local scripts/verify-analysis-v2-gender-resolution-e2e.ts",
+    "replay:analysis-v2:validate": "tsx scripts/replay-analysis-v2.ts --dry-run"
   },
   "dependencies": {
     "@amplitude/unified": "1.1.25",
