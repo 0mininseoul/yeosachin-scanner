@@ -775,7 +775,8 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointFinalScores(input) {
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'final_score', null, input.candidates.length, {
-                riskPolicyVersion: 'risk-policy-v2.4',
+                ...(input.riskPolicyVersion === 'risk-policy-v2.3'
+                    ? {} : { riskPolicyVersion: 'risk-policy-v2.4' }),
                 candidates: input.candidates,
                 narrativeCandidateIds: input.narrativeCandidateIds,
                 narrativeBatchHash: input.narrativeBatchHash,
@@ -783,7 +784,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             return Object.freeze({
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
-                riskPolicyVersion: 'risk-policy-v2.4',
+                riskPolicyVersion: input.riskPolicyVersion ?? 'risk-policy-v2.4',
                 candidates: envelope.payload.candidates,
                 narrativeCandidateIds: envelope.payload.narrativeCandidateIds,
                 narrativeBatchHash: envelope.payload.narrativeBatchHash,

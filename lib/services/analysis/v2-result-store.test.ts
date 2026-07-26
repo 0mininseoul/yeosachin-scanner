@@ -311,6 +311,32 @@ describe('analysis V2 result checkpoint store', () => {
         })]);
     });
 
+    it('keeps recovered v2.3 preliminary checkpoints on the legacy five-argument RPC', async () => {
+        const fake = rpcClient({ data: manifest('track:score', null), error: null });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+        await store.checkpointPreliminaryScores({
+            ...claim('track:score'),
+            riskPolicyVersion: 'risk-policy-v2.3',
+            rows: [{
+                candidateId: 'candidate-legacy',
+                components: {
+                    candidateToTargetLikes: 0, candidateToTargetComments: 0,
+                    targetToCandidateLike: 0, tagOrCaptionMention: 0,
+                    recentMutual: 0, appearanceExposure: 0,
+                },
+                preScore: 0, possibleUpperBound: 3,
+                recentMutualRank: null, verificationShortlistRank: null,
+            }],
+        });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointPreliminaryLegacyRpc,
+            expect.objectContaining({ p_rows: [expect.objectContaining({
+                components: expect.objectContaining({ tagOrCaptionMention: 0 }),
+            })] })
+        );
+        expect(fake.rpc.mock.calls[0]?.[1]).not.toHaveProperty('p_risk_policy_version');
+    });
+
     it.each([
         ['ANALYSIS_V2_RESULT_FENCE_MISMATCH', AnalysisV2ResultFenceError],
         ['ANALYSIS_V2_JOB_LEASE_FENCE_MISMATCH', AnalysisV2ResultFenceError],

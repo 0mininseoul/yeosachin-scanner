@@ -55,6 +55,7 @@ export const ANALYSIS_V2_RESULT_DATABASE_NAMES = Object.freeze({
     femaleResultTable: 'analysis_v2_female_results',
     privateResultTable: 'analysis_v2_private_results',
     checkpointFeatureRpc: 'checkpoint_analysis_v2_candidate_features',
+    checkpointPreliminaryLegacyRpc: 'checkpoint_analysis_v2_preliminary_scores',
     checkpointPreliminaryRpc: 'checkpoint_analysis_v2_preliminary_scores_v24',
     checkpointReverseRpc: 'checkpoint_analysis_v2_reverse_likes',
     checkpointPartnerRpc: 'checkpoint_analysis_v2_partner_safety',
@@ -202,6 +203,22 @@ export interface AnalysisV2PreliminaryScoreRow {
     verificationShortlistRank: number | null;
 }
 
+export interface AnalysisV2LegacyPreliminaryScoreRow {
+    candidateId: string;
+    components: Readonly<{
+        candidateToTargetLikes: number;
+        candidateToTargetComments: number;
+        targetToCandidateLike: number;
+        tagOrCaptionMention: number;
+        recentMutual: number;
+        appearanceExposure: number;
+    }>;
+    preScore: number;
+    possibleUpperBound: number;
+    recentMutualRank: number | null;
+    verificationShortlistRank: number | null;
+}
+
 export interface AnalysisV2ReverseLikeRow {
     candidateId: string;
     status: 'observed' | 'not_observed' | 'not_collected';
@@ -313,7 +330,8 @@ export interface AnalysisV2ResultStore {
         rows: readonly AnalysisV2ProfileClassificationRow[];
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointPreliminaryScores(input: AnalysisV2ResultJobClaim & {
-        rows: readonly AnalysisV2PreliminaryScoreRow[];
+        rows: readonly (AnalysisV2PreliminaryScoreRow | AnalysisV2LegacyPreliminaryScoreRow)[];
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointReverseLikes(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2ReverseLikeRow[];
@@ -323,6 +341,7 @@ export interface AnalysisV2ResultStore {
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointScores(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2CandidateScoreRow[];
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointPrivateNames(input: AnalysisV2ResultJobClaim & {
         batch: number;
@@ -521,6 +540,30 @@ const preliminaryScoreRowSchema = z.object({
         context.addIssue({ code: 'custom', path: ['possibleUpperBound'], message: 'Invalid upper bound.' });
     }
 });
+const legacyPreliminaryScoreRowSchema = z.object({
+    candidateId: candidateIdSchema,
+    components: z.object({
+        candidateToTargetLikes: z.number().finite().min(0).max(20),
+        candidateToTargetComments: z.number().finite().min(0).max(26),
+        targetToCandidateLike: z.literal(0),
+        tagOrCaptionMention: z.number().finite().min(0).max(14),
+        recentMutual: z.number().finite().min(0).max(17),
+        appearanceExposure: z.number().finite().min(0).max(20),
+    }).strict(),
+    preScore: z.number().finite().min(0).max(97),
+    possibleUpperBound: z.number().finite().min(0).max(100),
+    recentMutualRank: z.number().int().min(1).max(10).nullable(),
+    verificationShortlistRank: z.number().int().min(1).max(10).nullable(),
+}).strict().superRefine((value, context) => {
+    const expectedPreScore = Object.values(value.components).reduce((total, value) => total + value, 0);
+    if (Math.abs(value.preScore - expectedPreScore) > 1e-6
+        || Math.abs(value.possibleUpperBound - Math.min(value.preScore + 3, 100)) > 1e-6) {
+        context.addIssue({ code: 'custom', message: 'Legacy preliminary score drifted.' });
+    }
+});
+const preliminaryCheckpointRowSchema = z.union([
+    preliminaryScoreRowSchema, legacyPreliminaryScoreRowSchema,
+]);
 
 const reverseLikeRowSchema = z.object({
     candidateId: candidateIdSchema,
@@ -652,6 +695,35 @@ const scoreRowSchema = z.object({
         });
     }
 });
+
+const legacyScoreRowSchema = z.object({
+    candidateId: candidateIdSchema,
+    displayScore: femaleResultRowV1Schema.shape.displayScore,
+    riskBand: femaleResultRowV1Schema.shape.riskBand,
+    featuredRank: z.number().int().min(1).max(15).nullable(),
+    recentMutualRank: femaleResultRowV1Schema.shape.recentMutualRank,
+    verificationShortlistRank: z.number().int().min(1).max(10).nullable(),
+    partnerSafetySource: z.enum(['not_collected', 'feature_only', 'gemini', 'safe_fallback']),
+    partnerSafetyOperationKey: operationKeySchema.regex(/^partner-safety:/).nullable(),
+    partnerSafetyResultHash: hashSchema.nullable(),
+    components: z.object({
+        candidateToTargetLikes: z.number().finite().min(0).max(20),
+        candidateToTargetComments: z.number().finite().min(0).max(26),
+        targetToCandidateLike: z.number().finite().min(0).max(3),
+        tagOrCaptionMention: z.number().finite().min(0).max(14),
+        recentMutual: z.number().finite().min(0).max(17),
+        appearanceExposure: z.number().finite().min(0).max(20),
+    }).strict(),
+    weakPartnerAdjustment: z.union([z.literal(-5), z.literal(0)]),
+    preScore: z.number().finite().min(0).max(97),
+    rawScore: z.number().finite().min(0).max(100),
+    possibleUpperBound: z.number().finite().min(0).max(100),
+    publicScore: z.number().finite().min(1).max(10),
+    possibleUpperPublicScore: z.number().finite().min(1).max(10),
+    partnerCapApplied: z.boolean(),
+    partnerEvidenceSelectionIds: z.array(selectionIdSchema).max(8),
+}).strict();
+const scoreCheckpointRowSchema = z.union([scoreRowSchema, legacyScoreRowSchema]);
 
 const privateNameRowSchema = z.object({
     candidateId: candidateIdSchema,
@@ -1197,11 +1269,18 @@ export function createSupabaseAnalysisV2ResultStore(
         },
 
         async checkpointPreliminaryScores(input) {
-            const rows = uniqueSortedRows(input.rows, preliminaryScoreRowSchema);
+            const legacyRecovery = input.riskPolicyVersion === 'risk-policy-v2.3';
+            const rows = uniqueSortedRows(
+                input.rows, preliminaryCheckpointRowSchema as unknown as typeof preliminaryScoreRowSchema
+            );
             return checkpoint(
-                ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointPreliminaryRpc,
+                legacyRecovery
+                    ? ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointPreliminaryLegacyRpc
+                    : ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointPreliminaryRpc,
                 input,
-                { p_rows: rows, p_risk_policy_version: RISK_POLICY_VERSION }
+                legacyRecovery ? { p_rows: rows } : {
+                    p_rows: rows, p_risk_policy_version: RISK_POLICY_VERSION,
+                }
             );
         },
 
@@ -1224,11 +1303,13 @@ export function createSupabaseAnalysisV2ResultStore(
         },
 
         async checkpointScores(input) {
-            const rows = uniqueSortedRows(input.rows, scoreRowSchema);
+            const rows = uniqueSortedRows(
+                input.rows, scoreCheckpointRowSchema as unknown as typeof scoreRowSchema
+            ) as AnalysisV2CandidateScoreRow[];
             return checkpoint(
                 ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointScoreRpc,
                 input,
-                { p_rows: rows, p_risk_policy_version: RISK_POLICY_VERSION }
+                { p_rows: rows, p_risk_policy_version: input.riskPolicyVersion ?? RISK_POLICY_VERSION }
             );
         },
 

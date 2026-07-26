@@ -309,6 +309,7 @@ function memoryStageStore(memory: MemoryState): AnalysisV2AiScoringStageStore {
             memory.final = {
                 revision: 1,
                 resultHash: digest('final'),
+                riskPolicyVersion: input.riskPolicyVersion,
                 candidates: input.candidates,
                 narrativeCandidateIds: input.narrativeCandidateIds,
                 narrativeBatchHash: input.narrativeBatchHash,
@@ -3425,5 +3426,49 @@ describe('V2 final score invariants', () => {
         expect(final.filter(row => row.riskBand === 'caution')).toHaveLength(2);
         expect(final.filter(row => row.featuredRank !== null)).toHaveLength(3);
         expect(final.filter(row => row.relativeWatchRank !== null)).toHaveLength(2);
+    });
+
+    it('reclaims a persisted v2.3 screening checkpoint through final-score recovery', async () => {
+        const memoryState = memory();
+        const outcome = verifiedOutcome('woman.one');
+        memoryState.outcomes = [outcome];
+        memoryState.screening = {
+            revision: 1,
+            resultHash: digest('legacy-screening'),
+            riskPolicyVersion: 'risk-policy-v2.3',
+            shortlistHash: digest('legacy-shortlist'),
+            candidates: [{
+                candidateId: outcome.candidateId,
+                username: outcome.instagramId,
+                appearanceGrade: 4,
+                exposureScore: 2,
+                accountContext: 'personal',
+                hasWeakPartnerEvidence: false,
+                hasStrongPartnerEvidence: false,
+                uniqueTargetPostsLikedByCandidate: 1,
+                boundedCandidateCommentsOnTarget: 2,
+                hasTagOrCaptionMention: true,
+                recentFemaleMutualRank: 1,
+                recentMutualBadgeRank: 1,
+                preScore: 53.66666666666667,
+                verificationShortlistRank: 1,
+            }],
+        } as unknown as AnalysisV2ScreeningSnapshot;
+        memoryState.reverse = { revision: 1, resultHash: digest('legacy-reverse'), rows: [] };
+        memoryState.partner = { revision: 1, resultHash: digest('legacy-partner'), rows: [] };
+        const deps = dependencies(memoryState);
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await expect(registry.final_score!(context('final_score', {
+            jobKey: 'track:final-score',
+        }))).resolves.toMatchObject({ checkpoint: { kind: 'final_score' } });
+        expect(deps.resultStore.checkpointScores).toHaveBeenCalledWith(expect.objectContaining({
+            riskPolicyVersion: 'risk-policy-v2.3',
+            rows: [expect.objectContaining({
+                components: expect.objectContaining({ tagOrCaptionMention: 14 }),
+                possibleUpperBound: expect.any(Number),
+            })],
+        }));
+        expect(memoryState.final?.riskPolicyVersion).toBe('risk-policy-v2.3');
     });
 });
