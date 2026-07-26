@@ -38,11 +38,11 @@ BEGIN
         ORDER BY female.sort_ordinal, female.candidate_id
     LOOP
         -- Replace legacy self-referential DB fallback text only for new v2.8 results.
-        IF v_row.one_line_overview ~ '(판독관|제가|저는|나는)' THEN
+        IF v_row.one_line_overview ~ '판독관' THEN
             v_normalized := '소개와 피드 구성이 같은 방향을 가리킵니다. 무엇을 보여주려는지는 꽤 분명하네요.';
         ELSE
             v_normalized := pg_catalog.regexp_replace(
-                pg_catalog.regexp_replace(v_row.one_line_overview, '(ㅋㅋ)+', 'ㅋㅋ', 'g'),
+                pg_catalog.regexp_replace(v_row.one_line_overview, 'ㅋ+', 'ㅋㅋ', 'g'),
                 '[[:space:]]{2,}', ' ', 'g'
             );
         END IF;
@@ -56,15 +56,16 @@ BEGIN
             -- At most one token in a kept summary. Keep the first; remove later occurrences.
             v_first_laugh_position := pg_catalog.strpos(v_normalized, 'ㅋㅋ');
             v_normalized := pg_catalog.left(v_normalized, v_first_laugh_position + 1)
-                || pg_catalog.replace(
+                || pg_catalog.regexp_replace(
                     pg_catalog.substr(v_normalized, v_first_laugh_position + 2),
-                    'ㅋㅋ',
-                    ''
+                    'ㅋ+',
+                    '',
+                    'g'
                 );
             v_kept := v_kept + 1;
             v_previous_kept_ordinal := v_row.sort_ordinal;
         ELSE
-            v_normalized := pg_catalog.replace(v_normalized, 'ㅋㅋ', '');
+            v_normalized := pg_catalog.regexp_replace(v_normalized, 'ㅋ+', '', 'g');
         END IF;
 
         v_normalized := pg_catalog.regexp_replace(v_normalized, '[[:space:]]{2,}', ' ', 'g');
@@ -79,11 +80,15 @@ BEGIN
     UPDATE public.analysis_v2_female_results AS female
     SET narrative_line_one = CASE
             WHEN female.narrative_line_one IS NULL THEN NULL
-            ELSE pg_catalog.btrim(pg_catalog.replace(female.narrative_line_one, 'ㅋㅋ', ''))
+            ELSE pg_catalog.btrim(pg_catalog.regexp_replace(
+                female.narrative_line_one, 'ㅋ+', '', 'g'
+            ))
         END,
         narrative_line_two = CASE
             WHEN female.narrative_line_two IS NULL THEN NULL
-            ELSE pg_catalog.btrim(pg_catalog.replace(female.narrative_line_two, 'ㅋㅋ', ''))
+            ELSE pg_catalog.btrim(pg_catalog.regexp_replace(
+                female.narrative_line_two, 'ㅋ+', '', 'g'
+            ))
         END
     WHERE female.request_id = p_request_id;
 END;

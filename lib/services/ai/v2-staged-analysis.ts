@@ -56,12 +56,17 @@ const FEATURE_OVERVIEW_FALLBACKS_LEGACY = [
     '정체를 한 번에 보여주지 않는 구성이네요, 판독관 입장에서는 은근히 신경 쓰이는 타입입니다.',
     '자료는 얌전한데 분위기는 묘하게 남네요, 별일 없어 보여도 판독관은 한 번 더 눈길이 갑니다.',
 ] as const;
-const FEATURE_OVERVIEW_FALLBACKS_V28 = [
-    '사진과 문구가 같은 방향만 보고 달립니다. 취향 회의는 이미 끝난 계정 같네요.',
-    '피드마다 비슷한 장면이 이어지는데, 우연치고는 연출팀이 너무 성실합니다.',
-    '소개와 피드가 같은 이야기를 반복합니다. 무엇을 보여주려는지는 꽤 분명하네요.',
-    '사진 순서까지 신경 쓴 흔적이 보입니다. 대충 올린 척하기엔 구성이 너무 단단합니다.',
-] as const;
+const FEATURE_OVERVIEW_FALLBACKS_V28 = Object.freeze({
+    personal: '개인 계정 맥락으로 분류됐지만, 더 구체적인 총평을 뒷받침할 공개 단서는 부족합니다.',
+    individual_creator:
+        '개인 창작자 계정으로 분류됐습니다. 활동 분야를 더 구체적으로 말할 공개 단서는 부족합니다.',
+    official_group_or_brand:
+        '공식 단체나 브랜드 맥락으로 분류됐습니다. 개인 계정보다 조직 성격을 먼저 볼 만합니다.',
+    uncertain: '공개 자료만으로 계정 성격을 확정하기 어렵습니다. 없는 디테일까지 만들 필요는 없겠네요.',
+} satisfies Record<
+    'personal' | 'individual_creator' | 'official_group_or_brand' | 'uncertain',
+    string
+>);
 
 const CANDIDATE_TO_TARGET_LIKE_PHRASE = '후보가 대상 게시물에 남긴 좋아요';
 const TARGET_TO_CANDIDATE_LIKE_PHRASE = '대상 계정이 후보 피드에 남긴 좋아요';
@@ -76,8 +81,21 @@ const GENERIC_FEATURE_OVERVIEW_PATTERN =
 const PUBLIC_IDENTIFIER_PATTERN = /(?:https?:\/\/|www\.|\b[^\s@]+@[^\s@]+\b|@[A-Za-z0-9._]+)/iu;
 const INSTAGRAM_USERNAME_PATTERN = /^[A-Za-z0-9._]{1,30}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const V28_SELF_REFERENCE_PATTERN = /(?:판독관|제가|저는|나는)/u;
-const V28_LAUGH_PATTERN = /ㅋㅋ/u;
+const V28_SELF_REFERENCE_PATTERN =
+    /(?:판독관|(?:^|[\s"'“‘(])(?:제가|저는|나는)(?=[\s,.;!?"'”’)]|$))/u;
+const V28_LAUGH_PATTERN = /ㅋ+/u;
+const V28_RELATIONSHIP_TERM_PATTERN =
+    /(?:사귀|썸|연애|연인|애인|남자친구|여자친구|남친|여친|커플|교제|불륜|외도|바람|밀회|데이트)/u;
+const V28_RELATIONSHIP_SPECULATION_PATTERN =
+    /(?:같(?:다|네요|아|은|은데)?|듯(?:하다|해|한)?|보이(?:다|네요|는)|의심|추정|가능성|아닐까|일지도|느낌|기류|냄새|혹시|설마|아마)/u;
+const V28_RELATIONSHIP_ASSERTION_PATTERN =
+    /(?:사귀고\s*있|연애\s*중|교제\s*중|(?:연인|애인|남자친구|여자친구|남친|여친|커플)(?:이|가)?\s*(?:다|있))/u;
+const V28_ATTRIBUTED_BIO_PATTERN =
+    /(?:bio|바이오|소개(?:글|문구)?).{0,24}(?:적혀|표시|밝혀|쓴|문구|라고|라며)/iu;
+const V28_PROTECTED_OR_APPEARANCE_TERM_PATTERN =
+    /(?:인종|피부색|국적|출신|종교|장애|성적\s*지향|성별\s*정체성|나이|체형|몸매|얼굴|외모|키|체중)/u;
+const V28_MOCKERY_MARKER_PATTERN =
+    /(?:조롱|비웃|한심|우습|웃기|볼품없|못생|괴상|혐오|추하|꼴사납|돼지|멸치|괴물|뭘까요|뭐냐)/u;
 const STAGED_OPERATION_PREFIX = Object.freeze({
     genderTriage: 'gender-triage',
     genderResolution: 'gender-resolution',
@@ -252,15 +270,52 @@ const safeOverviewSchema = z.string()
             'The overview uses generic repeated copy.'
         ));
 
+function containsV28UnsupportedRelationshipStyle(value: string): boolean {
+    const normalized = value.normalize('NFKC');
+    if (!V28_RELATIONSHIP_TERM_PATTERN.test(normalized)) return false;
+    if (V28_ATTRIBUTED_BIO_PATTERN.test(normalized)) return false;
+    return V28_RELATIONSHIP_ASSERTION_PATTERN.test(normalized)
+        || V28_RELATIONSHIP_SPECULATION_PATTERN.test(normalized);
+}
+
+function containsV28ProtectedOrAppearanceMockery(value: string): boolean {
+    const normalized = value.normalize('NFKC');
+    if (V28_ATTRIBUTED_BIO_PATTERN.test(normalized)) return false;
+    return /(?:돼지|멸치)(?:네요|같|라고|취급|취급하)/u.test(normalized)
+        || (
+            V28_PROTECTED_OR_APPEARANCE_TERM_PATTERN.test(normalized)
+            && V28_MOCKERY_MARKER_PATTERN.test(normalized)
+        );
+}
+
+function addV28PublicStyleIssues(
+    value: string,
+    context: z.RefinementCtx,
+): void {
+    if (V28_SELF_REFERENCE_PATTERN.test(value)) {
+        context.addIssue({
+            code: 'custom',
+            message: 'v2.8 public copy must not self-reference.',
+        });
+    }
+    if (containsV28ProtectedOrAppearanceMockery(value)) {
+        context.addIssue({
+            code: 'custom',
+            message: 'v2.8 public copy must not mock protected traits, bodies, or appearance.',
+        });
+    }
+    if (containsV28UnsupportedRelationshipStyle(value)) {
+        context.addIssue({
+            code: 'custom',
+            message: 'v2.8 public copy must not assert or speculate about a relationship.',
+        });
+    }
+}
+
 function safeOverviewSchemaFor(policyVersion: AiStagePolicyVersion) {
     if (policyVersion !== AI_STAGE_POLICY_V28_VERSION) return safeOverviewSchema;
     return safeOverviewSchema.superRefine((value, context) => {
-        if (V28_SELF_REFERENCE_PATTERN.test(value)) {
-            context.addIssue({
-                code: 'custom',
-                message: 'v2.8 overview must not self-reference.',
-            });
-        }
+        addV28PublicStyleIssues(value, context);
     });
 }
 
@@ -1140,10 +1195,12 @@ function featureOverviewFallback(input: {
     for (const character of seed) {
         hash = ((hash * 31) + (character.codePointAt(0) ?? 0)) >>> 0;
     }
-    const fallbacks = input.policyVersion === AI_STAGE_POLICY_V28_VERSION
-        ? FEATURE_OVERVIEW_FALLBACKS_V28
-        : FEATURE_OVERVIEW_FALLBACKS_LEGACY;
-    return fallbacks[hash % fallbacks.length];
+    if (input.policyVersion === AI_STAGE_POLICY_V28_VERSION) {
+        return FEATURE_OVERVIEW_FALLBACKS_V28[input.accountContext];
+    }
+    return FEATURE_OVERVIEW_FALLBACKS_LEGACY[
+        hash % FEATURE_OVERVIEW_FALLBACKS_LEGACY.length
+    ];
 }
 
 function normalizeUntrustedText(value: string | null | undefined, maximum: number): string | null {
@@ -2055,15 +2112,15 @@ function narrativeResponseSchemaFor(
             });
         }
         value.lines.forEach((line, lineIndex) => {
-            if (
-                policyVersion === AI_STAGE_POLICY_V28_VERSION
-                && (V28_LAUGH_PATTERN.test(line.text) || V28_SELF_REFERENCE_PATTERN.test(line.text))
-            ) {
-                context.addIssue({
-                    code: 'custom',
-                    path: ['lines', lineIndex, 'text'],
-                    message: 'v2.8 high-risk narrative cannot use laughter or self-reference.',
-                });
+            if (policyVersion === AI_STAGE_POLICY_V28_VERSION) {
+                addV28PublicStyleIssues(line.text, context);
+                if (V28_LAUGH_PATTERN.test(line.text)) {
+                    context.addIssue({
+                        code: 'custom',
+                        path: ['lines', lineIndex, 'text'],
+                        message: 'v2.8 high-risk narrative cannot use laughter.',
+                    });
+                }
             }
             if (
                 containsForbiddenPublicIdentifier(line.text, input.forbiddenIdentifiers)

@@ -53,7 +53,7 @@ afterAll(async () => {
 async function seed(requestId: string, count: number, laughs: readonly number[]) {
     await db.query('DELETE FROM public.analysis_v2_female_results WHERE request_id = $1', [requestId]);
     for (let ordinal = 1; ordinal <= count; ordinal++) {
-        const laugh = laughs.includes(ordinal) ? ' ㅋㅋㅋㅋ 그리고 ㅋㅋ' : '';
+        const laugh = laughs.includes(ordinal) ? ' ㅋ 그리고 ㅋㅋㅋ 또 ㅋㅋㅋㅋㅋ' : '';
         await db.query(
             `INSERT INTO public.analysis_v2_female_results (
                 request_id, candidate_id, sort_ordinal, one_line_overview,
@@ -64,8 +64,8 @@ async function seed(requestId: string, count: number, laughs: readonly number[])
                 `candidate-${ordinal}`,
                 ordinal,
                 `사진과 소개가 같은 방향을 가리키는 계정입니다${laugh}.`,
-                ordinal === 1 ? '근거가 있는 설명 ㅋㅋ' : null,
-                ordinal === 1 ? '상호작용 근거 ㅋㅋ' : null,
+                ordinal === 1 ? '근거가 있는 설명 ㅋ ㅋㅋㅋ' : null,
+                ordinal === 1 ? '상호작용 근거 ㅋㅋㅋㅋㅋ' : null,
             ],
         );
     }
@@ -106,12 +106,14 @@ describe('v2.8 atomic finalizer tone guard', () => {
         await seed(REQUEST_V28, count, Array.from({ length: count }, (_, index) => index + 1));
         await db.query('SELECT public.analysis_v2_apply_v28_summary_tone($1)', [REQUEST_V28]);
         const rows = await summaries(REQUEST_V28);
-        const kept = rows.filter(row => row.one_line_overview.includes('ㅋㅋ'));
+        const kept = rows.filter(row => /ㅋ/u.test(row.one_line_overview));
         expect(kept).toHaveLength(expected);
-        expect(kept.every(row => (row.one_line_overview.match(/ㅋㅋ/g) ?? []).length === 1)).toBe(true);
+        expect(kept.every(row => (
+            row.one_line_overview.match(/ㅋ+/gu) ?? []
+        ).join('|') === 'ㅋㅋ')).toBe(true);
         if (rows[0]) {
-            expect(rows[0].narrative_line_one).not.toContain('ㅋㅋ');
-            expect(rows[0].narrative_line_two).not.toContain('ㅋㅋ');
+            expect(rows[0].narrative_line_one).not.toMatch(/ㅋ/u);
+            expect(rows[0].narrative_line_two).not.toMatch(/ㅋ/u);
         }
     });
 
@@ -119,7 +121,7 @@ describe('v2.8 atomic finalizer tone guard', () => {
         await seed(REQUEST_V28, 40, [1, 2, 3, 4]);
         await db.query('SELECT public.analysis_v2_apply_v28_summary_tone($1)', [REQUEST_V28]);
         const first = await summaries(REQUEST_V28);
-        expect(first.filter(row => row.one_line_overview.includes('ㅋㅋ')).map(row => row.sort_ordinal))
+        expect(first.filter(row => /ㅋ/u.test(row.one_line_overview)).map(row => row.sort_ordinal))
             .toEqual([1, 3]);
         await db.query('SELECT public.analysis_v2_apply_v28_summary_tone($1)', [REQUEST_V28]);
         expect(await summaries(REQUEST_V28)).toEqual(first);
@@ -128,7 +130,8 @@ describe('v2.8 atomic finalizer tone guard', () => {
     it('does not modify legacy result copy and replaces a v2.8 self-referential fallback', async () => {
         await seed(REQUEST_LEGACY, 20, [1]);
         await db.query('SELECT public.analysis_v2_apply_v28_summary_tone($1)', [REQUEST_LEGACY]);
-        expect((await summaries(REQUEST_LEGACY))[0]?.one_line_overview).toContain('ㅋㅋㅋㅋ');
+        expect((await summaries(REQUEST_LEGACY))[0]?.one_line_overview)
+            .toContain('ㅋ 그리고 ㅋㅋㅋ 또 ㅋㅋㅋㅋㅋ');
 
         await seed(REQUEST_V28, 1, []);
         await db.query(`UPDATE public.analysis_v2_female_results

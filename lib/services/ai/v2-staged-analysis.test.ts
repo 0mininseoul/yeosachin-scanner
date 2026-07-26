@@ -965,6 +965,69 @@ describe('V2 staged AI services', () => {
             .toContain('판독관');
     });
 
+    it.each([
+        '얼굴이 못생겨서 우습네요. 사진보다 조롱거리가 먼저 보이는 계정입니다.',
+        '이 정도면 둘이 사귀는 것 같네요. 커플 기류를 모른 척하기 어렵습니다.',
+        '두 사람은 연애 중으로 보입니다. 공개 자료만 봐도 커플인 듯하네요.',
+    ])('rejects prohibited v2.8 public style at the output boundary: %s', async unsafeCopy => {
+        const input = featureInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: unsafeCopy })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.features.oneLineOverview)
+            .toBe('개인 계정 맥락으로 분류됐지만, 더 구체적인 총평을 뒷받침할 공개 단서는 부족합니다.');
+    });
+
+    it('allows attributed neutral bio evidence without turning it into a relationship claim', async () => {
+        const input = featureInput();
+        const attributed =
+            'bio에 남자친구가 있다고 적혀 있습니다. 공개 문구 그 이상은 추측하지 않겠습니다.';
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: attributed })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toBe(attributed);
+    });
+
+    it('uses only parsed account context in v2.8 fallback copy', async () => {
+        const input = featureInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            accountContext: 'official_group_or_brand',
+            oneLineOverview: '판독관이 사진 순서에서 조직의 숨은 사정을 알아냈습니다.',
+        })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.features.oneLineOverview)
+            .toBe('공식 단체나 브랜드 맥락으로 분류됐습니다. 개인 계정보다 조직 성격을 먼저 볼 만합니다.');
+        expect(result.features.oneLineOverview).not.toMatch(/비슷한 장면|사진 순서|연출팀/u);
+    });
+
     it('normalizes unsupported feature evidence and unsafe claims to strict grounded values', async () => {
         const response = featureResponse({
             appearanceGrade: 5,
@@ -1596,7 +1659,7 @@ describe('V2 staged AI services', () => {
             options: { schema: { parse(value: unknown): unknown } },
         ) => options.schema.parse({
             lines: [{
-                text: '여행 사진을 꾸준히 올리는 흐름이 꽤 선명하네요 ㅋㅋ',
+                text: '여행 사진을 꾸준히 올리는 흐름이 꽤 선명하네요 ㅋㅋㅋ',
                 evidenceRefs: ['profile:bio', 'post:1:thumbnail'],
             }, {
                 text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
@@ -1615,7 +1678,71 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
         );
         expect(result.source).toBe('safe_fallback');
-        expect(result.lines.join(' ')).not.toContain('ㅋㅋ');
+        expect(result.lines.join(' ')).not.toMatch(/ㅋ/u);
+    });
+
+    it.each([
+        '얼굴이 못생겨서 우습네요. 공개 사진보다 조롱거리가 먼저 보입니다.',
+        '둘이 사귀는 것 같네요. 커플 기류를 모른 척하기 어렵습니다.',
+        '판독관은 이 관계가 연애 중이라고 봅니다. 숨길 생각은 없어 보이네요.',
+    ])('falls back when v2.8 high-risk output violates public style: %s', async unsafeLine => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: unsafeLine,
+                evidenceRefs: ['profile:bio', 'post:1:thumbnail'],
+            }, {
+                text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+        const input = narrativeInput();
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.source).toBe('safe_fallback');
+        expect(result.lines.join(' ')).not.toMatch(/판독관|못생|사귀|커플/u);
+    });
+
+    it('accepts v2.8 neutral relationship evidence explicitly attributed to bio', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: 'bio에 남자친구가 있다고 적혀 있지만, 굳이 공개 문구 이상으로 확대하지 않는 계정입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글의 보자 표현은 확인됐지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+        const input = narrativeInput();
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V28_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION },
+        );
+
+        expect(result.source).toBe('gemini');
+        expect(result.lines[0]).toContain('bio에 남자친구가 있다고 적혀');
     });
 
     it('uses a sanitized carousel caption dossier only as first-line persona evidence', async () => {
