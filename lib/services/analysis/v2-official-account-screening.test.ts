@@ -26,6 +26,46 @@ describe('screenAnalysisV2OfficialAccount', () => {
         });
     });
 
+    it.each([
+        ['Sora Club', 'single today, I am out now shopping'],
+        ['Sora Club', 'I am single today — out now shopping'],
+        ['Sora Club', 'latest photos, out now'],
+        ['Sora Club', 'listen now, single today'],
+    ])('does not treat ordinary out-now language as music release evidence: %s / %s', (
+        fullName,
+        bio,
+    ) => {
+        expect(screenAnalysisV2OfficialAccount({
+            modelAccountContext: 'official_group_or_brand',
+            fullName,
+            bio,
+        })).toEqual({
+            accountContext: 'uncertain',
+            exclusionReason: null,
+            profileSignalCount: 0,
+        });
+    });
+
+    it.each([
+        ['Black Cherry Club', 'Single   [ 콜드브루 ]   OUT NOW'],
+        ['Night Club', 'EP “봄밤” out now'],
+        ['Blue Club', 'Latest album Summer Tape available now'],
+        ['Blue Club', 'New single Blue Hour streaming now'],
+    ])('accepts high-confidence release syntax across spacing and Unicode variants: %s / %s', (
+        fullName,
+        bio,
+    ) => {
+        expect(screenAnalysisV2OfficialAccount({
+            modelAccountContext: 'official_group_or_brand',
+            fullName,
+            bio,
+        })).toEqual({
+            accountContext: 'official_group_or_brand',
+            exclusionReason: 'model_group_context_plus_profile_signals',
+            profileSignalCount: 2,
+        });
+    });
+
     it('does not exclude a personal account from one ambiguous club word', () => {
         expect(screenAnalysisV2OfficialAccount({
             modelAccountContext: 'official_group_or_brand',

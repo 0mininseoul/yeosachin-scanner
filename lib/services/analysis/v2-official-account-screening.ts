@@ -19,12 +19,12 @@ export interface AnalysisV2OfficialAccountScreening {
 const ORGANIZATION_PATTERNS: readonly RegExp[] = [
     /(?:(?<![\p{L}\p{N}_])(?:official|company|corporation|inc\.?|ltd\.?|agency|studio|label|records?)(?![\p{L}\p{N}_])|공식)/iu,
     /(?:(?<![\p{L}\p{N}_])(?:band|team|crew|collective|community)(?![\p{L}\p{N}_])|밴드|팀|크루|커뮤니티|프로젝트)/iu,
-    /(?:(?<![\p{L}\p{N}_])(?:out\s+now|new\s+(?:single|album|release)|release|booking|shop|store)(?![\p{L}\p{N}_])|발매|신곡|공연|예매|예약|문의|상품)/iu,
+    /(?:(?<![\p{L}\p{N}_])(?:booking|shop|store)(?![\p{L}\p{N}_])|공연|예매|예약|문의|상품)/iu,
 ];
 const AMBIGUOUS_CLUB_NAME_PATTERN =
     /(?<![\p{L}\p{N}_])club(?![\p{L}\p{N}_])/iu;
 const MUSIC_RELEASE_PATTERN =
-    /(?:(?<![\p{L}\p{N}_])(?:out\s+now|new\s+(?:single|album|ep)|(?:single|album|ep)[^\n]{0,80}out\s+now|stream(?:ing)?\s+now)(?![\p{L}\p{N}_])|신곡|발매|음원|스트리밍|앨범[^\n]{0,40}공개)/iu;
+    /(?:(?<![\p{L}\p{N}_])(?:single|album|ep)\s*(?:\[[^\]\n]{1,120}\]|["'“‘][^"'“”‘’\n]{1,120}["'”’])\s*(?:[-–—·|:]\s*)?(?:is\s+)?out\s+now(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])(?:new|latest)\s+(?:single|album|ep)(?![\p{L}\p{N}_])[^\n]{0,120}?(?:out\s+now|released?|available(?:\s+now)?|stream(?:ing)?(?:\s+now)?|listen(?:\s+now)?)(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])(?:stream|listen\s+to)\s+(?:the\s+)?(?:new|latest)?\s*(?:single|album|ep)(?![\p{L}\p{N}_])|(?:신곡|새\s*(?:싱글|앨범|ep)|싱글|앨범|ep)[^\n]{0,80}?(?:발매|공개|스트리밍|듣기)|(?:발매|스트리밍|듣기)[^\n]{0,40}?(?:신곡|싱글|앨범|ep))/iu;
 
 function normalized(value: string | null | undefined, maximum: number): string {
     return value?.normalize('NFKC').replace(/\s+/gu, ' ').trim().slice(0, maximum) ?? '';
@@ -40,7 +40,7 @@ function profileSignalCount(input: {
     const sources = [fullName, bio].filter(Boolean);
     const explicitSignals = ORGANIZATION_PATTERNS.reduce((count, pattern) => (
         count + Number(sources.some(source => pattern.test(source)))
-    ), 0);
+    ), Number(sources.some(source => MUSIC_RELEASE_PATTERN.test(source))));
     const guardedClubSignal = input.modelAccountContext === 'official_group_or_brand'
         && AMBIGUOUS_CLUB_NAME_PATTERN.test(fullName)
         && MUSIC_RELEASE_PATTERN.test(bio);
