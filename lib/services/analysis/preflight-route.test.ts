@@ -44,6 +44,10 @@ const mocks = vi.hoisted(() => ({
         blockQueueUnavailable: vi.fn(),
         setExclusion: vi.fn(),
     },
+    demoStore: {
+        createOrReplay: vi.fn(),
+        findForOwner: vi.fn(),
+    },
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
@@ -80,6 +84,7 @@ vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
 vi.mock('@/lib/services/leads/store', () => ({
     insertLandingLead: mocks.insertLandingLead,
 }));
+vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: mocks.demoStore }));
 
 import { POST as createPreflight } from '@/app/api/analysis/preflight/route';
 import {
@@ -844,5 +849,30 @@ describe('preflight owner routes', () => {
         expect(response.status).toBe(400);
         expect(mocks.after).not.toHaveBeenCalled();
         expect(mocks.insertLandingLead).not.toHaveBeenCalled();
+    });
+
+    it('isolates the exact allowlisted synthetic target before reservation, task, and provider work', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.createOrReplay.mockResolvedValue({
+            run: {
+                id: preflightId, user_id: userId, target_instagram_id: 'junho_dem',
+                fixture_version: 'synthetic-fixture-v1', idempotency_key: 'preflight-key-000000000000',
+                duration_seconds: 75, created_at: expiresAt, started_at: null,
+            },
+            created: true,
+        });
+
+        const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
+        expect(response.status).toBe(202);
+        expect(response.headers.get('x-analysis-synthetic')).toBe('1');
+        expect(mocks.demoStore.createOrReplay).toHaveBeenCalledOnce();
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.resolveDispatch).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
     });
 });

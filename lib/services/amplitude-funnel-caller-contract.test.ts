@@ -53,7 +53,7 @@ describe('Amplitude product funnel caller contract', () => {
     it('tracks preflight and analysis only at accepted lifecycle boundaries', () => {
         const preflight = source('hooks/useAnalysisV2Preflight.ts');
         expect(preflight).toMatch(
-            /trackEvent\(EVENTS\.PREFLIGHT_STARTED\);[\s\S]*?fetch\('\/api\/analysis\/preflight'/,
+            /fetch\('\/api\/analysis\/preflight'[\s\S]*?x-analysis-synthetic[\s\S]*?trackEvent\(EVENTS\.PREFLIGHT_STARTED\)/,
         );
         expect(preflight).toMatch(
             /if \(!scope\.isCurrent\(\)\) return false;[\s\S]*?trackEvent\(EVENTS\.EXCLUSION_DECIDED/,

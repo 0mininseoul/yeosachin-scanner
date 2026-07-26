@@ -9,6 +9,8 @@ import {
 } from '@/lib/domain/analysis/result-pagination';
 import { analysisV2ResultStore } from '@/lib/services/analysis/v2-result-store';
 import { createClient } from '@/lib/supabase/server';
+import { demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
 const pageSizeSchema = z.string().regex(/^\d{1,2}$/).transform(Number)
@@ -60,6 +62,16 @@ export async function GET(
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
             return json({ error: 'Authentication required.' }, 401);
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
+                return json({ error: 'Analysis result not found.' }, 404);
+            }
+            return NextResponse.json(analysisResultPageV1Schema.parse(demoResultPage({
+                requestId: demo.id, femaleCursor, privateCursor, pageSize: pageSize.data,
+            })), { status: 200, headers: { ...PRIVATE_NO_STORE_HEADERS, 'X-Analysis-Synthetic': '1' } });
         }
 
         const result = await analysisV2ResultStore.loadPage({

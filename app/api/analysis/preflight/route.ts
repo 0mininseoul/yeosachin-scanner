@@ -36,6 +36,8 @@ import {
     operationalLogger,
 } from '@/lib/observability/server';
 import { emitPreflightProcessObservation } from '@/lib/observability/preflight-events';
+import { isDemoEligible } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -128,6 +130,9 @@ async function handlePOST(
         if (!parsed.success) {
             return failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
         }
+        const rawTargetInstagramId = body && typeof body === 'object'
+            ? Reflect.get(body, 'targetInstagramId')
+            : undefined;
         targetInstagramId = parsed.data.targetInstagramId;
 
         const idempotencyKey = request.headers.get('idempotency-key')?.trim();
@@ -137,6 +142,24 @@ async function handlePOST(
                 'INVALID_IDEMPOTENCY_KEY',
                 '올바른 Idempotency-Key가 필요합니다.'
             );
+        }
+        // This check intentionally uses the un-normalized browser value. All production
+        // validation continues to receive the canonical parsed value below.
+        if (isDemoEligible(user.id, rawTargetInstagramId)) {
+            const createdDemo = await demoAnalysisStore.createOrReplay({
+                userId: user.id,
+                idempotencyKey,
+            });
+            if (!createdDemo) {
+                return failed(503, 'ANALYSIS_FAILED', '사전 점검 요청 생성에 실패했습니다.');
+            }
+            return NextResponse.json({
+                schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                preflightId: createdDemo.run.id,
+                expiresAt: new Date(new Date(createdDemo.run.created_at).getTime() + 30 * 60_000).toISOString(),
+                status: 'pending',
+                exclusionDecision: 'pending',
+            }, { status: createdDemo.created ? 202 : 200, headers: { 'X-Analysis-Synthetic': '1', 'Cache-Control': 'private, no-store' } });
         }
         const publicAdmission = isAnalysisV2AdmissionAvailable();
         const signedTestAdmission = signedTestAdmissionState(

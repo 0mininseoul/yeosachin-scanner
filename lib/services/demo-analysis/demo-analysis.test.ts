@@ -1,0 +1,70 @@
+import { describe, expect, it } from 'vitest';
+import {
+    DEMO_TARGET_USERNAME,
+    createDemoFixture,
+    demoDurationSeconds,
+    isDemoEligible,
+    projectDemoProgress,
+    validateDemoAssetManifest,
+} from './demo-analysis';
+
+const ownerId = '123e4567-e89b-42d3-a456-426614174000';
+const requestId = '223e4567-e89b-42d3-a456-426614174000';
+
+describe('synthetic demo analysis policy', () => {
+    it('requires strict flag, allowlisted owner, and the exact raw target', () => {
+        const env = { DEMO_ANALYSIS_ENABLED: 'true', DEMO_ANALYSIS_OPERATOR_USER_IDS: ownerId };
+        expect(DEMO_TARGET_USERNAME).toBe('junho_dem');
+        expect(isDemoEligible(ownerId, 'junho_dem', env)).toBe(true);
+        expect(isDemoEligible(ownerId, 'Junho_dem', env)).toBe(false);
+        expect(isDemoEligible(ownerId, ' junho_dem', env)).toBe(false);
+        expect(isDemoEligible(ownerId, '@junho_dem', env)).toBe(false);
+        expect(isDemoEligible(ownerId, 'junho_dem_', env)).toBe(false);
+        expect(isDemoEligible('323e4567-e89b-42d3-a456-426614174000', 'junho_dem', env)).toBe(false);
+        expect(isDemoEligible(ownerId, 'junho_dem', { ...env, DEMO_ANALYSIS_ENABLED: 'TRUE' })).toBe(false);
+    });
+
+    it('bounds duration without accepting a browser supplied value', () => {
+        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(30);
+        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '999' })).toBe(90);
+        expect(demoDurationSeconds({})).toBe(75);
+    });
+});
+
+describe('synthetic demo fixture', () => {
+    it('uses only existing local permanently defocused raster assets', async () => {
+        await expect(validateDemoAssetManifest()).resolves.toEqual([
+            '/demo-avatars/synthetic-blurred-avatar-1-v1.png',
+            '/demo-avatars/synthetic-blurred-avatar-2-v1.png',
+            '/demo-avatars/synthetic-blurred-avatar-3-v1.png',
+            '/demo-avatars/synthetic-blurred-avatar-4-v1.png',
+        ]);
+    });
+
+    it('is deterministic and has exact synthetic relationship totals', () => {
+        const first = createDemoFixture(requestId);
+        expect(first).toEqual(createDemoFixture(requestId));
+        expect(first.publicAccounts).toHaveLength(242);
+        expect(first.privateAccounts).toHaveLength(142);
+        expect(new Set(first.publicAccounts.map(row => row.instagramId)).size).toBe(242);
+        expect(first.publicAccounts.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(first.publicAccounts.filter(row => row.riskBand === 'caution').length).toBeGreaterThanOrEqual(2);
+        expect(first.publicAccounts.every(row => Number.isInteger(row.displayScore))).toBe(true);
+        expect(first.publicAccounts.every(row => row.displayScore >= 1 && row.displayScore <= 10)).toBe(true);
+        expect(first.summary.genderStats.male + first.summary.genderStats.female + first.summary.genderStats.unknown)
+            .toBe(first.summary.screenedMutuals);
+    });
+
+    it('derives monotonic server progress from persisted start time and never fails', () => {
+        const startedAt = new Date('2026-07-01T00:00:00.000Z');
+        const early = projectDemoProgress({ requestId, startedAt, durationSeconds: 75, now: new Date(+startedAt + 10_000) });
+        const later = projectDemoProgress({ requestId, startedAt, durationSeconds: 75, now: new Date(+startedAt + 50_000) });
+        const done = projectDemoProgress({ requestId, startedAt, durationSeconds: 75, now: new Date(+startedAt + 75_000) });
+        expect(early.snapshot.progressBp).toBeLessThan(later.snapshot.progressBp);
+        expect(later.snapshot.status).toBe('processing');
+        expect(done.snapshot.status).toBe('completed');
+        expect(done.snapshot.progressBp).toBe(10_000);
+        expect(done.snapshot.backgroundProcessing).toBe(false);
+        expect([...early.events, ...later.events, ...done.events].every(event => event.eventCode !== 'FINDING_CORRECTED')).toBe(true);
+    });
+});

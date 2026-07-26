@@ -89,6 +89,7 @@ export default function AnalyzePage() {
         submitExclusion,
         refreshPreflight,
         reset,
+        isSyntheticDemo,
     } = useAnalysisV2Preflight();
 
     const {
@@ -151,7 +152,7 @@ export default function AnalyzePage() {
     }, [disclosureModalOpen]);
 
     useEffect(() => {
-        if (!readyPreflight || !exclusionDecided) return;
+        if (!readyPreflight || !exclusionDecided || isSyntheticDemo) return;
         for (const plan of readyPreflight.plans) {
             if (
                 plan.planId === 'plus'
@@ -173,7 +174,7 @@ export default function AnalyzePage() {
                 properties => trackEvent(EVENTS.PLAN_VIEWED, properties)
             );
         }
-    }, [exclusionDecided, readyPreflight]);
+    }, [exclusionDecided, isSyntheticDemo, readyPreflight]);
 
     useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
@@ -252,7 +253,7 @@ export default function AnalyzePage() {
     };
 
     const trackPlanSelection = (planId: PlanId) => {
-        if (!readyPreflight) return;
+        if (!readyPreflight || isSyntheticDemo) return;
         const plan = readyPreflight.plans.find(candidate => candidate.planId === planId);
         if (!plan || plan.selectionState === 'unavailable') return;
         const key = planSelectedEventKey(
@@ -302,7 +303,7 @@ export default function AnalyzePage() {
                 preflight_id: readyPreflight.preflightId,
             };
             if (paidPlan) {
-                emitCurrentEarlybirdPricingEvent(
+                if (!isSyntheticDemo) emitCurrentEarlybirdPricingEvent(
                     'checkout_started',
                     readyPreflight,
                     effectiveSelectedPlan,
@@ -361,6 +362,13 @@ export default function AnalyzePage() {
                 setWaitlistComplete(true);
                 return;
             }
+            if (payload && typeof payload === 'object'
+                && 'nextUrl' in payload
+                && typeof payload.nextUrl === 'string'
+                && /^\/progress\/[0-9a-f-]{36}$/i.test(payload.nextUrl)) {
+                window.location.assign(payload.nextUrl);
+                return;
+            }
             if (!payload || typeof payload !== 'object'
                 || !('checkoutUrl' in payload)
                 || typeof payload.checkoutUrl !== 'string'
@@ -368,7 +376,7 @@ export default function AnalyzePage() {
                 setError('결제창 주소를 확인하지 못했습니다. 잠시 후 다시 시도해주세요.');
                 return;
             }
-            trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
+            if (!isSyntheticDemo) trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
             window.location.assign(payload.checkoutUrl);
         } catch {
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');

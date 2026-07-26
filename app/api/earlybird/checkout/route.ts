@@ -29,6 +29,8 @@ import {
     flushOperationalLogs,
     operationalLogger,
 } from '@/lib/observability/server';
+import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status });
@@ -197,6 +199,22 @@ async function handlePOST(
     }
     state.preflightId = parsed.data.preflightId;
     state.planId = parsed.data.planId;
+
+    const demo = await demoAnalysisStore.findForOwner(parsed.data.preflightId, user.id);
+    if (demo) {
+        if (!isDemoOperator(user.id)) {
+            return failed(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
+        }
+        if (parsed.data.planId !== 'standard') {
+            return failed(409, 'PLAN_SELECTION_UNAVAILABLE', '선택한 플랜으로 사전 구매할 수 없습니다.');
+        }
+        const started = await demoAnalysisStore.startForOwner(demo.id, user.id);
+        if (!started) {
+            return failed(409, 'PREFLIGHT_NOT_VALID', '최신 사전 점검을 다시 확인해주세요.');
+        }
+        // Deliberately before checkout/order/event code: this has no commercial side effect.
+        return NextResponse.json({ nextUrl: `/progress/${started.id}` }, { status: 200 });
+    }
 
     try {
         const result = await createEarlybirdCheckout({

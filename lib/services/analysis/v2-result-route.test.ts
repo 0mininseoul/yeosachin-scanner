@@ -8,11 +8,15 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     loadPage: vi.fn(),
+    demoFindForOwner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/services/analysis/v2-result-store', () => ({
     analysisV2ResultStore: { loadPage: mocks.loadPage },
+}));
+vi.mock('@/lib/services/demo-analysis/store', () => ({
+    demoAnalysisStore: { findForOwner: mocks.demoFindForOwner },
 }));
 
 import { GET } from '@/app/api/analysis/v2/result/[requestId]/route';
@@ -82,6 +86,7 @@ describe('analysis V2 owner result route', () => {
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
         mocks.loadPage.mockResolvedValue(page());
+        mocks.demoFindForOwner.mockResolvedValue(null);
     });
 
     it('validates identifiers, cursor scope, and page size before authentication', async () => {

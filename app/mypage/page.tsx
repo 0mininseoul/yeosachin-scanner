@@ -4,6 +4,8 @@ import { TopBar, Eyebrow } from '@/components/case-ui';
 import { LogoutButton } from '@/components/logout-button';
 import { ownerAnalysisHistoryV1Schema } from '@/lib/services/analysis/owner-history';
 import AnalysisList from './analysis-list';
+import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 export const metadata = {
     title: '보관함 - 위장여사친 판독기',
@@ -30,7 +32,21 @@ export default async function MyPage() {
     if (!analysisError && !parsedHistory.success) {
         console.error('Analysis owner history response failed validation');
     }
-    const analyses = parsedHistory.success ? parsedHistory.data.items : [];
+    const productionAnalyses = parsedHistory.success ? parsedHistory.data.items : [];
+    const archiveNow = new Date().valueOf();
+    const demoAnalyses = isDemoOperator(user.id)
+        ? (await demoAnalysisStore.listForOwner(user.id)).map(run => ({
+            id: run.id,
+            targetInstagramId: run.target_instagram_id,
+            status: run.started_at && archiveNow >= new Date(run.started_at).getTime() + run.duration_seconds * 1_000
+                ? 'completed' as const
+                : 'processing' as const,
+            createdAt: run.created_at,
+            planType: 'standard',
+            pipelineVersion: 'v2' as const,
+        }))
+        : [];
+    const analyses = [...demoAnalyses, ...productionAnalyses];
 
     return (
         <div className="min-h-dvh">

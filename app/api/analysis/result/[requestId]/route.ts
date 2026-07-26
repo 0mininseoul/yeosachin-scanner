@@ -11,6 +11,8 @@ import {
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
 import { isAnalysisDeletable } from '@/lib/services/analysis/deletion';
+import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 export async function GET(
     request: Request,
@@ -188,6 +190,14 @@ export async function DELETE(
         const { data: { user }, error: authError } = await supabase.auth.getUser();
         if (authError || !user) {
             return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id)) return NextResponse.json({ error: '판독 기록을 찾을 수 없습니다.' }, { status: 404 });
+            return await demoAnalysisStore.deleteForOwner(demo.id, user.id)
+                ? new NextResponse(null, { status: 204 })
+                : NextResponse.json({ error: '판독 기록을 찾을 수 없습니다.' }, { status: 404 });
         }
 
         const mutation = await supabaseAdmin

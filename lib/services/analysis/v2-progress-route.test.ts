@@ -4,11 +4,15 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     loadForOwner: vi.fn(),
+    demoFindForOwner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/services/analysis/v2-progress-store', () => ({
     analysisV2ProgressStore: { loadForOwner: mocks.loadForOwner },
+}));
+vi.mock('@/lib/services/demo-analysis/store', () => ({
+    demoAnalysisStore: { findForOwner: mocks.demoFindForOwner },
 }));
 
 import { GET } from '@/app/api/analysis/progress/[requestId]/route';
@@ -77,6 +81,7 @@ describe('analysis V2 owner progress route', () => {
                 aggregateCount: 1,
             }],
         });
+        mocks.demoFindForOwner.mockResolvedValue(null);
     });
 
     it('requires authentication before reading owner progress', async () => {

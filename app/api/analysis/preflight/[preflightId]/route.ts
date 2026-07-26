@@ -21,6 +21,8 @@ import {
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
 import { insertLandingLead } from '@/lib/services/leads/store';
+import { demoReadyPreflight, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -105,6 +107,12 @@ async function handleGET(
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
         }
 
+        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id)) return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
+            return NextResponse.json(demoReadyPreflight(demo), { headers: { 'X-Analysis-Synthetic': '1', 'Cache-Control': 'private, no-store' } });
+        }
+
         const stored = await preflightStore.findForOwner(preflightId, user.id);
         if (!stored) {
             return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
@@ -165,6 +173,14 @@ async function handlePATCH(
         const parsed = preflightExclusionRequestV1Schema.safeParse(body);
         if (!parsed.success) {
             return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id)) return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
+            // Synthetic runs do not persist an exclusion or create a lead; this preserves
+            // the existing UI's compatible acknowledgement without mutating production rows.
+            return new NextResponse(null, { status: 204 });
         }
 
         await preflightStore.setExclusion({

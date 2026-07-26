@@ -3,6 +3,8 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { ANALYSIS_V2_SCHEMA_VERSION, progressReadV1Schema } from '@/lib/contracts/analysis-v2';
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
+import { isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
 const sequenceSchema = z.string().regex(/^\d{1,16}$/).transform(Number)
@@ -43,6 +45,16 @@ export async function GET(
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
             return json({ error: 'Authentication required.' }, 401);
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id) || !demo.started_at) return json({ error: 'Analysis progress not found.' }, 404);
+            const progress = projectDemoProgress({ requestId: demo.id, startedAt: new Date(demo.started_at), durationSeconds: demo.duration_seconds, now: new Date() });
+            return NextResponse.json({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, ...progress }, {
+                status: 200,
+                headers: { ...PRIVATE_NO_STORE_HEADERS, 'X-Analysis-Synthetic': '1' },
+            });
         }
 
         const progress = await analysisV2ProgressStore.loadForOwner({

@@ -8,6 +8,10 @@ const mocks = vi.hoisted(() => ({
     after: vi.fn(),
     flush: vi.fn(),
     findForOwner: vi.fn(),
+    demoStore: {
+        findForOwner: vi.fn(),
+        startForOwner: vi.fn(),
+    },
     emit: vi.fn(),
     observeRoute: vi.fn((
         _request: Request,
@@ -39,6 +43,7 @@ vi.mock('next/server', async (importOriginal) => {
 vi.mock('@/lib/services/analysis/preflight', () => ({
     preflightStore: { findForOwner: mocks.findForOwner },
 }));
+vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: mocks.demoStore }));
 
 import * as checkoutRoute from '@/app/api/earlybird/checkout/route';
 import { POST as waitlist } from '@/app/api/earlybird/waitlist/route';
@@ -793,5 +798,32 @@ describe('earlybird checkout and waitlist routes', () => {
             readFileSync(new URL('../../../app/api/earlybird/waitlist/route.ts', import.meta.url), 'utf8'),
         ].join('\n');
         expect(source).not.toMatch(/analysis_requests|Cloud Tasks|dispatchAnalysis|enqueue/i);
+    });
+
+    it('starts the exact synthetic run before Groble, order, inventory, or commercial events', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({
+            id: PREFLIGHT_ID, user_id: USER_ID, target_instagram_id: 'junho_dem',
+            fixture_version: 'synthetic-fixture-v1', idempotency_key: 'checkout-key-0000000000000',
+            duration_seconds: 75, created_at: '2030-01-01T00:00:00.000Z', started_at: null,
+        });
+        mocks.demoStore.startForOwner.mockResolvedValue({
+            id: PREFLIGHT_ID, user_id: USER_ID, target_instagram_id: 'junho_dem',
+            fixture_version: 'synthetic-fixture-v1', idempotency_key: 'checkout-key-0000000000000',
+            duration_seconds: 75, created_at: '2030-01-01T00:00:00.000Z', started_at: '2030-01-01T00:00:01.000Z',
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID, planId: 'standard', disclosureAccepted: true,
+        }));
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ nextUrl: `/progress/${PREFLIGHT_ID}` });
+        expect(mocks.demoStore.startForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
     });
 });

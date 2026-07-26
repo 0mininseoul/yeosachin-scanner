@@ -12,6 +12,8 @@ import {
     releaseAnalysisRequestLease,
 } from '@/lib/services/analysis/request-lease';
 import { NextResponse } from 'next/server';
+import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const STATUS_COLUMNS = 'id, user_id, pipeline_version, status, current_step, progress, progress_step, error_message, background_processing, created_at, completed_at, idempotency_key';
 
@@ -40,6 +42,15 @@ export async function GET(
                 { error: '로그인이 필요합니다.' },
                 { status: 401 }
             );
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id)) return NextResponse.json({ error: '분석 요청을 찾을 수 없습니다.' }, { status: 404, headers: PRIVATE_NO_STORE_HEADERS });
+            return NextResponse.json({
+                error: 'V2 분석은 전용 진행 경로를 사용합니다.', code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2',
+                progressUrl: `/api/analysis/progress/${encodeURIComponent(demo.id)}`,
+            }, { status: 409, headers: { ...PRIVATE_NO_STORE_HEADERS, 'X-Analysis-Synthetic': '1' } });
         }
 
         // Re-check ownership on the admin query instead of relying on a client-provided ID.
