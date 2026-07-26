@@ -304,32 +304,17 @@ BEGIN
        OR pg_catalog.strpos(v_definition, v_final_old) = 0
        OR pg_catalog.strpos(v_definition, v_preliminary_old) = 0
        OR pg_catalog.strpos(v_definition, ', 97') = 0
-       OR pg_catalog.strpos(v_definition, '+ 3,') = 0 THEN
+       OR pg_catalog.strpos(v_definition, '+ 3,') = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            $caution$ranked.risk_band = 'caution' AND ranked.expected_rank <= 15$caution$
+       ) = 0 THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_FINAL_DRIFT', ERRCODE = 'P0001';
     END IF;
     v_definition := pg_catalog.replace(v_definition, v_final_old, v_final_new);
     v_definition := pg_catalog.replace(v_definition, v_preliminary_old, v_preliminary_new);
     v_definition := pg_catalog.replace(v_definition, ', 97', ', 95');
     v_definition := pg_catalog.replace(v_definition, '+ 3,', '+ 5,');
-    v_definition := pg_catalog.replace(v_definition, 'risk-policy-v2.3', 'risk-policy-v2.4');
-    EXECUTE v_definition;
-END;
-$migration$;
-
-DO $migration$
-DECLARE v_definition TEXT;
-BEGIN
-    SELECT pg_catalog.pg_get_functiondef(
-        'public.analysis_v2_complete_result_and_purge_internal(uuid,text,uuid,text,text)'
-            ::pg_catalog.regprocedure
-    ) INTO v_definition;
-    IF pg_catalog.strpos(v_definition, 'risk-policy-v2.3') = 0
-       OR pg_catalog.strpos(
-            v_definition,
-            $caution$ranked.risk_band = 'caution' AND ranked.expected_rank <= 15$caution$
-       ) = 0 THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_FINALIZER_DRIFT', ERRCODE = 'P0001';
-    END IF;
     v_definition := pg_catalog.replace(v_definition, 'risk-policy-v2.3', 'risk-policy-v2.4');
     v_definition := pg_catalog.replace(
         v_definition,

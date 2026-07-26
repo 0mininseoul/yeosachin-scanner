@@ -106,6 +106,12 @@ describe('risk-policy v2.4 database replay', () => {
                     CONSTRAINT analysis_v2_result_summaries_score_policy_version_check
                         CHECK (score_policy_version IN ('risk-policy-v2.2', 'risk-policy-v2.3'))
                 );
+                CREATE TABLE public.analysis_v2_candidate_score_rows (
+                    candidate_id TEXT PRIMARY KEY,
+                    risk_band TEXT NOT NULL,
+                    display_score NUMERIC NOT NULL,
+                    featured_rank SMALLINT NULL
+                );
                 CREATE TABLE public.analysis_v2_preliminary_score_rows (
                     candidate_id TEXT PRIMARY KEY,
                     pre_score NUMERIC NOT NULL CHECK (pre_score BETWEEN 0 AND 97),
@@ -165,9 +171,15 @@ describe('risk-policy v2.4 database replay', () => {
                 END;
                 $function$;
                 CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_candidate_scores(
-                    UUID, TEXT, UUID, TEXT, JSONB, TEXT
+                    p_request_id UUID,
+                    p_job_key TEXT,
+                    p_claim_token UUID,
+                    p_job_input_hash TEXT,
+                    p_rows JSONB,
+                    p_risk_policy_version TEXT
                 ) RETURNS JSONB LANGUAGE plpgsql AS $function$
-                DECLARE v_note TEXT := $note$
+                DECLARE
+                    v_note TEXT := $note$
                     + (item.value->'components'->>'targetToCandidateLike')::NUMERIC
                     + (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
                     + (item.value->'components'->>'recentMutual')::NUMERIC
@@ -175,16 +187,39 @@ describe('risk-policy v2.4 database replay', () => {
                     + (item.value->'components'->>'recentMutual')::NUMERIC
                     , 97 + 3,$note$;
                 BEGIN
-                    IF v_note = 'risk-policy-v2.3' THEN NULL; END IF;
-                    RETURN '{}'::JSONB;
-                END;
-                $function$;
-                CREATE OR REPLACE FUNCTION public.analysis_v2_complete_result_and_purge_internal(
-                    UUID, TEXT, UUID, TEXT, TEXT
-                ) RETURNS JSONB LANGUAGE plpgsql AS $function$
-                DECLARE v_value TEXT := $body$ranked.risk_band = 'caution' AND ranked.expected_rank <= 15$body$;
-                BEGIN
-                    IF v_value = 'risk-policy-v2.3' THEN NULL; END IF;
+                    IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.3' THEN
+                        RAISE EXCEPTION 'policy';
+                    END IF;
+                    DELETE FROM public.analysis_v2_candidate_score_rows;
+                    INSERT INTO public.analysis_v2_candidate_score_rows(
+                        candidate_id, risk_band, display_score, featured_rank
+                    )
+                    SELECT item.value->>'candidateId', item.value->>'riskBand',
+                        (item.value->>'displayScore')::NUMERIC,
+                        CASE WHEN item.value->'featuredRank' = 'null'::JSONB THEN NULL
+                            ELSE (item.value->>'featuredRank')::SMALLINT END
+                    FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value);
+                    IF EXISTS (
+                        SELECT 1
+                        FROM (
+                            SELECT score.candidate_id, score.risk_band, score.featured_rank,
+                                pg_catalog.row_number() OVER (
+                                    PARTITION BY score.risk_band
+                                    ORDER BY score.display_score DESC, score.candidate_id
+                                ) AS expected_rank
+                            FROM public.analysis_v2_candidate_score_rows AS score
+                            WHERE score.risk_band IN ('high_risk', 'caution')
+                        ) AS ranked
+                        WHERE ranked.featured_rank IS DISTINCT FROM CASE
+                            WHEN ranked.risk_band = 'high_risk' AND ranked.expected_rank <= 3
+                                THEN ranked.expected_rank::SMALLINT
+                            WHEN ranked.risk_band = 'caution' AND ranked.expected_rank <= 15
+                                THEN ranked.expected_rank::SMALLINT
+                            ELSE NULL
+                        END
+                    ) THEN
+                        RAISE EXCEPTION 'featured ranks';
+                    END IF;
                     RETURN '{}'::JSONB;
                 END;
                 $function$;
@@ -219,14 +254,45 @@ describe('risk-policy v2.4 database replay', () => {
                     candidate_id, pre_score, possible_upper_bound
                 ) VALUES ('over-cap', 95, 101)
             `)).rejects.toThrow();
-            const definitions = await migrationDb.query<{ definition: string }>(
-                `SELECT pg_catalog.pg_get_functiondef(
-                    'public.analysis_v2_complete_result_and_purge_internal(uuid,text,uuid,text,text)'
-                        ::pg_catalog.regprocedure
-                ) AS definition`
-            );
-            expect(definitions.rows[0]!.definition).toContain('risk-policy-v2.4');
-            expect(definitions.rows[0]!.definition).toContain('expected_rank <= 10');
+            const featuredRows = [
+                ...Array.from({ length: 4 }, (_, index) => ({
+                    candidateId: `high-${index + 1}`,
+                    riskBand: 'high_risk',
+                    displayScore: 10 - index / 10,
+                    featuredRank: index < 3 ? index + 1 : null,
+                })),
+                ...Array.from({ length: 11 }, (_, index) => ({
+                    candidateId: `caution-${String(index + 1).padStart(2, '0')}`,
+                    riskBand: 'caution',
+                    displayScore: 6.7 - index / 10,
+                    featuredRank: index < 10 ? index + 1 : null,
+                })),
+            ];
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:final-score',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.4'
+                )`,
+                [JSON.stringify(featuredRows)]
+            )).resolves.toBeDefined();
+            const storedRanks = await migrationDb.query<{
+                candidate_id: string;
+                featured_rank: number | null;
+            }>(`
+                SELECT candidate_id, featured_rank
+                FROM public.analysis_v2_candidate_score_rows
+                WHERE candidate_id IN ('high-4', 'caution-10', 'caution-11')
+                ORDER BY candidate_id
+            `);
+            expect(storedRanks.rows).toEqual([
+                { candidate_id: 'caution-10', featured_rank: 10 },
+                { candidate_id: 'caution-11', featured_rank: null },
+                { candidate_id: 'high-4', featured_rank: null },
+            ]);
         } finally {
             await migrationDb.close();
         }
