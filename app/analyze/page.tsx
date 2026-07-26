@@ -52,6 +52,7 @@ const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
 
 interface CheckoutStatusCta {
     path: string;
+    message: string;
     preflightId: string;
     targetInstagramId: string | null;
     planId: PlanId;
@@ -131,6 +132,10 @@ export default function AnalyzePage() {
     })
         ? checkoutStatusCta
         : null;
+    // The pending-checkout copy belongs to the same submission binding as its
+    // CTA. A late 409 must not leave this message behind after the user has
+    // selected another plan or started a new preflight.
+    const visibleError = activeCheckoutStatusCta?.message ?? error;
 
     useEffect(() => {
         if (
@@ -363,12 +368,12 @@ export default function AnalyzePage() {
                 if (pendingStatusPath) {
                     setCheckoutStatusCta({
                         path: pendingStatusPath,
+                        message: '기존 결제 처리 상태를 먼저 확인해주세요.',
                         preflightId: readyPreflight.preflightId,
                         targetInstagramId,
                         planId: effectiveSelectedPlan,
                         navigating: false,
                     });
-                    setError('기존 결제 처리 상태를 먼저 확인해주세요.');
                     return;
                 }
                 const message = payload && typeof payload === 'object' && 'error' in payload
@@ -827,13 +832,13 @@ export default function AnalyzePage() {
                                         </div>
                                     )}
 
-                                    {error && (
+                                    {visibleError && (
                                         <div
                                             id="checkout-recovery-message"
                                             className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood"
                                             role="alert"
                                         >
-                                            {error}
+                                            {visibleError}
                                         </div>
                                     )}
                                     {activeCheckoutStatusCta && (
@@ -842,7 +847,7 @@ export default function AnalyzePage() {
                                                 type="button"
                                                 onClick={handleCheckoutStatusNavigation}
                                                 disabled={activeCheckoutStatusCta.navigating}
-                                                aria-describedby={error
+                                                aria-describedby={visibleError
                                                     ? 'checkout-recovery-message'
                                                     : undefined}
                                             >

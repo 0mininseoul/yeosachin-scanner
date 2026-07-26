@@ -527,10 +527,10 @@ describe('earlybird analyze UI state', () => {
         }, 'plus')).toBeNull();
     });
 
-    it('hides a late Standard pending-checkout CTA after the user switches plans', () => {
+    it('hides a late Standard pending-checkout CTA and its bound message after selection changes', () => {
         // Submit Standard, select Basic/Plus while its request is pending, then
-        // receive the exact 409. The stale Standard CTA must not render under
-        // the newer selection.
+        // receive the exact 409. Both the stale Standard CTA and its conflict
+        // message must disappear under the newer selection.
         const lateStandardCta = {
             preflightId: '10000000-0000-4000-8000-000000000001',
             targetInstagramId: 'pricing_target',
@@ -552,6 +552,25 @@ describe('earlybird analyze UI state', () => {
             targetInstagramId: lateStandardCta.targetInstagramId,
             planId: 'standard',
         })).toBe(true);
+    });
+
+    it('hides a late Standard pending-checkout CTA and message after target or preflight changes', () => {
+        const lateStandardCta = {
+            preflightId: '10000000-0000-4000-8000-000000000001',
+            targetInstagramId: 'pricing_target',
+            planId: 'standard' as const,
+        };
+
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: 'new_target',
+            planId: 'standard',
+        })).toBe(false);
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: '20000000-0000-4000-8000-000000000002',
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'standard',
+        })).toBe(false);
     });
 
     it.each([
@@ -626,6 +645,9 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('pendingEarlybirdCheckoutStatusPath(');
         expect(source).toContain('router.push(activeCheckoutStatusCta.path)');
         expect(source).toContain('기존 결제창 확인하기');
+        expect(source).toContain("message: '기존 결제 처리 상태를 먼저 확인해주세요.'");
+        expect(source).toContain('const visibleError = activeCheckoutStatusCta?.message ?? error;');
+        expect(source).not.toContain("setError('기존 결제 처리 상태를 먼저 확인해주세요.')");
         expect(source).not.toContain('recoverPendingEarlybirdCheckout(');
         expect(source).not.toContain('checkoutRecoveryPreflightId');
     });
