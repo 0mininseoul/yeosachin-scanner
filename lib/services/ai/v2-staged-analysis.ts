@@ -26,6 +26,7 @@ import {
     type AiStageName,
     type AiStagePolicyVersion,
 } from './stage-policy';
+import type { ReplayStatelessCapability } from './replay-stateless-capability';
 import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
@@ -1431,7 +1432,10 @@ export function createFeatureAnalysisResultIdentity(
 export async function genderTriage(
     rawInput: GenderTriageInput,
     rawAuditContext: StagedAiAuditContext,
-    options: { aiStagePolicyVersion?: AiStagePolicyVersion; statelessReplay?: boolean } = {},
+    options: {
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+        replayCapability?: ReplayStatelessCapability;
+    } = {},
 ): Promise<GenderTriageResult> {
     const input = genderTriageInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
@@ -1459,7 +1463,9 @@ export async function genderTriage(
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
-                ...(options.statelessReplay ? { skipTokenLog: true, statelessReplay: true } : {}),
+                ...(options.replayCapability
+                    ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                    : {}),
             }
         ));
     const exclude = assessment.inferredGender === 'male'
@@ -1476,7 +1482,10 @@ export async function genderTriage(
 export async function genderResolution(
     rawInput: GenderResolutionInput,
     rawAuditContext: StagedAiAuditContext,
-    options: { abortSignal?: AbortSignal; statelessReplay?: boolean } = {},
+    options: {
+        abortSignal?: AbortSignal;
+        replayCapability?: ReplayStatelessCapability;
+    } = {},
 ): Promise<GenderResolutionResult> {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
@@ -1507,7 +1516,9 @@ export async function genderResolution(
             abortSignal: options.abortSignal,
             onBeforeAttempt: audit.onBeforeAttempt,
             onAttemptTelemetry: audit.onAttemptTelemetry,
-            ...(options.statelessReplay ? { skipTokenLog: true, statelessReplay: true } : {}),
+            ...(options.replayCapability
+                ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                : {}),
         },
     ));
     const assessment = genderResolutionModelResponseSchema.parse({
@@ -1531,7 +1542,10 @@ export async function genderResolution(
 export async function featureAnalysis(
     rawInput: FeatureAnalysisInput,
     rawAuditContext: StagedAiAuditContext,
-    options: { aiStagePolicyVersion?: AiStagePolicyVersion; statelessReplay?: boolean } = {},
+    options: {
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+        replayCapability?: ReplayStatelessCapability;
+    } = {},
 ): Promise<FeatureAnalysisResult> {
     const input = featureAnalysisInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
@@ -1559,7 +1573,9 @@ export async function featureAnalysis(
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
-                ...(options.statelessReplay ? { skipTokenLog: true, statelessReplay: true } : {}),
+                ...(options.replayCapability
+                    ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                    : {}),
             }
         ));
     return featureAnalysisResultSchema.parse({

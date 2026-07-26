@@ -75,13 +75,14 @@ describe('live replay source mapping', () => {
                 run(`candidate-likers:${'f'.repeat(64)}`, 'RUNREVR1', APIFY_LIKERS_ACTOR_ID),
             ],
         };
-        for (const item of [...descriptor.preflightRuns, ...descriptor.providerRuns]) runActor[item.runId] = item.actorId;
+        for (const item of [...descriptor.preflightRuns, ...descriptor.providerRuns]) runActor[item.runId] = 'canonicalActorId';
         const listItems = vi.fn(async (datasetId: string, input: { offset: number; limit: number }) => {
             const items = datasets[datasetId.slice(1)] ?? [];
             const page = items.slice(input.offset, input.offset + 1);
             return { offset: input.offset, count: page.length, total: items.length, items: page };
         });
         const client: ReplayReadonlyApifyClient = {
+            resolveActorId: async () => 'canonicalActorId',
             run: runId => ({ get: async () => ({ id: runId, actId: runActor[runId], status: 'SUCCEEDED', defaultDatasetId: `D${runId}` }) }),
             dataset: datasetId => ({ listItems: input => listItems(datasetId, input) }),
         };
@@ -134,6 +135,7 @@ describe('live replay source mapping', () => {
         };
         const get = vi.fn();
         const client: ReplayReadonlyApifyClient = {
+            resolveActorId: async () => 'canonicalActorId',
             run: () => ({ get }),
             dataset: () => ({ listItems: vi.fn() }),
         };
@@ -191,9 +193,10 @@ describe('live replay source mapping', () => {
         };
         const actors = new Map(
             [...descriptor.preflightRuns, ...descriptor.providerRuns]
-                .map(item => [item.runId, item.actorId]),
+                .map(item => [item.runId, 'canonicalActorId']),
         );
         const client: ReplayReadonlyApifyClient = {
+            resolveActorId: async () => 'canonicalActorId',
             run: runId => ({
                 get: async () => ({
                     id: runId,

@@ -1,4 +1,4 @@
-import { mkdtemp, chmod, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, chmod, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +8,7 @@ import {
     removeExpiredReplayArtifacts,
     removeOwnedReplayArtifacts,
     readReplayBundle,
+    readAuthenticatedReplayBundle,
     removeReplayArtifacts,
     writeReplayBundle,
     type AnalysisV2ReplayBundle,
@@ -223,6 +224,47 @@ describe('analysis V2 replay bundle', () => {
         });
 
         await expect(readFile(keyPath, 'utf8')).resolves.toBe('raced key');
+    });
+
+    it('restores a replacement swapped after identity validation instead of unlinking it', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'race-window.key');
+        const movedOwnedPath = join(directory, 'owned-away.key');
+        const bundlePath = join(directory, 'race-window.enc');
+        const ownedKey = await createReplayKeyFile(keyPath);
+
+        await removeOwnedReplayArtifacts({
+            bundlePath,
+            keyPath,
+            ownedKey,
+            beforeOwnedArtifactDelete: async path => {
+                expect(path).toBe(keyPath);
+                await rename(keyPath, movedOwnedPath);
+                await writeFile(keyPath, 'post-validation replacement', { mode: 0o600 });
+            },
+        });
+
+        await expect(readFile(keyPath, 'utf8')).resolves.toBe('post-validation replacement');
+        await expect(stat(movedOwnedPath)).resolves.toBeDefined();
+    });
+
+    it('rejects an oversized encrypted artifact from fstat before reading bytes', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'oversized.key');
+        const bundlePath = join(directory, 'oversized.enc');
+        await createReplayKeyFile(keyPath);
+        await writeFile(bundlePath, 'sparse', { mode: 0o600 });
+        await truncate(bundlePath, 400 * 1024 * 1024);
+        const readFileFromHandle = vi.fn(async () => Buffer.alloc(0));
+
+        await expect(readAuthenticatedReplayBundle({
+            bundlePath,
+            keyPath,
+            artifactRead: { readFile: readFileFromHandle },
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
+        expect(readFileFromHandle).not.toHaveBeenCalled();
     });
 
     it('removes an exact expired pair but preserves an unexpired pair', async () => {

@@ -21,11 +21,20 @@ import type { ReplayCaptureDescriptor } from './replay-supabase-repository';
 type Run = ReplayCaptureDescriptor['providerRuns'][number];
 const record = z.record(z.string(), z.unknown());
 
-/** The returned object has no Actor/start/update/delete/abort methods. */
+/** The returned object exposes only Actor/run GET and dataset list operations. */
 export function createReplayReadonlyApifyClient(token: string): ReplayReadonlyApifyClient {
     if (!token.trim()) throw new Error('ANALYSIS_V2_REPLAY_APIFY_CREDENTIAL_MISSING');
     const client = new ApifyClient({ token, maxRetries: 0 });
+    const actorIds = new Map<string, Promise<string | null>>();
     return {
+        resolveActorId: actorSlug => {
+            const existing = actorIds.get(actorSlug);
+            if (existing) return existing;
+            const pending = client.actor(actorSlug).get()
+                .then(actor => actor?.id ?? null);
+            actorIds.set(actorSlug, pending);
+            return pending;
+        },
         run: runId => ({ get: async () => {
             const value = await client.run(runId).get();
             return { id: value?.id, actId: value?.actId, status: value?.status, defaultDatasetId: value?.defaultDatasetId };

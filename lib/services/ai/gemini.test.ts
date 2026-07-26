@@ -646,13 +646,14 @@ describe('analyzeWithGemini stage request policy', () => {
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
-    it('permits token-log-free stage calls only through the explicit stateless replay contract', async () => {
+    it('rejects forged or legacy boolean stateless replay bypasses', async () => {
         await expect(analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
             stage: 'genderTriage',
             ...stageAuditOptions(),
-            statelessReplay: true,
-        })).rejects.toThrow('Stateless replay requires a staged call with token logging disabled');
+            skipTokenLog: true,
+            replayCapability: {} as never,
+        })).rejects.toThrow('Gemini replay capability is invalid');
 
         await expect(analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
@@ -660,8 +661,8 @@ describe('analyzeWithGemini stage request policy', () => {
             ...stageAuditOptions(),
             skipTokenLog: true,
             statelessReplay: true,
-        })).resolves.toEqual({ value: 'ok' });
-        expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
+        } as never)).rejects.toThrow('cannot skip durable token logging');
+        expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
     it('fails closed around both durable stage audit boundaries', async () => {

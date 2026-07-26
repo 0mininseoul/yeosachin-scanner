@@ -346,6 +346,74 @@ describe('AI-only replay runner', () => {
         expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
     });
 
+    it('marks retry-backoff cutoff without fabricating an attempt or latency', async () => {
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 1,
+            runner: {
+                triage: async () => ({
+                    outcome: 'ok',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'failed',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                }),
+                resolveGender: async ({
+                    signal,
+                    onAttemptStart,
+                    onAttemptTelemetry,
+                }) => new Promise(resolve => {
+                    onAttemptStart?.({ attempt: 1, retryCount: 0 });
+                    onAttemptTelemetry?.({
+                        attempt: 1,
+                        retryCount: 0,
+                        disposition: 'rate_limited',
+                        latencyMs: 5,
+                    });
+                    signal.addEventListener('abort', () => {
+                        resolve({
+                            outcome: 'failed',
+                            attempts: 1,
+                            retries: 0,
+                            elapsedMs: 5,
+                        });
+                    }, { once: true });
+                }),
+            },
+        });
+
+        expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
+        expect(report.stages.genderResolution).toMatchObject({
+            calls: 1,
+            retries: 0,
+            rateLimited: 1,
+            meanLatencyMs: 5,
+            failureDisposition: {
+                rate_limited: 1,
+                backoff_cutoff: 1,
+            },
+        });
+        expect(report.stages.genderResolution.failureDisposition.cutoff).toBeUndefined();
+    });
+
     it('lets all required profile work finish before cutting off pending resolvers', async () => {
         const publicProfiles = Array.from({ length: 5 }, (_, index) => ({
             ...bundle.profiles[0]!,

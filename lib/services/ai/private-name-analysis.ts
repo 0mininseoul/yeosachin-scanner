@@ -11,6 +11,7 @@ import {
     getAiStagePolicy,
     type AiStagePolicyVersion,
 } from './stage-policy';
+import type { ReplayStatelessCapability } from './replay-stateless-capability';
 import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
@@ -176,7 +177,7 @@ async function analyzePrivateNameChunk(
     auditFactory?: PrivateNameAnalysisAudit,
     chunkIndex = 0,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
-    statelessReplay = false,
+    replayCapability?: ReplayStatelessCapability,
 ): Promise<PrivateNameAnalysisResult[]> {
     const expectedIds = accounts.map(account => account.id);
     const schema = createPrivateNameBatchResponseSchema(expectedIds);
@@ -207,7 +208,9 @@ async function analyzePrivateNameChunk(
                             startingAttempt: prepared?.startingAttempt ?? 1,
                             onBeforeAttempt: audit.onBeforeAttempt,
                             onAttemptTelemetry: audit.onAttemptTelemetry,
-                            ...(statelessReplay ? { skipTokenLog: true, statelessReplay: true } : {}),
+                            ...(replayCapability
+                                ? { skipTokenLog: true, replayCapability }
+                                : {}),
                         }
                         : {
                             // Preserve the legacy batch allowance when no durable V2 policy applies.
@@ -288,7 +291,10 @@ export async function analyzePrivateAccountNames(
     rawAccounts: PrivateNameAccountInput[],
     requestId?: string,
     audit?: PrivateNameAnalysisAudit,
-    options: { aiStagePolicyVersion?: AiStagePolicyVersion; statelessReplay?: boolean } = {},
+    options: {
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+        replayCapability?: ReplayStatelessCapability;
+    } = {},
 ): Promise<PrivateNameAnalysisResult[]> {
     const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
     if (requestId !== undefined) {
@@ -320,7 +326,7 @@ export async function analyzePrivateAccountNames(
                     audit,
                     chunkIndex,
                     policyVersion,
-                    options.statelessReplay === true,
+                    options.replayCapability,
                 );
             })
         );

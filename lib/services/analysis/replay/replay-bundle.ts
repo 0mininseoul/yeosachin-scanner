@@ -7,8 +7,9 @@ import {
     write as writeDescriptor,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { lstat, open, realpath, stat, unlink } from 'node:fs/promises';
-import { basename, dirname, resolve, sep } from 'node:path';
+import { link, lstat, open, realpath, rename, stat, unlink } from 'node:fs/promises';
+import type { FileHandle as NodeFileHandle } from 'node:fs/promises';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { replaySourceLineageSchema } from './replay-source-lineage';
@@ -132,6 +133,10 @@ export interface ReplayArtifactWriteDependencies {
     close?: (handle: ReplayArtifactFileHandle) => Promise<void>;
 }
 
+export interface ReplayArtifactReadDependencies {
+    readFile?: (handle: NodeFileHandle, path: string) => Promise<Buffer>;
+}
+
 const replayArtifactCreationStates = new WeakMap<ReplayArtifactCreationScope, ReplayArtifactCreationState>();
 
 export interface ReplayArtifactFileHandle {
@@ -177,7 +182,23 @@ function ownershipToken(
     });
 }
 
-async function unlinkIfIdentityMatches(path: string, identity: ReplayArtifactIdentity): Promise<void> {
+async function restoreUnownedQuarantine(
+    quarantinePath: string,
+    originalPath: string,
+): Promise<void> {
+    try {
+        await link(quarantinePath, originalPath);
+    } catch {
+        bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_OWNERSHIP_RACE');
+    }
+    await unlink(quarantinePath);
+}
+
+async function unlinkIfIdentityMatches(
+    path: string,
+    identity: ReplayArtifactIdentity,
+    beforeDelete?: (path: string) => Promise<void>,
+): Promise<void> {
     let file;
     try {
         file = await lstat(path);
@@ -194,7 +215,31 @@ async function unlinkIfIdentityMatches(path: string, identity: ReplayArtifactIde
         || file.isSymbolicLink()
         || !sameIdentity(identity, identityOf(file))
     ) return;
-    await unlink(path);
+    await beforeDelete?.(path);
+    const quarantinePath = join(
+        dirname(path),
+        `.analysis-v2-replay-delete-${randomBytes(16).toString('hex')}.tmp`,
+    );
+    try {
+        await rename(path, quarantinePath);
+    } catch (error) {
+        if (
+            error instanceof Error
+            && 'code' in error
+            && error.code === 'ENOENT'
+        ) return;
+        throw error;
+    }
+    const moved = await lstat(quarantinePath);
+    if (
+        !moved.isFile()
+        || moved.isSymbolicLink()
+        || !sameIdentity(identity, identityOf(moved))
+    ) {
+        await restoreUnownedQuarantine(quarantinePath, path);
+        return;
+    }
+    await unlink(quarantinePath);
 }
 
 async function cleanupActiveCreation(record: ActiveReplayArtifactCreation): Promise<void> {
@@ -396,6 +441,9 @@ function decryptEnvelope(raw: Buffer, key: Buffer): Buffer {
 
 async function readPrivateReplayArtifact(
     path: string,
+    maxBytes: number,
+    limitCode: string,
+    dependencies: ReplayArtifactReadDependencies = {},
 ): Promise<{ bytes: Buffer; ownership: ReplayArtifactOwnership }> {
     let handle;
     try {
@@ -416,9 +464,29 @@ async function readPrivateReplayArtifact(
         if (!file.isFile() || (file.mode & 0o077) !== 0) {
             bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_PERMISSIONS');
         }
+        if (file.size > maxBytes) bundleError(limitCode);
         const identity = identityOf(file);
         return {
-            bytes: await handle.readFile(),
+            bytes: await (
+                dependencies.readFile
+                ?? (async (fileHandle: NodeFileHandle) => {
+                    const bytes = Buffer.alloc(file.size);
+                    let offset = 0;
+                    while (offset < bytes.byteLength) {
+                        const result = await fileHandle.read(
+                            bytes,
+                            offset,
+                            bytes.byteLength - offset,
+                            offset,
+                        );
+                        if (result.bytesRead === 0) break;
+                        offset += result.bytesRead;
+                    }
+                    return offset === bytes.byteLength
+                        ? bytes
+                        : bytes.subarray(0, offset);
+                })
+            )(handle, path),
             ownership: ownershipToken(path, identity),
         };
     } finally {
@@ -428,9 +496,15 @@ async function readPrivateReplayArtifact(
 
 async function readKey(
     keyPath: string,
+    dependencies: ReplayArtifactReadDependencies = {},
 ): Promise<{ key: Buffer; ownership: ReplayArtifactOwnership }> {
     validatePathSuffix(keyPath, '.key');
-    const artifact = await readPrivateReplayArtifact(keyPath);
+    const artifact = await readPrivateReplayArtifact(
+        keyPath,
+        KEY_BYTES,
+        'ANALYSIS_V2_REPLAY_KEY_INVALID',
+        dependencies,
+    );
     if (artifact.bytes.byteLength !== KEY_BYTES) bundleError('ANALYSIS_V2_REPLAY_KEY_INVALID');
     return { key: artifact.bytes, ownership: artifact.ownership };
 }
@@ -474,6 +548,7 @@ export async function readAuthenticatedReplayBundle(input: {
     bundlePath: string;
     keyPath: string;
     now?: number;
+    artifactRead?: ReplayArtifactReadDependencies;
 }): Promise<AuthenticatedReplayBundle> {
     validatePathSuffix(input.bundlePath, '.enc');
     validatePathSuffix(input.keyPath, '.key');
@@ -481,10 +556,14 @@ export async function readAuthenticatedReplayBundle(input: {
         bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_PATH_INVALID');
     }
     await assertExplicitReplayTempDirectory(dirname(input.bundlePath));
-    const bundleArtifact = await readPrivateReplayArtifact(input.bundlePath);
+    const bundleArtifact = await readPrivateReplayArtifact(
+        input.bundlePath,
+        MAX_ENVELOPE_BYTES,
+        'ANALYSIS_V2_REPLAY_BUNDLE_LIMIT',
+        input.artifactRead,
+    );
     const raw = bundleArtifact.bytes;
-    if (raw.byteLength > MAX_ENVELOPE_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
-    const keyArtifact = await readKey(input.keyPath);
+    const keyArtifact = await readKey(input.keyPath, input.artifactRead);
     const decrypted = decryptEnvelope(raw, keyArtifact.key);
     let json: unknown;
     try { json = JSON.parse(decrypted.toString('utf8')); } catch { return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_INVALID'); }
@@ -541,6 +620,7 @@ export async function removeOwnedReplayArtifacts(input: {
     keyPath: string;
     ownedBundle?: ReplayArtifactOwnership;
     ownedKey?: ReplayArtifactOwnership;
+    beforeOwnedArtifactDelete?: (path: string) => Promise<void>;
 }): Promise<void> {
     validatePathSuffix(input.bundlePath, '.enc');
     validatePathSuffix(input.keyPath, '.key');
@@ -559,7 +639,11 @@ export async function removeOwnedReplayArtifacts(input: {
         ) {
             bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_OWNERSHIP_INVALID');
         }
-        await unlinkIfIdentityMatches(expectedPath, ownership);
+        await unlinkIfIdentityMatches(
+            expectedPath,
+            ownership,
+            input.beforeOwnedArtifactDelete,
+        );
     }
 }
 

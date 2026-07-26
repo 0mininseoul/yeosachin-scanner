@@ -74,7 +74,6 @@ interface TrackedResolver {
     promise?: Promise<ReplayInvocation<GenderResolutionResult>>;
     settled: boolean;
     value?: ReplayInvocation<GenderResolutionResult>;
-    startedAt: number;
     telemetry: {
         calls: number;
         retries: number;
@@ -140,7 +139,7 @@ function collectCutoffResolver(
     durations: number[],
     tracked: TrackedResolver,
 ): void {
-    stage.calls += Math.max(1, tracked.telemetry.calls);
+    stage.calls += tracked.telemetry.calls;
     stage.retries += tracked.telemetry.retries;
     stage.rateLimited += tracked.telemetry.rateLimited;
     for (const [disposition, count] of Object.entries(
@@ -149,13 +148,17 @@ function collectCutoffResolver(
         stage.failureDisposition[disposition] =
             (stage.failureDisposition[disposition] ?? 0) + count;
     }
-    stage.failureDisposition.cutoff =
-        (stage.failureDisposition.cutoff ?? 0) + 1;
     durations.push(...tracked.telemetry.attemptLatenciesMs);
-    durations.push(Math.max(1, Math.round(
-        performance.now()
-            - (tracked.telemetry.pendingAttemptStartedAt ?? tracked.startedAt),
-    )));
+    if (tracked.telemetry.pendingAttemptStartedAt !== undefined) {
+        stage.failureDisposition.cutoff =
+            (stage.failureDisposition.cutoff ?? 0) + 1;
+        durations.push(Math.max(1, Math.round(
+            performance.now() - tracked.telemetry.pendingAttemptStartedAt,
+        )));
+    } else {
+        stage.failureDisposition.backoff_cutoff =
+            (stage.failureDisposition.backoff_cutoff ?? 0) + 1;
+    }
 }
 
 function finalize(stage: ReplayStageMetrics, durations: number[]): void {
@@ -346,7 +349,6 @@ export async function runAnalysisV2AiReplay(input: {
                 trackedResolver = {
                     abort,
                     settled: false,
-                    startedAt: performance.now(),
                     telemetry: {
                         calls: 0,
                         retries: 0,

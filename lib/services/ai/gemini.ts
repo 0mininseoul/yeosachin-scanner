@@ -40,6 +40,10 @@ import {
     type AiStagePolicyVersion,
     type AiThinkingLevel,
 } from './stage-policy';
+import {
+    isReplayStatelessCapability,
+    type ReplayStatelessCapability,
+} from './replay-stateless-capability';
 
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 
@@ -254,8 +258,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     analysisType?: string;
     requestId?: string;
     skipTokenLog?: boolean;
-    /** Explicit offline replay escape hatch. Stage telemetry stays in-memory and no DB log runs. */
-    statelessReplay?: boolean;
+    /** Opaque offline replay capability. Stage telemetry stays in-memory and no DB log runs. */
+    replayCapability?: ReplayStatelessCapability;
     stage?: AiStageName;
     aiStagePolicyVersion?: AiStagePolicyVersion;
     abortSignal?: AbortSignal;
@@ -688,7 +692,7 @@ export async function analyzeWithGemini<T>(
         analysisType = 'unknown',
         requestId,
         skipTokenLog = false,
-        statelessReplay = false,
+        replayCapability,
         stage,
         aiStagePolicyVersion,
         abortSignal,
@@ -720,6 +724,10 @@ export async function analyzeWithGemini<T>(
     const explicitModel = validateExplicitModel(model);
     validateThinkingLevel(thinkingLevel);
     validateMediaResolution(mediaResolution);
+    const statelessReplay = isReplayStatelessCapability(replayCapability);
+    if (replayCapability !== undefined && !statelessReplay) {
+        throw new Error('Gemini replay capability is invalid');
+    }
     if (stage && skipTokenLog && !statelessReplay) {
         throw new Error('Gemini stage calls cannot skip durable token logging');
     }

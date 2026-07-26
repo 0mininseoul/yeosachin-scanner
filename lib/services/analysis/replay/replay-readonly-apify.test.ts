@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
     AnalysisV2ReplayReadError,
     readCompletedApifyDatasetOnce,
@@ -7,10 +7,11 @@ import {
 
 function client(pages: readonly { offset: number; count: number; total: number; items: unknown[] }[]): ReplayReadonlyApifyClient {
     return {
+        resolveActorId: async () => 'canonicalActorId',
         run: runId => ({
             get: async () => ({
                 id: runId,
-                actId: 'actor/name',
+                actId: 'canonicalActorId',
                 status: 'SUCCEEDED',
                 defaultDatasetId: 'dataset',
             }),
@@ -42,7 +43,7 @@ describe('read-only Apify replay adapter', () => {
                 run: runId => ({
                     get: async () => ({
                         id: runId,
-                        actId: 'actor/name',
+                        actId: 'canonicalActorId',
                         status: 'RUNNING',
                         defaultDatasetId: 'dataset',
                     }),
@@ -63,6 +64,46 @@ describe('read-only Apify replay adapter', () => {
     it('does not surface provider messages in stable errors', () => {
         expect(new AnalysisV2ReplayReadError('ANALYSIS_V2_REPLAY_APIFY_DATASET_DRIFT').message)
             .toBe('ANALYSIS_V2_REPLAY_APIFY_DATASET_DRIFT');
+    });
+
+    it('fails closed before dataset access when the run Actor identity drifts', async () => {
+        const listItems = vi.fn(async () => ({
+            offset: 0,
+            count: 0,
+            total: 0,
+            items: [],
+        }));
+        const adapter: ReplayReadonlyApifyClient = {
+            resolveActorId: async actorSlug => {
+                expect(actorSlug).toBe('actor/name');
+                return 'canonicalActorId';
+            },
+            run: runId => ({
+                get: async () => ({
+                    id: runId,
+                    actId: 'differentCanonicalActorId',
+                    status: 'SUCCEEDED',
+                    defaultDatasetId: 'dataset',
+                }),
+            }),
+            dataset: () => ({ listItems }),
+        };
+
+        await expect(readCompletedApifyDatasetOnce({
+            client: adapter,
+            runId: 'run00001',
+            expected: {
+                actorId: 'actor/name',
+                credentialSlot: 'secondary',
+                runId: 'run00001',
+            },
+            ledger: {
+                actorId: 'actor/name',
+                credentialSlot: 'secondary',
+                runId: 'run00001',
+            },
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PROVIDER_IDENTITY_MISMATCH');
+        expect(listItems).not.toHaveBeenCalled();
     });
 
     it('rejects two different run identities that resolve to the same dataset', async () => {
