@@ -158,7 +158,8 @@ export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
 export type AiStagePolicyCapability =
     | 'durableGeminiLease'
     | 'genderResolution'
-    | 'partialMediaCoverage';
+    | 'partialMediaCoverage'
+    | 'inputQualityV28';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -174,6 +175,7 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'durableGeminiLease',
         'genderResolution',
         'partialMediaCoverage',
+        'inputQualityV28',
     ]),
 });
 

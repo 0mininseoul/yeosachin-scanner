@@ -688,6 +688,73 @@ describe('V2 AI and scoring executors', () => {
         ]);
     });
 
+    it('uses v2.8 profile evidence and records privacy-safe media/official provenance without extra normalization', async () => {
+        const memoryState = memory();
+        const account = profile('blackcherry.club', {
+            fullName: 'Black Cherry Club',
+            bio: 'Official band · new single out now',
+        });
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{ username: account.username, status: 'success' as const, profile: account }],
+                })),
+            },
+        });
+        deps.ai.features = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['features']>[0]
+        ) => {
+            const result = feature(input.media.map(row => row.selectionId));
+            result.features.accountContext = 'official_group_or_brand';
+            return {
+                result,
+                operationKey: `feature-analysis:${digest('official-feature')}`,
+                resultHash: digest('official-feature-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.profile_ai!(context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+            state: state({
+                relationships: {
+                    ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: 1, inputHash: digest('profile-topology') }],
+                },
+                profileFetchBatches: [{
+                    batch: 0,
+                    itemCount: 1,
+                    producerInputHash: digest('profile-producer'),
+                    revision: 1,
+                    resultHash: digest('profile-result'),
+                }],
+            }),
+        }));
+
+        expect(deps.ai.gender).toHaveBeenCalledWith(expect.objectContaining({
+            accountProfile: { fullName: 'Black Cherry Club', hasProfileImage: true },
+        }), expect.any(Object));
+        expect(deps.ai.features).toHaveBeenCalledWith(expect.objectContaining({
+            accountProfile: { fullName: 'Black Cherry Club', hasProfileImage: true },
+        }), expect.any(Object));
+        expect(deps.normalizeMedia).toHaveBeenCalledTimes(3);
+        expect(new Set(vi.mocked(deps.normalizeMedia).mock.calls.map(([row]) => row.selectionId)).size)
+            .toBe(3);
+        expect(memoryState.outcomes[0]).toMatchObject({
+            accountContextOverride: 'official_group_or_brand',
+            officialExclusionReason: 'model_group_context_plus_profile_signals',
+            mediaSelectionProvenance: {
+                triageSelectedCount: 3,
+                featureSelectedCount: 3,
+                selectedKinds: { profile: 1, postRepresentative: 2, carouselContext: 0 },
+            },
+        });
+    });
+
     it('starts feature and eligible resolver in the same turn and applies only a ready resolver', async () => {
         const memoryState = memory();
         const account = profile('resolver.ready');
@@ -2933,6 +3000,47 @@ describe('V2 AI and scoring executors', () => {
             .filter(row => row.verificationShortlistRank !== null) ?? [];
         expect(shortlist).toHaveLength(10);
         expect(new Set(shortlist.map(row => row.verificationShortlistRank)).size).toBe(10);
+    });
+
+    it('feeds only corroborated v2.8 official screening into the unchanged v2.4 ranking input', async () => {
+        const screened = verifiedOutcome('band.account');
+        screened.feature!.features.accountContext = 'official_group_or_brand';
+        screened.accountContextOverride = 'official_group_or_brand';
+        screened.officialExclusionReason = 'model_group_context_plus_profile_signals';
+        const uncorroborated = verifiedOutcome('person.club');
+        uncorroborated.feature!.features.accountContext = 'official_group_or_brand';
+        uncorroborated.accountContextOverride = 'uncertain';
+        uncorroborated.officialExclusionReason = null;
+        const memoryState = memory();
+        memoryState.outcomes = [screened, uncorroborated];
+        memoryState.primary = {
+            revision: 1,
+            resultHash: digest('primary'),
+            candidates: memoryState.outcomes.map(outcome => ({
+                candidateId: outcome.candidateId,
+                instagramId: outcome.instagramId,
+                interactions: [],
+            })),
+        };
+        const deps = dependencies(memoryState, {
+            evidence: {
+                loadRelationships: vi.fn(async () => relationshipSnapshot({
+                    excluded: null,
+                    usernames: [screened.instagramId, uncorroborated.instagramId],
+                })),
+                loadTargetEvidence: vi.fn(async () => targetEvidence()),
+            },
+        });
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).screening!(context('screening'));
+
+        expect(memoryState.screening?.candidates.map(candidate => ({
+            username: candidate.username,
+            accountContext: candidate.accountContext,
+        }))).toEqual([
+            { username: 'band.account', accountContext: 'official_group_or_brand' },
+            { username: 'person.club', accountContext: 'uncertain' },
+        ]);
     });
 
     it('defers the weak-partner adjustment until final scoring', async () => {

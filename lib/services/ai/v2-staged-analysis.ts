@@ -124,6 +124,10 @@ const accountContextSchema = z.enum([
     'official_group_or_brand',
     'uncertain',
 ]);
+const accountProfileEvidenceSchema = z.object({
+    fullName: z.string().max(240).nullable(),
+    hasProfileImage: z.boolean(),
+}).strict();
 
 export const normalizedAiMediaSelectionSchema = z.object({
     selectionId: selectionIdSchema,
@@ -185,7 +189,11 @@ const stagedCaptionListSchema = z.array(stagedCaptionEvidenceSchema)
         }
     });
 
-export const genderTriageInputSchema = z.object({ media: normalizedMediaListSchema }).strict();
+export const genderTriageInputSchema = z.object({
+    media: normalizedMediaListSchema,
+    /** v2.8-only optional, trusted profile metadata. Omitted for legacy byte identity. */
+    accountProfile: accountProfileEvidenceSchema.optional(),
+}).strict();
 
 const genderAssessmentSchema = z.object({
     inferredGender: inferredGenderSchema,
@@ -400,6 +408,8 @@ export const featureAnalysisModelResponseSchema =
 export const featureAnalysisInputSchema = z.object({
     triage: genderTriageResultSchema,
     bio: z.string().max(MAX_PROFILE_BIO_LENGTH).nullable(),
+    /** v2.8-only optional, trusted profile metadata. Omitted for legacy byte identity. */
+    accountProfile: accountProfileEvidenceSchema.optional(),
     media: normalizedMediaListSchema,
     captions: stagedCaptionListSchema,
 }).strict().superRefine((value, context) => {
@@ -1231,7 +1241,19 @@ function sanitizeNarrativeEvidenceText(
     return sanitized ? sanitized.slice(0, maximum) : null;
 }
 
-function genderTriagePrompt(media: readonly NormalizedAiMediaSelection[]): string {
+function genderTriagePrompt(
+    media: readonly NormalizedAiMediaSelection[],
+    policyVersion: AiStagePolicyVersion,
+    accountProfile?: z.output<typeof accountProfileEvidenceSchema>,
+): string {
+    const profileInstruction = policyVersion === AI_STAGE_POLICY_V28_VERSION && accountProfile
+        ? [
+            '프로필 이름·프로필 이미지 유무는 계정이 사람 개인인지 조직·브랜드인지 가늠하는 보조 단서일 뿐, 성별 근거로 쓰지 마세요.',
+            '로고·단체·브랜드로 보이거나 개인 소유자가 보이지 않으면 성별을 강제하지 말고 unknown을 반환하세요.',
+            '여러 이미지에서 같은 개인이 반복되면 소유자 일관성의 시각 근거가 될 수 있지만, 여러 사람이 섞였으면 multiple_or_unclear를 유지하세요.',
+            `profileEvidence(JSON): ${JSON.stringify(accountProfile)}`,
+        ].join('\n')
+        : '';
     return `
 당신은 인스타그램 공개 이미지에서 계정 소유자의 성별을 보수적으로 선별하는 분류기입니다.
 첨부 이미지는 mediaManifest 순서와 일치합니다.
@@ -1239,6 +1261,7 @@ function genderTriagePrompt(media: readonly NormalizedAiMediaSelection[]): strin
 confidence=high는 여러 이미지가 같은 소유자를 일관되게 뒷받침할 때만 사용하세요.
 이름이나 고정관념으로 추측하지 말고 중복 selectionId 없이 실제 사용한 ID만 근거로 반환하세요.
 근거가 하나뿐이면 confidence=high를 쓰지 말고, 유효한 근거가 없으면 unknown, low, not_visible을 반환하세요.
+${profileInstruction}
 JSON 이외의 텍스트를 반환하지 마세요.
 mediaManifest(JSON): ${JSON.stringify(mediaManifest(media))}
 `.trim();
@@ -1361,6 +1384,7 @@ function featureAnalysisPromptV28(
     const evidence = {
         stageOneAssessment: input.triage.assessment,
         bio: normalizeUntrustedText(input.bio, MAX_PROFILE_BIO_LENGTH),
+        ...(input.accountProfile ? { profile: input.accountProfile } : {}),
         mediaManifest: mediaManifest(media),
         captions,
     };
@@ -1542,7 +1566,7 @@ export function createGenderTriageResultIdentity(
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
     return stagedResultIdentity(
         'genderTriage',
-        genderTriagePrompt(media),
+        genderTriagePrompt(media, policyVersion, input.accountProfile),
         media,
         'request',
         policyVersion,
@@ -1590,8 +1614,8 @@ export async function genderTriage(
 ): Promise<GenderTriageResult> {
     const input = genderTriageInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const prompt = genderTriagePrompt(media);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const prompt = genderTriagePrompt(media, policyVersion, input.accountProfile);
     const identity = stagedResultIdentity(
         'genderTriage',
         prompt,

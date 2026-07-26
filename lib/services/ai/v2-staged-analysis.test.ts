@@ -945,6 +945,21 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('물음표나 ㅋㅋ은');
     });
 
+    it('keeps v2.7 input identity byte-stable while v2.8 admits profile evidence', () => {
+        const profile = { fullName: 'Black Cherry Club', hasProfileImage: true };
+        const triage = { media: media(), accountProfile: profile };
+        const feature = { ...featureInput(), accountProfile: profile };
+
+        expect(createGenderTriageResultIdentity(triage, AI_STAGE_POLICY_V28_VERSION).operationKey)
+            .not.toBe(createGenderTriageResultIdentity({ media: media() }, AI_STAGE_POLICY_V28_VERSION).operationKey);
+        expect(createGenderTriageResultIdentity(triage, 'ai-stage-policy-v2.7').operationKey)
+            .toBe(createGenderTriageResultIdentity({ media: media() }, 'ai-stage-policy-v2.7').operationKey);
+        expect(createFeatureAnalysisResultIdentity(feature, 'ai-stage-policy-v2.7').operationKey)
+            .toBe(createFeatureAnalysisResultIdentity(featureInput(), 'ai-stage-policy-v2.7').operationKey);
+        expect(createFeatureAnalysisResultIdentity(feature, AI_STAGE_POLICY_V28_VERSION).operationKey)
+            .not.toBe(createFeatureAnalysisResultIdentity(featureInput(), AI_STAGE_POLICY_V28_VERSION).operationKey);
+    });
+
     it('normalizes v2.8 self-reference to a forward-only fallback without changing legacy copy', async () => {
         const input = featureInput();
         mocks.analyzeWithGemini.mockImplementationOnce(async (

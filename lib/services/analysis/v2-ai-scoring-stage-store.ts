@@ -106,6 +106,25 @@ const mediaCoverageSchema = z.object({
     }
 });
 
+const mediaSelectionProvenanceSchema = z.object({
+    triageSelectedCount: z.number().int().min(0).max(5),
+    featureSelectedCount: z.number().int().min(0).max(11),
+    selectedKinds: z.object({
+        profile: z.number().int().min(0).max(1),
+        postRepresentative: z.number().int().min(0).max(10),
+        carouselContext: z.number().int().min(0).max(10),
+    }).strict(),
+}).strict().superRefine((value, context) => {
+    if (
+        value.selectedKinds.profile
+        + value.selectedKinds.postRepresentative
+        + value.selectedKinds.carouselContext
+        !== value.featureSelectedCount
+    ) {
+        context.addIssue({ code: 'custom', message: 'Media selection provenance drifted.' });
+    }
+});
+
 const captionSchema = z.object({
     evidenceRefId: z.string().trim().min(1).max(240),
     selectionId: selectionIdSchema,
@@ -133,6 +152,10 @@ const profileOutcomeSchema = z.object({
     genderResolutionOperationKey: resolverOperationKeySchema.nullable().optional(),
     genderResolutionResultHash: hashSchema.nullable().optional(),
     mediaBundlePersisted: z.boolean(),
+    mediaSelectionProvenance: mediaSelectionProvenanceSchema.optional(),
+    accountContextOverride: accountContextSchema.optional(),
+    officialExclusionReason: z.literal('model_group_context_plus_profile_signals')
+        .nullable().optional(),
 }).strict().transform(value => ({
     ...value,
     unavailableReason: value.unavailableReason
@@ -247,6 +270,34 @@ const profileOutcomeSchema = z.object({
         !value.feature || !value.featureOperationKey || !value.featureResultHash
     )) {
         context.addIssue({ code: 'custom', message: 'Feature outcome is incomplete.' });
+    }
+    if (value.accountContextOverride !== undefined && (
+        !value.feature
+        || value.feature.features.accountContext !== 'official_group_or_brand'
+        || !['official_group_or_brand', 'uncertain'].includes(value.accountContextOverride)
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Only an AI-proposed official context may receive a v2.8 override.',
+        });
+    }
+    if (
+        value.officialExclusionReason !== undefined
+        && value.officialExclusionReason !== null
+        && (value.accountContextOverride !== 'official_group_or_brand'
+            || !value.feature
+            || value.feature.features.accountContext !== 'official_group_or_brand')
+    ) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Official exclusion reason requires corroborated official context.',
+        });
+    }
+    if (value.mediaSelectionProvenance !== undefined && !value.feature) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Media selection provenance requires completed feature analysis.',
+        });
     }
     if (value.mediaBundlePersisted !== (value.status === 'verified_female')) {
         context.addIssue({ code: 'custom', message: 'Only verified women retain media bundles.' });

@@ -87,6 +87,10 @@ import {
 } from './v2-ai-stage-runtime';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
+import {
+    screenAnalysisV2OfficialAccount,
+    type AnalysisV2OfficialExclusionReason,
+} from './v2-official-account-screening';
 
 const PROFILE_BATCH_JOB_PREFIX = 'track:profiles:batch:';
 const MAX_PROFILE_AI_CONCURRENCY = 4;
@@ -172,6 +176,19 @@ export interface AnalysisV2ProfileAiOutcome {
     genderResolutionOperationKey: string | null;
     genderResolutionResultHash: string | null;
     mediaBundlePersisted: boolean;
+    /** v2.8 provenance only: aggregate counts, never source URLs/captions/media. */
+    mediaSelectionProvenance?: Readonly<{
+        triageSelectedCount: number;
+        featureSelectedCount: number;
+        selectedKinds: Readonly<{
+            profile: number;
+            postRepresentative: number;
+            carouselContext: number;
+        }>;
+    }>;
+    /** v2.8 conservative override consumed by the existing v2.4 risk policy. */
+    accountContextOverride?: AccountContext;
+    officialExclusionReason?: AnalysisV2OfficialExclusionReason | null;
 }
 
 function analysisUnavailableOutcome(
@@ -645,7 +662,10 @@ async function runBounded<T, R>(
     return results;
 }
 
-function mediaPolicy(profile: AnalysisV2CheckpointProfile) {
+function mediaPolicy(
+    profile: AnalysisV2CheckpointProfile,
+    inputQualityV28 = false,
+) {
     const latestPosts = profile.latestPosts ?? [];
     if (
         !profile.isPrivate
@@ -658,11 +678,31 @@ function mediaPolicy(profile: AnalysisV2CheckpointProfile) {
             ? { id: profile.username, imageUrl: profile.profilePicUrl }
             : undefined,
         posts: latestPosts,
-    });
+    }, inputQualityV28 ? { carouselDiversity: true } : undefined);
     if (policy.carouselCoverage.incompletePostIds.length > 0) {
         throw new Error('ANALYSIS_V2_PROFILE_MEDIA_STRUCTURAL_INCOMPLETE');
     }
     return policy;
+}
+
+function mediaSelectionProvenance(
+    policy: ReturnType<typeof mediaPolicy>
+): AnalysisV2ProfileAiOutcome['mediaSelectionProvenance'] {
+    const selectedKinds = {
+        profile: 0,
+        postRepresentative: 0,
+        carouselContext: 0,
+    };
+    for (const media of policy.feature.media) {
+        if (media.role === 'profile') selectedKinds.profile += 1;
+        else if (media.role === 'post_representative') selectedKinds.postRepresentative += 1;
+        else if (media.role === 'carousel_context') selectedKinds.carouselContext += 1;
+    }
+    return Object.freeze({
+        triageSelectedCount: policy.triage.media.length,
+        featureSelectedCount: policy.feature.media.length,
+        selectedKinds: Object.freeze(selectedKinds),
+    });
 }
 
 function policySupports(
@@ -838,7 +878,7 @@ function weakFeaturePartnerEvidence(feature: FeatureAnalysisResult): boolean {
 function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
     if (!outcome.profile) return [];
     const normalizedSelectionIds = new Set(outcome.normalizedSelectionIds);
-    const policy = mediaPolicy(outcome.profile);
+    const policy = mediaPolicy(outcome.profile, outcome.mediaSelectionProvenance !== undefined);
     const selectedPostIds = new Set([
         ...policy.triage.media,
         ...policy.feature.media,
@@ -856,6 +896,12 @@ function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
             mentionedUsers: post.mentionedUsers,
         }];
     });
+}
+
+function screenedAccountContext(outcome: AnalysisV2ProfileAiOutcome): AccountContext {
+    return outcome.accountContextOverride
+        ?? outcome.feature?.features.accountContext
+        ?? 'uncertain';
 }
 
 function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2VerifiedFemaleFeatureRow {
@@ -922,7 +968,7 @@ function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2Verifi
                 isBusinessAccount: [
                     'individual_creator',
                     'official_group_or_brand',
-                ].includes(outcome.feature.features.accountContext),
+                ].includes(screenedAccountContext(outcome)),
                 featurePartnerEvidenceStrong: strongFeaturePartnerEvidence(outcome.feature),
                 oneLineOverview: outcome.feature.features.oneLineOverview,
             }
@@ -1234,6 +1280,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 aiFence.aiStagePolicyVersion,
                 'genderResolution',
             );
+            const inputQualityV28 = policySupports(
+                aiFence.aiStagePolicyVersion,
+                'inputQualityV28',
+            );
             const defaultGenderResolutionStatus = genderResolutionEnabled
                 ? 'not_eligible' as const
                 : 'disabled' as const;
@@ -1276,7 +1326,16 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     }
                     const profile = item.profile;
 
-                    const policy = mediaPolicy(profile);
+                    const policy = mediaPolicy(profile, inputQualityV28);
+                    const selectionProvenance = inputQualityV28
+                        ? mediaSelectionProvenance(policy)
+                        : undefined;
+                    const profileEvidence = inputQualityV28
+                        ? {
+                            fullName: profile.fullName ?? null,
+                            hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
+                        }
+                        : undefined;
                     const triageNormalized = await normalizedSelections(
                         policy.triage.media,
                         dependencies.normalizeMedia,
@@ -1317,6 +1376,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     try {
                         gender = await dependencies.ai.gender({
                             media: triageNormalized.media,
+                            ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
                         }, aiFence);
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
@@ -1414,6 +1474,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         bio: item.profile.bio ?? null,
                         media: normalized.media,
                         captions,
+                        ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
                     }, aiFence);
                     const triageAssessment = gender.result.assessment;
                     const resolverEligible = genderResolutionEnabled && !(
@@ -1484,6 +1545,17 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         row => row.selectionId
                     );
                     const normalizedCoverage = normalized.coverage;
+                    const officialScreening = inputQualityV28
+                        ? screenAnalysisV2OfficialAccount({
+                            modelAccountContext: features.result.features.accountContext,
+                            fullName: profile.fullName ?? null,
+                            bio: profile.bio ?? null,
+                        })
+                        : null;
+                    const accountContextOverride = inputQualityV28
+                        && features.result.features.accountContext === 'official_group_or_brand'
+                        ? officialScreening!.accountContext
+                        : undefined;
                     const couldResolveFemale = resolverHandle !== null
                         && (
                             baselineClassification === 'unresolved'
@@ -1594,6 +1666,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 genderResolutionResultHash:
                                     readyResolver?.resultHash ?? null,
                                 mediaBundlePersisted,
+                                ...(selectionProvenance
+                                    ? { mediaSelectionProvenance: selectionProvenance }
+                                    : {}),
+                                ...(accountContextOverride
+                                    ? { accountContextOverride }
+                                    : {}),
+                                ...(officialScreening
+                                    ? { officialExclusionReason: officialScreening.exclusionReason }
+                                    : {}),
                             };
                         },
                     };
@@ -1795,7 +1876,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         username: outcome.instagramId,
                         appearanceGrade: outcome.feature!.features.appearanceGrade as AppearanceGrade,
                         exposureScore: outcome.feature!.features.exposureScore,
-                        accountContext: outcome.feature!.features.accountContext,
+                        // v2.8 may conservatively downgrade an uncorroborated
+                        // model official label to uncertain. The v2.4 scorer then
+                        // consumes this existing account-context input unchanged.
+                        accountContext: screenedAccountContext(outcome),
                         hasWeakPartnerEvidence: weakFeaturePartnerEvidence(outcome.feature!),
                         hasStrongPartnerEvidence: strongFeaturePartnerEvidence(outcome.feature!),
                         uniqueTargetPostsLikedByCandidate:
@@ -1984,7 +2068,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 if (!outcome?.profile || !outcome.feature) {
                     throw new Error('ANALYSIS_V2_PARTNER_FEATURE_MISSING');
                 }
-                const selected = mediaPolicy(outcome.profile);
+                const selected = mediaPolicy(
+                    outcome.profile,
+                    policySupports(aiJobFence(context).aiStagePolicyVersion, 'inputQualityV28'),
+                );
                 const contactCandidates = selected.partnerSafetyContactSheetCandidates.media;
                 const captionPolicy = buildCarouselCaptionPolicy({
                     targetUsername: target.username,
@@ -2264,7 +2351,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         expectedSelectionIds: outcome.feature.analyzedSelectionIds,
                     });
                     if (!bundle) throw new Error('ANALYSIS_V2_NARRATIVE_BUNDLE_MISSING');
-                    const selected = mediaPolicy(outcome.profile);
+                    const selected = mediaPolicy(
+                        outcome.profile,
+                        policySupports(aiJobFence(context).aiStagePolicyVersion, 'inputQualityV28'),
+                    );
                     const captionPolicy = buildCarouselCaptionPolicy({
                         targetUsername: target.username,
                         profile: outcome.profile,
