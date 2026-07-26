@@ -3,6 +3,8 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { ANALYSIS_V2_SCHEMA_VERSION, progressReadV1Schema } from '@/lib/contracts/analysis-v2';
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
+import { demoResponseHeaders, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
 const sequenceSchema = z.string().regex(/^\d{1,16}$/).transform(Number)
@@ -22,27 +24,54 @@ function json(body: unknown, status: number) {
     });
 }
 
+function demoJson(body: unknown, status: number) {
+    return NextResponse.json(body, { status, headers: demoResponseHeaders() });
+}
+
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ requestId: string }> }
 ) {
+    let demoRecognized = false;
     try {
         const requestId = requestIdSchema.safeParse((await params).requestId);
+        if (!requestId.success) {
+            return json({ error: 'Invalid progress request.' }, 400);
+        }
         const url = new URL(request.url);
+
+        const supabase = await createClient();
+        const { data: { user }, error } = await supabase.auth.getUser();
+        if (error || !user) {
+            return json({ error: 'Authentication required.' }, 401);
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        demoRecognized = demo !== null;
+
         const afterSequence = url.searchParams.has('afterSeq')
             ? sequenceSchema.safeParse(url.searchParams.get('afterSeq'))
             : { success: true as const, data: 0 };
         const eventLimit = url.searchParams.has('limit')
             ? limitSchema.safeParse(url.searchParams.get('limit'))
             : { success: true as const, data: 100 };
-        if (!requestId.success || !afterSequence.success || !eventLimit.success) {
-            return json({ error: 'Invalid progress request.' }, 400);
+        if (!afterSequence.success || !eventLimit.success) {
+            return demoRecognized
+                ? demoJson({ error: 'Invalid progress request.' }, 400)
+                : json({ error: 'Invalid progress request.' }, 400);
         }
 
-        const supabase = await createClient();
-        const { data: { user }, error } = await supabase.auth.getUser();
-        if (error || !user) {
-            return json({ error: 'Authentication required.' }, 401);
+        if (demo) {
+            if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at) return demoJson({ error: 'Analysis progress not found.' }, 404);
+            const progress = projectDemoProgress({
+                requestId: demo.id,
+                startedAt: new Date(demo.started_at),
+                durationSeconds: demo.duration_seconds,
+                now: new Date(),
+                afterSequence: afterSequence.data,
+                eventLimit: eventLimit.data,
+            });
+            return demoJson({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, ...progress }, 200);
         }
 
         const progress = await analysisV2ProgressStore.loadForOwner({
@@ -62,6 +91,8 @@ export async function GET(
         return json(response, 200);
     } catch {
         console.error('[analysis-v2-progress] owner progress read failed');
-        return json({ error: 'Progress could not be loaded.' }, 500);
+        return demoRecognized
+            ? demoJson({ error: 'Progress could not be loaded.' }, 500)
+            : json({ error: 'Progress could not be loaded.' }, 500);
     }
 }

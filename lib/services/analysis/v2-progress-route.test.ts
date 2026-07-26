@@ -4,11 +4,15 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     loadForOwner: vi.fn(),
+    demoFindForOwner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/services/analysis/v2-progress-store', () => ({
     analysisV2ProgressStore: { loadForOwner: mocks.loadForOwner },
+}));
+vi.mock('@/lib/services/demo-analysis/store', () => ({
+    demoAnalysisStore: { findForOwner: mocks.demoFindForOwner },
 }));
 
 import { GET } from '@/app/api/analysis/progress/[requestId]/route';
@@ -77,19 +81,22 @@ describe('analysis V2 owner progress route', () => {
                 aggregateCount: 1,
             }],
         });
+        mocks.demoFindForOwner.mockResolvedValue(null);
     });
 
-    it('requires authentication before reading owner progress', async () => {
+    it('requires authentication before reading malformed pagination for a valid route id', async () => {
         mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
         const response = await GET(
-            new Request(`https://example.com/api/analysis/progress/${requestId}`),
+            new Request(`https://example.com/api/analysis/progress/${requestId}?afterSeq=-1`),
             context()
         );
         expect(response.status).toBe(401);
+        expect(response.headers.get('x-analytics-eligible')).toBeNull();
+        expect(mocks.demoFindForOwner).not.toHaveBeenCalled();
         expect(mocks.loadForOwner).not.toHaveBeenCalled();
     });
 
-    it('rejects malformed request ids and cursor bounds before authentication', async () => {
+    it('validates route identifiers safely and keeps malformed production pagination generic', async () => {
         const malformedId = await GET(
             new Request('https://example.com/api/analysis/progress/nope'),
             context('nope')
@@ -104,7 +111,12 @@ describe('analysis V2 owner progress route', () => {
         );
         expect([malformedId.status, malformedCursor.status, excessiveLimit.status])
             .toEqual([400, 400, 400]);
-        expect(mocks.getUser).not.toHaveBeenCalled();
+        expect(malformedId.headers.get('x-analytics-eligible')).toBeNull();
+        expect(malformedCursor.headers.get('x-analytics-eligible')).toBeNull();
+        expect(excessiveLimit.headers.get('x-analytics-eligible')).toBeNull();
+        expect(mocks.getUser).toHaveBeenCalledTimes(2);
+        expect(mocks.demoFindForOwner).toHaveBeenCalledTimes(2);
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
     });
 
     it('owner-scopes recovery reads and returns a validated no-store envelope', async () => {
@@ -127,6 +139,98 @@ describe('analysis V2 owner progress route', () => {
             snapshot: { requestId, lastEventSeq: 1 },
             events: [{ seq: 1, eventCode: 'PROFILE_SCREENED' }],
         });
+    });
+
+    it('serves an allowlisted started demo without loading production progress', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date(Date.now() - 20_000).toISOString(),
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        await expect(response.json()).resolves.toMatchObject({ snapshot: { requestId, status: 'processing' } });
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it.each([
+        'afterSeq=-1',
+        'limit=201',
+    ])('keeps malformed demo progress pagination private: %s', async query => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date().toISOString(),
+        });
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/progress/${requestId}?${query}`),
+            context()
+        );
+
+        expect(response.status).toBe(400);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.demoFindForOwner).toHaveBeenCalledWith(requestId, userId);
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it('returns only the requested contiguous demo event window across refreshes', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-01T00:00:20.000Z'));
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-07-01T00:00:00.000Z', started_at: '2026-07-01T00:00:00.000Z',
+        });
+        try {
+            const first = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}?afterSeq=1&limit=2`), context());
+            const firstPayload = await first.json() as { snapshot: { lastEventSeq: number }; events: Array<{ seq: number; revision: number; occurredAt: string }> };
+            expect(firstPayload.snapshot.lastEventSeq).toBeGreaterThanOrEqual(4);
+            expect(firstPayload.events.map(event => event.seq)).toEqual([2, 3]);
+            expect(firstPayload.events[1]!.revision).toBeGreaterThan(firstPayload.events[0]!.revision);
+            expect(Date.parse(firstPayload.events[1]!.occurredAt)).toBeGreaterThan(Date.parse(firstPayload.events[0]!.occurredAt));
+
+            const refreshed = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}?afterSeq=3&limit=2`), context());
+            const refreshedPayload = await refreshed.json() as { events: Array<{ seq: number; revision: number; occurredAt: string }> };
+            expect(refreshedPayload.events.map(event => event.seq)).toEqual([4]);
+            expect(refreshedPayload.events[0]!.revision).toBeGreaterThan(firstPayload.events[1]!.revision);
+            expect(Date.parse(refreshedPayload.events[0]!.occurredAt)).toBeGreaterThan(Date.parse(firstPayload.events[1]!.occurredAt));
+        } finally {
+            vi.useRealTimers();
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it.each([
+        ['unstarted', { started_at: null }, true],
+        ['flag-off', { started_at: new Date(Date.now() - 20_000).toISOString() }, false],
+        ['other-owner', { user_id: '323e4567-e89b-42d3-a456-426614174000', started_at: new Date(Date.now() - 20_000).toISOString() }, true],
+    ])('returns a safe 404 for a %s demo state without loading production progress', async (_case, overrides, enabled) => {
+        if (enabled) {
+            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+            vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        }
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', ...overrides,
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
+        expect(response.status).toBe(404);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
     });
 
     it('maps an owner-hidden row to 404 without leaking existence', async () => {

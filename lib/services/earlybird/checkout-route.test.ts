@@ -8,7 +8,12 @@ const mocks = vi.hoisted(() => ({
     after: vi.fn(),
     flush: vi.fn(),
     findForOwner: vi.fn(),
+    demoStore: {
+        findForOwner: vi.fn(),
+        startForOwner: vi.fn(),
+    },
     emit: vi.fn(),
+    suppressOperationalObservation: vi.fn((response: Response) => response),
     observeRoute: vi.fn((
         _request: Request,
         _route: string,
@@ -27,7 +32,10 @@ vi.mock('@/lib/supabase/server', () => ({
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: mocks.rpc, from: mocks.from },
 }));
-vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/request', () => ({
+    observeRoute: mocks.observeRoute,
+    suppressOperationalObservation: mocks.suppressOperationalObservation,
+}));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
     flushOperationalLogs: mocks.flush,
@@ -39,6 +47,7 @@ vi.mock('next/server', async (importOriginal) => {
 vi.mock('@/lib/services/analysis/preflight', () => ({
     preflightStore: { findForOwner: mocks.findForOwner },
 }));
+vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: mocks.demoStore }));
 
 import * as checkoutRoute from '@/app/api/earlybird/checkout/route';
 import { POST as waitlist } from '@/app/api/earlybird/waitlist/route';
@@ -318,6 +327,7 @@ describe('earlybird checkout and waitlist routes', () => {
             /basic_product-01|basic-checkout-a1|ord\.[a-f0-9]{32}/
         );
         expect(mocks.flush).toHaveBeenCalledOnce();
+        expect(mocks.suppressOperationalObservation).not.toHaveBeenCalled();
     });
 
     it('restores the same pending order on idempotent checkout replay', async () => {
@@ -787,11 +797,145 @@ describe('earlybird checkout and waitlist routes', () => {
         });
     });
 
+    it('blocks an owner demo waitlist before RPC, inventory, or checkout events', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+        const response = await waitlist(request('/api/earlybird/waitlist', { preflightId: PREFLIGHT_ID, planId: 'plus' }));
+        expect(response.status).toBe(409);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
     it('has no automatic analysis or task dispatcher dependency', () => {
         const source = [
             readFileSync(new URL('../../../app/api/earlybird/checkout/route.ts', import.meta.url), 'utf8'),
             readFileSync(new URL('../../../app/api/earlybird/waitlist/route.ts', import.meta.url), 'utf8'),
         ].join('\n');
         expect(source).not.toMatch(/analysis_requests|Cloud Tasks|dispatchAnalysis|enqueue/i);
+    });
+
+    it('starts the exact synthetic run before Groble, order, inventory, or commercial events', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({
+            id: PREFLIGHT_ID, user_id: USER_ID, target_instagram_id: 'junho_dem',
+            fixture_version: 'synthetic-fixture-v1', idempotency_key: 'checkout-key-0000000000000',
+            duration_seconds: 75, created_at: '2030-01-01T00:00:00.000Z', started_at: null,
+        });
+        mocks.demoStore.startForOwner.mockResolvedValue({
+            id: PREFLIGHT_ID, user_id: USER_ID, target_instagram_id: 'junho_dem',
+            fixture_version: 'synthetic-fixture-v1', idempotency_key: 'checkout-key-0000000000000',
+            duration_seconds: 75, created_at: '2030-01-01T00:00:00.000Z', started_at: '2030-01-01T00:00:01.000Z',
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID, planId: 'standard', disclosureAccepted: true,
+        }));
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        await expect(response.json()).resolves.toEqual({ nextUrl: `/progress/${PREFLIGHT_ID}` });
+        expect(mocks.demoStore.startForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        vi.unstubAllEnvs();
+    });
+
+    it.each([
+        ['flag-off', 'off', 'standard', true, 404, 'NOT_FOUND'],
+        ['allowlist-revoked', 'revoked', 'standard', true, 404, 'NOT_FOUND'],
+        ['non-Standard plan', 'operator', 'basic', true, 409, 'PLAN_SELECTION_UNAVAILABLE'],
+        ['start failure', 'operator', 'standard', false, 409, 'PREFLIGHT_NOT_VALID'],
+    ] as const)('keeps the %s demo checkout rejection entirely silent', async (
+        _case,
+        operatorMode,
+        planId,
+        startSucceeds,
+        expectedStatus,
+        expectedCode,
+    ) => {
+        if (operatorMode === 'off') {
+            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'false');
+        } else {
+            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+            vi.stubEnv(
+                'DEMO_ANALYSIS_OPERATOR_USER_IDS',
+                operatorMode === 'operator' ? USER_ID : '223e4567-e89b-42d3-a456-426614174000'
+            );
+        }
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+        mocks.demoStore.startForOwner.mockResolvedValue(startSucceeds ? { id: PREFLIGHT_ID, user_id: USER_ID } : null);
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId,
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(expectedStatus);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        await expect(response.json()).resolves.toMatchObject({ code: expectedCode });
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
+        expect(mocks.demoStore.startForOwner).toHaveBeenCalledTimes(
+            planId === 'standard' && operatorMode === 'operator' ? 1 : 0
+        );
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        vi.unstubAllEnvs();
+    });
+
+    it('keeps a thrown demo start failure silent and marked', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+        mocks.demoStore.startForOwner.mockRejectedValue(new Error('demo start unavailable'));
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID, planId: 'standard', disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        [{ preflightId: PREFLIGHT_ID, planId: 'standard', disclosureAccepted: false }],
+        [{ preflightId: PREFLIGHT_ID, unexpected: true }],
+    ])('recognizes a UUID-owned demo before malformed checkout validation: %o', async body => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', USER_ID);
+        mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
+
+        const response = await checkout(request('/api/earlybird/checkout', body));
+
+        expect(response.status).toBe(400);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.demoStore.startForOwner).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
     });
 });

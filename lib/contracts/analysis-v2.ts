@@ -42,8 +42,9 @@ const boundedImageUrlSchema = z.string()
     .trim()
     .min(1)
     .max(2_048)
-    .refine(value => value.startsWith('/api/image-proxy?'), {
-        message: 'Public image URLs must use the signed image proxy.',
+    .refine(value => value.startsWith('/api/image-proxy?')
+        || /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(value), {
+        message: 'Public image URLs must use the signed proxy or a fixed local synthetic asset.',
     })
     .nullable();
 const stageCodeSchema = z.string().min(1).max(64).regex(/^[A-Z][A-Z0-9_]*$/);

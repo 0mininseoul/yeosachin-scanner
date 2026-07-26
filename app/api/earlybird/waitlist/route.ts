@@ -7,9 +7,15 @@ import {
 } from '@/lib/services/earlybird/contracts';
 import { joinEarlybirdWaitlist } from '@/lib/services/earlybird/checkout';
 import { EarlybirdPersistenceError } from '@/lib/services/earlybird/store';
+import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status });
+}
+
+function demoErrorResponse(status: number, code: string, error: string): NextResponse {
+    return NextResponse.json({ code, error }, { status, headers: demoResponseHeaders() });
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -35,6 +41,13 @@ export async function POST(request: Request): Promise<NextResponse> {
     const parsed = earlybirdWaitlistRequestSchema.safeParse(body);
     if (!parsed.success) {
         return errorResponse(400, 'INVALID_REQUEST', 'Plus 플랜 대기 신청만 가능합니다.');
+    }
+
+    const demo = await demoAnalysisStore.findForOwner(parsed.data.preflightId, user.id);
+    if (demo) {
+        return isDemoOperator(user.id)
+            ? demoErrorResponse(409, 'PLAN_SELECTION_UNAVAILABLE', '선택한 플랜으로 사전 구매할 수 없습니다.')
+            : demoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
     }
 
     try {

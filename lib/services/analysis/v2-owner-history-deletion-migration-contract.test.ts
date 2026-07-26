@@ -144,6 +144,10 @@ describe('analysis V2 owner history and deletion migration contract', () => {
         expect(analysisList).not.toContain('target_instagram_id');
     });
 
+    it('opens archived V2 items on the explicit V2 result route contract', () => {
+        expect(analysisList).toContain("item.pipelineVersion === 'v2' ? '?pipeline=v2' : ''");
+    });
+
     it('filters stale failed payloads before rendering and has no failure UI copy', () => {
         expect(analysisList).toContain("['pending', 'processing', 'completed'].includes(item.status)");
         expect(analysisList).toContain('visibleAnalyses.map');

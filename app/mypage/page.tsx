@@ -4,6 +4,9 @@ import { TopBar, Eyebrow } from '@/components/case-ui';
 import { LogoutButton } from '@/components/logout-button';
 import { ownerAnalysisHistoryV1Schema } from '@/lib/services/analysis/owner-history';
 import AnalysisList from './analysis-list';
+import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import { demoArchiveItems } from '@/lib/services/demo-analysis/archive';
 
 export const metadata = {
     title: '보관함 - 위장여사친 판독기',
@@ -30,7 +33,11 @@ export default async function MyPage() {
     if (!analysisError && !parsedHistory.success) {
         console.error('Analysis owner history response failed validation');
     }
-    const analyses = parsedHistory.success ? parsedHistory.data.items : [];
+    const productionAnalyses = parsedHistory.success ? parsedHistory.data.items : [];
+    const demoAnalyses = isDemoOperator(user.id)
+        ? demoArchiveItems(await demoAnalysisStore.listForOwner(user.id), new Date())
+        : [];
+    const analyses = [...demoAnalyses, ...productionAnalyses].sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''));
 
     return (
         <div className="min-h-dvh">

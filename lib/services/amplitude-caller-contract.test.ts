@@ -72,7 +72,7 @@ describe('Amplitude caller privacy contract', () => {
         ]) {
             expect(page).toContain('resultViewTrackedRef');
             expect(page).toMatch(
-                /if \(!resultViewTrackedRef\.current\)[\s\S]*?resultViewTrackedRef\.current = true;[\s\S]*?trackEvent\(EVENTS\.RESULT_VIEWED/,
+                /if \((?:responseAnalyticsEligible && )?!resultViewTrackedRef\.current\)[\s\S]*?resultViewTrackedRef\.current = true;[\s\S]*?trackEvent\(EVENTS\.RESULT_VIEWED/,
             );
         }
     });

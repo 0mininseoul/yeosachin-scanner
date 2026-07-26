@@ -9,6 +9,8 @@ import {
 } from '@/lib/domain/analysis/result-pagination';
 import { analysisV2ResultStore } from '@/lib/services/analysis/v2-result-store';
 import { createClient } from '@/lib/supabase/server';
+import { demoResponseHeaders, demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
 const pageSizeSchema = z.string().regex(/^\d{1,2}$/).transform(Number)
@@ -26,6 +28,10 @@ function json(body: unknown, status: number) {
     });
 }
 
+function demoJson(body: unknown, status: number) {
+    return NextResponse.json(body, { status, headers: demoResponseHeaders() });
+}
+
 function parseCursor(value: string | null, list: ResultListKind): string | null {
     if (value === null) return null;
     const cursor = decodeResultCursor(value);
@@ -38,28 +44,48 @@ export async function GET(
     { params }: { params: Promise<{ requestId: string }> }
 ) {
     const requestId = requestIdSchema.safeParse((await params).requestId);
+    if (!requestId.success) {
+        return json({ error: 'Invalid result request.' }, 400);
+    }
     const url = new URL(request.url);
-    const pageSize = url.searchParams.has('pageSize')
-        ? pageSizeSchema.safeParse(url.searchParams.get('pageSize'))
-        : { success: true as const, data: RESULT_PAGE_SIZE_DEFAULT };
-
-    let femaleCursor: string | null;
-    let privateCursor: string | null;
-    try {
-        femaleCursor = parseCursor(url.searchParams.get('femaleCursor'), 'public');
-        privateCursor = parseCursor(url.searchParams.get('privateCursor'), 'private');
-    } catch {
-        return json({ error: 'Invalid result request.' }, 400);
-    }
-    if (!requestId.success || !pageSize.success) {
-        return json({ error: 'Invalid result request.' }, 400);
-    }
+    let demoRecognized = false;
 
     try {
         const supabase = await createClient();
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
             return json({ error: 'Authentication required.' }, 401);
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        demoRecognized = demo !== null;
+
+        const pageSize = url.searchParams.has('pageSize')
+            ? pageSizeSchema.safeParse(url.searchParams.get('pageSize'))
+            : { success: true as const, data: RESULT_PAGE_SIZE_DEFAULT };
+        let femaleCursor: string | null;
+        let privateCursor: string | null;
+        try {
+            femaleCursor = parseCursor(url.searchParams.get('femaleCursor'), 'public');
+            privateCursor = parseCursor(url.searchParams.get('privateCursor'), 'private');
+        } catch {
+            return demoRecognized
+                ? demoJson({ error: 'Invalid result request.' }, 400)
+                : json({ error: 'Invalid result request.' }, 400);
+        }
+        if (!pageSize.success) {
+            return demoRecognized
+                ? demoJson({ error: 'Invalid result request.' }, 400)
+                : json({ error: 'Invalid result request.' }, 400);
+        }
+
+        if (demo) {
+            if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
+                return demoJson({ error: 'Analysis result not found.' }, 404);
+            }
+            return demoJson(analysisResultPageV1Schema.parse(demoResultPage({
+                requestId: demo.id, femaleCursor, privateCursor, pageSize: pageSize.data,
+            })), 200);
         }
 
         const result = await analysisV2ResultStore.loadPage({
@@ -76,6 +102,8 @@ export async function GET(
         return json(analysisResultPageV1Schema.parse(result), 200);
     } catch {
         console.error('[analysis-v2-result] owner result read failed');
-        return json({ error: 'Result could not be loaded.' }, 500);
+        return demoRecognized
+            ? demoJson({ error: 'Result could not be loaded.' }, 500)
+            : json({ error: 'Result could not be loaded.' }, 500);
     }
 }
