@@ -69,6 +69,28 @@ describe('analysis V2 replay CLI', () => {
         });
     });
 
+    it('rejects capture paths in different directories before creating either artifact', async () => {
+        const bundleDirectory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-cli-bundle-'));
+        const keyDirectory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-cli-key-'));
+        temporaryPaths.push(bundleDirectory, keyDirectory);
+        const bundlePath = join(bundleDirectory, 'bundle.enc');
+        const keyPath = join(keyDirectory, 'bundle.key');
+
+        const args = [
+            '--capture',
+            '--target=target',
+            `--bundle=${bundlePath}`,
+            `--key=${keyPath}`,
+        ];
+        expect(() => parseReplayCliArgs(args))
+            .toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_PATH_INVALID');
+        await expect(runReplayCli(args))
+            .rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_PATH_INVALID');
+
+        await expect(stat(bundlePath)).rejects.toThrow();
+        await expect(stat(keyPath)).rejects.toThrow();
+    });
+
     it('defaults run to dry-run and requires both paid-AI confirmations', () => {
         expect(parseReplayCliArgs(['--run', '--bundle=/private/bundle.enc', '--key=/private/key.key']))
             .toEqual({ command: 'run', mode: 'dry-run', bundlePath: '/private/bundle.enc', keyPath: '/private/key.key' });

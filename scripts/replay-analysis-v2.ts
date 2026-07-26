@@ -1,4 +1,5 @@
 import { stat } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import { createAnalysisV2SelectedMediaNormalizer } from '../lib/services/ai/image-preprocessing';
@@ -57,6 +58,9 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const bundlePath = parsed.get('--bundle')?.trim();
     const keyPath = parsed.get('--key')?.trim();
     if (!bundlePath || !keyPath) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    if (dirname(resolve(bundlePath)) !== dirname(resolve(keyPath))) {
+        throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_PATH_INVALID');
+    }
     if (parsed.has('--capture')) {
         const target = parsed.get('--target')?.trim();
         const allowed = new Set(['--capture', '--target', '--request-id', '--bundle', '--key']);
