@@ -144,4 +144,81 @@ describe('live replay source mapping', () => {
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_PROVIDER_IDENTITY_MISMATCH');
         expect(get).not.toHaveBeenCalled();
     });
+
+    it('fails closed instead of benchmarking only the Apify fallback subset', async () => {
+        const datasets: Record<string, unknown[]> = {
+            RUNPROF1: [profile('target', 'target')],
+            RUNPROF2: [profile('fallback_only', 'fallbk')],
+            RUNFOLL1: [
+                { username_scrape: 'target', type: 'Followers', id: '1', username: 'fallback_only', full_name: 'Fallback', is_private: false, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/fallback.jpg' },
+                { username_scrape: 'target', type: 'Followers', id: '2', username: 'selfhosted_only', full_name: 'Selfhosted', is_private: false, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/selfhosted.jpg' },
+            ],
+            RUNFOLL2: [
+                { username_scrape: 'target', type: 'Following', id: '1', username: 'fallback_only', full_name: 'Fallback', is_private: false, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/fallback.jpg' },
+                { username_scrape: 'target', type: 'Following', id: '2', username: 'selfhosted_only', full_name: 'Selfhosted', is_private: false, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/selfhosted.jpg' },
+            ],
+            RUNLIKE1: [],
+            RUNCOMM1: [],
+        };
+        const descriptor: ReplayCaptureDescriptor = {
+            requestId: '10000000-0000-4000-8000-000000000001',
+            preflightId: '20000000-0000-4000-8000-000000000001',
+            requestFingerprint: 'a'.repeat(64),
+            targetUsername: 'target',
+            sourceLineage: {
+                selectedPlanId: 'standard',
+                policyVersions: {
+                    pipeline: 'v2',
+                    risk: 'risk-policy-v2.4',
+                    aiStage: 'ai-stage-policy-v2.7',
+                },
+            },
+            target: {
+                fullName: null,
+                bio: null,
+                profileImageUrl: null,
+                followersCount: 2,
+                followingCount: 2,
+            },
+            preflightRuns: [run('target-profile-fallback', 'RUNPROF1', APIFY_PROFILE_ACTOR_ID)],
+            providerRuns: [
+                run(`profile-fallback:${'a'.repeat(64)}`, 'RUNPROF2', APIFY_PROFILE_ACTOR_ID),
+                run(`relationship-followers:${'b'.repeat(64)}`, 'RUNFOLL1', APIFY_RELATIONSHIP_ACTOR_ID),
+                run(`relationship-following:${'c'.repeat(64)}`, 'RUNFOLL2', APIFY_RELATIONSHIP_ACTOR_ID),
+                run(`target-likers:${'d'.repeat(64)}`, 'RUNLIKE1', APIFY_LIKERS_ACTOR_ID),
+                run(`target-comments:${'e'.repeat(64)}`, 'RUNCOMM1', APIFY_COMMENTS_ACTOR_ID),
+            ],
+        };
+        const actors = new Map(
+            [...descriptor.preflightRuns, ...descriptor.providerRuns]
+                .map(item => [item.runId, item.actorId]),
+        );
+        const client: ReplayReadonlyApifyClient = {
+            run: runId => ({
+                get: async () => ({
+                    id: runId,
+                    actId: actors.get(runId),
+                    status: 'SUCCEEDED',
+                    defaultDatasetId: `D${runId}`,
+                }),
+            }),
+            dataset: datasetId => ({
+                listItems: async ({ offset, limit }) => {
+                    const items = datasets[datasetId.slice(1)] ?? [];
+                    const page = items.slice(offset, offset + limit);
+                    return {
+                        offset,
+                        count: page.length,
+                        total: items.length,
+                        items: page,
+                    };
+                },
+            }),
+        };
+
+        await expect(loadReplaySourceFromExistingRuns({
+            descriptor,
+            clientForSlot: () => client,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_EXACT_PUBLIC_COVERAGE_INCOMPLETE');
+    });
 });

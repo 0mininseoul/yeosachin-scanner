@@ -100,7 +100,7 @@ describe('replay capture read-only repository', () => {
         await expect(loadReplayCaptureDescriptor(
             { rpc } satisfies ReplaySourceRpcClient,
             { targetUsername: 'target' },
-        )).rejects.toThrow('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+        )).rejects.toThrow('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
         await expect(loadReplayCaptureDescriptor(
             { rpc } satisfies ReplaySourceRpcClient,
             { targetUsername: 'target' },

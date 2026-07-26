@@ -35,6 +35,15 @@ describe('AI-only replay runner', () => {
         expect(lines.join('\n')).not.toContain('m1');
         expect(lines.join('\n')).not.toContain('a'.repeat(64));
         expect(lines.join('\n')).not.toContain('public');
+        expect(JSON.parse(lines[0]!)).toMatchObject({
+            benchmark_scope: 'ai-only-exact-replay',
+            source_plan: 'standard',
+            source_pipeline: 'v2',
+            source_ai_policy: 'ai-stage-policy-v2.7',
+            source_risk_policy: 'risk-policy-v2.4',
+            replay_ai_policy: 'ai-stage-policy-v2.7',
+            full_e2e_evidence: false,
+        });
     });
 
     it('rejects malformed normalized input during dry-run before invoking AI', async () => {
@@ -44,6 +53,37 @@ describe('AI-only replay runner', () => {
             runner: { triage }, mode: 'dry-run',
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
         expect(triage).not.toHaveBeenCalled();
+    });
+
+    it('never relabels a historical Plus source as Standard evidence', async () => {
+        const lines: string[] = [];
+        await runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    requestFingerprint: 'b'.repeat(64),
+                    sourceLineage: {
+                        selectedPlanId: 'plus',
+                        policyVersions: {
+                            pipeline: 'v2',
+                            aiStage: 'ai-stage-policy-v2.4',
+                            risk: 'risk-policy-v2.2',
+                        },
+                    },
+                },
+            },
+            runner: {},
+            mode: 'dry-run',
+            write: line => lines.push(line),
+        });
+
+        expect(JSON.parse(lines[0]!)).toMatchObject({
+            source_plan: 'plus',
+            source_ai_policy: 'ai-stage-policy-v2.4',
+            source_risk_policy: 'risk-policy-v2.2',
+            replay_ai_policy: 'ai-stage-policy-v2.7',
+            full_e2e_evidence: false,
+        });
     });
 
     it('requires explicit paid-ai mode, summarizes retry/rate-limit/outcome metrics, and has no persistence dependency', async () => {
@@ -56,6 +96,7 @@ describe('AI-only replay runner', () => {
                 attempts: 1,
                 retries: 0,
                 elapsedMs: 10,
+                attemptLatenciesMs: [4],
                 failureDisposition: { response_rejected: 1 },
             })),
         };
@@ -64,7 +105,12 @@ describe('AI-only replay runner', () => {
         expect(report.stages.genderTriage).toMatchObject({ calls: 1, retries: 1, meanLatencyMs: 20 });
         expect(report.stages.featureAnalysis).toMatchObject({ calls: 1, rateLimited: 1, failureDisposition: { rate_limited: 1 } });
         expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
-        expect(report.stages.privateAccountName.calls).toBe(1);
+        expect(report.stages.privateAccountName).toMatchObject({
+            calls: 1,
+            meanLatencyMs: 4,
+            p50LatencyMs: 4,
+            p95LatencyMs: 4,
+        });
         expect(report.stages.privateAccountName.failureDisposition)
             .toEqual({ response_rejected: 1 });
     });
@@ -265,15 +311,13 @@ describe('AI-only replay runner', () => {
                     retries: 0,
                     elapsedMs: 1,
                 }),
-                resolveGender: async ({ signal }) => new Promise(resolve => {
+                resolveGender: async ({ signal, onAttemptStart }) => new Promise(resolve => {
+                    onAttemptStart?.({ attempt: 1, retryCount: 0 });
                     signal.addEventListener('abort', () => {
                         aborted = true;
-                        resolve({
-                            outcome: 'failed',
-                            attempts: 0,
-                            retries: 0,
-                            elapsedMs: 1,
-                        });
+                        setTimeout(() => resolve({
+                            outcome: 'failed', attempts: 1, retries: 0, elapsedMs: 20,
+                        }), 20);
                     }, { once: true });
                 }),
             },
@@ -281,6 +325,12 @@ describe('AI-only replay runner', () => {
 
         expect(aborted).toBe(true);
         expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
+        expect(report.stages.genderResolution).toMatchObject({
+            calls: 1,
+            retries: 0,
+            failureDisposition: { cutoff: 1 },
+        });
+        expect(report.stages.genderResolution.meanLatencyMs).toBeGreaterThanOrEqual(1);
         expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
     });
 

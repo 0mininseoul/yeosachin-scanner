@@ -232,13 +232,59 @@ export async function readReplayBundle(input: {
 
 /** Deletes exactly a validated pair of files; it never recursively removes a directory. */
 export async function removeReplayArtifacts(input: { bundlePath: string; keyPath: string }): Promise<void> {
+    await removeOwnedReplayArtifacts({
+        ...input,
+        ownedBundle: true,
+        ownedKey: true,
+    });
+}
+
+/** Deletes only the exact files created by the current capture attempt. */
+export async function removeOwnedReplayArtifacts(input: {
+    bundlePath: string;
+    keyPath: string;
+    ownedBundle: boolean;
+    ownedKey: boolean;
+}): Promise<void> {
     validatePathSuffix(input.bundlePath, '.enc');
     validatePathSuffix(input.keyPath, '.key');
     if (dirname(resolve(input.bundlePath)) !== dirname(resolve(input.keyPath))) {
         bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_PATH_INVALID');
     }
-    for (const path of [input.bundlePath, input.keyPath]) {
-        await assertPrivateFile(path);
+    await assertExplicitReplayTempDirectory(dirname(input.bundlePath));
+    const ownedPaths = [
+        ...(input.ownedBundle ? [input.bundlePath] : []),
+        ...(input.ownedKey ? [input.keyPath] : []),
+    ];
+    for (const path of ownedPaths) {
+        try {
+            await assertPrivateFile(path);
+        } catch (error) {
+            if (
+                error instanceof AnalysisV2ReplayBundleError
+                && error.code === 'ANALYSIS_V2_REPLAY_ARTIFACT_MISSING'
+            ) continue;
+            throw error;
+        }
         await unlink(path);
+    }
+}
+
+/** Removes only a caller-selected pair whose authenticated bundle is past its TTL. */
+export async function removeExpiredReplayArtifacts(input: {
+    bundlePath: string;
+    keyPath: string;
+    now?: number;
+}): Promise<boolean> {
+    try {
+        await readReplayBundle(input);
+        return false;
+    } catch (error) {
+        if (
+            !(error instanceof AnalysisV2ReplayBundleError)
+            || error.code !== 'ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED'
+        ) throw error;
+        await removeReplayArtifacts(input);
+        return true;
     }
 }

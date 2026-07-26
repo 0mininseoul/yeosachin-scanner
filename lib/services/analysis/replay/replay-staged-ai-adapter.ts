@@ -20,6 +20,7 @@ interface InvocationTelemetry {
     attempts: number;
     rateLimited: number;
     failureDisposition: Record<string, number>;
+    attemptLatenciesMs: number[];
 }
 
 function normalized(media: readonly ReplayMedia[]) {
@@ -44,13 +45,12 @@ function outcome(error: unknown, telemetry: InvocationTelemetry): ReplayOutcome 
 
 function recordStart(state: InvocationTelemetry, value: GeminiAttemptStartTelemetry): void {
     state.calls++;
-    state.attempts = Math.max(state.attempts, value.attempt);
-    state.retries = Math.max(state.retries, value.retryCount);
+    state.attempts++;
+    if (value.retryCount > 0) state.retries++;
 }
 
 function recordTerminal(state: InvocationTelemetry, value: GeminiAttemptTelemetry): void {
-    state.attempts = Math.max(state.attempts, value.attempt);
-    state.retries = Math.max(state.retries, value.retryCount);
+    state.attemptLatenciesMs.push(Math.max(0, value.latencyMs));
     if (value.disposition === 'rate_limited') state.rateLimited++;
     if (value.disposition !== 'success') {
         state.failureDisposition[value.disposition] =
@@ -62,14 +62,24 @@ function statelessAudit(
     requestId: string,
     identity: StagedAiAuditContext['resultIdentity'],
     state: InvocationTelemetry,
+    observer: {
+        onAttemptStart?: (value: GeminiAttemptStartTelemetry) => void;
+        onAttemptTelemetry?: (value: GeminiAttemptTelemetry) => void;
+    } = {},
 ): StagedAiAuditContext {
     return {
         requestId,
         operationKey: identity.operationKey,
         resultIdentity: identity,
         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
-        onBeforeAttempt: telemetry => recordStart(state, telemetry),
-        onAttemptTelemetry: telemetry => recordTerminal(state, telemetry),
+        onBeforeAttempt: telemetry => {
+            recordStart(state, telemetry);
+            observer.onAttemptStart?.(telemetry);
+        },
+        onAttemptTelemetry: telemetry => {
+            recordTerminal(state, telemetry);
+            observer.onAttemptTelemetry?.(telemetry);
+        },
     };
 }
 
@@ -81,6 +91,7 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
         attempts: 0,
         rateLimited: 0,
         failureDisposition: {},
+        attemptLatenciesMs: [],
     };
     try {
         const value = await task(state);
@@ -90,7 +101,8 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
             calls: state.calls,
             rateLimited: state.rateLimited,
             failureDisposition: state.failureDisposition,
-            attempts: state.attempts || 1,
+            attemptLatenciesMs: state.attemptLatenciesMs,
+            attempts: state.attempts,
             retries: state.retries,
             elapsedMs: Math.round(performance.now() - started),
         };
@@ -100,6 +112,7 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
             calls: state.calls,
             rateLimited: state.rateLimited,
             failureDisposition: state.failureDisposition,
+            attemptLatenciesMs: state.attemptLatenciesMs,
             attempts: state.attempts || (state.calls ? 1 : 0),
             retries: state.retries,
             elapsedMs: Math.round(performance.now() - started),
@@ -124,7 +137,18 @@ export function createReplayStagedAiAdapter(): ReplayAiRunner {
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderResolutionResultIdentity(aiInput);
-            return genderResolution(aiInput, statelessAudit(requestId, identity, state), { abortSignal: input.signal, statelessReplay: true });
+            return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
+                onAttemptStart: value => input.onAttemptStart?.({
+                    attempt: value.attempt,
+                    retryCount: value.retryCount,
+                }),
+                onAttemptTelemetry: value => input.onAttemptTelemetry?.({
+                    attempt: value.attempt,
+                    retryCount: value.retryCount,
+                    disposition: value.disposition,
+                    latencyMs: value.latencyMs,
+                }),
+            }), { abortSignal: input.signal, statelessReplay: true });
         }),
         privateNames: accounts => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {

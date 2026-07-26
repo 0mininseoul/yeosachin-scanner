@@ -70,7 +70,7 @@ export async function loadReplayCaptureDescriptor(
         p_target_username: target,
         p_request_id: requestId,
     });
-    if (result.error) throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    if (result.error) throw new Error('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
     const sourceResult = source.safeParse(result.data);
     if (!sourceResult.success) {
         throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');

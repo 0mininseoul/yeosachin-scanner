@@ -205,7 +205,11 @@ export async function loadReplaySourceFromExistingRuns(input: {
     const profileList = [...mutual.values()].map(row => {
         const detailed = profiles.get(row.username);
         if (detailed) return detailed;
-        if (!row.isPrivate) throw new Error('ANALYSIS_V2_REPLAY_PUBLIC_PROFILE_MISSING');
+        if (!row.isPrivate) {
+            // Completed requests purge selfhosted profile checkpoints. Never treat the
+            // surviving Apify fallback subset as an exact AI workload benchmark.
+            throw new Error('ANALYSIS_V2_REPLAY_EXACT_PUBLIC_COVERAGE_INCOMPLETE');
+        }
         return { username: row.username, fullName: row.fullName ?? undefined, followersCount: 0, followingCount: 0, postsCount: 0, isPrivate: true, isVerified: row.isVerified } satisfies AnalysisV2CheckpointProfile;
     });
     return { profiles: profileList, evidence: { relationship, targetInteractions, reverseInteractions }, providerRuns: input.descriptor.providerRuns };

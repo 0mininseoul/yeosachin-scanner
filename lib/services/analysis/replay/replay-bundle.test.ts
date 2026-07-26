@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
     createReplayKeyFile,
+    removeExpiredReplayArtifacts,
+    removeOwnedReplayArtifacts,
     readReplayBundle,
     removeReplayArtifacts,
     writeReplayBundle,
@@ -91,5 +93,53 @@ describe('analysis V2 replay bundle', () => {
         await expect(stat(bundlePath)).rejects.toThrow();
         await expect(stat(keyPath)).rejects.toThrow();
         await expect(readFile(untouchedPath, 'utf8')).resolves.toBe('keep');
+    });
+
+    it('removes only explicitly owned files after a partial capture failure', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'partial.key');
+        const bundlePath = join(directory, 'partial.enc');
+        const untouchedPath = join(directory, 'untouched');
+        await createReplayKeyFile(keyPath);
+        await writeFile(untouchedPath, 'keep', { mode: 0o600 });
+
+        await removeOwnedReplayArtifacts({
+            bundlePath,
+            keyPath,
+            ownedBundle: false,
+            ownedKey: true,
+        });
+
+        await expect(stat(keyPath)).rejects.toThrow();
+        await expect(readFile(untouchedPath, 'utf8')).resolves.toBe('keep');
+    });
+
+    it('removes an exact expired pair but preserves an unexpired pair', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'stale.key');
+        const bundlePath = join(directory, 'stale.enc');
+        await createReplayKeyFile(keyPath);
+        await writeReplayBundle({
+            bundle: bundle(),
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+
+        await expect(removeExpiredReplayArtifacts({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:20:00.000Z'),
+        })).resolves.toBe(false);
+        await expect(stat(bundlePath)).resolves.toBeDefined();
+        await expect(removeExpiredReplayArtifacts({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T01:01:00.000Z'),
+        })).resolves.toBe(true);
+        await expect(stat(bundlePath)).rejects.toThrow();
+        await expect(stat(keyPath)).rejects.toThrow();
     });
 });

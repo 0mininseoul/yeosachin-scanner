@@ -1,5 +1,6 @@
 import { applyGenderResolution, type FeatureAnalysisResult, type GenderResolutionResult, type GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
+import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
@@ -11,6 +12,7 @@ export interface ReplayInvocation<T> {
     calls?: number;
     rateLimited?: number;
     failureDisposition?: Readonly<Record<string, number>>;
+    attemptLatenciesMs?: readonly number[];
     attempts: number;
     retries: number;
     elapsedMs: number;
@@ -28,14 +30,32 @@ export interface ReplayAiRunner {
     triage?(input: { ordinal: number; media: readonly ReplayMedia[] }): Promise<ReplayInvocation<GenderTriageResult>>;
     feature?(input: { ordinal: number; bio: string | null; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
-    resolveGender?(input: { ordinal: number; media: readonly ReplayMedia[]; signal: AbortSignal }): Promise<ReplayInvocation<GenderResolutionResult>>;
+    resolveGender?(input: {
+        ordinal: number;
+        media: readonly ReplayMedia[];
+        signal: AbortSignal;
+        onAttemptStart?: (value: ReplayAttemptStart) => void;
+        onAttemptTelemetry?: (value: ReplayAttemptTelemetry) => void;
+    }): Promise<ReplayInvocation<GenderResolutionResult>>;
 }
 
 export interface ReplayCaption { evidenceRefId: string; selectionId: string; text: string; }
+export interface ReplayAttemptStart { attempt: number; retryCount: number; }
+export interface ReplayAttemptTelemetry extends ReplayAttemptStart {
+    disposition: string;
+    latencyMs: number;
+}
 export interface ReplayStageMetrics {
     calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: Record<string, number>;
 }
 export interface AnalysisV2AiReplayReport {
+    benchmarkScope: 'ai-only-exact-replay';
+    sourcePlan: 'standard' | 'plus';
+    sourcePipeline: 'v2';
+    sourceAiPolicy: string;
+    sourceRiskPolicy: string;
+    replayAiPolicy: string;
+    fullE2eEvidence: false;
     stages: Record<'genderTriage' | 'featureAnalysis' | 'privateAccountName' | 'genderResolution', ReplayStageMetrics>;
     gender: { male: number; female: number; unknown: number; unknownRate: number };
     resolver: { ready: number; applied: number; inconclusive: number; cutoff: number; capacitySkipped: number };
@@ -51,9 +71,17 @@ type ReplayBaselineClassification =
 
 interface TrackedResolver {
     abort: AbortController;
-    promise: Promise<ReplayInvocation<GenderResolutionResult>>;
+    promise?: Promise<ReplayInvocation<GenderResolutionResult>>;
     settled: boolean;
     value?: ReplayInvocation<GenderResolutionResult>;
+    startedAt: number;
+    telemetry: {
+        calls: number;
+        retries: number;
+        rateLimited: number;
+        attemptLatenciesMs: number[];
+        failureDisposition: Record<string, number>;
+    };
 }
 
 interface PreparedPublicReplay {
@@ -84,7 +112,14 @@ function percentile(values: number[], p: number): number {
 function collect(stage: ReplayStageMetrics, durations: number[], invocation: ReplayInvocation<unknown>): void {
     stage.calls += invocation.calls ?? 1;
     stage.retries += Math.max(0, invocation.retries);
-    durations.push(Math.max(0, invocation.elapsedMs));
+    const attemptLatencies = invocation.attemptLatenciesMs?.filter(value => (
+        Number.isFinite(value) && value >= 0
+    ));
+    if (attemptLatencies?.length) {
+        durations.push(...attemptLatencies);
+    } else if ((invocation.calls ?? 1) > 0) {
+        durations.push(Math.max(0, invocation.elapsedMs));
+    }
     stage.rateLimited += invocation.rateLimited
         ?? (invocation.outcome === 'rate_limited' ? 1 : 0);
     const recordedFailureEntries = Object.entries(invocation.failureDisposition ?? {})
@@ -97,6 +132,27 @@ function collect(stage: ReplayStageMetrics, durations: number[], invocation: Rep
         stage.failureDisposition[invocation.outcome] =
             (stage.failureDisposition[invocation.outcome] ?? 0) + 1;
     }
+}
+
+function collectCutoffResolver(
+    stage: ReplayStageMetrics,
+    durations: number[],
+    tracked: TrackedResolver,
+): void {
+    stage.calls += Math.max(1, tracked.telemetry.calls);
+    stage.retries += tracked.telemetry.retries;
+    stage.rateLimited += tracked.telemetry.rateLimited;
+    for (const [disposition, count] of Object.entries(
+        tracked.telemetry.failureDisposition,
+    )) {
+        stage.failureDisposition[disposition] =
+            (stage.failureDisposition[disposition] ?? 0) + count;
+    }
+    stage.failureDisposition.cutoff =
+        (stage.failureDisposition.cutoff ?? 0) + 1;
+    durations.push(...(tracked.telemetry.attemptLatenciesMs.length
+        ? tracked.telemetry.attemptLatenciesMs
+        : [Math.max(1, Math.round(performance.now() - tracked.startedAt))]));
 }
 
 function finalize(stage: ReplayStageMetrics, durations: number[]): void {
@@ -183,6 +239,13 @@ function mediaFor(profile: AnalysisV2ReplayBundle['profiles'][number], ids: read
 function safeLine(report: AnalysisV2AiReplayReport): string {
     return JSON.stringify({
         status: 'ok',
+        benchmark_scope: report.benchmarkScope,
+        source_plan: report.sourcePlan,
+        source_pipeline: report.sourcePipeline,
+        source_ai_policy: report.sourceAiPolicy,
+        source_risk_policy: report.sourceRiskPolicy,
+        replay_ai_policy: report.replayAiPolicy,
+        full_e2e_evidence: report.fullE2eEvidence,
         total_elapsed_ms: report.totalElapsedMs,
         stages: Object.fromEntries(Object.entries(report.stages).map(([stage, values]) => [
             stage,
@@ -275,19 +338,47 @@ export async function runAnalysisV2AiReplay(input: {
                 && assessment.ownerConsistency === 'same_person'
             );
             const abort = new AbortController();
-            const resolverPromise = eligible && input.runner.resolveGender
-                ? input.runner.resolveGender({
-                    ordinal: profile.ordinal,
-                    media: mediaFor(profile, profile.resolverSelectionIds),
-                    signal: abort.signal,
-                })
-                : undefined;
             let trackedResolver: TrackedResolver | undefined;
-            if (resolverPromise) {
+            if (eligible && input.runner.resolveGender) {
                 trackedResolver = {
                     abort,
                     settled: false,
-                } as TrackedResolver;
+                    startedAt: performance.now(),
+                    telemetry: {
+                        calls: 0,
+                        retries: 0,
+                        rateLimited: 0,
+                        attemptLatenciesMs: [],
+                        failureDisposition: {},
+                    },
+                };
+                const resolverPromise = input.runner.resolveGender({
+                    ordinal: profile.ordinal,
+                    media: mediaFor(profile, profile.resolverSelectionIds),
+                    signal: abort.signal,
+                    onAttemptStart: value => {
+                        if (!trackedResolver) return;
+                        trackedResolver.telemetry.calls++;
+                        if (value.retryCount > 0) {
+                            trackedResolver.telemetry.retries++;
+                        }
+                    },
+                    onAttemptTelemetry: value => {
+                        if (!trackedResolver) return;
+                        trackedResolver.telemetry.attemptLatenciesMs.push(
+                            Math.max(0, value.latencyMs),
+                        );
+                        if (value.disposition === 'rate_limited') {
+                            trackedResolver.telemetry.rateLimited++;
+                        }
+                        if (value.disposition !== 'success') {
+                            const failures =
+                                trackedResolver.telemetry.failureDisposition;
+                            failures[value.disposition] =
+                                (failures[value.disposition] ?? 0) + 1;
+                        }
+                    },
+                });
                 trackedResolver.promise = resolverPromise.then(value => {
                     trackedResolver!.settled = true;
                     trackedResolver!.value = value;
@@ -322,24 +413,22 @@ export async function runAnalysisV2AiReplay(input: {
             } else if (outcome.resolver) {
                 outcome.resolver.abort.abort();
                 resolver.cutoff++;
+                collectCutoffResolver(
+                    stages.genderResolution,
+                    durations.genderResolution,
+                    outcome.resolver,
+                );
                 let bookkeepingTimer: ReturnType<typeof setTimeout> | undefined;
                 try {
-                    const afterAbort = await Promise.race([
-                        outcome.resolver.promise.then(value => ({ value })),
-                        new Promise<{ value: undefined }>(resolve => {
+                    await Promise.race([
+                        outcome.resolver.promise!,
+                        new Promise<undefined>(resolve => {
                             bookkeepingTimer = setTimeout(
-                                () => resolve({ value: undefined }),
+                                () => resolve(undefined),
                                 cutoffBookkeepingMs,
                             );
                         }),
                     ]);
-                    if (afterAbort.value) {
-                        collect(
-                            stages.genderResolution,
-                            durations.genderResolution,
-                            afterAbort.value,
-                        );
-                    }
                 } finally {
                     if (bookkeepingTimer) clearTimeout(bookkeepingTimer);
                 }
@@ -376,6 +465,13 @@ export async function runAnalysisV2AiReplay(input: {
     gender.unknownRate = total ? Number((gender.unknown / total).toFixed(4)) : 0;
     for (const name of names) finalize(stages[name], durations[name]);
     const report = {
+        benchmarkScope: 'ai-only-exact-replay' as const,
+        sourcePlan: input.bundle.capture.sourceLineage.selectedPlanId,
+        sourcePipeline: input.bundle.capture.sourceLineage.policyVersions.pipeline,
+        sourceAiPolicy: input.bundle.capture.sourceLineage.policyVersions.aiStage,
+        sourceRiskPolicy: input.bundle.capture.sourceLineage.policyVersions.risk,
+        replayAiPolicy: AI_STAGE_POLICY_LATEST_VERSION,
+        fullE2eEvidence: false as const,
         stages,
         gender,
         resolver,
