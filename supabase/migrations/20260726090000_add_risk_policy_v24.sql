@@ -461,31 +461,79 @@ DECLARE
     v_caution_pattern TEXT := $pattern$ranked\.risk_band\s*=\s*'caution'\s+AND\s+ranked\.expected_rank\s*<=\s*15$pattern$;
     v_reverse_component_pattern TEXT := $pattern$pg_catalog\.jsonb_set\(\s*preliminary\.components\s*,\s*ARRAY\['targetToCandidateLike'\]\s*,\s*pg_catalog\.to_jsonb\(reverse_like\.component_score\)\s*,\s*TRUE\s*\)$pattern$;
     v_policy_guard_pattern TEXT := $pattern$p_risk_policy_version\s+IS\s+DISTINCT\s+FROM\s+'risk-policy-v2\.3'$pattern$;
-    v_allowed_fields_pattern TEXT := $pattern$'partnerEvidenceSelectionIds'\s*\]$pattern$;
+    v_legacy_row_shape_pattern TEXT := $pattern$OR\s+NOT\s+\(item\.value\s+\?&\s+ARRAY\[[^\]]*'partnerEvidenceSelectionIds'\s*\]\s*\)\s+OR\s+item\.value\s*-\s*ARRAY\[[^\]]*'partnerEvidenceSelectionIds'\s*\]\s*<>\s*'\{\}'::JSONB$pattern$;
     v_row_count_marker TEXT := '    v_count := pg_catalog.jsonb_array_length(v_rows);';
     v_relative_helper_marker TEXT := 'JOIN public.analysis_v2_expected_relative_risk_rows(';
     v_relative_helper_close_marker TEXT := '        ) AS expected';
-    v_account_context_validation TEXT := $replacement$    IF EXISTS (
-        SELECT 1
-        FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value)
-        WHERE (
-            p_risk_policy_version = 'risk-policy-v2.3'
-            AND item.value ? 'accountContext'
-        ) OR (
-            p_risk_policy_version = 'risk-policy-v2.4'
-            AND (
-                NOT (item.value ? 'accountContext')
-                OR pg_catalog.jsonb_typeof(item.value->'accountContext') <> 'string'
-                OR item.value->>'accountContext' NOT IN (
-                    'personal', 'individual_creator', 'official_group_or_brand', 'uncertain'
-                )
-            )
-        )
-    ) THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RESULT_INVALID', ERRCODE = 'P0001';
-    END IF;
-
-$replacement$;
+    v_policy_row_shape TEXT := $replacement$OR NOT (
+                    (
+                        p_risk_policy_version = 'risk-policy-v2.3'
+                        AND item.value ?& ARRAY[
+                            'candidateId', 'displayScore', 'riskBand', 'featuredRank',
+                            'recentMutualRank', 'verificationShortlistRank',
+                            'partnerSafetySource', 'partnerSafetyOperationKey',
+                            'partnerSafetyResultHash', 'components', 'preScore', 'rawScore',
+                            'possibleUpperBound', 'publicScore', 'possibleUpperPublicScore',
+                            'weakPartnerAdjustment', 'partnerCapApplied',
+                            'partnerEvidenceSelectionIds'
+                        ]
+                        AND item.value - ARRAY[
+                            'candidateId', 'displayScore', 'riskBand', 'featuredRank',
+                            'recentMutualRank', 'verificationShortlistRank',
+                            'partnerSafetySource', 'partnerSafetyOperationKey',
+                            'partnerSafetyResultHash', 'components', 'preScore', 'rawScore',
+                            'possibleUpperBound', 'publicScore', 'possibleUpperPublicScore',
+                            'weakPartnerAdjustment', 'partnerCapApplied',
+                            'partnerEvidenceSelectionIds'
+                        ] = '{}'::JSONB
+                        AND item.value->'components' ?& ARRAY[
+                            'candidateToTargetLikes', 'candidateToTargetComments',
+                            'targetToCandidateLike', 'tagOrCaptionMention',
+                            'recentMutual', 'appearanceExposure'
+                        ]
+                        AND (item.value->'components') - ARRAY[
+                            'candidateToTargetLikes', 'candidateToTargetComments',
+                            'targetToCandidateLike', 'tagOrCaptionMention',
+                            'recentMutual', 'appearanceExposure'
+                        ] = '{}'::JSONB
+                    ) OR (
+                        p_risk_policy_version = 'risk-policy-v2.4'
+                        AND item.value ?& ARRAY[
+                            'candidateId', 'displayScore', 'riskBand', 'featuredRank',
+                            'recentMutualRank', 'verificationShortlistRank',
+                            'partnerSafetySource', 'partnerSafetyOperationKey',
+                            'partnerSafetyResultHash', 'components', 'preScore', 'rawScore',
+                            'possibleUpperBound', 'publicScore', 'possibleUpperPublicScore',
+                            'weakPartnerAdjustment', 'partnerCapApplied',
+                            'partnerEvidenceSelectionIds', 'accountContext'
+                        ]
+                        AND item.value - ARRAY[
+                            'candidateId', 'displayScore', 'riskBand', 'featuredRank',
+                            'recentMutualRank', 'verificationShortlistRank',
+                            'partnerSafetySource', 'partnerSafetyOperationKey',
+                            'partnerSafetyResultHash', 'components', 'preScore', 'rawScore',
+                            'possibleUpperBound', 'publicScore', 'possibleUpperPublicScore',
+                            'weakPartnerAdjustment', 'partnerCapApplied',
+                            'partnerEvidenceSelectionIds', 'accountContext'
+                        ] = '{}'::JSONB
+                        AND pg_catalog.jsonb_typeof(item.value->'accountContext') = 'string'
+                        AND item.value->>'accountContext' IN (
+                            'personal', 'individual_creator', 'official_group_or_brand', 'uncertain'
+                        )
+                        AND item.value->'components' ?& ARRAY[
+                            'candidateToTargetLikes', 'candidateToTargetComments',
+                            'candidateToTargetTagOrCaptionMention',
+                            'targetToCandidateTagOrCaptionMention',
+                            'targetToCandidateLike', 'recentMutual', 'appearanceExposure'
+                        ]
+                        AND (item.value->'components') - ARRAY[
+                            'candidateToTargetLikes', 'candidateToTargetComments',
+                            'candidateToTargetTagOrCaptionMention',
+                            'targetToCandidateTagOrCaptionMention',
+                            'targetToCandidateLike', 'recentMutual', 'appearanceExposure'
+                        ] = '{}'::JSONB
+                    )
+                )$replacement$;
 BEGIN
     SELECT pg_catalog.pg_get_functiondef(
         'public.checkpoint_analysis_v2_candidate_scores(uuid,text,uuid,text,jsonb,text)'
@@ -498,7 +546,7 @@ BEGIN
        OR v_definition !~ v_caution_pattern
        OR v_definition !~ v_reverse_component_pattern
        OR v_definition !~ v_policy_guard_pattern
-       OR v_definition !~ v_allowed_fields_pattern
+       OR v_definition !~ v_legacy_row_shape_pattern
        OR pg_catalog.strpos(v_definition, v_row_count_marker) = 0
        OR pg_catalog.strpos(v_definition, v_relative_helper_marker) = 0
        OR pg_catalog.strpos(v_definition, v_relative_helper_close_marker) = 0 THEN
@@ -557,15 +605,8 @@ BEGIN
     );
     v_definition := pg_catalog.regexp_replace(
         v_definition,
-        v_allowed_fields_pattern,
-        $replacement$'partnerEvidenceSelectionIds', 'accountContext'
-               ]$replacement$,
-        'g'
-    );
-    v_definition := pg_catalog.replace(
-        v_definition,
-        v_row_count_marker,
-        v_account_context_validation || v_row_count_marker
+        v_legacy_row_shape_pattern,
+        v_policy_row_shape
     );
     v_definition := pg_catalog.replace(
         v_definition,

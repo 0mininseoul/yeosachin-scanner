@@ -220,14 +220,38 @@ describe('risk-policy v2.4 database replay', () => {
                         component_sum.component_total,
                         100
                     )) AS expected_raw_score
-                    expected_score.expected_pre_score + 3, 100
-                    'partnerEvidenceSelectionIds'
-                    ]
-                    'partnerEvidenceSelectionIds'
-                    ]$note$;
+                    expected_score.expected_pre_score + 3, 100$note$;
                 BEGIN
                     IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.3' THEN
                         RAISE EXCEPTION 'policy';
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value)
+                        WHERE item.value->>'candidateId' LIKE 'structural:%'
+                          AND (
+                            FALSE
+                            OR NOT (item.value ?& ARRAY[
+                                'candidateId', 'displayScore', 'riskBand', 'featuredRank',
+                                'recentMutualRank', 'verificationShortlistRank',
+                                'partnerSafetySource', 'partnerSafetyOperationKey',
+                                'partnerSafetyResultHash', 'components', 'preScore', 'rawScore',
+                                'possibleUpperBound', 'publicScore', 'possibleUpperPublicScore',
+                                'weakPartnerAdjustment', 'partnerCapApplied',
+                                'partnerEvidenceSelectionIds'
+                            ])
+                            OR item.value - ARRAY[
+                                'candidateId', 'displayScore', 'riskBand', 'featuredRank',
+                                'recentMutualRank', 'verificationShortlistRank',
+                                'partnerSafetySource', 'partnerSafetyOperationKey',
+                                'partnerSafetyResultHash', 'components', 'preScore', 'rawScore',
+                                'possibleUpperBound', 'publicScore', 'possibleUpperPublicScore',
+                                'weakPartnerAdjustment', 'partnerCapApplied',
+                                'partnerEvidenceSelectionIds'
+                            ] <> '{}'::JSONB
+                          )
+                    ) THEN
+                        RAISE EXCEPTION 'structural replay';
                     END IF;
                     v_count := pg_catalog.jsonb_array_length(v_rows);
                     IF v_count < 0 THEN RAISE EXCEPTION 'count'; END IF;
@@ -239,7 +263,10 @@ describe('risk-policy v2.4 database replay', () => {
                             ARRAY[]::TEXT[]
                         ) AS expected
                           ON expected.candidate_id = item.value->>'candidateId'
-                        WHERE item.value->>'candidateId' LIKE 'relative:%'
+                        WHERE (
+                            item.value->>'candidateId' LIKE 'relative:%'
+                            OR item.value->>'candidateId' = 'structural:official'
+                        )
                           AND (
                             pg_catalog.abs(
                                 (item.value->>'displayScore')::NUMERIC - expected.display_score
@@ -373,6 +400,96 @@ describe('risk-policy v2.4 database replay', () => {
                     candidate_id, pre_score, components, possible_upper_bound
                 ) VALUES ('mixed', 50, '{}'::JSONB, 55)
             `);
+            const checkpointScoreRows = (rows: readonly Record<string, unknown>[], policy: string) => (
+                migrationDb.query(
+                    `SELECT public.checkpoint_analysis_v2_candidate_scores(
+                        '10000000-0000-4000-8000-000000000001'::UUID,
+                        'coordinator:final-score',
+                        '20000000-0000-4000-8000-000000000001'::UUID,
+                        'input',
+                        $1::JSONB,
+                        $2::TEXT
+                    )`,
+                    [JSON.stringify(rows), policy]
+                )
+            );
+            const legacyStructuralRow = {
+                candidateId: 'structural:v23',
+                displayScore: 1,
+                riskBand: 'normal',
+                featuredRank: null,
+                recentMutualRank: null,
+                verificationShortlistRank: null,
+                partnerSafetySource: 'not_collected',
+                partnerSafetyOperationKey: null,
+                partnerSafetyResultHash: null,
+                components: {
+                    candidateToTargetLikes: 0,
+                    candidateToTargetComments: 0,
+                    targetToCandidateLike: 0,
+                    tagOrCaptionMention: 0,
+                    recentMutual: 0,
+                    appearanceExposure: 0,
+                },
+                weakPartnerAdjustment: 0,
+                preScore: 0,
+                rawScore: 0,
+                possibleUpperBound: 3,
+                publicScore: 1,
+                possibleUpperPublicScore: 1,
+                partnerCapApplied: false,
+                partnerEvidenceSelectionIds: [],
+            };
+            await expect(checkpointScoreRows(
+                [legacyStructuralRow], 'risk-policy-v2.3'
+            )).resolves.toBeDefined();
+            await expect(checkpointScoreRows(
+                [{ ...legacyStructuralRow, accountContext: 'personal' }], 'risk-policy-v2.3'
+            )).rejects.toThrow('structural replay');
+            await expect(checkpointScoreRows(
+                [{
+                    ...legacyStructuralRow,
+                    components: {
+                        ...legacyStructuralRow.components,
+                        candidateToTargetTagOrCaptionMention: 0,
+                    },
+                }], 'risk-policy-v2.3'
+            )).rejects.toThrow('structural replay');
+            const officialStructuralRow = {
+                ...legacyStructuralRow,
+                candidateId: 'structural:official',
+                accountContext: 'official_group_or_brand',
+                displayScore: 4.1,
+                publicScore: 9,
+                possibleUpperPublicScore: 1.81,
+                components: {
+                    candidateToTargetLikes: 0,
+                    candidateToTargetComments: 0,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0,
+                    targetToCandidateLike: 0,
+                    recentMutual: 0,
+                    appearanceExposure: 0,
+                },
+                possibleUpperBound: 5,
+            };
+            await expect(checkpointScoreRows(
+                [officialStructuralRow], 'risk-policy-v2.4'
+            )).resolves.toBeDefined();
+            await expect(checkpointScoreRows(
+                [Object.fromEntries(Object.entries(officialStructuralRow)
+                    .filter(([key]) => key !== 'accountContext'))],
+                'risk-policy-v2.4'
+            )).rejects.toThrow('structural replay');
+            await expect(checkpointScoreRows(
+                [{ ...officialStructuralRow, accountContext: 'not-a-context' }], 'risk-policy-v2.4'
+            )).rejects.toThrow('structural replay');
+            await expect(checkpointScoreRows(
+                [{ ...officialStructuralRow, unexpected: true }], 'risk-policy-v2.4'
+            )).rejects.toThrow('structural replay');
+            await expect(checkpointScoreRows(
+                [{ ...officialStructuralRow, components: legacyStructuralRow.components }], 'risk-policy-v2.4'
+            )).rejects.toThrow('structural replay');
             const canonicalMixedRow = [{
                 candidateId: 'mixed',
                 accountContext: 'personal',
@@ -439,43 +556,6 @@ describe('risk-policy v2.4 database replay', () => {
                 )`,
                 [JSON.stringify([legacyMixedRow])]
             )).rejects.toThrow('reverse like component');
-            await expect(migrationDb.query(
-                `SELECT public.checkpoint_analysis_v2_candidate_scores(
-                    '10000000-0000-4000-8000-000000000001'::UUID,
-                    'coordinator:final-score',
-                    '20000000-0000-4000-8000-000000000001'::UUID,
-                    'input',
-                    $1::JSONB,
-                    'risk-policy-v2.4'
-                )`,
-                [JSON.stringify([{
-                    candidateId: 'relative:official',
-                    accountContext: 'official_group_or_brand',
-                    riskBand: 'normal',
-                    displayScore: 4.1,
-                    publicScore: 9,
-                    featuredRank: null,
-                    components: {},
-                }])]
-            )).resolves.toBeDefined();
-            await expect(migrationDb.query(
-                `SELECT public.checkpoint_analysis_v2_candidate_scores(
-                    '10000000-0000-4000-8000-000000000001'::UUID,
-                    'coordinator:final-score',
-                    '20000000-0000-4000-8000-000000000001'::UUID,
-                    'input',
-                    $1::JSONB,
-                    'risk-policy-v2.4'
-                )`,
-                [JSON.stringify([{
-                    candidateId: 'relative:official',
-                    riskBand: 'normal',
-                    displayScore: 4.1,
-                    publicScore: 9,
-                    featuredRank: null,
-                    components: {},
-                }])]
-            )).rejects.toThrow('ANALYSIS_V2_RESULT_INVALID');
             const legacyRelativeRows = Array.from({ length: 10 }, (_, index) => ({
                 candidateId: `relative:v23-${String(index + 1).padStart(2, '0')}`,
                 riskBand: index < 8 ? 'high_risk' : 'caution',
