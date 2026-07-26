@@ -14,6 +14,7 @@ import {
     createSupabaseAnalysisV2AiScoringStageStore,
     type AnalysisV2AiScoringStageSupabaseClient,
 } from './v2-ai-scoring-stage-store';
+import type { AnalysisV2ProfileAiOutcome } from './v2-ai-scoring-executors';
 
 // gitleaks:allow -- UUID fixture
 const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
@@ -110,7 +111,114 @@ function legacyFinal() {
     };
 }
 
+function v28ProfileOutcome(): AnalysisV2ProfileAiOutcome {
+    const selectionId = 'profile:screening-fixture';
+    return {
+        candidateId: `candidate:${'1'.repeat(40)}`,
+        instagramId: 'screening.fixture',
+        status: 'verified_female',
+        unavailableReason: null,
+        profile: {
+            username: 'screening.fixture',
+            fullName: 'Screening Fixture Band',
+            bio: 'Official band · new single out now',
+            profilePicUrl: 'https://cdn.example/screening.jpg',
+            followersCount: 10,
+            followingCount: 10,
+            postsCount: 0,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [],
+        },
+        triage: {
+            assessment: {
+                inferredGender: 'female',
+                confidence: 'high',
+                ownerConsistency: 'same_person',
+                evidenceSelectionIds: [selectionId],
+            },
+            routingDecision: 'route_to_feature_analysis',
+            routingReason: 'conserve_female_recall',
+            analyzedSelectionIds: [selectionId],
+        },
+        feature: {
+            features: {
+                gender: 'female',
+                genderConfidence: 'high',
+                ownerConsistency: 'same_person',
+                appearanceGrade: 1,
+                exposureScore: 0,
+                businessClassification: 'business',
+                businessConfidence: 'high',
+                accountContext: 'official_group_or_brand',
+                marriageEvidence: 'none',
+                partnerEvidence: 'none',
+                partnerExclusionContext: 'none',
+                evidenceSelectionIds: {
+                    gender: [selectionId],
+                    appearance: [],
+                    exposure: [],
+                    business: [selectionId],
+                    accountContext: [selectionId],
+                    marriagePartner: [],
+                },
+                oneLineOverview:
+                    '공식 밴드와 신곡 발매 문구가 함께 보여 개인 계정보다 조직 활동을 먼저 볼 만합니다.',
+            },
+            finalGenderDecision: 'verified_female',
+            analyzedSelectionIds: [selectionId],
+        },
+        normalizedSelectionIds: [selectionId],
+        captions: [],
+        mediaCoverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        genderOperationKey: `gender-triage:${digest('gender')}`,
+        genderResultHash: digest('gender-result'),
+        featureOperationKey: `feature-analysis:${digest('feature')}`,
+        featureResultHash: digest('feature-result'),
+        baselineClassification: 'verified_female',
+        classificationSource: 'feature',
+        genderResolutionStatus: 'not_eligible',
+        genderResolutionOperationKey: null,
+        genderResolutionResultHash: null,
+        mediaBundlePersisted: true,
+        inputQualityPolicy: 'input-quality-v2.8',
+        mediaSelectionProvenance: {
+            triageSelectedCount: 1,
+            featureSelectedCount: 1,
+            selectedKinds: {
+                profile: 1,
+                postRepresentative: 0,
+                carouselContext: 0,
+            },
+        },
+        accountContextOverride: 'official_group_or_brand',
+        officialScreeningStatus: 'corroborated_official',
+        officialExclusionReason: 'model_group_context_plus_profile_signals',
+    };
+}
+
 describe('analysis V2 AI/scoring stage store', () => {
+    it.each([
+        ['missing screening fields', (outcome: AnalysisV2ProfileAiOutcome) => {
+            delete outcome.accountContextOverride;
+            delete outcome.officialScreeningStatus;
+            delete outcome.officialExclusionReason;
+        }],
+        ['partial screening fields', (outcome: AnalysisV2ProfileAiOutcome) => {
+            delete outcome.officialScreeningStatus;
+            delete outcome.officialExclusionReason;
+        }],
+    ] as const)('rejects v2.8 profile checkpoints with %s', async (_label, mutate) => {
+        const outcome = v28ProfileOutcome();
+        mutate(outcome);
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [outcome],
+        })).rejects.toThrow('v2.8 input-quality provenance is incomplete');
+    });
+
     it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {
         const candidates = preliminary();
         const shortlistHash = digest('shortlist');

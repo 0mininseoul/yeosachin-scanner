@@ -17,17 +17,17 @@ export interface AnalysisV2OfficialAccountScreening {
 }
 
 const ORGANIZATION_PATTERNS: readonly RegExp[] = [
-    /(?:\bofficial\b|공식|company|corporation|inc\.?|ltd\.?|agency|studio|label|records?)/iu,
-    /(?:\bband\b|\bteam\b|\bcrew\b|\bcollective\b|\bcommunity\b|밴드|팀|크루|커뮤니티|프로젝트)/iu,
-    /(?:\bout\s+now\b|\bnew\s+(?:single|album|release)\b|\brelease\b|\bbooking\b|\bshop\b|\bstore\b|발매|신곡|공연|예매|예약|문의|상품)/iu,
+    /(?:(?<![\p{L}\p{N}_])(?:official|company|corporation|inc\.?|ltd\.?|agency|studio|label|records?)(?![\p{L}\p{N}_])|공식)/iu,
+    /(?:(?<![\p{L}\p{N}_])(?:band|team|crew|collective|community)(?![\p{L}\p{N}_])|밴드|팀|크루|커뮤니티|프로젝트)/iu,
+    /(?:(?<![\p{L}\p{N}_])(?:out\s+now|new\s+(?:single|album|release)|release|booking|shop|store)(?![\p{L}\p{N}_])|발매|신곡|공연|예매|예약|문의|상품)/iu,
 ];
 
-function normalized(value: string | null | undefined): string {
-    return value?.normalize('NFKC').replace(/\s+/gu, ' ').trim() ?? '';
+function normalized(value: string | null | undefined, maximum: number): string {
+    return value?.normalize('NFKC').replace(/\s+/gu, ' ').trim().slice(0, maximum) ?? '';
 }
 
 function profileSignalCount(input: { fullName: string | null; bio: string | null }): number {
-    const sources = [normalized(input.fullName), normalized(input.bio)].filter(Boolean);
+    const sources = [normalized(input.fullName, 240), normalized(input.bio, 2_200)].filter(Boolean);
     return ORGANIZATION_PATTERNS.reduce((count, pattern) => (
         count + Number(sources.some(source => pattern.test(source)))
     ), 0);

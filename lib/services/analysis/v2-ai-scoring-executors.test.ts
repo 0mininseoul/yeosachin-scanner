@@ -745,7 +745,9 @@ describe('V2 AI and scoring executors', () => {
         expect(new Set(vi.mocked(deps.normalizeMedia).mock.calls.map(([row]) => row.selectionId)).size)
             .toBe(3);
         expect(memoryState.outcomes[0]).toMatchObject({
+            inputQualityPolicy: 'input-quality-v2.8',
             accountContextOverride: 'official_group_or_brand',
+            officialScreeningStatus: 'corroborated_official',
             officialExclusionReason: 'model_group_context_plus_profile_signals',
             mediaSelectionProvenance: {
                 triageSelectedCount: 3,
@@ -3003,16 +3005,42 @@ describe('V2 AI and scoring executors', () => {
     });
 
     it('feeds only corroborated v2.8 official screening into the unchanged v2.4 ranking input', async () => {
+        const provenance = {
+            triageSelectedCount: 1,
+            featureSelectedCount: 1,
+            selectedKinds: {
+                profile: 1,
+                postRepresentative: 0,
+                carouselContext: 0,
+            },
+        } as const;
         const screened = verifiedOutcome('band.account');
         screened.feature!.features.accountContext = 'official_group_or_brand';
+        screened.inputQualityPolicy = 'input-quality-v2.8';
+        screened.mediaSelectionProvenance = provenance;
         screened.accountContextOverride = 'official_group_or_brand';
+        screened.officialScreeningStatus = 'corroborated_official';
         screened.officialExclusionReason = 'model_group_context_plus_profile_signals';
         const uncorroborated = verifiedOutcome('person.club');
         uncorroborated.feature!.features.accountContext = 'official_group_or_brand';
+        uncorroborated.inputQualityPolicy = 'input-quality-v2.8';
+        uncorroborated.mediaSelectionProvenance = provenance;
         uncorroborated.accountContextOverride = 'uncertain';
+        uncorroborated.officialScreeningStatus = 'uncorroborated_official';
         uncorroborated.officialExclusionReason = null;
+        const missingCheckpoint = verifiedOutcome('partial.checkpoint');
+        missingCheckpoint.feature!.features.accountContext = 'official_group_or_brand';
+        missingCheckpoint.inputQualityPolicy = 'input-quality-v2.8';
+        missingCheckpoint.mediaSelectionProvenance = provenance;
+        const missingEntireCheckpoint = verifiedOutcome('missing.checkpoint');
+        missingEntireCheckpoint.feature!.features.accountContext = 'official_group_or_brand';
         const memoryState = memory();
-        memoryState.outcomes = [screened, uncorroborated];
+        memoryState.outcomes = [
+            screened,
+            uncorroborated,
+            missingCheckpoint,
+            missingEntireCheckpoint,
+        ];
         memoryState.primary = {
             revision: 1,
             resultHash: digest('primary'),
@@ -3026,13 +3054,20 @@ describe('V2 AI and scoring executors', () => {
             evidence: {
                 loadRelationships: vi.fn(async () => relationshipSnapshot({
                     excluded: null,
-                    usernames: [screened.instagramId, uncorroborated.instagramId],
+                    usernames: [
+                        screened.instagramId,
+                        uncorroborated.instagramId,
+                        missingCheckpoint.instagramId,
+                        missingEntireCheckpoint.instagramId,
+                    ],
                 })),
                 loadTargetEvidence: vi.fn(async () => targetEvidence()),
             },
         });
 
-        await createAnalysisV2AiScoringExecutorRegistry(deps).screening!(context('screening'));
+        await createAnalysisV2AiScoringExecutorRegistry(deps).screening!(context('screening', {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+        }));
 
         expect(memoryState.screening?.candidates.map(candidate => ({
             username: candidate.username,
@@ -3040,6 +3075,8 @@ describe('V2 AI and scoring executors', () => {
         }))).toEqual([
             { username: 'band.account', accountContext: 'official_group_or_brand' },
             { username: 'person.club', accountContext: 'uncertain' },
+            { username: 'partial.checkpoint', accountContext: 'uncertain' },
+            { username: 'missing.checkpoint', accountContext: 'uncertain' },
         ]);
     });
 

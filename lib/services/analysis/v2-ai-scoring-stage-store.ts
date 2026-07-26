@@ -153,7 +153,13 @@ const profileOutcomeSchema = z.object({
     genderResolutionResultHash: hashSchema.nullable().optional(),
     mediaBundlePersisted: z.boolean(),
     mediaSelectionProvenance: mediaSelectionProvenanceSchema.optional(),
+    inputQualityPolicy: z.literal('input-quality-v2.8').optional(),
     accountContextOverride: accountContextSchema.optional(),
+    officialScreeningStatus: z.enum([
+        'not_model_official',
+        'corroborated_official',
+        'uncorroborated_official',
+    ]).optional(),
     officialExclusionReason: z.literal('model_group_context_plus_profile_signals')
         .nullable().optional(),
 }).strict().transform(value => ({
@@ -271,33 +277,46 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Feature outcome is incomplete.' });
     }
-    if (value.accountContextOverride !== undefined && (
-        !value.feature
-        || value.feature.features.accountContext !== 'official_group_or_brand'
-        || !['official_group_or_brand', 'uncertain'].includes(value.accountContextOverride)
-    )) {
-        context.addIssue({
-            code: 'custom',
-            message: 'Only an AI-proposed official context may receive a v2.8 override.',
-        });
-    }
-    if (
-        value.officialExclusionReason !== undefined
-        && value.officialExclusionReason !== null
-        && (value.accountContextOverride !== 'official_group_or_brand'
-            || !value.feature
-            || value.feature.features.accountContext !== 'official_group_or_brand')
-    ) {
-        context.addIssue({
-            code: 'custom',
-            message: 'Official exclusion reason requires corroborated official context.',
-        });
-    }
-    if (value.mediaSelectionProvenance !== undefined && !value.feature) {
+    const v28InputQuality = value.inputQualityPolicy === 'input-quality-v2.8'
+        || value.mediaSelectionProvenance !== undefined;
+    if (v28InputQuality && !value.feature) {
         context.addIssue({
             code: 'custom',
             message: 'Media selection provenance requires completed feature analysis.',
         });
+    }
+    if (v28InputQuality && (
+        value.inputQualityPolicy !== 'input-quality-v2.8'
+        || value.mediaSelectionProvenance === undefined
+        || value.accountContextOverride === undefined
+        || value.officialScreeningStatus === undefined
+        || value.officialExclusionReason === undefined
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'v2.8 input-quality provenance is incomplete.',
+        });
+    }
+    if (v28InputQuality && value.feature) {
+        const modelContext = value.feature.features.accountContext;
+        const coherentNonOfficial = modelContext !== 'official_group_or_brand'
+            && value.officialScreeningStatus === 'not_model_official'
+            && value.accountContextOverride === modelContext
+            && value.officialExclusionReason === null;
+        const coherentOfficial = modelContext === 'official_group_or_brand'
+            && value.officialScreeningStatus === 'corroborated_official'
+            && value.accountContextOverride === 'official_group_or_brand'
+            && value.officialExclusionReason === 'model_group_context_plus_profile_signals';
+        const coherentUncertain = modelContext === 'official_group_or_brand'
+            && value.officialScreeningStatus === 'uncorroborated_official'
+            && value.accountContextOverride === 'uncertain'
+            && value.officialExclusionReason === null;
+        if (!coherentNonOfficial && !coherentOfficial && !coherentUncertain) {
+            context.addIssue({
+                code: 'custom',
+                message: 'v2.8 official screening provenance is inconsistent.',
+            });
+        }
     }
     if (value.mediaBundlePersisted !== (value.status === 'verified_female')) {
         context.addIssue({ code: 'custom', message: 'Only verified women retain media bundles.' });

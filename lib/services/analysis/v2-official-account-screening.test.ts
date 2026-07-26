@@ -33,4 +33,23 @@ describe('screenAnalysisV2OfficialAccount', () => {
             bio: 'new single out now',
         }).accountContext).toBe('uncertain');
     });
+
+    it.each([
+        'since recording',
+        'recording communityservice',
+        'accompany labelmaker',
+        'homestudioish teammate',
+        'officially collectivework',
+        '소company원 개인일기',
+    ])('does not count English organization substrings: %s', bio => {
+        expect(screenAnalysisV2OfficialAccount({
+            modelAccountContext: 'official_group_or_brand',
+            fullName: 'A personal name',
+            bio,
+        })).toEqual({
+            accountContext: 'uncertain',
+            exclusionReason: null,
+            profileSignalCount: 0,
+        });
+    });
 });

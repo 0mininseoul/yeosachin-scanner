@@ -186,8 +186,13 @@ export interface AnalysisV2ProfileAiOutcome {
             carouselContext: number;
         }>;
     }>;
-    /** v2.8 conservative override consumed by the existing v2.4 risk policy. */
+    inputQualityPolicy?: 'input-quality-v2.8';
+    /** v2.8 screened context consumed by the existing v2.4 risk policy. */
     accountContextOverride?: AccountContext;
+    officialScreeningStatus?:
+        | 'not_model_official'
+        | 'corroborated_official'
+        | 'uncorroborated_official';
     officialExclusionReason?: AnalysisV2OfficialExclusionReason | null;
 }
 
@@ -898,10 +903,38 @@ function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
     });
 }
 
-function screenedAccountContext(outcome: AnalysisV2ProfileAiOutcome): AccountContext {
-    return outcome.accountContextOverride
-        ?? outcome.feature?.features.accountContext
-        ?? 'uncertain';
+function screenedAccountContext(
+    outcome: AnalysisV2ProfileAiOutcome,
+    exactV28Policy = false,
+): AccountContext {
+    const modelContext = outcome.feature?.features.accountContext ?? 'uncertain';
+    const v28 = exactV28Policy
+        || outcome.inputQualityPolicy === 'input-quality-v2.8'
+        || outcome.mediaSelectionProvenance !== undefined;
+    if (!v28) return modelContext;
+    if (outcome.officialScreeningStatus === 'not_model_official') {
+        return modelContext !== 'official_group_or_brand'
+            && outcome.accountContextOverride === modelContext
+            && outcome.officialExclusionReason === null
+            ? modelContext
+            : 'uncertain';
+    }
+    if (modelContext !== 'official_group_or_brand') return 'uncertain';
+    if (
+        outcome.officialScreeningStatus === 'corroborated_official'
+        && outcome.accountContextOverride === 'official_group_or_brand'
+        && outcome.officialExclusionReason === 'model_group_context_plus_profile_signals'
+    ) {
+        return 'official_group_or_brand';
+    }
+    if (
+        outcome.officialScreeningStatus === 'uncorroborated_official'
+        && outcome.accountContextOverride === 'uncertain'
+        && outcome.officialExclusionReason === null
+    ) {
+        return 'uncertain';
+    }
+    return 'uncertain';
 }
 
 function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2VerifiedFemaleFeatureRow {
@@ -1552,9 +1585,18 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             bio: profile.bio ?? null,
                         })
                         : null;
+                    const modelAccountContext = features.result.features.accountContext;
                     const accountContextOverride = inputQualityV28
-                        && features.result.features.accountContext === 'official_group_or_brand'
-                        ? officialScreening!.accountContext
+                        ? modelAccountContext === 'official_group_or_brand'
+                            ? officialScreening!.accountContext
+                            : modelAccountContext
+                        : undefined;
+                    const officialScreeningStatus = inputQualityV28
+                        ? modelAccountContext !== 'official_group_or_brand'
+                            ? 'not_model_official' as const
+                            : officialScreening!.exclusionReason
+                                ? 'corroborated_official' as const
+                                : 'uncorroborated_official' as const
                         : undefined;
                     const couldResolveFemale = resolverHandle !== null
                         && (
@@ -1667,10 +1709,16 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                     readyResolver?.resultHash ?? null,
                                 mediaBundlePersisted,
                                 ...(selectionProvenance
-                                    ? { mediaSelectionProvenance: selectionProvenance }
+                                    ? {
+                                        mediaSelectionProvenance: selectionProvenance,
+                                        inputQualityPolicy: 'input-quality-v2.8' as const,
+                                    }
                                     : {}),
                                 ...(accountContextOverride
                                     ? { accountContextOverride }
+                                    : {}),
+                                ...(officialScreeningStatus
+                                    ? { officialScreeningStatus }
                                     : {}),
                                 ...(officialScreening
                                     ? { officialExclusionReason: officialScreening.exclusionReason }
@@ -1879,7 +1927,13 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         // v2.8 may conservatively downgrade an uncorroborated
                         // model official label to uncertain. The v2.4 scorer then
                         // consumes this existing account-context input unchanged.
-                        accountContext: screenedAccountContext(outcome),
+                        accountContext: screenedAccountContext(
+                            outcome,
+                            policySupports(
+                                aiJobFence(context).aiStagePolicyVersion,
+                                'inputQualityV28',
+                            ),
+                        ),
                         hasWeakPartnerEvidence: weakFeaturePartnerEvidence(outcome.feature!),
                         hasStrongPartnerEvidence: strongFeaturePartnerEvidence(outcome.feature!),
                         uniqueTargetPostsLikedByCandidate:
