@@ -140,8 +140,7 @@ describe('risk-policy v2.4 database replay', () => {
                     p_job_key TEXT,
                     p_claim_token UUID,
                     p_job_input_hash TEXT,
-                    p_rows JSONB,
-                    p_risk_policy_version TEXT
+                    p_rows JSONB
                 ) RETURNS JSONB LANGUAGE plpgsql AS $function$
                 DECLARE
                     v_row JSONB := p_rows->0;
@@ -150,10 +149,8 @@ describe('risk-policy v2.4 database replay', () => {
                     + (item.value->'components'->>'recentMutual')::NUMERIC
                     $note$;
                 BEGIN
-                    IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.3' THEN
-                        RAISE EXCEPTION 'policy';
-                    END IF;
                     IF (v_row->>'preScore')::NUMERIC NOT BETWEEN 0 AND 97
+                       OR (v_row->>'possibleUpperBound')::NUMERIC NOT BETWEEN 0 AND 100
                        OR (v_row->>'possibleUpperBound')::NUMERIC
                             <> LEAST((v_row->>'preScore')::NUMERIC + 3, 100) THEN
                         RAISE EXCEPTION 'bounds';
@@ -205,8 +202,7 @@ describe('risk-policy v2.4 database replay', () => {
                     'coordinator:candidate-screening',
                     '20000000-0000-4000-8000-000000000001'::UUID,
                     'input',
-                    '[{"candidateId":"normal","preScore":50,"possibleUpperBound":55}]'::JSONB,
-                    'risk-policy-v2.4'
+                    '[{"candidateId":"normal","preScore":50,"possibleUpperBound":55}]'::JSONB
                 )`
             )).resolves.toBeDefined();
             await expect(migrationDb.query(
@@ -215,8 +211,7 @@ describe('risk-policy v2.4 database replay', () => {
                     'coordinator:candidate-screening',
                     '20000000-0000-4000-8000-000000000001'::UUID,
                     'input',
-                    '[{"candidateId":"invalid","preScore":50,"possibleUpperBound":54}]'::JSONB,
-                    'risk-policy-v2.4'
+                    '[{"candidateId":"invalid","preScore":50,"possibleUpperBound":54}]'::JSONB
                 )`
             )).rejects.toThrow('bounds');
             await expect(migrationDb.exec(`

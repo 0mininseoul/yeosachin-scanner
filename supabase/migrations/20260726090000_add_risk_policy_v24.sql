@@ -260,19 +260,18 @@ DECLARE
                     + (item.value->'components'->>'recentMutual')::NUMERIC$new$;
 BEGIN
     SELECT pg_catalog.pg_get_functiondef(
-        'public.checkpoint_analysis_v2_preliminary_scores(uuid,text,uuid,text,jsonb,text)'
+        'public.checkpoint_analysis_v2_preliminary_scores(uuid,text,uuid,text,jsonb)'
             ::pg_catalog.regprocedure
     ) INTO v_definition;
-    IF pg_catalog.strpos(v_definition, 'risk-policy-v2.3') = 0
-       OR pg_catalog.strpos(v_definition, v_preliminary_old) = 0
+    IF pg_catalog.strpos(v_definition, v_preliminary_old) = 0
        OR pg_catalog.strpos(v_definition, 'NOT BETWEEN 0 AND 97') = 0
+       OR pg_catalog.strpos(v_definition, 'NOT BETWEEN 0 AND 100') = 0
        OR pg_catalog.strpos(v_definition, '+ 3, 100') = 0 THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_PRELIMINARY_DRIFT', ERRCODE = 'P0001';
     END IF;
     v_definition := pg_catalog.replace(v_definition, v_preliminary_old, v_preliminary_new);
     v_definition := pg_catalog.replace(v_definition, 'NOT BETWEEN 0 AND 97', 'NOT BETWEEN 0 AND 95');
     v_definition := pg_catalog.replace(v_definition, '+ 3, 100', '+ 5, 100');
-    v_definition := pg_catalog.replace(v_definition, 'risk-policy-v2.3', 'risk-policy-v2.4');
     EXECUTE v_definition;
 END;
 $migration$;
