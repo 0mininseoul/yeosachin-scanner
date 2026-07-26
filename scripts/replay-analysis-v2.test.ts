@@ -78,6 +78,26 @@ describe('analysis V2 replay CLI', () => {
             .toEqual({ command: 'run', mode: 'paid-ai', bundlePath: 'a.enc', keyPath: 'a.key' });
     });
 
+    it.each([
+        '--paid-ai=false',
+        '--paid-ai=true',
+        '--paid-ai=1',
+        '--confirm-paid-ai=false',
+        '--confirm-paid-ai=true',
+        '--confirm-paid-ai=confirmed',
+        '--dry-run=false',
+        '--run=true',
+    ])('rejects value-bearing boolean flag %s', flag => {
+        expect(() => parseReplayCliArgs([
+            '--run',
+            '--paid-ai',
+            '--confirm-paid-ai',
+            flag,
+            '--bundle=a.enc',
+            '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    });
+
     it('exposes exact artifact cleanup without directory arguments', () => {
         expect(parseReplayCliArgs(['--cleanup', '--bundle=a.enc', '--key=a.key']))
             .toEqual({ command: 'cleanup', bundlePath: 'a.enc', keyPath: 'a.key' });

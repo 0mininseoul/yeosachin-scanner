@@ -1,9 +1,10 @@
-import { mkdtemp, chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, chmod, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     createReplayKeyFile,
+    createReplayArtifactCreationScope,
     removeExpiredReplayArtifacts,
     removeOwnedReplayArtifacts,
     readReplayBundle,
@@ -11,6 +12,7 @@ import {
     writeReplayBundle,
     type AnalysisV2ReplayBundle,
 } from './replay-bundle';
+import { installReplayArtifactSignalCleanup } from './replay-artifact-lifecycle';
 
 const temporaryPaths: string[] = [];
 
@@ -101,18 +103,126 @@ describe('analysis V2 replay bundle', () => {
         const keyPath = join(directory, 'partial.key');
         const bundlePath = join(directory, 'partial.enc');
         const untouchedPath = join(directory, 'untouched');
-        await createReplayKeyFile(keyPath);
+        const ownedKey = await createReplayKeyFile(keyPath);
         await writeFile(untouchedPath, 'keep', { mode: 0o600 });
 
         await removeOwnedReplayArtifacts({
             bundlePath,
             keyPath,
-            ownedBundle: false,
-            ownedKey: true,
+            ownedKey,
         });
 
         await expect(stat(keyPath)).rejects.toThrow();
         await expect(readFile(untouchedPath, 'utf8')).resolves.toBe('keep');
+    });
+
+    it('unlinks its securely-created key when writing fails before ownership is returned', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'partial.key');
+
+        await expect(createReplayKeyFile(keyPath, {
+            writeFile: async (handle, bytes) => {
+                await handle.writeFile(bytes);
+                throw new Error('injected write failure');
+            },
+        })).rejects.toThrow('injected write failure');
+
+        await expect(stat(keyPath)).rejects.toThrow();
+    });
+
+    it('unlinks its securely-created key when close fails before ownership is returned', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'partial-close.key');
+
+        await expect(createReplayKeyFile(keyPath, {
+            close: async () => {
+                throw new Error('injected close failure');
+            },
+        })).rejects.toThrow('injected close failure');
+
+        await expect(stat(keyPath)).rejects.toThrow();
+    });
+
+    it('cleans an active partial creation when the signal lifecycle runs', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'signal.key');
+        const scope = createReplayArtifactCreationScope();
+        const handlers = new Map<string, () => void>();
+        const exit = vi.fn();
+        const processLike = {
+            once: vi.fn((signal: string, handler: () => void) => {
+                handlers.set(signal, handler);
+                return processLike;
+            }),
+            off: vi.fn((signal: string) => {
+                handlers.delete(signal);
+                return processLike;
+            }),
+            exit,
+        };
+        const uninstall = installReplayArtifactSignalCleanup({
+            cleanup: () => scope.cleanupActive(),
+            processLike,
+        });
+
+        let releaseWrite: (() => void) | undefined;
+        const writing = createReplayKeyFile(keyPath, {
+            scope,
+            writeFile: async () => new Promise<void>(resolve => {
+                releaseWrite = resolve;
+            }),
+        });
+        await vi.waitFor(() => expect(releaseWrite).toBeTypeOf('function'));
+
+        handlers.get('SIGTERM')?.();
+        await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(143));
+        releaseWrite?.();
+
+        await expect(writing).rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_INTERRUPTED');
+        await expect(stat(keyPath)).rejects.toThrow();
+        uninstall();
+    });
+
+    it('does not delete a raced bundle when exclusive creation returns EEXIST', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'race.key');
+        const bundlePath = join(directory, 'race.enc');
+        const ownedKey = await createReplayKeyFile(keyPath);
+        await writeFile(bundlePath, 'raced bundle', { mode: 0o600 });
+
+        await expect(writeReplayBundle({
+            bundle: bundle(),
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toMatchObject({ code: 'EEXIST' });
+        await removeOwnedReplayArtifacts({ bundlePath, keyPath, ownedKey });
+
+        await expect(readFile(bundlePath, 'utf8')).resolves.toBe('raced bundle');
+        await expect(stat(keyPath)).rejects.toThrow();
+    });
+
+    it('does not delete a replacement inode using an ownership token for the original', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'race.key');
+        const movedOwnedPath = join(directory, 'owned-away.key');
+        const bundlePath = join(directory, 'race.enc');
+        const ownedKey = await createReplayKeyFile(keyPath);
+        await rename(keyPath, movedOwnedPath);
+        await writeFile(keyPath, 'raced key', { mode: 0o600 });
+
+        await removeOwnedReplayArtifacts({
+            bundlePath,
+            keyPath,
+            ownedKey,
+        });
+
+        await expect(readFile(keyPath, 'utf8')).resolves.toBe('raced key');
     });
 
     it('removes an exact expired pair but preserves an unexpired pair', async () => {

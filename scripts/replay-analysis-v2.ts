@@ -6,6 +6,7 @@ import { AI_STAGE_POLICY_LATEST_VERSION } from '../lib/services/ai/stage-policy'
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
 import { captureAnalysisV2ReplayBundle } from '../lib/services/analysis/replay/replay-capture';
 import {
+    createReplayArtifactCreationScope,
     createReplayKeyFile,
     readReplayBundle,
     removeExpiredReplayArtifacts,
@@ -33,8 +34,20 @@ function values(args: readonly string[]): Map<string, string> {
     return parsed;
 }
 
+const VALUELESS_FLAGS = new Set([
+    '--capture',
+    '--cleanup',
+    '--run',
+    '--dry-run',
+    '--paid-ai',
+    '--confirm-paid-ai',
+]);
+
 export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const parsed = values(args);
+    if ([...parsed].some(([key, value]) => VALUELESS_FLAGS.has(key) && value !== '')) {
+        throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    }
     const bundlePath = parsed.get('--bundle')?.trim();
     const keyPath = parsed.get('--key')?.trim();
     if (!bundlePath || !keyPath) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
@@ -84,12 +97,15 @@ async function exists(path: string): Promise<boolean> {
 
 async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }>): Promise<void> {
     const started = performance.now();
-    const ownership = { ownedBundle: false, ownedKey: false };
-    const cleanup = () => removeOwnedReplayArtifacts({
+    const ownership: Parameters<typeof removeOwnedReplayArtifacts>[0] = {
         bundlePath: options.bundlePath,
         keyPath: options.keyPath,
-        ...ownership,
-    });
+    };
+    const creationScope = createReplayArtifactCreationScope();
+    const cleanup = async () => {
+        await creationScope.cleanupActive();
+        await removeOwnedReplayArtifacts(ownership);
+    };
     const [bundleExists, keyExists] = await Promise.all([
         exists(options.bundlePath),
         exists(options.keyPath),
@@ -129,10 +145,15 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             },
             normalizeMedia: createAnalysisV2SelectedMediaNormalizer(),
         });
-        await createReplayKeyFile(options.keyPath);
-        ownership.ownedKey = true;
-        ownership.ownedBundle = true;
-        await writeReplayBundle({ bundle, bundlePath: options.bundlePath, keyPath: options.keyPath });
+        ownership.ownedKey = await createReplayKeyFile(options.keyPath, {
+            scope: creationScope,
+        });
+        ownership.ownedBundle = await writeReplayBundle({
+            bundle,
+            bundlePath: options.bundlePath,
+            keyPath: options.keyPath,
+            artifactWrite: { scope: creationScope },
+        });
         const bytes = (await stat(options.bundlePath)).size;
         process.stdout.write(`${JSON.stringify({
             status: 'ok',
