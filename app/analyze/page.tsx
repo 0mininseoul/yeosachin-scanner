@@ -16,6 +16,7 @@ import {
     emitCurrentEarlybirdPricingEvent,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
+    isCurrentEarlybirdCheckoutStatusCta,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
     pendingEarlybirdCheckoutStatusPath,
@@ -53,6 +54,7 @@ interface CheckoutStatusCta {
     path: string;
     preflightId: string;
     targetInstagramId: string | null;
+    planId: PlanId;
     navigating: boolean;
 }
 
@@ -122,9 +124,11 @@ export default function AnalyzePage() {
             plan => isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
         )
         : false;
-    const activeCheckoutStatusCta = checkoutStatusCta
-        && checkoutStatusCta.preflightId === readyPreflight?.preflightId
-        && checkoutStatusCta.targetInstagramId === targetInstagramId
+    const activeCheckoutStatusCta = isCurrentEarlybirdCheckoutStatusCta(checkoutStatusCta, {
+        preflightId: readyPreflight?.preflightId,
+        targetInstagramId,
+        planId: effectiveSelectedPlan,
+    })
         ? checkoutStatusCta
         : null;
 
@@ -361,6 +365,7 @@ export default function AnalyzePage() {
                         path: pendingStatusPath,
                         preflightId: readyPreflight.preflightId,
                         targetInstagramId,
+                        planId: effectiveSelectedPlan,
                         navigating: false,
                     });
                     setError('기존 결제 처리 상태를 먼저 확인해주세요.');

@@ -7,6 +7,7 @@ import {
     emitCurrentEarlybirdPricingEvent,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
+    isCurrentEarlybirdCheckoutStatusCta,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
     pendingEarlybirdCheckoutStatusPath,
@@ -526,6 +527,33 @@ describe('earlybird analyze UI state', () => {
         }, 'plus')).toBeNull();
     });
 
+    it('hides a late Standard pending-checkout CTA after the user switches plans', () => {
+        // Submit Standard, select Basic/Plus while its request is pending, then
+        // receive the exact 409. The stale Standard CTA must not render under
+        // the newer selection.
+        const lateStandardCta = {
+            preflightId: '10000000-0000-4000-8000-000000000001',
+            targetInstagramId: 'pricing_target',
+            planId: 'standard' as const,
+        };
+
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'basic',
+        })).toBe(false);
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'plus',
+        })).toBe(false);
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'standard',
+        })).toBe(true);
+    });
+
     it.each([
         [
             409,
@@ -607,12 +635,8 @@ describe('earlybird analyze UI state', () => {
             new URL('../../../app/analyze/page.tsx', import.meta.url),
             'utf8'
         );
-        expect(source).toContain(
-            'checkoutStatusCta.preflightId === readyPreflight?.preflightId'
-        );
-        expect(source).toContain(
-            'checkoutStatusCta.targetInstagramId === targetInstagramId'
-        );
+        expect(source).toContain('isCurrentEarlybirdCheckoutStatusCta(checkoutStatusCta, {');
+        expect(source).toContain('planId: effectiveSelectedPlan');
         expect(source).not.toMatch(
             /useEffect\(\(\) => \{\s*setCheckoutStatus(?:Path|Navigating)/
         );

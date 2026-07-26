@@ -45,6 +45,33 @@ export interface EarlybirdCheckoutRecoveryGuard {
     inFlight: boolean;
 }
 
+/**
+ * A late checkout response must remain bound to the exact paid-plan selection
+ * that submitted it.  Otherwise a stale Standard conflict can offer a resume
+ * action after the user has already switched to Basic or Plus.
+ */
+export interface EarlybirdCheckoutStatusCtaBinding {
+    preflightId: string;
+    targetInstagramId: string | null;
+    planId: PlanId;
+}
+
+export function isCurrentEarlybirdCheckoutStatusCta(
+    cta: EarlybirdCheckoutStatusCtaBinding | null,
+    current: {
+        preflightId: string | null | undefined;
+        targetInstagramId: string | null;
+        planId: PlanId | null;
+    }
+): boolean {
+    return Boolean(
+        cta
+        && cta.preflightId === current.preflightId
+        && cta.targetInstagramId === current.targetInstagramId
+        && cta.planId === current.planId
+    );
+}
+
 interface PendingEarlybirdRecoveryDependencies {
     request: (
         input: RequestInfo | URL,
