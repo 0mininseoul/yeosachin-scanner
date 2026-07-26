@@ -33,6 +33,7 @@ import {
     aiStagePolicySupports,
     assertSupportedAiStagePolicyVersion,
     type AiStagePolicyCapability,
+    type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
 import type {
@@ -186,6 +187,7 @@ export interface AnalysisV2ProfileAiOutcome {
             carouselContext: number;
         }>;
     }>;
+    aiStagePolicyVersion?: AiStagePolicyVersion;
     inputQualityPolicy?: 'input-quality-v2.8';
     /** v2.8 screened context consumed by the existing v2.4 risk policy. */
     accountContextOverride?: AccountContext;
@@ -356,6 +358,7 @@ export interface AnalysisV2AiScoringStageStore {
         claimToken: string;
         jobInputHash: string;
         batch: number;
+        aiStagePolicyVersion?: AiStagePolicyVersion;
         outcomes: readonly AnalysisV2ProfileAiOutcome[];
     }): Promise<AnalysisV2ProfileAiBatchCheckpoint>;
     loadProfileAiOutcomes(input: AnalysisV2StageReadClaim):
@@ -908,19 +911,50 @@ function screenedAccountContext(
     exactV28Policy = false,
 ): AccountContext {
     const modelContext = outcome.feature?.features.accountContext ?? 'uncertain';
-    const hasAnyV28Field = outcome.inputQualityPolicy !== undefined
-        || outcome.mediaSelectionProvenance !== undefined
-        || outcome.accountContextOverride !== undefined
-        || outcome.officialScreeningStatus !== undefined
-        || outcome.officialExclusionReason !== undefined;
-    if (!exactV28Policy && !hasAnyV28Field) return modelContext;
+    // Legacy requests intentionally ignore v2.8-only fields. Exact request policy,
+    // not field sniffing, chooses the semantic branch.
+    if (!exactV28Policy) return modelContext;
     const hasCompleteV28Provenance =
-        outcome.inputQualityPolicy === 'input-quality-v2.8'
+        outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        && outcome.inputQualityPolicy === 'input-quality-v2.8'
         && outcome.mediaSelectionProvenance !== undefined
         && outcome.accountContextOverride !== undefined
         && outcome.officialScreeningStatus !== undefined
         && outcome.officialExclusionReason !== undefined;
     if (!hasCompleteV28Provenance) return 'uncertain';
+    if (!outcome.profile) return 'uncertain';
+    let expectedMedia: AnalysisV2ProfileAiOutcome['mediaSelectionProvenance'];
+    try {
+        expectedMedia = mediaSelectionProvenance(mediaPolicy(outcome.profile, true));
+    } catch {
+        return 'uncertain';
+    }
+    if (
+        expectedMedia === undefined
+        || canonicalJson(expectedMedia) !== canonicalJson(outcome.mediaSelectionProvenance)
+    ) {
+        return 'uncertain';
+    }
+    const canonicalScreening = screenAnalysisV2OfficialAccount({
+        modelAccountContext: modelContext,
+        fullName: outcome.profile.fullName ?? null,
+        bio: outcome.profile.bio ?? null,
+    });
+    const canonicalContext = modelContext === 'official_group_or_brand'
+        ? canonicalScreening.accountContext
+        : modelContext;
+    const canonicalStatus = modelContext !== 'official_group_or_brand'
+        ? 'not_model_official'
+        : canonicalScreening.exclusionReason
+            ? 'corroborated_official'
+            : 'uncorroborated_official';
+    if (
+        outcome.accountContextOverride !== canonicalContext
+        || outcome.officialScreeningStatus !== canonicalStatus
+        || outcome.officialExclusionReason !== canonicalScreening.exclusionReason
+    ) {
+        return 'uncertain';
+    }
     if (outcome.officialScreeningStatus === 'not_model_official') {
         return modelContext !== 'official_group_or_brand'
             && outcome.accountContextOverride === modelContext
@@ -946,7 +980,10 @@ function screenedAccountContext(
     return 'uncertain';
 }
 
-function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2VerifiedFemaleFeatureRow {
+function publicFeatureRow(
+    outcome: AnalysisV2ProfileAiOutcome,
+    exactV28Policy = false,
+): AnalysisV2VerifiedFemaleFeatureRow {
     if (
         outcome.status === 'fetch_unavailable'
         || outcome.status === 'media_unavailable'
@@ -1010,7 +1047,7 @@ function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2Verifi
                 isBusinessAccount: [
                     'individual_creator',
                     'official_group_or_brand',
-                ].includes(screenedAccountContext(outcome)),
+                ].includes(screenedAccountContext(outcome, exactV28Policy)),
                 featurePartnerEvidenceStrong: strongFeaturePartnerEvidence(outcome.feature),
                 oneLineOverview: outcome.feature.features.oneLineOverview,
             }
@@ -1719,6 +1756,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 mediaBundlePersisted,
                                 ...(selectionProvenance
                                     ? {
+                                        aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const,
                                         mediaSelectionProvenance: selectionProvenance,
                                         inputQualityPolicy: 'input-quality-v2.8' as const,
                                     }
@@ -1767,12 +1805,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 ...checkpointClaim(context),
                 batch: context.job.batch!,
                 analyzedCount: outcomes.length,
-                rows: outcomes.map(publicFeatureRow),
+                rows: outcomes.map(outcome => publicFeatureRow(outcome, inputQualityV28)),
             });
             assertCheckpointCount(publicCheckpoint, outcomes.length, 'PROFILE_AI');
             const stored = await dependencies.stageStore.checkpointProfileAiBatch({
                 ...checkpointClaim(context),
                 batch: context.job.batch!,
+                ...(inputQualityV28
+                    ? { aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const }
+                    : {}),
                 outcomes,
             });
             if (stored.itemCount !== topology.itemCount) {

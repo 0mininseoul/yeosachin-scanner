@@ -134,11 +134,15 @@ const AI_STAGE_POLICIES_V27 = Object.freeze({
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
 /**
- * Keep the v2.7 objects and their prompt metadata untouched. v2.8 changes only the two copy
- * producing stages; all scheduling and model choices deliberately inherit from v2.7.
+ * Keep the v2.7 objects and their prompt metadata untouched. v2.8 versions only prompts whose
+ * bytes changed; all scheduling, model choices, schemas, and thresholds inherit from v2.7.
  */
 const AI_STAGE_POLICIES_V28 = Object.freeze({
     ...AI_STAGE_POLICIES_V27,
+    genderTriage: Object.freeze({
+        ...AI_STAGE_POLICIES_V27.genderTriage,
+        promptVersion: 'gender-triage-v3',
+    }),
     featureAnalysis: Object.freeze({
         ...AI_STAGE_POLICIES_V27.featureAnalysis,
         promptVersion: 'feature-analysis-v4',

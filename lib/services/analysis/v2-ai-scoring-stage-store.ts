@@ -5,7 +5,12 @@ import {
     genderTriageResultSchema,
     partnerSafetyResultSchema,
 } from '@/lib/services/ai/v2-staged-analysis';
-import { analysisV2CheckpointProfileSchema } from './v2-profile-fetch-store';
+import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
+import {
+    analysisV2CheckpointProfileSchema,
+    type AnalysisV2CheckpointProfile,
+} from './v2-profile-fetch-store';
+import { screenAnalysisV2OfficialAccount } from './v2-official-account-screening';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     AnalysisV2AiScoringStageStore,
@@ -125,6 +130,38 @@ const mediaSelectionProvenanceSchema = z.object({
     }
 });
 
+function canonicalV28MediaSelectionProvenance(profile: AnalysisV2CheckpointProfile) {
+    const latestPosts = profile.latestPosts ?? [];
+    if (
+        !profile.isPrivate
+        && latestPosts.length < Math.min(profile.postsCount, 8)
+    ) {
+        return null;
+    }
+    const selected = selectAnalysisMedia({
+        profile: profile.profilePicUrl
+            ? { id: profile.username, imageUrl: profile.profilePicUrl }
+            : undefined,
+        posts: latestPosts,
+    }, { carouselDiversity: true });
+    if (selected.carouselCoverage.incompletePostIds.length > 0) return null;
+    const selectedKinds = {
+        profile: 0,
+        postRepresentative: 0,
+        carouselContext: 0,
+    };
+    for (const media of selected.feature.media) {
+        if (media.role === 'profile') selectedKinds.profile += 1;
+        else if (media.role === 'post_representative') selectedKinds.postRepresentative += 1;
+        else if (media.role === 'carousel_context') selectedKinds.carouselContext += 1;
+    }
+    return {
+        triageSelectedCount: selected.triage.media.length,
+        featureSelectedCount: selected.feature.media.length,
+        selectedKinds,
+    };
+}
+
 const captionSchema = z.object({
     evidenceRefId: z.string().trim().min(1).max(240),
     selectionId: selectionIdSchema,
@@ -152,6 +189,7 @@ const profileOutcomeSchema = z.object({
     genderResolutionOperationKey: resolverOperationKeySchema.nullable().optional(),
     genderResolutionResultHash: hashSchema.nullable().optional(),
     mediaBundlePersisted: z.boolean(),
+    aiStagePolicyVersion: z.literal('ai-stage-policy-v2.8').optional(),
     mediaSelectionProvenance: mediaSelectionProvenanceSchema.optional(),
     inputQualityPolicy: z.literal('input-quality-v2.8').optional(),
     accountContextOverride: accountContextSchema.optional(),
@@ -277,18 +315,25 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Feature outcome is incomplete.' });
     }
-    const v28InputQuality = value.inputQualityPolicy !== undefined
+    const hasV28Contamination = value.inputQualityPolicy !== undefined
         || value.mediaSelectionProvenance !== undefined
         || value.accountContextOverride !== undefined
         || value.officialScreeningStatus !== undefined
         || value.officialExclusionReason !== undefined;
-    if (v28InputQuality && !value.feature) {
+    const exactV28InputQuality = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8';
+    if (!exactV28InputQuality && hasV28Contamination) {
+        context.addIssue({
+            code: 'custom',
+            message: 'v2.8 input-quality fields require the exact v2.8 AI-stage policy.',
+        });
+    }
+    if (exactV28InputQuality && !value.feature) {
         context.addIssue({
             code: 'custom',
             message: 'Media selection provenance requires completed feature analysis.',
         });
     }
-    if (v28InputQuality && (
+    if (exactV28InputQuality && (
         value.inputQualityPolicy !== 'input-quality-v2.8'
         || value.mediaSelectionProvenance === undefined
         || value.accountContextOverride === undefined
@@ -300,24 +345,32 @@ const profileOutcomeSchema = z.object({
             message: 'v2.8 input-quality provenance is incomplete.',
         });
     }
-    if (v28InputQuality && value.feature) {
+    if (exactV28InputQuality && value.feature && value.profile) {
         const modelContext = value.feature.features.accountContext;
-        const coherentNonOfficial = modelContext !== 'official_group_or_brand'
-            && value.officialScreeningStatus === 'not_model_official'
-            && value.accountContextOverride === modelContext
-            && value.officialExclusionReason === null;
-        const coherentOfficial = modelContext === 'official_group_or_brand'
-            && value.officialScreeningStatus === 'corroborated_official'
-            && value.accountContextOverride === 'official_group_or_brand'
-            && value.officialExclusionReason === 'model_group_context_plus_profile_signals';
-        const coherentUncertain = modelContext === 'official_group_or_brand'
-            && value.officialScreeningStatus === 'uncorroborated_official'
-            && value.accountContextOverride === 'uncertain'
-            && value.officialExclusionReason === null;
-        if (!coherentNonOfficial && !coherentOfficial && !coherentUncertain) {
+        const screening = screenAnalysisV2OfficialAccount({
+            modelAccountContext: modelContext,
+            fullName: value.profile.fullName ?? null,
+            bio: value.profile.bio ?? null,
+        });
+        const expectedContext = modelContext === 'official_group_or_brand'
+            ? screening.accountContext
+            : modelContext;
+        const expectedStatus = modelContext !== 'official_group_or_brand'
+            ? 'not_model_official'
+            : screening.exclusionReason
+                ? 'corroborated_official'
+                : 'uncorroborated_official';
+        const expectedMedia = canonicalV28MediaSelectionProvenance(value.profile);
+        if (
+            value.accountContextOverride !== expectedContext
+            || value.officialScreeningStatus !== expectedStatus
+            || value.officialExclusionReason !== screening.exclusionReason
+            || expectedMedia === null
+            || JSON.stringify(value.mediaSelectionProvenance) !== JSON.stringify(expectedMedia)
+        ) {
             context.addIssue({
                 code: 'custom',
-                message: 'v2.8 official screening provenance is inconsistent.',
+                message: 'v2.8 input-quality provenance does not match persisted source evidence.',
             });
         }
     }
@@ -497,8 +550,28 @@ const narrativeRowSchema = z.object({
 });
 
 const profilePayloadSchema = z.object({
+    aiStagePolicyVersion: z.literal('ai-stage-policy-v2.8').optional(),
     outcomes: z.array(profileOutcomeSchema).min(1).max(30),
-}).strict();
+}).strict().superRefine((value, context) => {
+    const exactV28 = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8';
+    for (const [index, outcome] of value.outcomes.entries()) {
+        const hasFeature = outcome.feature !== null;
+        if (exactV28 && hasFeature && outcome.aiStagePolicyVersion !== 'ai-stage-policy-v2.8') {
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.8 feature outcome is not bound to the batch policy.',
+            });
+        }
+        if (!exactV28 && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8') {
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.8 outcome requires a v2.8 batch policy.',
+            });
+        }
+    }
+});
 const primaryPayloadSchema = z.object({
     candidates: z.array(primaryCandidateSchema).max(900),
 }).strict();
@@ -719,12 +792,18 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointProfileAiBatch(input) {
             const outcomes = profileOutcomeSchema.array().min(1).max(30).parse(input.outcomes);
             uniqueCandidates(outcomes);
+            const payload = {
+                ...(input.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+                    ? { aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const }
+                    : {}),
+                outcomes,
+            };
             const envelope = await checkpoint(
                 input,
                 'profile_ai_batch',
                 input.batch,
                 outcomes.length,
-                { outcomes }
+                payload,
             );
             return {
                 revision: envelope.revision,

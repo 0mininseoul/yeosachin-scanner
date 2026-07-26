@@ -204,6 +204,12 @@ describe('V2 AI stage policy', () => {
             promptVersion: 'feature-analysis-v4',
             concurrency: 4,
         });
+        expect(getAiStagePolicy('ai-stage-policy-v2.8', 'genderTriage')).toMatchObject({
+            model: 'gemini-3.1-flash-lite',
+            promptVersion: 'gender-triage-v3',
+            schemaVersion: 2,
+            concurrency: 4,
+        });
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'highRiskNarrative')).toMatchObject({
             promptVersion: 'high-risk-narrative-v3',
             concurrency: 3,
@@ -212,6 +218,8 @@ describe('V2 AI stage policy', () => {
             .toBe(JSON.stringify(V26_POLICY_SNAPSHOT));
         expect(getAiStagePolicy('ai-stage-policy-v2.7', 'featureAnalysis').promptVersion)
             .toBe('feature-analysis-v3');
+        expect(getAiStagePolicy('ai-stage-policy-v2.7', 'genderTriage').promptVersion)
+            .toBe('gender-triage-v2');
     });
 
     it('lowers only v2.7 scheduling concurrency for rate-limited early stages', () => {

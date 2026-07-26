@@ -986,8 +986,12 @@ describe('V2 staged AI services', () => {
 
         expect(createGenderTriageResultIdentity(triage, AI_STAGE_POLICY_V28_VERSION).operationKey)
             .not.toBe(createGenderTriageResultIdentity({ media: media() }, AI_STAGE_POLICY_V28_VERSION).operationKey);
+        expect(createGenderTriageResultIdentity(triage, AI_STAGE_POLICY_V28_VERSION).promptVersion)
+            .toBe('gender-triage-v3');
         expect(createGenderTriageResultIdentity(triage, 'ai-stage-policy-v2.7').operationKey)
             .toBe(createGenderTriageResultIdentity({ media: media() }, 'ai-stage-policy-v2.7').operationKey);
+        expect(createGenderTriageResultIdentity(triage, 'ai-stage-policy-v2.7').promptVersion)
+            .toBe('gender-triage-v2');
         expect(createFeatureAnalysisResultIdentity(feature, 'ai-stage-policy-v2.7').operationKey)
             .toBe(createFeatureAnalysisResultIdentity(featureInput(), 'ai-stage-policy-v2.7').operationKey);
         expect(createFeatureAnalysisResultIdentity(feature, AI_STAGE_POLICY_V28_VERSION).operationKey)

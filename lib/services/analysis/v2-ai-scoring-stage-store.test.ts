@@ -181,6 +181,7 @@ function v28ProfileOutcome(): AnalysisV2ProfileAiOutcome {
         genderResolutionOperationKey: null,
         genderResolutionResultHash: null,
         mediaBundlePersisted: true,
+        aiStagePolicyVersion: 'ai-stage-policy-v2.8',
         inputQualityPolicy: 'input-quality-v2.8',
         mediaSelectionProvenance: {
             triageSelectedCount: 1,
@@ -199,6 +200,7 @@ function v28ProfileOutcome(): AnalysisV2ProfileAiOutcome {
 
 describe('analysis V2 AI/scoring stage store', () => {
     const v28FieldNames = [
+        'aiStagePolicyVersion',
         'inputQualityPolicy',
         'mediaSelectionProvenance',
         'accountContextOverride',
@@ -212,7 +214,7 @@ describe('analysis V2 AI/scoring stage store', () => {
             ...claim('track:profile-ai:batch:0'),
             batch: 0,
             outcomes: [outcome],
-        })).rejects.toThrow('v2.8 input-quality provenance is incomplete');
+        })).rejects.toThrow('v2.8 input-quality');
     }
 
     it.each(v28FieldNames)(
@@ -240,6 +242,65 @@ describe('analysis V2 AI/scoring stage store', () => {
         delete outcome.inputQualityPolicy;
         delete outcome.mediaSelectionProvenance;
         await expectIncompleteV28Rejected(outcome);
+    });
+
+    it('rejects forged coherent provenance when persisted source evidence disagrees', async () => {
+        const outcome = v28ProfileOutcome();
+        outcome.profile = {
+            ...outcome.profile!,
+            fullName: 'Personal photo diary',
+            bio: 'coffee and weekend walks',
+        };
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [outcome],
+        })).rejects.toThrow(
+            'v2.8 input-quality provenance does not match persisted source evidence'
+        );
+    });
+
+    it('binds a valid v2.8 outcome to the exact persisted batch policy', async () => {
+        const outcome = v28ProfileOutcome();
+        const payload = {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const,
+            outcomes: [outcome],
+        };
+        const fake = clientWith({
+            data: {
+                stageKind: 'profile_ai_batch',
+                batch: 0,
+                revision: 1,
+                resultHash: digest('profile-v28'),
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+            outcomes: [outcome],
+        })).resolves.toMatchObject({ itemCount: 1 });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({
+                p_payload: payload,
+            }),
+        );
+    });
+
+    it('rejects v2.8 outcome provenance under a legacy or missing batch policy', async () => {
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [v28ProfileOutcome()],
+        })).rejects.toThrow('v2.8 outcome requires a v2.8 batch policy');
     });
 
     it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {

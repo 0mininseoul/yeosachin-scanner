@@ -745,6 +745,7 @@ describe('V2 AI and scoring executors', () => {
         expect(new Set(vi.mocked(deps.normalizeMedia).mock.calls.map(([row]) => row.selectionId)).size)
             .toBe(3);
         expect(memoryState.outcomes[0]).toMatchObject({
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
             inputQualityPolicy: 'input-quality-v2.8',
             accountContextOverride: 'official_group_or_brand',
             officialScreeningStatus: 'corroborated_official',
@@ -3006,16 +3007,22 @@ describe('V2 AI and scoring executors', () => {
 
     it('feeds only corroborated v2.8 official screening into the unchanged v2.4 ranking input', async () => {
         const provenance = {
-            triageSelectedCount: 1,
-            featureSelectedCount: 1,
+            triageSelectedCount: 3,
+            featureSelectedCount: 3,
             selectedKinds: {
                 profile: 1,
-                postRepresentative: 0,
+                postRepresentative: 2,
                 carouselContext: 0,
             },
         } as const;
         const screened = verifiedOutcome('band.account');
+        screened.profile = {
+            ...screened.profile!,
+            fullName: 'Black Cherry Club',
+            bio: 'Single [콜드브루] Out now',
+        };
         screened.feature!.features.accountContext = 'official_group_or_brand';
+        screened.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
         screened.inputQualityPolicy = 'input-quality-v2.8';
         screened.mediaSelectionProvenance = provenance;
         screened.accountContextOverride = 'official_group_or_brand';
@@ -3023,6 +3030,7 @@ describe('V2 AI and scoring executors', () => {
         screened.officialExclusionReason = 'model_group_context_plus_profile_signals';
         const uncorroborated = verifiedOutcome('person.club');
         uncorroborated.feature!.features.accountContext = 'official_group_or_brand';
+        uncorroborated.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
         uncorroborated.inputQualityPolicy = 'input-quality-v2.8';
         uncorroborated.mediaSelectionProvenance = provenance;
         uncorroborated.accountContextOverride = 'uncertain';
@@ -3030,6 +3038,7 @@ describe('V2 AI and scoring executors', () => {
         uncorroborated.officialExclusionReason = null;
         const missingCheckpoint = verifiedOutcome('partial.checkpoint');
         missingCheckpoint.feature!.features.accountContext = 'official_group_or_brand';
+        missingCheckpoint.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
         missingCheckpoint.inputQualityPolicy = 'input-quality-v2.8';
         missingCheckpoint.mediaSelectionProvenance = provenance;
         const missingEntireCheckpoint = verifiedOutcome('missing.checkpoint');
@@ -3040,6 +3049,15 @@ describe('V2 AI and scoring executors', () => {
         screeningFieldsOnly.officialScreeningStatus = 'corroborated_official';
         screeningFieldsOnly.officialExclusionReason =
             'model_group_context_plus_profile_signals';
+        const forgedCoherent = verifiedOutcome('forged.coherent');
+        forgedCoherent.feature!.features.accountContext = 'official_group_or_brand';
+        forgedCoherent.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
+        forgedCoherent.inputQualityPolicy = 'input-quality-v2.8';
+        forgedCoherent.mediaSelectionProvenance = provenance;
+        forgedCoherent.accountContextOverride = 'official_group_or_brand';
+        forgedCoherent.officialScreeningStatus = 'corroborated_official';
+        forgedCoherent.officialExclusionReason =
+            'model_group_context_plus_profile_signals';
         const memoryState = memory();
         memoryState.outcomes = [
             screened,
@@ -3047,6 +3065,7 @@ describe('V2 AI and scoring executors', () => {
             missingCheckpoint,
             missingEntireCheckpoint,
             screeningFieldsOnly,
+            forgedCoherent,
         ];
         memoryState.primary = {
             revision: 1,
@@ -3067,6 +3086,7 @@ describe('V2 AI and scoring executors', () => {
                         missingCheckpoint.instagramId,
                         missingEntireCheckpoint.instagramId,
                         screeningFieldsOnly.instagramId,
+                        forgedCoherent.instagramId,
                     ],
                 })),
                 loadTargetEvidence: vi.fn(async () => targetEvidence()),
@@ -3086,6 +3106,7 @@ describe('V2 AI and scoring executors', () => {
             { username: 'partial.checkpoint', accountContext: 'uncertain' },
             { username: 'missing.checkpoint', accountContext: 'uncertain' },
             { username: 'screening.fields.only', accountContext: 'uncertain' },
+            { username: 'forged.coherent', accountContext: 'uncertain' },
         ]);
     });
 
@@ -3095,6 +3116,9 @@ describe('V2 AI and scoring executors', () => {
     ])('preserves clean legacy official context under %s', async aiStagePolicyVersion => {
         const legacyOfficial = verifiedOutcome('legacy.official');
         legacyOfficial.feature!.features.accountContext = 'official_group_or_brand';
+        legacyOfficial.accountContextOverride = 'uncertain';
+        legacyOfficial.officialScreeningStatus = 'uncorroborated_official';
+        legacyOfficial.officialExclusionReason = null;
         const memoryState = memory();
         memoryState.outcomes = [legacyOfficial];
         memoryState.primary = {

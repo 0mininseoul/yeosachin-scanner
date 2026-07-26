@@ -10,7 +10,19 @@ describe('screenAnalysisV2OfficialAccount', () => {
         })).toMatchObject({
             accountContext: 'official_group_or_brand',
             exclusionReason: 'model_group_context_plus_profile_signals',
-            profileSignalCount: 3,
+            profileSignalCount: 4,
+        });
+    });
+
+    it('corroborates the reported band fixture from only club plus release evidence', () => {
+        expect(screenAnalysisV2OfficialAccount({
+            modelAccountContext: 'official_group_or_brand',
+            fullName: 'Black Cherry Club',
+            bio: 'Single [콜드브루] Out now',
+        })).toEqual({
+            accountContext: 'official_group_or_brand',
+            exclusionReason: 'model_group_context_plus_profile_signals',
+            profileSignalCount: 2,
         });
     });
 
@@ -23,6 +35,25 @@ describe('screenAnalysisV2OfficialAccount', () => {
             accountContext: 'uncertain',
             exclusionReason: null,
             profileSignalCount: 0,
+        });
+    });
+
+    it.each([
+        ['Running Club', 'weekend photos and coffee'],
+        ['Book Club', 'my favorite album is on repeat'],
+        ['Lunch Club', 'single person, not a group'],
+        ['Black Cherry Clubhouse', 'Single [콜드브루] Out now'],
+    ])('does not turn a personal club phrase into organization evidence: %s', (
+        fullName,
+        bio,
+    ) => {
+        expect(screenAnalysisV2OfficialAccount({
+            modelAccountContext: 'official_group_or_brand',
+            fullName,
+            bio,
+        })).toMatchObject({
+            accountContext: 'uncertain',
+            exclusionReason: null,
         });
     });
 
