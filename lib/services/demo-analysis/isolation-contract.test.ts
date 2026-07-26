@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const migration = readFileSync(new URL('../../../supabase/migrations/20260726050000_add_demo_analysis_runs.sql', import.meta.url), 'utf8');
 const waitlist = readFileSync(new URL('../../../app/api/earlybird/waitlist/route.ts', import.meta.url), 'utf8');
-const expiryMigration = readFileSync(new URL('../../../supabase/migrations/20260727010000_expire_demo_analysis_runs.sql', import.meta.url), 'utf8');
+const expiryMigration = readFileSync(new URL('../../../supabase/migrations/20260727010100_expire_demo_analysis_runs.sql', import.meta.url), 'utf8');
 
 describe('demo persistence isolation contract', () => {
     it('keeps the demo migration service-only and out of production/commercial domains', () => {
