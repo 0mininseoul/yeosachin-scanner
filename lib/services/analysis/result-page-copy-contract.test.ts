@@ -45,6 +45,15 @@ describe('result page pagination copy contract', () => {
         expect(resultPage).toContain('<row.Icon aria-hidden="true"');
     });
 
+    it('omits the screened-count header while retaining the gender breakdown and account tabs', () => {
+        expect(resultPage).not.toContain('판독 {counts.screened.toLocaleString()}명');
+        expect(resultPage).toContain('<GenderRatioBreakdown gr={gr} />');
+        expect(resultPage).toContain("label: '공개 계정'");
+        expect(resultPage).toContain('summary.v2.publicMutuals.toLocaleString()');
+        expect(resultPage).toContain("label: '비공개 계정'");
+        expect(resultPage).toContain('summary.v2.privateMutuals.toLocaleString()');
+    });
+
     it('keeps the signed image proxy boundary for profile images', () => {
         expect(resultPage).toContain("url.startsWith('/api/image-proxy?')");
     });

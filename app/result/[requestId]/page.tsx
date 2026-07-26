@@ -698,7 +698,6 @@ export default function ResultPage({ params }: PageProps) {
                             <div className="mt-3.5 border-t border-line pt-3.5">
                                 <div className="flex items-center justify-between">
                                     <span className="text-[12px] font-semibold text-fg-dim">공개 계정 판독 분포</span>
-                                    <span className="num text-[11px] text-fg-mute">판독 {counts.screened.toLocaleString()}명</span>
                                 </div>
                                 <div className="mt-2.5">
                                     <GenderRatioBreakdown gr={gr} />
