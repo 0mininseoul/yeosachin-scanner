@@ -9,7 +9,9 @@ function candidate(
     naturalDisplayScore: number,
     naturalRiskBand: RelativeRiskCandidate['naturalRiskBand'] = 'normal',
     partnerCapApplied = false,
-    naturalPublicScore = naturalDisplayScore
+    naturalPublicScore = naturalDisplayScore,
+    isInbound = false,
+    personalRiskEligible = true
 ): RelativeRiskCandidate {
     return {
         candidateId,
@@ -17,6 +19,8 @@ function candidate(
         naturalDisplayScore,
         naturalRiskBand,
         partnerCapApplied,
+        isInbound,
+        personalRiskEligible,
     };
 }
 
@@ -49,6 +53,57 @@ describe('relative risk tier policy', () => {
             .toEqual(['high_risk', 'caution', 'caution']);
         expect(result.map(row => row.displayScore)).toEqual([6.8, 4.2, 4.2]);
         expect(result.every(row => row.relativeTierApplied)).toBe(true);
+    });
+
+    it('restricts high-risk selection to inbound candidates when any are present', () => {
+        const result = assignRelativeRiskTiers([
+            candidate('candidate:no-inbound', 4.1, 'normal', false, 4.1),
+            candidate('candidate:inbound', 1.1, 'normal', false, 1.1, true),
+            candidate('candidate:other', 1, 'normal'),
+        ]);
+
+        expect(result.find(row => row.candidateId === 'candidate:inbound')?.riskBand)
+            .toBe('high_risk');
+        expect(result.find(row => row.candidateId === 'candidate:no-inbound')?.riskBand)
+            .toBe('caution');
+    });
+
+    it('uses the full eligible pool for the all-zero-inbound fallback', () => {
+        const result = assignRelativeRiskTiers([
+            candidate('candidate:top', 4.1),
+            candidate('candidate:middle', 2),
+            candidate('candidate:low', 1),
+        ]);
+
+        expect(result.find(row => row.candidateId === 'candidate:top')?.riskBand)
+            .toBe('high_risk');
+    });
+
+    it('caps quota assignment at three high and ten caution rows', () => {
+        const result = assignRelativeRiskTiers(Array.from(
+            { length: 20 },
+            (_, index) => candidate(`candidate:${index}`, 9 - index * 0.1, 'high_risk')
+        ));
+
+        expect(result.filter(row => row.riskBand === 'high_risk')).toHaveLength(3);
+        expect(result.filter(row => row.riskBand === 'caution')).toHaveLength(10);
+        expect(result.filter(row => row.riskBand === 'normal')).toHaveLength(7);
+    });
+
+    it('keeps an official account out of personal ranking and normal in presentation', () => {
+        const result = assignRelativeRiskTiers([
+            candidate('candidate:official', 9, 'high_risk', false, 9, true, false),
+            candidate('candidate:a', 3),
+            candidate('candidate:b', 2),
+            candidate('candidate:c', 1),
+        ]);
+
+        expect(result.find(row => row.candidateId === 'candidate:official')).toEqual({
+            candidateId: 'candidate:official',
+            displayScore: 4.1,
+            riskBand: 'normal',
+            relativeTierApplied: false,
+        });
     });
 
     it('keeps the two lowest eligible rows caution when every natural row is high-risk', () => {

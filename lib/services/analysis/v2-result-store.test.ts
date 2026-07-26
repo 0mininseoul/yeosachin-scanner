@@ -220,8 +220,9 @@ describe('analysis V2 result checkpoint store', () => {
         const scoreComponents = {
             candidateToTargetLikes: 0,
             candidateToTargetComments: 0,
+            candidateToTargetTagOrCaptionMention: 0,
+            targetToCandidateTagOrCaptionMention: 0,
             targetToCandidateLike: 0,
-            tagOrCaptionMention: 0,
             recentMutual: 0,
             appearanceExposure: 0,
         };
@@ -230,7 +231,7 @@ describe('analysis V2 result checkpoint store', () => {
             ...claim('track:score'),
             rows: [{
                 candidateId: 'candidate-1', components: scoreComponents,
-                preScore: 0, possibleUpperBound: 3,
+                preScore: 0, possibleUpperBound: 5,
                 recentMutualRank: null, verificationShortlistRank: null,
             }],
         });
@@ -238,7 +239,7 @@ describe('analysis V2 result checkpoint store', () => {
             ...claim('track:score'),
             rows: [{
                 candidateId: 'candidate-1', status: 'observed',
-                componentScore: 3, evidenceRefIds: ['like:post-1'],
+                componentScore: 5, evidenceRefIds: ['like:post-1'],
             }],
         });
         await store.checkpointPartnerSafety({
@@ -261,8 +262,8 @@ describe('analysis V2 result checkpoint store', () => {
                 partnerSafetyOperationKey: null, partnerSafetyResultHash: null,
                 components: scoreComponents, weakPartnerAdjustment: 0,
                 preScore: 0, rawScore: 0,
-                possibleUpperBound: 3, publicScore: 1,
-                possibleUpperPublicScore: 1.3, partnerCapApplied: false,
+                possibleUpperBound: 5, publicScore: 1,
+                possibleUpperPublicScore: 1.45, partnerCapApplied: false,
                 partnerEvidenceSelectionIds: [],
             }],
         });
@@ -334,12 +335,13 @@ describe('analysis V2 result checkpoint store', () => {
                 partnerSafetyOperationKey: null, partnerSafetyResultHash: null,
                 components: {
                     candidateToTargetLikes: 0, candidateToTargetComments: 0,
-                    targetToCandidateLike: 0, tagOrCaptionMention: 0,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0, targetToCandidateLike: 0,
                     recentMutual: 0, appearanceExposure: 0,
                 },
                 weakPartnerAdjustment: 0,
-                preScore: 0, rawScore: 0, possibleUpperBound: 3,
-                publicScore: 1, possibleUpperPublicScore: 1.3,
+                preScore: 0, rawScore: 0, possibleUpperBound: 5,
+                publicScore: 1, possibleUpperPublicScore: 1.45,
                 partnerCapApplied: false, partnerEvidenceSelectionIds: [],
             }],
         })).resolves.toMatchObject({ rowCount: 1 });
@@ -376,7 +378,7 @@ describe('analysis V2 result checkpoint store', () => {
             },
         ].map((row, index) => {
             const rawScore = (row.publicScore - 1) * 100 / 9;
-            const possibleUpperBound = rawScore + 3;
+            const possibleUpperBound = rawScore + 5;
             return {
                 ...row,
                 featuredRank: index + 1,
@@ -388,8 +390,9 @@ describe('analysis V2 result checkpoint store', () => {
                 components: {
                     candidateToTargetLikes: 0,
                     candidateToTargetComments: rawScore,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0,
                     targetToCandidateLike: 0,
-                    tagOrCaptionMention: 0,
                     recentMutual: 0,
                     appearanceExposure: 0,
                 },
@@ -443,15 +446,16 @@ describe('analysis V2 result checkpoint store', () => {
                 components: {
                     candidateToTargetLikes: 0,
                     candidateToTargetComments: 0,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0,
                     targetToCandidateLike: 0,
-                    tagOrCaptionMention: 0,
                     recentMutual: 0,
                     appearanceExposure: 0,
                 },
                 weakPartnerAdjustment: 0,
                 preScore: 0,
                 rawScore: 0,
-                possibleUpperBound: 3,
+                possibleUpperBound: 5,
                 publicScore: 1,
                 possibleUpperPublicScore: 1.3,
                 partnerCapApplied: false,

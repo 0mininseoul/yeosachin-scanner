@@ -18,7 +18,8 @@ V2FemaleCandidateEvidence {
         hasStrongPartnerEvidence: false,
         uniqueTargetPostsLikedByCandidate: 0,
         boundedCandidateCommentsOnTarget: 0,
-        hasTagOrCaptionMention: false,
+        hasCandidateToTargetTagOrCaptionMention: false,
+        hasTargetToCandidateTagOrCaptionMention: false,
         ...overrides,
     };
 }
@@ -118,6 +119,7 @@ describe('V2 candidate scoring orchestration', () => {
                     appearanceGrade: 5,
                     exposureScore: 5,
                     uniqueTargetPostsLikedByCandidate: 1,
+                    hasCandidateToTargetTagOrCaptionMention: true,
                 }),
                 candidate(2, {
                     accountContext: 'personal',
@@ -141,20 +143,31 @@ describe('V2 candidate scoring orchestration', () => {
             .toBe(personal.risk.components.candidateToTargetLikes);
         expect(official.risk.components.recentMutual).toBe(0);
         expect(official.risk.components.appearanceExposure).toBe(0);
+        expect(official.riskBand).toBe('normal');
+        expect(official.featuredRank).toBeNull();
+        expect(official.relativeWatchRank).toBeNull();
+        expect(official.recentFemaleMutualRank).toBeNull();
+        expect(official.recentMutualBadgeRank).toBeNull();
     });
 
-    it('detects either-direction target/candidate tags and caption mentions', () => {
+    it('keeps target-to-candidate and candidate-to-target tags directional', () => {
         expect(hasCandidateTargetMention({
             targetUsername: 'target',
             candidateUsername: 'candidate',
             targetPosts: [{ taggedUsers: [], mentionedUsers: ['Candidate'] }],
             candidatePosts: [{ taggedUsers: [], mentionedUsers: [] }],
-        })).toBe(true);
+        })).toEqual({
+            candidateToTargetTagOrCaptionMention: false,
+            targetToCandidateTagOrCaptionMention: true,
+        });
         expect(hasCandidateTargetMention({
             targetUsername: 'target',
             candidateUsername: 'candidate',
             targetPosts: [{ taggedUsers: [], mentionedUsers: [] }],
             candidatePosts: [{ taggedUsers: ['TARGET'], mentionedUsers: [] }],
-        })).toBe(true);
+        })).toEqual({
+            candidateToTargetTagOrCaptionMention: true,
+            targetToCandidateTagOrCaptionMention: false,
+        });
     });
 });

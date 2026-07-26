@@ -52,7 +52,8 @@ function preliminary() {
             hasStrongPartnerEvidence: false,
             uniqueTargetPostsLikedByCandidate: 1,
             boundedCandidateCommentsOnTarget: 2,
-            hasTagOrCaptionMention: false,
+            hasCandidateToTargetTagOrCaptionMention: false,
+            hasTargetToCandidateTagOrCaptionMention: false,
         }],
         orderedMutualUsernames: ['woman.one'],
         excludedUsername: null,
@@ -97,7 +98,7 @@ describe('analysis V2 AI/scoring stage store', () => {
         );
     });
 
-    it('persists calibrated v2.3 fields and rejects v2.2 final-score replay', async () => {
+    it('persists calibrated v2.4 fields and rejects v2.2 final-score replay', async () => {
         const candidates = calculateV2FinalScores({
             preliminary: preliminary(),
             observedReverseLikeCandidateIds: new Set(),
@@ -131,7 +132,7 @@ describe('analysis V2 AI/scoring stage store', () => {
                 displayScore: expect.any(Number),
                 riskBand: expect.any(String),
                 relativeTierApplied: false,
-                risk: expect.objectContaining({ policyVersion: 'risk-policy-v2.3' }),
+                risk: expect.objectContaining({ policyVersion: 'risk-policy-v2.4' }),
             })],
         });
 

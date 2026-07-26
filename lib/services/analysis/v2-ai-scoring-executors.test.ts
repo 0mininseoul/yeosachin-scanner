@@ -474,7 +474,7 @@ function dependencies(
                     notScreenedMutuals: 0,
                     privateMutuals: 0,
                     exclusionApplied: false,
-                    scorePolicyVersion: 'risk-policy-v2.3' as const,
+                    scorePolicyVersion: 'risk-policy-v2.4' as const,
                 },
             })),
         },
@@ -2727,7 +2727,8 @@ describe('V2 AI and scoring executors', () => {
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
                     boundedCandidateCommentsOnTarget: 0,
-                    hasTagOrCaptionMention: false,
+                    hasCandidateToTargetTagOrCaptionMention: false,
+                    hasTargetToCandidateTagOrCaptionMention: false,
                 }],
                 orderedMutualUsernames: [candidate.instagramId],
                 excludedUsername: null,
@@ -2839,7 +2840,8 @@ describe('V2 AI and scoring executors', () => {
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
                     boundedCandidateCommentsOnTarget: 0,
-                    hasTagOrCaptionMention: false,
+                    hasCandidateToTargetTagOrCaptionMention: false,
+                    hasTargetToCandidateTagOrCaptionMention: false,
                 }],
                 orderedMutualUsernames: [candidate.instagramId],
                 excludedUsername: null,
@@ -2998,7 +3000,8 @@ describe('V2 AI and scoring executors', () => {
                     outcome.feature!.features.marriageEvidence === 'strong',
                 uniqueTargetPostsLikedByCandidate: 0,
                 boundedCandidateCommentsOnTarget: 0,
-                hasTagOrCaptionMention: false,
+                hasCandidateToTargetTagOrCaptionMention: false,
+                hasTargetToCandidateTagOrCaptionMention: false,
             })),
             orderedMutualUsernames: women,
             excludedUsername: null,
@@ -3111,7 +3114,8 @@ describe('V2 AI and scoring executors', () => {
                 hasStrongPartnerEvidence: false,
                 uniqueTargetPostsLikedByCandidate: 4,
                 boundedCandidateCommentsOnTarget: 12,
-                hasTagOrCaptionMention: true,
+                hasCandidateToTargetTagOrCaptionMention: true,
+                hasTargetToCandidateTagOrCaptionMention: false,
             }],
             orderedMutualUsernames: [candidate.instagramId],
             excludedUsername: null,
@@ -3138,7 +3142,7 @@ describe('V2 AI and scoring executors', () => {
 
         expect(memoryState.final?.candidates[0].reverseLikeStatus).toBe('not_collected');
         expect(memoryState.final?.candidates[0].risk.possibleUpperBound)
-            .toBe(memoryState.final!.candidates[0].risk.preScore + 3);
+            .toBe(memoryState.final!.candidates[0].risk.preScore + 5);
     });
 
     it('reuses the exact private bundle for narrative grounding and never redownloads Instagram media', async () => {
@@ -3328,7 +3332,8 @@ describe('V2 final score invariants', () => {
             hasStrongPartnerEvidence: false,
             uniqueTargetPostsLikedByCandidate: 0,
             boundedCandidateCommentsOnTarget: 0,
-            hasTagOrCaptionMention: false,
+            hasCandidateToTargetTagOrCaptionMention: false,
+            hasTargetToCandidateTagOrCaptionMention: false,
             ...overrides,
         };
     }
@@ -3371,13 +3376,13 @@ describe('V2 final score invariants', () => {
         expect(business.risk.publicScore).toBeLessThanOrEqual(STRONG_PARTNER_PUBLIC_SCORE_CAP);
     });
 
-    it('keeps reverse-like verification inside the frozen Top 10 and enforces 3/15 featured caps', () => {
+    it('keeps reverse-like verification inside the frozen Top 10 and enforces 3/10 featured caps', () => {
         const candidates = Array.from({ length: 30 }, (_, index) => candidate(index + 1, {
             appearanceGrade: 5,
             exposureScore: 5,
             uniqueTargetPostsLikedByCandidate: index < 20 ? 4 : 2,
             boundedCandidateCommentsOnTarget: index < 20 ? 12 : 5,
-            hasTagOrCaptionMention: index < 20,
+            hasCandidateToTargetTagOrCaptionMention: index < 20,
         }));
         const preliminary = calculateV2PreliminaryScores({
             candidates,
@@ -3393,7 +3398,7 @@ describe('V2 final score invariants', () => {
 
         expect(shortlist).toHaveLength(10);
         expect(final.find(row => row.candidateId === observedId)!.risk.components.targetToCandidateLike)
-            .toBe(3);
+            .toBe(5);
         expect(final.filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null))
             .toHaveLength(FEATURED_RISK_LIMITS.high_risk);
         expect(final.filter(row => row.riskBand === 'caution' && row.featuredRank !== null).length)

@@ -26,7 +26,8 @@ const maximumInput = {
     uniqueTargetPostsLikedByCandidate: 4,
     boundedCandidateCommentsOnTarget: 12,
     reverseLikeStatus: 'observed' as const,
-    hasTagOrCaptionMention: true,
+    hasCandidateToTargetTagOrCaptionMention: true,
+    hasTargetToCandidateTagOrCaptionMention: true,
     recentFemaleMutualRank: 1,
     appearanceGrade: 5 as const,
     exposureScore: 5,
@@ -37,30 +38,31 @@ const maximumInput = {
 
 describe('risk policy components', () => {
     it('keeps the final component weights at exactly 100 points', () => {
-        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.3');
+        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.4');
         expect(RISK_BANDS).toEqual(['normal', 'caution', 'high_risk']);
         expect(RISK_COMPONENT_WEIGHTS).toEqual({
-            candidateToTargetLikes: 20,
-            candidateToTargetComments: 26,
-            targetToCandidateLike: 3,
-            tagOrCaptionMention: 14,
-            recentMutual: 17,
-            appearanceExposure: 20,
+            candidateToTargetLikes: 24,
+            candidateToTargetComments: 30,
+            candidateToTargetTagOrCaptionMention: 12,
+            targetToCandidateTagOrCaptionMention: 8,
+            targetToCandidateLike: 5,
+            recentMutual: 5,
+            appearanceExposure: 16,
         });
         expect(Object.values(RISK_COMPONENT_WEIGHTS).reduce((sum, value) => sum + value, 0))
             .toBe(RAW_SCORE_MAX);
     });
 
-    it('normalizes appearance grade plus exposure from 18 raw points to 20', () => {
+    it('normalizes appearance grade plus exposure from 18 raw points to 16', () => {
         expect(Object.values(APPEARANCE_GRADE_POINTS)).toEqual([0, 3, 7, 10, 13]);
-        expect(APPEARANCE_EXPOSURE_NORMALIZER).toBe(20 / 18);
+        expect(APPEARANCE_EXPOSURE_NORMALIZER).toBe(16 / 18);
         expect(scoreAppearanceExposure(1, 0)).toBe(0);
-        expect(scoreAppearanceExposure(3, 2)).toBeCloseTo(9 * (20 / 18));
-        expect(scoreAppearanceExposure(5, 5)).toBe(20);
+        expect(scoreAppearanceExposure(3, 2)).toBeCloseTo(9 * (16 / 18));
+        expect(scoreAppearanceExposure(5, 5)).toBe(16);
     });
 
     it('uses the final recent-woman rank table and scores later ranks as zero', () => {
-        expect(RECENT_FEMALE_MUTUAL_POINTS).toEqual([17, 16, 15, 14, 13, 12, 10, 8, 6, 4]);
+        expect(RECENT_FEMALE_MUTUAL_POINTS).toEqual([5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5]);
         for (const [index, points] of RECENT_FEMALE_MUTUAL_POINTS.entries()) {
             expect(scoreRecentFemaleMutual(index + 1)).toBe(points);
         }
@@ -85,8 +87,10 @@ describe('risk policy components', () => {
                 .toBe(regular.components.candidateToTargetComments);
             expect(adjusted.components.targetToCandidateLike)
                 .toBe(regular.components.targetToCandidateLike);
-            expect(adjusted.components.tagOrCaptionMention)
-                .toBe(regular.components.tagOrCaptionMention);
+            expect(adjusted.components.candidateToTargetTagOrCaptionMention)
+                .toBe(regular.components.candidateToTargetTagOrCaptionMention);
+            expect(adjusted.components.targetToCandidateTagOrCaptionMention)
+                .toBe(regular.components.targetToCandidateTagOrCaptionMention);
             expect(adjusted.components.recentMutual)
                 .toBe(regular.components.recentMutual * multiplier);
             expect(adjusted.components.appearanceExposure)
@@ -95,7 +99,7 @@ describe('risk policy components', () => {
         }
     );
 
-    it('caps pre-score at 97 and reserves three points for reverse-like evidence', () => {
+    it('caps pre-score at 95 and reserves five points for reverse-like evidence', () => {
         const notCollected = calculateRiskPolicy({
             ...maximumInput,
             reverseLikeStatus: 'not_collected',
@@ -106,6 +110,7 @@ describe('risk policy components', () => {
             reverseLikeStatus: 'not_observed',
         });
 
+        expect(PRE_SCORE_MAX).toBe(95);
         expect(notCollected.preScore).toBe(PRE_SCORE_MAX);
         expect(notCollected.rawScore).toBe(PRE_SCORE_MAX);
         expect(notCollected.possibleUpperBound).toBe(RAW_SCORE_MAX);
@@ -194,7 +199,7 @@ describe('public score and absolute risk bands', () => {
 });
 
 describe('featured risk ranks', () => {
-    it('features at most three high and fifteen caution rows without changing any band', () => {
+    it('features at most three high and ten caution rows without changing any band', () => {
         const high = Array.from({ length: 5 }, (_, index) => ({
             candidateId: `high-${index}`,
             publicScore: 9 - index * 0.1,

@@ -1,14 +1,15 @@
-export const RISK_POLICY_VERSION = 'risk-policy-v2.3' as const;
+export const RISK_POLICY_VERSION = 'risk-policy-v2.4' as const;
 
 export const RISK_BANDS = ['normal', 'caution', 'high_risk'] as const;
 
 export const RISK_COMPONENT_WEIGHTS = Object.freeze({
-    candidateToTargetLikes: 20,
-    candidateToTargetComments: 26,
-    targetToCandidateLike: 3,
-    tagOrCaptionMention: 14,
-    recentMutual: 17,
-    appearanceExposure: 20,
+    candidateToTargetLikes: 24,
+    candidateToTargetComments: 30,
+    candidateToTargetTagOrCaptionMention: 12,
+    targetToCandidateTagOrCaptionMention: 8,
+    targetToCandidateLike: 5,
+    recentMutual: 5,
+    appearanceExposure: 16,
 } as const);
 
 export const APPEARANCE_GRADE_POINTS = Object.freeze({
@@ -20,16 +21,16 @@ export const APPEARANCE_GRADE_POINTS = Object.freeze({
 } as const);
 
 export const RECENT_FEMALE_MUTUAL_POINTS = Object.freeze([
-    17,
-    16,
-    15,
-    14,
-    13,
-    12,
-    10,
-    8,
-    6,
+    5,
+    4.5,
     4,
+    3.5,
+    3,
+    2.5,
+    2,
+    1.5,
+    1,
+    0.5,
 ] as const);
 
 export const RISK_DISPLAY_THRESHOLDS = Object.freeze({
@@ -39,7 +40,7 @@ export const RISK_DISPLAY_THRESHOLDS = Object.freeze({
 
 export const FEATURED_RISK_LIMITS = Object.freeze({
     high_risk: 3,
-    caution: 15,
+    caution: 10,
 } as const);
 
 export const STRONG_PARTNER_PUBLIC_SCORE_CAP = 3.4;
@@ -60,8 +61,8 @@ export const ACCOUNT_CONTEXT_SOFT_MULTIPLIERS = Object.freeze({
 } satisfies Record<AccountContext, 0 | 0.5 | 1>);
 /** @deprecated Use ACCOUNT_CONTEXT_SOFT_MULTIPLIERS.individual_creator. */
 export const BUSINESS_SOFT_CONTEXT_MULTIPLIER = 0.5;
-export const APPEARANCE_EXPOSURE_NORMALIZER = 20 / 18;
-export const PRE_SCORE_MAX = 97;
+export const APPEARANCE_EXPOSURE_NORMALIZER = 16 / 18;
+export const PRE_SCORE_MAX = 95;
 export const RAW_SCORE_MAX = 100;
 export const VERIFICATION_SHORTLIST_LIMIT = 10;
 
@@ -76,7 +77,8 @@ export interface RiskPolicyInput {
     uniqueTargetPostsLikedByCandidate: number;
     boundedCandidateCommentsOnTarget: number;
     reverseLikeStatus: ReverseLikeStatus;
-    hasTagOrCaptionMention: boolean;
+    hasCandidateToTargetTagOrCaptionMention: boolean;
+    hasTargetToCandidateTagOrCaptionMention: boolean;
     recentFemaleMutualRank: number | null;
     appearanceGrade: AppearanceGrade;
     exposureScore: number;
@@ -89,7 +91,8 @@ export interface RiskPolicyComponents {
     candidateToTargetLikes: number;
     candidateToTargetComments: number;
     targetToCandidateLike: number;
-    tagOrCaptionMention: number;
+    candidateToTargetTagOrCaptionMention: number;
+    targetToCandidateTagOrCaptionMention: number;
     recentMutual: number;
     appearanceExposure: number;
 }
@@ -178,8 +181,12 @@ export function scoreReverseLike(status: ReverseLikeStatus): number {
     return status === 'observed' ? RISK_COMPONENT_WEIGHTS.targetToCandidateLike : 0;
 }
 
-export function scoreTagOrCaptionMention(observed: boolean): number {
-    return observed ? RISK_COMPONENT_WEIGHTS.tagOrCaptionMention : 0;
+export function scoreCandidateToTargetTagOrCaptionMention(observed: boolean): number {
+    return observed ? RISK_COMPONENT_WEIGHTS.candidateToTargetTagOrCaptionMention : 0;
+}
+
+export function scoreTargetToCandidateTagOrCaptionMention(observed: boolean): number {
+    return observed ? RISK_COMPONENT_WEIGHTS.targetToCandidateTagOrCaptionMention : 0;
 }
 
 export function scoreRecentFemaleMutual(rank: number | null): number {
@@ -268,7 +275,12 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
         input.boundedCandidateCommentsOnTarget
     );
     const targetToCandidateLike = scoreReverseLike(input.reverseLikeStatus);
-    const tagOrCaptionMention = scoreTagOrCaptionMention(input.hasTagOrCaptionMention);
+    const candidateToTargetTagOrCaptionMention = scoreCandidateToTargetTagOrCaptionMention(
+        input.hasCandidateToTargetTagOrCaptionMention
+    );
+    const targetToCandidateTagOrCaptionMention = scoreTargetToCandidateTagOrCaptionMention(
+        input.hasTargetToCandidateTagOrCaptionMention
+    );
     const recentMutualBeforeBusiness = scoreRecentFemaleMutual(input.recentFemaleMutualRank);
     const appearanceExposureBeforeBusiness = scoreAppearanceExposure(
         input.appearanceGrade,
@@ -287,7 +299,8 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
     const preScore = clamp(
         candidateToTargetLikes
             + candidateToTargetComments
-            + tagOrCaptionMention
+            + candidateToTargetTagOrCaptionMention
+            + targetToCandidateTagOrCaptionMention
             + recentMutual
             + appearanceExposure
             + weakPartnerAdjustment,
@@ -310,7 +323,8 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
             candidateToTargetLikes,
             candidateToTargetComments,
             targetToCandidateLike,
-            tagOrCaptionMention,
+            candidateToTargetTagOrCaptionMention,
+            targetToCandidateTagOrCaptionMention,
             recentMutual,
             appearanceExposure,
         }),

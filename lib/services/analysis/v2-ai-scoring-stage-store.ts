@@ -286,32 +286,34 @@ const preliminaryCandidateSchema = z.object({
     hasStrongPartnerEvidence: z.boolean(),
     uniqueTargetPostsLikedByCandidate: z.number().int().min(0).max(4),
     boundedCandidateCommentsOnTarget: z.number().int().min(0).max(12),
-    hasTagOrCaptionMention: z.boolean(),
+    hasCandidateToTargetTagOrCaptionMention: z.boolean(),
+    hasTargetToCandidateTagOrCaptionMention: z.boolean(),
     recentFemaleMutualRank: nullableRankSchema,
     recentMutualBadgeRank: z.number().int().min(1).max(5).nullable(),
-    preScore: z.number().finite().min(0).max(97),
+    preScore: z.number().finite().min(0).max(95),
     verificationShortlistRank: z.number().int().min(1).max(10).nullable(),
 }).strict();
 
 const scoreComponentsSchema = z.object({
-    candidateToTargetLikes: z.number().finite().min(0).max(20),
-    candidateToTargetComments: z.number().finite().min(0).max(26),
-    targetToCandidateLike: z.number().finite().min(0).max(3),
-    tagOrCaptionMention: z.number().finite().min(0).max(14),
-    recentMutual: z.number().finite().min(0).max(17),
-    appearanceExposure: z.number().finite().min(0).max(20),
+    candidateToTargetLikes: z.number().finite().min(0).max(24),
+    candidateToTargetComments: z.number().finite().min(0).max(30),
+    candidateToTargetTagOrCaptionMention: z.number().finite().min(0).max(12),
+    targetToCandidateTagOrCaptionMention: z.number().finite().min(0).max(8),
+    targetToCandidateLike: z.number().finite().min(0).max(5),
+    recentMutual: z.number().finite().min(0).max(5),
+    appearanceExposure: z.number().finite().min(0).max(16),
 }).strict();
 
 const riskResultSchema = z.object({
-    policyVersion: z.literal('risk-policy-v2.3'),
+    policyVersion: z.literal('risk-policy-v2.4'),
     components: scoreComponentsSchema,
     softContextBeforeBusinessAdjustment: z.object({
-        recentMutual: z.number().finite().min(0).max(17),
-        appearanceExposure: z.number().finite().min(0).max(20),
+        recentMutual: z.number().finite().min(0).max(5),
+        appearanceExposure: z.number().finite().min(0).max(16),
     }).strict(),
     softContextMultiplier: z.union([z.literal(0), z.literal(0.5), z.literal(1)]),
     weakPartnerAdjustment: z.union([z.literal(-5), z.literal(0)]),
-    preScore: z.number().finite().min(0).max(97),
+    preScore: z.number().finite().min(0).max(95),
     rawScore: z.number().finite().min(0).max(100),
     possibleUpperBound: z.number().finite().min(0).max(100),
     publicScore: z.number().finite().min(1).max(10),
@@ -329,7 +331,7 @@ const finalCandidateSchema = preliminaryCandidateSchema.extend({
         .refine(value => Math.round(value * 10) === value * 10),
     riskBand: riskBandSchema,
     relativeTierApplied: z.boolean(),
-    featuredRank: z.number().int().min(1).max(15).nullable(),
+    featuredRank: z.number().int().min(1).max(10).nullable(),
     relativeWatchRank: z.number().int().min(1).max(2).nullable(),
 }).strict();
 

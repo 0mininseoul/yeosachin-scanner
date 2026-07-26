@@ -1141,7 +1141,10 @@ function preliminaryStoreRow(
         uniqueTargetPostsLikedByCandidate: candidate.uniqueTargetPostsLikedByCandidate,
         boundedCandidateCommentsOnTarget: candidate.boundedCandidateCommentsOnTarget,
         reverseLikeStatus: 'not_collected',
-        hasTagOrCaptionMention: candidate.hasTagOrCaptionMention,
+        hasCandidateToTargetTagOrCaptionMention:
+            candidate.hasCandidateToTargetTagOrCaptionMention,
+        hasTargetToCandidateTagOrCaptionMention:
+            candidate.hasTargetToCandidateTagOrCaptionMention,
         recentFemaleMutualRank: candidate.recentFemaleMutualRank,
         appearanceGrade: candidate.appearanceGrade,
         exposureScore: candidate.exposureScore,
@@ -1752,6 +1755,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const preliminary = calculateV2PreliminaryScores({
                 candidates: verified.map(outcome => {
                     const summary = summaryByUsername.get(outcome.instagramId);
+                    const tagEvidence = hasCandidateTargetMention({
+                        targetUsername: target.username,
+                        candidateUsername: outcome.instagramId,
+                        targetPosts: target.latestPosts ?? [],
+                        candidatePosts: outcome.profile!.latestPosts ?? [],
+                    });
                     return {
                         candidateId: outcome.candidateId,
                         username: outcome.instagramId,
@@ -1764,12 +1773,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             summary?.uniqueTargetPostsLikedByCandidate ?? 0,
                         boundedCandidateCommentsOnTarget:
                             summary?.boundedCandidateCommentsOnTarget ?? 0,
-                        hasTagOrCaptionMention: hasCandidateTargetMention({
-                            targetUsername: target.username,
-                            candidateUsername: outcome.instagramId,
-                            targetPosts: target.latestPosts ?? [],
-                            candidatePosts: outcome.profile!.latestPosts ?? [],
-                        }),
+                        hasCandidateToTargetTagOrCaptionMention:
+                            tagEvidence.candidateToTargetTagOrCaptionMention,
+                        hasTargetToCandidateTagOrCaptionMention:
+                            tagEvidence.targetToCandidateTagOrCaptionMention,
                     };
                 }),
                 orderedMutualUsernames: relationship.mutualRows
@@ -1860,7 +1867,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     return {
                         candidateId: candidate.candidateId,
                         status: status === 'observed_not_found' ? 'not_observed' : status,
-                        componentScore: status === 'observed' ? 3 : 0,
+                        componentScore: status === 'observed' ? 5 : 0,
                         evidenceRefIds: status === 'observed'
                             ? [evidenceRef(
                                 'analysis-v2-reverse-like-ref-v1',
