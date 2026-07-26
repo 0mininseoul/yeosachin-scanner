@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 import {
     ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
     ANALYSIS_V2_RELATIONSHIPS_JOB_KEY,
@@ -224,6 +225,66 @@ describe('analysis V2 durable DAG worker', () => {
 
         expect(loadAiStagePolicyVersion).toHaveBeenCalledWith(requestId);
         expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('passes scheduler capability only from the exact immutable request snapshot', async () => {
+        const relationshipState: AnalysisV2DagState = {
+            ...baseState(), relationships: relationshipManifest(),
+        };
+        const fetchJob = buildAnalysisV2DagPlan(requestId, relationshipState).jobs
+            .find(job => job.jobKey === 'track:profiles:batch:0');
+        if (!fetchJob) throw new Error('Missing profile fetch fixture job');
+        const initial: AnalysisV2DagState = {
+            ...relationshipState,
+            profileFetchBatches: [{
+                batch: 0,
+                itemCount: relationshipState.relationships!.profileBatches[0]!.itemCount,
+                producerInputHash: fetchJob.inputHash,
+                revision: 1,
+                resultHash: digest('profile-fetch-result:0'),
+            }],
+        };
+        const claim = claimFor(initial, 'track:profile-ai:batch:0');
+        const persisted: AnalysisV2DagState = {
+            ...initial,
+            profileAiBatches: [{
+                batch: 0,
+                itemCount: 30,
+                producerInputHash: claim.inputHash,
+                revision: 1,
+                resultHash: digest('profile-ai-result:0'),
+            }],
+        };
+        const executor = vi.fn(async () => ({
+            checkpoint: {
+                kind: 'profile_ai_batch' as const,
+                manifest: persisted.profileAiBatches![0]!,
+            },
+        }));
+        const loadPolicyVersionsSnapshot = vi.fn(async () => ({
+            pipeline: 'v2', risk: 'risk-policy-v2.4',
+            aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+            scheduler: 'ai-scheduler-v1',
+        }));
+
+        await expect(executeAnalysisV2DagJob(claim, {
+            stateStore: stateStore(initial, {
+                checkpointManifest: vi.fn(async () => persisted),
+                load: vi.fn()
+                    .mockResolvedValueOnce(initial)
+                    .mockResolvedValue(persisted),
+            }),
+            executors: { profile_ai: executor },
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+                loadPolicyVersionsSnapshot,
+            },
+        })).resolves.toEqual(expect.any(Array));
+        expect(loadPolicyVersionsSnapshot).toHaveBeenCalledWith(requestId);
+        expect(executor).toHaveBeenCalledWith(expect.objectContaining({
+            schedulerCapability: 'scheduler-v1',
+        }));
     });
 
     it('confirms provider cleanup before invoking the request failure RPC', async () => {

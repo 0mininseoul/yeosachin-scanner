@@ -27,6 +27,26 @@ describe('analysis V2 AI policy store', () => {
         });
     });
 
+    it('loads the complete immutable snapshot only through its bounded service RPC', async () => {
+        const snapshot = {
+            pipeline: 'v2', risk: 'risk-policy-v2.4', aiStage: AI_STAGE_POLICY_VERSION,
+            scheduler: 'ai-scheduler-v1',
+        };
+        const rpc = vi.fn(async () => ({ data: snapshot, error: null }));
+        const store = createSupabaseAnalysisV2AiPolicyStore({ rpc });
+        await expect(store.loadPolicyVersionsSnapshot!(requestId)).resolves.toEqual(snapshot);
+        expect(rpc).toHaveBeenCalledWith('load_analysis_v2_policy_versions_snapshot', {
+            p_request_id: requestId,
+        });
+    });
+
+    it('rejects a malformed full snapshot rather than silently enabling a scheduler', async () => {
+        const rpc = vi.fn(async () => ({ data: { scheduler: 'ai-scheduler-v1' }, error: null }));
+        const store = createSupabaseAnalysisV2AiPolicyStore({ rpc });
+        await expect(store.loadPolicyVersionsSnapshot!(requestId))
+            .rejects.toThrow('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR');
+    });
+
     it('rejects invalid input and malformed policy values without leaking database details', async () => {
         const rpc = vi.fn(async () => ({ data: 'invalid policy value', error: null }));
         const store = createSupabaseAnalysisV2AiPolicyStore({ rpc });

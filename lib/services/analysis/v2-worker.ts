@@ -50,6 +50,10 @@ import {
 import { analysisV2ResultStore } from './v2-result-store';
 import { assertSupportedAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
+    parseAiSchedulerPolicySnapshot,
+    type AiSchedulerCapability,
+} from '@/lib/services/ai/scheduler-policy';
+import {
     analysisV2AiPolicyStore,
     type AnalysisV2AiPolicyStore,
 } from './v2-ai-policy-store';
@@ -131,6 +135,8 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     job: AnalysisV2DagJob;
     state: AnalysisV2DagState;
     aiStagePolicyVersion: string | null;
+    /** Parsed once from this request's immutable policy snapshot. */
+    schedulerCapability?: AiSchedulerCapability;
     riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null;
     handlerDeadlineAtMs?: number;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
@@ -538,12 +544,27 @@ export async function executeAnalysisV2DagJob(
     }
 
     let aiStagePolicyVersion: string | null = null;
+    let schedulerCapability: AiSchedulerCapability = 'legacy';
     if (AI_PROVIDER_STAGES.has(current.stage)) {
         aiStagePolicyVersion = await aiPolicyStore.loadAiStagePolicyVersion(claim.requestId);
         try {
             assertSupportedAiStagePolicyVersion(aiStagePolicyVersion);
         } catch {
             executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
+        }
+        // Older request fixtures and all historical policy snapshots stay on the exact legacy
+        // runtime. A production store supplies the full immutable snapshot; parsing it here
+        // makes scheduler admission independent of an environment value that can change mid-job.
+        if (aiPolicyStore.loadPolicyVersionsSnapshot) {
+            const snapshot = await aiPolicyStore.loadPolicyVersionsSnapshot(claim.requestId);
+            if (!snapshot || snapshot.aiStage !== aiStagePolicyVersion) {
+                executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
+            }
+            try {
+                schedulerCapability = parseAiSchedulerPolicySnapshot(snapshot).capability;
+            } catch {
+                executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
+            }
         }
     }
     let riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null = null;
@@ -572,6 +593,7 @@ export async function executeAnalysisV2DagJob(
         job: current.job,
         state,
         aiStagePolicyVersion,
+        schedulerCapability,
         riskPolicyVersion,
         handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
