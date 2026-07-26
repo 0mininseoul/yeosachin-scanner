@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { ANALYSIS_V2_SCHEMA_VERSION, progressReadV1Schema } from '@/lib/contracts/analysis-v2';
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
-import { isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseCapabilities, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
@@ -53,7 +53,7 @@ export async function GET(
             const progress = projectDemoProgress({ requestId: demo.id, startedAt: new Date(demo.started_at), durationSeconds: demo.duration_seconds, now: new Date() });
             return NextResponse.json({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, ...progress }, {
                 status: 200,
-                headers: { ...PRIVATE_NO_STORE_HEADERS, 'X-Analysis-Synthetic': '1' },
+                headers: { ...PRIVATE_NO_STORE_HEADERS, ...demoResponseCapabilities() },
             });
         }
 

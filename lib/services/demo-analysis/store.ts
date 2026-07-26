@@ -11,7 +11,7 @@ const rowSchema = z.object({
     target_instagram_id: z.literal(DEMO_TARGET_USERNAME),
     fixture_version: z.literal(DEMO_FIXTURE_VERSION),
     idempotency_key: z.string().min(16).max(128),
-    duration_seconds: z.number().int().min(30).max(90),
+    duration_seconds: z.number().int().min(60).max(90),
     created_at: z.string().datetime({ offset: true }),
     started_at: z.string().datetime({ offset: true }).nullable(),
 }).passthrough();

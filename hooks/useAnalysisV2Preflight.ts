@@ -262,17 +262,17 @@ export function useAnalysisV2Preflight() {
     const [starting, setStarting] = useState(false);
     const [, setCredentialRevision] = useState(0);
     const [error, setError] = useState<string | null>(null);
-    const [isSyntheticDemo, setIsSyntheticDemo] = useState(false);
+    const [analyticsEligible, setAnalyticsEligible] = useState(true);
     const [coordinator] = useState(() => new PreflightRequestCoordinator());
     const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
     const entitlementScopeRef = useRef<PreflightRequestScope | null>(null);
     const preflightStartedAtRef = useRef<number | null>(null);
     const preflightOutcomeTrackedRef = useRef(new Set<string>());
     const analysisStartedTrackedRef = useRef(new Set<string>());
-    const syntheticDemoRef = useRef(false);
+    const analyticsEligibleRef = useRef(true);
 
     const trackPreflightOutcome = useCallback((status: PreflightStatusV1) => {
-        if (syntheticDemoRef.current) return;
+        if (!analyticsEligibleRef.current) return;
         if (status.status !== 'ready' && status.status !== 'blocked') return;
         const outcome = status.status === 'ready' ? 'succeeded' : 'failed';
         const localKey = `${outcome}:${status.preflightId}`;
@@ -307,7 +307,7 @@ export function useAnalysisV2Preflight() {
         cause: unknown,
         preflightId?: string,
     ) => {
-        if (syntheticDemoRef.current) return;
+        if (!analyticsEligibleRef.current) return;
         const durationMs = trustedDurationMs(preflightStartedAtRef.current, Date.now());
         trackEvent(EVENTS.PREFLIGHT_FAILED, {
             ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
@@ -326,8 +326,8 @@ export function useAnalysisV2Preflight() {
             { cache: 'no-store', signal: scope.signal }
         );
         const payload = await readPayload(response);
-        syntheticDemoRef.current = response.headers.get('x-analysis-synthetic') === '1';
-        setIsSyntheticDemo(syntheticDemoRef.current);
+        analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
+        setAnalyticsEligible(analyticsEligibleRef.current);
         if (!response.ok) {
             throw new AnalyticsRequestError(
                 messageFromPayload(payload, '사전 점검 상태를 확인할 수 없습니다.'),
@@ -443,8 +443,8 @@ export function useAnalysisV2Preflight() {
                 signal: scope.signal,
             });
             const payload = await readPayload(response);
-            syntheticDemoRef.current = response.headers.get('x-analysis-synthetic') === '1';
-            setIsSyntheticDemo(syntheticDemoRef.current);
+            analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
+            setAnalyticsEligible(analyticsEligibleRef.current);
             if (!response.ok) {
                 throw new AnalyticsRequestError(
                     messageFromPayload(payload, '사전 점검을 시작할 수 없습니다.'),
@@ -458,7 +458,7 @@ export function useAnalysisV2Preflight() {
                     'VALIDATION_ERROR',
                 );
             }
-            if (!syntheticDemoRef.current) trackEvent(EVENTS.PREFLIGHT_STARTED);
+            if (analyticsEligibleRef.current) trackEvent(EVENTS.PREFLIGHT_STARTED);
             if (!scope.isCurrent()) return null;
             if (!coordinator.attachPreflight(generation, accepted.data.preflightId)) return null;
             if (preflightStartedAtRef.current !== null) {
@@ -511,8 +511,6 @@ export function useAnalysisV2Preflight() {
 
         setExclusionState('saving');
         setError(null);
-        syntheticDemoRef.current = false;
-        setIsSyntheticDemo(false);
         try {
             const response = await fetch(
                 `/api/analysis/preflight/${encodeURIComponent(preflight.preflightId)}`,
@@ -535,7 +533,7 @@ export function useAnalysisV2Preflight() {
                 ? { ...current, exclusionDecision }
                 : current);
             setExclusionState(exclusionDecision === 'exclude' ? 'excluded' : 'skipped');
-            if (!syntheticDemoRef.current) trackEvent(EVENTS.EXCLUSION_DECIDED, {
+            if (analyticsEligibleRef.current) trackEvent(EVENTS.EXCLUSION_DECIDED, {
                 preflight_id: preflight.preflightId,
                 decision: exclusionDecision,
             });
@@ -709,6 +707,8 @@ export function useAnalysisV2Preflight() {
         setCreating(false);
         setExclusionState('undecided');
         setStarting(false);
+        analyticsEligibleRef.current = true;
+        setAnalyticsEligible(true);
         setError(null);
     }, [coordinator]);
 
@@ -770,7 +770,7 @@ export function useAnalysisV2Preflight() {
         creating,
         exclusionState,
         starting,
-        isSyntheticDemo,
+        analyticsEligible,
         error,
         setError,
         startPreflight,

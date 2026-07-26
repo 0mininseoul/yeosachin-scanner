@@ -1,13 +1,12 @@
--- Synthetic operator demonstrations are deliberately isolated from every production
--- preflight, order, provider, cost, and pipeline table.
+-- Synthetic operator demonstrations use their own isolated persistence domain.
 create table public.demo_analysis_runs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  target_instagram_id text not null check (target_instagram_id = 'junho_dem'),
+  target_instagram_id text not null check (target_instagram_id ~ '^[A-Za-z0-9._]{1,30}$'),
   fixture_version text not null check (fixture_version = 'synthetic-fixture-v1'),
   plan_id text not null check (plan_id = 'standard'),
   idempotency_key text not null check (idempotency_key ~ '^[A-Za-z0-9._:-]{16,128}$'),
-  duration_seconds integer not null check (duration_seconds between 30 and 90),
+  duration_seconds integer not null check (duration_seconds between 60 and 90),
   created_at timestamptz not null default clock_timestamp(),
   started_at timestamptz,
   unique (user_id, idempotency_key)
@@ -29,9 +28,9 @@ create or replace function public.create_demo_analysis_preflight(
 language plpgsql security definer set search_path = '' as $$
 declare inserted_count integer := 0;
 begin
-  if p_target_instagram_id <> 'junho_dem'
+  if p_target_instagram_id !~ '^[A-Za-z0-9._]{1,30}$'
     or p_idempotency_key !~ '^[A-Za-z0-9._:-]{16,128}$'
-    or p_duration_seconds not between 30 and 90 then
+    or p_duration_seconds not between 60 and 90 then
     raise exception 'invalid demo run input';
   end if;
   insert into public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)

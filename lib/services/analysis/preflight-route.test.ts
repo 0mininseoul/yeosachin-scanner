@@ -865,7 +865,7 @@ describe('preflight owner routes', () => {
 
         const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
         expect(response.status).toBe(202);
-        expect(response.headers.get('x-analysis-synthetic')).toBe('1');
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
         expect(mocks.demoStore.createOrReplay).toHaveBeenCalledOnce();
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
         expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();

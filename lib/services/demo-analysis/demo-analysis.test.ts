@@ -5,6 +5,7 @@ import {
     demoDurationSeconds,
     isDemoEligible,
     projectDemoProgress,
+    demoResultPage,
     validateDemoAssetManifest,
 } from './demo-analysis';
 
@@ -25,7 +26,7 @@ describe('synthetic demo analysis policy', () => {
     });
 
     it('bounds duration without accepting a browser supplied value', () => {
-        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(30);
+        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(60);
         expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '999' })).toBe(90);
         expect(demoDurationSeconds({})).toBe(75);
     });
@@ -51,6 +52,9 @@ describe('synthetic demo fixture', () => {
         expect(first.publicAccounts.filter(row => row.riskBand === 'caution').length).toBeGreaterThanOrEqual(2);
         expect(first.publicAccounts.every(row => Number.isInteger(row.displayScore))).toBe(true);
         expect(first.publicAccounts.every(row => row.displayScore >= 1 && row.displayScore <= 10)).toBe(true);
+        expect(first.publicAccounts.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+        expect(first.publicAccounts.every(row => !row.instagramId.startsWith('synth.'))).toBe(true);
+        expect(first.publicAccounts.every(row => !/가상 프로필|비공개 프로필/u.test(row.fullName ?? ''))).toBe(true);
         expect(first.summary.genderStats.male + first.summary.genderStats.female + first.summary.genderStats.unknown)
             .toBe(first.summary.screenedMutuals);
     });
@@ -66,5 +70,21 @@ describe('synthetic demo fixture', () => {
         expect(done.snapshot.progressBp).toBe(10_000);
         expect(done.snapshot.backgroundProcessing).toBe(false);
         expect([...early.events, ...later.events, ...done.events].every(event => event.eventCode !== 'FINDING_CORRECTED')).toBe(true);
+    });
+
+    it('walks every public and private cursor page without duplicates', () => {
+        let publicCursor: string | null = null;
+        let privateCursor: string | null = null;
+        const publicIds = new Set<string>();
+        const privateIds = new Set<string>();
+        do {
+            const page = demoResultPage({ requestId, femaleCursor: publicCursor, privateCursor, pageSize: 50 });
+            page.femaleAccounts.forEach(row => publicIds.add(row.instagramId));
+            page.privateAccounts.forEach(row => privateIds.add(row.instagramId));
+            publicCursor = page.femaleNextCursor;
+            privateCursor = page.privateNextCursor;
+        } while (publicCursor || privateCursor);
+        expect(publicIds).toHaveLength(242);
+        expect(privateIds).toHaveLength(142);
     });
 });

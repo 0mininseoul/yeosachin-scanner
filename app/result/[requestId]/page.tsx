@@ -49,7 +49,9 @@ interface PageProps {
 
 const getProxyImageUrl = (url: string | undefined): string | undefined => {
     if (!url) return undefined;
-    return url.startsWith('/api/image-proxy?') ? url : undefined;
+    return url.startsWith('/api/image-proxy?') || /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(url)
+        ? url
+        : undefined;
 };
 
 function FallbackGlyph({ variant }: { variant: 'person' | 'private' }) {
@@ -114,7 +116,7 @@ interface FemaleAccount {
     instagramId: string;
     fullName?: string;
     profileImage?: string;
-    instagramUrl: string;
+    instagramUrl?: string;
     riskGrade: 'high_risk' | 'caution' | 'normal';
     bio: string;
     recentMutualRank?: 1 | 2 | 3 | 4 | 5;
@@ -127,7 +129,7 @@ interface PrivateAccount {
     instagramId: string;
     fullName?: string;
     profileImage?: string;
-    instagramUrl: string;
+    instagramUrl?: string;
     bio?: string;
 }
 
@@ -241,7 +243,7 @@ function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
     );
 }
 
-function mapV2Result(result: AnalysisResultPageV1): ResultData {
+function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks = true): ResultData {
     // genderStats is an additive summary field; tolerate results produced before
     // the backend contract ships it and fall back to hiding the gender breakdown.
     const genderStats = (result.summary as {
@@ -271,7 +273,7 @@ function mapV2Result(result: AnalysisResultPageV1): ResultData {
             instagramId: account.instagramId,
             fullName: account.fullName || undefined,
             profileImage: account.profileImage || undefined,
-            instagramUrl: `https://instagram.com/${account.instagramId}`,
+            instagramUrl: externalProfileLinks ? `https://instagram.com/${account.instagramId}` : undefined,
             riskGrade: account.riskBand,
             bio: account.bio || '',
             recentMutualRank: account.recentMutualRank !== null && account.recentMutualRank <= 5
@@ -285,7 +287,7 @@ function mapV2Result(result: AnalysisResultPageV1): ResultData {
             instagramId: account.instagramId,
             fullName: account.fullName || undefined,
             profileImage: account.profileImage || undefined,
-            instagramUrl: `https://instagram.com/${account.instagramId}`,
+            instagramUrl: externalProfileLinks ? `https://instagram.com/${account.instagramId}` : undefined,
         })),
         femaleNextCursor: result.femaleNextCursor,
         privateNextCursor: result.privateNextCursor,
@@ -307,6 +309,7 @@ export default function ResultPage({ params }: PageProps) {
     const publicSectionRef = useRef<HTMLElement>(null);
     const privateSectionRef = useRef<HTMLElement>(null);
     const resultViewTrackedRef = useRef(false);
+    const [externalProfileLinks, setExternalProfileLinks] = useState(true);
     const router = useRouter();
     const requestedPipeline = useSearchParams().get('pipeline');
 
@@ -324,6 +327,7 @@ export default function ResultPage({ params }: PageProps) {
                     { cache: 'no-store', signal: abortController.signal }
                 );
                 let result = await response.json();
+                setExternalProfileLinks(response.headers.get('x-external-profile-links') !== 'disabled');
 
                 if (
                     response.status === 409
@@ -338,8 +342,10 @@ export default function ResultPage({ params }: PageProps) {
                         signal: abortController.signal,
                     });
                     result = await response.json();
+                    setExternalProfileLinks(response.headers.get('x-external-profile-links') !== 'disabled');
                 }
 
+                const responseAnalyticsEligible = response.headers.get('x-analytics-eligible') !== '0';
                 if (!response.ok) {
                     if (isV2Request) {
                         let progressStatus: OwnerProgressStatus | null = null;
@@ -373,7 +379,7 @@ export default function ResultPage({ params }: PageProps) {
                     && result.summary
                     && 'detectedMutuals' in result.summary;
                 const displayResult = isV2Result
-                    ? mapV2Result(result as AnalysisResultPageV1)
+                    ? mapV2Result(result as AnalysisResultPageV1, response.headers.get('x-external-profile-links') !== 'disabled')
                     : { ...result, pipelineVersion: 'v1' as const };
                 setData(displayResult);
                 setPageNavigation(initialResultPageNavigation(
@@ -385,7 +391,7 @@ export default function ResultPage({ params }: PageProps) {
                 setError(null);
                 const storage = availablePendingTargetStorage();
                 if (storage) clearPendingAnalysisTargetForTerminalState(storage, 'completed');
-                if (!resultViewTrackedRef.current) {
+                if (responseAnalyticsEligible && !resultViewTrackedRef.current) {
                     resultViewTrackedRef.current = true;
                     trackEvent(EVENTS.RESULT_VIEWED, {
                         request_id: requestId,
@@ -791,14 +797,14 @@ export default function ResultPage({ params }: PageProps) {
                                                         + 1
                                                     ).padStart(2, '0')}
                                                 </span>
-                                                <a
+                                                {account.instagramUrl ? <a
                                                     href={account.instagramUrl}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     className="truncate text-[14px] font-bold text-fg transition-colors hover:text-blood"
                                                 >
                                                     @{account.instagramId}
-                                                </a>
+                                                </a> : <span className="truncate text-[14px] font-bold text-fg">@{account.instagramId}</span>}
                                                 <RiskTag grade={account.riskGrade} className="ml-auto" />
                                             </div>
                                             {(account.fullName || account.bio) && (
@@ -834,7 +840,7 @@ export default function ResultPage({ params }: PageProps) {
                                                 {roundedOwnerScore(account.displayScore)}/10
                                             </span>
                                         )}
-                                        <InstaLink url={account.instagramUrl} />
+                                        {account.instagramUrl && externalProfileLinks && <InstaLink url={account.instagramUrl} />}
                                     </div>
                                 </CaseCard>
                             ))}
@@ -873,14 +879,14 @@ export default function ResultPage({ params }: PageProps) {
                                         <ProfileImage src={account.profileImage} variant="private" />
                                     </div>
                                     <div className="min-w-0 flex-1">
-                                        <a
+                                        {account.instagramUrl ? <a
                                             href={account.instagramUrl}
                                             target="_blank"
                                             rel="noopener noreferrer"
                                             className="block truncate text-[14px] font-bold text-fg transition-colors hover:text-blood"
                                         >
                                             @{account.instagramId}
-                                        </a>
+                                        </a> : <span className="block truncate text-[14px] font-bold text-fg">@{account.instagramId}</span>}
                                         {(account.fullName || account.bio) && (
                                             <p className="mt-0.5 truncate text-[12px] text-fg-dim">
                                                 {account.fullName && <span>{account.fullName}</span>}
@@ -889,7 +895,7 @@ export default function ResultPage({ params }: PageProps) {
                                             </p>
                                         )}
                                     </div>
-                                    <InstaLink url={account.instagramUrl} />
+                                    {account.instagramUrl && externalProfileLinks && <InstaLink url={account.instagramUrl} />}
                                 </div>
                             ))}
                         </div>

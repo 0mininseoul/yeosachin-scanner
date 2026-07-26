@@ -55,7 +55,7 @@ export function useAnalysisProgress(requestId: string) {
     const fetchQueuedRef = useRef(false);
     const analysisStartedTrackedRef = useRef(new Set<string>());
     const completionTrackedRef = useRef(new Set<string>());
-    const syntheticDemoRef = useRef(false);
+    const analyticsEligibleRef = useRef(true);
     const activeRequestIdRef = useRef<string | null>(null);
     const fetchInFlightRef = useRef<{
         requestId: string;
@@ -83,7 +83,7 @@ export function useAnalysisProgress(requestId: string) {
                     { cache: 'no-store', signal: controller.signal }
                 );
                 let payload = await response.json() as Record<string, unknown>;
-                syntheticDemoRef.current = response.headers.get('x-analysis-synthetic') === '1';
+                analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
                 if (
                     response.status === 409
                     && payload.code === 'V2_ROUTE_REQUIRED'
@@ -97,7 +97,7 @@ export function useAnalysisProgress(requestId: string) {
                         { cache: 'no-store', signal: controller.signal }
                     );
                     payload = await response.json() as Record<string, unknown>;
-                    syntheticDemoRef.current = response.headers.get('x-analysis-synthetic') === '1';
+                    analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
                 }
                 if (!response.ok) {
                     throw new Error(`Analysis status request failed (${response.status}).`);
@@ -227,7 +227,7 @@ export function useAnalysisProgress(requestId: string) {
 
     useEffect(() => {
         if (
-            syntheticDemoRef.current ||
+            !analyticsEligibleRef.current ||
             (data?.status !== 'pending' && data?.status !== 'processing')
             || data.id !== requestId
         ) return;
@@ -243,7 +243,7 @@ export function useAnalysisProgress(requestId: string) {
     }, [data?.id, data?.status, requestId]);
 
     useEffect(() => {
-        if (syntheticDemoRef.current || data?.status !== 'completed' || data.id !== requestId) return;
+        if (!analyticsEligibleRef.current || data?.status !== 'completed' || data.id !== requestId) return;
         const eventKey = analysisCompletedEventKey(requestId);
         if (completionTrackedRef.current.has(eventKey)) return;
         completionTrackedRef.current.add(eventKey);

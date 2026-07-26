@@ -6,6 +6,7 @@ import { ownerAnalysisHistoryV1Schema } from '@/lib/services/analysis/owner-hist
 import AnalysisList from './analysis-list';
 import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import { demoArchiveItems } from '@/lib/services/demo-analysis/archive';
 
 export const metadata = {
     title: '보관함 - 위장여사친 판독기',
@@ -33,20 +34,10 @@ export default async function MyPage() {
         console.error('Analysis owner history response failed validation');
     }
     const productionAnalyses = parsedHistory.success ? parsedHistory.data.items : [];
-    const archiveNow = new Date().valueOf();
     const demoAnalyses = isDemoOperator(user.id)
-        ? (await demoAnalysisStore.listForOwner(user.id)).map(run => ({
-            id: run.id,
-            targetInstagramId: run.target_instagram_id,
-            status: run.started_at && archiveNow >= new Date(run.started_at).getTime() + run.duration_seconds * 1_000
-                ? 'completed' as const
-                : 'processing' as const,
-            createdAt: run.created_at,
-            planType: 'standard',
-            pipelineVersion: 'v2' as const,
-        }))
+        ? demoArchiveItems(await demoAnalysisStore.listForOwner(user.id), new Date())
         : [];
-    const analyses = [...demoAnalyses, ...productionAnalyses];
+    const analyses = [...demoAnalyses, ...productionAnalyses].sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''));
 
     return (
         <div className="min-h-dvh">

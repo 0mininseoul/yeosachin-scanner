@@ -9,7 +9,7 @@ import {
 } from '@/lib/domain/analysis/result-pagination';
 import { analysisV2ResultStore } from '@/lib/services/analysis/v2-result-store';
 import { createClient } from '@/lib/supabase/server';
-import { demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseCapabilities, demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
@@ -71,7 +71,7 @@ export async function GET(
             }
             return NextResponse.json(analysisResultPageV1Schema.parse(demoResultPage({
                 requestId: demo.id, femaleCursor, privateCursor, pageSize: pageSize.data,
-            })), { status: 200, headers: { ...PRIVATE_NO_STORE_HEADERS, 'X-Analysis-Synthetic': '1' } });
+            })), { status: 200, headers: { ...PRIVATE_NO_STORE_HEADERS, ...demoResponseCapabilities() } });
         }
 
         const result = await analysisV2ResultStore.loadPage({

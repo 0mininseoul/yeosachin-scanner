@@ -18,6 +18,14 @@ export const DEMO_TARGET_USERNAME = 'junho_dem' as const;
 export const DEMO_FIXTURE_VERSION = 'synthetic-fixture-v1' as const;
 export const DEMO_ASSET_PREFIX = '/demo-avatars/synthetic-blurred-avatar-' as const;
 
+export function demoResponseCapabilities() {
+    return {
+        'X-Analytics-Eligible': '0',
+        'X-External-Profile-Links': 'disabled',
+        'X-Result-Actions': 'disabled',
+    } as const;
+}
+
 /** Deployment/test guard: synthetic profiles may only reference these local rasters. */
 export async function validateDemoAssetManifest(): Promise<string[]> {
     const assets = [1, 2, 3, 4].map(index => `${DEMO_ASSET_PREFIX}${index}-v1.png`);
@@ -28,6 +36,17 @@ export async function validateDemoAssetManifest(): Promise<string[]> {
         if (metadata.format !== 'png' || !metadata.width || !metadata.height) {
             throw new Error(`Invalid synthetic demo image: ${asset}`);
         }
+        const { data, info } = await sharp(diskPath).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+        let edgeTotal = 0;
+        let edgeCount = 0;
+        for (let y = 1; y < info.height; y += 8) for (let x = 1; x < info.width; x += 8) {
+            const offset = (y * info.width + x) * info.channels;
+            const left = (y * info.width + x - 1) * info.channels;
+            const up = ((y - 1) * info.width + x) * info.channels;
+            edgeTotal += Math.abs(data[offset]! - data[left]!) + Math.abs(data[offset]! - data[up]!);
+            edgeCount += 2;
+        }
+        if (edgeTotal / Math.max(1, edgeCount) > 35) throw new Error(`Synthetic demo image is not sufficiently defocused: ${asset}`);
     }));
     return assets;
 }
@@ -41,7 +60,7 @@ type DemoEnvironment = Readonly<{
 export function demoDurationSeconds(env: DemoEnvironment = process.env as DemoEnvironment): number {
     const value = Number.parseInt(env.DEMO_ANALYSIS_DURATION_SECONDS ?? '', 10);
     if (!Number.isFinite(value)) return 75;
-    return Math.max(30, Math.min(90, value));
+    return Math.max(60, Math.min(90, value));
 }
 
 export function isDemoEligible(
@@ -66,7 +85,8 @@ function avatar(index: number): string {
 }
 
 function identifier(index: number): string {
-    return `synth.member.${String(index + 1).padStart(3, '0')}`;
+    const stems = ['mira.lane', 'sori.park', 'dana.river', 'june.willow'];
+    return `${stems[index % stems.length]}.${String(index + 1).padStart(3, '0')}`;
 }
 
 function publicAccount(index: number): FemaleResultRowV1 {
@@ -74,7 +94,7 @@ function publicAccount(index: number): FemaleResultRowV1 {
     const displayScore = index === 0 ? 8 : index < 3 ? 5 : 3;
     return {
         instagramId: identifier(index),
-        fullName: `가상 프로필 ${index + 1}`,
+        fullName: ['미라 류', '서린 박', '다나 윤', '주은 한'][index % 4],
         profileImage: avatar(index),
         bio: '일상과 취미를 기록하는 공개 프로필입니다.',
         displayScore,
@@ -98,8 +118,8 @@ function publicAccount(index: number): FemaleResultRowV1 {
 
 function privateAccount(index: number): PrivateResultRowV1 {
     return {
-        instagramId: `synth.private.${String(index + 1).padStart(3, '0')}`,
-        fullName: `비공개 프로필 ${index + 1}`,
+        instagramId: `quiet.${['mira', 'sori', 'dana', 'june'][index % 4]}.${String(index + 1).padStart(3, '0')}`,
+        fullName: ['민아 류', '소연 박', '다은 윤', '지우 한'][index % 4],
         profileImage: avatar(index),
     };
 }
@@ -113,17 +133,21 @@ export interface DemoFixture {
 
 export function demoReadyPreflight(run: { id: string; created_at: string }) {
     const counts = { followers: 600, following: 580 };
-    const cards = buildPlanSelectionCards(counts);
+    const catalog = {
+        ...ANALYSIS_PLAN_CATALOG,
+        plus: { ...ANALYSIS_PLAN_CATALOG.plus, launchStatus: 'disabled' as const },
+    };
+    const cards = buildPlanSelectionCards(counts, { catalog });
     return {
         schemaVersion: 1 as const,
         preflightId: run.id,
         expiresAt: new Date(new Date(run.created_at).getTime() + 30 * 60_000).toISOString(),
         status: 'ready' as const,
-        exclusionDecision: 'pending' as const,
+        exclusionDecision: 'skip' as const,
         target: {
             username: DEMO_TARGET_USERNAME,
-            fullName: '가상 데모 계정',
-            bio: '데모용으로 구성된 가상 공개 프로필입니다.',
+            fullName: '준호의 공개 프로필',
+            bio: '사진과 일상을 기록하는 공개 프로필입니다.',
             profileImage: avatar(0),
             followersCount: counts.followers,
             followingCount: counts.following,
@@ -134,13 +158,13 @@ export function demoReadyPreflight(run: { id: string; created_at: string }) {
         requiredPlan: 'standard' as const,
         plans: cards.map(card => ({
             planId: card.planId,
-            launchStatus: ANALYSIS_PLAN_CATALOG[card.planId].launchStatus,
-            relationshipCapacity: ANALYSIS_PLAN_CATALOG[card.planId].relationshipCapacity,
-            detailedMutualLimit: ANALYSIS_PLAN_CATALOG[card.planId].detailedMutualLimit,
+            launchStatus: catalog[card.planId].launchStatus,
+            relationshipCapacity: catalog[card.planId].relationshipCapacity,
+            detailedMutualLimit: catalog[card.planId].detailedMutualLimit,
             selectionState: card.selectionState,
             unavailableReason: card.unavailableReason,
             pricingVersion: PLAN_PRICING_VERSION,
-            price: ANALYSIS_PLAN_CATALOG[card.planId].price,
+            price: catalog[card.planId].price,
             remainingSlots: null,
         })),
         pricingVersion: PLAN_PRICING_VERSION,
@@ -216,25 +240,25 @@ export function projectDemoProgress(input: {
     const progressBp = Math.min(10_000, Math.floor(elapsed / (input.durationSeconds * 1_000) * 10_000));
     const completed = progressBp === 10_000;
     const tracks = {
-        relationshipAi: track(progressBp, 0, 4_000, 'RELATIONSHIP_PROGRESS'),
-        interactions: track(progressBp, 3_000, 8_000, 'PROFILE_SCREENED'),
-        finalization: track(progressBp, 7_000, 10_000, 'FINALIZATION'),
+        relationshipAi: track(progressBp, 0, 4_000, 'PROFILE_SCREENING'),
+        interactions: track(progressBp, 3_000, 8_000, 'TARGET_INTERACTIONS_COLLECTING'),
+        finalization: track(progressBp, 7_000, 10_000, 'RESULT_FINALIZING'),
     };
     if (completed) {
-        tracks.relationshipAi = track(10_000, 0, 4_000, 'RELATIONSHIP_PROGRESS');
-        tracks.interactions = track(10_000, 3_000, 8_000, 'PROFILE_SCREENED');
-        tracks.finalization = track(10_000, 7_000, 10_000, 'FINALIZATION');
+        tracks.relationshipAi = track(10_000, 0, 4_000, 'PROFILE_SCREENING');
+        tracks.interactions = track(10_000, 3_000, 8_000, 'TARGET_INTERACTIONS_COLLECTING');
+        tracks.finalization = track(10_000, 7_000, 10_000, 'RESULT_FINALIZING');
     }
     const events: ProgressEventV1[] = [{
         schemaVersion: 1, requestId: input.requestId, seq: 1, revision: Math.floor(progressBp / 500),
         occurredAt: input.startedAt.toISOString(), state: 'confirmed', eventCode: completed ? 'ANALYSIS_COMPLETED' : 'TARGET_PROFILE_READY',
-        copyCode: completed ? 'ANALYSIS_COMPLETED' : 'TARGET_PROFILE_READY', aggregateCount: null,
+        copyCode: completed ? 'ANALYSIS_COMPLETED' : progressBp < 2_000 ? 'TARGET_PROFILE_READY' : progressBp < 4_000 ? 'RELATIONSHIPS_COLLECTING' : progressBp < 6_000 ? 'PROFILE_SCREENING' : progressBp < 8_000 ? 'TARGET_INTERACTIONS_COLLECTING' : 'RESULT_FINALIZING', aggregateCount: null,
     }];
     return {
         snapshot: {
             schemaVersion: 1, requestId: input.requestId, revision: Math.floor(progressBp / 500),
             status: completed ? 'completed' : 'processing', progressBp, backgroundProcessing: !completed,
-            tracks, activeProfile: completed ? null : { maskedUsername: 'synth.***', imageUrl: avatar(0) },
+            tracks, activeProfile: completed ? null : { maskedUsername: 'profile.***', imageUrl: avatar(0) },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
             lastEventSeq: 1,
         },

@@ -21,7 +21,7 @@ import {
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
 import { insertLandingLead } from '@/lib/services/leads/store';
-import { demoReadyPreflight, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoReadyPreflight, demoResponseCapabilities, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -110,7 +110,7 @@ async function handleGET(
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
             if (!isDemoOperator(user.id)) return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
-            return NextResponse.json(demoReadyPreflight(demo), { headers: { 'X-Analysis-Synthetic': '1', 'Cache-Control': 'private, no-store' } });
+            return NextResponse.json(demoReadyPreflight(demo), { headers: { ...demoResponseCapabilities(), 'Cache-Control': 'private, no-store' } });
         }
 
         const stored = await preflightStore.findForOwner(preflightId, user.id);

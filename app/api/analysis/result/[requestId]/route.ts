@@ -32,6 +32,15 @@ export async function GET(
             );
         }
 
+        const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
+        if (demo) {
+            if (!isDemoOperator(user.id)) return NextResponse.json({ error: '분석 요청을 찾을 수 없습니다.' }, { status: 404 });
+            return NextResponse.json({
+                error: 'V2 분석은 전용 결과 경로를 사용합니다.', code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2',
+                resultUrl: `/api/analysis/v2/result/${encodeURIComponent(demo.id)}`,
+            }, { status: 409, headers: { 'X-Analytics-Eligible': '0', 'X-External-Profile-Links': 'disabled', 'X-Result-Actions': 'disabled' } });
+        }
+
         // 2. 분석 요청 조회
         const { data: analysisRequest, error: requestError } = await supabaseAdmin
             .from('analysis_requests')

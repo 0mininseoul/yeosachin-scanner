@@ -89,7 +89,7 @@ export default function AnalyzePage() {
         submitExclusion,
         refreshPreflight,
         reset,
-        isSyntheticDemo,
+        analyticsEligible,
     } = useAnalysisV2Preflight();
 
     const {
@@ -152,7 +152,7 @@ export default function AnalyzePage() {
     }, [disclosureModalOpen]);
 
     useEffect(() => {
-        if (!readyPreflight || !exclusionDecided || isSyntheticDemo) return;
+        if (!readyPreflight || !exclusionDecided || !analyticsEligible) return;
         for (const plan of readyPreflight.plans) {
             if (
                 plan.planId === 'plus'
@@ -174,7 +174,7 @@ export default function AnalyzePage() {
                 properties => trackEvent(EVENTS.PLAN_VIEWED, properties)
             );
         }
-    }, [exclusionDecided, isSyntheticDemo, readyPreflight]);
+    }, [analyticsEligible, exclusionDecided, readyPreflight]);
 
     useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
@@ -253,7 +253,7 @@ export default function AnalyzePage() {
     };
 
     const trackPlanSelection = (planId: PlanId) => {
-        if (!readyPreflight || isSyntheticDemo) return;
+        if (!readyPreflight || !analyticsEligible) return;
         const plan = readyPreflight.plans.find(candidate => candidate.planId === planId);
         if (!plan || plan.selectionState === 'unavailable') return;
         const key = planSelectedEventKey(
@@ -303,7 +303,7 @@ export default function AnalyzePage() {
                 preflight_id: readyPreflight.preflightId,
             };
             if (paidPlan) {
-                if (!isSyntheticDemo) emitCurrentEarlybirdPricingEvent(
+                if (analyticsEligible) emitCurrentEarlybirdPricingEvent(
                     'checkout_started',
                     readyPreflight,
                     effectiveSelectedPlan,
@@ -376,7 +376,7 @@ export default function AnalyzePage() {
                 setError('결제창 주소를 확인하지 못했습니다. 잠시 후 다시 시도해주세요.');
                 return;
             }
-            if (!isSyntheticDemo) trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
+            if (analyticsEligible) trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
             window.location.assign(payload.checkoutUrl);
         } catch {
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');
