@@ -55,9 +55,14 @@ beforeAll(async () => {
             'relationship-followers:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
             'apify', 'actor/name', 'secondary', 'succeeded', 'RUNID001'
         );
-        INSERT INTO public.analysis_preflight_provider_runs VALUES (
-            '20000000-0000-4000-8000-000000000001', 'target-profile-fallback',
+        INSERT INTO public.analysis_preflight_provider_runs VALUES
+        (
+            '20000000-0000-4000-8000-000000000001', 'target-profile-fallback:z',
             'apify', 'apify/instagram-profile-scraper', 'secondary', 'succeeded', 'RUNID002'
+        ),
+        (
+            '20000000-0000-4000-8000-000000000001', 'target-profile-fallback:a',
+            'apify', 'apify/instagram-profile-scraper', 'secondary', 'succeeded', 'RUNID003'
         );
     `);
 });
@@ -76,7 +81,7 @@ describe('read_analysis_v2_replay_capture_source', () => {
         expect(result.rows[0]?.source).toMatchObject({
             targetUsername: 'target',
             providerRuns: [{ credentialSlot: 'secondary', runId: 'RUNID001' }],
-            preflightRuns: [{ runId: 'RUNID002' }],
+            preflightRuns: [{ runId: 'RUNID003' }, { runId: 'RUNID002' }],
         });
     });
 
