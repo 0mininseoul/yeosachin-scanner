@@ -251,25 +251,24 @@ $migration$;
 DO $migration$
 DECLARE
     v_definition TEXT;
-    v_preliminary_old TEXT := $old$
-                    + (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'recentMutual')::NUMERIC$old$;
-    v_preliminary_new TEXT := $new$
-                    + (item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'recentMutual')::NUMERIC$new$;
+    v_tag_component_pattern TEXT := $pattern$\(item\.value->'components'->>'tagOrCaptionMention'\)::NUMERIC$pattern$;
 BEGIN
     SELECT pg_catalog.pg_get_functiondef(
         'public.checkpoint_analysis_v2_preliminary_scores(uuid,text,uuid,text,jsonb)'
             ::pg_catalog.regprocedure
     ) INTO v_definition;
-    IF pg_catalog.strpos(v_definition, v_preliminary_old) = 0
+    IF v_definition !~ v_tag_component_pattern
        OR pg_catalog.strpos(v_definition, 'NOT BETWEEN 0 AND 97') = 0
        OR pg_catalog.strpos(v_definition, 'NOT BETWEEN 0 AND 100') = 0
        OR pg_catalog.strpos(v_definition, '+ 3, 100') = 0 THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_PRELIMINARY_DRIFT', ERRCODE = 'P0001';
     END IF;
-    v_definition := pg_catalog.replace(v_definition, v_preliminary_old, v_preliminary_new);
+    v_definition := pg_catalog.regexp_replace(
+        v_definition,
+        v_tag_component_pattern,
+        $replacement$(item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
+                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC$replacement$
+    );
     v_definition := pg_catalog.replace(v_definition, 'NOT BETWEEN 0 AND 97', 'NOT BETWEEN 0 AND 95');
     v_definition := pg_catalog.replace(v_definition, '+ 3, 100', '+ 5, 100');
     EXECUTE v_definition;
@@ -279,47 +278,47 @@ $migration$;
 DO $migration$
 DECLARE
     v_definition TEXT;
-    v_final_old TEXT := $old$
-                    + (item.value->'components'->>'targetToCandidateLike')::NUMERIC
-                    + (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'recentMutual')::NUMERIC$old$;
-    v_final_new TEXT := $new$
-                    + (item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'targetToCandidateLike')::NUMERIC
-                    + (item.value->'components'->>'recentMutual')::NUMERIC$new$;
-    v_preliminary_old TEXT := $old$
-                    + (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'recentMutual')::NUMERIC$old$;
-    v_preliminary_new TEXT := $new$
-                    + (item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'recentMutual')::NUMERIC$new$;
+    v_tag_component_pattern TEXT := $pattern$\(item\.value->'components'->>'tagOrCaptionMention'\)::NUMERIC$pattern$;
+    v_expected_pre_score_pattern TEXT := $pattern$GREATEST\(\s*0\s*,\s*LEAST\(\s*component_sum\.preliminary_component_total\s*\+\s*\(item\.value->>'weakPartnerAdjustment'\)::NUMERIC\s*,\s*97\s*\)\s*\)\s+AS\s+expected_pre_score$pattern$;
+    v_possible_upper_pattern TEXT := $pattern$expected_score\.expected_pre_score\s*\+\s*3\s*,\s*100$pattern$;
+    v_caution_pattern TEXT := $pattern$ranked\.risk_band\s*=\s*'caution'\s+AND\s+ranked\.expected_rank\s*<=\s*15$pattern$;
 BEGIN
     SELECT pg_catalog.pg_get_functiondef(
         'public.checkpoint_analysis_v2_candidate_scores(uuid,text,uuid,text,jsonb,text)'
             ::pg_catalog.regprocedure
     ) INTO v_definition;
     IF pg_catalog.strpos(v_definition, 'risk-policy-v2.3') = 0
-       OR pg_catalog.strpos(v_definition, v_final_old) = 0
-       OR pg_catalog.strpos(v_definition, v_preliminary_old) = 0
-       OR pg_catalog.strpos(v_definition, ', 97') = 0
-       OR pg_catalog.strpos(v_definition, '+ 3,') = 0
-       OR pg_catalog.strpos(
-            v_definition,
-            $caution$ranked.risk_band = 'caution' AND ranked.expected_rank <= 15$caution$
-       ) = 0 THEN
+       OR v_definition !~ v_tag_component_pattern
+       OR v_definition !~ v_expected_pre_score_pattern
+       OR v_definition !~ v_possible_upper_pattern
+       OR v_definition !~ v_caution_pattern THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_FINAL_DRIFT', ERRCODE = 'P0001';
     END IF;
-    v_definition := pg_catalog.replace(v_definition, v_final_old, v_final_new);
-    v_definition := pg_catalog.replace(v_definition, v_preliminary_old, v_preliminary_new);
-    v_definition := pg_catalog.replace(v_definition, ', 97', ', 95');
-    v_definition := pg_catalog.replace(v_definition, '+ 3,', '+ 5,');
-    v_definition := pg_catalog.replace(v_definition, 'risk-policy-v2.3', 'risk-policy-v2.4');
-    v_definition := pg_catalog.replace(
+    v_definition := pg_catalog.regexp_replace(
         v_definition,
-        $caution$ranked.risk_band = 'caution' AND ranked.expected_rank <= 15$caution$,
-        $caution$ranked.risk_band = 'caution' AND ranked.expected_rank <= 10$caution$
+        v_tag_component_pattern,
+        $replacement$(item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
+                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC$replacement$,
+        'g'
+    );
+    v_definition := pg_catalog.regexp_replace(
+        v_definition,
+        v_expected_pre_score_pattern,
+        $replacement$GREATEST(0, LEAST(
+                    component_sum.preliminary_component_total
+                        + (item.value->>'weakPartnerAdjustment')::NUMERIC,
+                    95
+                )) AS expected_pre_score$replacement$
+    );
+    v_definition := pg_catalog.regexp_replace(
+        v_definition,
+        v_possible_upper_pattern,
+        $replacement$expected_score.expected_pre_score + 5, 100$replacement$
+    );
+    v_definition := pg_catalog.replace(v_definition, 'risk-policy-v2.3', 'risk-policy-v2.4');
+    v_definition := pg_catalog.regexp_replace(
+        v_definition, v_caution_pattern,
+        $replacement$ranked.risk_band = 'caution' AND ranked.expected_rank <= 10$replacement$
     );
     EXECUTE v_definition;
 END;

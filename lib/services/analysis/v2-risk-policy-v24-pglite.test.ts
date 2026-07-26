@@ -9,6 +9,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const baseFinalizationMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260713185711_add_analysis_v2_result_finalization.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -17,6 +24,15 @@ function functionDefinition(name: string): string {
     const end = migration.indexOf('\n$$;', start);
     if (end < 0) throw new Error(`Unbounded function ${name}`);
     return migration.slice(start, end + 4);
+}
+
+function latestBaseFunctionDefinition(name: string): string {
+    const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
+    const start = baseFinalizationMigration.lastIndexOf(marker);
+    if (start < 0) throw new Error(`Missing base function ${name}`);
+    const end = baseFinalizationMigration.indexOf('\n$$;', start);
+    if (end < 0) throw new Error(`Unbounded base function ${name}`);
+    return baseFinalizationMigration.slice(start, end + 4);
 }
 
 let db: PGlite;
@@ -82,11 +98,16 @@ describe('risk-policy v2.4 database replay', () => {
     });
 
     it('declares v2.4 constraints and five-point reverse-like finalization', () => {
+        const predecessor = latestBaseFunctionDefinition('checkpoint_analysis_v2_candidate_scores');
         expect(migration).toContain("'risk-policy-v2.4'");
         expect(migration).toContain("candidateToTargetTagOrCaptionMention");
         expect(migration).toContain("targetToCandidateTagOrCaptionMention");
         expect(migration).toContain("+ 5, 100");
         expect(migration).toContain("expected_rank <= 10");
+        expect(predecessor).toContain('component_sum.preliminary_component_total');
+        expect(predecessor).toContain('                    97\n                )) AS expected_pre_score');
+        expect(predecessor).toContain('                    100\n                )) AS expected_raw_score');
+        expect(predecessor).toContain("ranked.expected_rank <= 15");
     });
 
     it('patches v2.3 finalization definitions forward without rewriting history', async () => {
@@ -185,7 +206,16 @@ describe('risk-policy v2.4 database replay', () => {
                     + (item.value->'components'->>'recentMutual')::NUMERIC
                     + (item.value->'components'->>'tagOrCaptionMention')::NUMERIC
                     + (item.value->'components'->>'recentMutual')::NUMERIC
-                    , 97 + 3,$note$;
+                    GREATEST(0, LEAST(
+                        component_sum.preliminary_component_total
+                            + (item.value->>'weakPartnerAdjustment')::NUMERIC,
+                        97
+                    )) AS expected_pre_score
+                    GREATEST(0, LEAST(
+                        component_sum.component_total,
+                        100
+                    )) AS expected_raw_score
+                    expected_score.expected_pre_score + 3, 100$note$;
                 BEGIN
                     IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.3' THEN
                         RAISE EXCEPTION 'policy';
@@ -293,6 +323,17 @@ describe('risk-policy v2.4 database replay', () => {
                 { candidate_id: 'caution-11', featured_rank: null },
                 { candidate_id: 'high-4', featured_rank: null },
             ]);
+            const patchedDefinition = await migrationDb.query<{ definition: string }>(
+                `SELECT pg_catalog.pg_get_functiondef(
+                    'public.checkpoint_analysis_v2_candidate_scores(uuid,text,uuid,text,jsonb,text)'
+                        ::pg_catalog.regprocedure
+                ) AS definition`
+            );
+            expect(patchedDefinition.rows[0]!.definition).toContain('95\n                )) AS expected_pre_score');
+            expect(patchedDefinition.rows[0]!.definition).toContain('100\n                    )) AS expected_raw_score');
+            expect(patchedDefinition.rows[0]!.definition).toContain('expected_rank <= 10');
+            expect(patchedDefinition.rows[0]!.definition).toContain('expected_rank <= 3');
+            expect(patchedDefinition.rows[0]!.definition).not.toContain('expected_rank <= 15');
         } finally {
             await migrationDb.close();
         }
