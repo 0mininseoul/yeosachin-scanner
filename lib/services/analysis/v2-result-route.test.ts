@@ -89,7 +89,7 @@ describe('analysis V2 owner result route', () => {
         mocks.demoFindForOwner.mockResolvedValue(null);
     });
 
-    it('validates identifiers, cursor scope, and page size before authentication', async () => {
+    it('validates route identifiers safely and keeps malformed production pagination generic', async () => {
         const malformedId = await GET(
             new Request('https://example.com/api/analysis/v2/result/nope'),
             context('nope')
@@ -109,16 +109,23 @@ describe('analysis V2 owner result route', () => {
 
         expect([malformedId.status, wrongCursor.status, excessivePage.status])
             .toEqual([400, 400, 400]);
-        expect(mocks.getUser).not.toHaveBeenCalled();
+        expect(malformedId.headers.get('x-analytics-eligible')).toBeNull();
+        expect(wrongCursor.headers.get('x-analytics-eligible')).toBeNull();
+        expect(excessivePage.headers.get('x-analytics-eligible')).toBeNull();
+        expect(mocks.getUser).toHaveBeenCalledTimes(2);
+        expect(mocks.demoFindForOwner).toHaveBeenCalledTimes(2);
+        expect(mocks.loadPage).not.toHaveBeenCalled();
     });
 
-    it('requires authentication', async () => {
+    it('requires authentication before reading malformed pagination for a valid route id', async () => {
         mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
         const response = await GET(
-            new Request(`https://example.com/api/analysis/v2/result/${requestId}`),
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}?pageSize=51`),
             context()
         );
         expect(response.status).toBe(401);
+        expect(response.headers.get('x-analytics-eligible')).toBeNull();
+        expect(mocks.demoFindForOwner).not.toHaveBeenCalled();
         expect(mocks.loadPage).not.toHaveBeenCalled();
     });
 
@@ -134,6 +141,32 @@ describe('analysis V2 owner result route', () => {
         expect(response.status).toBe(404);
         expect(response.headers.get('x-analytics-eligible')).toBe('0');
         expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it.each([
+        `femaleCursor=${cursor('private')}`,
+        `privateCursor=${cursor('public')}`,
+        'pageSize=51',
+    ])('keeps malformed demo result pagination private: %s', async query => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-result-key-00000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date().toISOString(),
+        });
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}?${query}`),
+            context()
+        );
+
+        expect(response.status).toBe(400);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.demoFindForOwner).toHaveBeenCalledWith(requestId, userId);
         expect(mocks.loadPage).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });

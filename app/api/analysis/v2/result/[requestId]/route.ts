@@ -44,23 +44,11 @@ export async function GET(
     { params }: { params: Promise<{ requestId: string }> }
 ) {
     const requestId = requestIdSchema.safeParse((await params).requestId);
+    if (!requestId.success) {
+        return json({ error: 'Invalid result request.' }, 400);
+    }
     const url = new URL(request.url);
-    const pageSize = url.searchParams.has('pageSize')
-        ? pageSizeSchema.safeParse(url.searchParams.get('pageSize'))
-        : { success: true as const, data: RESULT_PAGE_SIZE_DEFAULT };
-
-    let femaleCursor: string | null;
-    let privateCursor: string | null;
     let demoRecognized = false;
-    try {
-        femaleCursor = parseCursor(url.searchParams.get('femaleCursor'), 'public');
-        privateCursor = parseCursor(url.searchParams.get('privateCursor'), 'private');
-    } catch {
-        return json({ error: 'Invalid result request.' }, 400);
-    }
-    if (!requestId.success || !pageSize.success) {
-        return json({ error: 'Invalid result request.' }, 400);
-    }
 
     try {
         const supabase = await createClient();
@@ -70,8 +58,28 @@ export async function GET(
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        demoRecognized = demo !== null;
+
+        const pageSize = url.searchParams.has('pageSize')
+            ? pageSizeSchema.safeParse(url.searchParams.get('pageSize'))
+            : { success: true as const, data: RESULT_PAGE_SIZE_DEFAULT };
+        let femaleCursor: string | null;
+        let privateCursor: string | null;
+        try {
+            femaleCursor = parseCursor(url.searchParams.get('femaleCursor'), 'public');
+            privateCursor = parseCursor(url.searchParams.get('privateCursor'), 'private');
+        } catch {
+            return demoRecognized
+                ? demoJson({ error: 'Invalid result request.' }, 400)
+                : json({ error: 'Invalid result request.' }, 400);
+        }
+        if (!pageSize.success) {
+            return demoRecognized
+                ? demoJson({ error: 'Invalid result request.' }, 400)
+                : json({ error: 'Invalid result request.' }, 400);
+        }
+
         if (demo) {
-            demoRecognized = true;
             if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
                 return demoJson({ error: 'Analysis result not found.' }, 404);
             }

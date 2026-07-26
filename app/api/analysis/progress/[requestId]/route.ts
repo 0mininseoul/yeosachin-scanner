@@ -35,16 +35,10 @@ export async function GET(
     let demoRecognized = false;
     try {
         const requestId = requestIdSchema.safeParse((await params).requestId);
-        const url = new URL(request.url);
-        const afterSequence = url.searchParams.has('afterSeq')
-            ? sequenceSchema.safeParse(url.searchParams.get('afterSeq'))
-            : { success: true as const, data: 0 };
-        const eventLimit = url.searchParams.has('limit')
-            ? limitSchema.safeParse(url.searchParams.get('limit'))
-            : { success: true as const, data: 100 };
-        if (!requestId.success || !afterSequence.success || !eventLimit.success) {
+        if (!requestId.success) {
             return json({ error: 'Invalid progress request.' }, 400);
         }
+        const url = new URL(request.url);
 
         const supabase = await createClient();
         const { data: { user }, error } = await supabase.auth.getUser();
@@ -53,8 +47,21 @@ export async function GET(
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        demoRecognized = demo !== null;
+
+        const afterSequence = url.searchParams.has('afterSeq')
+            ? sequenceSchema.safeParse(url.searchParams.get('afterSeq'))
+            : { success: true as const, data: 0 };
+        const eventLimit = url.searchParams.has('limit')
+            ? limitSchema.safeParse(url.searchParams.get('limit'))
+            : { success: true as const, data: 100 };
+        if (!afterSequence.success || !eventLimit.success) {
+            return demoRecognized
+                ? demoJson({ error: 'Invalid progress request.' }, 400)
+                : json({ error: 'Invalid progress request.' }, 400);
+        }
+
         if (demo) {
-            demoRecognized = true;
             if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at) return demoJson({ error: 'Analysis progress not found.' }, 404);
             const progress = projectDemoProgress({
                 requestId: demo.id,
