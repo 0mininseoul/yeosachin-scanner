@@ -7,7 +7,7 @@ export interface ReplayDatasetPage {
 
 /** Deliberately has no actor(), start(), abort(), update(), or delete() capability. */
 export interface ReplayReadonlyApifyClient {
-    run(runId: string): { get(): Promise<{ status?: string; defaultDatasetId?: string | null }> };
+    run(runId: string): { get(): Promise<{ id?: string; actId?: string; status?: string; defaultDatasetId?: string | null }> };
     dataset(datasetId: string): { listItems(input: { offset: number; limit: number }): Promise<ReplayDatasetPage> };
 }
 
@@ -18,7 +18,7 @@ export interface ReplayProviderLedgerIdentity {
 }
 
 export class AnalysisV2ReplayReadError extends Error {
-    constructor(readonly code: string, _unsafeDetail?: string) {
+    constructor(readonly code: string) {
         super(code);
         this.name = 'AnalysisV2ReplayReadError';
     }
@@ -48,8 +48,14 @@ export async function readCompletedApifyDatasetOnce(input: {
     if (readState.has(readKey)) fail('ANALYSIS_V2_REPLAY_DUPLICATE_DATASET_READ');
     readState.add(readKey);
     const run = await input.client.run(input.runId).get().catch(() => fail('ANALYSIS_V2_REPLAY_APIFY_RUN_UNAVAILABLE'));
+    if (run.id !== undefined && run.id !== input.runId) {
+        fail('ANALYSIS_V2_REPLAY_PROVIDER_IDENTITY_MISMATCH');
+    }
     if (run.status !== 'SUCCEEDED') fail('ANALYSIS_V2_REPLAY_APIFY_RUN_NOT_SUCCEEDED');
     if (!run.defaultDatasetId || !/^[A-Za-z0-9]{1,64}$/.test(run.defaultDatasetId)) fail('ANALYSIS_V2_REPLAY_APIFY_DATASET_MISSING');
+    const datasetReadKey = `${input.expected.credentialSlot}:dataset:${run.defaultDatasetId}`;
+    if (readState.has(datasetReadKey)) fail('ANALYSIS_V2_REPLAY_DUPLICATE_DATASET_READ');
+    readState.add(datasetReadKey);
     const output: unknown[] = [];
     let offset = 0;
     let total: number | undefined;

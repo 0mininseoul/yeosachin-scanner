@@ -1,14 +1,20 @@
 import { createHash } from 'node:crypto';
-import { selectAnalysisMedia, type SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
+import { MAX_RECENT_POSTS, selectAnalysisMedia, type SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
+import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import type { AnalysisV2CheckpointProfile } from '@/lib/services/analysis/v2-profile-fetch-store';
+import { ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS } from '@/lib/services/analysis/v2-ai-scoring-executors';
+import { classifyAnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import type { ReplayProviderLedgerIdentity } from './replay-readonly-apify';
+import {
+    replaySourceLineageSchema,
+    type ReplaySourceLineage,
+} from './replay-source-lineage';
 
 export interface ReplayCaptureSelector { targetUsername: string; }
 export interface ReplayCompletedRequest {
     requestFingerprint: string;
-    plan: string;
-    pipelineVersion: string;
+    sourceLineage: ReplaySourceLineage;
     completed: boolean;
 }
 export interface ReplayCaptureSource {
@@ -19,7 +25,7 @@ export interface ReplayCaptureSource {
 
 /** A deliberately narrow read-only source. It has no RPC/mutation methods. */
 export interface ReplayCaptureRepository {
-    findCompletedStandardV2Exact(selector: ReplayCaptureSelector): Promise<ReplayCompletedRequest | null>;
+    findCompletedReplaySourceExact(selector: ReplayCaptureSelector): Promise<ReplayCompletedRequest | null>;
     loadReplaySource(request: ReplayCompletedRequest): Promise<ReplayCaptureSource>;
 }
 
@@ -33,7 +39,7 @@ function normalizedUsername(value: string): string {
 
 function selectionMedia(profile: AnalysisV2CheckpointProfile): readonly SelectedAnalysisMedia[] {
     if (profile.isPrivate) return [];
-    if ((profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, 4)) {
+    if ((profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
         fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
     }
     const policy = selectAnalysisMedia({
@@ -42,6 +48,23 @@ function selectionMedia(profile: AnalysisV2CheckpointProfile): readonly Selected
     });
     if (policy.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
     return policy.feature.media;
+}
+
+async function normalizeExact(
+    media: SelectedAnalysisMedia,
+    normalize: (media: SelectedAnalysisMedia) => Promise<Buffer>,
+): Promise<Buffer> {
+    for (let attempt = 1; attempt <= ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS; attempt++) {
+        try {
+            return await normalize(media);
+        } catch (error) {
+            const failure = classifyAnalysisImagePreparationError(error, 'download');
+            if (failure.disposition !== 'transient' || attempt === ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS) {
+                fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
+            }
+        }
+    }
+    return fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
 }
 
 function jpeg(buffer: Buffer): boolean {
@@ -59,29 +82,58 @@ export async function captureAnalysisV2ReplayBundle(input: {
     now?: number;
 }): Promise<AnalysisV2ReplayBundle> {
     const targetUsername = normalizedUsername(input.selector.targetUsername);
-    const request = await input.repository.findCompletedStandardV2Exact({ targetUsername });
-    if (!request || request.plan !== 'standard' || request.pipelineVersion !== 'v2' || request.completed !== true || !/^[a-f0-9]{64}$/.test(request.requestFingerprint)) {
+    const request = await input.repository.findCompletedReplaySourceExact({ targetUsername });
+    if (
+        !request
+        || request.completed !== true
+        || !/^[a-f0-9]{64}$/.test(request.requestFingerprint)
+        || !replaySourceLineageSchema.safeParse(request.sourceLineage).success
+    ) {
         fail('ANALYSIS_V2_REPLAY_REQUEST_INELIGIBLE');
     }
     const source = await input.repository.loadReplaySource(request);
     const profiles: AnalysisV2ReplayBundle['profiles'] = [];
     for (const [index, profile] of source.profiles.entries()) {
         const selected = selectionMedia(profile);
-        const normalized = await Promise.all(selected.map(async media => ({ media, bytes: await input.normalizeMedia(media) })));
+        const policy = profile.isPrivate ? null : selectAnalysisMedia({
+            profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
+            posts: profile.latestPosts ?? [],
+        });
+        const normalized = await Promise.all(selected.map(async media => ({ media, bytes: await normalizeExact(media, input.normalizeMedia) })));
         if (normalized.length !== selected.length || normalized.some(item => !jpeg(item.bytes))) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         }
         profiles.push({
             ordinal: index + 1,
             isPrivate: profile.isPrivate,
+            username: profile.username.toLowerCase(),
+            fullName: profile.fullName ?? null,
             bio: profile.isPrivate ? undefined : profile.bio ?? null,
             media: normalized.map(({ media, bytes }) => ({
                 selectionId: media.selectionId,
+                kind: media.role === 'profile' ? 'profile' as const : 'feed' as const,
+                ...(media.postId ? { postId: media.postId } : {}),
                 caption: media.postId
                     ? profile.latestPosts?.find(post => post.id === media.postId)?.caption ?? null
                     : null,
                 jpegBase64: bytes.toString('base64'),
             })),
+            triageSelectionIds: policy?.triage.selectionIds ?? [],
+            featureSelectionIds: policy?.feature.selectionIds ?? [],
+            // Production passes the complete normalized feature set to the resolver;
+            // the resolver applies its own current projection/media limit.
+            resolverSelectionIds: policy?.feature.selectionIds ?? [],
+            captions: policy ? buildCarouselCaptionPolicy({
+                targetUsername: profile.username,
+                profile,
+                featureSelections: policy.feature.media,
+                partnerSelections: policy.partnerSafetyContactSheetCandidates.media,
+            }).featureCaptions : [],
+            coverage: {
+                selectedCount: selected.length,
+                normalizedCount: normalized.length,
+                failures: [],
+            },
         });
     }
     const now = input.now ?? Date.now();
@@ -89,7 +141,10 @@ export async function captureAnalysisV2ReplayBundle(input: {
         schemaVersion: 1,
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + 24 * 60 * 60 * 1_000).toISOString(),
-        capture: { requestFingerprint: request.requestFingerprint, plan: 'standard' },
+        capture: {
+            requestFingerprint: request.requestFingerprint,
+            sourceLineage: request.sourceLineage,
+        },
         profiles,
         evidence: source.evidence,
     };

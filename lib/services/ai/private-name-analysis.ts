@@ -176,6 +176,7 @@ async function analyzePrivateNameChunk(
     auditFactory?: PrivateNameAnalysisAudit,
     chunkIndex = 0,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+    statelessReplay = false,
 ): Promise<PrivateNameAnalysisResult[]> {
     const expectedIds = accounts.map(account => account.id);
     const schema = createPrivateNameBatchResponseSchema(expectedIds);
@@ -206,6 +207,7 @@ async function analyzePrivateNameChunk(
                             startingAttempt: prepared?.startingAttempt ?? 1,
                             onBeforeAttempt: audit.onBeforeAttempt,
                             onAttemptTelemetry: audit.onAttemptTelemetry,
+                            ...(statelessReplay ? { skipTokenLog: true, statelessReplay: true } : {}),
                         }
                         : {
                             // Preserve the legacy batch allowance when no durable V2 policy applies.
@@ -286,7 +288,7 @@ export async function analyzePrivateAccountNames(
     rawAccounts: PrivateNameAccountInput[],
     requestId?: string,
     audit?: PrivateNameAnalysisAudit,
-    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
+    options: { aiStagePolicyVersion?: AiStagePolicyVersion; statelessReplay?: boolean } = {},
 ): Promise<PrivateNameAnalysisResult[]> {
     const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
     if (requestId !== undefined) {
@@ -318,6 +320,7 @@ export async function analyzePrivateAccountNames(
                     audit,
                     chunkIndex,
                     policyVersion,
+                    options.statelessReplay === true,
                 );
             })
         );

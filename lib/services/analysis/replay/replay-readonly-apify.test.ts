@@ -7,7 +7,14 @@ import {
 
 function client(pages: readonly { offset: number; count: number; total: number; items: unknown[] }[]): ReplayReadonlyApifyClient {
     return {
-        run: () => ({ get: async () => ({ status: 'SUCCEEDED', defaultDatasetId: 'dataset' }) }),
+        run: runId => ({
+            get: async () => ({
+                id: runId,
+                actId: 'actor/name',
+                status: 'SUCCEEDED',
+                defaultDatasetId: 'dataset',
+            }),
+        }),
         dataset: () => ({ listItems: async ({ offset }) => {
             const page = pages.find(candidate => candidate.offset === offset);
             if (!page) throw new Error('missing page');
@@ -30,7 +37,17 @@ describe('read-only Apify replay adapter', () => {
 
     it('fails closed for non-terminal, identity drift, page drift, or duplicate dataset read', async () => {
         await expect(readCompletedApifyDatasetOnce({
-            client: { ...client([{ offset: 0, count: 0, total: 0, items: [] }]), run: () => ({ get: async () => ({ status: 'RUNNING', defaultDatasetId: 'dataset' }) }) },
+            client: {
+                ...client([{ offset: 0, count: 0, total: 0, items: [] }]),
+                run: runId => ({
+                    get: async () => ({
+                        id: runId,
+                        actId: 'actor/name',
+                        status: 'RUNNING',
+                        defaultDatasetId: 'dataset',
+                    }),
+                }),
+            },
             runId: 'run00001', expected: { actorId: 'actor/name', credentialSlot: 'secondary', runId: 'run00001' }, ledger: { actorId: 'actor/name', credentialSlot: 'secondary', runId: 'run00001' },
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_APIFY_RUN_NOT_SUCCEEDED');
         await expect(readCompletedApifyDatasetOnce({
@@ -44,7 +61,26 @@ describe('read-only Apify replay adapter', () => {
     });
 
     it('does not surface provider messages in stable errors', () => {
-        expect(new AnalysisV2ReplayReadError('ANALYSIS_V2_REPLAY_APIFY_DATASET_DRIFT', 'sensitive provider response').message)
+        expect(new AnalysisV2ReplayReadError('ANALYSIS_V2_REPLAY_APIFY_DATASET_DRIFT').message)
             .toBe('ANALYSIS_V2_REPLAY_APIFY_DATASET_DRIFT');
+    });
+
+    it('rejects two different run identities that resolve to the same dataset', async () => {
+        const state = new Set<string>();
+        const sharedDatasetClient = client([{ offset: 0, count: 0, total: 0, items: [] }]);
+        await readCompletedApifyDatasetOnce({
+            client: sharedDatasetClient,
+            runId: 'run00001',
+            expected: { actorId: 'actor/name', credentialSlot: 'secondary', runId: 'run00001' },
+            ledger: { actorId: 'actor/name', credentialSlot: 'secondary', runId: 'run00001' },
+            readState: state,
+        });
+        await expect(readCompletedApifyDatasetOnce({
+            client: sharedDatasetClient,
+            runId: 'run00002',
+            expected: { actorId: 'actor/name', credentialSlot: 'secondary', runId: 'run00002' },
+            ledger: { actorId: 'actor/name', credentialSlot: 'secondary', runId: 'run00002' },
+            readState: state,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_DUPLICATE_DATASET_READ');
     });
 });

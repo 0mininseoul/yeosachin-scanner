@@ -1,13 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
 
 const bundle = {
     schemaVersion: 1 as const,
     createdAt: '2026-07-27T00:00:00.000Z', expiresAt: '2026-07-27T01:00:00.000Z',
-    capture: { requestFingerprint: 'a'.repeat(64), plan: 'standard' as const },
+    capture: {
+        requestFingerprint: 'a'.repeat(64),
+        sourceLineage: {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+                risk: 'risk-policy-v2.4' as const,
+            },
+        },
+    },
     profiles: [
-        { ordinal: 1, isPrivate: false, bio: null, media: [{ selectionId: 'm1', caption: null, jpegBase64: '/9j/2Q==' }] },
-        { ordinal: 2, isPrivate: true, bio: null, media: [] },
+        { ordinal: 1, isPrivate: false, username: 'public', fullName: null, bio: null, media: [
+            { selectionId: 'm1', kind: 'feed' as const, postId: 'p1', caption: null, jpegBase64: '/9j/2Q==' },
+            { selectionId: 'm2', kind: 'feed' as const, postId: 'p2', caption: null, jpegBase64: '/9j/2Q==' },
+        ], triageSelectionIds: ['m1', 'm2'], featureSelectionIds: ['m1', 'm2'], resolverSelectionIds: ['m1', 'm2'], captions: [], coverage: { selectedCount: 2, normalizedCount: 2, failures: [] } },
+        { ordinal: 2, isPrivate: true, username: 'private', fullName: null, bio: null, media: [], triageSelectionIds: [], featureSelectionIds: [], resolverSelectionIds: [], captions: [], coverage: { selectedCount: 0, normalizedCount: 0, failures: [] } },
     ], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
 };
 
@@ -20,12 +34,13 @@ describe('AI-only replay runner', () => {
         expect(report.stages.genderTriage.calls).toBe(0);
         expect(lines.join('\n')).not.toContain('m1');
         expect(lines.join('\n')).not.toContain('a'.repeat(64));
+        expect(lines.join('\n')).not.toContain('public');
     });
 
     it('rejects malformed normalized input during dry-run before invoking AI', async () => {
         const triage = vi.fn();
         await expect(runAnalysisV2AiReplay({
-            bundle: { ...bundle, profiles: [{ ...bundle.profiles[0], media: [{ selectionId: 'm1', caption: null, jpegBase64: 'aGVsbG8=' }] }] },
+            bundle: { ...bundle, profiles: [{ ...bundle.profiles[0], media: [{ selectionId: 'm1', kind: 'feed', caption: null, jpegBase64: 'aGVsbG8=' }] }] },
             runner: { triage }, mode: 'dry-run',
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
         expect(triage).not.toHaveBeenCalled();
@@ -33,15 +48,292 @@ describe('AI-only replay runner', () => {
 
     it('requires explicit paid-ai mode, summarizes retry/rate-limit/outcome metrics, and has no persistence dependency', async () => {
         const runner: ReplayAiRunner = {
-            triage: vi.fn(async () => ({ outcome: 'ok' as const, value: { inferredGender: 'female' as const, routeToFeature: true }, attempts: 2, retries: 1, elapsedMs: 20 })),
+            triage: vi.fn(async () => ({ outcome: 'ok' as const, value: { assessment: { inferredGender: 'female' as const, confidence: 'medium' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1'] }, routingDecision: 'route_to_feature_analysis' as const, routingReason: 'conserve_female_recall' as const, analyzedSelectionIds: ['m1'] }, attempts: 2, retries: 1, elapsedMs: 20 })),
             feature: vi.fn(async () => ({ outcome: 'rate_limited' as const, attempts: 1, retries: 0, elapsedMs: 30 })),
-            privateName: vi.fn(async () => ({ outcome: 'ok' as const, attempts: 1, retries: 0, elapsedMs: 10 })),
+            privateNames: vi.fn(async () => ({ outcome: 'ok' as const, calls: 1, attempts: 1, retries: 0, elapsedMs: 10 })),
         };
         await expect(runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai' })).rejects.toThrow('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
         const report = await runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai', paidAiOptIn: true });
         expect(report.stages.genderTriage).toMatchObject({ calls: 1, retries: 1, meanLatencyMs: 20 });
         expect(report.stages.featureAnalysis).toMatchObject({ calls: 1, rateLimited: 1, failureDisposition: { rate_limited: 1 } });
-        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
         expect(report.stages.privateAccountName.calls).toBe(1);
+    });
+
+    it('excludes only a high-confidence same-owner male before feature work', async () => {
+        const feature = vi.fn();
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: {
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: { inferredGender: 'male', confidence: 'high', ownerConsistency: 'same_person', evidenceSelectionIds: ['m1'] },
+                        routingDecision: 'exclude_high_confidence_male',
+                        routingReason: 'high_confidence_same_owner_male',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature,
+            },
+        });
+        expect(feature).not.toHaveBeenCalled();
+        expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
+    });
+
+    it('starts feature and resolver together and applies the production reconciliation to final gender', async () => {
+        let resolverStarted = false;
+        const featureResult = {
+            features: {
+                gender: 'female', genderConfidence: 'medium', ownerConsistency: 'same_person',
+                appearanceGrade: 3, exposureScore: 1, businessClassification: 'personal',
+                businessConfidence: 'medium', accountContext: 'personal',
+                marriageEvidence: 'none', partnerEvidence: 'none', partnerExclusionContext: 'none',
+                evidenceSelectionIds: { gender: ['m1'], appearance: ['m1'], exposure: ['m1'], business: ['m1'], accountContext: ['m1'], marriagePartner: [] },
+                oneLineOverview: '구체적인 관찰을 바탕으로 계정 맥락을 정리한 충분히 긴 한국어 총평입니다.',
+            },
+            finalGenderDecision: 'unresolved' as const,
+            analyzedSelectionIds: ['m1', 'm2'],
+        } satisfies FeatureAnalysisResult;
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: {
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: { inferredGender: 'unknown', confidence: 'low', ownerConsistency: 'multiple_or_unclear', evidenceSelectionIds: ['m1'] },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => {
+                    await Promise.resolve();
+                    expect(resolverStarted).toBe(true);
+                    return { outcome: 'ok', value: featureResult, attempts: 1, retries: 0, elapsedMs: 2 };
+                },
+                resolveGender: async () => {
+                    resolverStarted = true;
+                    return {
+                        outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 3,
+                        value: {
+                            assessment: { inferredGender: 'female', confidence: 'high', ownerConsistency: 'same_person', evidenceSelectionIds: ['m1', 'm2'] },
+                            analyzedSelectionIds: ['m1', 'm2'],
+                        },
+                    };
+                },
+            },
+        });
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+        expect(report.resolver).toMatchObject({ ready: 1, applied: 1, inconclusive: 0, cutoff: 0 });
+    });
+
+    it('caps concurrently active public profiles at four', async () => {
+        let active = 0;
+        let maximum = 0;
+        const releases: Array<() => void> = [];
+        const publicProfiles = Array.from({ length: 5 }, (_, index) => ({
+            ...bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `public${index}`,
+        }));
+        const pending = runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: publicProfiles },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: {
+                triage: async () => {
+                    active++;
+                    maximum = Math.max(maximum, active);
+                    await new Promise<void>(resolve => releases.push(resolve));
+                    active--;
+                    return {
+                        outcome: 'ok',
+                        attempts: 1,
+                        retries: 0,
+                        elapsedMs: 1,
+                        value: {
+                            assessment: {
+                                inferredGender: 'male',
+                                confidence: 'high',
+                                ownerConsistency: 'same_person',
+                                evidenceSelectionIds: ['m1'],
+                            },
+                            routingDecision: 'exclude_high_confidence_male',
+                            routingReason: 'high_confidence_same_owner_male',
+                            analyzedSelectionIds: ['m1', 'm2'],
+                        },
+                    };
+                },
+            },
+        });
+
+        await vi.waitFor(() => expect(releases).toHaveLength(4));
+        expect(maximum).toBe(4);
+        releases.splice(0, 4).forEach(release => release());
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+        releases.splice(0).forEach(release => release());
+        await expect(pending).resolves.toMatchObject({
+            gender: { male: 5, female: 0, unknown: 0 },
+        });
+        expect(maximum).toBe(4);
+    });
+
+    it('runs the private-name batch alongside public profile AI work', async () => {
+        let privateStarted = false;
+        let releasePrivate: (() => void) | undefined;
+        const privateNames = vi.fn(async () => {
+            privateStarted = true;
+            await new Promise<void>(resolve => {
+                releasePrivate = resolve;
+            });
+            return { outcome: 'ok' as const, calls: 1, attempts: 1, retries: 0, elapsedMs: 1 };
+        });
+        const triage = vi.fn(async () => {
+            expect(privateStarted).toBe(true);
+            releasePrivate?.();
+            return {
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: ['m1'],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: ['m1', 'm2'],
+                },
+            };
+        });
+
+        await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: { privateNames, triage },
+        });
+        expect(privateNames).toHaveBeenCalledOnce();
+        expect(triage).toHaveBeenCalledOnce();
+    });
+
+    it('cuts off an opportunistic resolver without blocking the required result', async () => {
+        let aborted = false;
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 1,
+            runner: {
+                triage: async () => ({
+                    outcome: 'ok',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'failed',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                }),
+                resolveGender: async ({ signal }) => new Promise(resolve => {
+                    signal.addEventListener('abort', () => {
+                        aborted = true;
+                        resolve({
+                            outcome: 'failed',
+                            attempts: 0,
+                            retries: 0,
+                            elapsedMs: 1,
+                        });
+                    }, { once: true });
+                }),
+            },
+        });
+
+        expect(aborted).toBe(true);
+        expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+    });
+
+    it('lets all required profile work finish before cutting off pending resolvers', async () => {
+        const publicProfiles = Array.from({ length: 5 }, (_, index) => ({
+            ...bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `candidate${index}`,
+        }));
+        let resolverStarts = 0;
+        let everyRequiredProfileStartedBeforeAbort = true;
+        const report = await runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: publicProfiles },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 1,
+            runner: {
+                triage: async () => ({
+                    outcome: 'ok',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'failed',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                }),
+                resolveGender: async ({ signal }) => {
+                    resolverStarts++;
+                    return new Promise(resolve => {
+                        signal.addEventListener('abort', () => {
+                            if (resolverStarts !== publicProfiles.length) {
+                                everyRequiredProfileStartedBeforeAbort = false;
+                            }
+                            resolve({
+                                outcome: 'failed',
+                                attempts: 0,
+                                retries: 0,
+                                elapsedMs: 1,
+                            });
+                        }, { once: true });
+                    });
+                },
+            },
+        });
+
+        expect(resolverStarts).toBe(5);
+        expect(everyRequiredProfileStartedBeforeAbort).toBe(true);
+        expect(report.resolver.cutoff).toBe(5);
+        expect(report.gender.unknown).toBe(5);
     });
 });

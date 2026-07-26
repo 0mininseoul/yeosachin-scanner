@@ -1,12 +1,8 @@
 import { z } from 'zod';
 import type { SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import {
-    AnalysisImagePreparationError,
-    classifyAnalysisImagePreparationError,
-    downloadImageBytes,
-    downloadImageBytesViaTrustedProxy,
-    normalizeImageToJpeg,
-    runWithImagePreparationSlot,
+    createAnalysisV2SelectedMediaNormalizer,
+    type AnalysisV2SelectedMediaNormalizerDependencies,
 } from '@/lib/services/ai/image-preprocessing';
 import {
     APIFY_LIKERS_ACTOR_ID,
@@ -495,60 +491,11 @@ export function createAnalysisV2ReverseLikeCollector(input: {
     };
 }
 
-export interface AnalysisV2MediaNormalizerDependencies {
-    download?: (url: string) => Promise<Buffer>;
-    downloadFallback?: (url: string) => Promise<Buffer>;
-    normalize?: (bytes: Buffer) => Promise<Buffer>;
-    withSlot?: <T>(task: () => Promise<T>) => Promise<T>;
-}
-
 /** Uses the shared process-wide eight-slot preparation semaphore and the secure image fetcher. */
 export function createAnalysisV2MediaNormalizer(
-    input: AnalysisV2MediaNormalizerDependencies = {}
+    input: AnalysisV2SelectedMediaNormalizerDependencies = {}
 ): (media: SelectedAnalysisMedia) => Promise<Buffer> {
-    const download = input.download ?? (url => downloadImageBytes(url));
-    const downloadFallback = input.downloadFallback
-        ?? (input.download ? null : (url: string) => downloadImageBytesViaTrustedProxy(url));
-    const normalize = input.normalize ?? (bytes => normalizeImageToJpeg(bytes));
-    const withSlot = input.withSlot ?? runWithImagePreparationSlot;
-    return async (media) => withSlot(async () => {
-        if (
-            !media.selectionId.trim()
-            || !media.imageUrl.trim()
-        ) {
-            throw new AnalysisImagePreparationError('invalid_source', 'permanent');
-        }
-        let downloaded: Buffer;
-        try {
-            downloaded = await download(media.imageUrl);
-        } catch (directError) {
-            if (!downloadFallback) {
-                throw classifyAnalysisImagePreparationError(directError, 'download');
-            }
-            try {
-                downloaded = await downloadFallback(media.imageUrl);
-            } catch (fallbackError) {
-                const classifiedFallback = classifyAnalysisImagePreparationError(
-                    fallbackError,
-                    'download'
-                );
-                if (classifiedFallback.disposition === 'transient') {
-                    throw classifiedFallback;
-                }
-                throw classifyAnalysisImagePreparationError(directError, 'download');
-            }
-        }
-        let normalized: Buffer;
-        try {
-            normalized = await normalize(downloaded);
-        } catch (error) {
-            throw classifyAnalysisImagePreparationError(error, 'decode');
-        }
-        if (normalized.length === 0) {
-            throw new AnalysisImagePreparationError('empty_output', 'permanent');
-        }
-        return normalized;
-    });
+    return createAnalysisV2SelectedMediaNormalizer(input);
 }
 
 export const analysisV2ProfileBatchReadModel = createAnalysisV2ProfileBatchReadModel();

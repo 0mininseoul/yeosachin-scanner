@@ -747,6 +747,66 @@ function assertPerPostLimit<T extends { postUrl: string }>(
     }
 }
 
+/** Pure parser shared by paid execution and offline replay of an already-finished Dataset. */
+export function parseApifyLikerDataset(
+    rawItems: readonly unknown[],
+    postUrls: readonly string[],
+    limitPerPost: number,
+    options: {
+        minimumUniqueRatio?: number;
+        context?: ProviderCallContext;
+    } = {},
+): ApifyPostLiker[] {
+    const posts = parseRequestedPosts([...postUrls]);
+    const items = rawItems.map((item, index) => {
+        const parsed = unknownRecordSchema.safeParse(item);
+        if (!parsed.success) throw new Error('SCRAPING_SCHEMA_ERROR: APIFY_LIKER_ROW_INVALID');
+        return projectLiker(parsed.data, index, posts);
+    });
+    assertPerPostLimit(items, limitPerPost);
+    return dedupeAndRecord(
+        items,
+        item => `${item.postUrl}\n${item.username.toLowerCase()}`,
+        options.minimumUniqueRatio ?? 0.95,
+        options.context,
+    );
+}
+
+/** Pure parser shared by paid execution and offline replay of an already-finished Dataset. */
+export function parseApifyCommentDataset(
+    rawItems: readonly unknown[],
+    postUrls: readonly string[],
+    limitPerPost: number,
+    options: {
+        minimumUniqueRatio?: number;
+        context?: ProviderCallContext;
+    } = {},
+): { comments: ApifyPostComment[]; unavailablePostUrls: string[] } {
+    const posts = parseRequestedPosts([...postUrls]);
+    const projected = rawItems.map((item, index) => {
+        const parsed = unknownRecordSchema.safeParse(item);
+        if (!parsed.success) throw new Error('SCRAPING_SCHEMA_ERROR: APIFY_COMMENT_ROW_INVALID');
+        return projectComment(parsed.data, index, posts);
+    });
+    const unavailablePostUrls = new Set(projected.flatMap(item => (
+        item.kind === 'unavailable' ? [item.postUrl] : []
+    )));
+    const comments = projected.flatMap(item => item.kind === 'comment' ? [item.value] : []);
+    if (comments.some(comment => unavailablePostUrls.has(comment.postUrl))) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: APIFY_COMMENT_POST_OUTCOME_CONFLICT.');
+    }
+    assertPerPostLimit(comments, limitPerPost);
+    return {
+        comments: dedupeAndRecord(
+            comments,
+            item => `${item.postUrl}\n${item.id}`,
+            options.minimumUniqueRatio ?? 0.95,
+            options.context,
+        ),
+        unavailablePostUrls: [...unavailablePostUrls],
+    };
+}
+
 export function makeApifyInteractionAdapter(
     deps: ApifyInteractionDeps = {}
 ): ApifyInteractionAdapter {
@@ -769,13 +829,11 @@ export function makeApifyInteractionAdapter(
                 limitPerPost,
                 context
             );
-            const likers = items.map((item, index) => projectLiker(item, index, posts));
-            assertPerPostLimit(likers, limitPerPost);
-            return dedupeAndRecord(
-                likers,
-                (liker) => `${liker.postUrl}\n${liker.username.toLowerCase()}`,
-                config.minimumUniqueRatio,
-                context
+            return parseApifyLikerDataset(
+                items,
+                [...posts.values()].map(post => post.canonicalUrl),
+                limitPerPost,
+                { minimumUniqueRatio: config.minimumUniqueRatio, context },
             );
         },
 
@@ -794,25 +852,12 @@ export function makeApifyInteractionAdapter(
                 limitPerPost,
                 context
             );
-            const projected = items.map((item, index) => projectComment(item, index, posts));
-            const unavailablePosts = new Set(projected.flatMap(item => (
-                item.kind === 'unavailable' ? [item.postUrl] : []
-            )));
-            const comments = projected.flatMap(item => (
-                item.kind === 'comment' ? [item.value] : []
-            ));
-            if (comments.some(comment => unavailablePosts.has(comment.postUrl))) {
-                throw new Error(
-                    'SCRAPING_SCHEMA_ERROR: APIFY_COMMENT_POST_OUTCOME_CONFLICT.'
-                );
-            }
-            assertPerPostLimit(comments, limitPerPost);
-            return dedupeAndRecord(
-                comments,
-                (comment) => `${comment.postUrl}\n${comment.id}`,
-                config.minimumUniqueRatio,
-                context
-            );
+            return parseApifyCommentDataset(
+                items,
+                [...posts.values()].map(post => post.canonicalUrl),
+                limitPerPost,
+                { minimumUniqueRatio: config.minimumUniqueRatio, context },
+            ).comments;
         },
     };
 }

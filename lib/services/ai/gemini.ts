@@ -254,6 +254,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     analysisType?: string;
     requestId?: string;
     skipTokenLog?: boolean;
+    /** Explicit offline replay escape hatch. Stage telemetry stays in-memory and no DB log runs. */
+    statelessReplay?: boolean;
     stage?: AiStageName;
     aiStagePolicyVersion?: AiStagePolicyVersion;
     abortSignal?: AbortSignal;
@@ -686,6 +688,7 @@ export async function analyzeWithGemini<T>(
         analysisType = 'unknown',
         requestId,
         skipTokenLog = false,
+        statelessReplay = false,
         stage,
         aiStagePolicyVersion,
         abortSignal,
@@ -717,8 +720,11 @@ export async function analyzeWithGemini<T>(
     const explicitModel = validateExplicitModel(model);
     validateThinkingLevel(thinkingLevel);
     validateMediaResolution(mediaResolution);
-    if (stage && skipTokenLog) {
+    if (stage && skipTokenLog && !statelessReplay) {
         throw new Error('Gemini stage calls cannot skip durable token logging');
+    }
+    if (statelessReplay && (!stage || !skipTokenLog)) {
+        throw new Error('Stateless replay requires a staged call with token logging disabled');
     }
     if (
         stage

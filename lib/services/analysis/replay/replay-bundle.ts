@@ -3,35 +3,82 @@ import { lstat, open, readFile, realpath, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
+import { replaySourceLineageSchema } from './replay-source-lineage';
 
 const MAX_TTL_MS = 24 * 60 * 60 * 1_000;
-const MAX_BUNDLE_BYTES = 256 * 1024 * 1024;
+const MAX_PLAINTEXT_BYTES = 256 * 1024 * 1024;
+const MAX_ENVELOPE_BYTES = Math.ceil(MAX_PLAINTEXT_BYTES * 4 / 3) + 4_096;
+const MAX_MEDIA_BYTES = 192 * 1024 * 1024;
 const MAX_PROFILES = 1_500;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
-const TAG_BYTES = 16;
 const ENVELOPE_VERSION = 1;
 
 const jpegBase64Schema = z.string().min(4).max(12 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/);
+const usernameSchema = z.string().regex(/^[a-z0-9._]{1,30}$/);
+const selectionIdSchema = z.string().min(1).max(255);
+const canonicalMediaSchema = z.object({
+    selectionId: selectionIdSchema,
+    kind: z.enum(['profile', 'feed']),
+    postId: z.string().min(1).max(200).optional(),
+    caption: z.string().max(5_000).nullable().optional(),
+    jpegBase64: jpegBase64Schema,
+}).strict();
 const bundleSchema = z.object({
     schemaVersion: z.literal(1),
     createdAt: z.string().datetime({ offset: true }),
     expiresAt: z.string().datetime({ offset: true }),
-    capture: z.object({ requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/), plan: z.literal('standard') }).strict(),
+    capture: z.object({
+        requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+        sourceLineage: replaySourceLineageSchema,
+    }).strict(),
     profiles: z.array(z.object({
         ordinal: z.number().int().positive(),
         isPrivate: z.boolean(),
+        username: usernameSchema,
+        fullName: z.string().max(200).nullable(),
         bio: z.string().max(2_200).nullable().optional(),
-        media: z.array(z.object({
-            selectionId: z.string().min(1).max(255),
-            caption: z.string().max(5_000).nullable().optional(),
-            jpegBase64: jpegBase64Schema,
-        }).strict()).max(12),
+        media: z.array(canonicalMediaSchema).max(12),
+        triageSelectionIds: z.array(selectionIdSchema).max(9),
+        featureSelectionIds: z.array(selectionIdSchema).max(12),
+        resolverSelectionIds: z.array(selectionIdSchema).max(9),
+        captions: z.array(z.object({
+            evidenceRefId: z.string().min(1).max(240),
+            selectionId: selectionIdSchema,
+            text: z.string().max(5_000),
+        }).strict()).max(11),
+        coverage: z.object({
+            selectedCount: z.number().int().min(0).max(12),
+            normalizedCount: z.number().int().min(0).max(12),
+            failures: z.array(z.object({
+                selectionId: selectionIdSchema,
+                reason: z.string().regex(/^[a-z_]{1,64}$/),
+                disposition: z.enum(['transient', 'permanent']),
+            }).strict()).max(12),
+        }).strict(),
     }).strict()).max(MAX_PROFILES),
     evidence: z.object({
-        relationship: z.array(z.record(z.string(), z.unknown())).max(5_000),
-        targetInteractions: z.array(z.record(z.string(), z.unknown())).max(10_000),
-        reverseInteractions: z.array(z.record(z.string(), z.unknown())).max(10_000),
+        relationship: z.array(z.object({
+            username: usernameSchema,
+            side: z.enum(['follower', 'following']),
+            isPrivate: z.boolean(),
+            isVerified: z.boolean(),
+            fullName: z.string().max(200).nullable(),
+            ordinal: z.number().int().positive(),
+        }).strict()).max(5_000),
+        targetInteractions: z.array(z.object({
+            actorUsername: usernameSchema,
+            postId: z.string().min(1).max(200),
+            signal: z.enum(['target_post_like', 'target_post_comment']),
+            sourceInteractionId: z.string().min(1).max(255),
+            occurredAt: z.string().datetime({ offset: true }).nullable(),
+            content: z.string().max(1_000).nullable(),
+        }).strict()).max(10_000),
+        reverseInteractions: z.array(z.object({
+            candidateUsername: usernameSchema,
+            postId: z.string().min(1).max(200),
+            status: z.enum(['observed', 'not_observed', 'not_collected']),
+        }).strict()).max(10_000),
     }).strict(),
 }).strict();
 
@@ -93,8 +140,15 @@ function canonicalPayload(bundle: AnalysisV2ReplayBundle, now: number): Buffer {
     if (!Number.isFinite(created) || !Number.isFinite(expires) || expires <= created || expires - created > MAX_TTL_MS || expires <= now) {
         bundleError('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
     }
+    let mediaBytes = 0;
+    for (const profile of parsed.data.profiles) {
+        for (const media of profile.media) {
+            mediaBytes += Buffer.byteLength(media.jpegBase64, 'base64');
+            if (mediaBytes > MAX_MEDIA_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
+        }
+    }
     const payload = Buffer.from(JSON.stringify(parsed.data), 'utf8');
-    if (payload.byteLength > MAX_BUNDLE_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
+    if (payload.byteLength > MAX_PLAINTEXT_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
     return payload;
 }
 
@@ -166,7 +220,7 @@ export async function readReplayBundle(input: {
     await assertExplicitReplayTempDirectory(dirname(input.bundlePath));
     await assertPrivateFile(input.bundlePath);
     const raw = await readFile(input.bundlePath);
-    if (raw.byteLength > MAX_BUNDLE_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
+    if (raw.byteLength > MAX_ENVELOPE_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
     const decrypted = decryptEnvelope(raw, await readKey(input.keyPath));
     let json: unknown;
     try { json = JSON.parse(decrypted.toString('utf8')); } catch { return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_INVALID'); }

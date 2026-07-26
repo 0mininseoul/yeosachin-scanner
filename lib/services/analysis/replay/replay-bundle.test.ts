@@ -21,12 +21,23 @@ function bundle(): AnalysisV2ReplayBundle {
         schemaVersion: 1,
         createdAt: '2026-07-27T00:00:00.000Z',
         expiresAt: '2026-07-27T01:00:00.000Z',
-        capture: { requestFingerprint: 'a'.repeat(64), plan: 'standard' },
-        profiles: [{ ordinal: 1, isPrivate: false, bio: 'private bundle text', media: [{
+        capture: {
+            requestFingerprint: 'a'.repeat(64),
+            sourceLineage: {
+                selectedPlanId: 'standard',
+                policyVersions: {
+                    pipeline: 'v2',
+                    aiStage: 'ai-stage-policy-v2.7',
+                    risk: 'risk-policy-v2.4',
+                },
+            },
+        },
+        profiles: [{ ordinal: 1, isPrivate: false, username: 'example', fullName: null, bio: 'private bundle text', media: [{
             selectionId: 'post:1',
+            kind: 'feed', postId: '1',
             caption: 'caption',
             jpegBase64: Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64'),
-        }] }],
+        }], triageSelectionIds: ['post:1'], featureSelectionIds: ['post:1'], resolverSelectionIds: ['post:1'], captions: [], coverage: { selectedCount: 1, normalizedCount: 1, failures: [] } }],
         evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
     };
 }

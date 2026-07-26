@@ -646,6 +646,24 @@ describe('analyzeWithGemini stage request policy', () => {
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
+    it('permits token-log-free stage calls only through the explicit stateless replay contract', async () => {
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            ...stageAuditOptions(),
+            statelessReplay: true,
+        })).rejects.toThrow('Stateless replay requires a staged call with token logging disabled');
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            ...stageAuditOptions(),
+            skipTokenLog: true,
+            statelessReplay: true,
+        })).resolves.toEqual({ value: 'ok' });
+        expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
+    });
+
     it('fails closed around both durable stage audit boundaries', async () => {
         const beforeFailure = vi.fn().mockRejectedValue(new Error('database unavailable'));
         await expect(analyzeWithGemini('prompt', undefined, {

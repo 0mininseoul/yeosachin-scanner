@@ -1,4 +1,5 @@
 import sharp from 'sharp';
+import type { SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import { isVertexAICostOptimized } from './gemini-cost';
 import {
     MAX_VERTEX_AI_CONCURRENT_IMAGE_DECODES,
@@ -199,6 +200,47 @@ export function runWithImagePreparationSlot<T>(task: () => Promise<T>): Promise<
 
 export function runWithImageDecodeSlot<T>(task: () => Promise<T>): Promise<T> {
     return imageDecodeSemaphore.run(task);
+}
+
+export interface AnalysisV2SelectedMediaNormalizerDependencies {
+    download?: (url: string) => Promise<Buffer>;
+    downloadFallback?: (url: string) => Promise<Buffer>;
+    normalize?: (bytes: Buffer) => Promise<Buffer>;
+    withSlot?: <T>(task: () => Promise<T>) => Promise<T>;
+}
+
+/** Exact V2 selected-media normalizer shared by production and offline replay capture. */
+export function createAnalysisV2SelectedMediaNormalizer(
+    input: AnalysisV2SelectedMediaNormalizerDependencies = {},
+): (media: SelectedAnalysisMedia) => Promise<Buffer> {
+    const download = input.download ?? (url => downloadImageBytes(url));
+    const fallback = input.downloadFallback
+        ?? (input.download ? null : (url: string) => downloadImageBytesViaTrustedProxy(url));
+    const normalize = input.normalize ?? (bytes => normalizeImageToJpeg(bytes));
+    const withSlot = input.withSlot ?? runWithImagePreparationSlot;
+    return async media => withSlot(async () => {
+        if (!media.selectionId.trim() || !media.imageUrl.trim()) {
+            throw new AnalysisImagePreparationError('invalid_source', 'permanent');
+        }
+        let downloaded: Buffer;
+        try {
+            downloaded = await download(media.imageUrl);
+        } catch (directError) {
+            if (!fallback) throw classifyAnalysisImagePreparationError(directError, 'download');
+            try {
+                downloaded = await fallback(media.imageUrl);
+            } catch (fallbackError) {
+                const classified = classifyAnalysisImagePreparationError(fallbackError, 'download');
+                if (classified.disposition === 'transient') throw classified;
+                throw classifyAnalysisImagePreparationError(directError, 'download');
+            }
+        }
+        let normalized: Buffer;
+        try { normalized = await normalize(downloaded); }
+        catch (error) { throw classifyAnalysisImagePreparationError(error, 'decode'); }
+        if (!normalized.length) throw new AnalysisImagePreparationError('empty_output', 'permanent');
+        return normalized;
+    });
 }
 
 function normalizedUrl(url: string | undefined): string | null {
