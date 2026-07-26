@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const deletionMigration = readFileSync(
@@ -9,13 +9,13 @@ const deletionMigration = readFileSync(
     'utf8'
 );
 
-const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
-const hideFailedHistoryMigrationFilename = readdirSync(migrationsDirectory).find((filename) =>
-    filename.endsWith('_hide_failed_analysis_owner_history.sql')
+const hideFailedHistoryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260726035347_hide_failed_analysis_owner_history.sql',
+        import.meta.url
+    ),
+    'utf8'
 );
-const hideFailedHistoryMigration = hideFailedHistoryMigrationFilename
-    ? readFileSync(new URL(hideFailedHistoryMigrationFilename, migrationsDirectory), 'utf8')
-    : '';
 
 const resultImageMigration = readFileSync(
     new URL(
