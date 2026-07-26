@@ -55,7 +55,7 @@ export const ANALYSIS_V2_RESULT_DATABASE_NAMES = Object.freeze({
     femaleResultTable: 'analysis_v2_female_results',
     privateResultTable: 'analysis_v2_private_results',
     checkpointFeatureRpc: 'checkpoint_analysis_v2_candidate_features',
-    checkpointPreliminaryRpc: 'checkpoint_analysis_v2_preliminary_scores',
+    checkpointPreliminaryRpc: 'checkpoint_analysis_v2_preliminary_scores_v24',
     checkpointReverseRpc: 'checkpoint_analysis_v2_reverse_likes',
     checkpointPartnerRpc: 'checkpoint_analysis_v2_partner_safety',
     checkpointScoreRpc: 'checkpoint_analysis_v2_candidate_scores',
@@ -1201,7 +1201,7 @@ export function createSupabaseAnalysisV2ResultStore(
             return checkpoint(
                 ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointPreliminaryRpc,
                 input,
-                { p_rows: rows }
+                { p_rows: rows, p_risk_policy_version: RISK_POLICY_VERSION }
             );
         },
 

@@ -60,6 +60,56 @@ function preliminary() {
     });
 }
 
+function legacyPreliminary() {
+    const [candidate] = preliminary();
+    if (!candidate) throw new Error('fixture missing candidate');
+    const {
+        hasCandidateToTargetTagOrCaptionMention: candidateToTargetMention,
+        hasTargetToCandidateTagOrCaptionMention: targetToCandidateMention,
+        ...legacy
+    } = candidate;
+    return {
+        ...legacy,
+        hasTagOrCaptionMention: candidateToTargetMention || targetToCandidateMention,
+    };
+}
+
+function legacyFinal() {
+    const candidate = legacyPreliminary();
+    return {
+        ...candidate,
+        reverseLikeStatus: 'not_collected' as const,
+        risk: {
+            policyVersion: 'risk-policy-v2.3' as const,
+            components: {
+                candidateToTargetLikes: 0,
+                candidateToTargetComments: 0,
+                targetToCandidateLike: 0,
+                tagOrCaptionMention: 0,
+                recentMutual: 0,
+                appearanceExposure: 0,
+            },
+            softContextBeforeBusinessAdjustment: { recentMutual: 0, appearanceExposure: 0 },
+            softContextMultiplier: 1 as const,
+            weakPartnerAdjustment: 0 as const,
+            preScore: candidate.preScore,
+            rawScore: candidate.preScore,
+            possibleUpperBound: candidate.preScore,
+            publicScore: 1,
+            displayScore: 1,
+            possibleUpperPublicScore: 1,
+            possibleUpperDisplayScore: 1,
+            riskBand: 'normal' as const,
+            partnerCapApplied: false,
+        },
+        displayScore: 1,
+        riskBand: 'normal' as const,
+        relativeTierApplied: false,
+        featuredRank: null,
+        relativeWatchRank: null,
+    };
+}
+
 describe('analysis V2 AI/scoring stage store', () => {
     it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {
         const candidates = preliminary();
@@ -72,7 +122,7 @@ describe('analysis V2 AI/scoring stage store', () => {
                 revision: 1,
                 resultHash,
                 itemCount: 1,
-                payload: { shortlistHash, candidates },
+                payload: { riskPolicyVersion: 'risk-policy-v2.4', shortlistHash, candidates },
             },
             error: null,
         });
@@ -84,7 +134,13 @@ describe('analysis V2 AI/scoring stage store', () => {
             candidates,
         });
 
-        expect(stored).toEqual({ revision: 1, resultHash, shortlistHash, candidates });
+        expect(stored).toEqual({
+            revision: 1,
+            resultHash,
+            riskPolicyVersion: 'risk-policy-v2.4',
+            shortlistHash,
+            candidates,
+        });
         expect(fake.rpc).toHaveBeenCalledWith(
             ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
             expect.objectContaining({
@@ -93,7 +149,7 @@ describe('analysis V2 AI/scoring stage store', () => {
                 p_stage_kind: 'screening',
                 p_batch: null,
                 p_item_count: 1,
-                p_payload: { shortlistHash, candidates },
+                p_payload: { riskPolicyVersion: 'risk-policy-v2.4', shortlistHash, candidates },
             })
         );
     });
@@ -106,6 +162,7 @@ describe('analysis V2 AI/scoring stage store', () => {
         const narrativeBatchHash = digest('narrative-batch');
         const resultHash = digest('final-score');
         const payload = {
+            riskPolicyVersion: 'risk-policy-v2.4' as const,
             candidates,
             narrativeCandidateIds: [],
             narrativeBatchHash,
@@ -153,6 +210,63 @@ describe('analysis V2 AI/scoring stage store', () => {
         });
         await expect(createSupabaseAnalysisV2AiScoringStageStore(rejected.client)
             .loadFinalScores(claim('track:final-score')))
+            .rejects.toThrow('invalid payload');
+    });
+
+    it('recovers an exact v2.3 screening checkpoint without converting its policy snapshot', async () => {
+        const shortlistHash = digest('legacy-shortlist');
+        const resultHash = digest('legacy-screening');
+        const candidates = [legacyPreliminary()];
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: {
+                stageKind: 'screening', batch: null, revision: 1, resultHash, itemCount: 1,
+                payload: { shortlistHash, candidates },
+            },
+            error: null,
+        }).client);
+
+        await expect(store.loadScreening(claim('track:reverse-likes:collect'))).resolves.toEqual({
+            revision: 1,
+            resultHash,
+            riskPolicyVersion: 'risk-policy-v2.3',
+            shortlistHash,
+            candidates,
+        });
+    });
+
+    it('recovers an exact v2.3 final checkpoint and rejects hybrid policy payloads', async () => {
+        const narrativeBatchHash = digest('legacy-narrative');
+        const resultHash = digest('legacy-final');
+        const candidates = [legacyFinal()];
+        const legacyStore = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: {
+                stageKind: 'final_score', batch: null, revision: 1, resultHash, itemCount: 1,
+                payload: { candidates, narrativeCandidateIds: [], narrativeBatchHash },
+            },
+            error: null,
+        }).client);
+        await expect(legacyStore.loadFinalScores(claim('track:final-score'))).resolves.toEqual({
+            revision: 1,
+            resultHash,
+            riskPolicyVersion: 'risk-policy-v2.3',
+            candidates,
+            narrativeCandidateIds: [],
+            narrativeBatchHash,
+        });
+
+        const hybridStore = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: {
+                stageKind: 'screening', batch: null, revision: 1,
+                resultHash: digest('hybrid-screening'), itemCount: 1,
+                payload: {
+                    riskPolicyVersion: 'risk-policy-v2.4',
+                    shortlistHash: digest('hybrid-shortlist'),
+                    candidates: [legacyPreliminary()],
+                },
+            },
+            error: null,
+        }).client);
+        await expect(hybridStore.loadScreening(claim('track:reverse-likes:collect')))
             .rejects.toThrow('invalid payload');
     });
 

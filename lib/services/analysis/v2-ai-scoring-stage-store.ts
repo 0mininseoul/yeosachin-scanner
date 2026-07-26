@@ -294,6 +294,23 @@ const preliminaryCandidateSchema = z.object({
     verificationShortlistRank: z.number().int().min(1).max(10).nullable(),
 }).strict();
 
+const legacyPreliminaryCandidateSchema = z.object({
+    candidateId: candidateIdSchema,
+    username: usernameSchema,
+    appearanceGrade: appearanceGradeSchema,
+    exposureScore: z.number().int().min(0).max(5),
+    accountContext: accountContextSchema,
+    hasWeakPartnerEvidence: z.boolean(),
+    hasStrongPartnerEvidence: z.boolean(),
+    uniqueTargetPostsLikedByCandidate: z.number().int().min(0).max(4),
+    boundedCandidateCommentsOnTarget: z.number().int().min(0).max(12),
+    hasTagOrCaptionMention: z.boolean(),
+    recentFemaleMutualRank: nullableRankSchema,
+    recentMutualBadgeRank: z.number().int().min(1).max(5).nullable(),
+    preScore: z.number().finite().min(0).max(97),
+    verificationShortlistRank: z.number().int().min(1).max(10).nullable(),
+}).strict();
+
 const scoreComponentsSchema = z.object({
     candidateToTargetLikes: z.number().finite().min(0).max(24),
     candidateToTargetComments: z.number().finite().min(0).max(30),
@@ -324,6 +341,35 @@ const riskResultSchema = z.object({
     partnerCapApplied: z.boolean(),
 }).strict();
 
+const legacyScoreComponentsSchema = z.object({
+    candidateToTargetLikes: z.number().finite().min(0).max(20),
+    candidateToTargetComments: z.number().finite().min(0).max(26),
+    targetToCandidateLike: z.number().finite().min(0).max(3),
+    tagOrCaptionMention: z.number().finite().min(0).max(14),
+    recentMutual: z.number().finite().min(0).max(17),
+    appearanceExposure: z.number().finite().min(0).max(20),
+}).strict();
+
+const legacyRiskResultSchema = z.object({
+    policyVersion: z.literal('risk-policy-v2.3'),
+    components: legacyScoreComponentsSchema,
+    softContextBeforeBusinessAdjustment: z.object({
+        recentMutual: z.number().finite().min(0).max(17),
+        appearanceExposure: z.number().finite().min(0).max(20),
+    }).strict(),
+    softContextMultiplier: z.union([z.literal(0), z.literal(0.5), z.literal(1)]),
+    weakPartnerAdjustment: z.union([z.literal(-5), z.literal(0)]),
+    preScore: z.number().finite().min(0).max(97),
+    rawScore: z.number().finite().min(0).max(100),
+    possibleUpperBound: z.number().finite().min(0).max(100),
+    publicScore: z.number().finite().min(1).max(10),
+    displayScore: z.number().finite().min(1).max(10),
+    possibleUpperPublicScore: z.number().finite().min(1).max(10),
+    possibleUpperDisplayScore: z.number().finite().min(1).max(10),
+    riskBand: riskBandSchema,
+    partnerCapApplied: z.boolean(),
+}).strict();
+
 const finalCandidateSchema = preliminaryCandidateSchema.extend({
     reverseLikeStatus: z.enum(['observed', 'not_observed', 'not_collected']),
     risk: riskResultSchema,
@@ -332,6 +378,17 @@ const finalCandidateSchema = preliminaryCandidateSchema.extend({
     riskBand: riskBandSchema,
     relativeTierApplied: z.boolean(),
     featuredRank: z.number().int().min(1).max(10).nullable(),
+    relativeWatchRank: z.number().int().min(1).max(2).nullable(),
+}).strict();
+
+const legacyFinalCandidateSchema = legacyPreliminaryCandidateSchema.extend({
+    reverseLikeStatus: z.enum(['observed', 'not_observed', 'not_collected']),
+    risk: legacyRiskResultSchema,
+    displayScore: z.number().finite().min(1).max(10)
+        .refine(value => Math.round(value * 10) === value * 10),
+    riskBand: riskBandSchema,
+    relativeTierApplied: z.boolean(),
+    featuredRank: z.number().int().min(1).max(15).nullable(),
     relativeWatchRank: z.number().int().min(1).max(2).nullable(),
 }).strict();
 
@@ -372,10 +429,16 @@ const profilePayloadSchema = z.object({
 const primaryPayloadSchema = z.object({
     candidates: z.array(primaryCandidateSchema).max(900),
 }).strict();
-const screeningPayloadSchema = z.object({
+const screeningPayloadV24Schema = z.object({
+    riskPolicyVersion: z.literal('risk-policy-v2.4'),
     shortlistHash: hashSchema,
     candidates: z.array(preliminaryCandidateSchema).max(900),
 }).strict();
+const screeningPayloadV23Schema = z.object({
+    shortlistHash: hashSchema,
+    candidates: z.array(legacyPreliminaryCandidateSchema).max(900),
+}).strict();
+const screeningPayloadSchema = z.union([screeningPayloadV24Schema, screeningPayloadV23Schema]);
 const reverseRowsPayloadSchema = z.object({
     rows: z.array(reverseLikeRowSchema).max(10),
 }).strict();
@@ -385,11 +448,18 @@ const partnerRowsPayloadSchema = z.object({
 const narrativeRowsPayloadSchema = z.object({
     rows: z.array(narrativeRowSchema).max(3),
 }).strict();
-const finalPayloadSchema = z.object({
+const finalPayloadV24Schema = z.object({
+    riskPolicyVersion: z.literal('risk-policy-v2.4'),
     candidates: z.array(finalCandidateSchema).max(900),
     narrativeCandidateIds: z.array(candidateIdSchema).max(3),
     narrativeBatchHash: hashSchema,
 }).strict();
+const finalPayloadV23Schema = z.object({
+    candidates: z.array(legacyFinalCandidateSchema).max(900),
+    narrativeCandidateIds: z.array(candidateIdSchema).max(3),
+    narrativeBatchHash: hashSchema,
+}).strict();
+const finalPayloadSchema = z.union([finalPayloadV24Schema, finalPayloadV23Schema]);
 
 const rpcEnvelopeSchema = z.object({
     stageKind: stageKindSchema,
@@ -634,6 +704,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointScreening(input) {
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'screening', null, input.candidates.length, {
+                riskPolicyVersion: 'risk-policy-v2.4',
                 shortlistHash: input.shortlistHash,
                 candidates: input.candidates,
             });
@@ -641,6 +712,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
                 shortlistHash: envelope.payload.shortlistHash,
+                riskPolicyVersion: 'risk-policy-v2.4',
                 candidates: envelope.payload.candidates,
             }) as AnalysisV2ScreeningSnapshot;
         },
@@ -651,6 +723,9 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
                 shortlistHash: envelope.payload.shortlistHash,
+                riskPolicyVersion: 'riskPolicyVersion' in envelope.payload
+                    ? envelope.payload.riskPolicyVersion
+                    : 'risk-policy-v2.3',
                 candidates: envelope.payload.candidates,
             }) as AnalysisV2ScreeningSnapshot;
         },
@@ -700,6 +775,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointFinalScores(input) {
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'final_score', null, input.candidates.length, {
+                riskPolicyVersion: 'risk-policy-v2.4',
                 candidates: input.candidates,
                 narrativeCandidateIds: input.narrativeCandidateIds,
                 narrativeBatchHash: input.narrativeBatchHash,
@@ -707,6 +783,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             return Object.freeze({
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
+                riskPolicyVersion: 'risk-policy-v2.4',
                 candidates: envelope.payload.candidates,
                 narrativeCandidateIds: envelope.payload.narrativeCandidateIds,
                 narrativeBatchHash: envelope.payload.narrativeBatchHash,
@@ -718,6 +795,9 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             return envelope === null ? null : Object.freeze({
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
+                riskPolicyVersion: 'riskPolicyVersion' in envelope.payload
+                    ? envelope.payload.riskPolicyVersion
+                    : 'risk-policy-v2.3',
                 candidates: envelope.payload.candidates,
                 narrativeCandidateIds: envelope.payload.narrativeCandidateIds,
                 narrativeBatchHash: envelope.payload.narrativeBatchHash,

@@ -8,6 +8,7 @@ import { applyGenderResolution } from '@/lib/services/ai/v2-staged-analysis';
 import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import {
     calculateRiskPolicy,
+    RISK_POLICY_VERSION,
     type AccountContext,
     type AppearanceGrade,
     type RiskBand,
@@ -248,6 +249,8 @@ export interface AnalysisV2ScreeningSnapshot {
     revision: number;
     resultHash: string;
     shortlistHash: string;
+    /** The persisted scoring contract; absent only on pre-policy in-memory test doubles. */
+    riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     candidates: readonly V2PreliminaryCandidateScore[];
 }
 
@@ -287,6 +290,8 @@ export interface AnalysisV2PartnerSafetySnapshot {
 export interface AnalysisV2FinalScoreSnapshot {
     revision: number;
     resultHash: string;
+    /** The persisted scoring contract; absent only on pre-policy in-memory test doubles. */
+    riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     candidates: readonly V2FinalCandidateScore[];
     narrativeCandidateIds: readonly string[];
     narrativeBatchHash: string;
@@ -1827,6 +1832,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 dependencies.targetProfiles.loadTargetProfile(checkpointClaim(context)),
             ]);
             if (!screening) throw new Error('ANALYSIS_V2_SCREENING_NOT_READY');
+            if (screening.riskPolicyVersion && screening.riskPolicyVersion !== RISK_POLICY_VERSION) {
+                throw new Error('ANALYSIS_V2_POLICY_RECOVERY_UNSUPPORTED');
+            }
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const shortlist = screening.candidates
                 .filter(row => row.verificationShortlistRank !== null)
@@ -1910,6 +1918,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 dependencies.targetProfiles.loadTargetProfile(checkpointClaim(context)),
             ]);
             if (!screening) throw new Error('ANALYSIS_V2_SCREENING_NOT_READY');
+            if (screening.riskPolicyVersion && screening.riskPolicyVersion !== RISK_POLICY_VERSION) {
+                throw new Error('ANALYSIS_V2_POLICY_RECOVERY_UNSUPPORTED');
+            }
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const shortlist = screening.candidates
                 .filter(row => row.verificationShortlistRank !== null)
@@ -2060,6 +2071,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (!screening || !reverse || !partner) {
                 throw new Error('ANALYSIS_V2_FINAL_SCORE_DEPENDENCY_MISSING');
             }
+            if (screening.riskPolicyVersion && screening.riskPolicyVersion !== RISK_POLICY_VERSION) {
+                throw new Error('ANALYSIS_V2_POLICY_RECOVERY_UNSUPPORTED');
+            }
             const partnerById = new Map(partner.rows.map(row => [row.candidateId, row]));
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const preliminary = screening.candidates.map(candidate => {
@@ -2162,6 +2176,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             ]);
             if (!finalScores || !reverse) {
                 throw new Error('ANALYSIS_V2_NARRATIVE_DEPENDENCY_MISSING');
+            }
+            if (finalScores.riskPolicyVersion && finalScores.riskPolicyVersion !== RISK_POLICY_VERSION) {
+                throw new Error('ANALYSIS_V2_POLICY_RECOVERY_UNSUPPORTED');
             }
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const reverseById = new Map(reverse.rows.map(row => [row.candidateId, row]));

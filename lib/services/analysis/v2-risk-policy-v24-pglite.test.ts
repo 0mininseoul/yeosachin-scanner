@@ -16,14 +16,25 @@ const baseFinalizationMigration = readFileSync(
     ),
     'utf8'
 );
+const relativeRiskMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260724123400_add_relative_risk_policy_v23.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
+    return functionDefinitionFrom(migration, name);
+}
+
+function functionDefinitionFrom(source: string, name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
-    const start = migration.indexOf(marker);
+    const start = source.indexOf(marker);
     if (start < 0) throw new Error(`Missing function ${name}`);
-    const end = migration.indexOf('\n$$;', start);
+    const end = source.indexOf('\n$$;', start);
     if (end < 0) throw new Error(`Unbounded function ${name}`);
-    return migration.slice(start, end + 4);
+    return source.slice(start, end + 4);
 }
 
 function latestBaseFunctionDefinition(name: string): string {
@@ -33,6 +44,18 @@ function latestBaseFunctionDefinition(name: string): string {
     const end = baseFinalizationMigration.indexOf('\n$$;', start);
     if (end < 0) throw new Error(`Unbounded base function ${name}`);
     return baseFinalizationMigration.slice(start, end + 4);
+}
+
+function migrationBlock(marker: string): string {
+    return migrationBlockFrom(migration, marker);
+}
+
+function migrationBlockFrom(source: string, marker: string): string {
+    const start = source.indexOf(marker);
+    if (start < 0) throw new Error(`Missing migration block ${marker}`);
+    const end = source.indexOf('\n$migration$;', start);
+    if (end < 0) throw new Error(`Unbounded migration block ${marker}`);
+    return source.slice(start, end + '\n$migration$;'.length);
 }
 
 let db: PGlite;
@@ -109,6 +132,41 @@ describe('risk-policy v2.4 database replay', () => {
         expect(predecessor).toContain('                    97\n                )) AS expected_pre_score');
         expect(predecessor).toContain('                    100\n                )) AS expected_raw_score');
         expect(predecessor).toContain("ranked.expected_rank <= 15");
+    });
+
+    it('patches the actual final-score predecessor body, not a rewritten fixture', async () => {
+        const predecessorDb = await PGlite.create();
+        try {
+            await predecessorDb.exec('SET check_function_bodies = false');
+            await predecessorDb.exec(latestBaseFunctionDefinition(
+                'checkpoint_analysis_v2_candidate_scores'
+            ));
+            await predecessorDb.exec(functionDefinitionFrom(
+                relativeRiskMigration, 'analysis_v2_expected_relative_risk_rows'
+            ));
+            await predecessorDb.exec(migrationBlockFrom(
+                relativeRiskMigration,
+                'DO $migration$\nDECLARE\n    v_definition TEXT;\n    v_old_display_check'
+            ));
+            await predecessorDb.exec(migrationBlock(
+                'DO $migration$\nDECLARE\n    v_definition TEXT;\n    v_tag_component_pattern'
+            ));
+            const patched = await predecessorDb.query<{ definition: string }>(`
+                SELECT pg_catalog.pg_get_functiondef(
+                    'public.checkpoint_analysis_v2_candidate_scores(uuid,text,uuid,text,jsonb,text)'
+                        ::pg_catalog.regprocedure
+                ) AS definition
+            `);
+            expect(patched.rows[0]?.definition).toContain(
+                "p_risk_policy_version NOT IN ('risk-policy-v2.3', 'risk-policy-v2.4')"
+            );
+            expect(patched.rows[0]?.definition).toContain('THEN 97 ELSE 95 END');
+            expect(patched.rows[0]?.definition).toContain(
+                "candidateToTargetTagOrCaptionMention"
+            );
+        } finally {
+            await predecessorDb.close();
+        }
     });
 
     it('patches v2.3 finalization definitions forward without rewriting history', async () => {
@@ -194,6 +252,12 @@ describe('risk-policy v2.4 database replay', () => {
                     RETURN '{}'::JSONB;
                 END;
                 $function$;
+                REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_preliminary_scores(
+                    UUID, TEXT, UUID, TEXT, JSONB
+                ) FROM PUBLIC, anon, authenticated, service_role;
+                GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_preliminary_scores(
+                    UUID, TEXT, UUID, TEXT, JSONB
+                ) TO service_role;
                 CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_candidate_scores(
                     p_request_id UUID,
                     p_job_key TEXT,
@@ -334,7 +398,89 @@ describe('risk-policy v2.4 database replay', () => {
                 ) VALUES ('mixed', 'observed', 3, ARRAY['like:legacy'])
             `);
 
+            await migrationDb.exec('SET check_function_bodies = false');
             await expect(migrationDb.exec(migration)).resolves.toBeDefined();
+            const preliminaryContracts = await migrationDb.query<{
+                identity_arguments: string;
+                acl: string[] | null;
+            }>(`
+                SELECT pg_catalog.pg_get_function_identity_arguments(proc.oid) AS identity_arguments,
+                       proc.proacl::TEXT[] AS acl
+                FROM pg_catalog.pg_proc AS proc
+                WHERE proc.oid IN (
+                    'public.checkpoint_analysis_v2_preliminary_scores(uuid,text,uuid,text,jsonb)'
+                        ::pg_catalog.regprocedure,
+                    'public.checkpoint_analysis_v2_preliminary_scores_v24(uuid,text,uuid,text,jsonb,text)'
+                        ::pg_catalog.regprocedure
+                )
+                ORDER BY identity_arguments
+            `);
+            expect(preliminaryContracts.rows.map(row => row.identity_arguments)).toEqual([
+                'p_request_id uuid, p_job_key text, p_claim_token uuid, p_job_input_hash text, p_rows jsonb',
+                'p_request_id uuid, p_job_key text, p_claim_token uuid, p_job_input_hash text, p_rows jsonb, p_risk_policy_version text',
+            ]);
+            for (const contract of preliminaryContracts.rows) {
+                expect(contract.acl).toContain('service_role=X/postgres');
+                expect(contract.acl).not.toEqual(expect.arrayContaining([
+                    expect.stringMatching(/^(PUBLIC|anon|authenticated)=/),
+                ]));
+            }
+            /*
+             * Do not use a six-argument overload of the legacy name: the exact old
+             * signature must remain callable by draining v2.3 workers.
+             */
+            expect(preliminaryContracts.rows).toHaveLength(2);
+            await migrationDb.exec(`
+                CREATE TABLE public.analysis_pipeline_jobs (
+                    job_key TEXT NOT NULL,
+                    track TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    batch INTEGER NULL
+                );
+                CREATE TABLE public.analysis_requests (
+                    id UUID PRIMARY KEY,
+                    policy_versions_snapshot JSONB NOT NULL
+                );
+                CREATE TABLE public.analysis_v2_candidate_feature_rows (
+                    request_id UUID NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    terminal_classification TEXT NOT NULL
+                );
+                CREATE TABLE public.analysis_v2_preliminary_score_manifests (
+                    request_id UUID PRIMARY KEY,
+                    producer_job_key TEXT NOT NULL,
+                    producer_input_hash TEXT NOT NULL,
+                    producer_claim_token UUID NOT NULL,
+                    item_count INTEGER NOT NULL,
+                    result_hash TEXT NOT NULL
+                );
+                ALTER TABLE public.analysis_v2_preliminary_score_rows
+                    ADD COLUMN request_id UUID,
+                    ADD COLUMN recent_mutual_rank SMALLINT,
+                    ADD COLUMN verification_shortlist_rank SMALLINT;
+                CREATE FUNCTION public.analysis_v2_assert_result_job_fence(
+                    UUID, TEXT, UUID, TEXT
+                ) RETURNS public.analysis_pipeline_jobs LANGUAGE sql AS $function$
+                    SELECT ROW('coordinator:candidate-screening', 'coordinator', 'screening', NULL)
+                        ::public.analysis_pipeline_jobs
+                $function$;
+                CREATE FUNCTION public.analysis_v2_result_staging_hash(TEXT, INTEGER, JSONB)
+                RETURNS TEXT LANGUAGE sql IMMUTABLE AS $function$ SELECT 'v24-hash' $function$;
+                CREATE FUNCTION public.analysis_v2_result_checkpoint_json(
+                    UUID, TEXT, INTEGER, INTEGER, INTEGER, TEXT
+                ) RETURNS JSONB LANGUAGE sql IMMUTABLE AS $function$ SELECT '{}'::JSONB $function$;
+                INSERT INTO public.analysis_requests(id, policy_versions_snapshot)
+                VALUES (
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    '{"risk":"risk-policy-v2.4"}'::JSONB
+                );
+                INSERT INTO public.analysis_v2_candidate_feature_rows(
+                    request_id, candidate_id, terminal_classification
+                ) VALUES (
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'v24-preliminary', 'verified_female'
+                );
+            `);
             const componentSchemas = await migrationDb.query<{ valid: boolean }>(
                 `SELECT public.analysis_v2_result_valid_score_components($1::JSONB) AS valid`,
                 [JSON.stringify({
@@ -581,7 +727,7 @@ describe('risk-policy v2.4 database replay', () => {
                     'coordinator:candidate-screening',
                     '20000000-0000-4000-8000-000000000001'::UUID,
                     'input',
-                    '[{"candidateId":"normal","preScore":50,"possibleUpperBound":55}]'::JSONB
+                    '[{"candidateId":"normal","preScore":50,"possibleUpperBound":53}]'::JSONB
                 )`
             )).resolves.toBeDefined();
             await expect(migrationDb.query(
@@ -593,6 +739,58 @@ describe('risk-policy v2.4 database replay', () => {
                     '[{"candidateId":"invalid","preScore":50,"possibleUpperBound":54}]'::JSONB
                 )`
             )).rejects.toThrow('bounds');
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_preliminary_scores_v24(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:candidate-screening',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.4'
+                )`,
+                [JSON.stringify([{
+                    candidateId: 'v24-preliminary',
+                    components: {
+                        candidateToTargetLikes: 24,
+                        candidateToTargetComments: 30,
+                        candidateToTargetTagOrCaptionMention: 12,
+                        targetToCandidateTagOrCaptionMention: 8,
+                        targetToCandidateLike: 0,
+                        recentMutual: 5,
+                        appearanceExposure: 16,
+                    },
+                    preScore: 95,
+                    possibleUpperBound: 100,
+                    recentMutualRank: null,
+                    verificationShortlistRank: 1,
+                }])]
+            )).resolves.toBeDefined();
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_preliminary_scores_v24(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:candidate-screening',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.4'
+                )`,
+                [JSON.stringify([{
+                    candidateId: 'v24-preliminary',
+                    components: {
+                        candidateToTargetLikes: 24,
+                        candidateToTargetComments: 30,
+                        candidateToTargetTagOrCaptionMention: 12,
+                        targetToCandidateTagOrCaptionMention: 8,
+                        targetToCandidateLike: 0,
+                        recentMutual: 5,
+                        appearanceExposure: 16,
+                    },
+                    preScore: 95,
+                    possibleUpperBound: 99,
+                    recentMutualRank: null,
+                    verificationShortlistRank: 1,
+                }])]
+            )).rejects.toThrow('ANALYSIS_V2_RESULT_INVALID');
             await expect(migrationDb.exec(`
                 INSERT INTO public.analysis_v2_preliminary_score_rows(
                     candidate_id, pre_score, possible_upper_bound

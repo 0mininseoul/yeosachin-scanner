@@ -425,32 +425,166 @@ BEGIN
 END;
 $migration$;
 
-DO $migration$
+-- The five-argument predecessor is intentionally left untouched: in-flight v2.3
+-- workers still submit its legacy component shape. v2.4 uses this separately named,
+-- policy-fenced checkpoint rather than relying on overload resolution.
+CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_preliminary_scores_v24(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_job_input_hash TEXT,
+    p_rows JSONB,
+    p_risk_policy_version TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
 DECLARE
-    v_definition TEXT;
-    v_tag_component_pattern TEXT := $pattern$\(item\.value->'components'->>'tagOrCaptionMention'\)::NUMERIC$pattern$;
+    v_job public.analysis_pipeline_jobs%ROWTYPE;
+    v_rows JSONB;
+    v_count INTEGER;
+    v_shortlist INTEGER;
+    v_hash TEXT;
+    v_existing RECORD;
 BEGIN
-    SELECT pg_catalog.pg_get_functiondef(
-        'public.checkpoint_analysis_v2_preliminary_scores(uuid,text,uuid,text,jsonb)'
-            ::pg_catalog.regprocedure
-    ) INTO v_definition;
-    IF v_definition !~ v_tag_component_pattern
-       OR pg_catalog.strpos(v_definition, 'NOT BETWEEN 0 AND 97') = 0
-       OR pg_catalog.strpos(v_definition, 'NOT BETWEEN 0 AND 100') = 0
-       OR pg_catalog.strpos(v_definition, '+ 3, 100') = 0 THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RISK_POLICY_V24_PRELIMINARY_DRIFT', ERRCODE = 'P0001';
+    IF p_risk_policy_version IS DISTINCT FROM 'risk-policy-v2.4'
+       OR p_rows IS NULL OR pg_catalog.jsonb_typeof(p_rows) <> 'array'
+       OR pg_catalog.jsonb_array_length(p_rows) > 900
+       OR pg_catalog.octet_length(p_rows::TEXT) > 2097152
+       OR EXISTS (
+            SELECT 1 FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+            WHERE pg_catalog.jsonb_typeof(item.value) <> 'object'
+               OR NOT (item.value ?& ARRAY[
+                    'candidateId', 'components', 'preScore', 'possibleUpperBound',
+                    'recentMutualRank', 'verificationShortlistRank'
+               ])
+               OR item.value - ARRAY[
+                    'candidateId', 'components', 'preScore', 'possibleUpperBound',
+                    'recentMutualRank', 'verificationShortlistRank'
+               ] <> '{}'::JSONB
+               OR item.value->>'candidateId' !~ '^[A-Za-z0-9._:-]{1,128}$'
+               OR NOT public.analysis_v2_result_valid_score_components(item.value->'components')
+               OR NOT (item.value->'components' ?& ARRAY[
+                    'candidateToTargetLikes', 'candidateToTargetComments',
+                    'candidateToTargetTagOrCaptionMention',
+                    'targetToCandidateTagOrCaptionMention', 'targetToCandidateLike',
+                    'recentMutual', 'appearanceExposure'
+               ])
+               OR (item.value->'components') - ARRAY[
+                    'candidateToTargetLikes', 'candidateToTargetComments',
+                    'candidateToTargetTagOrCaptionMention',
+                    'targetToCandidateTagOrCaptionMention', 'targetToCandidateLike',
+                    'recentMutual', 'appearanceExposure'
+               ] <> '{}'::JSONB
+               OR (item.value->'components'->>'targetToCandidateLike')::NUMERIC <> 0
+               OR pg_catalog.jsonb_typeof(item.value->'preScore') <> 'number'
+               OR (item.value->>'preScore')::NUMERIC NOT BETWEEN 0 AND 95
+               OR pg_catalog.jsonb_typeof(item.value->'possibleUpperBound') <> 'number'
+               OR (item.value->>'possibleUpperBound')::NUMERIC
+                    NOT BETWEEN (item.value->>'preScore')::NUMERIC
+                        AND LEAST((item.value->>'preScore')::NUMERIC + 5, 100)
+       ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RESULT_INVALID', ERRCODE = 'P0001';
     END IF;
-    v_definition := pg_catalog.regexp_replace(
-        v_definition,
-        v_tag_component_pattern,
-        $replacement$(item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
-                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC$replacement$
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+        WHERE pg_catalog.abs(
+                (item.value->>'preScore')::NUMERIC - (
+                    (item.value->'components'->>'candidateToTargetLikes')::NUMERIC
+                    + (item.value->'components'->>'candidateToTargetComments')::NUMERIC
+                    + (item.value->'components'->>'candidateToTargetTagOrCaptionMention')::NUMERIC
+                    + (item.value->'components'->>'targetToCandidateTagOrCaptionMention')::NUMERIC
+                    + (item.value->'components'->>'recentMutual')::NUMERIC
+                    + (item.value->'components'->>'appearanceExposure')::NUMERIC
+                )
+              ) > 0.0001
+           OR pg_catalog.abs(
+                (item.value->>'possibleUpperBound')::NUMERIC
+                - LEAST((item.value->>'preScore')::NUMERIC + 5, 100)
+              ) > 0.0001
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RESULT_INVALID', ERRCODE = 'P0001';
+    END IF;
+    v_job := public.analysis_v2_assert_result_job_fence(
+        p_request_id, p_job_key, p_claim_token, p_job_input_hash
     );
-    v_definition := pg_catalog.replace(v_definition, 'NOT BETWEEN 0 AND 97', 'NOT BETWEEN 0 AND 95');
-    v_definition := pg_catalog.replace(v_definition, '+ 3, 100', '+ 5, 100');
-    EXECUTE v_definition;
+    IF v_job.job_key <> 'coordinator:candidate-screening'
+       OR v_job.track <> 'coordinator' OR v_job.kind <> 'screening'
+       OR NOT EXISTS (
+            SELECT 1 FROM public.analysis_requests AS analysis_request
+            WHERE analysis_request.id = p_request_id
+              AND analysis_request.policy_versions_snapshot->>'risk' = p_risk_policy_version
+       ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RESULT_NOT_READY', ERRCODE = 'P0001';
+    END IF;
+    SELECT COALESCE(pg_catalog.jsonb_agg(item.value ORDER BY item.value->>'candidateId'), '[]')
+    INTO v_rows FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value);
+    v_count := pg_catalog.jsonb_array_length(v_rows);
+    v_shortlist := LEAST(v_count, 10);
+    IF v_count <> (
+        SELECT pg_catalog.count(*) FROM public.analysis_v2_candidate_feature_rows AS feature
+        WHERE feature.request_id = p_request_id
+          AND feature.terminal_classification = 'verified_female'
+    ) OR EXISTS (
+        SELECT 1 FROM public.analysis_v2_candidate_feature_rows AS feature
+        WHERE feature.request_id = p_request_id
+          AND feature.terminal_classification = 'verified_female'
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value)
+              WHERE item.value->>'candidateId' = feature.candidate_id
+          )
+    ) OR (
+        SELECT pg_catalog.count(*) FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value)
+        WHERE item.value->'verificationShortlistRank' <> 'null'::JSONB
+    ) <> v_shortlist OR EXISTS (
+        SELECT 1 FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value)
+        WHERE (
+                item.value->'recentMutualRank' <> 'null'::JSONB
+                AND item.value->>'recentMutualRank' !~ '^(?:[1-9]|10)$'
+              )
+           OR (
+                item.value->'verificationShortlistRank' <> 'null'::JSONB
+                AND item.value->>'verificationShortlistRank' !~ '^(?:[1-9]|10)$'
+              )
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RESULT_NOT_READY', ERRCODE = 'P0001';
+    END IF;
+    v_hash := public.analysis_v2_result_staging_hash('preliminary_scores', NULL, v_rows);
+    SELECT manifest.* INTO v_existing FROM public.analysis_v2_preliminary_score_manifests AS manifest
+    WHERE manifest.request_id = p_request_id FOR UPDATE;
+    IF FOUND THEN
+        IF v_existing.producer_job_key <> p_job_key
+           OR v_existing.producer_input_hash <> p_job_input_hash
+           OR v_existing.producer_claim_token <> p_claim_token
+           OR v_existing.item_count <> v_count OR v_existing.result_hash <> v_hash THEN
+            RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_RESULT_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+        RETURN public.analysis_v2_result_checkpoint_json(
+            p_request_id, p_job_key, NULL, v_count, v_count, v_hash
+        );
+    END IF;
+    INSERT INTO public.analysis_v2_preliminary_score_manifests (
+        request_id, producer_job_key, producer_input_hash, producer_claim_token,
+        item_count, result_hash
+    ) VALUES (p_request_id, p_job_key, p_job_input_hash, p_claim_token, v_count, v_hash);
+    INSERT INTO public.analysis_v2_preliminary_score_rows (
+        request_id, candidate_id, components, pre_score, possible_upper_bound,
+        recent_mutual_rank, verification_shortlist_rank
+    )
+    SELECT p_request_id, item.value->>'candidateId', item.value->'components',
+        (item.value->>'preScore')::NUMERIC, (item.value->>'possibleUpperBound')::NUMERIC,
+        CASE WHEN item.value->'recentMutualRank' = 'null'::JSONB THEN NULL
+            ELSE (item.value->>'recentMutualRank')::SMALLINT END,
+        CASE WHEN item.value->'verificationShortlistRank' = 'null'::JSONB THEN NULL
+            ELSE (item.value->>'verificationShortlistRank')::SMALLINT END
+    FROM pg_catalog.jsonb_array_elements(v_rows) AS item(value);
+    RETURN public.analysis_v2_result_checkpoint_json(
+        p_request_id, p_job_key, NULL, v_count, v_count, v_hash
+    );
 END;
-$migration$;
+$$;
 
 DO $migration$
 DECLARE
@@ -632,6 +766,12 @@ REVOKE ALL ON FUNCTION public.analysis_v2_expected_relative_risk_rows(JSONB, TEX
     FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.analysis_v2_expected_relative_risk_rows_v23(JSONB, TEXT[])
     FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_preliminary_scores_v24(
+    UUID, TEXT, UUID, TEXT, JSONB, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_preliminary_scores_v24(
+    UUID, TEXT, UUID, TEXT, JSONB, TEXT
+) TO service_role;
 REVOKE ALL ON FUNCTION public.analysis_v2_result_valid_score_components(JSONB)
     FROM PUBLIC, anon, authenticated, service_role;
 
