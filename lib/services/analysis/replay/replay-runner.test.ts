@@ -311,8 +311,19 @@ describe('AI-only replay runner', () => {
                     retries: 0,
                     elapsedMs: 1,
                 }),
-                resolveGender: async ({ signal, onAttemptStart }) => new Promise(resolve => {
+                resolveGender: async ({
+                    signal,
+                    onAttemptStart,
+                    onAttemptTelemetry,
+                }) => new Promise(resolve => {
                     onAttemptStart?.({ attempt: 1, retryCount: 0 });
+                    onAttemptTelemetry?.({
+                        attempt: 1,
+                        retryCount: 0,
+                        disposition: 'rate_limited',
+                        latencyMs: 5,
+                    });
+                    onAttemptStart?.({ attempt: 2, retryCount: 1 });
                     signal.addEventListener('abort', () => {
                         aborted = true;
                         setTimeout(() => resolve({
@@ -326,11 +337,12 @@ describe('AI-only replay runner', () => {
         expect(aborted).toBe(true);
         expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
         expect(report.stages.genderResolution).toMatchObject({
-            calls: 1,
-            retries: 0,
-            failureDisposition: { cutoff: 1 },
+            calls: 2,
+            retries: 1,
+            rateLimited: 1,
+            failureDisposition: { rate_limited: 1, cutoff: 1 },
         });
-        expect(report.stages.genderResolution.meanLatencyMs).toBeGreaterThanOrEqual(1);
+        expect(report.stages.genderResolution.meanLatencyMs).toBeGreaterThanOrEqual(3);
         expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
     });
 

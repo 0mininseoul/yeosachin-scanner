@@ -81,6 +81,7 @@ interface TrackedResolver {
         rateLimited: number;
         attemptLatenciesMs: number[];
         failureDisposition: Record<string, number>;
+        pendingAttemptStartedAt?: number;
     };
 }
 
@@ -150,9 +151,11 @@ function collectCutoffResolver(
     }
     stage.failureDisposition.cutoff =
         (stage.failureDisposition.cutoff ?? 0) + 1;
-    durations.push(...(tracked.telemetry.attemptLatenciesMs.length
-        ? tracked.telemetry.attemptLatenciesMs
-        : [Math.max(1, Math.round(performance.now() - tracked.startedAt))]));
+    durations.push(...tracked.telemetry.attemptLatenciesMs);
+    durations.push(Math.max(1, Math.round(
+        performance.now()
+            - (tracked.telemetry.pendingAttemptStartedAt ?? tracked.startedAt),
+    )));
 }
 
 function finalize(stage: ReplayStageMetrics, durations: number[]): void {
@@ -350,6 +353,7 @@ export async function runAnalysisV2AiReplay(input: {
                         rateLimited: 0,
                         attemptLatenciesMs: [],
                         failureDisposition: {},
+                        pendingAttemptStartedAt: undefined,
                     },
                 };
                 const resolverPromise = input.runner.resolveGender({
@@ -359,6 +363,8 @@ export async function runAnalysisV2AiReplay(input: {
                     onAttemptStart: value => {
                         if (!trackedResolver) return;
                         trackedResolver.telemetry.calls++;
+                        trackedResolver.telemetry.pendingAttemptStartedAt =
+                            performance.now();
                         if (value.retryCount > 0) {
                             trackedResolver.telemetry.retries++;
                         }
@@ -368,6 +374,8 @@ export async function runAnalysisV2AiReplay(input: {
                         trackedResolver.telemetry.attemptLatenciesMs.push(
                             Math.max(0, value.latencyMs),
                         );
+                        trackedResolver.telemetry.pendingAttemptStartedAt =
+                            undefined;
                         if (value.disposition === 'rate_limited') {
                             trackedResolver.telemetry.rateLimited++;
                         }
