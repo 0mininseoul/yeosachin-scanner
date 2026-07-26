@@ -48,7 +48,8 @@ describe('analysis V2 replay safety contract', () => {
             replayCapability.pathname,
             stagedAdapter.pathname,
         ].sort());
-        expect(source).toContain('AI_STAGE_POLICY_LATEST_VERSION');
+        expect(source).toContain('replayAiStagePolicyVersion');
+        expect(source).not.toContain('AI_STAGE_POLICY_LATEST_VERSION');
         expect(adapterSource).not.toContain('sourceLineage');
         expect(imports).not.toMatch(/supabase|provider-run|result-store|archive|cloudflare|R2/i);
     });

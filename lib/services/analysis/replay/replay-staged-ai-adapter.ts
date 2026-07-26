@@ -9,11 +9,11 @@ import {
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib/services/ai/private-name-analysis';
-import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import type { ReplayAiRunner, ReplayInvocation, ReplayMedia, ReplayOutcome } from './replay-runner';
+import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineage';
 
 interface InvocationTelemetry {
     calls: number;
@@ -122,19 +122,21 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
 }
 
 /** Stateless paid-AI adapter. It imports no Supabase, provider, R2, job, result, or archive module. */
-export function createReplayStagedAiAdapter(): ReplayAiRunner {
+export function createReplayStagedAiAdapter(
+    aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
+): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
     return {
         triage: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
-            const identity = createGenderTriageResultIdentity(aiInput, AI_STAGE_POLICY_LATEST_VERSION);
-            return genderTriage(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION, replayCapability });
+            const identity = createGenderTriageResultIdentity(aiInput, aiStagePolicyVersion);
+            return genderTriage(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
         }),
         feature: input => invoke(async state => {
             const aiInput = { triage: input.triage, bio: input.bio, media: normalized(input.media), captions: [...input.captions] };
-            const identity = createFeatureAnalysisResultIdentity(aiInput, AI_STAGE_POLICY_LATEST_VERSION);
-            return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION, replayCapability });
+            const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
+            return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
         }),
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
@@ -150,7 +152,7 @@ export function createReplayStagedAiAdapter(): ReplayAiRunner {
                     disposition: value.disposition,
                     latencyMs: value.latencyMs,
                 }),
-            }), { abortSignal: input.signal, replayCapability });
+            }), { abortSignal: input.signal, aiStagePolicyVersion, replayCapability });
         }),
         privateNames: accounts => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {
@@ -165,7 +167,7 @@ export function createReplayStagedAiAdapter(): ReplayAiRunner {
                     };
                 },
             };
-            return analyzePrivateAccountNames([...accounts], requestId, audit, { aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION, replayCapability });
+            return analyzePrivateAccountNames([...accounts], requestId, audit, { aiStagePolicyVersion, replayCapability });
         }),
     };
 }

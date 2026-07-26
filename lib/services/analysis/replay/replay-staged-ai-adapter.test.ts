@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const privateNames = vi.hoisted(() => vi.fn());
-
-vi.mock('@/lib/services/ai/private-name-analysis', () => ({
-    analyzePrivateAccountNames: privateNames,
-}));
-
-vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
+const mocks = vi.hoisted(() => ({
+    privateNames: vi.fn(),
     createFeatureAnalysisResultIdentity: vi.fn(),
     createGenderResolutionResultIdentity: vi.fn(),
     createGenderTriageResultIdentity: vi.fn(),
@@ -15,13 +10,26 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     genderTriage: vi.fn(),
 }));
 
+vi.mock('@/lib/services/ai/private-name-analysis', () => ({
+    analyzePrivateAccountNames: mocks.privateNames,
+}));
+
+vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
+    createFeatureAnalysisResultIdentity: mocks.createFeatureAnalysisResultIdentity,
+    createGenderResolutionResultIdentity: mocks.createGenderResolutionResultIdentity,
+    createGenderTriageResultIdentity: mocks.createGenderTriageResultIdentity,
+    featureAnalysis: mocks.featureAnalysis,
+    genderResolution: mocks.genderResolution,
+    genderTriage: mocks.genderTriage,
+}));
+
 import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
 
 describe('replay staged AI adapter telemetry', () => {
     beforeEach(() => vi.clearAllMocks());
 
     it('sums retries and per-attempt latency across private-name chunks', async () => {
-        privateNames.mockImplementation(async (
+        mocks.privateNames.mockImplementation(async (
             _accounts: unknown,
             _requestId: unknown,
             audit: {
@@ -64,7 +72,7 @@ describe('replay staged AI adapter telemetry', () => {
             }
             return [];
         });
-        const result = await createReplayStagedAiAdapter().privateNames?.([
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.7').privateNames?.([
             { id: 'ordinal:1', username: 'private' },
         ]);
 
@@ -78,4 +86,26 @@ describe('replay staged AI adapter telemetry', () => {
             attemptLatenciesMs: [5, 7, 11, 13],
         });
     });
+
+    it.each(['ai-stage-policy-v2.7', 'ai-stage-policy-v2.8'] as const)(
+        'pins %s into result identity and execution options',
+        async aiStagePolicyVersion => {
+            const identity = { operationKey: 'triage:identity' };
+            mocks.createGenderTriageResultIdentity.mockReturnValue(identity);
+            mocks.genderTriage.mockResolvedValue({ assessment: {}, routingDecision: 'route_to_feature_analysis' });
+
+            await createReplayStagedAiAdapter(aiStagePolicyVersion).triage?.({
+                ordinal: 1,
+                media: [],
+            });
+
+            expect(mocks.createGenderTriageResultIdentity)
+                .toHaveBeenCalledWith({ media: [] }, aiStagePolicyVersion);
+            expect(mocks.genderTriage).toHaveBeenCalledWith(
+                { media: [] },
+                expect.any(Object),
+                expect.objectContaining({ aiStagePolicyVersion }),
+            );
+        },
+    );
 });

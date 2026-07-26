@@ -57,7 +57,7 @@ describe('AI-only replay runner', () => {
 
     it('never relabels a historical Plus source as Standard evidence', async () => {
         const lines: string[] = [];
-        await runAnalysisV2AiReplay({
+        await expect(runAnalysisV2AiReplay({
             bundle: {
                 ...bundle,
                 capture: {
@@ -75,14 +75,36 @@ describe('AI-only replay runner', () => {
             runner: {},
             mode: 'dry-run',
             write: line => lines.push(line),
-        });
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_AI_POLICY_UNSUPPORTED');
+        expect(lines).toEqual([]);
+    });
 
+    it('replays an exact v2.8 bundle using v2.8 rather than ambient latest policy', async () => {
+        const lines: string[] = [];
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    ...bundle.capture,
+                    sourceLineage: {
+                        selectedPlanId: 'standard',
+                        policyVersions: {
+                            pipeline: 'v2',
+                            risk: 'risk-policy-v2.4',
+                            aiStage: 'ai-stage-policy-v2.8',
+                            scheduler: 'ai-scheduler-v1',
+                        },
+                    },
+                },
+            },
+            runner: {},
+            mode: 'dry-run',
+            write: line => lines.push(line),
+        });
+        expect(report.replayAiPolicy).toBe('ai-stage-policy-v2.8');
         expect(JSON.parse(lines[0]!)).toMatchObject({
-            source_plan: 'plus',
-            source_ai_policy: 'ai-stage-policy-v2.4',
-            source_risk_policy: 'risk-policy-v2.2',
-            replay_ai_policy: 'ai-stage-policy-v2.7',
-            full_e2e_evidence: false,
+            source_ai_policy: 'ai-stage-policy-v2.8',
+            replay_ai_policy: 'ai-stage-policy-v2.8',
         });
     });
 

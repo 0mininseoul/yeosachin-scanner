@@ -2,8 +2,12 @@ import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-const migration = readFileSync(new URL(
+const foundationMigration = readFileSync(new URL(
     '../../../../supabase/migrations/20260727021000_add_analysis_v2_replay_capture_foundation.sql',
+    import.meta.url,
+), 'utf8');
+const v28FenceMigration = readFileSync(new URL(
+    '../../../../supabase/migrations/20260727033000_fence_replay_capture_to_ai_stage_v28.sql',
     import.meta.url,
 ), 'utf8');
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
@@ -13,7 +17,7 @@ const OTHER_OWNER_ID = '523e4567-e89b-42d3-a456-426614174000';
 const TARGET = 'target.account';
 const OPERATOR = 'a'.repeat(64);
 const EXPECTED_RISK_POLICY = 'risk-policy-v2.4';
-const EXPECTED_AI_STAGE_POLICY = 'ai-stage-policy-v2.7';
+const EXPECTED_AI_STAGE_POLICY = 'ai-stage-policy-v2.8';
 const POLICY = {
     pipeline: 'v2',
     risk: EXPECTED_RISK_POLICY,
@@ -65,8 +69,23 @@ beforeEach(async () => {
             policy_versions_snapshot JSONB, plan_cards_snapshot JSONB,
             user_id UUID, target_instagram_id TEXT
         );
+        CREATE TABLE public.analysis_v2_result_summaries (
+            request_id UUID PRIMARY KEY, target_instagram_id TEXT, plan_id TEXT,
+            followers_declared INTEGER, following_declared INTEGER,
+            public_mutuals INTEGER, screened_mutuals INTEGER,
+            score_policy_version TEXT
+        );
+        CREATE TABLE public.analysis_v2_provider_runs (
+            request_id UUID, job_key TEXT, operation_key TEXT, logical_provider TEXT,
+            actor_id TEXT, credential_slot TEXT, status TEXT, run_id TEXT
+        );
+        CREATE TABLE public.analysis_preflight_provider_runs (
+            preflight_id UUID, operation_key TEXT, logical_provider TEXT,
+            actor_id TEXT, credential_slot TEXT, status TEXT, run_id TEXT
+        );
     `);
-    await db.exec(migration);
+    await db.exec(foundationMigration);
+    await db.exec(v28FenceMigration);
     await db.query(`INSERT INTO public.analysis_preflights VALUES (
         $1, 'ready', 'production', NULL, clock_timestamp() + INTERVAL '1 hour',
         $2::JSONB, $3::JSONB, 1000, 1000, $4, $5
@@ -157,10 +176,37 @@ describe('replay capture authorization fences', () => {
         );
     });
 
+    it('rejects v2.7, missing keys, and extra policy drift at arm', async () => {
+        for (const policy of [
+            { ...POLICY, aiStage: 'ai-stage-policy-v2.7' },
+            (() => { const value = { ...POLICY }; delete (value as { scheduler?: string }).scheduler; return value; })(),
+            { ...POLICY, unexpected: 'drift' },
+        ]) {
+            await db.query(
+                'UPDATE public.analysis_preflights SET policy_versions_snapshot = $2::JSONB WHERE id = $1',
+                [PREFLIGHT_ID, JSON.stringify(policy)],
+            );
+            await expect(arm()).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_CAPTURE_PREFLIGHT_REJECTED',
+            );
+        }
+    });
+
     it('does not grant direct service-role table access', async () => {
         await db.exec('SET ROLE service_role');
         await expect(db.query(
             'SELECT * FROM public.analysis_v2_replay_capture_authorizations'
+        )).rejects.toThrow(/permission denied/i);
+        await db.exec('RESET ROLE');
+    });
+
+    it.each(['anon', 'authenticated'])('does not grant %s capture RPC access', async role => {
+        await db.exec(`SET ROLE ${role}`);
+        await expect(db.query(
+            `SELECT public.arm_analysis_v2_replay_capture(
+                $1, $2, $3, $4, 0, 0, 2, $5, 'AUTHORIZED'
+            )`,
+            [PREFLIGHT_ID, 'a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), OPERATOR],
         )).rejects.toThrow(/permission denied/i);
         await db.exec('RESET ROLE');
     });

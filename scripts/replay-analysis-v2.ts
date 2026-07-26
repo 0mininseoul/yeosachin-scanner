@@ -3,7 +3,6 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import { createAnalysisV2SelectedMediaNormalizer } from '../lib/services/ai/image-preprocessing';
-import { AI_STAGE_POLICY_LATEST_VERSION } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
 import { captureAnalysisV2ReplayBundle } from '../lib/services/analysis/replay/replay-capture';
 import {
@@ -18,6 +17,7 @@ import {
 import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } from '../lib/services/analysis/replay/replay-live-source';
 import { runAnalysisV2AiReplay } from '../lib/services/analysis/replay/replay-runner';
 import { createReplayStagedAiAdapter } from '../lib/services/analysis/replay/replay-staged-ai-adapter';
+import { replayAiStagePolicyVersion } from '../lib/services/analysis/replay/replay-source-lineage';
 import { loadReplayCaptureDescriptor, type ReplaySourceRpcClient } from '../lib/services/analysis/replay/replay-supabase-repository';
 
 type ReplayCliOptions =
@@ -138,6 +138,7 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         if (serviceKey.startsWith('sb_publishable_') || serviceKey === process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()) throw new Error('ANALYSIS_V2_REPLAY_CONFIGURATION_INVALID');
         const supabase = createClient(requiredEnvironment('NEXT_PUBLIC_SUPABASE_URL'), serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
         const descriptor = await loadReplayCaptureDescriptor(supabase as unknown as ReplaySourceRpcClient, { targetUsername: options.target, ...(options.requestId ? { requestId: options.requestId } : {}) });
+        const replayAiPolicy = replayAiStagePolicyVersion(descriptor.sourceLineage);
         const clients = new Map<string, ReturnType<typeof createReplayReadonlyApifyClient>>();
         const source = await loadReplaySourceFromExistingRuns({ descriptor, clientForSlot: slot => {
             const existing = clients.get(slot); if (existing) return existing;
@@ -173,7 +174,7 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             source_pipeline: descriptor.sourceLineage.policyVersions.pipeline,
             source_ai_policy: descriptor.sourceLineage.policyVersions.aiStage,
             source_risk_policy: descriptor.sourceLineage.policyVersions.risk,
-            replay_ai_policy: AI_STAGE_POLICY_LATEST_VERSION,
+            replay_ai_policy: replayAiPolicy,
             full_e2e_evidence: false,
             profiles: bundle.profiles.length,
             public: bundle.profiles.filter(p => !p.isPrivate).length,
@@ -220,7 +221,10 @@ export async function runReplayCli(
         if (authenticated.expired) {
             throw new Error('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
         }
-        await runAnalysisV2AiReplay({ bundle: authenticated.bundle, runner: options.mode === 'paid-ai' ? createReplayStagedAiAdapter() : {}, mode: options.mode, paidAiOptIn: options.mode === 'paid-ai', write: line => process.stdout.write(`${line}\n`) });
+        const replayAiPolicy = replayAiStagePolicyVersion(
+            authenticated.bundle.capture.sourceLineage,
+        );
+        await runAnalysisV2AiReplay({ bundle: authenticated.bundle, runner: options.mode === 'paid-ai' ? createReplayStagedAiAdapter(replayAiPolicy) : {}, mode: options.mode, paidAiOptIn: options.mode === 'paid-ai', write: line => process.stdout.write(`${line}\n`) });
         return { exitCode: 0 };
     } finally {
         uninstallSignals();

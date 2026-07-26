@@ -1,7 +1,7 @@
 import { applyGenderResolution, type FeatureAnalysisResult, type GenderResolutionResult, type GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
-import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
+import { replayAiStagePolicyVersion } from './replay-source-lineage';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -280,6 +280,9 @@ export async function runAnalysisV2AiReplay(input: {
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
     assertReplayInput(input.bundle);
+    const replayAiPolicy = replayAiStagePolicyVersion(
+        input.bundle.capture.sourceLineage,
+    );
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
@@ -480,7 +483,7 @@ export async function runAnalysisV2AiReplay(input: {
         sourcePipeline: input.bundle.capture.sourceLineage.policyVersions.pipeline,
         sourceAiPolicy: input.bundle.capture.sourceLineage.policyVersions.aiStage,
         sourceRiskPolicy: input.bundle.capture.sourceLineage.policyVersions.risk,
-        replayAiPolicy: AI_STAGE_POLICY_LATEST_VERSION,
+        replayAiPolicy,
         fullE2eEvidence: false as const,
         stages,
         gender,
