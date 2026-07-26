@@ -277,8 +277,11 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Feature outcome is incomplete.' });
     }
-    const v28InputQuality = value.inputQualityPolicy === 'input-quality-v2.8'
-        || value.mediaSelectionProvenance !== undefined;
+    const v28InputQuality = value.inputQualityPolicy !== undefined
+        || value.mediaSelectionProvenance !== undefined
+        || value.accountContextOverride !== undefined
+        || value.officialScreeningStatus !== undefined
+        || value.officialExclusionReason !== undefined;
     if (v28InputQuality && !value.feature) {
         context.addIssue({
             code: 'custom',

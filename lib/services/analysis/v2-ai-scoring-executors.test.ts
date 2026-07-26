@@ -3034,12 +3034,19 @@ describe('V2 AI and scoring executors', () => {
         missingCheckpoint.mediaSelectionProvenance = provenance;
         const missingEntireCheckpoint = verifiedOutcome('missing.checkpoint');
         missingEntireCheckpoint.feature!.features.accountContext = 'official_group_or_brand';
+        const screeningFieldsOnly = verifiedOutcome('screening.fields.only');
+        screeningFieldsOnly.feature!.features.accountContext = 'official_group_or_brand';
+        screeningFieldsOnly.accountContextOverride = 'official_group_or_brand';
+        screeningFieldsOnly.officialScreeningStatus = 'corroborated_official';
+        screeningFieldsOnly.officialExclusionReason =
+            'model_group_context_plus_profile_signals';
         const memoryState = memory();
         memoryState.outcomes = [
             screened,
             uncorroborated,
             missingCheckpoint,
             missingEntireCheckpoint,
+            screeningFieldsOnly,
         ];
         memoryState.primary = {
             revision: 1,
@@ -3059,6 +3066,7 @@ describe('V2 AI and scoring executors', () => {
                         uncorroborated.instagramId,
                         missingCheckpoint.instagramId,
                         missingEntireCheckpoint.instagramId,
+                        screeningFieldsOnly.instagramId,
                     ],
                 })),
                 loadTargetEvidence: vi.fn(async () => targetEvidence()),
@@ -3077,7 +3085,43 @@ describe('V2 AI and scoring executors', () => {
             { username: 'person.club', accountContext: 'uncertain' },
             { username: 'partial.checkpoint', accountContext: 'uncertain' },
             { username: 'missing.checkpoint', accountContext: 'uncertain' },
+            { username: 'screening.fields.only', accountContext: 'uncertain' },
         ]);
+    });
+
+    it.each([
+        'ai-stage-policy-v2.6',
+        'ai-stage-policy-v2.7',
+    ])('preserves clean legacy official context under %s', async aiStagePolicyVersion => {
+        const legacyOfficial = verifiedOutcome('legacy.official');
+        legacyOfficial.feature!.features.accountContext = 'official_group_or_brand';
+        const memoryState = memory();
+        memoryState.outcomes = [legacyOfficial];
+        memoryState.primary = {
+            revision: 1,
+            resultHash: digest('legacy-primary'),
+            candidates: [{
+                candidateId: legacyOfficial.candidateId,
+                instagramId: legacyOfficial.instagramId,
+                interactions: [],
+            }],
+        };
+        const deps = dependencies(memoryState, {
+            evidence: {
+                loadRelationships: vi.fn(async () => relationshipSnapshot({
+                    excluded: null,
+                    usernames: [legacyOfficial.instagramId],
+                })),
+                loadTargetEvidence: vi.fn(async () => targetEvidence()),
+            },
+        });
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).screening!(context('screening', {
+            aiStagePolicyVersion,
+        }));
+
+        expect(memoryState.screening?.candidates[0]?.accountContext)
+            .toBe('official_group_or_brand');
     });
 
     it('defers the weak-partner adjustment until final scoring', async () => {

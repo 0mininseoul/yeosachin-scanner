@@ -908,10 +908,19 @@ function screenedAccountContext(
     exactV28Policy = false,
 ): AccountContext {
     const modelContext = outcome.feature?.features.accountContext ?? 'uncertain';
-    const v28 = exactV28Policy
-        || outcome.inputQualityPolicy === 'input-quality-v2.8'
-        || outcome.mediaSelectionProvenance !== undefined;
-    if (!v28) return modelContext;
+    const hasAnyV28Field = outcome.inputQualityPolicy !== undefined
+        || outcome.mediaSelectionProvenance !== undefined
+        || outcome.accountContextOverride !== undefined
+        || outcome.officialScreeningStatus !== undefined
+        || outcome.officialExclusionReason !== undefined;
+    if (!exactV28Policy && !hasAnyV28Field) return modelContext;
+    const hasCompleteV28Provenance =
+        outcome.inputQualityPolicy === 'input-quality-v2.8'
+        && outcome.mediaSelectionProvenance !== undefined
+        && outcome.accountContextOverride !== undefined
+        && outcome.officialScreeningStatus !== undefined
+        && outcome.officialExclusionReason !== undefined;
+    if (!hasCompleteV28Provenance) return 'uncertain';
     if (outcome.officialScreeningStatus === 'not_model_official') {
         return modelContext !== 'official_group_or_brand'
             && outcome.accountContextOverride === modelContext

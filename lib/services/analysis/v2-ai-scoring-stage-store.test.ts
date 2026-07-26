@@ -198,25 +198,48 @@ function v28ProfileOutcome(): AnalysisV2ProfileAiOutcome {
 }
 
 describe('analysis V2 AI/scoring stage store', () => {
-    it.each([
-        ['missing screening fields', (outcome: AnalysisV2ProfileAiOutcome) => {
-            delete outcome.accountContextOverride;
-            delete outcome.officialScreeningStatus;
-            delete outcome.officialExclusionReason;
-        }],
-        ['partial screening fields', (outcome: AnalysisV2ProfileAiOutcome) => {
-            delete outcome.officialScreeningStatus;
-            delete outcome.officialExclusionReason;
-        }],
-    ] as const)('rejects v2.8 profile checkpoints with %s', async (_label, mutate) => {
-        const outcome = v28ProfileOutcome();
-        mutate(outcome);
+    const v28FieldNames = [
+        'inputQualityPolicy',
+        'mediaSelectionProvenance',
+        'accountContextOverride',
+        'officialScreeningStatus',
+        'officialExclusionReason',
+    ] as const satisfies readonly (keyof AnalysisV2ProfileAiOutcome)[];
+
+    async function expectIncompleteV28Rejected(outcome: AnalysisV2ProfileAiOutcome) {
         const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
         await expect(store.checkpointProfileAiBatch({
             ...claim('track:profile-ai:batch:0'),
             batch: 0,
             outcomes: [outcome],
         })).rejects.toThrow('v2.8 input-quality provenance is incomplete');
+    }
+
+    it.each(v28FieldNames)(
+        'rejects a v2.8 profile checkpoint missing only %s',
+        async missingField => {
+            const outcome = v28ProfileOutcome();
+            delete outcome[missingField];
+            await expectIncompleteV28Rejected(outcome);
+        },
+    );
+
+    it.each(v28FieldNames)(
+        'rejects a profile checkpoint containing only v2.8 field %s',
+        async presentField => {
+            const complete = v28ProfileOutcome();
+            const value = complete[presentField];
+            for (const field of v28FieldNames) delete complete[field];
+            Object.assign(complete, { [presentField]: value });
+            await expectIncompleteV28Rejected(complete);
+        },
+    );
+
+    it('rejects the three screening fields without the marker and media provenance', async () => {
+        const outcome = v28ProfileOutcome();
+        delete outcome.inputQualityPolicy;
+        delete outcome.mediaSelectionProvenance;
+        await expectIncompleteV28Rejected(outcome);
     });
 
     it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {
