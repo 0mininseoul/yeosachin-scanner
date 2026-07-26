@@ -1,12 +1,17 @@
 'use client';
 
-import { type ReactNode, useEffect, useRef } from 'react';
+import { type ReactNode, Suspense, useEffect, useLayoutEffect, useRef } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import {
+    enforceAmplitudeReplayRoutePrivacy,
     initAmplitude,
+    installAmplitudeReplayNavigationGuards,
     isCanonicalAnalyticsUserId,
     markAnalyticsIdentityPending,
     markAnalyticsIdentityReady,
+    teardownAmplitudeSessionReplay,
+    updateAmplitudeReplayRuntimeContext,
 } from '@/lib/services/analytics';
 import {
     analyticsAuthProvider,
@@ -64,10 +69,24 @@ export async function syncAnalyticsAuth(
     return { provider, resolved: true, userId };
 }
 
-export function AmplitudeProvider({ children }: { children: ReactNode }) {
+interface AmplitudeProviderProps {
+    children: ReactNode;
+    demoAnalysisEnabled: boolean;
+}
+
+function AmplitudeProviderClient({ children, demoAnalysisEnabled }: AmplitudeProviderProps) {
     const { loading, user } = useAuth();
     const authState = useRef(createAuthAnalyticsState());
     const transitionGeneration = useRef(0);
+
+    useLayoutEffect(() => {
+        updateAmplitudeReplayRuntimeContext({ demoAnalysisEnabled });
+        enforceAmplitudeReplayRoutePrivacy();
+    }, [demoAnalysisEnabled]);
+
+    useLayoutEffect(() => installAmplitudeReplayNavigationGuards(), []);
+
+    useEffect(() => teardownAmplitudeSessionReplay, []);
 
     useEffect(() => {
         const generation = transitionGeneration.current + 1;
@@ -97,5 +116,33 @@ export function AmplitudeProvider({ children }: { children: ReactNode }) {
         };
     }, [loading, user?.id, user?.app_metadata?.provider, user?.identities]);
 
-    return children;
+    return (
+        <>
+            <Suspense fallback={null}>
+                <AmplitudeReplayRouteObserver />
+            </Suspense>
+            {children}
+        </>
+    );
+}
+
+function AmplitudeReplayRouteObserver() {
+    const pathname = usePathname();
+    const searchParams = useSearchParams();
+
+    useEffect(() => {
+        // Do not pass a path, query, request ID, or token to the SDK. The analytics adapter
+        // reads the browser location only to make the binary capture/no-capture decision.
+        void pathname;
+        void searchParams;
+        enforceAmplitudeReplayRoutePrivacy();
+    }, [pathname, searchParams]);
+
+    return null;
+}
+
+export function AmplitudeProvider({ children, demoAnalysisEnabled }: AmplitudeProviderProps) {
+    // useSearchParams makes query-bearing URLs fail closed before they can be replayed.
+    // Only the zero-DOM route observer suspends; the product subtree is mounted exactly once.
+    return <AmplitudeProviderClient demoAnalysisEnabled={demoAnalysisEnabled}>{children}</AmplitudeProviderClient>;
 }

@@ -44,7 +44,9 @@ describe('analytics and observability disclosure contract', () => {
             /주문자명[^<]*?이메일[^<]*?전화번호[^<]*?영속[^<]*?저장하지[^<]*?Amplitude[^<]*?Axiom[^<]*?전송하지/
         );
         expect(disclosure).toMatch(/카드[^<]*?원문 웹훅[^<]*?보관하지/);
-        expect(disclosure).toMatch(/Amplitude[^<]*?이용 통계[^<]*?Session Replay[^<]*?비활성화/);
+        expect(disclosure).toMatch(/Amplitude[^<]*?이용 통계[^<]*?Session Replay[^<]*?활성화된 경우/);
+        expect(disclosure).toMatch(/공개 페이지[^<]*?마스킹된 화면 구조/);
+        expect(disclosure).toMatch(/로그인[^<]*?분석[^<]*?결제[^<]*?결과[^<]*?차단/);
         expect(disclosure).toMatch(/구매자[^<]*?연락처[^<]*?댓글[^<]*?소개글[^<]*?캡션[^<]*?(이미지|미디어) URL[^<]*?제외/);
         expect(disclosure).toMatch(/리에종\(그로블\)[^<]*?통신판매중개/);
         expect(disclosure).not.toContain('주식회사 리에종');

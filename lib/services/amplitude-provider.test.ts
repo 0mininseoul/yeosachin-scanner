@@ -1,18 +1,33 @@
 import { readFileSync } from 'node:fs';
+import { createElement } from 'react';
+import { renderToString } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const analyticsMocks = vi.hoisted(() => ({
+    enforceAmplitudeReplayRoutePrivacy: vi.fn(),
     initAmplitude: vi.fn(),
+    installAmplitudeReplayNavigationGuards: vi.fn(),
     isCanonicalAnalyticsUserId: vi.fn(),
     markAnalyticsIdentityPending: vi.fn(),
     markAnalyticsIdentityReady: vi.fn(),
+    teardownAmplitudeSessionReplay: vi.fn(),
+    updateAmplitudeReplayRuntimeContext: vi.fn(),
 }));
 
 const authMarkerMocks = vi.hoisted(() => ({
+    analyticsAuthProvider: vi.fn(),
+    availableAnalyticsSessionStorage: vi.fn(),
     completePendingAuthEvent: vi.fn(),
 }));
 
-vi.mock('@/hooks/useAuth', () => ({ useAuth: vi.fn() }));
+const authMocks = vi.hoisted(() => ({ useAuth: vi.fn() }));
+const navigationMocks = vi.hoisted(() => ({
+    usePathname: vi.fn(),
+    useSearchParams: vi.fn(),
+}));
+
+vi.mock('@/hooks/useAuth', () => authMocks);
+vi.mock('next/navigation', () => navigationMocks);
 vi.mock('@/lib/services/analytics', () => analyticsMocks);
 vi.mock('@/lib/services/analytics-auth', () => authMarkerMocks);
 
@@ -29,7 +44,16 @@ describe('AmplitudeProvider auth integration', () => {
             ));
         analyticsMocks.markAnalyticsIdentityPending.mockReset();
         analyticsMocks.markAnalyticsIdentityReady.mockReset();
+        analyticsMocks.enforceAmplitudeReplayRoutePrivacy.mockReset();
+        analyticsMocks.installAmplitudeReplayNavigationGuards.mockReset();
+        analyticsMocks.teardownAmplitudeSessionReplay.mockReset();
+        analyticsMocks.updateAmplitudeReplayRuntimeContext.mockReset();
+        authMarkerMocks.analyticsAuthProvider.mockReset().mockReturnValue(null);
+        authMarkerMocks.availableAnalyticsSessionStorage.mockReset();
         authMarkerMocks.completePendingAuthEvent.mockReset();
+        authMocks.useAuth.mockReset().mockReturnValue({ loading: true, user: null });
+        navigationMocks.usePathname.mockReset().mockReturnValue('/');
+        navigationMocks.useSearchParams.mockReset().mockReturnValue(new URLSearchParams());
     });
 
     it('waits for resolved auth, then reconciles the first anonymous identity', async () => {
@@ -237,9 +261,35 @@ describe('AmplitudeProvider auth integration', () => {
         expect(layoutSource).toContain(
             'import { AmplitudeProvider } from "@/components/amplitude-provider";',
         );
-        expect(layoutSource.match(/<AmplitudeProvider>/g)).toHaveLength(1);
+        expect(layoutSource.match(/<AmplitudeProvider\s/g)).toHaveLength(1);
         expect(layoutSource).toMatch(
-            /<AmplitudeProvider>\s*\{children\}\s*<\/AmplitudeProvider>/,
+            /<AmplitudeProvider demoAnalysisEnabled=\{demoAnalysisEnabled\}>\s*\{children\}\s*<\/AmplitudeProvider>/,
         );
+    });
+
+    it('keeps the product subtree mounted once when the route observer suspends during hydration', async () => {
+        const { AmplitudeProvider } = await import('../../components/amplitude-provider');
+        let productRenderCount = 0;
+
+        navigationMocks.useSearchParams.mockImplementation(() => {
+            throw new Promise<never>(() => undefined);
+        });
+
+        function ProductShell() {
+            productRenderCount += 1;
+            return createElement('main', null, 'product');
+        }
+
+        // React's TypeScript overload requires the required child in props, even though this
+        // is the createElement equivalent of normal JSX child placement.
+        // eslint-disable-next-line react/no-children-prop
+        const html = renderToString(createElement(AmplitudeProvider, {
+            children: createElement(ProductShell),
+            demoAnalysisEnabled: false,
+        }));
+
+        expect(html).toContain('<main>product</main>');
+        expect(productRenderCount).toBe(1);
+        expect(analyticsMocks.initAmplitude).not.toHaveBeenCalled();
     });
 });
