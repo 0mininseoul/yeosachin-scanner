@@ -1,12 +1,11 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { constants, createDecipheriv, generateKeyPairSync, privateDecrypt } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
     createReplayCaptureStore,
-    decryptReplayCaptureEnvelopeForTest,
     encryptReplayCaptureFragment,
     loadReplayCaptureConfig,
     replayCaptureObjectKey,
-} from './replay-capture';
+} from './replay-input-snapshot';
 
 const CAPTURE_ID = '123e4567-e89b-42d3-a456-426614174000';
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -25,6 +24,30 @@ const ENV = {
     ANALYSIS_V2_REPLAY_CAPTURE_RECIPIENT_PUBLIC_KEY_B64: PUBLIC_KEY_B64,
 };
 
+function decryptForTest(
+    ciphertext: Buffer,
+    input: { captureId: string; opaqueLocator: string; kind: string; stage: string }
+): Buffer {
+    const envelope = JSON.parse(ciphertext.toString('utf8')) as {
+        ek: string; iv: string; tag: string; ct: string;
+    };
+    const key = privateDecrypt({
+        key: privateKey,
+        padding: constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+    }, Buffer.from(envelope.ek, 'base64'));
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.iv, 'base64'));
+    decipher.setAAD(Buffer.from(JSON.stringify({
+        v: 1,
+        captureId: input.captureId,
+        opaqueLocator: input.opaqueLocator,
+        kind: input.kind,
+        stage: input.stage,
+    }), 'utf8'));
+    decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(envelope.ct, 'base64')), decipher.final()]);
+}
+
 describe('replay capture configuration', () => {
     it('is disabled by default and creates no transport client', () => {
         const createTransport = vi.fn();
@@ -40,8 +63,14 @@ describe('replay capture configuration', () => {
         })).toThrow('REPLAY_CAPTURE_INVALID_CONFIGURATION');
         expect(() => loadReplayCaptureConfig({
             ...ENV,
-            ANALYSIS_V2_REPLAY_CAPTURE_R2_BUCKET: 'result-images',
             ANALYSIS_V2_REPLAY_CAPTURE_RECIPIENT_PUBLIC_KEY_B64: 'not-base64',
+        })).toThrow('REPLAY_CAPTURE_INVALID_CONFIGURATION');
+    });
+
+    it('rejects a replay bucket that aliases the result-image bucket', () => {
+        expect(() => loadReplayCaptureConfig({
+            ...ENV,
+            ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: ENV.ANALYSIS_V2_REPLAY_CAPTURE_R2_BUCKET,
         })).toThrow('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     });
 });
@@ -62,9 +91,9 @@ describe('replay capture envelope', () => {
         expect(first.ciphertext.equals(second.ciphertext)).toBe(false);
         expect(first.objectKey).toMatch(/^replay\/v1\/[0-9a-f-]{36}\/[a-z0-9-]{1,64}\.enc$/);
         expect(first.objectKey).not.toContain('candidate-0001-a9c3');
-        expect(decryptReplayCaptureEnvelopeForTest(first, privateKey, input))
+        expect(decryptForTest(first.ciphertext, input))
             .toEqual(input.plaintext);
-        expect(() => decryptReplayCaptureEnvelopeForTest(first, privateKey, {
+        expect(() => decryptForTest(first.ciphertext, {
             ...input,
             opaqueLocator: 'candidate-0002-b2d4',
         })).toThrow();
@@ -76,10 +105,9 @@ describe('replay capture envelope', () => {
             opaqueLocator: 'opaque-a', kind: 'provider_payload', stage: 'collection',
             plaintext: Buffer.from('a'), recipientPublicKeyBase64: PUBLIC_KEY_B64,
         });
-        expect(() => decryptReplayCaptureEnvelopeForTest(first, privateKey, {
+        expect(() => decryptForTest(first.ciphertext, {
             captureId: CAPTURE_ID, opaqueLocator: 'opaque-b', kind: 'provider_payload',
-            stage: 'collection', plaintext: Buffer.from('a'),
-            recipientPublicKeyBase64: PUBLIC_KEY_B64,
+            stage: 'collection',
         })).toThrow();
     });
 });
@@ -103,5 +131,35 @@ describe('replay capture exact-key transport', () => {
             sha256: encrypted.ciphertextSha256,
         });
         expect(replayCaptureObjectKey(CAPTURE_ID, 'opaque-a')).not.toContain('opaque-a');
+    });
+});
+
+describe('replay capture upload integrity fence', () => {
+    it.each([
+        ['ciphertext', (fragment: ReturnType<typeof encryptReplayCaptureFragment>) => ({
+            ...fragment, ciphertext: Buffer.from('tampered'),
+        })],
+        ['hash', (fragment: ReturnType<typeof encryptReplayCaptureFragment>) => ({
+            ...fragment, ciphertextSha256: 'f'.repeat(64),
+        })],
+        ['size', (fragment: ReturnType<typeof encryptReplayCaptureFragment>) => ({
+            ...fragment, ciphertextByteSize: fragment.ciphertextByteSize + 1,
+        })],
+        ['recipient fingerprint', (fragment: ReturnType<typeof encryptReplayCaptureFragment>) => ({
+            ...fragment, recipientKeyFingerprint: 'f'.repeat(64),
+        })],
+    ])('rejects a tampered %s before upload', async (_name, mutate) => {
+        const put = vi.fn(async () => undefined);
+        const store = createReplayCaptureStore(ENV, {
+            createTransport: () => ({ put, get: vi.fn(), delete: vi.fn() }),
+        });
+        const fragment = encryptReplayCaptureFragment({
+            captureId: CAPTURE_ID, opaqueLocator: 'opaque-a', kind: 'provider_payload',
+            stage: 'collection', plaintext: Buffer.from('a'),
+            recipientPublicKeyBase64: PUBLIC_KEY_B64,
+        });
+
+        await expect(store.put(mutate(fragment))).rejects.toThrow('REPLAY_CAPTURE_INTEGRITY_FAILURE');
+        expect(put).not.toHaveBeenCalled();
     });
 });

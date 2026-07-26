@@ -28,7 +28,8 @@ beforeEach(async () => {
         $$;
         CREATE TABLE public.analysis_preflights (
             id UUID PRIMARY KEY, status TEXT, access_mode TEXT, consumed_request_id UUID,
-            expires_at TIMESTAMPTZ, plan_cards_snapshot JSONB, policy_versions_snapshot JSONB
+            expires_at TIMESTAMPTZ, plan_cards_snapshot JSONB, policy_versions_snapshot JSONB,
+            target_followers_count INTEGER, target_following_count INTEGER
         );
         CREATE TABLE public.analysis_requests (
             id UUID PRIMARY KEY, preflight_id UUID, pipeline_version TEXT, status TEXT,
@@ -39,7 +40,7 @@ beforeEach(async () => {
     await db.exec(migration);
     await db.query(`INSERT INTO public.analysis_preflights VALUES (
         $1, 'ready', 'production', NULL, clock_timestamp() + INTERVAL '1 hour',
-        $2::JSONB, '{"pipeline":"v2"}'::JSONB
+        $2::JSONB, '{"pipeline":"v2"}'::JSONB, 1000, 1000
     )`, [PREFLIGHT_ID, JSON.stringify({
         standard: {
             launchStatus: 'production', selectionState: 'required', detailedMutualLimit: 100,
@@ -51,13 +52,30 @@ beforeEach(async () => {
 afterEach(async () => { await db.close(); });
 
 async function arm() {
+    const policy = await db.query<{ hash: string }>(
+        `SELECT pg_catalog.encode(extensions.digest(
+            '{"pipeline":"v2"}'::JSONB::TEXT, 'sha256'
+        ), 'hex') AS hash`,
+    );
     return db.query<{ capture_id: string }>(
-        `SELECT public.arm_analysis_v2_replay_capture($1, $2, 0, 0, 2, $3, 'AUTHORIZED') AS capture_id`,
-        [PREFLIGHT_ID, 'b'.repeat(64), OPERATOR],
+        `SELECT public.arm_analysis_v2_replay_capture($1, $2, $3, 0, 0, 2, $4, 'AUTHORIZED') AS capture_id`,
+        [PREFLIGHT_ID, policy.rows[0]?.hash, 'b'.repeat(64), OPERATOR],
     );
 }
 
 describe('replay capture authorization fences', () => {
+    it('rejects a caller policy hash or target capacity that differs from the ready preflight', async () => {
+        await expect(db.query(
+            `SELECT public.arm_analysis_v2_replay_capture($1, $2, $3, 0, 0, 2, $4, 'AUTHORIZED')`,
+            [PREFLIGHT_ID, 'f'.repeat(64), 'b'.repeat(64), OPERATOR],
+        )).rejects.toThrow('ANALYSIS_V2_REPLAY_CAPTURE_POLICY_MISMATCH');
+        await db.query(
+            'UPDATE public.analysis_preflights SET target_followers_count = 1001 WHERE id = $1',
+            [PREFLIGHT_ID],
+        );
+        await expect(arm()).rejects.toThrow('ANALYSIS_V2_REPLAY_CAPTURE_PREFLIGHT_REJECTED');
+    });
+
     it('does not grant direct service-role table access', async () => {
         await db.exec('SET ROLE service_role');
         await expect(db.query(
@@ -89,12 +107,15 @@ describe('replay capture authorization fences', () => {
         await expect(db.query(`SELECT public.bind_analysis_v2_replay_capture($1, $2, $3, 'AUTHORIZED')`, [captureId, REQUEST_ID, OPERATOR])).rejects.toThrow('ANALYSIS_V2_REPLAY_CAPTURE_BIND_REJECTED');
 
         const params = [captureId, 'c'.repeat(64), 'provider_payload', 'collection', 0, 0,
-            `replay/v1/${captureId}/${'d'.repeat(64)}.enc`, 'e'.repeat(64), 123, 1, OPERATOR, 'AUTHORIZED'];
+            `replay/v1/${captureId}/${'c'.repeat(64)}.enc`, 'e'.repeat(64), 123, 1, OPERATOR, 'AUTHORIZED'];
         const call = `SELECT public.register_analysis_v2_replay_capture_fragment($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`;
         await expect(db.query(call, params)).resolves.toBeDefined();
         await expect(db.query(call, params)).resolves.toBeDefined();
         await expect(db.query(call, params.map((value, index) => (
             index === 7 ? 'f'.repeat(64) : value
         )))).rejects.toThrow('ANALYSIS_V2_REPLAY_CAPTURE_FRAGMENT_CONFLICT');
+        await expect(db.query(call, params.map((value, index) => (
+            index === 6 ? `replay/v1/${captureId}/${'f'.repeat(64)}.enc` : value
+        )))).rejects.toThrow('ANALYSIS_V2_REPLAY_CAPTURE_INVALID');
     });
 });

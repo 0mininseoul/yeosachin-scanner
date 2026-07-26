@@ -29,8 +29,18 @@ describe('analysis V2 replay capture foundation migration', () => {
         expect(sql).toContain("analysis_request.status IN ('pending', 'processing')");
         expect(sql).toContain("analysis_request.selected_plan_id_snapshot = 'standard'");
         expect(sql).toContain("analysis_request.plan_access_mode_snapshot = 'production'");
+        expect(sql).toContain('p_expected_policy_hash TEXT');
+        expect(sql).toContain('ANALYSIS_V2_REPLAY_CAPTURE_POLICY_MISMATCH');
+        expect(sql).toContain('preflight.target_followers_count BETWEEN 0');
+        expect(sql).toContain('preflight.target_following_count BETWEEN 0');
+        expect(sql).toContain("p_object_key IS DISTINCT FROM ('replay/v1/' || p_capture_id::TEXT || '/' || p_opaque_locator_hash || '.enc')");
         expect(sql).toContain("v_existing.ciphertext_sha256 IS DISTINCT FROM p_ciphertext_sha256");
         expect(sql).toContain("replay/v1/");
+        expect(sql).toContain("(state <> 'capturing') OR (request_id IS NOT NULL AND bound_at IS NOT NULL");
+        expect(sql).toContain("(state <> 'sealed') OR (request_id IS NOT NULL AND bound_at IS NOT NULL");
+        expect(sql).toContain('actual_fragment_count <= expected_fragment_count');
+        expect(sql).toContain("cleanup_status = 'leased' AND cleanup_lease_token IS NOT NULL");
+        expect(sql).toContain("expires_at > created_at AND expires_at <= created_at + INTERVAL '24 hours'");
         expect(sql).not.toMatch(/\b(username|bio|prompt|raw_evidence)\b/i);
     });
 });

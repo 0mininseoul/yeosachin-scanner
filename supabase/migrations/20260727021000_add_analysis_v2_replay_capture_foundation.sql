@@ -30,8 +30,18 @@ CREATE TABLE public.analysis_v2_replay_capture_authorizations (
     bound_at TIMESTAMPTZ,
     sealed_at TIMESTAMPTZ,
     CHECK (arm_expires_at > armed_at AND arm_expires_at <= armed_at + INTERVAL '4 hours'),
-    CHECK (artifact_expires_at > armed_at AND artifact_expires_at <= armed_at + INTERVAL '24 hours'),
-    CHECK (request_id IS NULL OR bound_at IS NOT NULL)
+    CHECK (artifact_expires_at >= arm_expires_at AND artifact_expires_at <= armed_at + INTERVAL '24 hours'),
+    CHECK ((state <> 'armed') OR (request_id IS NULL AND bound_at IS NULL AND sealed_at IS NULL
+        AND manifest_hash IS NULL AND actual_fragment_count = 0 AND actual_ciphertext_byte_size = 0)),
+    CHECK ((state <> 'capturing') OR (request_id IS NOT NULL AND bound_at IS NOT NULL AND sealed_at IS NULL)),
+    CHECK ((state <> 'sealed') OR (request_id IS NOT NULL AND bound_at IS NOT NULL
+        AND sealed_at IS NOT NULL AND manifest_hash IS NOT NULL
+        AND actual_fragment_count = expected_fragment_count
+        AND actual_public_count IS NOT DISTINCT FROM expected_public_count
+        AND actual_private_count IS NOT DISTINCT FROM expected_private_count)),
+    CHECK (actual_public_count IS NULL OR expected_public_count IS NULL OR actual_public_count <= expected_public_count),
+    CHECK (actual_private_count IS NULL OR expected_private_count IS NULL OR actual_private_count <= expected_private_count),
+    CHECK (actual_fragment_count <= expected_fragment_count)
 );
 
 CREATE TABLE public.analysis_v2_replay_capture_fragments (
@@ -51,7 +61,12 @@ CREATE TABLE public.analysis_v2_replay_capture_fragments (
     cleanup_lease_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     PRIMARY KEY (capture_id, opaque_locator_hash, fragment_kind, stage, batch_ordinal, ordinal),
-    CHECK ((cleanup_lease_token IS NULL) = (cleanup_lease_expires_at IS NULL))
+    CHECK (expires_at > created_at AND expires_at <= created_at + INTERVAL '24 hours'),
+    CHECK (
+        (cleanup_status = 'leased' AND cleanup_lease_token IS NOT NULL
+            AND cleanup_lease_expires_at IS NOT NULL AND cleanup_lease_expires_at > created_at)
+        OR (cleanup_status <> 'leased' AND cleanup_lease_token IS NULL AND cleanup_lease_expires_at IS NULL)
+    )
 );
 
 CREATE TABLE public.analysis_v2_replay_capture_audit_events (
@@ -76,6 +91,7 @@ REVOKE ALL ON TABLE public.analysis_v2_replay_capture_audit_events FROM PUBLIC, 
 
 CREATE OR REPLACE FUNCTION public.arm_analysis_v2_replay_capture(
     p_preflight_id UUID,
+    p_expected_policy_hash TEXT,
     p_recipient_key_fingerprint TEXT,
     p_expected_public_count INTEGER,
     p_expected_private_count INTEGER,
@@ -95,7 +111,8 @@ DECLARE
     v_policy_hash TEXT;
     v_snapshot_hash TEXT;
 BEGIN
-    IF p_recipient_key_fingerprint !~ '^[a-f0-9]{64}$'
+    IF p_expected_policy_hash !~ '^[a-f0-9]{64}$'
+       OR p_recipient_key_fingerprint !~ '^[a-f0-9]{64}$'
        OR p_operator_fingerprint !~ '^[a-f0-9]{64}$'
        OR p_reason_code !~ '^[A-Z0-9_]{1,64}$'
        OR p_expected_public_count NOT BETWEEN 0 AND 256
@@ -113,6 +130,10 @@ BEGIN
       AND preflight.expires_at > v_now
       AND preflight.plan_cards_snapshot->'standard'->>'launchStatus' = 'production'
       AND preflight.plan_cards_snapshot->'standard'->>'selectionState' IN ('required', 'available_upgrade')
+      AND preflight.target_followers_count BETWEEN 0
+          AND (preflight.plan_cards_snapshot->'standard'->'relationshipCapacity'->>'followers')::INTEGER
+      AND preflight.target_following_count BETWEEN 0
+          AND (preflight.plan_cards_snapshot->'standard'->'relationshipCapacity'->>'following')::INTEGER
       AND (preflight.plan_cards_snapshot->'standard'->'relationshipCapacity'->>'followers')::INTEGER BETWEEN 1 AND 10000000
       AND (preflight.plan_cards_snapshot->'standard'->'relationshipCapacity'->>'following')::INTEGER BETWEEN 1 AND 10000000
       AND (preflight.plan_cards_snapshot->'standard'->>'detailedMutualLimit')::INTEGER BETWEEN 1 AND 100000
@@ -124,12 +145,15 @@ BEGIN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_REPLAY_CAPTURE_ALREADY_ARMED', ERRCODE = 'P0001';
     END IF;
     v_policy_hash := pg_catalog.encode(extensions.digest(v_preflight.policy_versions_snapshot::TEXT, 'sha256'), 'hex');
+    IF v_policy_hash IS DISTINCT FROM p_expected_policy_hash THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_REPLAY_CAPTURE_POLICY_MISMATCH', ERRCODE = 'P0001';
+    END IF;
     v_snapshot_hash := pg_catalog.encode(extensions.digest(pg_catalog.jsonb_build_object('policy', v_preflight.policy_versions_snapshot, 'planCards', v_preflight.plan_cards_snapshot)::TEXT, 'sha256'), 'hex');
     INSERT INTO public.analysis_v2_replay_capture_authorizations (
         preflight_id, recipient_key_fingerprint, expected_policy_hash, expected_snapshot_hash,
         arm_expires_at, artifact_expires_at, expected_public_count, expected_private_count, expected_fragment_count
     ) VALUES (
-        p_preflight_id, p_recipient_key_fingerprint, v_policy_hash, v_snapshot_hash,
+        p_preflight_id, p_recipient_key_fingerprint, p_expected_policy_hash, v_snapshot_hash,
         v_now + INTERVAL '4 hours', v_now + INTERVAL '24 hours',
         p_expected_public_count, p_expected_private_count, p_expected_fragment_count
     ) RETURNING capture_id INTO v_capture_id;
@@ -199,7 +223,7 @@ DECLARE
     v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
 BEGIN
     IF p_opaque_locator_hash !~ '^[a-f0-9]{64}$' OR p_ciphertext_sha256 !~ '^[a-f0-9]{64}$'
-       OR p_object_key !~ ('^replay/v1/' || p_capture_id::TEXT || '/[0-9a-f]{64}[.]enc$')
+       OR p_object_key IS DISTINCT FROM ('replay/v1/' || p_capture_id::TEXT || '/' || p_opaque_locator_hash || '.enc')
        OR p_fragment_kind NOT IN ('provider_payload', 'normalized_snapshot', 'execution_trace')
        OR p_stage NOT IN ('preflight', 'collection', 'scoring', 'finalization')
        OR p_batch_ordinal NOT BETWEEN 0 AND 127 OR p_ordinal NOT BETWEEN 0 AND 1023
@@ -243,9 +267,9 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.arm_analysis_v2_replay_capture(UUID, TEXT, INTEGER, INTEGER, INTEGER, TEXT, TEXT) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.arm_analysis_v2_replay_capture(UUID, TEXT, TEXT, INTEGER, INTEGER, INTEGER, TEXT, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.bind_analysis_v2_replay_capture(UUID, UUID, TEXT, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.register_analysis_v2_replay_capture_fragment(UUID, TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, TEXT, INTEGER, SMALLINT, TEXT, TEXT) FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.arm_analysis_v2_replay_capture(UUID, TEXT, INTEGER, INTEGER, INTEGER, TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.arm_analysis_v2_replay_capture(UUID, TEXT, TEXT, INTEGER, INTEGER, INTEGER, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.bind_analysis_v2_replay_capture(UUID, UUID, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.register_analysis_v2_replay_capture_fragment(UUID, TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, TEXT, INTEGER, SMALLINT, TEXT, TEXT) TO service_role;

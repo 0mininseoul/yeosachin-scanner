@@ -2,10 +2,8 @@ import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } fro
 import {
     constants,
     createCipheriv,
-    createDecipheriv,
     createHash,
     createPublicKey,
-    privateDecrypt,
     publicEncrypt,
     randomBytes,
 } from 'node:crypto';
@@ -35,6 +33,7 @@ export type ReplayCaptureConfig = {
     accessKeyId: string;
     secretAccessKey: string;
     recipientPublicKeyBase64: string;
+    recipientKeyFingerprint: string;
 };
 
 export type ReplayFragmentKind = 'provider_payload' | 'normalized_snapshot' | 'execution_trace';
@@ -85,7 +84,7 @@ function fail(code: ReplayCaptureError['code']): never {
     throw new ReplayCaptureError(code);
 }
 
-function validR2Config(input: Omit<ReplayCaptureConfig, 'enabled'>): Omit<ReplayCaptureConfig, 'enabled'> {
+function validR2Config(input: Omit<ReplayCaptureConfig, 'enabled' | 'recipientKeyFingerprint'>): Omit<ReplayCaptureConfig, 'enabled'> {
     let endpoint: URL;
     try { endpoint = new URL(input.endpoint); } catch { return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION'); }
     if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.port
@@ -95,14 +94,18 @@ function validR2Config(input: Omit<ReplayCaptureConfig, 'enabled'>): Omit<Replay
         || input.secretAccessKey.length < 8 || input.secretAccessKey.length > 512) {
         return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     }
+    let recipientKeyFingerprint: string;
     try {
         const pem = Buffer.from(input.recipientPublicKeyBase64, 'base64').toString('utf8');
         const key = createPublicKey(pem);
         if (key.asymmetricKeyType !== 'rsa' || (key.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) {
             return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
         }
+        recipientKeyFingerprint = createHash('sha256')
+            .update(key.export({ type: 'spki', format: 'der' }))
+            .digest('hex');
     } catch { return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION'); }
-    return { ...input, endpoint: endpoint.origin };
+    return { ...input, endpoint: endpoint.origin, recipientKeyFingerprint };
 }
 
 /** Disabled unless the literal string `true` is supplied; disabled config has no required fields. */
@@ -113,9 +116,11 @@ export function loadReplayCaptureConfig(env: Readonly<Record<string, string | un
     const accessKeyId = env.ANALYSIS_V2_REPLAY_CAPTURE_R2_ACCESS_KEY_ID?.trim();
     const secretAccessKey = env.ANALYSIS_V2_REPLAY_CAPTURE_R2_SECRET_ACCESS_KEY?.trim();
     const recipientPublicKeyBase64 = env.ANALYSIS_V2_REPLAY_CAPTURE_RECIPIENT_PUBLIC_KEY_B64?.trim();
+    const resultImageBucket = env.ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET?.trim();
     if (!endpoint || !bucket || !accessKeyId || !secretAccessKey || !recipientPublicKeyBase64) {
         return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     }
+    if (resultImageBucket && resultImageBucket === bucket) return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     return { enabled: true, ...validR2Config({ endpoint, bucket, accessKeyId, secretAccessKey, recipientPublicKeyBase64 }) };
 }
 
@@ -141,7 +146,7 @@ export function encryptReplayCaptureFragment(input: ReplayFragmentInput): Encryp
     validateInput(input);
     let publicKey;
     try { publicKey = createPublicKey(Buffer.from(input.recipientPublicKeyBase64, 'base64').toString('utf8')); } catch { return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION'); }
-    if (publicKey.asymmetricKeyType !== 'rsa') fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
+    if (publicKey.asymmetricKeyType !== 'rsa' || (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     const key = randomBytes(32);
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', key, iv);
@@ -162,20 +167,6 @@ export function encryptReplayCaptureFragment(input: ReplayFragmentInput): Encryp
         recipientKeyFingerprint: createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex'),
         envelopeVersion: 1,
     };
-}
-
-/** Test-only private-key decryptor; production code never accepts recipient private keys. */
-export function decryptReplayCaptureEnvelopeForTest(fragment: EncryptedReplayFragment, privateKey: string, input: ReplayFragmentInput): Buffer {
-    validateInput(input);
-    try {
-        const envelope = JSON.parse(fragment.ciphertext.toString('utf8')) as Envelope;
-        if (envelope.v !== 1) return fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
-        const key = privateDecrypt({ key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(envelope.ek, 'base64'));
-        const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.iv, 'base64'));
-        decipher.setAAD(aad(input));
-        decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
-        return Buffer.concat([decipher.update(Buffer.from(envelope.ct, 'base64')), decipher.final()]);
-    } catch { return fail('REPLAY_CAPTURE_INTEGRITY_FAILURE'); }
 }
 
 function createR2Transport(config: ReplayCaptureConfig, client: CommandClient = new S3Client({ endpoint: config.endpoint, region: 'auto', credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey } })): ReplayCaptureTransport {
@@ -200,9 +191,31 @@ function createR2Transport(config: ReplayCaptureConfig, client: CommandClient = 
 }
 function validateExactKey(key: string): void { if (!OBJECT_KEY.test(key)) fail('REPLAY_CAPTURE_INVALID_FRAGMENT'); }
 
+function assertFragmentIntegrity(fragment: EncryptedReplayFragment, recipientKeyFingerprint: string): void {
+    validateExactKey(fragment.objectKey);
+    if (!Buffer.isBuffer(fragment.ciphertext)
+        || fragment.ciphertext.length < 1
+        || fragment.ciphertext.length > MAX_FRAGMENT_BYTES + 2048
+        || fragment.ciphertextByteSize !== fragment.ciphertext.length
+        || !SHA256.test(fragment.ciphertextSha256)
+        || !SHA256.test(fragment.recipientKeyFingerprint)
+        || fragment.recipientKeyFingerprint !== recipientKeyFingerprint
+        || createHash('sha256').update(fragment.ciphertext).digest('hex') !== fragment.ciphertextSha256) {
+        fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
+    }
+}
+
 export function createReplayCaptureStore(env: Readonly<Record<string, string | undefined>> = process.env, dependencies: Dependencies = {}) {
     const config = loadReplayCaptureConfig(env);
     if (!config.enabled) return { enabled: false as const, put: async () => undefined, get: async () => undefined, delete: async () => undefined };
     const transport = dependencies.createTransport?.(config) ?? createR2Transport(config, dependencies.client);
-    return { enabled: true as const, put: (fragment: EncryptedReplayFragment) => transport.put({ key: fragment.objectKey, bytes: fragment.ciphertext, sha256: fragment.ciphertextSha256 }), get: transport.get, delete: transport.delete };
+    return {
+        enabled: true as const,
+        put: async (fragment: EncryptedReplayFragment) => {
+            assertFragmentIntegrity(fragment, config.recipientKeyFingerprint);
+            await transport.put({ key: fragment.objectKey, bytes: fragment.ciphertext, sha256: fragment.ciphertextSha256 });
+        },
+        get: transport.get,
+        delete: transport.delete,
+    };
 }
