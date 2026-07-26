@@ -1,14 +1,18 @@
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
     constants,
     createCipheriv,
     createHash,
+    createHmac,
     createPublicKey,
     publicEncrypt,
     randomBytes,
+    timingSafeEqual,
 } from 'node:crypto';
 
-const MAX_FRAGMENT_BYTES = 8 * 1024 * 1024;
+const MAX_OBJECT_BYTES = 8 * 1024 * 1024;
+// Leaves deterministic room for base64 expansion, the wrapped AES key, and public metadata.
+const MAX_PLAINTEXT_BYTES = (6 * 1024 * 1024) - 4096;
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const MAX_FRAGMENT_COUNT = 128;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
@@ -20,7 +24,8 @@ const OBJECT_KEY = /^replay\/v1\/[0-9a-f-]{36}\/[0-9a-f]{64}\.enc$/;
 const SAFE_PART = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export const REPLAY_CAPTURE_LIMITS = {
-    maxFragmentBytes: MAX_FRAGMENT_BYTES,
+    maxPlaintextBytes: MAX_PLAINTEXT_BYTES,
+    maxObjectBytes: MAX_OBJECT_BYTES,
     maxCaptureBytes: MAX_CAPTURE_BYTES,
     maxFragmentCount: MAX_FRAGMENT_COUNT,
     maxTtlSeconds: MAX_TTL_SECONDS,
@@ -34,6 +39,7 @@ export type ReplayCaptureConfig = {
     secretAccessKey: string;
     recipientPublicKeyBase64: string;
     recipientKeyFingerprint: string;
+    contentCommitmentSecret: string;
 };
 
 export type ReplayFragmentKind = 'provider_payload' | 'normalized_snapshot' | 'execution_trace';
@@ -43,29 +49,49 @@ export type ReplayFragmentInput = {
     opaqueLocator: string;
     kind: ReplayFragmentKind;
     stage: ReplayFragmentStage;
+    batchOrdinal: number;
+    ordinal: number;
     plaintext: Buffer;
     recipientPublicKeyBase64: string;
+    contentCommitmentSecret: string;
+};
+export type ReplayFragmentIdentity = {
+    captureId: string;
+    opaqueLocatorHash: string;
+    kind: ReplayFragmentKind;
+    stage: ReplayFragmentStage;
+    batchOrdinal: number;
+    ordinal: number;
 };
 export type EncryptedReplayFragment = {
+    identity: ReplayFragmentIdentity;
     objectKey: string;
     ciphertext: Buffer;
     ciphertextSha256: string;
     ciphertextByteSize: number;
     recipientKeyFingerprint: string;
+    contentCommitment: string;
+    storeAuthenticator: string;
     envelopeVersion: 1;
 };
 
 type Envelope = {
     v: 1;
+    identity: ReplayFragmentIdentity;
+    recipientKeyFingerprint: string;
+    contentCommitment: string;
     ek: string;
     iv: string;
     tag: string;
     ct: string;
 };
 export type ReplayCaptureTransport = {
-    put(input: { key: string; bytes: Buffer; sha256: string }): Promise<void>;
-    get(input: { key: string; sha256: string; byteSize: number }): Promise<Buffer>;
-    delete(key: string): Promise<void>;
+    putCreateOnly(input: {
+        key: string;
+        bytes: Buffer;
+        sha256: string;
+    }): Promise<'created' | 'exists'>;
+    get(key: string): Promise<Buffer>;
 };
 type CommandClient = { send(command: object): Promise<unknown> };
 type Dependencies = {
@@ -74,7 +100,7 @@ type Dependencies = {
 };
 
 export class ReplayCaptureError extends Error {
-    constructor(readonly code: 'REPLAY_CAPTURE_INVALID_CONFIGURATION' | 'REPLAY_CAPTURE_INVALID_FRAGMENT' | 'REPLAY_CAPTURE_INTEGRITY_FAILURE' | 'REPLAY_CAPTURE_TRANSPORT_FAILURE') {
+    constructor(readonly code: 'REPLAY_CAPTURE_INVALID_CONFIGURATION' | 'REPLAY_CAPTURE_INVALID_FRAGMENT' | 'REPLAY_CAPTURE_INTEGRITY_FAILURE' | 'REPLAY_CAPTURE_CONFLICT' | 'REPLAY_CAPTURE_TRANSPORT_FAILURE') {
         super(code);
         this.name = 'ReplayCaptureError';
     }
@@ -91,7 +117,10 @@ function validR2Config(input: Omit<ReplayCaptureConfig, 'enabled' | 'recipientKe
         || endpoint.pathname !== '/' || endpoint.search || endpoint.hash
         || !R2_HOST.test(endpoint.hostname.toLowerCase()) || !BUCKET.test(input.bucket)
         || input.accessKeyId.length < 8 || input.accessKeyId.length > 256
-        || input.secretAccessKey.length < 8 || input.secretAccessKey.length > 512) {
+        || input.secretAccessKey.length < 8 || input.secretAccessKey.length > 512
+        || typeof input.contentCommitmentSecret !== 'string'
+        || input.contentCommitmentSecret.length < 32
+        || input.contentCommitmentSecret.length > 512) {
         return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     }
     let recipientKeyFingerprint: string;
@@ -116,28 +145,110 @@ export function loadReplayCaptureConfig(env: Readonly<Record<string, string | un
     const accessKeyId = env.ANALYSIS_V2_REPLAY_CAPTURE_R2_ACCESS_KEY_ID?.trim();
     const secretAccessKey = env.ANALYSIS_V2_REPLAY_CAPTURE_R2_SECRET_ACCESS_KEY?.trim();
     const recipientPublicKeyBase64 = env.ANALYSIS_V2_REPLAY_CAPTURE_RECIPIENT_PUBLIC_KEY_B64?.trim();
+    const contentCommitmentSecret =
+        env.ANALYSIS_V2_REPLAY_CAPTURE_CONTENT_COMMITMENT_SECRET?.trim();
     const resultImageBucket = env.ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET?.trim();
-    if (!endpoint || !bucket || !accessKeyId || !secretAccessKey || !recipientPublicKeyBase64) {
+    if (!endpoint || !bucket || !accessKeyId || !secretAccessKey
+        || !recipientPublicKeyBase64 || !contentCommitmentSecret) {
         return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
     }
     if (resultImageBucket && resultImageBucket === bucket) return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
-    return { enabled: true, ...validR2Config({ endpoint, bucket, accessKeyId, secretAccessKey, recipientPublicKeyBase64 }) };
+    return {
+        enabled: true,
+        ...validR2Config({
+            endpoint,
+            bucket,
+            accessKeyId,
+            secretAccessKey,
+            recipientPublicKeyBase64,
+            contentCommitmentSecret,
+        }),
+    };
 }
 
-function aad(input: Pick<ReplayFragmentInput, 'captureId' | 'opaqueLocator' | 'kind' | 'stage'>): Buffer {
-    return Buffer.from(JSON.stringify({ v: 1, captureId: input.captureId, opaqueLocator: input.opaqueLocator, kind: input.kind, stage: input.stage }), 'utf8');
+function canonicalIdentity(identity: ReplayFragmentIdentity): string {
+    return [
+        'replay/v1',
+        identity.captureId,
+        identity.opaqueLocatorHash,
+        identity.kind,
+        identity.stage,
+        String(identity.batchOrdinal),
+        String(identity.ordinal),
+    ].join('\n');
 }
 
-export function replayCaptureObjectKey(captureId: string, opaqueLocator: string): string {
-    if (!UUID.test(captureId) || !SAFE_PART.test(opaqueLocator)) fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
-    return `replay/v1/${captureId}/${createHash('sha256').update(opaqueLocator).digest('hex')}.enc`;
+function aad(identity: ReplayFragmentIdentity, contentCommitment: string): Buffer {
+    return Buffer.from(
+        `${canonicalIdentity(identity)}\n${contentCommitment}`,
+        'utf8',
+    );
+}
+
+function authenticateFragmentForStore(
+    secret: string,
+    fragment: Pick<
+        EncryptedReplayFragment,
+        'identity' | 'contentCommitment' | 'ciphertextSha256'
+        | 'ciphertextByteSize' | 'recipientKeyFingerprint' | 'envelopeVersion'
+    >,
+): string {
+    return createHmac('sha256', secret)
+        .update([
+            'replay-store-auth-v1',
+            canonicalIdentity(fragment.identity),
+            fragment.contentCommitment,
+            fragment.ciphertextSha256,
+            String(fragment.ciphertextByteSize),
+            fragment.recipientKeyFingerprint,
+            String(fragment.envelopeVersion),
+        ].join('\n'))
+        .digest('hex');
+}
+
+function authenticatedHexEquals(actual: string, expected: string): boolean {
+    if (!SHA256.test(actual) || !SHA256.test(expected)) return false;
+    return timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'));
+}
+
+function validateIdentity(identity: ReplayFragmentIdentity): void {
+    if (!UUID.test(identity.captureId)
+        || !SHA256.test(identity.opaqueLocatorHash)
+        || !['provider_payload', 'normalized_snapshot', 'execution_trace'].includes(identity.kind)
+        || !['preflight', 'collection', 'scoring', 'finalization'].includes(identity.stage)
+        || !Number.isSafeInteger(identity.batchOrdinal)
+        || identity.batchOrdinal < 0
+        || identity.batchOrdinal > 127
+        || !Number.isSafeInteger(identity.ordinal)
+        || identity.ordinal < 0
+        || identity.ordinal > 1023) {
+        fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
+    }
+}
+
+export function replayCaptureObjectKey(identity: ReplayFragmentIdentity): string {
+    validateIdentity(identity);
+    const identityHash = createHash('sha256')
+        .update(canonicalIdentity(identity))
+        .digest('hex');
+    return `replay/v1/${identity.captureId}/${identityHash}.enc`;
 }
 
 function validateInput(input: ReplayFragmentInput): void {
     if (!UUID.test(input.captureId) || !SAFE_PART.test(input.opaqueLocator)
         || !['provider_payload', 'normalized_snapshot', 'execution_trace'].includes(input.kind)
         || !['preflight', 'collection', 'scoring', 'finalization'].includes(input.stage)
-        || !Buffer.isBuffer(input.plaintext) || input.plaintext.length < 1 || input.plaintext.length > MAX_FRAGMENT_BYTES) {
+        || !Number.isSafeInteger(input.batchOrdinal)
+        || input.batchOrdinal < 0
+        || input.batchOrdinal > 127
+        || !Number.isSafeInteger(input.ordinal)
+        || input.ordinal < 0
+        || input.ordinal > 1023
+        || !Buffer.isBuffer(input.plaintext)
+        || input.plaintext.length < 1
+        || input.plaintext.length > MAX_PLAINTEXT_BYTES
+        || input.contentCommitmentSecret.length < 32
+        || input.contentCommitmentSecret.length > 512) {
         fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
     }
 }
@@ -147,25 +258,59 @@ export function encryptReplayCaptureFragment(input: ReplayFragmentInput): Encryp
     let publicKey;
     try { publicKey = createPublicKey(Buffer.from(input.recipientPublicKeyBase64, 'base64').toString('utf8')); } catch { return fail('REPLAY_CAPTURE_INVALID_CONFIGURATION'); }
     if (publicKey.asymmetricKeyType !== 'rsa' || (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) fail('REPLAY_CAPTURE_INVALID_CONFIGURATION');
+    const recipientKeyFingerprint = createHash('sha256')
+        .update(publicKey.export({ type: 'spki', format: 'der' }))
+        .digest('hex');
+    const identity: ReplayFragmentIdentity = {
+        captureId: input.captureId,
+        opaqueLocatorHash: createHash('sha256')
+            .update(input.opaqueLocator)
+            .digest('hex'),
+        kind: input.kind,
+        stage: input.stage,
+        batchOrdinal: input.batchOrdinal,
+        ordinal: input.ordinal,
+    };
+    validateIdentity(identity);
+    const contentCommitment = createHmac(
+        'sha256',
+        input.contentCommitmentSecret,
+    )
+        .update('replay-content-v1')
+        .update('\n')
+        .update(input.plaintext)
+        .digest('hex');
     const key = randomBytes(32);
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', key, iv);
-    cipher.setAAD(aad(input));
+    cipher.setAAD(aad(identity, contentCommitment));
     const ciphertext = Buffer.concat([cipher.update(input.plaintext), cipher.final()]);
     const envelope: Envelope = {
         v: 1,
+        identity,
+        recipientKeyFingerprint,
+        contentCommitment,
         ek: publicEncrypt({ key: publicKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, key).toString('base64'),
         iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ct: ciphertext.toString('base64'),
     };
     const bytes = Buffer.from(JSON.stringify(envelope), 'utf8');
-    if (bytes.length > MAX_FRAGMENT_BYTES + 2048) fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
-    return {
-        objectKey: replayCaptureObjectKey(input.captureId, input.opaqueLocator),
+    if (bytes.length > MAX_OBJECT_BYTES) fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
+    const encrypted = {
+        identity,
+        objectKey: replayCaptureObjectKey(identity),
         ciphertext: bytes,
         ciphertextSha256: createHash('sha256').update(bytes).digest('hex'),
         ciphertextByteSize: bytes.length,
-        recipientKeyFingerprint: createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex'),
+        recipientKeyFingerprint,
+        contentCommitment,
         envelopeVersion: 1,
+    } satisfies Omit<EncryptedReplayFragment, 'storeAuthenticator'>;
+    return {
+        ...encrypted,
+        storeAuthenticator: authenticateFragmentForStore(
+            input.contentCommitmentSecret,
+            encrypted,
+        ),
     };
 }
 
@@ -174,32 +319,150 @@ function createR2Transport(config: ReplayCaptureConfig, client: CommandClient = 
         try { return await operation(); } catch (error) { if (error instanceof ReplayCaptureError) throw error; return fail('REPLAY_CAPTURE_TRANSPORT_FAILURE'); }
     };
     return {
-        put: async ({ key, bytes, sha256 }) => safe(async () => {
-            validateExactKey(key); if (!SHA256.test(sha256) || bytes.length < 1 || bytes.length > MAX_FRAGMENT_BYTES + 2048) fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
-            await client.send(new PutObjectCommand({ Bucket: config.bucket, Key: key, Body: bytes, ContentLength: bytes.length, ContentType: 'application/octet-stream', CacheControl: `private, max-age=${MAX_TTL_SECONDS}`, Metadata: { sha256 } }));
-        }),
-        get: async ({ key, sha256, byteSize }) => safe(async () => {
-            validateExactKey(key); if (!SHA256.test(sha256) || byteSize < 1 || byteSize > MAX_FRAGMENT_BYTES + 2048) fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
-            const response = await client.send(new GetObjectCommand({ Bucket: config.bucket, Key: key })) as { Body?: { transformToByteArray(): Promise<Uint8Array> }; ContentLength?: number; Metadata?: Record<string, string> };
-            if (!response.Body || response.ContentLength !== byteSize || response.Metadata?.sha256 !== sha256) fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
+        putCreateOnly: async ({ key, bytes, sha256 }) => {
+            validateExactKey(key);
+            if (!SHA256.test(sha256) || bytes.length < 1 || bytes.length > MAX_OBJECT_BYTES) {
+                fail('REPLAY_CAPTURE_INVALID_FRAGMENT');
+            }
+            try {
+                await client.send(new PutObjectCommand({
+                    Bucket: config.bucket,
+                    Key: key,
+                    Body: bytes,
+                    ContentLength: bytes.length,
+                    ContentType: 'application/octet-stream',
+                    CacheControl: `private, max-age=${MAX_TTL_SECONDS}`,
+                    Metadata: { sha256 },
+                    IfNoneMatch: '*',
+                }));
+                return 'created' as const;
+            } catch (error) {
+                const providerError = error as {
+                    name?: string;
+                    $metadata?: { httpStatusCode?: number };
+                };
+                if (providerError.name === 'PreconditionFailed'
+                    || providerError.$metadata?.httpStatusCode === 412) {
+                    return 'exists' as const;
+                }
+                return fail('REPLAY_CAPTURE_TRANSPORT_FAILURE');
+            }
+        },
+        get: async (key) => safe(async () => {
+            validateExactKey(key);
+            const response = await client.send(new GetObjectCommand({
+                Bucket: config.bucket,
+                Key: key,
+                Range: `bytes=0-${MAX_OBJECT_BYTES}`,
+            })) as {
+                Body?: { transformToByteArray(): Promise<Uint8Array> };
+                ContentLength?: number;
+            };
+            if (!response.Body || !Number.isSafeInteger(response.ContentLength)
+                || response.ContentLength! < 1 || response.ContentLength! > MAX_OBJECT_BYTES) {
+                fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
+            }
             const bytes = Buffer.from(await response.Body.transformToByteArray());
-            if (bytes.length !== byteSize || createHash('sha256').update(bytes).digest('hex') !== sha256) fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
+            if (bytes.length !== response.ContentLength || bytes.length > MAX_OBJECT_BYTES) {
+                fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
+            }
             return bytes;
         }),
-        delete: async (key) => safe(async () => { validateExactKey(key); await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key })); }),
     };
 }
 function validateExactKey(key: string): void { if (!OBJECT_KEY.test(key)) fail('REPLAY_CAPTURE_INVALID_FRAGMENT'); }
 
-function assertFragmentIntegrity(fragment: EncryptedReplayFragment, recipientKeyFingerprint: string): void {
+function parseAndValidateEnvelope(
+    bytes: Buffer,
+    expectedIdentity: ReplayFragmentIdentity,
+    recipientKeyFingerprint: string,
+    expectedContentCommitment: string,
+    contentCommitmentSecret: string,
+    errorCode: 'REPLAY_CAPTURE_INTEGRITY_FAILURE' | 'REPLAY_CAPTURE_CONFLICT',
+): EncryptedReplayFragment {
+    const reject = (): never => fail(errorCode);
+    if (bytes.length < 1 || bytes.length > MAX_OBJECT_BYTES) reject();
+    let envelope: Envelope;
+    try {
+        envelope = JSON.parse(bytes.toString('utf8')) as Envelope;
+    } catch {
+        return reject();
+    }
+    try {
+        validateIdentity(envelope.identity);
+    } catch {
+        return reject();
+    }
+    if (envelope.v !== 1
+        || canonicalIdentity(envelope.identity) !== canonicalIdentity(expectedIdentity)
+        || envelope.recipientKeyFingerprint !== recipientKeyFingerprint
+        || !SHA256.test(envelope.recipientKeyFingerprint)
+        || envelope.contentCommitment !== expectedContentCommitment
+        || !SHA256.test(envelope.contentCommitment)
+        || typeof envelope.ek !== 'string'
+        || typeof envelope.iv !== 'string'
+        || typeof envelope.tag !== 'string'
+        || typeof envelope.ct !== 'string'
+        || Buffer.from(envelope.iv, 'base64').length !== 12
+        || Buffer.from(envelope.tag, 'base64').length !== 16
+        || Buffer.from(envelope.ek, 'base64').length < 256
+        || Buffer.from(envelope.ek, 'base64').length > 1024
+        || Buffer.from(envelope.ct, 'base64').length < 1
+        || Buffer.from(envelope.ct, 'base64').length > MAX_PLAINTEXT_BYTES) {
+        reject();
+    }
+    const objectKey = replayCaptureObjectKey(expectedIdentity);
+    const encrypted = {
+        identity: expectedIdentity,
+        objectKey,
+        ciphertext: bytes,
+        ciphertextSha256: createHash('sha256').update(bytes).digest('hex'),
+        ciphertextByteSize: bytes.length,
+        recipientKeyFingerprint,
+        contentCommitment: envelope.contentCommitment,
+        envelopeVersion: 1,
+    } satisfies Omit<EncryptedReplayFragment, 'storeAuthenticator'>;
+    return {
+        ...encrypted,
+        storeAuthenticator: authenticateFragmentForStore(
+            contentCommitmentSecret,
+            encrypted,
+        ),
+    };
+}
+
+function assertFragmentIntegrity(
+    fragment: EncryptedReplayFragment,
+    recipientKeyFingerprint: string,
+    contentCommitmentSecret: string,
+): void {
     validateExactKey(fragment.objectKey);
+    let parsed: EncryptedReplayFragment;
+    try {
+        parsed = parseAndValidateEnvelope(
+            fragment.ciphertext,
+            fragment.identity,
+            recipientKeyFingerprint,
+            fragment.contentCommitment,
+            contentCommitmentSecret,
+            'REPLAY_CAPTURE_INTEGRITY_FAILURE',
+        );
+    } catch {
+        return fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
+    }
     if (!Buffer.isBuffer(fragment.ciphertext)
         || fragment.ciphertext.length < 1
-        || fragment.ciphertext.length > MAX_FRAGMENT_BYTES + 2048
+        || fragment.ciphertext.length > MAX_OBJECT_BYTES
         || fragment.ciphertextByteSize !== fragment.ciphertext.length
         || !SHA256.test(fragment.ciphertextSha256)
         || !SHA256.test(fragment.recipientKeyFingerprint)
+        || !SHA256.test(fragment.contentCommitment)
+        || !authenticatedHexEquals(
+            fragment.storeAuthenticator,
+            authenticateFragmentForStore(contentCommitmentSecret, fragment),
+        )
         || fragment.recipientKeyFingerprint !== recipientKeyFingerprint
+        || fragment.objectKey !== parsed.objectKey
         || createHash('sha256').update(fragment.ciphertext).digest('hex') !== fragment.ciphertextSha256) {
         fail('REPLAY_CAPTURE_INTEGRITY_FAILURE');
     }
@@ -207,15 +470,38 @@ function assertFragmentIntegrity(fragment: EncryptedReplayFragment, recipientKey
 
 export function createReplayCaptureStore(env: Readonly<Record<string, string | undefined>> = process.env, dependencies: Dependencies = {}) {
     const config = loadReplayCaptureConfig(env);
-    if (!config.enabled) return { enabled: false as const, put: async () => undefined, get: async () => undefined, delete: async () => undefined };
+    if (!config.enabled) {
+        return {
+            enabled: false as const,
+            put: async () => undefined,
+            get: async () => undefined,
+        };
+    }
     const transport = dependencies.createTransport?.(config) ?? createR2Transport(config, dependencies.client);
     return {
         enabled: true as const,
         put: async (fragment: EncryptedReplayFragment) => {
-            assertFragmentIntegrity(fragment, config.recipientKeyFingerprint);
-            await transport.put({ key: fragment.objectKey, bytes: fragment.ciphertext, sha256: fragment.ciphertextSha256 });
+            assertFragmentIntegrity(
+                fragment,
+                config.recipientKeyFingerprint,
+                config.contentCommitmentSecret,
+            );
+            const outcome = await transport.putCreateOnly({
+                key: fragment.objectKey,
+                bytes: fragment.ciphertext,
+                sha256: fragment.ciphertextSha256,
+            });
+            if (outcome === 'created') return fragment;
+            const existing = await transport.get(fragment.objectKey);
+            return parseAndValidateEnvelope(
+                existing,
+                fragment.identity,
+                config.recipientKeyFingerprint,
+                fragment.contentCommitment,
+                config.contentCommitmentSecret,
+                'REPLAY_CAPTURE_CONFLICT',
+            );
         },
         get: transport.get,
-        delete: transport.delete,
     };
 }
