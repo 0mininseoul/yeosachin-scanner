@@ -1,11 +1,12 @@
 import { z } from 'zod';
 import {
-    AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
 
 const pipeline = z.literal('v2');
+/** Immutable historical replay lineage; never alias this to the moving latest policy. */
+export const AI_STAGE_POLICY_V27_VERSION = 'ai-stage-policy-v2.7' as const;
 
 /**
  * Historical source lineage accepted for capture. This is intentionally separate
@@ -13,7 +14,7 @@ const pipeline = z.literal('v2');
  */
 const standardV27PolicySchema = z.object({
     pipeline,
-    aiStage: z.literal(AI_STAGE_POLICY_LATEST_VERSION),
+    aiStage: z.literal(AI_STAGE_POLICY_V27_VERSION),
     risk: z.enum(['risk-policy-v2.3', 'risk-policy-v2.4']),
     scheduler: z.literal('ai-scheduler-v1').optional(),
 }).strict();
@@ -53,7 +54,7 @@ export type ReplaySourceLineage = z.infer<typeof replaySourceLineageSchema>;
 
 export type ReplaySupportedAiStagePolicyVersion = Extract<
     AiStagePolicyVersion,
-    typeof AI_STAGE_POLICY_LATEST_VERSION | typeof AI_STAGE_POLICY_V28_VERSION
+    typeof AI_STAGE_POLICY_V27_VERSION | typeof AI_STAGE_POLICY_V28_VERSION
 >;
 
 /**
@@ -66,7 +67,7 @@ export function replayAiStagePolicyVersion(
 ): ReplaySupportedAiStagePolicyVersion {
     const version = lineage.policyVersions.aiStage;
     if (
-        version === AI_STAGE_POLICY_LATEST_VERSION
+        version === AI_STAGE_POLICY_V27_VERSION
         || version === AI_STAGE_POLICY_V28_VERSION
     ) {
         return version;

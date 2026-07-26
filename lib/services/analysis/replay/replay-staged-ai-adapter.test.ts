@@ -108,4 +108,27 @@ describe('replay staged AI adapter telemetry', () => {
             );
         },
     );
+
+    it.each(['ai-stage-policy-v2.7', 'ai-stage-policy-v2.8'] as const)(
+        'pins %s into resolver identity and execution options',
+        async aiStagePolicyVersion => {
+            const identity = { operationKey: 'resolver:identity' };
+            mocks.createGenderResolutionResultIdentity.mockReturnValue(identity);
+            mocks.genderResolution.mockResolvedValue({ assessment: {} });
+
+            await createReplayStagedAiAdapter(aiStagePolicyVersion).resolveGender?.({
+                ordinal: 1,
+                media: [],
+                signal: new AbortController().signal,
+            });
+
+            expect(mocks.createGenderResolutionResultIdentity)
+                .toHaveBeenCalledWith({ media: [] }, aiStagePolicyVersion);
+            expect(mocks.genderResolution).toHaveBeenCalledWith(
+                { media: [] },
+                expect.any(Object),
+                expect.objectContaining({ aiStagePolicyVersion }),
+            );
+        },
+    );
 });

@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
-import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
+import {
+    bindReplayAiRunnerPolicy,
+    runAnalysisV2AiReplay,
+    type ReplayAiRunner,
+} from './replay-runner';
+
+function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    return bindReplayAiRunnerPolicy('ai-stage-policy-v2.7', operations);
+}
 
 const bundle = {
     schemaVersion: 1 as const,
@@ -108,8 +116,43 @@ describe('AI-only replay runner', () => {
         });
     });
 
+    it('rejects a v2.7 runner for a v2.8 bundle before any paid AI call', async () => {
+        const triage = vi.fn();
+        const privateNames = vi.fn();
+        const v28Bundle = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        risk: 'risk-policy-v2.4' as const,
+                        aiStage: 'ai-stage-policy-v2.8' as const,
+                        scheduler: 'ai-scheduler-v1' as const,
+                    },
+                },
+            },
+        };
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v28Bundle,
+            runner: v27Runner({ triage, privateNames }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+        expect(triage).not.toHaveBeenCalled();
+        expect(privateNames).not.toHaveBeenCalled();
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v28Bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+    });
+
     it('requires explicit paid-ai mode, summarizes retry/rate-limit/outcome metrics, and has no persistence dependency', async () => {
-        const runner: ReplayAiRunner = {
+        const runner = v27Runner({
             triage: vi.fn(async () => ({ outcome: 'ok' as const, value: { assessment: { inferredGender: 'female' as const, confidence: 'medium' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1'] }, routingDecision: 'route_to_feature_analysis' as const, routingReason: 'conserve_female_recall' as const, analyzedSelectionIds: ['m1'] }, attempts: 2, retries: 1, elapsedMs: 20 })),
             feature: vi.fn(async () => ({ outcome: 'rate_limited' as const, attempts: 1, retries: 0, elapsedMs: 30 })),
             privateNames: vi.fn(async () => ({
@@ -121,7 +164,7 @@ describe('AI-only replay runner', () => {
                 attemptLatenciesMs: [4],
                 failureDisposition: { response_rejected: 1 },
             })),
-        };
+        });
         await expect(runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai' })).rejects.toThrow('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
         const report = await runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai', paidAiOptIn: true });
         expect(report.stages.genderTriage).toMatchObject({ calls: 1, retries: 1, meanLatencyMs: 20 });
@@ -143,7 +186,7 @@ describe('AI-only replay runner', () => {
             bundle,
             mode: 'paid-ai',
             paidAiOptIn: true,
-            runner: {
+            runner: v27Runner({
                 triage: async () => ({
                     outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
                     value: {
@@ -154,7 +197,7 @@ describe('AI-only replay runner', () => {
                     },
                 }),
                 feature,
-            },
+            }),
         });
         expect(feature).not.toHaveBeenCalled();
         expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
@@ -178,7 +221,7 @@ describe('AI-only replay runner', () => {
             bundle,
             mode: 'paid-ai',
             paidAiOptIn: true,
-            runner: {
+            runner: v27Runner({
                 triage: async () => ({
                     outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
                     value: {
@@ -203,7 +246,7 @@ describe('AI-only replay runner', () => {
                         },
                     };
                 },
-            },
+            }),
         });
         expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
         expect(report.resolver).toMatchObject({ ready: 1, applied: 1, inconclusive: 0, cutoff: 0 });
@@ -222,7 +265,7 @@ describe('AI-only replay runner', () => {
             bundle: { ...bundle, profiles: publicProfiles },
             mode: 'paid-ai',
             paidAiOptIn: true,
-            runner: {
+            runner: v27Runner({
                 triage: async () => {
                     active++;
                     maximum = Math.max(maximum, active);
@@ -246,7 +289,7 @@ describe('AI-only replay runner', () => {
                         },
                     };
                 },
-            },
+            }),
         });
 
         await vi.waitFor(() => expect(releases).toHaveLength(4));
@@ -296,7 +339,7 @@ describe('AI-only replay runner', () => {
             bundle,
             mode: 'paid-ai',
             paidAiOptIn: true,
-            runner: { privateNames, triage },
+            runner: v27Runner({ privateNames, triage }),
         });
         expect(privateNames).toHaveBeenCalledOnce();
         expect(triage).toHaveBeenCalledOnce();
@@ -309,7 +352,7 @@ describe('AI-only replay runner', () => {
             mode: 'paid-ai',
             paidAiOptIn: true,
             resolverCutoffMs: 1,
-            runner: {
+            runner: v27Runner({
                 triage: async () => ({
                     outcome: 'ok',
                     attempts: 1,
@@ -353,7 +396,7 @@ describe('AI-only replay runner', () => {
                         }), 20);
                     }, { once: true });
                 }),
-            },
+            }),
         });
 
         expect(aborted).toBe(true);
@@ -374,7 +417,7 @@ describe('AI-only replay runner', () => {
             mode: 'paid-ai',
             paidAiOptIn: true,
             resolverCutoffMs: 1,
-            runner: {
+            runner: v27Runner({
                 triage: async () => ({
                     outcome: 'ok',
                     attempts: 1,
@@ -419,7 +462,7 @@ describe('AI-only replay runner', () => {
                         });
                     }, { once: true });
                 }),
-            },
+            }),
         });
 
         expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
@@ -449,7 +492,7 @@ describe('AI-only replay runner', () => {
             mode: 'paid-ai',
             paidAiOptIn: true,
             resolverCutoffMs: 1,
-            runner: {
+            runner: v27Runner({
                 triage: async () => ({
                     outcome: 'ok',
                     attempts: 1,
@@ -489,7 +532,7 @@ describe('AI-only replay runner', () => {
                         }, { once: true });
                     });
                 },
-            },
+            }),
         });
 
         expect(resolverStarts).toBe(5);

@@ -12,7 +12,13 @@ import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
-import type { ReplayAiRunner, ReplayInvocation, ReplayMedia, ReplayOutcome } from './replay-runner';
+import {
+    bindReplayAiRunnerPolicy,
+    type ReplayAiRunner,
+    type ReplayInvocation,
+    type ReplayMedia,
+    type ReplayOutcome,
+} from './replay-runner';
 import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineage';
 
 interface InvocationTelemetry {
@@ -127,7 +133,7 @@ export function createReplayStagedAiAdapter(
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
-    return {
+    return bindReplayAiRunnerPolicy(aiStagePolicyVersion, {
         triage: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderTriageResultIdentity(aiInput, aiStagePolicyVersion);
@@ -140,7 +146,10 @@ export function createReplayStagedAiAdapter(
         }),
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
-            const identity = createGenderResolutionResultIdentity(aiInput);
+            const identity = createGenderResolutionResultIdentity(
+                aiInput,
+                aiStagePolicyVersion,
+            );
             return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
                 onAttemptStart: value => input.onAttemptStart?.({
                     attempt: value.attempt,
@@ -169,5 +178,5 @@ export function createReplayStagedAiAdapter(
             };
             return analyzePrivateAccountNames([...accounts], requestId, audit, { aiStagePolicyVersion, replayCapability });
         }),
-    };
+    });
 }

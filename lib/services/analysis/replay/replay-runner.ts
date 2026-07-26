@@ -1,7 +1,10 @@
 import { applyGenderResolution, type FeatureAnalysisResult, type GenderResolutionResult, type GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
-import { replayAiStagePolicyVersion } from './replay-source-lineage';
+import {
+    replayAiStagePolicyVersion,
+    type ReplaySupportedAiStagePolicyVersion,
+} from './replay-source-lineage';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -37,6 +40,34 @@ export interface ReplayAiRunner {
         onAttemptStart?: (value: ReplayAttemptStart) => void;
         onAttemptTelemetry?: (value: ReplayAttemptTelemetry) => void;
     }): Promise<ReplayInvocation<GenderResolutionResult>>;
+}
+
+const replayAiRunnerPolicies = new WeakMap<
+    ReplayAiRunner,
+    ReplaySupportedAiStagePolicyVersion
+>();
+
+/**
+ * Issues an opaque policy binding that callers cannot forge by adding a public
+ * property. The runner is frozen before its policy capability is registered.
+ */
+export function bindReplayAiRunnerPolicy(
+    policyVersion: ReplaySupportedAiStagePolicyVersion,
+    operations: ReplayAiRunner,
+): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    replayAiRunnerPolicies.set(runner, policyVersion);
+    return runner;
+}
+
+function assertReplayAiRunnerPolicy(
+    runner: ReplayAiRunner | undefined,
+    expected: ReplaySupportedAiStagePolicyVersion,
+): ReplayAiRunner {
+    if (!runner || replayAiRunnerPolicies.get(runner) !== expected) {
+        throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+    }
+    return runner;
 }
 
 export interface ReplayCaption { evidenceRefId: string; selectionId: string; text: string; }
@@ -272,7 +303,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
 
 export async function runAnalysisV2AiReplay(input: {
     bundle: AnalysisV2ReplayBundle;
-    runner: ReplayAiRunner;
+    runner?: ReplayAiRunner;
     mode: ReplayMode;
     paidAiOptIn?: boolean;
     write?: (line: string) => void;
@@ -286,6 +317,9 @@ export async function runAnalysisV2AiReplay(input: {
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
+    const paidRunner = input.mode === 'paid-ai'
+        ? assertReplayAiRunnerPolicy(input.runner, replayAiPolicy)
+        : undefined;
     const cutoffBookkeepingMs = input.resolverCutoffMs ?? 25;
     if (
         !Number.isInteger(cutoffBookkeepingMs)
@@ -301,6 +335,7 @@ export async function runAnalysisV2AiReplay(input: {
     const gender = { male: 0, female: 0, unknown: 0, unknownRate: 0 };
     const resolver = { ready: 0, applied: 0, inconclusive: 0, cutoff: 0, capacitySkipped: 0 };
     if (input.mode === 'paid-ai') {
+        const runner = paidRunner!;
         const privateAccounts = input.bundle.profiles
             .filter(profile => profile.isPrivate)
             .map(profile => ({
@@ -308,8 +343,8 @@ export async function runAnalysisV2AiReplay(input: {
                 username: profile.username,
                 ...(profile.fullName ? { fullName: profile.fullName } : {}),
             }));
-        const privateTask = privateAccounts.length && input.runner.privateNames
-            ? input.runner.privateNames(privateAccounts).then(result => {
+        const privateTask = privateAccounts.length && runner.privateNames
+            ? runner.privateNames(privateAccounts).then(result => {
                 collect(stages.privateAccountName, durations.privateAccountName, result);
             })
             : Promise.resolve();
@@ -319,8 +354,8 @@ export async function runAnalysisV2AiReplay(input: {
             input.bundle.profiles.filter(profile => !profile.isPrivate),
             4,
             async profile => {
-            if (!input.runner.triage) return;
-            const triage = await input.runner.triage({
+            if (!runner.triage) return;
+            const triage = await runner.triage({
                 ordinal: profile.ordinal,
                 media: mediaFor(profile, profile.triageSelectionIds),
             });
@@ -333,7 +368,7 @@ export async function runAnalysisV2AiReplay(input: {
                 gender.male++;
                 return;
             }
-            const featurePromise = input.runner.feature?.({
+            const featurePromise = runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
                 media: mediaFor(profile, profile.featureSelectionIds),
@@ -348,7 +383,7 @@ export async function runAnalysisV2AiReplay(input: {
             );
             const abort = new AbortController();
             let trackedResolver: TrackedResolver | undefined;
-            if (eligible && input.runner.resolveGender) {
+            if (eligible && runner.resolveGender) {
                 trackedResolver = {
                     abort,
                     settled: false,
@@ -361,7 +396,7 @@ export async function runAnalysisV2AiReplay(input: {
                         pendingAttemptStartedAt: undefined,
                     },
                 };
-                const resolverPromise = input.runner.resolveGender({
+                const resolverPromise = runner.resolveGender({
                     ordinal: profile.ordinal,
                     media: mediaFor(profile, profile.resolverSelectionIds),
                     signal: abort.signal,

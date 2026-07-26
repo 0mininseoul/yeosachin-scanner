@@ -7,6 +7,7 @@ const runner = new URL('./replay-runner.ts', import.meta.url);
 const cli = new URL('../../../../scripts/replay-analysis-v2.ts', import.meta.url);
 const libRoot = new URL('../../../', import.meta.url);
 const replayCapability = new URL('../../ai/replay-stateless-capability.ts', import.meta.url);
+const sourceLineage = new URL('./replay-source-lineage.ts', import.meta.url);
 
 async function productionTypescriptFiles(directory: URL): Promise<URL[]> {
     const entries = await readdir(directory, { withFileTypes: true });
@@ -50,6 +51,11 @@ describe('analysis V2 replay safety contract', () => {
         ].sort());
         expect(source).toContain('replayAiStagePolicyVersion');
         expect(source).not.toContain('AI_STAGE_POLICY_LATEST_VERSION');
+        const sourceLineagePolicy = await readFile(sourceLineage, 'utf8');
+        expect(sourceLineagePolicy).toContain(
+            "AI_STAGE_POLICY_V27_VERSION = 'ai-stage-policy-v2.7'",
+        );
+        expect(sourceLineagePolicy).not.toContain('AI_STAGE_POLICY_LATEST_VERSION');
         expect(adapterSource).not.toContain('sourceLineage');
         expect(imports).not.toMatch(/supabase|provider-run|result-store|archive|cloudflare|R2/i);
     });
