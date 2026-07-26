@@ -195,6 +195,8 @@ describe('analysis V2 owner progress route', () => {
         });
         const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
         expect(response.status).toBe(404);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.loadForOwner).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });

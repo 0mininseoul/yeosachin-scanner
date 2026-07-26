@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { ANALYSIS_V2_SCHEMA_VERSION, progressReadV1Schema } from '@/lib/contracts/analysis-v2';
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
-import { demoResponseCapabilities, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseHeaders, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
@@ -24,10 +24,15 @@ function json(body: unknown, status: number) {
     });
 }
 
+function demoJson(body: unknown, status: number) {
+    return NextResponse.json(body, { status, headers: demoResponseHeaders() });
+}
+
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ requestId: string }> }
 ) {
+    let demoRecognized = false;
     try {
         const requestId = requestIdSchema.safeParse((await params).requestId);
         const url = new URL(request.url);
@@ -49,7 +54,8 @@ export async function GET(
 
         const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
         if (demo) {
-            if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at) return json({ error: 'Analysis progress not found.' }, 404);
+            demoRecognized = true;
+            if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at) return demoJson({ error: 'Analysis progress not found.' }, 404);
             const progress = projectDemoProgress({
                 requestId: demo.id,
                 startedAt: new Date(demo.started_at),
@@ -58,10 +64,7 @@ export async function GET(
                 afterSequence: afterSequence.data,
                 eventLimit: eventLimit.data,
             });
-            return NextResponse.json({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, ...progress }, {
-                status: 200,
-                headers: { ...PRIVATE_NO_STORE_HEADERS, ...demoResponseCapabilities() },
-            });
+            return demoJson({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, ...progress }, 200);
         }
 
         const progress = await analysisV2ProgressStore.loadForOwner({
@@ -81,6 +84,8 @@ export async function GET(
         return json(response, 200);
     } catch {
         console.error('[analysis-v2-progress] owner progress read failed');
-        return json({ error: 'Progress could not be loaded.' }, 500);
+        return demoRecognized
+            ? demoJson({ error: 'Progress could not be loaded.' }, 500)
+            : json({ error: 'Progress could not be loaded.' }, 500);
     }
 }

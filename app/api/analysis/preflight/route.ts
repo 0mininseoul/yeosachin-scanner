@@ -37,7 +37,7 @@ import {
     operationalLogger,
 } from '@/lib/observability/server';
 import { emitPreflightProcessObservation } from '@/lib/observability/preflight-events';
-import { demoResponseCapabilities, isDemoEligible } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseHeaders, isDemoEligible } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
@@ -95,6 +95,12 @@ async function handlePOST(
     let provider: PreflightAuthProvider | null = null;
     let preflightId: string | undefined;
     let demoCandidate = false;
+    const demoErrorResponse = (status: number, code: string, message: string): NextResponse =>
+        NextResponse.json({
+            schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+            code,
+            error: message,
+        }, { status, headers: demoResponseHeaders() });
     const failed = (status: number, code: string, message: string): NextResponse => {
         operationalLogger.emit({
             event: 'preflight.failed',
@@ -137,7 +143,7 @@ async function handlePOST(
         const parsed = preflightRequestV1Schema.safeParse(body);
         if (!parsed.success) {
             return demoCandidate
-                ? suppressOperationalObservation(errorResponse(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.'))
+                ? suppressOperationalObservation(demoErrorResponse(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.'))
                 : failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
         }
         targetInstagramId = parsed.data.targetInstagramId;
@@ -145,7 +151,7 @@ async function handlePOST(
         const idempotencyKey = request.headers.get('idempotency-key')?.trim();
         if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
             return demoCandidate
-                ? suppressOperationalObservation(errorResponse(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.'))
+                ? suppressOperationalObservation(demoErrorResponse(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.'))
                 : failed(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.');
         }
         // This check intentionally uses the un-normalized browser value. All production
@@ -156,7 +162,7 @@ async function handlePOST(
                 idempotencyKey,
             });
             if (!createdDemo) {
-                return suppressOperationalObservation(errorResponse(503, 'ANALYSIS_FAILED', '사전 점검 요청 생성에 실패했습니다.'));
+                return suppressOperationalObservation(demoErrorResponse(503, 'ANALYSIS_FAILED', '사전 점검 요청 생성에 실패했습니다.'));
             }
             return suppressOperationalObservation(NextResponse.json({
                 schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
@@ -164,7 +170,7 @@ async function handlePOST(
                 expiresAt: new Date(new Date(createdDemo.run.created_at).getTime() + 30 * 60_000).toISOString(),
                 status: 'pending',
                 exclusionDecision: 'pending',
-            }, { status: createdDemo.created ? 202 : 200, headers: { ...demoResponseCapabilities(), 'Cache-Control': 'private, no-store' } }));
+            }, { status: createdDemo.created ? 202 : 200, headers: demoResponseHeaders() }));
         }
         const publicAdmission = isAnalysisV2AdmissionAvailable();
         const signedTestAdmission = signedTestAdmissionState(
@@ -321,7 +327,7 @@ async function handlePOST(
         });
     } catch (error) {
         if (demoCandidate) {
-            return suppressOperationalObservation(errorResponse(
+            return suppressOperationalObservation(demoErrorResponse(
                 503,
                 'ANALYSIS_FAILED',
                 '사전 점검 요청 생성에 실패했습니다.'

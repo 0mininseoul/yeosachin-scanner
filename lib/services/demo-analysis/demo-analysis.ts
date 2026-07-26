@@ -27,6 +27,19 @@ export function demoResponseCapabilities() {
     } as const;
 }
 
+/**
+ * Public contract for every response after a request has been recognized as a
+ * synthetic demo request.  Keep this free of internal run state: clients only
+ * need to know that analytics and actionable result affordances are disabled.
+ */
+export function demoResponseHeaders() {
+    return {
+        ...demoResponseCapabilities(),
+        'Cache-Control': 'private, no-store, max-age=0',
+        Vary: 'Cookie',
+    } as const;
+}
+
 /** Deployment/test guard: synthetic profiles may only reference these local rasters. */
 export async function validateDemoAssetManifest(): Promise<string[]> {
     const assets = [1, 2, 3, 4].map(index => `${DEMO_ASSET_PREFIX}${index}-v1.png`);

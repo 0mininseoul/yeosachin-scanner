@@ -888,6 +888,8 @@ describe('preflight owner routes', () => {
         const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }, 'too-short'));
 
         expect(response.status).toBe(400);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.demoStore.createOrReplay).not.toHaveBeenCalled();
         expect(mocks.emit).not.toHaveBeenCalled();
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
@@ -912,6 +914,8 @@ describe('preflight owner routes', () => {
         mocks.demoStore.createOrReplay.mockResolvedValue(null);
         const rejected = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
         expect(rejected.status).toBe(503);
+        expect(rejected.headers.get('x-analytics-eligible')).toBe('0');
+        expect(rejected.headers.get('cache-control')).toContain('no-store');
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(rejected);
 
         mocks.suppressOperationalObservation.mockClear();
@@ -969,6 +973,8 @@ describe('preflight owner routes', () => {
         });
         const expired = await getPreflight(new Request('https://example.com'), context());
         expect(expired.status).toBe(410);
+        expect(expired.headers.get('x-analytics-eligible')).toBe('0');
+        expect(expired.headers.get('cache-control')).toContain('no-store');
         await expect(expired.json()).resolves.toMatchObject({ code: 'PREFLIGHT_EXPIRED' });
 
         mocks.demoStore.findForOwner.mockResolvedValueOnce({

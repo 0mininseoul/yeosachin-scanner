@@ -11,13 +11,14 @@ import {
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
 import { isAnalysisDeletable } from '@/lib/services/analysis/deletion';
-import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ requestId: string }> }
 ) {
+    let demoRecognized = false;
     try {
         const { requestId } = await params;
         const supabase = await createClient();
@@ -34,11 +35,15 @@ export async function GET(
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
         if (demo) {
-            if (demo.user_id !== user.id || !isDemoOperator(user.id)) return NextResponse.json({ error: '분석 요청을 찾을 수 없습니다.' }, { status: 404 });
+            demoRecognized = true;
+            if (demo.user_id !== user.id || !isDemoOperator(user.id)) return NextResponse.json(
+                { error: '분석 요청을 찾을 수 없습니다.' },
+                { status: 404, headers: demoResponseHeaders() }
+            );
             return NextResponse.json({
                 error: 'V2 분석은 전용 결과 경로를 사용합니다.', code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2',
                 resultUrl: `/api/analysis/v2/result/${encodeURIComponent(demo.id)}`,
-            }, { status: 409, headers: { 'X-Analytics-Eligible': '0', 'X-External-Profile-Links': 'disabled', 'X-Result-Actions': 'disabled' } });
+            }, { status: 409, headers: demoResponseHeaders() });
         }
 
         // 2. 분석 요청 조회
@@ -184,7 +189,9 @@ export async function GET(
         console.error('Result fetch error:', error);
         return NextResponse.json(
             { error: '서버 오류가 발생했습니다.' },
-            { status: 500 }
+            demoRecognized
+                ? { status: 500, headers: demoResponseHeaders() }
+                : { status: 500 }
         );
     }
 }
@@ -193,6 +200,7 @@ export async function DELETE(
     _request: Request,
     { params }: { params: Promise<{ requestId: string }> }
 ) {
+    let demoRecognized = false;
     try {
         const { requestId } = await params;
         const supabase = await createClient();
@@ -203,10 +211,17 @@ export async function DELETE(
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
         if (demo) {
-            if (demo.user_id !== user.id || !isDemoOperator(user.id)) return NextResponse.json({ error: '판독 기록을 찾을 수 없습니다.' }, { status: 404 });
+            demoRecognized = true;
+            if (demo.user_id !== user.id || !isDemoOperator(user.id)) return NextResponse.json(
+                { error: '판독 기록을 찾을 수 없습니다.' },
+                { status: 404, headers: demoResponseHeaders() }
+            );
             return await demoAnalysisStore.deleteForOwner(demo.id, user.id)
-                ? new NextResponse(null, { status: 204 })
-                : NextResponse.json({ error: '판독 기록을 찾을 수 없습니다.' }, { status: 404 });
+                ? new NextResponse(null, { status: 204, headers: demoResponseHeaders() })
+                : NextResponse.json(
+                    { error: '판독 기록을 찾을 수 없습니다.' },
+                    { status: 404, headers: demoResponseHeaders() }
+                );
         }
 
         const mutation = await supabaseAdmin
@@ -247,6 +262,11 @@ export async function DELETE(
         return new NextResponse(null, { status: 204 });
     } catch {
         console.error('Analysis deletion API failed');
-        return NextResponse.json({ error: '서버 오류가 발생했습니다.' }, { status: 500 });
+        return NextResponse.json(
+            { error: '서버 오류가 발생했습니다.' },
+            demoRecognized
+                ? { status: 500, headers: demoResponseHeaders() }
+                : { status: 500 }
+        );
     }
 }

@@ -30,7 +30,7 @@ import {
     flushOperationalLogs,
     operationalLogger,
 } from '@/lib/observability/server';
-import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -44,7 +44,7 @@ function silentDemoErrorResponse(status: number, code: string, error: string): N
     return NextResponse.json({
         code: code.slice(0, 64),
         error: error.slice(0, 200),
-    }, { status });
+    }, { status, headers: demoResponseHeaders() });
 }
 
 function persistenceErrorResponse(error: EarlybirdPersistenceError): NextResponse {
@@ -234,7 +234,10 @@ async function handlePOST(
         if (!started) {
             return suppressOperationalObservation(silentDemoErrorResponse(409, 'PREFLIGHT_NOT_VALID', '최신 사전 점검을 다시 확인해주세요.'));
         }
-        return suppressOperationalObservation(NextResponse.json({ nextUrl: `/progress/${started.id}` }, { status: 200 }));
+        return suppressOperationalObservation(NextResponse.json(
+            { nextUrl: `/progress/${started.id}` },
+            { status: 200, headers: demoResponseHeaders() }
+        ));
     }
     const parsed = earlybirdCheckoutRequestSchema.safeParse(body);
     if (!parsed.success) {

@@ -12,7 +12,7 @@ import {
     releaseAnalysisRequestLease,
 } from '@/lib/services/analysis/request-lease';
 import { NextResponse } from 'next/server';
-import { demoResponseCapabilities, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const STATUS_COLUMNS = 'id, user_id, pipeline_version, status, current_step, progress, progress_step, error_message, background_processing, created_at, completed_at, idempotency_key';
@@ -30,6 +30,7 @@ export async function GET(
     request: Request,
     { params }: { params: Promise<{ requestId: string }> }
 ) {
+    let demoRecognized = false;
     try {
         const { requestId } = await params;
         const supabase = await createClient();
@@ -46,11 +47,15 @@ export async function GET(
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
         if (demo) {
-            if (!isDemoOperator(user.id)) return NextResponse.json({ error: '분석 요청을 찾을 수 없습니다.' }, { status: 404, headers: PRIVATE_NO_STORE_HEADERS });
+            demoRecognized = true;
+            if (!isDemoOperator(user.id)) return NextResponse.json(
+                { error: '분석 요청을 찾을 수 없습니다.' },
+                { status: 404, headers: demoResponseHeaders() }
+            );
             return NextResponse.json({
                 error: 'V2 분석은 전용 진행 경로를 사용합니다.', code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2',
                 progressUrl: `/api/analysis/progress/${encodeURIComponent(demo.id)}`,
-            }, { status: 409, headers: { ...PRIVATE_NO_STORE_HEADERS, ...demoResponseCapabilities() } });
+            }, { status: 409, headers: demoResponseHeaders() });
         }
 
         // Re-check ownership on the admin query instead of relying on a client-provided ID.
@@ -143,7 +148,9 @@ export async function GET(
         console.error('Status check error:', error);
         return NextResponse.json(
             { error: '서버 오류가 발생했습니다.' },
-            { status: 500 }
+            demoRecognized
+                ? { status: 500, headers: demoResponseHeaders() }
+                : { status: 500 }
         );
     }
 }

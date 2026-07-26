@@ -803,6 +803,8 @@ describe('earlybird checkout and waitlist routes', () => {
         mocks.demoStore.findForOwner.mockResolvedValue({ id: PREFLIGHT_ID, user_id: USER_ID });
         const response = await waitlist(request('/api/earlybird/waitlist', { preflightId: PREFLIGHT_ID, planId: 'plus' }));
         expect(response.status).toBe(409);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.rpc).not.toHaveBeenCalled();
         expect(mocks.from).not.toHaveBeenCalled();
         expect(mocks.after).not.toHaveBeenCalled();
@@ -836,6 +838,8 @@ describe('earlybird checkout and waitlist routes', () => {
             preflightId: PREFLIGHT_ID, planId: 'standard', disclosureAccepted: true,
         }));
         expect(response.status).toBe(200);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         await expect(response.json()).resolves.toEqual({ nextUrl: `/progress/${PREFLIGHT_ID}` });
         expect(mocks.demoStore.startForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
         expect(mocks.rpc).not.toHaveBeenCalled();
@@ -878,6 +882,8 @@ describe('earlybird checkout and waitlist routes', () => {
         }));
 
         expect(response.status).toBe(expectedStatus);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         await expect(response.json()).resolves.toMatchObject({ code: expectedCode });
         expect(mocks.emit).not.toHaveBeenCalled();
         expect(mocks.after).not.toHaveBeenCalled();
@@ -902,6 +908,8 @@ describe('earlybird checkout and waitlist routes', () => {
         }));
 
         expect(response.status).toBe(409);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
         expect(mocks.emit).not.toHaveBeenCalled();
         expect(mocks.after).not.toHaveBeenCalled();
@@ -920,6 +928,8 @@ describe('earlybird checkout and waitlist routes', () => {
         const response = await checkout(request('/api/earlybird/checkout', body));
 
         expect(response.status).toBe(400);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
         expect(mocks.demoStore.startForOwner).not.toHaveBeenCalled();
         expect(mocks.emit).not.toHaveBeenCalled();

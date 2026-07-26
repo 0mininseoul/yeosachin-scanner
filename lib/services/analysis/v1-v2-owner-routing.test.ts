@@ -140,6 +140,8 @@ describe('owner-facing V1/V2 route selection', () => {
         );
 
         expect(response.status).toBe(409);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         await expect(response.json()).resolves.toMatchObject({ code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2' });
         expect(mocks.from).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
@@ -155,6 +157,8 @@ describe('owner-facing V1/V2 route selection', () => {
             new Request(`https://example.com/api/analysis/result/${requestId}`, { method: 'DELETE' }), context()
         );
         expect(deleted.status).toBe(204);
+        expect(deleted.headers.get('x-analytics-eligible')).toBe('0');
+        expect(deleted.headers.get('cache-control')).toContain('no-store');
         expect(mocks.demoDeleteForOwner).toHaveBeenCalledWith(requestId, userId);
         expect(mocks.from).not.toHaveBeenCalled();
 
@@ -163,6 +167,8 @@ describe('owner-facing V1/V2 route selection', () => {
             new Request(`https://example.com/api/analysis/result/${requestId}`, { method: 'DELETE' }), context()
         );
         expect(hidden.status).toBe(404);
+        expect(hidden.headers.get('x-analytics-eligible')).toBe('0');
+        expect(hidden.headers.get('cache-control')).toContain('no-store');
         expect(mocks.demoDeleteForOwner).toHaveBeenCalledOnce();
         expect(mocks.from).not.toHaveBeenCalled();
         vi.unstubAllEnvs();

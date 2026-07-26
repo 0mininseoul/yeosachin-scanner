@@ -9,7 +9,7 @@ import {
 } from '@/lib/domain/analysis/result-pagination';
 import { analysisV2ResultStore } from '@/lib/services/analysis/v2-result-store';
 import { createClient } from '@/lib/supabase/server';
-import { demoResponseCapabilities, demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseHeaders, demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const requestIdSchema = z.string().uuid();
@@ -26,6 +26,10 @@ function json(body: unknown, status: number) {
         status,
         headers: PRIVATE_NO_STORE_HEADERS,
     });
+}
+
+function demoJson(body: unknown, status: number) {
+    return NextResponse.json(body, { status, headers: demoResponseHeaders() });
 }
 
 function parseCursor(value: string | null, list: ResultListKind): string | null {
@@ -47,6 +51,7 @@ export async function GET(
 
     let femaleCursor: string | null;
     let privateCursor: string | null;
+    let demoRecognized = false;
     try {
         femaleCursor = parseCursor(url.searchParams.get('femaleCursor'), 'public');
         privateCursor = parseCursor(url.searchParams.get('privateCursor'), 'private');
@@ -66,12 +71,13 @@ export async function GET(
 
         const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
         if (demo) {
+            demoRecognized = true;
             if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
-                return json({ error: 'Analysis result not found.' }, 404);
+                return demoJson({ error: 'Analysis result not found.' }, 404);
             }
-            return NextResponse.json(analysisResultPageV1Schema.parse(demoResultPage({
+            return demoJson(analysisResultPageV1Schema.parse(demoResultPage({
                 requestId: demo.id, femaleCursor, privateCursor, pageSize: pageSize.data,
-            })), { status: 200, headers: { ...PRIVATE_NO_STORE_HEADERS, ...demoResponseCapabilities() } });
+            })), 200);
         }
 
         const result = await analysisV2ResultStore.loadPage({
@@ -88,6 +94,8 @@ export async function GET(
         return json(analysisResultPageV1Schema.parse(result), 200);
     } catch {
         console.error('[analysis-v2-result] owner result read failed');
-        return json({ error: 'Result could not be loaded.' }, 500);
+        return demoRecognized
+            ? demoJson({ error: 'Result could not be loaded.' }, 500)
+            : json({ error: 'Result could not be loaded.' }, 500);
     }
 }

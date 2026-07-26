@@ -23,6 +23,8 @@ describe('demo share server gate', () => {
         mocks.demoFind.mockResolvedValue({ id: requestId, user_id: userId });
         const response = await POST(new Request('https://example.com/api/share/enable', { method: 'POST', body: JSON.stringify({ requestId }) }));
         expect(response.status).toBe(409);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.from).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });

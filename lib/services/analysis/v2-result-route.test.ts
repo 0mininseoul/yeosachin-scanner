@@ -132,6 +132,8 @@ describe('analysis V2 owner result route', () => {
         });
         const response = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}`), context());
         expect(response.status).toBe(404);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.loadPage).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });
@@ -162,6 +164,8 @@ describe('analysis V2 owner result route', () => {
         });
         const response = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}`), context());
         expect(response.status).toBe(404);
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.loadPage).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });
