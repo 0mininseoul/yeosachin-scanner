@@ -969,6 +969,13 @@ describe('V2 staged AI services', () => {
         '얼굴이 못생겨서 우습네요. 사진보다 조롱거리가 먼저 보이는 계정입니다.',
         '이 정도면 둘이 사귀는 것 같네요. 커플 기류를 모른 척하기 어렵습니다.',
         '두 사람은 연애 중으로 보입니다. 공개 자료만 봐도 커플인 듯하네요.',
+        'bio에 여행이라고 적혀 있고 둘이 사귀는 것 같네요. 공개 문구와 추측을 섞었습니다.',
+        'bio에 음악이라고 적혀 있고 얼굴이 못생겨서 우습네요. 소개보다 조롱이 먼저입니다.',
+        '둘은 커플 확정이네요. 공개 자료보다 결론이 한발 앞서갑니다.',
+        '둘이 연애하네요. 공개 자료만으로 관계를 단정한 문장입니다.',
+        '저는요 이 사진의 숨은 사정을 다 안다고 말하고 싶네요.',
+        '제가요 이 피드의 속뜻을 전부 읽었다고 주장합니다.',
+        '나는요 공개 자료보다 먼저 결론을 내렸습니다.',
     ])('rejects prohibited v2.8 public style at the output boundary: %s', async unsafeCopy => {
         const input = featureInput();
         mocks.analyzeWithGemini.mockImplementationOnce(async (
@@ -1685,6 +1692,13 @@ describe('V2 staged AI services', () => {
         '얼굴이 못생겨서 우습네요. 공개 사진보다 조롱거리가 먼저 보입니다.',
         '둘이 사귀는 것 같네요. 커플 기류를 모른 척하기 어렵습니다.',
         '판독관은 이 관계가 연애 중이라고 봅니다. 숨길 생각은 없어 보이네요.',
+        'bio에 여행이라고 적혀 있고 둘이 사귀는 것 같네요. 공개 문구와 추측을 섞었습니다.',
+        'bio에 음악이라고 적혀 있고 얼굴이 못생겨서 우습네요. 소개보다 조롱이 먼저입니다.',
+        '둘은 커플 확정이네요. 공개 자료보다 결론이 먼저 달립니다.',
+        '둘이 연애하네요. 공개 자료만으로 관계를 단정했습니다.',
+        '저는요 이 관계의 숨은 사정을 다 안다고 말하고 싶네요.',
+        '제가요 이 피드의 속뜻을 전부 읽었다고 주장합니다.',
+        '나는요 공개 자료보다 먼저 결론을 내렸습니다.',
     ])('falls back when v2.8 high-risk output violates public style: %s', async unsafeLine => {
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
@@ -1722,7 +1736,7 @@ describe('V2 staged AI services', () => {
             options: { schema: { parse(value: unknown): unknown } },
         ) => options.schema.parse({
             lines: [{
-                text: 'bio에 남자친구가 있다고 적혀 있지만, 굳이 공개 문구 이상으로 확대하지 않는 계정입니다.',
+                text: 'bio에 남자친구가 있다고 적혀 있습니다. 굳이 공개 문구 이상으로 확대하지 않는 계정입니다.',
                 evidenceRefs: ['profile:bio'],
             }, {
                 text: '서로 남긴 좋아요와 후보가 대상 게시물에 남긴 댓글의 보자 표현은 확인됐지만, 수집 표본 밖 누락 가능성은 남습니다.',
@@ -1743,6 +1757,8 @@ describe('V2 staged AI services', () => {
 
         expect(result.source).toBe('gemini');
         expect(result.lines[0]).toContain('bio에 남자친구가 있다고 적혀');
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('보호 특성·신체·외모를 조롱하지 마세요');
     });
 
     it('uses a sanitized carousel caption dossier only as first-line persona evidence', async () => {

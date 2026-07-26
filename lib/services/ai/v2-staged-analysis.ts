@@ -82,16 +82,12 @@ const PUBLIC_IDENTIFIER_PATTERN = /(?:https?:\/\/|www\.|\b[^\s@]+@[^\s@]+\b|@[A-
 const INSTAGRAM_USERNAME_PATTERN = /^[A-Za-z0-9._]{1,30}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const V28_SELF_REFERENCE_PATTERN =
-    /(?:판독관|(?:^|[\s"'“‘(])(?:제가|저는|나는)(?=[\s,.;!?"'”’)]|$))/u;
+    /(?:판독관|(?:^|[\s"'“‘(])(?:제가|저는|나는)(?:요)?(?=[\s,.;!?"'”’)]|$))/u;
 const V28_LAUGH_PATTERN = /ㅋ+/u;
 const V28_RELATIONSHIP_TERM_PATTERN =
-    /(?:사귀|썸|연애|연인|애인|남자친구|여자친구|남친|여친|커플|교제|불륜|외도|바람|밀회|데이트)/u;
-const V28_RELATIONSHIP_SPECULATION_PATTERN =
-    /(?:같(?:다|네요|아|은|은데)?|듯(?:하다|해|한)?|보이(?:다|네요|는)|의심|추정|가능성|아닐까|일지도|느낌|기류|냄새|혹시|설마|아마)/u;
-const V28_RELATIONSHIP_ASSERTION_PATTERN =
-    /(?:사귀고\s*있|연애\s*중|교제\s*중|(?:연인|애인|남자친구|여자친구|남친|여친|커플)(?:이|가)?\s*(?:다|있))/u;
-const V28_ATTRIBUTED_BIO_PATTERN =
-    /(?:bio|바이오|소개(?:글|문구)?).{0,24}(?:적혀|표시|밝혀|쓴|문구|라고|라며)/iu;
+    /(?:사귀|썸|연애|연인|애인|남자친구|여자친구|남친|여친|커플|교제|불륜|외도|밀회|데이트|바람(?:을\s*)?(?:피우|피웠|폈|난|났다|기))/u;
+const V28_STRICT_BIO_RELATIONSHIP_CLAUSE_PATTERN =
+    /^(?:bio|바이오|소개(?:글|문구)?)(?:에|에는)\s.{1,60}(?:라고\s*)?(?:적혀|쓰여|명시돼|명시되어|표시돼|표시되어)\s*(?:있(?:습니다|어요|네요|다)?)?[.!?]?$/iu;
 const V28_PROTECTED_OR_APPEARANCE_TERM_PATTERN =
     /(?:인종|피부색|국적|출신|종교|장애|성적\s*지향|성별\s*정체성|나이|체형|몸매|얼굴|외모|키|체중)/u;
 const V28_MOCKERY_MARKER_PATTERN =
@@ -272,15 +268,14 @@ const safeOverviewSchema = z.string()
 
 function containsV28UnsupportedRelationshipStyle(value: string): boolean {
     const normalized = value.normalize('NFKC');
-    if (!V28_RELATIONSHIP_TERM_PATTERN.test(normalized)) return false;
-    if (V28_ATTRIBUTED_BIO_PATTERN.test(normalized)) return false;
-    return V28_RELATIONSHIP_ASSERTION_PATTERN.test(normalized)
-        || V28_RELATIONSHIP_SPECULATION_PATTERN.test(normalized);
+    return normalized.split(/(?<=[.!?])\s+/u).some(clause => (
+        V28_RELATIONSHIP_TERM_PATTERN.test(clause)
+        && !V28_STRICT_BIO_RELATIONSHIP_CLAUSE_PATTERN.test(clause.trim())
+    ));
 }
 
 function containsV28ProtectedOrAppearanceMockery(value: string): boolean {
     const normalized = value.normalize('NFKC');
-    if (V28_ATTRIBUTED_BIO_PATTERN.test(normalized)) return false;
     return /(?:돼지|멸치)(?:네요|같|라고|취급|취급하)/u.test(normalized)
         || (
             V28_PROTECTED_OR_APPEARANCE_TERM_PATTERN.test(normalized)
@@ -2055,7 +2050,7 @@ function narrativePrompt(
 ): string {
     const legacy = narrativePromptLegacy(input, media, sanitized);
     if (policyVersion !== AI_STAGE_POLICY_V28_VERSION) return legacy;
-    return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭·관계 추측은 절대 쓰지 마세요.`;
+    return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭·관계 단정이나 추측을 절대 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요.`;
 }
 
 function containsForbiddenPublicIdentifier(
