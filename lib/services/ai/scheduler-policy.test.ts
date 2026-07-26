@@ -84,4 +84,23 @@ describe('AI scheduler policy', () => {
             aiStage: 'ai-stage-policy-v2.7',
         })).toThrow('Invalid AI scheduler policy snapshot');
     });
+
+    it.each([64, 65, 128])(
+        'accepts canonical policy version strings at length %i',
+        length => {
+            expect(parseAiSchedulerPolicySnapshot({
+                pipeline: `v${'a'.repeat(length - 1)}`,
+                risk: 'risk-policy-v2.4',
+                aiStage: 'ai-stage-policy-v2.7',
+            })).toEqual({ capability: 'legacy' });
+        },
+    );
+
+    it('rejects a policy version string at length 129', () => {
+        expect(() => parseAiSchedulerPolicySnapshot({
+            pipeline: `v${'a'.repeat(128)}`,
+            risk: 'risk-policy-v2.4',
+            aiStage: 'ai-stage-policy-v2.7',
+        })).toThrow('Invalid AI scheduler policy snapshot');
+    });
 });

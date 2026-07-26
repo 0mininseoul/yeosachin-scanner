@@ -195,6 +195,52 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         await expect(blockerExecution).resolves.toMatchObject({ status: 'completed' });
     });
 
+    it('does not lose a release between failed acquisition and waiter registration', async () => {
+        const releases: Array<() => void> = [];
+        const held = (value: string) => vi.fn(async () => {
+            await new Promise<void>(resolve => releases.push(resolve));
+            return value;
+        });
+        const blockers = [
+            ...Array.from({ length: 6 }, (_, index) => task(
+                `race:g${index}`, 'genderTriage', index, held(`race:g${index}`),
+            )),
+            ...Array.from({ length: 2 }, (_, index) => task(
+                `race:p${index}`, 'privateAccountName', 20 + index, held(`race:p${index}`),
+            )),
+        ];
+        const blockerExecution = runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: blockers,
+            operationStore: operationStore(),
+            handlerDeadlineAtMs: 1_000_000,
+            nowMs: () => 0,
+        });
+        await vi.waitFor(() => expect(releases).toHaveLength(8));
+
+        const beforeWait = vi.fn(() => {
+            releases.splice(0).forEach(release => release());
+        });
+        const paidCall = vi.fn(async () => 'recovered-slot');
+        const startedAt = performance.now();
+        const result = await runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: [task('race:waiting', 'featureAnalysis', 0, paidCall)],
+            operationStore: operationStore(),
+            handlerDeadlineAtMs: 75_500,
+            nowMs: () => performance.now() - startedAt,
+            onBeforeArbiterWait: beforeWait,
+        });
+        expect(result).toMatchObject({
+            status: 'completed',
+            completed: [{ key: 'race:waiting', value: 'recovered-slot' }],
+        });
+        expect(paidCall).toHaveBeenCalledOnce();
+        expect(beforeWait).toHaveBeenCalledOnce();
+        expect(performance.now() - startedAt).toBeLessThan(250);
+        await expect(blockerExecution).resolves.toMatchObject({ status: 'completed' });
+    });
+
     it('round-robins ready stages so feature work is not starved by triage', async () => {
         const started: string[] = [];
         const tasks = [

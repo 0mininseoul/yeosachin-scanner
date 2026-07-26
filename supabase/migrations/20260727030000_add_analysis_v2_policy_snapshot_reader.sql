@@ -1,55 +1,51 @@
--- Scheduler admission must derive from the request's persisted policy, never ambient rollout env.
-DO $migration$
+-- This reader owns its validation contract. It intentionally does not trust a mutable historical
+-- validator or a self-attested marker function from an earlier migration.
+CREATE OR REPLACE FUNCTION public.analysis_v2_scheduler_reader_valid_policy_snapshot_v1(
+    p_snapshot JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+SECURITY INVOKER
+SET search_path = ''
+AS $$
 DECLARE
-    v_validator OID;
-    v_version_function OID;
-    v_contract_version TEXT;
-    v_is_immutable BOOLEAN;
-    v_is_security_definer BOOLEAN;
-    v_version_is_immutable BOOLEAN;
-    v_version_is_security_definer BOOLEAN;
+    item RECORD;
+    item_count INTEGER := 0;
 BEGIN
-    v_validator := pg_catalog.to_regprocedure(
-        'public.analysis_v2_valid_policy_versions_snapshot_v2(jsonb)'
-    );
-    v_version_function := pg_catalog.to_regprocedure(
-        'public.analysis_v2_policy_validator_contract_version()'
-    );
-    IF v_validator IS NULL OR v_version_function IS NULL THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_SCHEDULER_POLICY_PREDECESSOR_DRIFT',
-            ERRCODE = 'P0001';
+    IF p_snapshot IS NULL
+       OR pg_catalog.jsonb_typeof(p_snapshot) <> 'object'
+       OR p_snapshot = '{}'::JSONB
+       OR pg_catalog.octet_length(p_snapshot::TEXT) > 8192 THEN
+        RETURN FALSE;
     END IF;
-    SELECT
-        proc.provolatile = 'i',
-        proc.prosecdef
-    INTO v_is_immutable, v_is_security_definer
-    FROM pg_catalog.pg_proc AS proc
-    WHERE proc.oid = v_validator;
 
-    SELECT public.analysis_v2_policy_validator_contract_version()
-    INTO v_contract_version;
-    SELECT
-        proc.provolatile = 'i',
-        proc.prosecdef
-    INTO v_version_is_immutable, v_version_is_security_definer
-    FROM pg_catalog.pg_proc AS proc
-    WHERE proc.oid = v_version_function;
-
-    IF NOT v_is_immutable
-       OR v_is_security_definer
-       OR NOT v_version_is_immutable
-       OR v_version_is_security_definer
-       OR v_contract_version IS DISTINCT FROM 'analysis-v2-policy-validator-v2' THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_SCHEDULER_POLICY_PREDECESSOR_DRIFT',
-            ERRCODE = 'P0001';
+    IF p_snapshot ? 'scheduler'
+       AND p_snapshot->>'scheduler' IS DISTINCT FROM 'ai-scheduler-v1' THEN
+        RETURN FALSE;
     END IF;
+
+    FOR item IN SELECT key, value FROM pg_catalog.jsonb_each(p_snapshot) LOOP
+        item_count := item_count + 1;
+        IF item_count > 16
+           OR item.key !~ '^[A-Za-z][A-Za-z0-9._:-]{0,63}$'
+           OR pg_catalog.jsonb_typeof(item.value) <> 'string'
+           OR pg_catalog.char_length(item.value #>> '{}') < 1
+           OR pg_catalog.char_length(item.value #>> '{}') > 128
+           OR (item.value #>> '{}') !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' THEN
+            RETURN FALSE;
+        END IF;
+    END LOOP;
+    RETURN TRUE;
 END;
-$migration$;
+$$;
 
--- Versioned exact activation contract. The generic predecessor intentionally remains compatible
--- with legacy snapshots; only this function defines scheduler-v1 eligibility.
+REVOKE ALL ON FUNCTION public.analysis_v2_scheduler_reader_valid_policy_snapshot_v1(JSONB)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.analysis_v2_scheduler_reader_valid_policy_snapshot_v1(JSONB)
+    TO service_role;
+
+-- Exact scheduler-v1 activation is stricter than the generic reader contract.
 CREATE OR REPLACE FUNCTION public.analysis_v2_valid_scheduler_policy_snapshot_v1(
     p_snapshot JSONB
 )
@@ -59,7 +55,7 @@ IMMUTABLE
 SECURITY INVOKER
 SET search_path = ''
 AS $$
-    SELECT public.analysis_v2_valid_policy_versions_snapshot_v2(p_snapshot)
+    SELECT public.analysis_v2_scheduler_reader_valid_policy_snapshot_v1(p_snapshot)
        AND pg_catalog.jsonb_typeof(p_snapshot) = 'object'
        AND p_snapshot ?& ARRAY['pipeline', 'risk', 'aiStage', 'scheduler']
        AND NOT EXISTS (
@@ -90,7 +86,7 @@ AS $$
     FROM public.analysis_requests AS analysis_request
     WHERE analysis_request.id = p_request_id
       AND analysis_request.pipeline_version = 'v2'
-      AND public.analysis_v2_valid_policy_versions_snapshot_v2(
+      AND public.analysis_v2_scheduler_reader_valid_policy_snapshot_v1(
           analysis_request.policy_versions_snapshot
       );
 $$;

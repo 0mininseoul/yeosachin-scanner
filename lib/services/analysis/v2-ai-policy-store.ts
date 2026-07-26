@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { parseAiSchedulerPolicySnapshot } from '@/lib/services/ai/scheduler-policy';
+import { aiPolicyVersionSchema } from '@/lib/services/ai/policy-version';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const VERSION_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
 
 interface RpcError {
     code?: string;
@@ -48,7 +48,7 @@ export function createSupabaseAnalysisV2AiPolicyStore(
             throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: '
                 + `policy load failed (${safeRpcCode(response.error)}).`);
         }
-        const parsed = z.string().regex(VERSION_PATTERN).nullable().safeParse(response.data);
+        const parsed = aiPolicyVersionSchema.nullable().safeParse(response.data);
         if (!parsed.success) {
             throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: invalid policy response.');
         }
@@ -78,7 +78,7 @@ export function createSupabaseAnalysisV2AiPolicyStore(
                 throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: '
                     + `policy load failed (${safeRpcCode(response.error)}).`);
             }
-            const parsed = z.record(z.string(), z.string().regex(VERSION_PATTERN))
+            const parsed = z.record(z.string(), aiPolicyVersionSchema)
                 .nullable().safeParse(response.data);
             if (!parsed.success) {
                 throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR: invalid policy response.');

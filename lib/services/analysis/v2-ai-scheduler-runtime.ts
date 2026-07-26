@@ -50,12 +50,19 @@ interface AnalysisV2SchedulerArbiterLease {
     release(): void;
 }
 
+type AnalysisV2SchedulerArbiterAcquire =
+    | Readonly<{ status: 'acquired'; lease: AnalysisV2SchedulerArbiterLease }>
+    | Readonly<{ status: 'blocked'; generation: number }>;
+
 interface AnalysisV2SchedulerArbiter {
     tryAcquire(
         stage: AnalysisV2SchedulerStage,
         limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
-    ): AnalysisV2SchedulerArbiterLease | null;
-    waitForChange(maxWaitMs: number): Promise<'changed' | 'cutoff'>;
+    ): AnalysisV2SchedulerArbiterAcquire;
+    waitForChange(
+        ifUnchangedGeneration: number,
+        maxWaitMs: number,
+    ): Promise<'changed' | 'cutoff'>;
 }
 
 export interface AnalysisV2SchedulerRuntimePolicy {
@@ -84,6 +91,8 @@ export interface AnalysisV2SchedulerRuntimeOptions<T> {
      * Values are clamped against the hard scheduler-v1 ceiling.
      */
     policy?: Partial<AnalysisV2SchedulerRuntimePolicy>;
+    /** Deterministic race hook for tests; production callers must omit it. */
+    onBeforeArbiterWait?: () => Promise<void> | void;
 }
 
 function stageLimit(
@@ -148,13 +157,14 @@ function boundedPolicy(
 
 class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbiter {
     private activeTotal = 0;
+    private generation = 0;
     private readonly activeByStage = new Map<AnalysisV2SchedulerStage, number>();
     private readonly waiters = new Set<() => void>();
 
     tryAcquire(
         stage: AnalysisV2SchedulerStage,
         limits: Readonly<AnalysisV2SchedulerRuntimePolicy>,
-    ): AnalysisV2SchedulerArbiterLease | null {
+    ): AnalysisV2SchedulerArbiterAcquire {
         const activeStage = this.activeByStage.get(stage) ?? 0;
         if (
             this.activeTotal >= Math.min(8, limits.sharedConcurrency)
@@ -163,25 +173,38 @@ class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbite
                 ANALYSIS_V2_SCHEDULER_V1_POLICY,
             ))
         ) {
-            return null;
+            return Object.freeze({
+                status: 'blocked' as const,
+                generation: this.generation,
+            });
         }
         this.activeTotal++;
         this.activeByStage.set(stage, activeStage + 1);
         let released = false;
         return Object.freeze({
-            release: () => {
-                if (released) return;
-                released = true;
-                this.activeTotal--;
-                this.activeByStage.set(stage, this.activeByStage.get(stage)! - 1);
-                const waiters = [...this.waiters];
-                this.waiters.clear();
-                waiters.forEach(resolve => resolve());
-            },
+            status: 'acquired' as const,
+            lease: Object.freeze({
+                release: () => {
+                    if (released) return;
+                    released = true;
+                    this.activeTotal--;
+                    this.activeByStage.set(stage, this.activeByStage.get(stage)! - 1);
+                    this.generation++;
+                    const waiters = [...this.waiters];
+                    this.waiters.clear();
+                    waiters.forEach(resolve => resolve());
+                },
+            }),
         });
     }
 
-    waitForChange(maxWaitMs: number): Promise<'changed' | 'cutoff'> {
+    waitForChange(
+        ifUnchangedGeneration: number,
+        maxWaitMs: number,
+    ): Promise<'changed' | 'cutoff'> {
+        if (this.generation !== ifUnchangedGeneration) {
+            return Promise.resolve('changed');
+        }
         if (!Number.isFinite(maxWaitMs) || maxWaitMs <= 0) {
             return Promise.resolve('cutoff');
         }
@@ -249,16 +272,24 @@ export async function runAnalysisV2FairAiScheduler<T>(
     const active = new Set<Promise<void>>();
     const mayAdmit = () => nowMs() + policy.admissionReserveMs < input.handlerDeadlineAtMs;
 
-    const admitOne = async (): Promise<'admitted' | 'handled' | 'blocked'> => {
-        if (!mayAdmit()) return 'blocked';
+    const admitOne = async (): Promise<
+        | Readonly<{ status: 'admitted' | 'handled' }>
+        | Readonly<{ status: 'blocked'; generation: number | null }>
+    > => {
+        if (!mayAdmit()) return { status: 'blocked', generation: null };
+        let blockedGeneration: number | null = null;
         for (let offset = 0; offset < stages.length; offset++) {
             const index = (cursor + offset) % stages.length;
             const stage = stages[index]!;
             const queue = queues.get(stage)!;
             const task = queue[0];
             if (!task) continue;
-            const lease = arbiter.tryAcquire(stage, policy);
-            if (!lease) continue;
+            const acquire = arbiter.tryAcquire(stage, policy);
+            if (acquire.status === 'blocked') {
+                blockedGeneration = acquire.generation;
+                continue;
+            }
+            const { lease } = acquire;
             const claim = await input.operationStore.claim({
                 key: task.key,
                 stage: task.stage,
@@ -280,7 +311,7 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 });
                 remaining.delete(task.key);
                 lease.release();
-                return 'handled';
+                return { status: 'handled' };
             }
             const execution = Promise.resolve()
                 .then(task.run)
@@ -299,16 +330,20 @@ export async function runAnalysisV2FairAiScheduler<T>(
                     active.delete(execution);
                 });
             active.add(execution);
-            return 'admitted';
+            return { status: 'admitted' };
         }
-        return 'blocked';
+        return { status: 'blocked', generation: blockedGeneration };
     };
 
     while (remaining.size > 0) {
         let admittedOrHandled = false;
+        let blockedGeneration: number | null = null;
         while (mayAdmit()) {
             const admission = await admitOne();
-            if (admission === 'blocked') break;
+            if (admission.status === 'blocked') {
+                blockedGeneration = admission.generation;
+                break;
+            }
             admittedOrHandled = true;
         }
         if (active.size > 0) {
@@ -317,7 +352,10 @@ export async function runAnalysisV2FairAiScheduler<T>(
         }
         if (!mayAdmit()) break;
         if (!admittedOrHandled) {
+            if (blockedGeneration === null) break;
+            await input.onBeforeArbiterWait?.();
             const waitOutcome = await arbiter.waitForChange(
+                blockedGeneration,
                 input.handlerDeadlineAtMs - policy.admissionReserveMs - nowMs(),
             );
             if (waitOutcome === 'cutoff') break;

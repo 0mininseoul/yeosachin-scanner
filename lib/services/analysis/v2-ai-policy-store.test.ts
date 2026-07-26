@@ -58,6 +58,28 @@ describe('analysis V2 AI policy store', () => {
             .rejects.toThrow('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR');
     });
 
+    it.each([64, 65, 128])(
+        'accepts persisted policy versions at canonical length %i',
+        async length => {
+            const value = `v${'a'.repeat(length - 1)}`;
+            const store = createSupabaseAnalysisV2AiPolicyStore({
+                rpc: vi.fn(async () => ({ data: value, error: null })),
+            });
+            await expect(store.loadAiStagePolicyVersion(requestId)).resolves.toBe(value);
+        },
+    );
+
+    it('rejects a persisted policy version at length 129', async () => {
+        const store = createSupabaseAnalysisV2AiPolicyStore({
+            rpc: vi.fn(async () => ({
+                data: `v${'a'.repeat(128)}`,
+                error: null,
+            })),
+        });
+        await expect(store.loadAiStagePolicyVersion(requestId))
+            .rejects.toThrow('ANALYSIS_V2_AI_STAGE_POLICY_PERSISTENCE_ERROR');
+    });
+
     it('maps an absent V2 request to null and sanitizes RPC failures', async () => {
         const rpc = vi.fn()
             .mockResolvedValueOnce({ data: null, error: null })

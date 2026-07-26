@@ -11,12 +11,6 @@ describe('analysis V2 AI scheduler policy snapshot migration contract', () => {
         expect(migration).toContain(
             'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot('
         );
-        expect(migration).toContain(
-            'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_policy_versions_snapshot_v2'
-        );
-        expect(migration).toContain(
-            "'analysis-v2-policy-validator-v2'::TEXT"
-        );
         expect(migration).toContain("p_snapshot ? 'scheduler'");
         expect(migration).toContain("p_snapshot->>'scheduler' IS DISTINCT FROM 'ai-scheduler-v1'");
         expect(migration).toContain('item_count > 16');

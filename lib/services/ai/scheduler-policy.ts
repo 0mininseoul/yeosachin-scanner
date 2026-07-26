@@ -1,3 +1,5 @@
+import { isAiPolicyVersion } from './policy-version';
+
 export const AI_SCHEDULER_POLICY_ID = 'ai-scheduler-v1' as const;
 
 export type AiSchedulerPolicyVersion = typeof AI_SCHEDULER_POLICY_ID;
@@ -16,7 +18,6 @@ const REQUIRED_APPLICATION_POLICY_KEYS = Object.freeze([
     'risk',
     'aiStage',
 ] as const);
-const POLICY_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export function selectAiSchedulerPolicyVersion({
     rolloutMode,
@@ -47,7 +48,7 @@ export function parseAiSchedulerPolicySnapshot(snapshot: unknown): Readonly<{
         || REQUIRED_APPLICATION_POLICY_KEYS.some(key => (
             !Object.prototype.hasOwnProperty.call(record, key)
             || typeof record[key] !== 'string'
-            || !POLICY_VERSION_PATTERN.test(record[key])
+            || !isAiPolicyVersion(record[key])
         ))
     ) {
         throw new Error('Invalid AI scheduler policy snapshot');
