@@ -21,11 +21,11 @@ export default function AnalysisList({ initialAnalyses }: Props) {
         ['pending', 'processing', 'completed'].includes(item.status)
     );
 
-    const handleCardClick = (id: string, status: OwnerAnalysisHistoryItemV1['status']) => {
-        if (status === 'completed') {
-            router.push(`/result/${id}`);
+    const handleCardClick = (item: OwnerAnalysisHistoryItemV1) => {
+        if (item.status === 'completed') {
+            router.push(`/result/${item.id}${item.pipelineVersion === 'v2' ? '?pipeline=v2' : ''}`);
         } else {
-            router.push(`/progress/${id}`);
+            router.push(`/progress/${item.id}`);
         }
     };
 
@@ -48,7 +48,7 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                     <div
                         key={item.id}
                         data-amp-block
-                        onClick={() => handleCardClick(item.id, item.status)}
+                        onClick={() => handleCardClick(item)}
                         className="group relative cursor-pointer border border-line bg-ink-2 p-4 transition-colors hover:border-blood/50 active:scale-[0.99]"
                     >
                         <div className="flex items-start justify-between gap-3">

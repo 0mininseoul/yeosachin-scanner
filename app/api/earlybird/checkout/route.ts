@@ -23,15 +23,28 @@ import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { preflightStore } from '@/lib/services/analysis/preflight';
 import {
     observeRoute,
+    suppressOperationalObservation,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import {
     flushOperationalLogs,
     operationalLogger,
 } from '@/lib/observability/server';
+import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status });
+}
+
+/** Demo rejections intentionally bypass operational and commercial instrumentation. */
+function silentDemoErrorResponse(status: number, code: string, error: string): NextResponse {
+    return NextResponse.json({
+        code: code.slice(0, 64),
+        error: error.slice(0, 200),
+    }, { status, headers: demoResponseHeaders() });
 }
 
 function persistenceErrorResponse(error: EarlybirdPersistenceError): NextResponse {
@@ -190,6 +203,41 @@ async function handlePOST(
         body = await request.json();
     } catch {
         return failed(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
+    }
+    const rawPreflightId = body && typeof body === 'object'
+        ? Reflect.get(body, 'preflightId')
+        : undefined;
+    const demo = typeof rawPreflightId === 'string' && UUID_PATTERN.test(rawPreflightId)
+        ? await demoAnalysisStore.findForOwner(rawPreflightId, user.id)
+        : null;
+    if (demo) {
+        if (!isDemoOperator(user.id)) {
+            return suppressOperationalObservation(silentDemoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
+        }
+        const demoParsed = earlybirdCheckoutRequestSchema.safeParse(body);
+        if (!demoParsed.success) {
+            return suppressOperationalObservation(silentDemoErrorResponse(400, 'DISCLOSURE_REQUIRED', '필수 안내에 동의해주세요.'));
+        }
+        if (demoParsed.data.planId !== 'standard') {
+            return suppressOperationalObservation(silentDemoErrorResponse(409, 'PLAN_SELECTION_UNAVAILABLE', '선택한 플랜으로 사전 구매할 수 없습니다.'));
+        }
+        let started: Awaited<ReturnType<typeof demoAnalysisStore.startForOwner>>;
+        try {
+            started = await demoAnalysisStore.startForOwner(demo.id, user.id);
+        } catch {
+            return suppressOperationalObservation(silentDemoErrorResponse(
+                409,
+                'PREFLIGHT_NOT_VALID',
+                '최신 사전 점검을 다시 확인해주세요.'
+            ));
+        }
+        if (!started) {
+            return suppressOperationalObservation(silentDemoErrorResponse(409, 'PREFLIGHT_NOT_VALID', '최신 사전 점검을 다시 확인해주세요.'));
+        }
+        return suppressOperationalObservation(NextResponse.json(
+            { nextUrl: `/progress/${started.id}` },
+            { status: 200, headers: demoResponseHeaders() }
+        ));
     }
     const parsed = earlybirdCheckoutRequestSchema.safeParse(body);
     if (!parsed.success) {

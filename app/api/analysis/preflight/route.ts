@@ -29,6 +29,7 @@ import {
 import { isAnalysisV2AdmissionAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import {
     observeRoute,
+    suppressOperationalObservation,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import {
@@ -36,6 +37,8 @@ import {
     operationalLogger,
 } from '@/lib/observability/server';
 import { emitPreflightProcessObservation } from '@/lib/observability/preflight-events';
+import { demoResponseHeaders, isDemoEligible } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -91,6 +94,13 @@ async function handlePOST(
     let targetInstagramId: string | undefined;
     let provider: PreflightAuthProvider | null = null;
     let preflightId: string | undefined;
+    let demoCandidate = false;
+    const demoErrorResponse = (status: number, code: string, message: string): NextResponse =>
+        NextResponse.json({
+            schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+            code,
+            error: message,
+        }, { status, headers: demoResponseHeaders() });
     const failed = (status: number, code: string, message: string): NextResponse => {
         operationalLogger.emit({
             event: 'preflight.failed',
@@ -124,19 +134,43 @@ async function handlePOST(
         } catch {
             return failed(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
         }
+        const rawTargetInstagramId = body && typeof body === 'object'
+            ? Reflect.get(body, 'targetInstagramId')
+            : undefined;
+        // This is intentionally evaluated before validation failures can be logged. The
+        // demo target is never an operational analytics/logging subject.
+        demoCandidate = isDemoEligible(user.id, rawTargetInstagramId);
         const parsed = preflightRequestV1Schema.safeParse(body);
         if (!parsed.success) {
-            return failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
+            return demoCandidate
+                ? suppressOperationalObservation(demoErrorResponse(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.'))
+                : failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
         }
         targetInstagramId = parsed.data.targetInstagramId;
 
         const idempotencyKey = request.headers.get('idempotency-key')?.trim();
         if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
-            return failed(
-                400,
-                'INVALID_IDEMPOTENCY_KEY',
-                '올바른 Idempotency-Key가 필요합니다.'
-            );
+            return demoCandidate
+                ? suppressOperationalObservation(demoErrorResponse(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.'))
+                : failed(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.');
+        }
+        // This check intentionally uses the un-normalized browser value. All production
+        // validation continues to receive the canonical parsed value below.
+        if (demoCandidate) {
+            const createdDemo = await demoAnalysisStore.createOrReplay({
+                userId: user.id,
+                idempotencyKey,
+            });
+            if (!createdDemo) {
+                return suppressOperationalObservation(demoErrorResponse(503, 'ANALYSIS_FAILED', '사전 점검 요청 생성에 실패했습니다.'));
+            }
+            return suppressOperationalObservation(NextResponse.json({
+                schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                preflightId: createdDemo.run.id,
+                expiresAt: new Date(new Date(createdDemo.run.created_at).getTime() + 30 * 60_000).toISOString(),
+                status: 'pending',
+                exclusionDecision: 'pending',
+            }, { status: createdDemo.created ? 202 : 200, headers: demoResponseHeaders() }));
         }
         const publicAdmission = isAnalysisV2AdmissionAvailable();
         const signedTestAdmission = signedTestAdmissionState(
@@ -292,6 +326,13 @@ async function handlePOST(
             status: created.created ? 202 : 200,
         });
     } catch (error) {
+        if (demoCandidate) {
+            return suppressOperationalObservation(demoErrorResponse(
+                503,
+                'ANALYSIS_FAILED',
+                '사전 점검 요청 생성에 실패했습니다.'
+            ));
+        }
         if (error instanceof PreflightIdempotencyConflictError) {
             return failed(
                 409,

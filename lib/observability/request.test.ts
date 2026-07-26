@@ -13,8 +13,10 @@ vi.mock('./server', () => ({
     flushOperationalLogs: observabilityMocks.flush,
 }));
 
-import { observeRoute, requestContext } from './request';
+import * as requestModule from './request';
 import { sanitizeOperationalEvent, type OperationalEvent } from './schema';
+
+const { observeRoute, requestContext } = requestModule;
 
 beforeEach(() => {
     vi.resetAllMocks();
@@ -219,6 +221,24 @@ describe('requestContext', () => {
 });
 
 describe('observeRoute', () => {
+    it('skips completion observation and scheduled flushing for a server-marked response', async () => {
+        const response = new Response(null, { status: 202 });
+        const suppress = (requestModule as unknown as {
+            suppressOperationalObservation: (value: Response) => Response;
+        }).suppressOperationalObservation;
+        suppress(response);
+
+        await expect(observeRoute(
+            new Request('https://example.com', { method: 'POST' }),
+            '/api/example',
+            async () => response,
+        )).resolves.toBe(response);
+
+        expect(observabilityMocks.emit).not.toHaveBeenCalled();
+        expect(observabilityMocks.afterTask).not.toHaveBeenCalled();
+        expect(observabilityMocks.flush).not.toHaveBeenCalled();
+    });
+
     it('emits completion fields and defers flush without replacing the response', async () => {
         const request = new Request('https://example.com/private?buyer=private', {
             method: 'POST',

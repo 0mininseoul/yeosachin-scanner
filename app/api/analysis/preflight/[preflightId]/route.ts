@@ -17,10 +17,13 @@ import { fetchEarlybirdRemainingSlots } from '@/lib/services/earlybird/inventory
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     observeRoute,
+    suppressOperationalObservation,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
 import { insertLandingLead } from '@/lib/services/leads/store';
+import { demoPreflightLifecycle, demoReadyPreflight, demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -30,6 +33,14 @@ function errorResponse(status: number, code: string, message: string): NextRespo
         code,
         error: message,
     }, { status });
+}
+
+function demoErrorResponse(status: number, code: string, message: string): NextResponse {
+    return NextResponse.json({
+        schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+        code,
+        error: message,
+    }, { status, headers: demoResponseHeaders() });
 }
 
 async function authenticatedUser() {
@@ -97,12 +108,36 @@ async function handleGET(
     _request: Request,
     { params }: { params: Promise<{ preflightId: string }> }
 ) {
+    let demoRecognized = false;
     try {
         const user = await authenticatedUser();
         if (!user) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
+        if (demo) {
+            demoRecognized = true;
+            if (!isDemoOperator(user.id)) return suppressOperationalObservation(demoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
+            const lifecycle = demoPreflightLifecycle(demo);
+            if (lifecycle === 'consumed') {
+                return suppressOperationalObservation(NextResponse.json(preflightStatusV1Schema.parse({
+                    schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                    preflightId: demo.id,
+                    status: 'consumed',
+                    exclusionDecision: 'skip',
+                    requestId: demo.id,
+                }), { headers: demoResponseHeaders() }));
+            }
+            if (lifecycle === 'expired') {
+                return suppressOperationalObservation(demoErrorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.'));
+            }
+            return suppressOperationalObservation(NextResponse.json(
+                demoReadyPreflight(demo),
+                { headers: demoResponseHeaders() }
+            ));
         }
 
         const stored = await preflightStore.findForOwner(preflightId, user.id);
@@ -124,6 +159,13 @@ async function handleGET(
             : {};
         return NextResponse.json(publicPreflightStatusDto(stored, remainingSlotsByPlan));
     } catch (error) {
+        if (demoRecognized) {
+            return suppressOperationalObservation(demoErrorResponse(
+                500,
+                'ANALYSIS_FAILED',
+                '사전 점검 상태 조회에 실패했습니다.'
+            ));
+        }
         if (error instanceof PreflightExpiredError) {
             return errorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.');
         }
@@ -148,12 +190,34 @@ async function handlePATCH(
     { params }: { params: Promise<{ preflightId: string }> },
     context: OperationalRequestContext,
 ) {
+    let demoRecognized = false;
     try {
         const user = await authenticatedUser();
         if (!user) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
+        if (demo) {
+            demoRecognized = true;
+            if (!isDemoOperator(user.id)) return suppressOperationalObservation(demoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
+            let demoBody: unknown;
+            try {
+                demoBody = await request.json();
+            } catch {
+                return suppressOperationalObservation(demoErrorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.'));
+            }
+            if (!preflightExclusionRequestV1Schema.safeParse(demoBody).success) {
+                return suppressOperationalObservation(demoErrorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.'));
+            }
+            if (demoPreflightLifecycle(demo) !== 'ready') {
+                return suppressOperationalObservation(demoErrorResponse(409, 'PREFLIGHT_IMMUTABLE', '이 사전 점검 요청은 변경할 수 없습니다.'));
+            }
+            // Synthetic runs do not persist an exclusion or create a lead; this preserves
+            // the existing UI's compatible acknowledgement without mutating production rows.
+            return suppressOperationalObservation(new NextResponse(null, { status: 204, headers: demoResponseHeaders() }));
         }
 
         let body: unknown;
@@ -197,6 +261,13 @@ async function handlePATCH(
         });
         return new NextResponse(null, { status: 204 });
     } catch (error) {
+        if (demoRecognized) {
+            return suppressOperationalObservation(demoErrorResponse(
+                500,
+                'ANALYSIS_FAILED',
+                '제외 계정 저장에 실패했습니다.'
+            ));
+        }
         if (error instanceof PreflightNotFoundError) {
             return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
         }
