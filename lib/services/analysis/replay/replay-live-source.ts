@@ -83,6 +83,26 @@ function profileUsernames(items: readonly unknown[]): string[] {
     return [...values];
 }
 
+function isProductionAllowedCandidateProfileFailure(error: Error): boolean {
+    return error.message.startsWith('SCRAPING_SCHEMA_ERROR:')
+        || error.message.startsWith('SCRAPING_INCOMPLETE_ERROR:');
+}
+
+function isProductionCompleteCandidateProfileDataset(input: {
+    usernames: readonly string[];
+    parsed: ReturnType<typeof parseApifyProfileDataset>;
+}): boolean {
+    const { usernames, parsed } = input;
+    const allowedFailures = usernames.length - Math.ceil(0.9 * usernames.length);
+    return !parsed.datasetContaminated
+        && parsed.profilesByUsername.size
+            + parsed.failuresByUsername.size
+            + parsed.notFoundUsernames.size === usernames.length
+        && parsed.failuresByUsername.size <= allowedFailures
+        && [...parsed.failuresByUsername.values()]
+            .every(isProductionAllowedCandidateProfileFailure);
+}
+
 function asCheckpoint(profile: ReturnType<typeof parseApifyProfileDataset>['profilesByUsername'] extends Map<string, infer P> ? P : never): AnalysisV2CheckpointProfile {
     return profile as AnalysisV2CheckpointProfile;
 }
@@ -143,20 +163,44 @@ export async function loadReplaySourceFromExistingRuns(input: {
     }
 
     const profiles = new Map<string, AnalysisV2CheckpointProfile>();
+    const terminalCandidateProfileUsernames = new Set<string>();
     for (const [run, items] of datasets) {
+        const kind = operationKind(run);
         if (![
             'target-profile-fallback',
             'target-profile-fresh-admission',
             'profile-fallback',
             'profile-repair',
-        ].includes(operationKind(run))) continue;
+        ].includes(kind)) continue;
         const usernames = profileUsernames(items);
         const parsed = parseApifyProfileDataset(items, usernames);
-        if (parsed.datasetContaminated || parsed.failuresByUsername.size || parsed.notFoundUsernames.size || parsed.profilesByUsername.size !== usernames.length) {
+        const isCandidateProfile = kind === 'profile-fallback' || kind === 'profile-repair';
+        if (
+            isCandidateProfile
+                ? !isProductionCompleteCandidateProfileDataset({ usernames, parsed })
+                : parsed.datasetContaminated
+                    || parsed.failuresByUsername.size > 0
+                    || parsed.notFoundUsernames.size > 0
+                    || parsed.profilesByUsername.size !== usernames.length
+        ) {
             throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+        }
+        if (isCandidateProfile) {
+            for (const username of [
+                ...parsed.failuresByUsername.keys(),
+                ...parsed.notFoundUsernames,
+            ]) {
+                if (profiles.has(username)) {
+                    throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+                }
+                terminalCandidateProfileUsernames.add(username);
+            }
         }
         for (const [username, profile] of parsed.profilesByUsername) {
             const mapped = asCheckpoint(profile);
+            if (terminalCandidateProfileUsernames.has(username)) {
+                throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+            }
             const existing = profiles.get(username);
             if (existing && JSON.stringify(existing) !== JSON.stringify(mapped)) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DUPLICATE_DRIFT');
             profiles.set(username, mapped);
@@ -252,15 +296,20 @@ export async function loadReplaySourceFromExistingRuns(input: {
     const reverseInteractions = [...reverseByCandidate.values()]
         .filter(row => mutual.has(row.candidateUsername));
 
-    const profileList = [...mutual.values()].map(row => {
+    const profileList = [...mutual.values()].flatMap(row => {
         const detailed = profiles.get(row.username);
-        if (detailed) return detailed;
+        if (detailed) return [detailed];
+        // These are the exact terminal `failed`/`unavailable` outcomes production permits
+        // below the per-batch 90% profile-evidence floor. They have no profile media and
+        // therefore no AI workload; accepting only this recorded set preserves the old
+        // fail-closed check for public accounts absent from the retained Apify evidence.
+        if (terminalCandidateProfileUsernames.has(row.username)) return [];
         if (!row.isPrivate) {
             // Completed requests purge selfhosted profile checkpoints. Never treat the
             // surviving Apify fallback subset as an exact AI workload benchmark.
             throw new Error('ANALYSIS_V2_REPLAY_EXACT_PUBLIC_COVERAGE_INCOMPLETE');
         }
-        return { username: row.username, fullName: row.fullName ?? undefined, followersCount: 0, followingCount: 0, postsCount: 0, isPrivate: true, isVerified: row.isVerified } satisfies AnalysisV2CheckpointProfile;
+        return [{ username: row.username, fullName: row.fullName ?? undefined, followersCount: 0, followingCount: 0, postsCount: 0, isPrivate: true, isVerified: row.isVerified } satisfies AnalysisV2CheckpointProfile];
     });
     return { profiles: profileList, evidence: { relationship, targetInteractions, reverseInteractions }, providerRuns: input.descriptor.providerRuns };
 }
