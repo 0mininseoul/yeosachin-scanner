@@ -4,6 +4,7 @@ import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_RELATIONSHIP_ACTOR_ID,
     apifyProfileOmittedAccountError,
+    attributedApifyProfileUsername,
     attributedProfileActorErrorUsername,
     parseApifyProfileDataset,
     parseApifyRelationshipDataset,
@@ -77,10 +78,8 @@ function assertActorForOperation(run: Run): void {
 function profileUsernames(items: readonly unknown[]): string[] {
     const values = new Set<string>();
     for (const item of items) {
-        const parsed = z.object({ username: z.string().regex(/^[A-Za-z0-9._]{1,30}$/) }).passthrough().safeParse(item);
-        const username = parsed.success
-            ? parsed.data.username.toLowerCase()
-            : attributedProfileActorErrorUsername(item);
+        const username = attributedApifyProfileUsername(item)
+            ?? attributedProfileActorErrorUsername(item);
         if (!username) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_ATTRIBUTION_MISSING');
         values.add(username);
     }

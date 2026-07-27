@@ -459,6 +459,17 @@ describe('live replay source mapping', () => {
         expect(source.profiles.some(item => item.username === unavailable)).toBe(false);
     });
 
+    it('uses the production-trimmed username envelope for repair attribution', async () => {
+        const { repaired, descriptor, client } = repairReplayScenario(input => [{
+            ...profile(input.repaired, 'repair'),
+            username: ` ${input.repaired} `,
+        }]);
+
+        const source = await loadReplaySourceFromExistingRuns({ descriptor, clientForSlot: () => client });
+        expect(source.profiles).toHaveLength(9);
+        expect(source.profiles.some(item => item.username === repaired)).toBe(true);
+    });
+
     it('maps reversed repair Actor output back to the fallback requested order', async () => {
         const { repaired, unavailable, descriptor, client } = repairReplayScenario(input => [
             profile(input.unavailable, 'repair-unavailable'),

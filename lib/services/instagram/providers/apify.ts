@@ -243,6 +243,11 @@ const profileUsernameEnvelopeSchema = z.object({
     username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
 }).passthrough();
 
+export function attributedApifyProfileUsername(item: unknown): string | null {
+    const parsed = profileUsernameEnvelopeSchema.safeParse(item);
+    return parsed.success ? parsed.data.username.toLowerCase() : null;
+}
+
 const profileNotFoundEnvelopeSchema = z.object({
     username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
     statusCode: z.literal(404).optional(),
@@ -643,8 +648,8 @@ export function parseApifyProfileDataset(
             notFoundUsernames.add(key);
             continue;
         }
-        const envelope = profileUsernameEnvelopeSchema.safeParse(item);
-        if (!envelope.success) {
+        const envelopeUsername = attributedApifyProfileUsername(item);
+        if (!envelopeUsername) {
             const hasUsernameField = typeof item === 'object'
                 && item !== null
                 && Object.prototype.hasOwnProperty.call(item, 'username');
@@ -668,7 +673,7 @@ export function parseApifyProfileDataset(
             datasetContaminated = true;
             continue;
         }
-        const key = envelope.data.username.toLowerCase();
+        const key = envelopeUsername;
         if (!currentBatch.has(key)) {
             datasetContaminated = true;
             continue;
