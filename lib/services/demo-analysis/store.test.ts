@@ -4,16 +4,17 @@ const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.rpc, from: mocks.from } }));
 
 import { demoAnalysisStore } from './store';
+import { DEMO_FIXTURE_VERSION } from './demo-analysis';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
 const otherOwnerId = '223e4567-e89b-42d3-a456-426614174000';
 const runId = '323e4567-e89b-42d3-a456-426614174000';
 const anotherRunId = '423e4567-e89b-42d3-a456-426614174000';
 
-function row(id = runId, userId = ownerId, startedAt: string | null = null) {
+function row(id = runId, userId = ownerId, startedAt: string | null = null, fixtureVersion = DEMO_FIXTURE_VERSION) {
     return {
-        id, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
-        idempotency_key: 'demo-idempotency-key-000000', duration_seconds: 75,
+        id, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: fixtureVersion,
+        idempotency_key: 'demo-idempotency-key-000000', duration_seconds: 38,
         created_at: '2026-07-01T00:00:00.000Z', started_at: startedAt,
     };
 }
@@ -37,7 +38,21 @@ describe('demo analysis store idempotency and ownership boundary', () => {
         expect(replay).toMatchObject({ created: false, run: { id: runId } });
         expect(started?.started_at).toBe('2026-07-01T00:01:00.000Z');
         expect(fresh?.run.id).toBe(anotherRunId);
-        expect(mocks.rpc).toHaveBeenNthCalledWith(1, 'create_demo_analysis_preflight', expect.objectContaining({ p_user_id: ownerId }));
+        expect(mocks.rpc).toHaveBeenNthCalledWith(1, 'create_demo_analysis_preflight', expect.objectContaining({
+            p_user_id: ownerId,
+            p_duration_seconds: 38,
+            p_idempotency_key: expect.not.stringMatching(/^demo-idempotency-key-000000$/),
+        }));
+    });
+
+    it('does not reinterpret a legacy v1 run as the current fixture', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: [{ ...row(), fixture_version: 'synthetic-fixture-v1', duration_seconds: 75, created: false }],
+            error: null,
+        });
+
+        await expect(demoAnalysisStore.createOrReplay({ userId: ownerId, idempotencyKey: 'demo-idempotency-key-000000' }))
+            .resolves.toBeNull();
     });
 
     it('fails closed when the database returns a row for another owner', async () => {

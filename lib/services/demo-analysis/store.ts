@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { DEMO_FIXTURE_VERSION, DEMO_TARGET_USERNAME, demoDurationSeconds } from './demo-analysis';
@@ -11,7 +12,7 @@ const rowSchema = z.object({
     target_instagram_id: z.literal(DEMO_TARGET_USERNAME),
     fixture_version: z.literal(DEMO_FIXTURE_VERSION),
     idempotency_key: z.string().min(16).max(128),
-    duration_seconds: z.number().int().min(60).max(90),
+    duration_seconds: z.number().int().min(30).max(45),
     created_at: z.string().datetime({ offset: true }),
     started_at: z.string().datetime({ offset: true }).nullable(),
 }).passthrough();
@@ -21,6 +22,11 @@ export type DemoAnalysisRun = z.infer<typeof rowSchema>;
 function parseRow(value: unknown): DemoAnalysisRun | null {
     const parsed = rowSchema.safeParse(value);
     return parsed.success ? parsed.data : null;
+}
+
+/** New fixture versions cannot replay a persisted run from an earlier fixture namespace. */
+export function demoFixtureIdempotencyKey(idempotencyKey: string): string {
+    return `fixture-v2-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
 }
 
 export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({
@@ -34,7 +40,7 @@ export const demoAnalysisStore = {
         const { data, error } = await supabaseAdmin.rpc(DEMO_ANALYSIS_DATABASE_NAMES.createRpc, {
             p_user_id: input.userId,
             p_target_instagram_id: DEMO_TARGET_USERNAME,
-            p_idempotency_key: input.idempotencyKey,
+            p_idempotency_key: demoFixtureIdempotencyKey(input.idempotencyKey),
             p_duration_seconds: demoDurationSeconds(),
         });
         if (error || !Array.isArray(data) || data.length !== 1) return null;

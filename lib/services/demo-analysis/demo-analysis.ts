@@ -15,7 +15,7 @@ import { ANALYSIS_PLAN_CATALOG, PLAN_PRICING_VERSION, buildPlanSelectionCards } 
 
 /** The only canonical demo target. Do not duplicate this value in route or SQL code. */
 export const DEMO_TARGET_USERNAME = 'junho_dem' as const;
-export const DEMO_FIXTURE_VERSION = 'synthetic-fixture-v1' as const;
+export const DEMO_FIXTURE_VERSION = 'authorized-text-fixture-v2' as const;
 export const DEMO_ASSET_PREFIX = '/demo-avatars/synthetic-blurred-avatar-' as const;
 export const DEMO_PREFLIGHT_TTL_MS = 30 * 60_000;
 
@@ -73,8 +73,8 @@ type DemoEnvironment = Readonly<{
 
 export function demoDurationSeconds(env: DemoEnvironment = process.env as DemoEnvironment): number {
     const value = Number.parseInt(env.DEMO_ANALYSIS_DURATION_SECONDS ?? '', 10);
-    if (!Number.isFinite(value)) return 75;
-    return Math.max(60, Math.min(90, value));
+    if (!Number.isFinite(value)) return 38;
+    return Math.max(30, Math.min(45, value));
 }
 
 export function demoPreflightLifecycle(
@@ -107,6 +107,451 @@ export function isDemoOperator(userId: string, env: DemoEnvironment = process.en
 function avatar(index: number): string {
     return `${DEMO_ASSET_PREFIX}${(index % 4) + 1}-v1.png`;
 }
+
+export type DemoSourceProfileFixture = Readonly<{
+    instagramId: string;
+    fullName: string | null;
+    bio: string | null;
+}>;
+
+/**
+ * Authorized source text is copied here once for this isolated v2 fixture.
+ * Runtime code must never read an analysis table or external profile source.
+ */
+export const DEMO_SOURCE_PROFILE_FIXTURE: readonly DemoSourceProfileFixture[] = [
+    {
+        "instagramId": "lotusonthepond",
+        "fullName": "윤하",
+        "bio": null
+    },
+    {
+        "instagramId": "clover_hee__",
+        "fullName": "윤희원",
+        "bio": null
+    },
+    {
+        "instagramId": "graceintheseo",
+        "fullName": "恩",
+        "bio": "SAY MA GRACE"
+    },
+    {
+        "instagramId": "yun_ten_quadrillion",
+        "fullName": "윤경",
+        "bio": "univ . music ."
+    },
+    {
+        "instagramId": "uiwahyou",
+        "fullName": "혜민 Hailey",
+        "bio": null
+    },
+    {
+        "instagramId": "jinjintonique",
+        "fullName": "임효진",
+        "bio": null
+    },
+    {
+        "instagramId": "o_aaaaasis",
+        "fullName": "정서진 Seojin J",
+        "bio": "Hi ⠀ What’s in my 🔍 Contact DM"
+    },
+    {
+        "instagramId": "hxxuiou",
+        "fullName": "한결",
+        "bio": null
+    },
+    {
+        "instagramId": "lululajin",
+        "fullName": "최유진",
+        "bio": null
+    },
+    {
+        "instagramId": "vel.ote",
+        "fullName": "윤예진 イェジン",
+        "bio": "35J"
+    },
+    {
+        "instagramId": "growth_yule",
+        "fullName": "율공이이",
+        "bio": "🎓 서울대 자연대 이과생 🧠 연구실 & 대학 현실 기록 🔥 회사와 창업을 거쳐 연구로 ➡️ 매일 릴스 올려요"
+    },
+    {
+        "instagramId": "nveouir",
+        "fullName": "명은",
+        "bio": "Myungeun"
+    },
+    {
+        "instagramId": "yoonsuumi",
+        "fullName": "윤수미",
+        "bio": null
+    },
+    {
+        "instagramId": "choahly",
+        "fullName": "Choah",
+        "bio": "singer-songwriter🇰🇷 choahlee1014 [Blonde] Full Album Cover out now on YouTube🍋"
+    },
+    {
+        "instagramId": "0rion_25",
+        "fullName": null,
+        "bio": "오윤아"
+    },
+    {
+        "instagramId": "oojookim",
+        "fullName": "MinJoo Kim",
+        "bio": null
+    },
+    {
+        "instagramId": "5una.9",
+        "fullName": "윤선아",
+        "bio": null
+    },
+    {
+        "instagramId": "iam_usb_",
+        "fullName": "유수빈",
+        "bio": null
+    },
+    {
+        "instagramId": "chaechae.jpg",
+        "fullName": "Chae",
+        "bio": "ʕ•ع•ʔ"
+    },
+    {
+        "instagramId": "babebettyyy",
+        "fullName": "베티",
+        "bio": "I'm Betty :)"
+    },
+    {
+        "instagramId": "marcymarcelinee",
+        "fullName": "안시나",
+        "bio": null
+    },
+    {
+        "instagramId": "ysleei1021",
+        "fullName": "이예슬",
+        "bio": null
+    },
+    {
+        "instagramId": "hayoung.emily",
+        "fullName": null,
+        "bio": null
+    },
+    {
+        "instagramId": "dx.kxm",
+        "fullName": "김도현",
+        "bio": null
+    },
+    {
+        "instagramId": "ch__n1",
+        "fullName": "정창은",
+        "bio": null
+    },
+    {
+        "instagramId": "what_a_jia",
+        "fullName": "김지아",
+        "bio": null
+    },
+    {
+        "instagramId": "ny.hssh",
+        "fullName": null,
+        "bio": null
+    },
+    {
+        "instagramId": "huse_birdcage",
+        "fullName": "휴세 (Huse)",
+        "bio": "수장"
+    },
+    {
+        "instagramId": "jmni_x",
+        "fullName": "김지민",
+        "bio": "🎵"
+    },
+    {
+        "instagramId": "ryu.seonhee",
+        "fullName": "유선희",
+        "bio": "✝️ Romans 8:18 CCC 성남지구 순장 대학생 2002.12.11 e-mail: seonhee021211"
+    },
+    {
+        "instagramId": "_i_.s0",
+        "fullName": null,
+        "bio": null
+    },
+    {
+        "instagramId": "heimish_msc",
+        "fullName": "서연우",
+        "bio": "🎹 Piano account SPO 서포터즈 12기"
+    },
+    {
+        "instagramId": "__van.ne",
+        "fullName": "최가은",
+        "bio": null
+    },
+    {
+        "instagramId": "ixxahn",
+        "fullName": "이다현",
+        "bio": null
+    },
+    {
+        "instagramId": "yemlxm",
+        "fullName": "예림",
+        "bio": null
+    },
+    {
+        "instagramId": "mymyyyk",
+        "fullName": "MyungJi Seo",
+        "bio": null
+    },
+    {
+        "instagramId": "makechanges0040",
+        "fullName": "시니 | 04년생 스타트업 대표",
+        "bio": "평범한 대학생이 창업 성공 할 수 있을까❓ CEO 💪팔로우하고 같이 성장해요!🪽 - 📩seo1a62"
+    },
+    {
+        "instagramId": "hyunsssplend",
+        "fullName": "Hyunseo Kang",
+        "bio": "잔잔한 기쁨과 넉넉한 마음"
+    },
+    {
+        "instagramId": "mountainheee",
+        "fullName": "▫️◤hee",
+        "bio": "firmitas, utilitas, venustas."
+    },
+    {
+        "instagramId": "two__silver_a",
+        "fullName": "이은아",
+        "bio": null
+    },
+    {
+        "instagramId": "z.fuul",
+        "fullName": "지풀",
+        "bio": "공연 섭외 및 각종 협업 DM🌱"
+    },
+    {
+        "instagramId": "seoul_sfiz",
+        "fullName": "정이 jeongi",
+        "bio": "유월 삼십일은 해의 절반 📮jeongiseoul"
+    },
+    {
+        "instagramId": "suhyen_o727",
+        "fullName": "수현",
+        "bio": null
+    },
+    {
+        "instagramId": "mwrluna",
+        "fullName": "민소",
+        "bio": null
+    },
+    {
+        "instagramId": "kx_.hui",
+        "fullName": "희 †",
+        "bio": "ᴊᴜꜱᴛ ᴀꜱ ᴛʜᴇ ꜰᴀᴛʜᴇʀ ʟᴏᴠᴇꜱ ᴍᴇ, ꜱᴏ ɪ ʟᴏᴠᴇ ʏᴏᴜ. ꜱᴛᴀʏ ɪɴ ᴍʏ ʟᴏᴠᴇ -`♥ ́-"
+    },
+    {
+        "instagramId": "ryusxmin",
+        "fullName": "유세민",
+        "bio": null
+    },
+    {
+        "instagramId": "yoonyooniii",
+        "fullName": "윤윤 yoonyoon",
+        "bio": "7월 30일 우주정거장 로켓라이브 7월 31일 우무지 경이로운 금요일"
+    },
+    {
+        "instagramId": "s2_heebin",
+        "fullName": "이희빈",
+        "bio": "본캐🍀🍀 부캐 -"
+    },
+    {
+        "instagramId": "wnwndusdus",
+        "fullName": "주연",
+        "bio": "Piano Instructor Composer & Producer"
+    },
+    {
+        "instagramId": "thisistaam",
+        "fullName": "탬",
+        "bio": "🧡 🍒 🐣"
+    },
+    {
+        "instagramId": "_juzila",
+        "fullName": null,
+        "bio": null
+    },
+    {
+        "instagramId": "seoheeeeeeee",
+        "fullName": "박서희",
+        "bio": "📧 seohee.mp3"
+    },
+    {
+        "instagramId": "ecitsuj_s",
+        "fullName": "의정",
+        "bio": null
+    },
+    {
+        "instagramId": "_ashl2y_",
+        "fullName": "Ashley",
+        "bio": "🎶🎸🎤"
+    },
+    {
+        "instagramId": "se.__.eun",
+        "fullName": "김세은",
+        "bio": "Leben und Leben lassen 🐬📷 🎧🍅 🥪☕️"
+    },
+    {
+        "instagramId": "fmpark0213",
+        "fullName": "박승민",
+        "bio": null
+    },
+    {
+        "instagramId": "glwormun",
+        "fullName": null,
+        "bio": null
+    },
+    {
+        "instagramId": "pxssword486",
+        "fullName": "최찬미",
+        "bio": null
+    },
+    {
+        "instagramId": "this.is.where.i.thrash",
+        "fullName": "조수현 Skylar",
+        "bio": null
+    },
+    {
+        "instagramId": "yuzexxiv",
+        "fullName": "유혜진혜유",
+        "bio": null
+    },
+    {
+        "instagramId": "a_trac._9",
+        "fullName": "권하은",
+        "bio": null
+    },
+    {
+        "instagramId": "hayoon.pp",
+        "fullName": "헤어메이크업 하윤",
+        "bio": "̊✧+⁎❝᷀ົཽ≀ˍ̮ ❝᷀ົཽ⁎+˳✧༚MAKE UP/HAIR ̊✧+⁎❝᷀ົཽ≀ˍ̮ ❝᷀ົཽ⁎+˳✧༚ Pslam23"
+    },
+    {
+        "instagramId": "sejinmanmanse",
+        "fullName": "세진만만세",
+        "bio": null
+    },
+    {
+        "instagramId": "letsmusiq",
+        "fullName": "I LOVE R&B",
+        "bio": null
+    },
+    {
+        "instagramId": "its.yxxng",
+        "fullName": "이채영",
+        "bio": "🎗"
+    },
+    {
+        "instagramId": "smouse0213",
+        "fullName": "eunji",
+        "bio": null
+    },
+    {
+        "instagramId": "jinse_bb",
+        "fullName": "이세진",
+        "bio": "Lee sejin"
+    },
+    {
+        "instagramId": "kwdozer",
+        "fullName": "Hyeokyeon 혁연",
+        "bio": "Yeon"
+    },
+    {
+        "instagramId": "jukeecandle",
+        "fullName": null,
+        "bio": null
+    },
+    {
+        "instagramId": "naengs_ppl",
+        "fullName": "냉이의 인물",
+        "bio": "냉이의 인생무물 <냉이의 인물>은 다채로운 인물들의 일상을 소개하는 카드뉴스 인터뷰입니다. 여러분의 물음표는 무엇인가요? 독자들에게 여러분의 일상을 나누어주세요. _contact : DM"
+    },
+    {
+        "instagramId": "seo_yeon.zip",
+        "fullName": "Seoyeon Hong",
+        "bio": "홍서연의 과일가게 📑 #대외활동 #공모전 본 계정 🏫 GCU Industrial Engineering 📍 SNU 과학영재교육원 생물 사사 📍 PCEO 9 📍 TEU MED 5 📍 GCS 7"
+    },
+    {
+        "instagramId": "_butterflies_fly_",
+        "fullName": "나영 Nayoung / Sally",
+        "bio": null
+    },
+    {
+        "instagramId": "euyuina",
+        "fullName": "김의나",
+        "bio": null
+    },
+    {
+        "instagramId": "ppo_sseun_._._",
+        "fullName": "이서은",
+        "bio": "24 셀프네일"
+    },
+    {
+        "instagramId": "eu__njjii",
+        "fullName": "신은지 Eunji Shin",
+        "bio": null
+    },
+    {
+        "instagramId": "uz._yo2n",
+        "fullName": "우지윤 jiyoon",
+        "bio": null
+    },
+    {
+        "instagramId": "redwestyear",
+        "fullName": "홍서연",
+        "bio": null
+    },
+    {
+        "instagramId": "hayoung.st",
+        "fullName": "하영 HAYOUNG",
+        "bio": "hayoung.st(ory) hayoungchokr"
+    },
+    {
+        "instagramId": "nusimik_",
+        "fullName": "민선",
+        "bio": null
+    },
+    {
+        "instagramId": "muzartlsyn",
+        "fullName": "소영",
+        "bio": null
+    },
+    {
+        "instagramId": "gaeun____._",
+        "fullName": "이가은",
+        "bio": null
+    },
+    {
+        "instagramId": "realizewhatuwant",
+        "fullName": "유진",
+        "bio": "마음이 가는 곳으로 . 작업물 기록"
+    },
+    {
+        "instagramId": "sselrevil",
+        "fullName": "노가은",
+        "bio": "🥐 🎵"
+    },
+    {
+        "instagramId": "hyson_18",
+        "fullName": "Yeson Hong",
+        "bio": null
+    },
+    {
+        "instagramId": "s._.dam2",
+        "fullName": "박새담",
+        "bio": "장면 같은 하루들🌫 📩 collab DM"
+    },
+    {
+        "instagramId": "humming_moon70",
+        "fullName": "歌う月",
+        "bio": "2000年生まれ|シンガーソングライター 「人生はきっと涙忘れ歩く日の連続」 ▶︎ ▶︎ チケット予約はプロフURLから ☽ 📍7/24 南堀江knave"
+    }
+];
+
+export const DEMO_SOURCE_HANDLE_FIXTURE = DEMO_SOURCE_PROFILE_FIXTURE.map(row => row.instagramId);
 
 /**
  * Deliberately fictional, hand-written derivatives for the isolated fixture.
@@ -229,16 +674,26 @@ function fixtureIdentifier(stems: readonly string[], index: number): string {
 }
 
 function publicAccount(index: number): FemaleResultRowV1 {
+    const sourceProfile = DEMO_SOURCE_PROFILE_FIXTURE[index] ?? null;
     const variant = DEMO_FIXTURE_VARIANTS[
         index % DEMO_FIXTURE_VARIANTS.length
     ]!;
     const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
-    const displayScore = index === 0 ? 8 : index === 1 ? 6 : index === 2 ? 5 : [3, 3, 2, 2, 1][index % 5]!;
+    const displayScore = index === 0
+        ? 8
+        : index === 1
+            ? 6
+            : index === 2
+                ? 5
+                : sourceProfile
+                    ? 3
+                    : [2, 1][index % 2]!;
     return {
-        instagramId: fixtureIdentifier(DEMO_PUBLIC_HANDLES, variant.handleIndex + index * DEMO_PUBLIC_HANDLES.length),
-        fullName: DEMO_PUBLIC_NAMES[variant.nameIndex]!,
+        instagramId: sourceProfile?.instagramId
+            ?? fixtureIdentifier(DEMO_PUBLIC_HANDLES, variant.handleIndex + index * DEMO_PUBLIC_HANDLES.length),
+        fullName: sourceProfile ? sourceProfile.fullName : DEMO_PUBLIC_NAMES[variant.nameIndex]!,
         profileImage: avatar(index),
-        bio: DEMO_PUBLIC_BIOS[variant.bioIndex]!,
+        bio: sourceProfile ? sourceProfile.bio : DEMO_PUBLIC_BIOS[variant.bioIndex]!,
         displayScore,
         riskBand,
         featuredRank: index === 0 ? 1 : index < 3 ? index + 1 : null,
@@ -252,6 +707,11 @@ function publicAccount(index: number): FemaleResultRowV1 {
             ]
             : null,
     };
+}
+
+function demoProgressProfileId(progressBp: number): string {
+    const index = Math.floor(progressBp / 1_000) % DEMO_SOURCE_HANDLE_FIXTURE.length;
+    return `${DEMO_SOURCE_HANDLE_FIXTURE[index] ?? 'demo.profile'}*`;
 }
 
 function privateAccount(index: number): PrivateResultRowV1 {
@@ -439,7 +899,7 @@ export function projectDemoProgress(input: {
         snapshot: {
             schemaVersion: 1, requestId: input.requestId, revision: allEvents.length,
             status: completed ? 'completed' : 'processing', progressBp, backgroundProcessing: !completed,
-            tracks, activeProfile: completed ? null : { maskedUsername: 'profile.***', imageUrl: avatar(0) },
+            tracks, activeProfile: completed ? null : { maskedUsername: demoProgressProfileId(progressBp), imageUrl: avatar(0) },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
             lastEventSeq: allEvents.length,
         },

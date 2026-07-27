@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { demoArchiveItems } from './archive';
+import { DEMO_FIXTURE_VERSION } from './demo-analysis';
 
 const owner = '123e4567-e89b-42d3-a456-426614174000';
 const run = (id: string, startedAt: string | null, createdAt: string) => ({
     id, user_id: owner, target_instagram_id: 'junho_dem' as const,
-    fixture_version: 'synthetic-fixture-v1' as const, idempotency_key: `idempotency-key-${id}`,
-    duration_seconds: 75, created_at: createdAt, started_at: startedAt,
+    fixture_version: DEMO_FIXTURE_VERSION, idempotency_key: `idempotency-key-${id}`,
+    duration_seconds: 38, created_at: createdAt, started_at: startedAt,
 });
 
 describe('demo archive projection', () => {
