@@ -60,12 +60,26 @@ describe('AI-only replay runner', () => {
         };
     }
 
+    const withIdentities = (
+        value: ReturnType<typeof validPartialBundle>,
+        sourceIdentities: ReturnType<typeof validPartialBundle>['capture']['partial']['sourceIdentities'],
+    ) => ({ ...value, capture: { ...value.capture, partial: {
+        ...value.capture.partial,
+        sourceIdentities,
+        sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+    } } });
+
+    it('rejects a stale digest before a direct runner invocation', async () => {
+        const value = validPartialBundle();
+        const invalid = { ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceUniverseDigest: '0'.repeat(64) } } };
+        await expect(runAnalysisV2AiReplay({ bundle: invalid, mode: 'dry-run', evaluationPolicy: invalid.capture.evaluationPolicy })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    });
+
     it.each([
-        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceUniverseDigest: '0'.repeat(64) } } }),
-        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceIdentities: [...value.capture.partial.sourceIdentities, { ordinal: 8, username: 'PUBLIC', partition: 'fetch_terminal' as const }] } } }),
-        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceIdentities: value.capture.partial.sourceIdentities.slice(0, 1) } } }),
-        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceIdentities: value.capture.partial.sourceIdentities.map(identity => identity.ordinal === 1 ? { ...identity, partition: 'private' as const } : identity) } } }),
-    ])('rejects invalid partial identity invariants before a direct runner invocation %#', async mutate => {
+        (value: ReturnType<typeof validPartialBundle>) => withIdentities(value, [...value.capture.partial.sourceIdentities, { ordinal: 8, username: 'PUBLIC', partition: 'fetch_terminal' as const }]),
+        (value: ReturnType<typeof validPartialBundle>) => withIdentities(value, value.capture.partial.sourceIdentities.slice(0, 1)),
+        (value: ReturnType<typeof validPartialBundle>) => withIdentities(value, value.capture.partial.sourceIdentities.map(identity => identity.ordinal === 1 ? { ...identity, partition: 'private' as const } : identity)),
+    ])('rejects an identity invariant with a matching recomputed digest before direct runner invocation %#', async mutate => {
         const invalid = mutate(validPartialBundle());
         await expect(runAnalysisV2AiReplay({ bundle: invalid, mode: 'dry-run', evaluationPolicy: invalid.capture.evaluationPolicy })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
     });

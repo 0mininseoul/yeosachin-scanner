@@ -116,12 +116,36 @@ describe('analysis V2 replay bundle', () => {
         temporaryPaths.push(directory);
         const keyPath = join(directory, 'key.key'); await createReplayKeyFile(keyPath);
         const base = partialBundle() as Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
-        const invalid = { ...base, capture: { ...base.capture, partial: { ...base.capture.partial, sourceIdentities: [
+        const sourceIdentities = [
             { ordinal: 1, username: 'example', partition: 'public' as const },
             { ordinal: 9, username: 'EXAMPLE', partition: 'fetch_terminal' as const },
-        ] } } };
+        ];
+        const invalid = { ...base, capture: { ...base.capture, partial: {
+            ...base.capture.partial,
+            sourceIdentities,
+            sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+        } } };
         await expect(writeReplayBundle({ bundle: invalid as AnalysisV2ReplayBundle, bundlePath: join(directory, 'write.enc'), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
         const readPath = join(directory, 'read.enc'); await writeRawEncrypted(readPath, keyPath, invalid);
+        await expect(readReplayBundle({ bundlePath: readPath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it.each([
+        (base: Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>) => base.capture.partial.sourceIdentities.slice(0, 0),
+        (base: Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>) => base.capture.partial.sourceIdentities.map(identity => ({ ...identity, partition: 'private' as const })),
+    ])('rejects missing or mismatched identity accounting with a recomputed digest at write and read %#', async mutate => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key'); await createReplayKeyFile(keyPath);
+        const base = partialBundle() as Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
+        const sourceIdentities = mutate(base);
+        const invalid = { ...base, capture: { ...base.capture, partial: {
+            ...base.capture.partial,
+            sourceIdentities,
+            sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+        } } };
+        await expect(writeReplayBundle({ bundle: invalid, bundlePath: join(directory, 'account-write.enc'), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+        const readPath = join(directory, 'account-read.enc'); await writeRawEncrypted(readPath, keyPath, invalid);
         await expect(readReplayBundle({ bundlePath: readPath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
     });
 
