@@ -4,10 +4,13 @@ const mocks = vi.hoisted(() => ({
     privateNames: vi.fn(),
     createFeatureAnalysisResultIdentity: vi.fn(),
     createGenderResolutionResultIdentity: vi.fn(),
+    createGenderTriageMicrobatchAccountId: vi.fn(),
+    createGenderTriageMicrobatchResultIdentity: vi.fn(),
     createGenderTriageResultIdentity: vi.fn(),
     featureAnalysis: vi.fn(),
     genderResolution: vi.fn(),
     genderTriage: vi.fn(),
+    genderTriageMicrobatch: vi.fn(),
 }));
 
 vi.mock('@/lib/services/ai/private-name-analysis', () => ({
@@ -17,10 +20,13 @@ vi.mock('@/lib/services/ai/private-name-analysis', () => ({
 vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     createFeatureAnalysisResultIdentity: mocks.createFeatureAnalysisResultIdentity,
     createGenderResolutionResultIdentity: mocks.createGenderResolutionResultIdentity,
+    createGenderTriageMicrobatchAccountId: mocks.createGenderTriageMicrobatchAccountId,
+    createGenderTriageMicrobatchResultIdentity: mocks.createGenderTriageMicrobatchResultIdentity,
     createGenderTriageResultIdentity: mocks.createGenderTriageResultIdentity,
     featureAnalysis: mocks.featureAnalysis,
     genderResolution: mocks.genderResolution,
     genderTriage: mocks.genderTriage,
+    genderTriageMicrobatch: mocks.genderTriageMicrobatch,
 }));
 
 import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
@@ -108,6 +114,29 @@ describe('replay staged AI adapter telemetry', () => {
             );
         },
     );
+
+    it('uses the v2.9 batch identity and never substitutes the ambient single-account policy', async () => {
+        const identity = { operationKey: 'gender-triage:batch-identity' };
+        mocks.createGenderTriageMicrobatchAccountId.mockReturnValue(`account:${'a'.repeat(64)}`);
+        mocks.createGenderTriageMicrobatchResultIdentity.mockReturnValue(identity);
+        mocks.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'a'.repeat(64)}`,
+            source: 'checkpoint',
+            result: { assessment: {}, routingDecision: 'route_to_feature_analysis' },
+        }]);
+
+        await createReplayStagedAiAdapter('ai-stage-policy-v2.9').triage?.({
+            ordinal: 1,
+            media: [],
+        });
+
+        expect(mocks.genderTriage).not.toHaveBeenCalled();
+        expect(mocks.genderTriageMicrobatch).toHaveBeenCalledWith(
+            [{ accountId: `account:${'a'.repeat(64)}`, input: { media: [] } }],
+            expect.any(Object),
+            expect.any(Object),
+        );
+    });
 
     it.each(['ai-stage-policy-v2.7', 'ai-stage-policy-v2.8'] as const)(
         'pins %s into resolver identity and execution options',

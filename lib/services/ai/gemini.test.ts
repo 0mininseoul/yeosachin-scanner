@@ -532,6 +532,30 @@ describe('analyzeWithGemini stage request policy', () => {
         }
     );
 
+    it('admits only the bounded v2.9 two-account gender microbatch media override', async () => {
+        const images = Array.from({ length: 11 }, (_, index) => `image-${index}`);
+        await analyzeWithGemini('prompt', images, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            maxImages: 10,
+            ...stageAuditOptions(),
+        });
+
+        const request = mocks.generateContent.mock.calls[0][0];
+        expect(request.config).toMatchObject({ maxOutputTokens: 1_024 });
+        expect(request.contents[0].parts.filter(
+            (part: { inlineData?: unknown }) => part.inlineData
+        )).toHaveLength(10);
+        await expect(analyzeWithGemini('prompt', images, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            maxImages: 11,
+            ...stageAuditOptions(),
+        })).rejects.toThrow('maxImages override is restricted to bounded v2.9 gender batches');
+    });
+
     it('allows explicit model, thinking, resolution, and output overrides without cost-mode coupling', async () => {
         await analyzeWithGemini('prompt', ['image'], {
             schema: responseSchema,

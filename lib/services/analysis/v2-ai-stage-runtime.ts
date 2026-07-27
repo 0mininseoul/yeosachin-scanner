@@ -14,6 +14,9 @@ import {
 } from '@/lib/services/ai/private-name-analysis';
 import {
     createFeatureAnalysisResultIdentity,
+    createGenderTriageMicrobatchAccountId,
+    createGenderTriageMicrobatchResponseSchema,
+    createGenderTriageMicrobatchResultIdentity,
     createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
     createHighRiskNarrativeResultIdentity,
@@ -25,6 +28,7 @@ import {
     genderResolutionCheckpointAssessment,
     genderResolutionModelResponseSchema,
     genderTriage,
+    genderTriageMicrobatch,
     genderTriageResultSchema,
     genderTriageModelResponseSchema,
     highRiskNarrative,
@@ -36,6 +40,7 @@ import {
     type GenderResolutionInput,
     type GenderResolutionResult,
     type GenderTriageInput,
+    type GenderTriageMicrobatchAccountInput,
     type GenderTriageResult,
     type HighRiskNarrativeInput,
     type HighRiskNarrativeResult,
@@ -143,6 +148,7 @@ AnalysisV2AiAuditAdapter<T>;
 export interface AnalysisV2AiStageRuntimeDependencies {
     createAudit?: AuditFactory;
     runGender?: typeof genderTriage;
+    runGenderMicrobatch?: typeof genderTriageMicrobatch;
     runGenderResolution?: typeof genderResolution;
     runFeatures?: typeof featureAnalysis;
     runPrivateNames?: typeof analyzePrivateAccountNames;
@@ -254,7 +260,10 @@ function assertGenderResolutionPolicyVersion(fence: AnalysisV2AiJobFence): void 
 const AI_RESULT_HASH_PATTERN = /^[0-9a-f]{64}$/;
 
 function exactSchedulerEnabled(fence: AnalysisV2AiJobFence): boolean {
-    return fence.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+    return (
+        fence.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        || fence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+    )
         && fence.schedulerCapability === 'scheduler-v1';
 }
 
@@ -416,6 +425,7 @@ export function createDurableAnalysisV2AiStageRuntime(
 ): AnalysisV2AiStageRuntime {
     const createAudit = dependencies.createAudit ?? createAnalysisV2AiAuditAdapter;
     const runGender = dependencies.runGender ?? genderTriage;
+    const runGenderMicrobatch = dependencies.runGenderMicrobatch ?? genderTriageMicrobatch;
     const runGenderResolution = dependencies.runGenderResolution ?? genderResolution;
     const runFeatures = dependencies.runFeatures ?? featureAnalysis;
     const runPrivateNames = dependencies.runPrivateNames ?? analyzePrivateAccountNames;
@@ -423,9 +433,142 @@ export function createDurableAnalysisV2AiStageRuntime(
     const runNarrative = dependencies.runNarrative ?? highRiskNarrative;
     const schedule = createSchedulerMicrobatch(dependencies);
 
+    type PendingGenderMicrobatchPlan = {
+        accountId: string;
+        input: GenderTriageInput;
+        fence: AnalysisV2AiJobFence;
+        waiters: Array<{
+            resolve(value: AnalysisV2AuditedResult<GenderTriageResult>): void;
+            reject(error: unknown): void;
+        }>;
+    };
+    const pendingGenderMicrobatches = new Map<string, {
+        fence: AnalysisV2AiJobFence;
+        plans: PendingGenderMicrobatchPlan[];
+        scheduled: boolean;
+    }>();
+
+    const flushGenderMicrobatch = async (groupKey: string): Promise<void> => {
+        const group = pendingGenderMicrobatches.get(groupKey);
+        if (!group) return;
+        pendingGenderMicrobatches.delete(groupKey);
+        const plans = [...group.plans].sort((left, right) => (
+            left.accountId.localeCompare(right.accountId)
+        ));
+        const chunks: PendingGenderMicrobatchPlan[][] = [];
+        for (let index = 0; index < plans.length; index += 2) {
+            chunks.push(plans.slice(index, index + 2));
+        }
+        await Promise.all(chunks.map(async chunk => {
+            const accounts: GenderTriageMicrobatchAccountInput[] = chunk.map(plan => ({
+                accountId: plan.accountId,
+                input: plan.input,
+            }));
+            try {
+                const identity = createGenderTriageMicrobatchResultIdentity(accounts);
+                const responseSchema = createGenderTriageMicrobatchResponseSchema(accounts);
+                const envelopeSchema = z.object({
+                    results: z.array(z.object({
+                        accountId: z.string().regex(/^account:[0-9a-f]{64}$/),
+                        result: genderTriageResultSchema,
+                        source: z.enum(['checkpoint', 'safe_fallback']),
+                    }).strict()).length(chunk.length),
+                    operationKey: z.literal(identity.operationKey),
+                }).strict();
+                const execute = async (
+                    activeFence: AnalysisV2AiJobFence,
+                ) => {
+                    const audit = adapter(
+                        createAudit,
+                        activeFence,
+                        identity,
+                        responseSchema,
+                    );
+                    const results = await runGenderMicrobatch(accounts, audit);
+                    return {
+                        results,
+                        operationKey: identity.operationKey,
+                    };
+                };
+                const completed = await schedule(group.fence, {
+                    key: identity.operationKey,
+                    stage: 'genderTriage',
+                    schema: envelopeSchema,
+                    run: () => execute(group.fence),
+                    recover: () => execute({ ...group.fence, schedulerRecoveryOnly: true }),
+                    terminalFallback: () => execute({
+                        ...group.fence,
+                        schedulerTerminalUnavailable: true,
+                    }),
+                });
+                const byAccount = new Map(completed.results.map(result => [
+                    result.accountId,
+                    result,
+                ]));
+                for (const plan of chunk) {
+                    const result = byAccount.get(plan.accountId);
+                    if (!result) {
+                        throw new Error('ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_RESULT_MISSING');
+                    }
+                    const completedResult = {
+                        result: result.result,
+                        operationKey: completed.operationKey,
+                        // Safe fallback is deterministic and scheduler-checkpointed even when the
+                        // provider response itself was rejected, so the profile-stage hash remains
+                        // replayable without pretending the Gemini result was accepted.
+                        resultHash: analysisV2CanonicalAiResultHash(result.result.assessment),
+                        source: result.source,
+                    } as const;
+                    plan.waiters.forEach(waiter => waiter.resolve(completedResult));
+                }
+            } catch (error) {
+                chunk.forEach(plan => plan.waiters.forEach(waiter => waiter.reject(error)));
+            }
+        }));
+    };
+
+    const queueGenderMicrobatch = (
+        input: GenderTriageInput,
+        fence: AnalysisV2AiJobFence,
+    ): Promise<AnalysisV2AuditedResult<GenderTriageResult>> => {
+        if (!exactSchedulerEnabled(fence)) {
+            return Promise.reject(new Error('ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_SCHEDULER_REQUIRED'));
+        }
+        const accountId = createGenderTriageMicrobatchAccountId(input);
+        const groupKey = schedulerBatchKey(fence);
+        let group = pendingGenderMicrobatches.get(groupKey);
+        if (!group) {
+            group = { fence, plans: [], scheduled: false };
+            pendingGenderMicrobatches.set(groupKey, group);
+        }
+        return new Promise((resolve, reject) => {
+            // The profile-stage operation may be observed more than once while a job is being
+            // recovered. It must remain one logical member of the exact batch, never two copies
+            // that could make an otherwise valid response ambiguous.
+            const existing = group!.plans.find(plan => plan.accountId === accountId);
+            if (existing) {
+                existing.waiters.push({ resolve, reject });
+                return;
+            }
+            group!.plans.push({
+                accountId,
+                input,
+                fence,
+                waiters: [{ resolve, reject }],
+            });
+            if (!group!.scheduled) {
+                group!.scheduled = true;
+                setTimeout(() => void flushGenderMicrobatch(groupKey), 0);
+            }
+        });
+    };
+
     return {
         async gender(input, fence) {
             const policyVersion = assertAiStagePolicyVersion(fence);
+            if (policyVersion === 'ai-stage-policy-v2.9') {
+                return queueGenderMicrobatch(input, fence);
+            }
             const identity = createGenderTriageResultIdentity(input, policyVersion);
             const execute = async (
                 activeFence: AnalysisV2AiJobFence,

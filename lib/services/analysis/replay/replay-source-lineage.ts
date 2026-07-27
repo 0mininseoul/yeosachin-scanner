@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
     AI_STAGE_POLICY_V28_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
 
@@ -26,6 +27,13 @@ const standardV28PolicySchema = z.object({
     scheduler: z.literal('ai-scheduler-v1'),
 }).strict();
 
+const standardV29PolicySchema = z.object({
+    pipeline,
+    aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
+    risk: z.literal('risk-policy-v2.4'),
+    scheduler: z.literal('ai-scheduler-v1'),
+}).strict();
+
 /**
  * Source lineage is deliberately exact. Historical v2.7 snapshots predate the
  * scheduler key, so that key is optional only for v2.7. v2.8 starts after the
@@ -41,6 +49,10 @@ export const replaySourceLineageSchema = z.union([
         policyVersions: standardV28PolicySchema,
     }).strict(),
     z.object({
+        selectedPlanId: z.literal('standard'),
+        policyVersions: standardV29PolicySchema,
+    }).strict(),
+    z.object({
         selectedPlanId: z.literal('plus'),
         policyVersions: z.object({
             pipeline,
@@ -54,7 +66,9 @@ export type ReplaySourceLineage = z.infer<typeof replaySourceLineageSchema>;
 
 export type ReplaySupportedAiStagePolicyVersion = Extract<
     AiStagePolicyVersion,
-    typeof AI_STAGE_POLICY_V27_VERSION | typeof AI_STAGE_POLICY_V28_VERSION
+    | typeof AI_STAGE_POLICY_V27_VERSION
+    | typeof AI_STAGE_POLICY_V28_VERSION
+    | typeof AI_STAGE_POLICY_V29_VERSION
 >;
 
 /**
@@ -69,6 +83,7 @@ export function replayAiStagePolicyVersion(
     if (
         version === AI_STAGE_POLICY_V27_VERSION
         || version === AI_STAGE_POLICY_V28_VERSION
+        || version === AI_STAGE_POLICY_V29_VERSION
     ) {
         return version;
     }

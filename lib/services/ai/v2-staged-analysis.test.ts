@@ -28,6 +28,7 @@ import { zodToGeminiResponseJsonSchema } from './gemini';
 import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
     type AiStagePolicyVersion,
 } from './stage-policy';
 import {
@@ -35,6 +36,8 @@ import {
     createFeatureAnalysisResultIdentity,
     createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
+    createGenderTriageMicrobatchAccountId,
+    createGenderTriageMicrobatchResultIdentity,
     createHighRiskNarrativeResultIdentity,
     createPartnerSafetyResultIdentity,
     featureAnalysis,
@@ -42,6 +45,7 @@ import {
     genderResolution,
     genderResolutionModelResponseSchemaFor,
     genderTriage,
+    genderTriageMicrobatch,
     highRiskNarrative,
     highRiskNarrativeInputSchema,
     highRiskNarrativeModelResponseSchema,
@@ -2151,5 +2155,127 @@ describe('V2 staged AI services', () => {
                 { text: '셋째 문장입니다.', evidenceRefs: ['profile:bio'] },
             ],
         })).toThrow();
+    });
+
+    it('maps a bounded v2.9 gender batch by stable account ID without cross-account evidence', async () => {
+        const first = {
+            media: media().slice(0, 2),
+            accountProfile: { fullName: 'First', hasProfileImage: true, bio: 'personal notes' },
+        };
+        const second = {
+            media: media().slice(0, 2).map((item, index) => ({
+                ...item,
+                selectionId: item.kind === 'profile'
+                    ? 'profile:second'
+                    : `post:second:${index}`,
+                normalizedJpegBase64: encoded(`second-${index}`),
+            })),
+            accountProfile: { fullName: 'Second', hasProfileImage: true, bio: 'team updates' },
+        };
+        const accounts = [first, second].map(input => ({
+            accountId: createGenderTriageMicrobatchAccountId(input),
+            input,
+        })).sort((left, right) => left.accountId.localeCompare(right.accountId));
+        const identity = createGenderTriageMicrobatchResultIdentity(accounts);
+        const batchAudit: StagedAiAuditContext = {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        };
+        mocks.analyzeWithGemini.mockResolvedValueOnce({
+            accounts: accounts.map((account, index) => index === 0 ? {
+                accountId: account.accountId,
+                status: 'ok',
+                assessment: {
+                    inferredGender: 'female',
+                    confidence: 'high',
+                    ownerConsistency: 'same_person',
+                    evidenceSelectionIds: [
+                        `batch-media:${account.accountId.slice(-16)}:1`,
+                        `batch-media:${account.accountId.slice(-16)}:2`,
+                    ],
+                },
+                accountContext: 'personal',
+            } : {
+                accountId: account.accountId,
+                status: 'uncertain',
+            }),
+        });
+
+        const result = await genderTriageMicrobatch(accounts, batchAudit);
+
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(images).toHaveLength(4);
+        expect(options).toMatchObject({
+            stage: 'genderTriage',
+            aiStagePolicyVersion: AI_STAGE_POLICY_V29_VERSION,
+            maxImages: 10,
+        });
+        expect(prompt).toContain(accounts[0]!.accountId);
+        expect(prompt).toContain(accounts[1]!.accountId);
+        expect(result[0]!.result.assessment.evidenceSelectionIds).toEqual(
+            accounts[0]!.input.media.map(item => item.selectionId)
+        );
+        expect(result[1]!.result.assessment.inferredGender).toBe('unknown');
+        expect(result[1]!.source).toBe('checkpoint');
+    });
+
+    it('does not retry a rejected v2.9 batch and marks every affected item uncertain', async () => {
+        const input = { media: media().slice(0, 2) };
+        const accounts = [{
+            accountId: createGenderTriageMicrobatchAccountId(input),
+            input,
+        }];
+        const identity = createGenderTriageMicrobatchResultIdentity(accounts);
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+        ));
+
+        const result = await genderTriageMicrobatch(accounts, {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        });
+
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        expect(result).toMatchObject([{
+            source: 'safe_fallback',
+            result: { assessment: { inferredGender: 'unknown', confidence: 'low' } },
+        }]);
+    });
+
+    it('does not replay or split an ambiguous v2.9 paid batch', async () => {
+        const accounts = ['first', 'second'].map(suffix => {
+            const input = { media: media().slice(0, 2).map(item => ({
+                ...item,
+                selectionId: item.selectionId.replace('candidate', suffix),
+            })) };
+            return { accountId: createGenderTriageMicrobatchAccountId(input), input };
+        }).sort((left, right) => left.accountId.localeCompare(right.accountId));
+        const identity = createGenderTriageMicrobatchResultIdentity(accounts);
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_AMBIGUOUS_GENERATION_ERROR: Gemini generation status is unknown; the request was not retried.'
+        ));
+
+        const result = await genderTriageMicrobatch(accounts, {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        });
+
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        expect(result).toHaveLength(2);
+        expect(result.every(row => row.source === 'safe_fallback')).toBe(true);
+        expect(result.every(row => row.result.assessment.inferredGender === 'unknown')).toBe(true);
     });
 });

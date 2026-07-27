@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import {
     createFeatureAnalysisResultIdentity,
+    createGenderTriageMicrobatchAccountId,
+    createGenderTriageMicrobatchResultIdentity,
     createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
     featureAnalysis,
     genderResolution,
     genderTriage,
+    genderTriageMicrobatch,
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib/services/ai/private-name-analysis';
@@ -158,6 +161,19 @@ export function createReplayStagedAiAdapter(
     const runner: ReplayAiRunner = {
         triage: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
+            if (aiStagePolicyVersion === 'ai-stage-policy-v2.9') {
+                const accounts = [{
+                    accountId: createGenderTriageMicrobatchAccountId(aiInput),
+                    input: aiInput,
+                }];
+                const identity = createGenderTriageMicrobatchResultIdentity(accounts);
+                const results = await genderTriageMicrobatch(
+                    accounts,
+                    statelessAudit(requestId, identity, state),
+                    { replayCapability },
+                );
+                return results[0]!.result;
+            }
             const identity = createGenderTriageResultIdentity(aiInput, aiStagePolicyVersion);
             return genderTriage(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
         }),

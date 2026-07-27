@@ -109,7 +109,10 @@ export function analysisV2ProfilePipelineConcurrency(
     configured?: number,
 ): number {
     return configured ?? (
-        aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        (
+            aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        )
         && schedulerCapability === 'scheduler-v1'
             ? SCHEDULER_V1_PROFILE_PIPELINE_CONCURRENCY
             : LEGACY_MAX_PROFILE_AI_CONCURRENCY
@@ -144,6 +147,43 @@ export function isAnalysisV2PartialMediaCoverageAllowed(
 ): boolean {
     return coverage.normalizedCount >= 1
         && coverage.failures.length * 5 <= coverage.selectedCount;
+}
+
+/**
+ * v2.9 moves the existing source-bound official-page screen ahead of feature admission.  This
+ * does not change the v2.4 risk calculation: it only avoids paying for feature extraction where
+ * the triage evidence cannot establish a personal female candidate.
+ */
+function v29FeatureAdmission(
+    triage: GenderTriageResult,
+    profile: AnalysisV2CheckpointProfile,
+): 'eligible' | 'nonpersonal_or_official' | 'unsupported_unknown' {
+    const assessment = triage.assessment;
+    const confirmedFemale = assessment.inferredGender === 'female'
+        && assessment.confidence === 'high'
+        && assessment.ownerConsistency === 'same_person'
+        && new Set(assessment.evidenceSelectionIds).size >= 2;
+    if (!confirmedFemale) return 'unsupported_unknown';
+
+    const modelAccountContext = triage.v29AccountContext;
+    // Keep the v2.8 source-bound corroboration as a mandatory admission input.  In particular,
+    // organization-looking profile text alone can never block a personal account: this helper
+    // only excludes when the visual/model context independently says official too.
+    if (!modelAccountContext) return 'unsupported_unknown';
+    const screened = screenAnalysisV2OfficialAccount({
+        modelAccountContext,
+        fullName: profile.fullName ?? null,
+        bio: profile.bio ?? null,
+    });
+    if (modelAccountContext === 'official_group_or_brand') {
+        return screened.exclusionReason
+            ? 'nonpersonal_or_official'
+            : 'unsupported_unknown';
+    }
+    if (modelAccountContext === 'personal' || modelAccountContext === 'individual_creator') {
+        return 'eligible';
+    }
+    return 'unsupported_unknown';
 }
 
 export class AnalysisV2TransientMediaPreparationError extends Error {
@@ -205,6 +245,8 @@ export interface AnalysisV2ProfileAiOutcome {
     }>;
     aiStagePolicyVersion?: AiStagePolicyVersion;
     inputQualityPolicy?: 'input-quality-v2.8';
+    /** v2.9-only pre-feature gate; prevents unsupported accounts from spending a feature call. */
+    v29FeatureAdmission?: 'eligible' | 'nonpersonal_or_official' | 'unsupported_unknown';
     /** v2.8 screened context consumed by the existing v2.4 risk policy. */
     accountContextOverride?: AccountContext;
     officialScreeningStatus?:
@@ -931,7 +973,10 @@ function screenedAccountContext(
     // not field sniffing, chooses the semantic branch.
     if (!exactV28Policy) return modelContext;
     const hasCompleteV28Provenance =
-        outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        (
+            outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+            || outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        )
         && outcome.inputQualityPolicy === 'input-quality-v2.8'
         && outcome.mediaSelectionProvenance !== undefined
         && outcome.accountContextOverride !== undefined
@@ -1384,6 +1429,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 aiFence.aiStagePolicyVersion,
                 'inputQualityV28',
             );
+            const inputQualityPolicyVersion = aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                ? 'ai-stage-policy-v2.9' as const
+                : 'ai-stage-policy-v2.8' as const;
             const defaultGenderResolutionStatus = genderResolutionEnabled
                 ? 'not_eligible' as const
                 : 'disabled' as const;
@@ -1434,6 +1482,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         ? {
                             fullName: profile.fullName ?? null,
                             hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
+                            ...(aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                                ? { bio: profile.bio ?? null }
+                                : {}),
                         }
                         : undefined;
                     const triageNormalized = await normalizedSelections(
@@ -1514,6 +1565,40 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             genderResolutionResultHash: null,
                             mediaBundlePersisted: false,
                         };
+                    }
+                    if (policySupports(
+                        aiFence.aiStagePolicyVersion,
+                        'genderTriageMicrobatchV29',
+                    )) {
+                        const admission = v29FeatureAdmission(gender.result, profile);
+                        if (admission !== 'eligible') {
+                            return {
+                                candidateId,
+                                instagramId: normalizeUsername(item.username),
+                                status: 'unresolved' as const,
+                                unavailableReason: null,
+                                profile: item.profile,
+                                triage: gender.result,
+                                feature: null,
+                                normalizedSelectionIds: triageNormalized.media.map(
+                                    row => row.selectionId
+                                ),
+                                mediaCoverage: triageNormalized.coverage,
+                                captions: [],
+                                genderOperationKey: gender.operationKey,
+                                genderResultHash: gender.resultHash,
+                                featureOperationKey: null,
+                                featureResultHash: null,
+                                baselineClassification: 'unresolved' as const,
+                                classificationSource: 'unknown' as const,
+                                genderResolutionStatus: 'not_eligible' as const,
+                                genderResolutionOperationKey: null,
+                                genderResolutionResultHash: null,
+                                mediaBundlePersisted: false,
+                                aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+                                v29FeatureAdmission: admission,
+                            };
+                        }
                     }
                     const triageAttempted = new Set(policy.triage.selectionIds);
                     const featureRemainder = policy.feature.media.filter(media => (
@@ -1777,7 +1862,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 mediaBundlePersisted,
                                 ...(selectionProvenance
                                     ? {
-                                        aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const,
+                                        aiStagePolicyVersion: inputQualityPolicyVersion,
                                         mediaSelectionProvenance: selectionProvenance,
                                         inputQualityPolicy: 'input-quality-v2.8' as const,
                                     }
@@ -1833,7 +1918,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 ...checkpointClaim(context),
                 batch: context.job.batch!,
                 ...(inputQualityV28
-                    ? { aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const }
+                    ? { aiStagePolicyVersion: inputQualityPolicyVersion }
                     : {}),
                 outcomes,
             });

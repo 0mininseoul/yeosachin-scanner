@@ -198,6 +198,27 @@ function v28ProfileOutcome(): AnalysisV2ProfileAiOutcome {
     };
 }
 
+function v29PreFeatureSkipOutcome(): AnalysisV2ProfileAiOutcome {
+    const outcome = v28ProfileOutcome();
+    return {
+        ...outcome,
+        status: 'unresolved',
+        feature: null,
+        featureOperationKey: null,
+        featureResultHash: null,
+        baselineClassification: 'unresolved',
+        classificationSource: 'unknown',
+        mediaBundlePersisted: false,
+        aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+        v29FeatureAdmission: 'unsupported_unknown',
+        inputQualityPolicy: undefined,
+        mediaSelectionProvenance: undefined,
+        accountContextOverride: undefined,
+        officialScreeningStatus: undefined,
+        officialExclusionReason: undefined,
+    };
+}
+
 describe('analysis V2 AI/scoring stage store', () => {
     const v28FieldNames = [
         'aiStagePolicyVersion',
@@ -301,6 +322,37 @@ describe('analysis V2 AI/scoring stage store', () => {
             batch: 0,
             outcomes: [v28ProfileOutcome()],
         })).rejects.toThrow('v2.8 outcome requires a v2.8 batch policy');
+    });
+
+    it('persists a v2.9 source-bound pre-feature exclusion without a feature operation', async () => {
+        const outcome = v29PreFeatureSkipOutcome();
+        const payload = {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+            outcomes: [outcome],
+        };
+        const fake = clientWith({
+            data: {
+                stageKind: 'profile_ai_batch',
+                batch: 0,
+                revision: 1,
+                resultHash: digest('profile-v29-skipped'),
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            outcomes: [outcome],
+        })).resolves.toMatchObject({ itemCount: 1 });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({ p_payload: payload }),
+        );
     });
 
     it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {

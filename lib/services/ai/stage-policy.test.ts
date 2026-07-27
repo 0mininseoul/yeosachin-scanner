@@ -5,6 +5,7 @@ import {
     AI_STAGE_POLICIES,
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -177,6 +178,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.6',
             'ai-stage-policy-v2.7',
             'ai-stage-policy-v2.8',
+            'ai-stage-policy-v2.9',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -198,6 +200,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.6',
             'ai-stage-policy-v2.7',
             'ai-stage-policy-v2.8',
+            'ai-stage-policy-v2.9',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -221,6 +224,23 @@ describe('V2 AI stage policy', () => {
             .toBe('feature-analysis-v3');
         expect(getAiStagePolicy('ai-stage-policy-v2.7', 'genderTriage').promptVersion)
             .toBe('gender-triage-v2');
+    });
+
+    it('adds v2.9 as an explicit bounded microbatch policy without mutating v2.8', () => {
+        expect(AI_STAGE_POLICY_V29_VERSION).toBe('ai-stage-policy-v2.9');
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V29_VERSION, 'genderTriage')).toMatchObject({
+            promptVersion: 'gender-triage-microbatch-v1',
+            schemaVersion: 3,
+            maxOutputTokens: 1_024,
+            concurrency: 6,
+        });
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V28_VERSION, 'genderTriage')).toMatchObject({
+            promptVersion: 'gender-triage-v3',
+            schemaVersion: 2,
+            maxOutputTokens: 512,
+        });
+        expect(aiStagePolicySupports(AI_STAGE_POLICY_V29_VERSION, 'genderTriageMicrobatchV29'))
+            .toBe(true);
     });
 
     it('lowers only v2.7 scheduling concurrency for rate-limited early stages', () => {
@@ -266,6 +286,8 @@ describe('V2 AI stage policy', () => {
             .toBe('ai-stage-policy-v2.7');
         expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.8'))
             .toBe('ai-stage-policy-v2.8');
+        expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.9'))
+            .toBe('ai-stage-policy-v2.9');
         expect(() => assertSupportedAiStagePolicyVersion('ai-stage-policy-v9'))
             .toThrow('Unsupported AI stage policy version');
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY)).toBe(true);
@@ -289,8 +311,9 @@ describe('V2 AI stage policy', () => {
         expect(selectAiStagePolicyVersion({
             rolloutMode: 'production',
             narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
             accessMode: 'production',
-        })).toBe('ai-stage-policy-v2.8');
+        })).toBe('ai-stage-policy-v2.9');
         expect(selectAiStagePolicyVersion({
             rolloutMode: 'test_entitlement',
             narrativeV28RolloutMode: 'test_entitlement',

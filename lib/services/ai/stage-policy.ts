@@ -35,10 +35,17 @@ export const AI_STAGE_POLICY_LATEST_VERSION = 'ai-stage-policy-v2.7';
  * separately gated tone rollout, so v2.7 remains the stable default for existing rollout paths.
  */
 export const AI_STAGE_POLICY_V28_VERSION = 'ai-stage-policy-v2.8';
+/**
+ * v2.9 is an explicit launch-performance fence.  It retains every v2.8 input
+ * and presentation rule, but changes only how small, independently-audited
+ * gender triage requests are packed for Gemini.
+ */
+export const AI_STAGE_POLICY_V29_VERSION = 'ai-stage-policy-v2.9';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -160,17 +167,36 @@ const AI_STAGE_POLICIES_V28 = Object.freeze({
     }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+/**
+ * The gender stage is deliberately a little larger than one v2.8 response so
+ * a bounded two-account response has room for its strict envelope.  The
+ * deployment-wide scheduler remains the source of truth for concurrent calls.
+ */
+const AI_STAGE_POLICIES_V29 = Object.freeze({
+    ...AI_STAGE_POLICIES_V28,
+    genderTriage: Object.freeze({
+        ...AI_STAGE_POLICIES_V28.genderTriage,
+        // Scheduler-v1 owns the matching six-call global cap; each call carries <=2 accounts.
+        concurrency: 6,
+        maxOutputTokens: 1_024,
+        promptVersion: 'gender-triage-microbatch-v1',
+        schemaVersion: 3,
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
     [AI_STAGE_POLICY_V28_VERSION]: AI_STAGE_POLICIES_V28,
+    [AI_STAGE_POLICY_V29_VERSION]: AI_STAGE_POLICIES_V29,
 });
 
 export type AiStagePolicyCapability =
     | 'durableGeminiLease'
     | 'genderResolution'
     | 'partialMediaCoverage'
-    | 'inputQualityV28';
+    | 'inputQualityV28'
+    | 'genderTriageMicrobatchV29';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -187,6 +213,13 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'genderResolution',
         'partialMediaCoverage',
         'inputQualityV28',
+    ]),
+    [AI_STAGE_POLICY_V29_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
     ]),
 });
 
@@ -239,10 +272,12 @@ export type AiStagePolicyAccessMode = 'test_entitlement' | 'production';
 export function selectAiStagePolicyVersion({
     rolloutMode,
     narrativeV28RolloutMode,
+    microbatchV29RolloutMode,
     accessMode,
 }: {
     rolloutMode: string | undefined;
     narrativeV28RolloutMode?: string | undefined;
+    microbatchV29RolloutMode?: string | undefined;
     accessMode: AiStagePolicyAccessMode;
 }): AiStagePolicyVersion {
     const v27Eligible = rolloutMode === 'production'
@@ -252,6 +287,14 @@ export function selectAiStagePolicyVersion({
             narrativeV28RolloutMode === 'test_entitlement'
             && accessMode === 'test_entitlement'
         );
+    const v29Eligible = microbatchV29RolloutMode === 'production'
+        || (
+            microbatchV29RolloutMode === 'test_entitlement'
+            && accessMode === 'test_entitlement'
+        );
+    if (v27Eligible && v28Eligible && v29Eligible) {
+        return AI_STAGE_POLICY_V29_VERSION;
+    }
     if (v27Eligible && v28Eligible) {
         return AI_STAGE_POLICY_V28_VERSION;
     }

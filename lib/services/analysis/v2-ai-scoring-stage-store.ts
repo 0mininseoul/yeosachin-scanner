@@ -189,7 +189,15 @@ const profileOutcomeSchema = z.object({
     genderResolutionOperationKey: resolverOperationKeySchema.nullable().optional(),
     genderResolutionResultHash: hashSchema.nullable().optional(),
     mediaBundlePersisted: z.boolean(),
-    aiStagePolicyVersion: z.literal('ai-stage-policy-v2.8').optional(),
+    v29FeatureAdmission: z.enum([
+        'eligible',
+        'nonpersonal_or_official',
+        'unsupported_unknown',
+    ]).optional(),
+    aiStagePolicyVersion: z.enum([
+        'ai-stage-policy-v2.8',
+        'ai-stage-policy-v2.9',
+    ]).optional(),
     mediaSelectionProvenance: mediaSelectionProvenanceSchema.optional(),
     inputQualityPolicy: z.literal('input-quality-v2.8').optional(),
     accountContextOverride: accountContextSchema.optional(),
@@ -307,7 +315,21 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Analyzed outcome is incomplete.' });
     }
-    const featureRequired = [
+    const v29FeatureSkipped = value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        && value.v29FeatureAdmission !== undefined
+        && value.v29FeatureAdmission !== 'eligible';
+    if (v29FeatureSkipped && (
+        value.status !== 'unresolved'
+        || value.feature !== null
+        || value.featureOperationKey !== null
+        || value.featureResultHash !== null
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'A v2.9 pre-feature exclusion must remain an unresolved triage-only outcome.',
+        });
+    }
+    const featureRequired = !v29FeatureSkipped && [
         'verified_female', 'unresolved', 'unresolved_stage_conflict',
     ].includes(value.status);
     if (featureRequired && (
@@ -320,20 +342,22 @@ const profileOutcomeSchema = z.object({
         || value.accountContextOverride !== undefined
         || value.officialScreeningStatus !== undefined
         || value.officialExclusionReason !== undefined;
-    const exactV28InputQuality = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8';
-    if (!exactV28InputQuality && hasV28Contamination) {
+    const inputQualityPolicyFamily = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9';
+    const requiresInputQualityProvenance = inputQualityPolicyFamily && !v29FeatureSkipped;
+    if (!inputQualityPolicyFamily && hasV28Contamination) {
         context.addIssue({
             code: 'custom',
-            message: 'v2.8 input-quality fields require the exact v2.8 AI-stage policy.',
+                message: 'v2.8 input-quality fields require an exact v2.8-family AI-stage policy.',
         });
     }
-    if (exactV28InputQuality && !value.feature) {
+    if (requiresInputQualityProvenance && !value.feature) {
         context.addIssue({
             code: 'custom',
             message: 'Media selection provenance requires completed feature analysis.',
         });
     }
-    if (exactV28InputQuality && (
+    if (requiresInputQualityProvenance && (
         value.inputQualityPolicy !== 'input-quality-v2.8'
         || value.mediaSelectionProvenance === undefined
         || value.accountContextOverride === undefined
@@ -345,7 +369,7 @@ const profileOutcomeSchema = z.object({
             message: 'v2.8 input-quality provenance is incomplete.',
         });
     }
-    if (exactV28InputQuality && value.feature && value.profile) {
+    if (requiresInputQualityProvenance && value.feature && value.profile) {
         const modelContext = value.feature.features.accountContext;
         const screening = screenAnalysisV2OfficialAccount({
             modelAccountContext: modelContext,
@@ -550,24 +574,36 @@ const narrativeRowSchema = z.object({
 });
 
 const profilePayloadSchema = z.object({
-    aiStagePolicyVersion: z.literal('ai-stage-policy-v2.8').optional(),
+    aiStagePolicyVersion: z.enum([
+        'ai-stage-policy-v2.8',
+        'ai-stage-policy-v2.9',
+    ]).optional(),
     outcomes: z.array(profileOutcomeSchema).min(1).max(30),
 }).strict().superRefine((value, context) => {
-    const exactV28 = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8';
+    const exactV28Family = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9';
     for (const [index, outcome] of value.outcomes.entries()) {
         const hasFeature = outcome.feature !== null;
-        if (exactV28 && hasFeature && outcome.aiStagePolicyVersion !== 'ai-stage-policy-v2.8') {
+        if (exactV28Family && hasFeature && outcome.aiStagePolicyVersion !== value.aiStagePolicyVersion) {
             context.addIssue({
                 code: 'custom',
                 path: ['outcomes', index, 'aiStagePolicyVersion'],
-                message: 'v2.8 feature outcome is not bound to the batch policy.',
+                message: 'v2.8-family feature outcome is not bound to the batch policy.',
             });
         }
-        if (!exactV28 && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8') {
+        if (!exactV28Family && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8') {
+            // Preserve the exact legacy rejection contract for every stored v2.8 checkpoint.
             context.addIssue({
                 code: 'custom',
                 path: ['outcomes', index, 'aiStagePolicyVersion'],
                 message: 'v2.8 outcome requires a v2.8 batch policy.',
+            });
+        }
+        if (!exactV28Family && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.9') {
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.9 outcome requires a v2.9 batch policy.',
             });
         }
     }
@@ -793,8 +829,10 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             const outcomes = profileOutcomeSchema.array().min(1).max(30).parse(input.outcomes);
             uniqueCandidates(outcomes);
             const payload = {
-                ...(input.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
-                    ? { aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const }
+                ...(
+                    input.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+                    || input.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                    ? { aiStagePolicyVersion: input.aiStagePolicyVersion }
                     : {}),
                 outcomes,
             };

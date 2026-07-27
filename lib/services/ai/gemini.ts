@@ -152,7 +152,10 @@ async function runWithGenerationSlot<T>(
     }
 
     if (
-        policyVersion === 'ai-stage-policy-v2.8'
+        (
+            policyVersion === 'ai-stage-policy-v2.8'
+            || policyVersion === 'ai-stage-policy-v2.9'
+        )
         && (
             stage === 'genderTriage'
             || stage === 'featureAnalysis'
@@ -290,6 +293,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     thinkingLevel?: AiThinkingLevel;
     mediaResolution?: AiMediaResolution;
     maxOutputTokens?: number;
+    /** v2.9 gender microbatches are the sole staged caller allowed above one-account media. */
+    maxImages?: number;
     /** Resume only after a durably terminalized explicit 429. Attempts are globally bounded at 4. */
     startingAttempt?: number;
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
@@ -723,6 +728,7 @@ export async function analyzeWithGemini<T>(
         thinkingLevel,
         mediaResolution,
         maxOutputTokens,
+        maxImages,
         startingAttempt = 1,
         onTelemetry,
         onBeforeAttempt,
@@ -776,6 +782,15 @@ export async function analyzeWithGemini<T>(
         ? assertSupportedAiStagePolicyVersion(aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION)
         : AI_STAGE_POLICY_VERSION;
     const stagePolicy = stage ? getAiStagePolicy(resolvedPolicyVersion, stage) : null;
+    if (maxImages !== undefined && (
+        !Number.isSafeInteger(maxImages)
+        || maxImages < 0
+        || maxImages > 10
+        || stage !== 'genderTriage'
+        || resolvedPolicyVersion !== 'ai-stage-policy-v2.9'
+    )) {
+        throw new Error('Gemini maxImages override is restricted to bounded v2.9 gender batches');
+    }
     const modelName = explicitModel
         ?? stagePolicy?.model
         ?? resolveVertexAIModel(process.env.VERTEX_AI_MODEL, costOptimized);
@@ -791,10 +806,10 @@ export async function analyzeWithGemini<T>(
         ?? stagePolicy?.maxOutputTokens
         ?? (costOptimized ? 1_024 : undefined);
     const imagePolicy = getAnalysisImagePolicy(costOptimized);
-    const maxImages = stagePolicy
+    const policyMaxImages = stagePolicy
         ? stagePolicy.profileImageLimit + stagePolicy.feedImageLimit
         : imagePolicy.maxImages;
-    const selectedImages = images?.slice(0, maxImages) ?? [];
+    const selectedImages = images?.slice(0, maxImages ?? policyMaxImages) ?? [];
     const responseJsonSchema = zodToGeminiResponseJsonSchema(schema);
     const analysisStartedAt = performance.now();
 

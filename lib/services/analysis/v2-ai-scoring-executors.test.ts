@@ -14,6 +14,7 @@ import { featureAnalysisInputSchema } from '@/lib/services/ai/v2-staged-analysis
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import {
     AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
@@ -65,6 +66,10 @@ describe('analysis V2 profile AI scheduler concurrency', () => {
     it('opens six candidate pipelines only for the exact persisted scheduler-v1 policy', () => {
         expect(analysisV2ProfilePipelineConcurrency(
             'ai-stage-policy-v2.8',
+            'scheduler-v1',
+        )).toBe(6);
+        expect(analysisV2ProfilePipelineConcurrency(
+            AI_STAGE_POLICY_V29_VERSION,
             'scheduler-v1',
         )).toBe(6);
         expect(analysisV2ProfilePipelineConcurrency(
@@ -778,6 +783,103 @@ describe('V2 AI and scoring executors', () => {
                 featureSelectedCount: 3,
                 selectedKinds: { profile: 1, postRepresentative: 2, carouselContext: 0 },
             },
+        });
+    });
+
+    it('v2.9 spends feature analysis only on confirmed personal women, excluding Black Cherry, men, and unknowns first', async () => {
+        const memoryState = memory();
+        const male = profile('male.account');
+        const blackCherry = profile('blackcherry.club', {
+            fullName: 'Black Cherry Club',
+            bio: 'Official band · new single out now',
+        });
+        // "club" alone is adversarial text, not a source-bound official signal.
+        const personalClub = profile('alice.club', {
+            fullName: 'Alice Club',
+            bio: 'photographer and personal diary',
+        });
+        const unknown = profile('unknown.account');
+        const profiles = [male, blackCherry, personalClub, unknown];
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: profiles.map(item => item.username),
+                    results: profiles.map(item => ({
+                        username: item.username,
+                        status: 'success' as const,
+                        profile: item,
+                    })),
+                })),
+            },
+        });
+        const confirmed = (
+            mediaIds: readonly string[],
+            accountContext: NonNullable<GenderTriageResult['v29AccountContext']>,
+        ): GenderTriageResult => ({
+            assessment: {
+                inferredGender: 'female', confidence: 'high', ownerConsistency: 'same_person',
+                evidenceSelectionIds: mediaIds.slice(0, 2),
+            },
+            routingDecision: 'route_to_feature_analysis',
+            routingReason: 'conserve_female_recall',
+            analyzedSelectionIds: mediaIds.slice(0, 5),
+            v29AccountContext: accountContext,
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0]
+        ) => {
+            const mediaIds = input.media.map(item => item.selectionId);
+            if (mediaIds.some(id => id.includes('male.account'))) {
+                return {
+                    result: triage(mediaIds, 'male'),
+                    operationKey: `gender-triage:${digest('v29-male')}`,
+                    resultHash: digest('v29-male'), source: 'checkpoint' as const,
+                };
+            }
+            const accountContext = mediaIds.some(id => id.includes('blackcherry.club'))
+                ? 'official_group_or_brand' as const
+                : mediaIds.some(id => id.includes('alice.club'))
+                    ? 'personal' as const
+                    : 'uncertain' as const;
+            return {
+                result: accountContext === 'uncertain'
+                    ? { ...triage(mediaIds), v29AccountContext: accountContext }
+                    : confirmed(mediaIds, accountContext),
+                operationKey: `gender-triage:${digest(`v29:${accountContext}:${mediaIds[0]}`)}`,
+                resultHash: digest(`v29:${accountContext}:${mediaIds[0]}`),
+                source: 'checkpoint' as const,
+            };
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+        await registry.profile_ai!(context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            state: state({
+                relationships: {
+                    ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: profiles.length, inputHash: digest('v29-topology') }],
+                },
+                profileFetchBatches: [{
+                    batch: 0, itemCount: profiles.length,
+                    producerInputHash: digest('v29-producer'), revision: 1,
+                    resultHash: digest('v29-profile-result'),
+                }],
+            }),
+        }));
+
+        expect(deps.ai.features).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(deps.ai.features).mock.calls[0]![0].accountProfile).toEqual({
+            fullName: 'Alice Club', hasProfileImage: true, bio: 'photographer and personal diary',
+        });
+        expect(memoryState.outcomes.map(outcome => outcome.status)).toEqual([
+            'verified_non_female', 'unresolved', 'verified_female', 'unresolved',
+        ]);
+        expect(memoryState.outcomes[1]).toMatchObject({
+            v29FeatureAdmission: 'nonpersonal_or_official', feature: null,
+        });
+        expect(memoryState.outcomes[3]).toMatchObject({
+            v29FeatureAdmission: 'unsupported_unknown', feature: null,
         });
     });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    runAnalysisV2MicrobatchV29LifecycleFixture,
     runAnalysisV2SchedulerLifecycleFixture,
 } from './v2-ai-scheduler-max-fixture';
 
@@ -55,5 +56,41 @@ describe('analysis V2 Standard lifecycle scheduler fixture', () => {
         });
         expect(faster.totalEndToEndWallTimeMs)
             .toBeLessThan(first.totalEndToEndWallTimeMs);
+    });
+
+    it('models the v2.9 bounded-call policy below five minutes without inventing replay cost or unknown-rate evidence', () => {
+        const metrics = runAnalysisV2MicrobatchV29LifecycleFixture();
+
+        expect(metrics).toMatchObject({
+            fixture: 'standard-240-public-145-private-v29-microbatch',
+            modeledOnly: true,
+            modeledUnderFiveMinutes: true,
+            duplicatePaidCalls: 0,
+            continuationDeadlineViolations: 0,
+            assumptions: {
+                genderAccountsPerProviderCall: 2,
+                confirmedFemalePersonalProfiles: 72,
+                observedPaidRetries: 0,
+                observedAmbiguousPaidResponses: 0,
+                costStatus: 'unknown_without_replay_token_usage',
+            },
+        });
+        expect(metrics.stages.genderTriage).toMatchObject({
+            logicalAccounts: 240,
+            operations: 120,
+            providerCalls: 120,
+            paidRetries: 0,
+        });
+        expect(metrics.stages.featureAnalysis).toMatchObject({
+            logicalAccounts: 72,
+            providerCalls: 72,
+            paidRetries: 0,
+        });
+        expect(metrics.stages.privateAccountName).toMatchObject({
+            logicalAccounts: 145,
+            providerCalls: 2,
+        });
+        expect(metrics.totalEndToEndWallTimeMs).toBe(265_000);
+        expect(metrics.maxConcurrency).toBeLessThanOrEqual(8);
     });
 });
