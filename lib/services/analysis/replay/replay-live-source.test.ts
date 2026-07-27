@@ -386,7 +386,7 @@ describe('live replay source mapping', () => {
         expect(source.profiles.some(item => item.username === unavailable)).toBe(false);
     });
 
-    it('applies the 90 percent candidate profile floor after a repair supersedes fallback failure', async () => {
+    it('reconstructs an omitted repair row as a terminal incomplete outcome before applying the 90 percent floor', async () => {
         const candidates = Array.from({ length: 10 }, (_, index) => `candidate${index}`);
         const repaired = candidates.at(-2)!;
         const unavailable = candidates.at(-1)!;
@@ -397,10 +397,7 @@ describe('live replay source mapping', () => {
                     ? { ...profile(username, `cand${index}`), latestPosts: [] }
                     : profile(username, `cand${index}`)
             )),
-            RUNREPAIR: [
-                profile(repaired, 'repair'),
-                { ...profile(unavailable, 'repair-unavailable'), latestPosts: [] },
-            ],
+            RUNREPAIR: [profile(repaired, 'repair')],
             RUNFOLL1: candidates.map((username, index) => ({ username_scrape: 'target', type: 'Followers', id: String(index + 1), username, full_name: username, is_private: false, is_verified: false, profile_pic_url: `https://scontent.cdninstagram.com/${username}.jpg` })),
             RUNFOLL2: candidates.map((username, index) => ({ username_scrape: 'target', type: 'Following', id: String(index + 1), username, full_name: username, is_private: false, is_verified: false, profile_pic_url: `https://scontent.cdninstagram.com/${username}.jpg` })),
             RUNLIKE1: [],

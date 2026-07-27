@@ -127,9 +127,26 @@ function isProductionCompleteCandidateProfileBatch(
         && failures.every(attempt => isProductionAllowedCandidateProfileFailure(attempt.error));
 }
 
-function sameOrderedUsernames(left: readonly string[], right: readonly string[]): boolean {
-    return left.length === right.length
-        && left.every((username, index) => username === right[index]);
+function isOrderedUsernameSubset(
+    observed: readonly string[],
+    requested: readonly string[],
+): boolean {
+    let offset = 0;
+    for (const username of observed) {
+        offset = requested.indexOf(username, offset);
+        if (offset < 0) return false;
+        offset += 1;
+    }
+    return true;
+}
+
+function omittedCandidateProfileAttempt(): CandidateProfileAttempt {
+    return {
+        status: 'failed',
+        error: new Error(
+            'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.',
+        ),
+    };
 }
 
 function asCheckpoint(profile: ReturnType<typeof parseApifyProfileDataset>['profilesByUsername'] extends Map<string, infer P> ? P : never): AnalysisV2CheckpointProfile {
@@ -204,7 +221,9 @@ export async function loadReplaySourceFromExistingRuns(input: {
             'profile-fallback',
             'profile-repair',
         ].includes(kind)) continue;
-        const usernames = profileUsernames(items);
+        const usernames = kind === 'profile-repair' && items.length === 0
+            ? []
+            : profileUsernames(items);
         const parsed = parseApifyProfileDataset(items, usernames);
         const isCandidateProfile = kind === 'profile-fallback' || kind === 'profile-repair';
         if (isCandidateProfile) {
@@ -242,7 +261,7 @@ export async function loadReplaySourceFromExistingRuns(input: {
     for (const repair of repairBatches) {
         const repairUsernames = [...repair.keys()];
         const matchingFallbackBatches = fallbackBatches.filter(batch => (
-            sameOrderedUsernames(
+            isOrderedUsernameSubset(
                 repairUsernames,
                 [...batch].flatMap(([username, attempt]) => (
                     attempt.status === 'failed' ? [username] : []
@@ -260,7 +279,11 @@ export async function loadReplaySourceFromExistingRuns(input: {
             throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
         }
         repairedFallbackBatches.add(fallback);
-        for (const [username, attempt] of repair) fallback.set(username, attempt);
+        for (const username of [...fallback].flatMap(([username, attempt]) => (
+            attempt.status === 'failed' ? [username] : []
+        ))) {
+            fallback.set(username, repair.get(username) ?? omittedCandidateProfileAttempt());
+        }
     }
     for (const batch of fallbackBatches) {
         const finalAttempts = [...batch.values()];
