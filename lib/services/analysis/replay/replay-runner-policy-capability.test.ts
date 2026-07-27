@@ -408,6 +408,165 @@ describe('replay staged AI runner policy capability', () => {
         });
     });
 
+    it('starts fast-batch feature work before slower sibling gender batches finish', async () => {
+        const profiles = Array.from({ length: 6 }, (_, index) => ({
+            ...v28Bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `public-${index + 1}`,
+            media: [{
+                ...v28Bundle.profiles[0]!.media[0]!,
+                selectionId: `m${index + 1}`,
+            }],
+            triageSelectionIds: [`m${index + 1}`],
+            featureSelectionIds: [`m${index + 1}`],
+            resolverSelectionIds: [`m${index + 1}`],
+        }));
+        ai.createGenderTriageMicrobatchAccountId.mockImplementation(
+            (input: { media: Array<{ selectionId: string }> }) => {
+                const ordinal = Number(input.media[0]!.selectionId.slice(1));
+                return `account:${ordinal.toString(16).padStart(64, '0')}`;
+            },
+        );
+        const releases: Array<() => void> = [];
+        let slowGenderFinished = false;
+        let featureBeforeSlow = false;
+        ai.genderTriageMicrobatch.mockImplementation(async accounts => {
+            const firstOrdinal = Number(accounts[0].input.media[0].selectionId.slice(1));
+            if (firstOrdinal > 2) {
+                await new Promise<void>(resolve => releases.push(resolve));
+                slowGenderFinished = true;
+            }
+            return accounts.map((account: {
+                accountId: string;
+                input: { media: Array<{ selectionId: string }> };
+            }) => ({
+                accountId: account.accountId,
+                source: 'checkpoint',
+                result: {
+                    ...highFemale('personal'),
+                    assessment: {
+                        ...highFemale('personal').assessment,
+                        evidenceSelectionIds: [
+                            account.input.media[0]!.selectionId,
+                            'corroborating',
+                        ],
+                    },
+                },
+            }));
+        });
+        ai.featureAnalysis.mockImplementation(async () => {
+            featureBeforeSlow ||= !slowGenderFinished;
+            return {
+                features: {
+                    gender: 'female',
+                    genderConfidence: 'high',
+                    ownerConsistency: 'same_person',
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    businessClassification: 'personal',
+                    businessConfidence: 'high',
+                    accountContext: 'personal',
+                    marriageEvidence: 'none',
+                    partnerEvidence: 'none',
+                    partnerExclusionContext: 'none',
+                    evidenceSelectionIds: {
+                        gender: ['m1'], appearance: ['m1'], exposure: ['m1'],
+                        business: ['m1'], accountContext: ['m1'], marriagePartner: [],
+                    },
+                    oneLineOverview: '관찰된 단서를 바탕으로 개인 계정의 특징을 구체적으로 정리했습니다.',
+                },
+                finalGenderDecision: 'verified_female',
+                analyzedSelectionIds: ['m1'],
+            };
+        });
+
+        const running = runAnalysisV2AiReplay({
+            bundle: { ...v28ToV29Bundle, profiles },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        });
+        await vi.waitFor(() => expect(ai.featureAnalysis).toHaveBeenCalled());
+        expect(featureBeforeSlow).toBe(true);
+        expect(releases).toHaveLength(2);
+        releases.forEach(release => release());
+        await running;
+    });
+
+    it('does not admit the seventh profile until a full pipeline slot frees', async () => {
+        const profiles = Array.from({ length: 7 }, (_, index) => ({
+            ...v28Bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `public-${index + 1}`,
+            media: [{
+                ...v28Bundle.profiles[0]!.media[0]!,
+                selectionId: `m${index + 1}`,
+            }],
+            triageSelectionIds: [`m${index + 1}`],
+            featureSelectionIds: [`m${index + 1}`],
+            resolverSelectionIds: [`m${index + 1}`],
+        }));
+        ai.createGenderTriageMicrobatchAccountId.mockImplementation(
+            (input: { media: Array<{ selectionId: string }> }) => {
+                const ordinal = Number(input.media[0]!.selectionId.slice(1));
+                return `account:${ordinal.toString(16).padStart(64, '0')}`;
+            },
+        );
+        type Account = {
+            accountId: string;
+            input: { media: Array<{ selectionId: string }> };
+        };
+        const pending: Array<{
+            accounts: Account[];
+            settled: boolean;
+            resolve(value: unknown): void;
+        }> = [];
+        ai.genderTriageMicrobatch.mockImplementation((accounts: Account[]) => (
+            new Promise(resolve => pending.push({
+                accounts,
+                settled: false,
+                resolve,
+            }))
+        ));
+        const settle = (entry: typeof pending[number]) => {
+            entry.settled = true;
+            entry.resolve(entry.accounts.map(account => ({
+                accountId: account.accountId,
+                source: 'checkpoint',
+                result: {
+                    assessment: {
+                        inferredGender: 'male',
+                        confidence: 'high',
+                        ownerConsistency: 'same_person',
+                        evidenceSelectionIds: [account.input.media[0]!.selectionId],
+                    },
+                    routingDecision: 'exclude_high_confidence_male',
+                    routingReason: 'high_confidence_same_owner_male',
+                    analyzedSelectionIds: [account.input.media[0]!.selectionId],
+                },
+            })));
+        };
+
+        const running = runAnalysisV2AiReplay({
+            bundle: { ...v28ToV29Bundle, profiles },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        });
+        await vi.waitFor(() => expect(pending).toHaveLength(3));
+        expect(pending.flatMap(entry => entry.accounts).some(account => (
+            account.input.media[0]!.selectionId === 'm7'
+        ))).toBe(false);
+
+        settle(pending[0]!);
+        await vi.waitFor(() => expect(pending).toHaveLength(4));
+        expect(pending[3]!.accounts[0]!.input.media[0]!.selectionId).toBe('m7');
+        pending.filter(entry => !entry.settled).forEach(settle);
+        await running;
+    });
+
     it('rejects a missing or different runtime evaluation before any AI call', async () => {
         const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.9');
         await expect(runAnalysisV2AiReplay({

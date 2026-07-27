@@ -45,7 +45,7 @@ describe('replay v2.9 account-profile fidelity', () => {
             }],
         };
 
-        await adapter.triageMany?.([
+        await Promise.all([
             {
                 ordinal: 1,
                 ...common,
@@ -64,7 +64,7 @@ describe('replay v2.9 account-profile fidelity', () => {
                     bio: 'team updates',
                 },
             },
-        ]);
+        ].map(input => adapter.triage!(input)));
 
         expect(provider.genderTriageMicrobatch).toHaveBeenCalledOnce();
         const accounts = provider.genderTriageMicrobatch.mock.calls[0]![0] as

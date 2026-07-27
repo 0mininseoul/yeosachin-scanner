@@ -43,17 +43,8 @@ export interface ReplayAccountProfile {
     bio: string | null;
 }
 
-export interface ReplayTriageBatch {
-    ordinals: readonly number[];
-    invocation: ReplayInvocation<readonly {
-        ordinal: number;
-        result: GenderTriageResult;
-    }[]>;
-}
-
 export interface ReplayAiRunner {
     triage?(input: ReplayTriageInput): Promise<ReplayInvocation<GenderTriageResult>>;
-    triageMany?(inputs: readonly ReplayTriageInput[]): Promise<readonly ReplayTriageBatch[]>;
     feature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
     resolveGender?(input: {
@@ -384,10 +375,6 @@ export async function runAnalysisV2AiReplay(input: {
             : Promise.resolve();
 
         const prepared: PreparedPublicReplay[] = [];
-        const profileByOrdinal = new Map(publicProfiles.map(profile => [
-            profile.ordinal,
-            profile,
-        ]));
         const v29AccountProfile = (
             profile: typeof publicProfiles[number],
         ): ReplayAccountProfile => {
@@ -502,52 +489,17 @@ export async function runAnalysisV2AiReplay(input: {
                 resolver: trackedResolver,
             });
         };
-        const publicTask = replayAiPolicy === 'ai-stage-policy-v2.9'
-            ? (async () => {
-                if (!runner.triageMany) {
-                    throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
-                }
-                const batches = await runner.triageMany(publicProfiles.map(profile => ({
-                    ordinal: profile.ordinal,
-                    media: mediaFor(profile, profile.triageSelectionIds),
-                    accountProfile: v29AccountProfile(profile),
-                })));
-                const mapped: Array<{
-                    profile: typeof publicProfiles[number];
-                    triage: GenderTriageResult;
-                }> = [];
-                for (const batch of batches) {
-                    collect(
-                        stages.genderTriage,
-                        durations.genderTriage,
-                        batch.invocation,
-                    );
-                    if (
-                        batch.invocation.outcome !== 'ok'
-                        || !batch.invocation.value
-                    ) {
-                        gender.unknown += batch.ordinals.length;
-                        continue;
-                    }
-                    for (const result of batch.invocation.value) {
-                        const profile = profileByOrdinal.get(result.ordinal);
-                        if (!profile) {
-                            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
-                        }
-                        mapped.push({ profile, triage: result.result });
-                    }
-                }
-                await runBounded(
-                    mapped,
-                    3,
-                    item => processTriageResult(item.profile, item.triage),
-                );
-            })()
-            : runBounded(publicProfiles, 4, async profile => {
+        const publicTask = runBounded(
+            publicProfiles,
+            replayAiPolicy === 'ai-stage-policy-v2.9' ? 6 : 4,
+            async profile => {
                 if (!runner.triage) return;
                 const triage = await runner.triage({
                     ordinal: profile.ordinal,
                     media: mediaFor(profile, profile.triageSelectionIds),
+                    ...(replayAiPolicy === 'ai-stage-policy-v2.9'
+                        ? { accountProfile: v29AccountProfile(profile) }
+                        : {}),
                 });
                 collect(stages.genderTriage, durations.genderTriage, triage);
                 if (triage.outcome !== 'ok' || !triage.value) {
@@ -555,7 +507,8 @@ export async function runAnalysisV2AiReplay(input: {
                     return;
                 }
                 await processTriageResult(profile, triage.value);
-            });
+            },
+        );
         await Promise.all([privateTask, publicTask]);
 
         await Promise.all(prepared.map(async outcome => {

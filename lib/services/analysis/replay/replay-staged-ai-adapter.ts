@@ -9,6 +9,7 @@ import {
     genderResolution,
     genderTriage,
     genderTriageMicrobatch,
+    type GenderTriageResult,
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib/services/ai/private-name-analysis';
@@ -16,13 +17,11 @@ import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generati
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
-import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import type {
     ReplayAiRunner,
     ReplayInvocation,
     ReplayMedia,
     ReplayOutcome,
-    ReplayTriageBatch,
     ReplayTriageInput,
 } from './replay-runner';
 import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineage';
@@ -30,7 +29,6 @@ import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineag
 interface IssuedReplayRunner {
     policyVersion: ReplaySupportedAiStagePolicyVersion;
     triage: ReplayAiRunner['triage'];
-    triageMany: ReplayAiRunner['triageMany'];
     feature: ReplayAiRunner['feature'];
     privateNames: ReplayAiRunner['privateNames'];
     resolveGender: ReplayAiRunner['resolveGender'];
@@ -47,7 +45,6 @@ export function lookupReplayStagedAiAdapterPolicy(
         !issued
         || !Object.isFrozen(runner)
         || runner.triage !== issued.triage
-        || runner.triageMany !== issued.triageMany
         || runner.feature !== issued.feature
         || runner.privateNames !== issued.privateNames
         || runner.resolveGender !== issued.resolveGender
@@ -163,90 +160,105 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
     }
 }
 
-async function runBounded<T>(
-    values: readonly T[],
-    concurrency: number,
-    task: (value: T) => Promise<void>,
-): Promise<void> {
-    let next = 0;
-    await Promise.all(Array.from(
-        { length: Math.min(concurrency, values.length) },
-        async () => {
-            while (next < values.length) {
-                await task(values[next++]!);
-            }
-        },
-    ));
-}
-
 /** Stateless paid-AI adapter. It imports no Supabase, provider, R2, job, result, or archive module. */
 export function createReplayStagedAiAdapter(
     aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
+    type PendingTriage = {
+        accountId: string;
+        aiInput: {
+            media: ReturnType<typeof normalized>;
+            accountProfile?: ReplayTriageInput['accountProfile'];
+        };
+        waiters: Array<{
+            resolve(value: ReplayInvocation<GenderTriageResult>): void;
+        }>;
+    };
+    const pendingTriage = new Map<string, PendingTriage>();
+    let triageFlushScheduled = false;
+
+    const flushTriage = async () => {
+        triageFlushScheduled = false;
+        const pending = [...pendingTriage.values()];
+        pendingTriage.clear();
+        const batches = planGenderTriageMicrobatches(pending.map(item => ({
+            accountId: item.accountId,
+            value: item,
+        })));
+        await Promise.all(batches.map(async batch => {
+            const accounts = batch.map(member => ({
+                accountId: member.accountId,
+                input: member.value.aiInput,
+            }));
+            const invocation = await invoke(async state => {
+                const identity =
+                    createGenderTriageMicrobatchResultIdentity(accounts);
+                return genderTriageMicrobatch(
+                    accounts,
+                    statelessAudit(requestId, identity, state),
+                    { replayCapability },
+                );
+            });
+            const byAccount = new Map(invocation.value?.map(result => [
+                result.accountId,
+                result.result,
+            ]));
+            let metricsOwned = false;
+            for (const member of batch) {
+                const result = byAccount.get(member.accountId);
+                for (const waiter of member.value.waiters) {
+                    const ownsMetrics = !metricsOwned;
+                    metricsOwned = true;
+                    waiter.resolve({
+                        outcome: invocation.outcome,
+                        ...(result ? { value: result } : {}),
+                        calls: ownsMetrics ? invocation.calls : 0,
+                        rateLimited: ownsMetrics ? invocation.rateLimited : 0,
+                        failureDisposition: ownsMetrics
+                            ? invocation.failureDisposition
+                            : {},
+                        attemptLatenciesMs: ownsMetrics
+                            ? invocation.attemptLatenciesMs
+                            : [],
+                        attempts: ownsMetrics ? invocation.attempts : 0,
+                        retries: ownsMetrics ? invocation.retries : 0,
+                        elapsedMs: ownsMetrics ? invocation.elapsedMs : 0,
+                    });
+                }
+            }
+        }));
+    };
+
+    const queueTriage = (input: ReplayTriageInput) => {
+        const aiInput = {
+            media: normalized(input.media),
+            ...(input.accountProfile
+                ? { accountProfile: input.accountProfile }
+                : {}),
+        };
+        const accountId = createGenderTriageMicrobatchAccountId(aiInput);
+        return new Promise<ReplayInvocation<GenderTriageResult>>(resolve => {
+            const existing = pendingTriage.get(accountId);
+            if (existing) {
+                existing.waiters.push({ resolve });
+            } else {
+                pendingTriage.set(accountId, {
+                    accountId,
+                    aiInput,
+                    waiters: [{ resolve }],
+                });
+            }
+            if (!triageFlushScheduled) {
+                triageFlushScheduled = true;
+                setTimeout(() => void flushTriage(), 0);
+            }
+        });
+    };
     const runner: ReplayAiRunner = {
         ...(aiStagePolicyVersion === 'ai-stage-policy-v2.9' ? {
-            async triageMany(inputs: readonly ReplayTriageInput[]) {
-                const members = inputs.map(input => {
-                    const aiInput = {
-                        media: normalized(input.media),
-                        ...(input.accountProfile
-                            ? { accountProfile: input.accountProfile }
-                            : {}),
-                    };
-                    return {
-                        accountId: createGenderTriageMicrobatchAccountId(aiInput),
-                        value: { input, aiInput },
-                    };
-                });
-                const batches = planGenderTriageMicrobatches(members);
-                const ordinalsByAccount = new Map<string, number[]>();
-                for (const member of members) {
-                    const ordinals = ordinalsByAccount.get(member.accountId) ?? [];
-                    ordinals.push(member.value.input.ordinal);
-                    ordinalsByAccount.set(member.accountId, ordinals);
-                }
-                const completed = new Array<ReplayTriageBatch>(batches.length);
-                await runBounded(
-                    batches.map((batch, index) => ({ batch, index })),
-                    ANALYSIS_V2_SCHEDULER_V1_POLICY.genderTriageConcurrency,
-                    async ({ batch, index }) => {
-                        const accounts = batch.map(member => ({
-                            accountId: member.accountId,
-                            input: member.value.aiInput,
-                        }));
-                        const ordinals = batch.flatMap(member => (
-                            ordinalsByAccount.get(member.accountId) ?? []
-                        ));
-                        const invocation = await invoke(async state => {
-                            const identity =
-                                createGenderTriageMicrobatchResultIdentity(accounts);
-                            const results = await genderTriageMicrobatch(
-                                accounts,
-                                statelessAudit(requestId, identity, state),
-                                { replayCapability },
-                            );
-                            const byAccount = new Map(results.map(result => [
-                                result.accountId,
-                                result.result,
-                            ]));
-                            return batch.flatMap(member => {
-                                const result = byAccount.get(member.accountId);
-                                if (!result) {
-                                    throw new Error(
-                                        'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_RESULT_MISSING',
-                                    );
-                                }
-                                return (ordinalsByAccount.get(member.accountId) ?? [])
-                                    .map(ordinal => ({ ordinal, result }));
-                            });
-                        });
-                        completed[index] = { ordinals, invocation };
-                    },
-                );
-                return completed;
-            },
+            triage: queueTriage,
         } : {
             triage: (input: ReplayTriageInput) => invoke(async state => {
                 const aiInput = { media: normalized(input.media) };
@@ -313,7 +325,6 @@ export function createReplayStagedAiAdapter(
     issuedReplayRunners.set(runner, {
         policyVersion: aiStagePolicyVersion,
         triage: runner.triage,
-        triageMany: runner.triageMany,
         feature: runner.feature,
         privateNames: runner.privateNames,
         resolveGender: runner.resolveGender,
