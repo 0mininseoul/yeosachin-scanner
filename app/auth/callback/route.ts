@@ -1,12 +1,16 @@
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
 import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
+import {
+    deliverKakaoSignupDiscordNotifications,
+    stageKakaoSignupDiscordProfile,
+} from '@/lib/services/identity/kakao-signup-discord';
 import {
     observeRoute,
     type OperationalRequestContext,
@@ -24,7 +28,8 @@ function asRecord(value: unknown): Record<string, unknown> {
 async function syncKakaoProfile(
     userId: string,
     email: string | undefined,
-    providerToken: string
+    providerToken: string,
+    signedUpAt: Date,
 ): Promise<'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null> {
     const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${providerToken}` },
@@ -70,6 +75,16 @@ async function syncKakaoProfile(
     if (error) {
         console.error('users upsert (kakao profile) failed:', error.code);
         return 'INTERNAL_ERROR';
+    }
+    try {
+        await stageKakaoSignupDiscordProfile(userId, {
+            name: account.name ?? profile.nickname,
+            birthyear: account.birthyear,
+            gender: account.gender,
+            signedUpAt,
+        });
+    } catch {
+        // A notification outbox issue never changes the authentication result.
     }
     return null;
 }
@@ -158,7 +173,8 @@ async function handleGET(
                 errorCode = await syncKakaoProfile(
                     authedUser.id,
                     authedUser.email ?? undefined,
-                    session.provider_token
+                    session.provider_token,
+                    new Date(authedUser.created_at ?? Date.now()),
                 );
             } catch {
                 console.error('Kakao profile sync failed');
@@ -178,6 +194,13 @@ async function handleGET(
                     error_code: errorCode,
                 },
             });
+        }
+        // The first-signup DB trigger is the only enqueue authority. Delivery runs
+        // asynchronously so Discord cannot delay or fail a completed login.
+        try {
+            after(() => deliverKakaoSignupDiscordNotifications({ userId: authedUser.id }));
+        } catch {
+            void deliverKakaoSignupDiscordNotifications({ userId: authedUser.id });
         }
     }
 
