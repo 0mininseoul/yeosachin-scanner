@@ -42,8 +42,15 @@ function merge(selected: readonly SelectedAnalysisMedia[], parts: readonly Await
     return { media: selected.flatMap(item => bytes.has(item.selectionId) ? [{ ...item, bytes: bytes.get(item.selectionId)! }] : []), coverage: { selectedCount: selected.length, normalizedCount: bytes.size, failures: parts.flatMap(part => part.coverage.failures) } };
 }
 function universeDigest(profiles: readonly HistoricalPartialSourceProfile[]): string {
-    const value = profiles.map(profile => `${profile.ordinal}\u0000${profile.partition}\u0000${profile.username ?? profile.profile?.username ?? ''}`).join('\n');
+    const value = profiles.map(profile => ({ ordinal: profile.ordinal, username: normalizedCandidateUsername(profile.username ?? profile.profile?.username ?? ''), partition: profile.partition }))
+        .sort((left, right) => left.ordinal - right.ordinal || left.username.localeCompare(right.username))
+        .map(profile => `${profile.ordinal}\u0000${profile.username}\u0000${profile.partition}`).join('\n');
     return createHash('sha256').update(`analysis-v2-historical-partial-universe-v1\n${value}`).digest('hex');
+}
+function normalizedCandidateUsername(value: string): string {
+    const normalized = value.trim().replace(/^@/, '').toLowerCase();
+    if (!/^[a-z0-9._]{1,30}$/.test(normalized)) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    return normalized;
 }
 function unavailableReason(reason: string) { return /^[a-z_]{1,64}$/.test(reason) ? reason : 'media_gate_failed'; }
 
@@ -59,7 +66,17 @@ export async function captureHistoricalPartialAvailableReplayBundle(input: {
     if (input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
     if (input.sourceLineage.selectedPlanId !== 'standard' || input.sourceLineage.policyVersions.aiStage !== 'ai-stage-policy-v2.7' || input.sourceLineage.policyVersions.risk !== 'risk-policy-v2.3' || 'scheduler' in input.sourceLineage.policyVersions) throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
     const seen = new Set<number>();
-    if (input.source.profiles.some(item => !Number.isInteger(item.ordinal) || item.ordinal < 1 || seen.has(item.ordinal) || (seen.add(item.ordinal), false))) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    for (const candidate of input.source.profiles) {
+        if (!Number.isInteger(candidate.ordinal) || candidate.ordinal < 1 || seen.has(candidate.ordinal)) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        seen.add(candidate.ordinal);
+        const candidateUsername = normalizedCandidateUsername(candidate.username ?? candidate.profile?.username ?? '');
+        if (candidate.profile && normalizedCandidateUsername(candidate.profile.username) !== candidateUsername) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        if (
+            (candidate.partition === 'fetch_terminal' && candidate.profile !== undefined)
+            || (candidate.partition === 'private' && candidate.profile?.isPrivate !== true)
+            || (candidate.partition === 'public' && candidate.profile?.isPrivate === true)
+        ) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    }
     const report: HistoricalPartialAvailableReport = { scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, sourceProfiles: input.source.profiles.length, sourceSelectedMedia: 0, partitions: { private: 0, fetch_terminal: 0, public_available: 0, public_media_unavailable: 0, total: input.source.profiles.length }, retained: { profiles: 0, profileRatio: 0, media: 0, mediaRatio: 0 }, stages: { triage: stageMetrics(), feature: stageMetrics() }, aiWorkload: { publicTriage: 0, publicFeature: 0, privateNames: 0 } };
     const profiles: PartialBundle['profiles'] = [];
     const mediaUnavailable: NonNullable<PartialBundle['capture']['partial']>['mediaUnavailable'] = [];

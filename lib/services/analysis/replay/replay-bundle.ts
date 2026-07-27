@@ -13,6 +13,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import {
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     replayEvaluationPolicySchema,
     replaySourceLineageSchema,
 } from './replay-source-lineage';
@@ -37,7 +38,7 @@ const canonicalMediaSchema = z.object({
     caption: z.string().max(5_000).nullable().optional(),
     jpegBase64: jpegBase64Schema,
 }).strict();
-const exactBundleSchema = z.object({
+const baseBundleSchema = z.object({
     schemaVersion: z.literal(1),
     createdAt: z.string().datetime({ offset: true }),
     expiresAt: z.string().datetime({ offset: true }),
@@ -98,14 +99,24 @@ const exactBundleSchema = z.object({
     }).strict(),
 }).strict();
 
+const exactBundleSchema = baseBundleSchema.superRefine((value, context) => {
+    if (value.capture.evaluationPolicy?.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY) {
+        context.addIssue({ code: 'custom', path: ['capture', 'evaluationPolicy'], message: 'Partial capability cannot authenticate an exact artifact.' });
+    }
+});
+
 /** A sealed, non-exact artifact. Exact schema-v1 artifacts remain unchanged. */
-const partialAvailableBundleSchema = exactBundleSchema.extend({
+const partialAvailableBundleSchema = baseBundleSchema.extend({
     schemaVersion: z.literal(2),
-    capture: exactBundleSchema.shape.capture.extend({
+    capture: baseBundleSchema.shape.capture.extend({
         scope: z.literal('ai-only-historical-partial-available'),
         notExact: z.literal(true),
         fullE2eEvidence: z.literal(false),
         noMediaSubstitution: z.literal(true),
+        evaluationPolicy: z.object({
+            capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY),
+            aiStage: z.literal('ai-stage-policy-v2.9'),
+        }).strict(),
         partial: z.object({
             sourceUniverseDigest: z.string().regex(/^[a-f0-9]{64}$/),
             mediaUnavailable: z.array(z.object({
@@ -117,7 +128,21 @@ const partialAvailableBundleSchema = exactBundleSchema.extend({
             }).strict()).max(MAX_PROFILES),
         }).strict(),
     }).strict(),
-}).strict();
+}).strict().superRefine((value, context) => {
+    const retained = new Set<number>();
+    for (const [index, profile] of value.profiles.entries()) {
+        if (retained.has(profile.ordinal)) context.addIssue({ code: 'custom', path: ['profiles', index, 'ordinal'], message: 'Retained profile ordinals must be unique.' });
+        if ((profile.isPrivate && profile.media.length !== 0) || (!profile.isPrivate && profile.media.length === 0)) {
+            context.addIssue({ code: 'custom', path: ['profiles', index, 'media'], message: 'Partial retained partition does not match its media workload.' });
+        }
+        retained.add(profile.ordinal);
+    }
+    const unavailable = new Set<number>();
+    for (const [index, terminal] of value.capture.partial.mediaUnavailable.entries()) {
+        if (unavailable.has(terminal.ordinal) || retained.has(terminal.ordinal)) context.addIssue({ code: 'custom', path: ['capture', 'partial', 'mediaUnavailable', index, 'ordinal'], message: 'Terminal ordinals must be unique and disjoint.' });
+        unavailable.add(terminal.ordinal);
+    }
+});
 const bundleSchema = z.union([exactBundleSchema, partialAvailableBundleSchema]);
 
 export type AnalysisV2ReplayBundle = z.infer<typeof bundleSchema>;

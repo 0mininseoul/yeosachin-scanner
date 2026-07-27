@@ -9,6 +9,7 @@ vi.mock('./replay-staged-ai-adapter', () => ({
 }));
 
 import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
+import type { AnalysisV2ReplayBundle } from './replay-bundle';
 
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
@@ -40,6 +41,14 @@ const bundle = {
 };
 
 describe('AI-only replay runner', () => {
+    it.each([
+        { ...bundle, capture: { ...bundle.capture, evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' } } },
+        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, partial: { sourceUniverseDigest: 'd'.repeat(64), mediaUnavailable: [] } } },
+        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, evaluationPolicy: { capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' }, partial: { sourceUniverseDigest: 'd'.repeat(64), mediaUnavailable: [] } } },
+    ])('rejects cross-version artifact capability at the runner boundary %#', async invalid => {
+        await expect(runAnalysisV2AiReplay({ bundle: invalid as AnalysisV2ReplayBundle, mode: 'dry-run', ...('evaluationPolicy' in invalid.capture ? { evaluationPolicy: invalid.capture.evaluationPolicy as never } : {}) })).rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
+    });
+
     it('dry-run validates inputs without calling AI and emits only safe aggregate metrics', async () => {
         const triage = vi.fn();
         const lines: string[] = [];

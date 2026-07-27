@@ -50,7 +50,7 @@ describe('historical partial-available replay capture', () => {
                     { ordinal: 3, partition: 'private', profile: { ...publicProfile('private'), isPrivate: true, profilePicUrl: undefined, latestPosts: undefined } },
                     { ordinal: 9, partition: 'public', profile: publicProfile('expired') },
                     { ordinal: 12, partition: 'public', profile: publicProfile('available') },
-                    { ordinal: 15, partition: 'fetch_terminal' },
+                    { ordinal: 15, partition: 'fetch_terminal', username: 'terminal' },
                 ],
                 evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
             },
@@ -129,5 +129,33 @@ describe('historical partial-available replay capture', () => {
         expect(result.bundle.capture.partial?.mediaUnavailable).toEqual([
             expect.objectContaining({ ordinal: 44, terminal: 'media_unavailable', reasons: ['profile_unavailable'] }),
         ]);
+    });
+
+    it('canonicalizes the universe digest by original ordinal and normalized username', async () => {
+        const sourceProfiles = [
+            { ordinal: 8, partition: 'public' as const, profile: publicProfile('Bravo') },
+            { ordinal: 2, partition: 'private' as const, profile: { ...publicProfile('alpha'), isPrivate: true, latestPosts: undefined, profilePicUrl: undefined } },
+        ];
+        const capture = (profiles: typeof sourceProfiles) => captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'e'.repeat(64), sourceLineage: lineage,
+            evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
+            source: { profiles, evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] } },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+        const [forward, reversed] = await Promise.all([capture(sourceProfiles), capture([...sourceProfiles].reverse())]);
+        expect(forward.bundle.capture.partial?.sourceUniverseDigest).toBe(reversed.bundle.capture.partial?.sourceUniverseDigest);
+    });
+
+    it.each([
+        { profiles: [{ ordinal: 1, partition: 'public' as const, profile: publicProfile('one'), username: 'different' }] },
+        { profiles: [{ ordinal: 1, partition: 'private' as const, profile: publicProfile('one') }] },
+        { profiles: [{ ordinal: 1, partition: 'fetch_terminal' as const, profile: publicProfile('one') }] },
+    ])('rejects inconsistent candidate partition identity %#', async ({ profiles }) => {
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'f'.repeat(64), sourceLineage: lineage,
+            evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
+            source: { profiles, evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] } },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
     });
 });

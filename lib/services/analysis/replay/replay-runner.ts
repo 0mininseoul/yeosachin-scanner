@@ -3,6 +3,7 @@ import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-recon
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -134,6 +135,41 @@ function metrics(): ReplayStageMetrics {
         p95LatencyMs: 0,
         failureDisposition: {},
     };
+}
+
+function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
+    const capture = bundle.capture as AnalysisV2ReplayBundle['capture'] & {
+        evaluationPolicy?: { capability?: string };
+        scope?: string; notExact?: boolean; fullE2eEvidence?: boolean;
+        noMediaSubstitution?: boolean;
+        partial?: { mediaUnavailable?: readonly { ordinal?: number }[] };
+    };
+    const capability = capture.evaluationPolicy?.capability;
+    if (
+        (bundle.schemaVersion === 1 && capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY)
+        || (bundle.schemaVersion === 2 && capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY)
+    ) throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
+    if (bundle.schemaVersion !== 2) return;
+    if (
+        capture.scope !== 'ai-only-historical-partial-available'
+        || capture.notExact !== true
+        || capture.fullE2eEvidence !== false
+        || capture.noMediaSubstitution !== true
+        || !Array.isArray(capture.partial?.mediaUnavailable)
+    ) throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
+    const ordinals = new Set<number>();
+    for (const profile of bundle.profiles) {
+        if (ordinals.has(profile.ordinal) || (profile.isPrivate ? profile.media.length !== 0 : profile.media.length === 0)) {
+            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        }
+        ordinals.add(profile.ordinal);
+    }
+    for (const terminal of capture.partial.mediaUnavailable) {
+        if (!Number.isInteger(terminal.ordinal) || terminal.ordinal! < 1 || ordinals.has(terminal.ordinal!)) {
+            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        }
+        ordinals.add(terminal.ordinal!);
+    }
 }
 
 function percentile(values: number[], p: number): number {
@@ -321,6 +357,7 @@ export async function runAnalysisV2AiReplay(input: {
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
+    assertArtifactCapability(input.bundle);
     if (input.bundle.schemaVersion === 2 && input.mode !== 'dry-run') {
         throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
     }

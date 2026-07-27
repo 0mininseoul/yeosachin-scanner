@@ -1,4 +1,5 @@
 import { mkdtemp, chmod, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
+import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -47,7 +48,66 @@ function bundle(): AnalysisV2ReplayBundle {
     };
 }
 
+function partialBundle(): AnalysisV2ReplayBundle {
+    const base = bundle();
+    return {
+        ...base,
+        schemaVersion: 2,
+        capture: {
+            ...base.capture,
+            scope: 'ai-only-historical-partial-available', notExact: true,
+            fullE2eEvidence: false, noMediaSubstitution: true,
+            sourceLineage: { selectedPlanId: 'standard', policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' } },
+            evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
+            partial: { sourceUniverseDigest: 'd'.repeat(64), mediaUnavailable: [] },
+        },
+    };
+}
+
+async function writeRawEncrypted(bundlePath: string, keyPath: string, value: unknown) {
+    const key = await readFile(keyPath);
+    const payload = Buffer.from(JSON.stringify(value));
+    const aadValue = value as { schemaVersion: number; capture: { requestFingerprint: string; sourceLineage: unknown; evaluationPolicy?: unknown } };
+    const aad = Buffer.from(JSON.stringify({ schemaVersion: aadValue.schemaVersion, requestFingerprint: aadValue.capture.requestFingerprint, sourceLineage: aadValue.capture.sourceLineage, evaluationPolicy: aadValue.capture.evaluationPolicy ?? null }));
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv); cipher.setAAD(aad);
+    const ciphertext = Buffer.concat([cipher.update(payload), cipher.final()]);
+    await writeFile(bundlePath, JSON.stringify({ v: 2, aad: aad.toString('base64'), iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64'), sha256: createHash('sha256').update(payload).digest('hex') }), { mode: 0o600 });
+}
+
 describe('analysis V2 replay bundle', () => {
+    it('seals evaluation capabilities to their artifact schema at write', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key'); await createReplayKeyFile(keyPath);
+        const invalid = [
+            { ...bundle(), capture: { ...bundle().capture, evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' } } },
+            { ...partialBundle(), capture: { ...partialBundle().capture, evaluationPolicy: undefined } },
+            { ...partialBundle(), capture: { ...partialBundle().capture, evaluationPolicy: { capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' } } },
+        ];
+        for (const [index, value] of invalid.entries()) {
+            await expect(writeReplayBundle({ bundle: value as AnalysisV2ReplayBundle, bundlePath: join(directory, `${index}.enc`), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+        }
+    });
+
+    it('rejects cross-version capabilities again while reading authenticated plaintext', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key'); const bundlePath = join(directory, 'invalid.enc');
+        await createReplayKeyFile(keyPath);
+        const invalid = { ...partialBundle(), capture: { ...partialBundle().capture, evaluationPolicy: undefined } };
+        await writeRawEncrypted(bundlePath, keyPath, invalid);
+        await expect(readReplayBundle({ bundlePath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('rejects duplicate or overlapping partial ordinals at the artifact boundary', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key'); await createReplayKeyFile(keyPath);
+        const base = partialBundle() as Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
+        const invalid = { ...base, capture: { ...base.capture, partial: { ...base.capture.partial!, mediaUnavailable: [{ ordinal: 1, terminal: 'media_unavailable' as const, triageFailures: 0, featureFailures: 0, reasons: ['profile_unavailable'] }] } } };
+        await expect(writeReplayBundle({ bundle: invalid as AnalysisV2ReplayBundle, bundlePath: join(directory, 'overlap.enc'), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
     it('encrypts private payloads with 0700/0600 artifact permissions and decrypts only with its key', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
         temporaryPaths.push(directory);
