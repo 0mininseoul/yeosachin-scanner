@@ -3,6 +3,8 @@ import { z } from 'zod';
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_RELATIONSHIP_ACTOR_ID,
+    apifyProfileOmittedAccountError,
+    attributedProfileActorErrorUsername,
     parseApifyProfileDataset,
     parseApifyRelationshipDataset,
 } from '@/lib/services/instagram/providers/apify';
@@ -76,8 +78,11 @@ function profileUsernames(items: readonly unknown[]): string[] {
     const values = new Set<string>();
     for (const item of items) {
         const parsed = z.object({ username: z.string().regex(/^[A-Za-z0-9._]{1,30}$/) }).passthrough().safeParse(item);
-        if (!parsed.success) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_ATTRIBUTION_MISSING');
-        values.add(parsed.data.username.toLowerCase());
+        const username = parsed.success
+            ? parsed.data.username.toLowerCase()
+            : attributedProfileActorErrorUsername(item);
+        if (!username) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_ATTRIBUTION_MISSING');
+        values.add(username);
     }
     if (!values.size) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_EMPTY');
     return [...values];
@@ -127,25 +132,18 @@ function isProductionCompleteCandidateProfileBatch(
         && failures.every(attempt => isProductionAllowedCandidateProfileFailure(attempt.error));
 }
 
-function isOrderedUsernameSubset(
+function isUsernameSubset(
     observed: readonly string[],
     requested: readonly string[],
 ): boolean {
-    let offset = 0;
-    for (const username of observed) {
-        offset = requested.indexOf(username, offset);
-        if (offset < 0) return false;
-        offset += 1;
-    }
-    return true;
+    const requestedSet = new Set(requested);
+    return observed.every(username => requestedSet.has(username));
 }
 
 function omittedCandidateProfileAttempt(): CandidateProfileAttempt {
     return {
         status: 'failed',
-        error: new Error(
-            'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.',
-        ),
+        error: apifyProfileOmittedAccountError(),
     };
 }
 
@@ -261,7 +259,8 @@ export async function loadReplaySourceFromExistingRuns(input: {
     for (const repair of repairBatches) {
         const repairUsernames = [...repair.keys()];
         const matchingFallbackBatches = fallbackBatches.filter(batch => (
-            isOrderedUsernameSubset(
+            !isProductionCompleteCandidateProfileBatch([...batch.values()])
+            && isUsernameSubset(
                 repairUsernames,
                 [...batch].flatMap(([username, attempt]) => (
                     attempt.status === 'failed' ? [username] : []
@@ -274,7 +273,6 @@ export async function loadReplaySourceFromExistingRuns(input: {
         const fallback = matchingFallbackBatches[0]!;
         if (
             repairedFallbackBatches.has(fallback)
-            || isProductionCompleteCandidateProfileBatch([...fallback.values()])
         ) {
             throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
         }

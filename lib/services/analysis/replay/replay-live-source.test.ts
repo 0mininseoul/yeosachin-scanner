@@ -29,6 +29,54 @@ function run(operationKey: string, runId: string, actorId = 'actor/name') {
     return { actorId, credentialSlot: 'secondary', runId, status: 'succeeded' as const, operationKey };
 }
 
+function repairReplayScenario(
+    repairItems: (input: { repaired: string; unavailable: string }) => unknown[],
+) {
+    const candidates = Array.from({ length: 10 }, (_, index) => `candidate${index}`);
+    const repaired = candidates.at(-2)!;
+    const unavailable = candidates.at(-1)!;
+    const datasets: Record<string, unknown[]> = {
+        RUNPROF1: [profile('target', 'target')],
+        RUNPROF2: candidates.map((username, index) => (
+            username === repaired || username === unavailable
+                ? { ...profile(username, `cand${index}`), latestPosts: [] }
+                : profile(username, `cand${index}`)
+        )),
+        RUNREPAIR: repairItems({ repaired, unavailable }),
+        RUNFOLL1: candidates.map((username, index) => ({ username_scrape: 'target', type: 'Followers', id: String(index + 1), username, full_name: username, is_private: false, is_verified: false, profile_pic_url: `https://scontent.cdninstagram.com/${username}.jpg` })),
+        RUNFOLL2: candidates.map((username, index) => ({ username_scrape: 'target', type: 'Following', id: String(index + 1), username, full_name: username, is_private: false, is_verified: false, profile_pic_url: `https://scontent.cdninstagram.com/${username}.jpg` })),
+        RUNLIKE1: [],
+        RUNCOMM1: [],
+    };
+    const descriptor: ReplayCaptureDescriptor = {
+        requestId: '10000000-0000-4000-8000-000000000001',
+        preflightId: '20000000-0000-4000-8000-000000000001',
+        requestFingerprint: 'a'.repeat(64), targetUsername: 'target',
+        sourceLineage: { selectedPlanId: 'standard', policyVersions: { pipeline: 'v2', risk: 'risk-policy-v2.3', aiStage: 'ai-stage-policy-v2.7' } },
+        target: { fullName: null, bio: null, profileImageUrl: null, followersCount: 10, followingCount: 10 },
+        preflightRuns: [run('target-profile-fallback', 'RUNPROF1', APIFY_PROFILE_ACTOR_ID)],
+        providerRuns: [
+            run(`profile-fallback:${'a'.repeat(64)}`, 'RUNPROF2', APIFY_PROFILE_ACTOR_ID),
+            run(`profile-repair:${'b'.repeat(64)}`, 'RUNREPAIR', REPLACEMENT_PROFILE_ACTOR.actorId),
+            run(`relationship-followers:${'c'.repeat(64)}`, 'RUNFOLL1', APIFY_RELATIONSHIP_ACTOR_ID),
+            run(`relationship-following:${'d'.repeat(64)}`, 'RUNFOLL2', APIFY_RELATIONSHIP_ACTOR_ID),
+            run(`target-likers:${'e'.repeat(64)}`, 'RUNLIKE1', APIFY_LIKERS_ACTOR_ID),
+            run(`target-comments:${'f'.repeat(64)}`, 'RUNCOMM1', APIFY_COMMENTS_ACTOR_ID),
+        ],
+    };
+    const actors = new Map([...descriptor.preflightRuns, ...descriptor.providerRuns].map(item => [item.runId, 'canonicalActorId']));
+    const client: ReplayReadonlyApifyClient = {
+        resolveActorId: async () => 'canonicalActorId',
+        run: runId => ({ get: async () => ({ id: runId, actId: actors.get(runId), status: 'SUCCEEDED', defaultDatasetId: `D${runId}` }) }),
+        dataset: datasetId => ({ listItems: async ({ offset, limit }) => {
+            const items = datasets[datasetId.slice(1)] ?? [];
+            const page = items.slice(offset, offset + limit);
+            return { offset, count: page.length, total: items.length, items: page };
+        } }),
+    };
+    return { candidates, repaired, unavailable, descriptor, client };
+}
+
 describe('live replay source mapping', () => {
     it('maps every paginated existing Actor dataset with shared duplicate-read state', async () => {
         const targetPosts = posts('target');
@@ -387,53 +435,40 @@ describe('live replay source mapping', () => {
     });
 
     it('reconstructs an omitted repair row as a terminal incomplete outcome before applying the 90 percent floor', async () => {
-        const candidates = Array.from({ length: 10 }, (_, index) => `candidate${index}`);
-        const repaired = candidates.at(-2)!;
-        const unavailable = candidates.at(-1)!;
-        const datasets: Record<string, unknown[]> = {
-            RUNPROF1: [profile('target', 'target')],
-            RUNPROF2: candidates.map((username, index) => (
-                username === repaired || username === unavailable
-                    ? { ...profile(username, `cand${index}`), latestPosts: [] }
-                    : profile(username, `cand${index}`)
-            )),
-            RUNREPAIR: [profile(repaired, 'repair')],
-            RUNFOLL1: candidates.map((username, index) => ({ username_scrape: 'target', type: 'Followers', id: String(index + 1), username, full_name: username, is_private: false, is_verified: false, profile_pic_url: `https://scontent.cdninstagram.com/${username}.jpg` })),
-            RUNFOLL2: candidates.map((username, index) => ({ username_scrape: 'target', type: 'Following', id: String(index + 1), username, full_name: username, is_private: false, is_verified: false, profile_pic_url: `https://scontent.cdninstagram.com/${username}.jpg` })),
-            RUNLIKE1: [],
-            RUNCOMM1: [],
-        };
-        const descriptor: ReplayCaptureDescriptor = {
-            requestId: '10000000-0000-4000-8000-000000000001',
-            preflightId: '20000000-0000-4000-8000-000000000001',
-            requestFingerprint: 'a'.repeat(64), targetUsername: 'target',
-            sourceLineage: { selectedPlanId: 'standard', policyVersions: { pipeline: 'v2', risk: 'risk-policy-v2.3', aiStage: 'ai-stage-policy-v2.7' } },
-            target: { fullName: null, bio: null, profileImageUrl: null, followersCount: 10, followingCount: 10 },
-            preflightRuns: [run('target-profile-fallback', 'RUNPROF1', APIFY_PROFILE_ACTOR_ID)],
-            providerRuns: [
-                run(`profile-fallback:${'a'.repeat(64)}`, 'RUNPROF2', APIFY_PROFILE_ACTOR_ID),
-                run(`profile-repair:${'b'.repeat(64)}`, 'RUNREPAIR', REPLACEMENT_PROFILE_ACTOR.actorId),
-                run(`relationship-followers:${'c'.repeat(64)}`, 'RUNFOLL1', APIFY_RELATIONSHIP_ACTOR_ID),
-                run(`relationship-following:${'d'.repeat(64)}`, 'RUNFOLL2', APIFY_RELATIONSHIP_ACTOR_ID),
-                run(`target-likers:${'e'.repeat(64)}`, 'RUNLIKE1', APIFY_LIKERS_ACTOR_ID),
-                run(`target-comments:${'f'.repeat(64)}`, 'RUNCOMM1', APIFY_COMMENTS_ACTOR_ID),
-            ],
-        };
-        const actors = new Map([...descriptor.preflightRuns, ...descriptor.providerRuns].map(item => [item.runId, 'canonicalActorId']));
-        const client: ReplayReadonlyApifyClient = {
-            resolveActorId: async () => 'canonicalActorId',
-            run: runId => ({ get: async () => ({ id: runId, actId: actors.get(runId), status: 'SUCCEEDED', defaultDatasetId: `D${runId}` }) }),
-            dataset: datasetId => ({ listItems: async ({ offset, limit }) => {
-                const items = datasets[datasetId.slice(1)] ?? [];
-                const page = items.slice(offset, offset + limit);
-                return { offset, count: page.length, total: items.length, items: page };
-            } }),
-        };
+        const { repaired, unavailable, descriptor, client } = repairReplayScenario(
+            input => [profile(input.repaired, 'repair')],
+        );
 
         const source = await loadReplaySourceFromExistingRuns({ descriptor, clientForSlot: () => client });
         expect(source.profiles).toHaveLength(9);
         expect(source.profiles.some(item => item.username === repaired)).toBe(true);
         expect(source.profiles.some(item => item.username === unavailable)).toBe(false);
+    });
+
+    it('accepts a canonically attributed Actor-error repair row without a username field', async () => {
+        const { unavailable, descriptor, client } = repairReplayScenario(input => [
+            profile(input.repaired, 'repair'),
+            {
+                inputUrl: `https://www.instagram.com/${input.unavailable}/`,
+                error: 'Synthetic Actor failure',
+            },
+        ]);
+
+        const source = await loadReplaySourceFromExistingRuns({ descriptor, clientForSlot: () => client });
+        expect(source.profiles).toHaveLength(9);
+        expect(source.profiles.some(item => item.username === unavailable)).toBe(false);
+    });
+
+    it('maps reversed repair Actor output back to the fallback requested order', async () => {
+        const { repaired, unavailable, descriptor, client } = repairReplayScenario(input => [
+            profile(input.unavailable, 'repair-unavailable'),
+            profile(input.repaired, 'repair-repaired'),
+        ]);
+
+        const source = await loadReplaySourceFromExistingRuns({ descriptor, clientForSlot: () => client });
+        expect(source.profiles).toHaveLength(10);
+        expect(source.profiles.some(item => item.username === repaired)).toBe(true);
+        expect(source.profiles.some(item => item.username === unavailable)).toBe(true);
     });
 
     it('rejects a repair run that mixes failed usernames from two fallback batches', async () => {

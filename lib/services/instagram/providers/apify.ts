@@ -297,7 +297,12 @@ function exactInstagramProfileUsername(value: string): string | null {
     return username.toLowerCase();
 }
 
-function attributedProfileActorErrorUsername(item: unknown): string | null {
+export function attributedProfileActorErrorUsername(item: unknown): string | null {
+    if (
+        typeof item === 'object'
+        && item !== null
+        && Object.prototype.hasOwnProperty.call(item, 'username')
+    ) return null;
     const parsed = profileActorErrorEnvelopeSchema.safeParse(item);
     if (!parsed.success) return null;
     const inputUsername = exactInstagramProfileUsername(parsed.data.inputUrl);
@@ -307,6 +312,12 @@ function attributedProfileActorErrorUsername(item: unknown): string | null {
         if (resultUsername !== inputUsername) return null;
     }
     return inputUsername;
+}
+
+export function apifyProfileOmittedAccountError(): Error {
+    return new Error(
+        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
+    );
 }
 
 const latestPostSchema = z.object({
@@ -730,9 +741,7 @@ export function buildApifyProfileAttemptResults(
             return failedProfileAttempt({
                 requestedUsername,
                 source: 'apify',
-                error: new Error(
-                    'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
-                ),
+                error: apifyProfileOmittedAccountError(),
                 requestCount: 1,
                 latencyMs,
             });
