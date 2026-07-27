@@ -214,7 +214,7 @@ describe('analysis V2 replay capture', () => {
                 loadReplaySource: async () => ({ profiles: [richProfile], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] }, providerRuns: [] }),
             },
             normalizeMedia: async media => {
-                if (media.selectionId.includes('post-0')) {
+                if (media.selectionId.includes('post-3')) {
                     throw new AnalysisImagePreparationError('source_missing', 'permanent');
                 }
                 return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
@@ -229,5 +229,28 @@ describe('analysis V2 replay capture', () => {
         });
         expect(captured.featureSelectionIds).toEqual(captured.media.map(media => media.selectionId));
         expect(captured.triageSelectionIds.every(id => captured.media.some(media => media.selectionId === id))).toBe(true);
+    });
+
+    it('rejects when the canonical triage stage falls below production media coverage', async () => {
+        const noAvatar = {
+            ...profile,
+            profilePicUrl: undefined,
+            postsCount: 8,
+            latestPosts: Array.from({ length: 8 }, (_, index) => ({
+                ...profile.latestPosts[0], id: `p${index}`, shortCode: `p${index}`,
+                imageUrl: `https://cdninstagram.com/p${index}.jpg`,
+            })),
+        };
+        await expect(captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({ requestFingerprint: 'f'.repeat(64), sourceLineage: STANDARD_SOURCE_LINEAGE, completed: true }),
+                loadReplaySource: async () => ({ profiles: [noAvatar], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] }, providerRuns: [] }),
+            },
+            normalizeMedia: async media => {
+                if (media.selectionId.includes('p0')) throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+            },
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
     });
 });

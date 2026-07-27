@@ -41,21 +41,26 @@ function normalizedUsername(value: string): string {
     return normalized;
 }
 
-function selectionMedia(profile: AnalysisV2CheckpointProfile): readonly SelectedAnalysisMedia[] {
-    if (profile.isPrivate) return [];
-    if ((profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
-        fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
-    }
-    const policy = selectAnalysisMedia({
-        profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
-        posts: profile.latestPosts ?? [],
-    });
-    if (policy.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
-    return policy.feature.media;
-}
-
 function jpeg(buffer: Buffer): boolean {
     return buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
+}
+
+function mergeNormalizedMedia(
+    selected: readonly SelectedAnalysisMedia[],
+    parts: readonly Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>>[],
+) {
+    const bytes = new Map(parts.flatMap(part => [...part.bytes.entries()]));
+    const failures = parts.flatMap(part => part.coverage.failures);
+    return {
+        media: selected.flatMap(media => bytes.has(media.selectionId)
+            ? [{ ...media, bytes: bytes.get(media.selectionId)! }]
+            : []),
+        coverage: {
+            selectedCount: selected.length,
+            normalizedCount: bytes.size,
+            failures,
+        },
+    };
 }
 
 /**
@@ -83,22 +88,37 @@ export async function captureAnalysisV2ReplayBundle(input: {
     const source = await input.repository.loadReplaySource(request);
     const profiles: AnalysisV2ReplayBundle['profiles'] = [];
     for (const [index, profile] of source.profiles.entries()) {
-        const selected = selectionMedia(profile);
+        if (!profile.isPrivate && (profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
+            fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        }
         const policy = profile.isPrivate ? null : selectAnalysisMedia({
             profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
             posts: profile.latestPosts ?? [],
         });
-        const normalized = await normalizeAnalysisV2MediaSelections(
-            selected,
+        if (policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        const triageNormalized = await normalizeAnalysisV2MediaSelections(
+            policy?.triage.media ?? [],
             input.normalizeMedia,
             request.sourceLineage.policyVersions.aiStage,
         );
         if (
-            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
-            || normalized.media.some(item => !jpeg(normalized.bytes.get(item.selectionId)!))
+            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(triageNormalized.coverage))
+            || triageNormalized.media.some(item => !jpeg(triageNormalized.bytes.get(item.selectionId)!))
         ) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         }
+        const triageIds = new Set(policy?.triage.selectionIds ?? []);
+        const featureRemainder = (policy?.feature.media ?? []).filter(media => !triageIds.has(media.selectionId));
+        const remainderNormalized = await normalizeAnalysisV2MediaSelections(
+            featureRemainder,
+            input.normalizeMedia,
+            request.sourceLineage.policyVersions.aiStage,
+        );
+        const normalized = mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
+        if (
+            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
+            || normalized.media.some(item => !jpeg(item.bytes))
+        ) fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         const normalizedSelectionIds = new Set(normalized.media.map(item => item.selectionId));
         profiles.push({
             ordinal: index + 1,
@@ -109,12 +129,12 @@ export async function captureAnalysisV2ReplayBundle(input: {
             bio: profile.isPrivate ? undefined : profile.bio ?? null,
             media: normalized.media.map(media => ({
                 selectionId: media.selectionId,
-                kind: media.kind === 'profile' ? 'profile' as const : 'feed' as const,
+                kind: media.role === 'profile' ? 'profile' as const : 'feed' as const,
                 ...(media.postId ? { postId: media.postId } : {}),
                 caption: media.postId
                     ? profile.latestPosts?.find(post => post.id === media.postId)?.caption ?? null
                     : null,
-                jpegBase64: normalized.bytes.get(media.selectionId)!.toString('base64'),
+                jpegBase64: media.bytes.toString('base64'),
             })),
             triageSelectionIds: (policy?.triage.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
             featureSelectionIds: (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
