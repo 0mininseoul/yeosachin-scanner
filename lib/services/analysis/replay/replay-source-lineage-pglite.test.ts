@@ -16,6 +16,20 @@ const forwardMigration = readFileSync(
     ),
     'utf8',
 );
+const v28FenceMigration = readFileSync(
+    new URL(
+        '../../../../supabase/migrations/20260727033000_fence_replay_capture_to_ai_stage_v28.sql',
+        import.meta.url,
+    ),
+    'utf8',
+);
+const v29FenceMigration = readFileSync(
+    new URL(
+        '../../../../supabase/migrations/20260727100000_fence_replay_capture_to_ai_stage_v29.sql',
+        import.meta.url,
+    ),
+    'utf8',
+);
 
 const PLUS_REQUEST = '10000000-0000-4000-8000-000000000001';
 const PLUS_PREFLIGHT = '20000000-0000-4000-8000-000000000001';
@@ -23,9 +37,15 @@ const STANDARD_REQUEST = '10000000-0000-4000-8000-000000000002';
 const STANDARD_PREFLIGHT = '20000000-0000-4000-8000-000000000002';
 const INVALID_REQUEST = '10000000-0000-4000-8000-000000000003';
 const INVALID_PREFLIGHT = '20000000-0000-4000-8000-000000000003';
+const V28_REQUEST = '10000000-0000-4000-8000-000000000007';
+const V28_PREFLIGHT = '20000000-0000-4000-8000-000000000007';
+const V29_REQUEST = '10000000-0000-4000-8000-000000000010';
+const V29_PREFLIGHT = '20000000-0000-4000-8000-000000000010';
 const PLUS_POLICY = '{"pipeline":"v2","risk":"risk-policy-v2.2","aiStage":"ai-stage-policy-v2.4"}';
 const STANDARD_POLICY = '{"pipeline":"v2","risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.7"}';
 const INVALID_POLICY = '{"pipeline":"v2","risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.7"}';
+const V28_POLICY = '{"pipeline":"v2","risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.8","scheduler":"ai-scheduler-v1"}';
+const V29_POLICY = '{"pipeline":"v2","risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.9","scheduler":"ai-scheduler-v1"}';
 const STANDARD_CARDS = JSON.stringify({
     standard: {
         launchStatus: 'production',
@@ -77,6 +97,8 @@ beforeAll(async () => {
     `);
     await db.exec(initialMigration);
     await db.exec(forwardMigration);
+    await db.exec(v28FenceMigration);
+    await db.exec(v29FenceMigration);
     await db.exec(`
         INSERT INTO public.analysis_requests VALUES
         (
@@ -92,6 +114,16 @@ beforeAll(async () => {
             '${INVALID_REQUEST}', 'invalid_source', 'completed', 'v2', 'plus',
             'production', '${INVALID_PREFLIGHT}', '2026-07-27T00:02:00Z',
             '${INVALID_POLICY}'
+        ),
+        (
+            '${V28_REQUEST}', 'v28_source', 'completed', 'v2', 'standard',
+            'production', '${V28_PREFLIGHT}', '2026-07-27T00:03:00Z',
+            '${V28_POLICY}'
+        ),
+        (
+            '${V29_REQUEST}', 'v29_source', 'completed', 'v2', 'standard',
+            'production', '${V29_PREFLIGHT}', '2026-07-27T00:04:00Z',
+            '${V29_POLICY}'
         );
         INSERT INTO public.analysis_preflights VALUES
         (
@@ -108,6 +140,16 @@ beforeAll(async () => {
             '${INVALID_PREFLIGHT}', 'consumed', 'production', '${INVALID_REQUEST}',
             'invalid_source', FALSE, '${INVALID_POLICY}', 'Invalid Source', 'bio',
             'https://example.com/invalid.jpg', 10, 20, '${STANDARD_CARDS}'
+        ),
+        (
+            '${V28_PREFLIGHT}', 'consumed', 'production', '${V28_REQUEST}',
+            'v28_source', FALSE, '${V28_POLICY}', 'V28 Source', 'bio',
+            'https://example.com/v28.jpg', 10, 20, '${STANDARD_CARDS}'
+        ),
+        (
+            '${V29_PREFLIGHT}', 'consumed', 'production', '${V29_REQUEST}',
+            'v29_source', FALSE, '${V29_POLICY}', 'V29 Source', 'bio',
+            'https://example.com/v29.jpg', 10, 20, '${STANDARD_CARDS}'
         );
         INSERT INTO public.analysis_v2_result_summaries VALUES (
             '${PLUS_REQUEST}', 'plus_source', 'plus', 800, 800, 600, 600,
@@ -178,6 +220,8 @@ describe('read_analysis_v2_replay_capture_source lineage allowlist', () => {
     it.each([
         ['plus_source', PLUS_REQUEST, 'plus', 'ai-stage-policy-v2.4', 'risk-policy-v2.2'],
         ['standard_source', STANDARD_REQUEST, 'standard', 'ai-stage-policy-v2.7', 'risk-policy-v2.4'],
+        ['v28_source', V28_REQUEST, 'standard', 'ai-stage-policy-v2.8', 'risk-policy-v2.4'],
+        ['v29_source', V29_REQUEST, 'standard', 'ai-stage-policy-v2.9', 'risk-policy-v2.4'],
     ])(
         'returns the exact supported %s source lineage',
         async (target, requestId, selectedPlanId, aiStage, risk) => {
@@ -205,6 +249,54 @@ describe('read_analysis_v2_replay_capture_source lineage allowlist', () => {
                 'invalid_source', '${INVALID_REQUEST}'
             )`,
         )).rejects.toThrow('ANALYSIS_V2_REPLAY_SOURCE_NOT_FOUND');
+        await db.exec('RESET ROLE');
+    });
+
+    it.each([
+        [
+            'v27_extra_drift',
+            '10000000-0000-4000-8000-000000000008',
+            '20000000-0000-4000-8000-000000000008',
+            { pipeline: 'v2', risk: 'risk-policy-v2.4', aiStage: 'ai-stage-policy-v2.7', scheduler: 'ai-scheduler-v1', drift: 'x' },
+        ],
+        [
+            'v28_missing_scheduler',
+            '10000000-0000-4000-8000-000000000009',
+            '20000000-0000-4000-8000-000000000009',
+            { pipeline: 'v2', risk: 'risk-policy-v2.4', aiStage: 'ai-stage-policy-v2.8' },
+        ],
+    ] as const)(
+        'rejects an exact-source policy with %s',
+        async (target, requestId, preflightId, policy) => {
+            await db.query(
+                `INSERT INTO public.analysis_requests VALUES
+                ($1, $2, 'completed', 'v2', 'standard', 'production', $3,
+                 '2026-07-27T02:00:00Z', $4::JSONB)`,
+                [requestId, target, preflightId, JSON.stringify(policy)],
+            );
+            await db.query(
+                `INSERT INTO public.analysis_preflights VALUES
+                ($1, 'consumed', 'production', $2, $3, FALSE, $4::JSONB,
+                 'Drift Source', 'bio', 'https://example.com/drift.jpg',
+                 10, 20, $5::JSONB)`,
+                [preflightId, requestId, target, JSON.stringify(policy), STANDARD_CARDS],
+            );
+            await db.exec('SET ROLE service_role');
+            await expect(db.query(
+                'SELECT public.read_analysis_v2_replay_capture_source($1, $2)',
+                [target, requestId],
+            )).rejects.toThrow('ANALYSIS_V2_REPLAY_SOURCE_NOT_FOUND');
+            await db.exec('RESET ROLE');
+        },
+    );
+
+    it.each(['anon', 'authenticated'])('does not grant %s source RPC access', async role => {
+        await db.exec(`SET ROLE ${role}`);
+        await expect(db.query(
+            `SELECT public.read_analysis_v2_replay_capture_source(
+                'standard_source', '${STANDARD_REQUEST}'
+            )`,
+        )).rejects.toThrow(/permission denied/i);
         await db.exec('RESET ROLE');
     });
 

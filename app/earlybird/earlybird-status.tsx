@@ -144,6 +144,16 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                         이메일 알림 받기
                     </button>
                 </>
+            ) : order.systemStatus === 'cancelled' ? (
+                <CaseCard className="mt-5 p-4" bracket="var(--color-amber)">
+                    <p className="text-[13px] font-bold text-amber" role="status">
+                        취소된 주문입니다.
+                    </p>
+                    <p className="mt-2 text-[12px] leading-relaxed text-fg-dim">
+                        결제를 이미 진행했다면 새로 결제하지 말고,
+                        결제 상태가 반영될 때까지 기다려주세요.
+                    </p>
+                </CaseCard>
             ) : (
                 <PrimaryButton className="mt-5" onClick={() => setNotifyModalOpen(true)}>
                     이메일 알림 받기

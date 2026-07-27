@@ -1,9 +1,10 @@
 'use client';
 
 import Image from 'next/image';
-import { useEffect, use, useRef, useCallback } from 'react';
+import { useEffect, use, useRef, useCallback, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
+import { useAnalysisDurationEstimate } from '@/hooks/useAnalysisDurationEstimate';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 import {
     ANALYSIS_PROGRESS_STEPS,
@@ -17,6 +18,16 @@ import {
     clearPendingAnalysisTargetForTerminalState,
     signOutAndClearPendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
+import {
+    analysisDurationRangeLabel,
+    hasAnalysisDurationExceeded,
+} from '@/lib/domain/analysis/duration-estimate';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import {
+    availableAnalyticsStorage,
+    readAnalysisStartedAt,
+    tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
@@ -28,17 +39,19 @@ const V2_TRACK_PRESENTATION = [
     { key: 'finalization', label: '위험도·총평 정리' },
 ] as const;
 
-function etaLabel(lowSeconds: number, highSeconds: number): string {
-    const lowMinutes = Math.max(1, Math.ceil(lowSeconds / 60));
-    const highMinutes = Math.max(lowMinutes, Math.ceil(highSeconds / 60));
-    return lowMinutes === highMinutes
-        ? `약 ${highMinutes}분 남음`
-        : `약 ${lowMinutes}~${highMinutes}분 남음`;
+function durationRangeKey(lowMinutes: number, highMinutes: number): '4_6' | '5_8' | '8_12' | '10_15' {
+    return `${lowMinutes}_${highMinutes}` as '4_6' | '5_8' | '8_12' | '10_15';
 }
 
 export default function ProgressPage({ params }: PageProps) {
     const { requestId } = use(params);
     const { data, loading, error, refetch } = useAnalysisProgress(requestId);
+    const durationEstimate = useAnalysisDurationEstimate({
+        requestId,
+        enabled: data?.pipelineVersion === 'v2'
+            && (data.status === 'pending' || data.status === 'processing'),
+        refreshKey: data?.progress ?? null,
+    });
     const router = useRouter();
     const isRunningStep = useRef(false);
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -46,6 +59,31 @@ export default function ProgressPage({ params }: PageProps) {
     const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const stepTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const runNextStepRef = useRef<() => void>(() => undefined);
+    const durationTrackedRef = useRef(new Set<string>());
+    const [nowMs, setNowMs] = useState(() => Date.now());
+
+    useEffect(() => {
+        if (!durationEstimate || durationEstimate.source === 'demo') return;
+        const rangeKey = durationRangeKey(
+            durationEstimate.estimate.range.lowMinutes,
+            durationEstimate.estimate.range.highMinutes,
+        );
+        const key = `analysis-duration:${requestId}:${durationEstimate.estimate.version}:${rangeKey}`;
+        if (durationTrackedRef.current.has(key)) return;
+        durationTrackedRef.current.add(key);
+        if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), key)) return;
+        trackEvent(EVENTS.ANALYSIS_DURATION_ESTIMATE_SHOWN, {
+            stage: 'duration_workload',
+            estimate_version: durationEstimate.estimate.version,
+            duration_range: rangeKey,
+        });
+    }, [durationEstimate, requestId]);
+
+    useEffect(() => {
+        if (!durationEstimate || durationEstimate.source === 'demo') return;
+        const interval = window.setInterval(() => setNowMs(Date.now()), 15_000);
+        return () => window.clearInterval(interval);
+    }, [durationEstimate]);
 
     const scheduleNextStep = useCallback((delayMs: number, retry = false) => {
         const targetRef = retry ? retryTimeoutRef : stepTimeoutRef;
@@ -354,13 +392,23 @@ export default function ProgressPage({ params }: PageProps) {
                     </div>
                     <div className="mt-2 flex justify-between text-[12px] text-fg-mute">
                         <span className="num font-bold text-blood">{data.progress}%</span>
-                        <span>
-                            {data.pipelineVersion === 'v2' && data.etaRange
-                                ? etaLabel(data.etaRange.lowSeconds, data.etaRange.highSeconds)
-                                : '단계별 처리 중'}
-                        </span>
+                        <span>{durationEstimate?.source === 'demo'
+                            ? '약 60~90초'
+                            : durationEstimate?.source === 'workload'
+                                ? `예상 ${analysisDurationRangeLabel(durationEstimate.estimate.range)}`
+                                : '작업량 확인 중'}</span>
                     </div>
                 </div>
+
+                {durationEstimate?.source === 'workload' && hasAnalysisDurationExceeded(
+                    readAnalysisStartedAt(availableAnalyticsStorage(), requestId),
+                    durationEstimate.estimate,
+                    nowMs,
+                ) && (
+                    <div className="mt-4 w-full border border-amber/40 bg-amber/[0.07] px-4 py-3 text-[13px] font-semibold text-amber" role="status">
+                        예상보다 지연 중
+                    </div>
+                )}
 
                 {/* step log */}
                 {data.pipelineVersion === 'v2' && data.tracks ? (

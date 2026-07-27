@@ -72,7 +72,7 @@ const qualitySchema = z.object({
     );
     const evaluable = quality.screenedCount > 0;
     const unknownPassed = evaluable
-        && quality.finalUnknownCount * 10 <= quality.screenedCount * 3;
+        && quality.finalUnknownCount * 10 <= quality.screenedCount * 2;
     const expectedRatio = evaluable
         ? quality.finalUnknownCount / quality.screenedCount
         : null;

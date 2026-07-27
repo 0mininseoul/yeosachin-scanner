@@ -16,8 +16,8 @@ function quality(overrides: Record<string, unknown> = {}) {
         screenedCount: 10,
         resolverEligibleCount: 5,
         baselineUnknownCount: 5,
-        finalUnknownCount: 3,
-        finalUnknownRatio: 0.3,
+        finalUnknownCount: 2,
+        finalUnknownRatio: 0.2,
         readyCount: 3,
         appliedCount: 2,
         appliedWithFencedResultCount: 2,
@@ -65,11 +65,11 @@ function setup(data: unknown) {
 }
 
 describe('analysis V2 gender resolution durable quality gate', () => {
-    it('passes the inclusive unknown-at-most-30-percent boundary', async () => {
+    it('passes the inclusive unknown-at-most-20-percent boundary', async () => {
         const { rpc, store } = setup(quality());
         await expect(store.load(requestId)).resolves.toMatchObject({
-            finalUnknownCount: 3,
-            finalUnknownRatio: 0.3,
+            finalUnknownCount: 2,
+            finalUnknownRatio: 0.2,
             unknownGatePassed: true,
             qualityGatePassed: true,
         });
@@ -79,10 +79,10 @@ describe('analysis V2 gender resolution durable quality gate', () => {
         );
     });
 
-    it('rejects an E2E result above 30 percent without changing classification', async () => {
+    it('rejects an E2E result above 20 percent without changing classification', async () => {
         const { store } = setup(quality({
-            finalUnknownCount: 4,
-            finalUnknownRatio: 0.4,
+            finalUnknownCount: 3,
+            finalUnknownRatio: 0.3,
             unknownGatePassed: false,
             qualityGatePassed: false,
         }));

@@ -14,6 +14,7 @@ import {
     createSupabaseAnalysisV2AiScoringStageStore,
     type AnalysisV2AiScoringStageSupabaseClient,
 } from './v2-ai-scoring-stage-store';
+import type { AnalysisV2ProfileAiOutcome } from './v2-ai-scoring-executors';
 
 // gitleaks:allow -- UUID fixture
 const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
@@ -52,14 +53,308 @@ function preliminary() {
             hasStrongPartnerEvidence: false,
             uniqueTargetPostsLikedByCandidate: 1,
             boundedCandidateCommentsOnTarget: 2,
-            hasTagOrCaptionMention: false,
+            hasCandidateToTargetTagOrCaptionMention: false,
+            hasTargetToCandidateTagOrCaptionMention: false,
         }],
         orderedMutualUsernames: ['woman.one'],
         excludedUsername: null,
     });
 }
 
+function legacyPreliminary() {
+    const [candidate] = preliminary();
+    if (!candidate) throw new Error('fixture missing candidate');
+    const {
+        hasCandidateToTargetTagOrCaptionMention: candidateToTargetMention,
+        hasTargetToCandidateTagOrCaptionMention: targetToCandidateMention,
+        ...legacy
+    } = candidate;
+    return {
+        ...legacy,
+        hasTagOrCaptionMention: candidateToTargetMention || targetToCandidateMention,
+    };
+}
+
+function legacyFinal() {
+    const candidate = legacyPreliminary();
+    return {
+        ...candidate,
+        reverseLikeStatus: 'not_collected' as const,
+        risk: {
+            policyVersion: 'risk-policy-v2.3' as const,
+            components: {
+                candidateToTargetLikes: 0,
+                candidateToTargetComments: 0,
+                targetToCandidateLike: 0,
+                tagOrCaptionMention: 0,
+                recentMutual: 0,
+                appearanceExposure: 0,
+            },
+            softContextBeforeBusinessAdjustment: { recentMutual: 0, appearanceExposure: 0 },
+            softContextMultiplier: 1 as const,
+            weakPartnerAdjustment: 0 as const,
+            preScore: candidate.preScore,
+            rawScore: candidate.preScore,
+            possibleUpperBound: candidate.preScore,
+            publicScore: 1,
+            displayScore: 1,
+            possibleUpperPublicScore: 1,
+            possibleUpperDisplayScore: 1,
+            riskBand: 'normal' as const,
+            partnerCapApplied: false,
+        },
+        displayScore: 1,
+        riskBand: 'normal' as const,
+        relativeTierApplied: false,
+        featuredRank: null,
+        relativeWatchRank: null,
+    };
+}
+
+function v28ProfileOutcome(): AnalysisV2ProfileAiOutcome {
+    const selectionId = 'profile:screening-fixture';
+    return {
+        candidateId: `candidate:${'1'.repeat(40)}`,
+        instagramId: 'screening.fixture',
+        status: 'verified_female',
+        unavailableReason: null,
+        profile: {
+            username: 'screening.fixture',
+            fullName: 'Screening Fixture Band',
+            bio: 'Official band · new single out now',
+            profilePicUrl: 'https://cdn.example/screening.jpg',
+            followersCount: 10,
+            followingCount: 10,
+            postsCount: 0,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [],
+        },
+        triage: {
+            assessment: {
+                inferredGender: 'female',
+                confidence: 'high',
+                ownerConsistency: 'same_person',
+                evidenceSelectionIds: [selectionId],
+            },
+            routingDecision: 'route_to_feature_analysis',
+            routingReason: 'conserve_female_recall',
+            analyzedSelectionIds: [selectionId],
+        },
+        feature: {
+            features: {
+                gender: 'female',
+                genderConfidence: 'high',
+                ownerConsistency: 'same_person',
+                appearanceGrade: 1,
+                exposureScore: 0,
+                businessClassification: 'business',
+                businessConfidence: 'high',
+                accountContext: 'official_group_or_brand',
+                marriageEvidence: 'none',
+                partnerEvidence: 'none',
+                partnerExclusionContext: 'none',
+                evidenceSelectionIds: {
+                    gender: [selectionId],
+                    appearance: [],
+                    exposure: [],
+                    business: [selectionId],
+                    accountContext: [selectionId],
+                    marriagePartner: [],
+                },
+                oneLineOverview:
+                    '공식 밴드와 신곡 발매 문구가 함께 보여 개인 계정보다 조직 활동을 먼저 볼 만합니다.',
+            },
+            finalGenderDecision: 'verified_female',
+            analyzedSelectionIds: [selectionId],
+        },
+        normalizedSelectionIds: [selectionId],
+        captions: [],
+        mediaCoverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        genderOperationKey: `gender-triage:${digest('gender')}`,
+        genderResultHash: digest('gender-result'),
+        featureOperationKey: `feature-analysis:${digest('feature')}`,
+        featureResultHash: digest('feature-result'),
+        baselineClassification: 'verified_female',
+        classificationSource: 'feature',
+        genderResolutionStatus: 'not_eligible',
+        genderResolutionOperationKey: null,
+        genderResolutionResultHash: null,
+        mediaBundlePersisted: true,
+        aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+        inputQualityPolicy: 'input-quality-v2.8',
+        mediaSelectionProvenance: {
+            triageSelectedCount: 1,
+            featureSelectedCount: 1,
+            selectedKinds: {
+                profile: 1,
+                postRepresentative: 0,
+                carouselContext: 0,
+            },
+        },
+        accountContextOverride: 'official_group_or_brand',
+        officialScreeningStatus: 'corroborated_official',
+        officialExclusionReason: 'model_group_context_plus_profile_signals',
+    };
+}
+
+function v29PreFeatureSkipOutcome(): AnalysisV2ProfileAiOutcome {
+    const outcome = v28ProfileOutcome();
+    return {
+        ...outcome,
+        status: 'unresolved',
+        feature: null,
+        featureOperationKey: null,
+        featureResultHash: null,
+        baselineClassification: 'unresolved',
+        classificationSource: 'unknown',
+        mediaBundlePersisted: false,
+        aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+        v29FeatureAdmission: 'unsupported_unknown',
+        inputQualityPolicy: undefined,
+        mediaSelectionProvenance: undefined,
+        accountContextOverride: undefined,
+        officialScreeningStatus: undefined,
+        officialExclusionReason: undefined,
+    };
+}
+
 describe('analysis V2 AI/scoring stage store', () => {
+    const v28FieldNames = [
+        'aiStagePolicyVersion',
+        'inputQualityPolicy',
+        'mediaSelectionProvenance',
+        'accountContextOverride',
+        'officialScreeningStatus',
+        'officialExclusionReason',
+    ] as const satisfies readonly (keyof AnalysisV2ProfileAiOutcome)[];
+
+    async function expectIncompleteV28Rejected(outcome: AnalysisV2ProfileAiOutcome) {
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [outcome],
+        })).rejects.toThrow('v2.8 input-quality');
+    }
+
+    it.each(v28FieldNames)(
+        'rejects a v2.8 profile checkpoint missing only %s',
+        async missingField => {
+            const outcome = v28ProfileOutcome();
+            delete outcome[missingField];
+            await expectIncompleteV28Rejected(outcome);
+        },
+    );
+
+    it.each(v28FieldNames)(
+        'rejects a profile checkpoint containing only v2.8 field %s',
+        async presentField => {
+            const complete = v28ProfileOutcome();
+            const value = complete[presentField];
+            for (const field of v28FieldNames) delete complete[field];
+            Object.assign(complete, { [presentField]: value });
+            await expectIncompleteV28Rejected(complete);
+        },
+    );
+
+    it('rejects the three screening fields without the marker and media provenance', async () => {
+        const outcome = v28ProfileOutcome();
+        delete outcome.inputQualityPolicy;
+        delete outcome.mediaSelectionProvenance;
+        await expectIncompleteV28Rejected(outcome);
+    });
+
+    it('rejects forged coherent provenance when persisted source evidence disagrees', async () => {
+        const outcome = v28ProfileOutcome();
+        outcome.profile = {
+            ...outcome.profile!,
+            fullName: 'Personal photo diary',
+            bio: 'coffee and weekend walks',
+        };
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [outcome],
+        })).rejects.toThrow(
+            'v2.8 input-quality provenance does not match persisted source evidence'
+        );
+    });
+
+    it('binds a valid v2.8 outcome to the exact persisted batch policy', async () => {
+        const outcome = v28ProfileOutcome();
+        const payload = {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const,
+            outcomes: [outcome],
+        };
+        const fake = clientWith({
+            data: {
+                stageKind: 'profile_ai_batch',
+                batch: 0,
+                revision: 1,
+                resultHash: digest('profile-v28'),
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+            outcomes: [outcome],
+        })).resolves.toMatchObject({ itemCount: 1 });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({
+                p_payload: payload,
+            }),
+        );
+    });
+
+    it('rejects v2.8 outcome provenance under a legacy or missing batch policy', async () => {
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            outcomes: [v28ProfileOutcome()],
+        })).rejects.toThrow('v2.8 outcome requires a v2.8 batch policy');
+    });
+
+    it('persists a v2.9 source-bound pre-feature exclusion without a feature operation', async () => {
+        const outcome = v29PreFeatureSkipOutcome();
+        const payload = {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+            outcomes: [outcome],
+        };
+        const fake = clientWith({
+            data: {
+                stageKind: 'profile_ai_batch',
+                batch: 0,
+                revision: 1,
+                resultHash: digest('profile-v29-skipped'),
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            outcomes: [outcome],
+        })).resolves.toMatchObject({ itemCount: 1 });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({ p_payload: payload }),
+        );
+    });
+
     it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {
         const candidates = preliminary();
         const shortlistHash = digest('shortlist');
@@ -71,7 +366,7 @@ describe('analysis V2 AI/scoring stage store', () => {
                 revision: 1,
                 resultHash,
                 itemCount: 1,
-                payload: { shortlistHash, candidates },
+                payload: { riskPolicyVersion: 'risk-policy-v2.4', shortlistHash, candidates },
             },
             error: null,
         });
@@ -83,7 +378,13 @@ describe('analysis V2 AI/scoring stage store', () => {
             candidates,
         });
 
-        expect(stored).toEqual({ revision: 1, resultHash, shortlistHash, candidates });
+        expect(stored).toEqual({
+            revision: 1,
+            resultHash,
+            riskPolicyVersion: 'risk-policy-v2.4',
+            shortlistHash,
+            candidates,
+        });
         expect(fake.rpc).toHaveBeenCalledWith(
             ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
             expect.objectContaining({
@@ -92,12 +393,12 @@ describe('analysis V2 AI/scoring stage store', () => {
                 p_stage_kind: 'screening',
                 p_batch: null,
                 p_item_count: 1,
-                p_payload: { shortlistHash, candidates },
+                p_payload: { riskPolicyVersion: 'risk-policy-v2.4', shortlistHash, candidates },
             })
         );
     });
 
-    it('persists calibrated v2.3 fields and rejects v2.2 final-score replay', async () => {
+    it('persists calibrated v2.4 fields and rejects v2.2 final-score replay', async () => {
         const candidates = calculateV2FinalScores({
             preliminary: preliminary(),
             observedReverseLikeCandidateIds: new Set(),
@@ -105,6 +406,7 @@ describe('analysis V2 AI/scoring stage store', () => {
         const narrativeBatchHash = digest('narrative-batch');
         const resultHash = digest('final-score');
         const payload = {
+            riskPolicyVersion: 'risk-policy-v2.4' as const,
             candidates,
             narrativeCandidateIds: [],
             narrativeBatchHash,
@@ -131,7 +433,7 @@ describe('analysis V2 AI/scoring stage store', () => {
                 displayScore: expect.any(Number),
                 riskBand: expect.any(String),
                 relativeTierApplied: false,
-                risk: expect.objectContaining({ policyVersion: 'risk-policy-v2.3' }),
+                risk: expect.objectContaining({ policyVersion: 'risk-policy-v2.4' }),
             })],
         });
 
@@ -152,6 +454,63 @@ describe('analysis V2 AI/scoring stage store', () => {
         });
         await expect(createSupabaseAnalysisV2AiScoringStageStore(rejected.client)
             .loadFinalScores(claim('track:final-score')))
+            .rejects.toThrow('invalid payload');
+    });
+
+    it('recovers an exact v2.3 screening checkpoint without converting its policy snapshot', async () => {
+        const shortlistHash = digest('legacy-shortlist');
+        const resultHash = digest('legacy-screening');
+        const candidates = [legacyPreliminary()];
+        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: {
+                stageKind: 'screening', batch: null, revision: 1, resultHash, itemCount: 1,
+                payload: { shortlistHash, candidates },
+            },
+            error: null,
+        }).client);
+
+        await expect(store.loadScreening(claim('track:reverse-likes:collect'))).resolves.toEqual({
+            revision: 1,
+            resultHash,
+            riskPolicyVersion: 'risk-policy-v2.3',
+            shortlistHash,
+            candidates,
+        });
+    });
+
+    it('recovers an exact v2.3 final checkpoint and rejects hybrid policy payloads', async () => {
+        const narrativeBatchHash = digest('legacy-narrative');
+        const resultHash = digest('legacy-final');
+        const candidates = [legacyFinal()];
+        const legacyStore = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: {
+                stageKind: 'final_score', batch: null, revision: 1, resultHash, itemCount: 1,
+                payload: { candidates, narrativeCandidateIds: [], narrativeBatchHash },
+            },
+            error: null,
+        }).client);
+        await expect(legacyStore.loadFinalScores(claim('track:final-score'))).resolves.toEqual({
+            revision: 1,
+            resultHash,
+            riskPolicyVersion: 'risk-policy-v2.3',
+            candidates,
+            narrativeCandidateIds: [],
+            narrativeBatchHash,
+        });
+
+        const hybridStore = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: {
+                stageKind: 'screening', batch: null, revision: 1,
+                resultHash: digest('hybrid-screening'), itemCount: 1,
+                payload: {
+                    riskPolicyVersion: 'risk-policy-v2.4',
+                    shortlistHash: digest('hybrid-shortlist'),
+                    candidates: [legacyPreliminary()],
+                },
+            },
+            error: null,
+        }).client);
+        await expect(hybridStore.loadScreening(claim('track:reverse-likes:collect')))
             .rejects.toThrow('invalid payload');
     });
 

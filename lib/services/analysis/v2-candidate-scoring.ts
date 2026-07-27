@@ -24,7 +24,8 @@ export interface V2FemaleCandidateEvidence {
     hasStrongPartnerEvidence: boolean;
     uniqueTargetPostsLikedByCandidate: number;
     boundedCandidateCommentsOnTarget: number;
-    hasTagOrCaptionMention: boolean;
+    hasCandidateToTargetTagOrCaptionMention: boolean;
+    hasTargetToCandidateTagOrCaptionMention: boolean;
 }
 
 export interface V2PreliminaryCandidateScore extends V2FemaleCandidateEvidence {
@@ -78,13 +79,15 @@ function recentAssignmentIndex(
 ): Map<string, RecentFemaleMutualAssignment> {
     const assignments = assignRecentFemaleMutuals({
         orderedMutualUsernames,
-        verifiedFemaleUsernames: candidates.map(candidate => candidate.username),
+        verifiedFemaleUsernames: candidates
+            .filter(candidate => candidate.accountContext !== 'official_group_or_brand')
+            .map(candidate => candidate.username),
         excludedUsername,
     });
     return new Map(assignments.map(assignment => [assignment.username, assignment]));
 }
 
-/** Freeze the global Top 10 before the three-point reverse-like lookup runs. */
+/** Freeze the global Top 10 before the five-point reverse-like lookup runs. */
 export function calculateV2PreliminaryScores(input: {
     candidates: readonly V2FemaleCandidateEvidence[];
     orderedMutualUsernames: readonly string[];
@@ -102,7 +105,10 @@ export function calculateV2PreliminaryScores(input: {
             uniqueTargetPostsLikedByCandidate: candidate.uniqueTargetPostsLikedByCandidate,
             boundedCandidateCommentsOnTarget: candidate.boundedCandidateCommentsOnTarget,
             reverseLikeStatus: 'not_collected',
-            hasTagOrCaptionMention: candidate.hasTagOrCaptionMention,
+            hasCandidateToTargetTagOrCaptionMention:
+                candidate.hasCandidateToTargetTagOrCaptionMention,
+            hasTargetToCandidateTagOrCaptionMention:
+                candidate.hasTargetToCandidateTagOrCaptionMention,
             recentFemaleMutualRank: recent?.rank ?? null,
             appearanceGrade: candidate.appearanceGrade,
             exposureScore: candidate.exposureScore,
@@ -135,7 +141,10 @@ function relativeWatchAssignments(
             .map(candidate => candidate.candidateId)
     );
     return new Map(candidates
-        .filter(candidate => !alreadyFeatured.has(candidate.candidateId))
+        .filter(candidate => (
+            candidate.accountContext !== 'official_group_or_brand'
+            && !alreadyFeatured.has(candidate.candidateId)
+        ))
         .slice()
         .sort((left, right) => (
             right.displayScore - left.displayScore
@@ -182,7 +191,10 @@ export function calculateV2FinalScores(input: {
             uniqueTargetPostsLikedByCandidate: candidate.uniqueTargetPostsLikedByCandidate,
             boundedCandidateCommentsOnTarget: candidate.boundedCandidateCommentsOnTarget,
             reverseLikeStatus,
-            hasTagOrCaptionMention: candidate.hasTagOrCaptionMention,
+            hasCandidateToTargetTagOrCaptionMention:
+                candidate.hasCandidateToTargetTagOrCaptionMention,
+            hasTargetToCandidateTagOrCaptionMention:
+                candidate.hasTargetToCandidateTagOrCaptionMention,
             recentFemaleMutualRank: candidate.recentFemaleMutualRank,
             appearanceGrade: candidate.appearanceGrade,
             exposureScore: candidate.exposureScore,
@@ -198,6 +210,10 @@ export function calculateV2FinalScores(input: {
         naturalDisplayScore: candidate.risk.displayScore,
         naturalRiskBand: candidate.risk.riskBand,
         partnerCapApplied: candidate.hasStrongPartnerEvidence,
+        isInbound: candidate.uniqueTargetPostsLikedByCandidate >= 1
+            || candidate.boundedCandidateCommentsOnTarget >= 1
+            || candidate.hasCandidateToTargetTagOrCaptionMention,
+        personalRiskEligible: candidate.accountContext !== 'official_group_or_brand',
     }))).map(assignment => [assignment.candidateId, assignment]));
     const calibrated = scored.map(candidate => {
         const assignment = relativeById.get(candidate.candidateId);
@@ -233,7 +249,10 @@ export function hasCandidateTargetMention(input: {
     candidateUsername: string;
     targetPosts: readonly Pick<import('@/lib/types/instagram').InstagramPost, 'taggedUsers' | 'mentionedUsers'>[];
     candidatePosts: readonly Pick<import('@/lib/types/instagram').InstagramPost, 'taggedUsers' | 'mentionedUsers'>[];
-}): boolean {
+}): Readonly<{
+    candidateToTargetTagOrCaptionMention: boolean;
+    targetToCandidateTagOrCaptionMention: boolean;
+}> {
     const target = normalizedUsername(input.targetUsername);
     const candidate = normalizedUsername(input.candidateUsername);
     const mentions = (
@@ -241,5 +260,8 @@ export function hasCandidateTargetMention(input: {
         username: string
     ) => posts.some(post => [...post.taggedUsers, ...post.mentionedUsers]
         .some(value => normalizedUsername(value) === username));
-    return mentions(input.targetPosts, candidate) || mentions(input.candidatePosts, target);
+    return Object.freeze({
+        candidateToTargetTagOrCaptionMention: mentions(input.candidatePosts, target),
+        targetToCandidateTagOrCaptionMention: mentions(input.targetPosts, candidate),
+    });
 }

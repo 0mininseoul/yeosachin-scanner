@@ -90,6 +90,65 @@ describe('selectAnalysisMedia', () => {
         expect(first.feature.selectionIds[0]).toBe('profile:avatar-v1');
     });
 
+    it('keeps v2.7 selection unchanged while v2.8 distributes carousel context under the same cap', () => {
+        const carousel = (id: string, timestamp: number): AnalysisPostMediaInput => ({
+            id,
+            timestamp,
+            type: 'carousel',
+            declaredMediaCount: 5,
+            childrenComplete: true,
+            mediaItems: Array.from({ length: 5 }, (_, index) => ({
+                id: `${id}-${index}`,
+                type: 'image' as const,
+                imageUrl: `https://cdn.example/${id}-${index}.jpg`,
+            })),
+        });
+        const posts = [
+            carousel('newest', 20),
+            carousel('second', 19),
+            ...Array.from({ length: 6 }, (_, index) => imagePost(`image-${index}`, 18 - index)),
+        ];
+
+        const legacy = selectAnalysisMedia({ posts });
+        const legacyAgain = selectAnalysisMedia({ posts });
+        const v28 = selectAnalysisMedia({ posts }, { carouselDiversity: true });
+
+        expect(legacy).toEqual(legacyAgain);
+        expect(legacy.feed.media.filter(media => media.role === 'carousel_context'))
+            .toMatchObject([
+                { postId: 'newest', mediaIndex: 2 },
+                { postId: 'newest', mediaIndex: 4 },
+            ]);
+        expect(v28.feed.media.filter(media => media.role === 'carousel_context'))
+            .toMatchObject([
+                { postId: 'newest', mediaIndex: 2 },
+                { postId: 'second', mediaIndex: 2 },
+            ]);
+        expect(v28.feature.media).toHaveLength(MAX_FEATURE_FEED_MEDIA);
+    });
+
+    it('selects first, middle, and last from every complete carousel when the fixed cap permits', () => {
+        const carousel = (id: string, timestamp: number): AnalysisPostMediaInput => ({
+            id,
+            timestamp,
+            type: 'carousel',
+            declaredMediaCount: 3,
+            childrenComplete: true,
+            mediaItems: Array.from({ length: 3 }, (_, index) => ({
+                id: `${id}-${index}`,
+                type: 'image' as const,
+                imageUrl: `https://cdn.example/${id}-${index}.jpg`,
+            })),
+        });
+        const result = selectAnalysisMedia({ posts: [carousel('a', 3), carousel('b', 2)] }, {
+            carouselDiversity: true,
+        });
+        expect(result.feed.media.filter(media => media.postId === 'a').map(media => media.mediaIndex))
+            .toEqual([0, 1, 2]);
+        expect(result.feed.media.filter(media => media.postId === 'b').map(media => media.mediaIndex))
+            .toEqual([0, 1, 2]);
+    });
+
     it('uses available reel and video thumbnails instead of dropping those posts', () => {
         const result = selectAnalysisMedia({
             posts: [

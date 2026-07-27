@@ -661,7 +661,7 @@ export const analysisResultSummaryV1Schema = z.object({
     }).strict(),
     notScreenedMutuals: z.number().int().nonnegative(),
     exclusionApplied: z.boolean(),
-    scorePolicyVersion: z.enum(['risk-policy-v2.2', RISK_POLICY_VERSION]),
+    scorePolicyVersion: z.enum(['risk-policy-v2.2', 'risk-policy-v2.3', RISK_POLICY_VERSION]),
 }).strip().superRefine((value, context) => {
     for (const side of ['followers', 'following'] as const) {
         if (!value[side].meetsCoverageGate) {
@@ -750,7 +750,7 @@ export const femaleResultRowV1Schema = z.object({
             message: 'Display score must have at most one decimal place.',
         }),
     riskBand: riskBandSchema,
-    featuredRank: z.number().int().min(1).max(15).nullable(),
+    featuredRank: z.number().int().min(1).max(10).nullable(),
     recentMutualRank: z.number().int().min(1).max(10).nullable(),
     analysisDepth: z.enum(['features', 'narrative']),
     oneLineOverview: publicCopySchema(180),

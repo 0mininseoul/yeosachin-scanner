@@ -33,6 +33,10 @@ const finalizerSealingMigrationUrl = new URL(
     '../../../supabase/migrations/20260725033000_allow_analysis_unavailable_finalizer_sealing.sql',
     import.meta.url
 );
+const qualityGateV2MigrationUrl = new URL(
+    '../../../supabase/migrations/20260727171000_update_gender_resolution_unknown_gate_20_percent.sql',
+    import.meta.url
+);
 
 function functionDefinition(migration: string, name: string): string {
     const marker = new RegExp(
@@ -46,6 +50,38 @@ function functionDefinition(migration: string, name: string): string {
 }
 
 describe('gender resolution forward migration contract', () => {
+    it('replaces only the quality RPC threshold with the 20 percent gate', () => {
+        expect(existsSync(qualityGateV2MigrationUrl)).toBe(true);
+        const forward = readFileSync(qualityGateV2MigrationUrl, 'utf8');
+        const predecessor = functionDefinition(
+            provenanceMigration,
+            'load_analysis_v2_gender_resolution_quality',
+        );
+        const replacement = functionDefinition(
+            forward,
+            'load_analysis_v2_gender_resolution_quality',
+        );
+
+        expect(replacement).toContain(
+            'v_metrics.final_unknown_count * 10 <= v_metrics.screened_count * 2'
+        );
+        expect(replacement).not.toContain(
+            'v_metrics.final_unknown_count * 10 <= v_metrics.screened_count * 3'
+        );
+        expect(replacement.replace(
+            'v_metrics.screened_count * 2',
+            'v_metrics.screened_count * 3',
+        ).replace('CREATE OR REPLACE FUNCTION', 'CREATE FUNCTION')).toBe(predecessor);
+        expect(forward).toContain(
+            'REVOKE ALL ON FUNCTION public.load_analysis_v2_gender_resolution_quality(UUID)\n'
+            + '    FROM PUBLIC, anon, authenticated, service_role;'
+        );
+        expect(forward).toContain(
+            'GRANT EXECUTE ON FUNCTION public.load_analysis_v2_gender_resolution_quality(UUID)\n'
+            + '    TO service_role;'
+        );
+    });
+
     it('allows only the finalizer sealing shape for analysis-unavailable provenance', () => {
         const finalizer = functionDefinition(
             terminalOutcomeMigration,

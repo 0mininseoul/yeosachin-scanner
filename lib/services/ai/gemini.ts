@@ -6,7 +6,6 @@ import {
     type Part,
 } from '@google/genai';
 import { toJSONSchema, type ZodType } from 'zod';
-import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     estimateGeminiRequestCost,
     isVertexAICostOptimized,
@@ -40,6 +39,10 @@ import {
     type AiStagePolicyVersion,
     type AiThinkingLevel,
 } from './stage-policy';
+import {
+    isReplayStatelessCapability,
+    type ReplayStatelessCapability,
+} from './replay-stateless-capability';
 
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 
@@ -138,6 +141,32 @@ async function runWithGenerationSlot<T>(
         if (!releaseShared) {
             releaseStage();
             throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        }
+        try {
+            return await task();
+        } finally {
+            releaseShared();
+            releaseStage();
+        }
+    }
+
+    if (
+        (
+            policyVersion === 'ai-stage-policy-v2.8'
+            || policyVersion === 'ai-stage-policy-v2.9'
+        )
+        && (
+            stage === 'genderTriage'
+            || stage === 'featureAnalysis'
+            || stage === 'privateAccountName'
+        )
+    ) {
+        const releaseStage = stageSemaphore.tryAcquire();
+        if (!releaseStage) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        const releaseShared = generationLimiterState.shared.tryAcquire();
+        if (!releaseShared) {
+            releaseStage();
+            throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
         }
         try {
             return await task();
@@ -254,6 +283,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     analysisType?: string;
     requestId?: string;
     skipTokenLog?: boolean;
+    /** Opaque offline replay capability. Stage telemetry stays in-memory and no DB log runs. */
+    replayCapability?: ReplayStatelessCapability;
     stage?: AiStageName;
     aiStagePolicyVersion?: AiStagePolicyVersion;
     abortSignal?: AbortSignal;
@@ -261,6 +292,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     thinkingLevel?: AiThinkingLevel;
     mediaResolution?: AiMediaResolution;
     maxOutputTokens?: number;
+    /** v2.9 gender microbatches are the sole staged caller allowed above one-account media. */
+    maxImages?: number;
     /** Resume only after a durably terminalized explicit 429. Attempts are globally bounded at 4. */
     startingAttempt?: number;
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
@@ -627,6 +660,7 @@ export async function logTokenUsage(
     };
 
     try {
+        const { supabaseAdmin } = await import('@/lib/supabase/admin');
         if (extendedTelemetrySupported !== false) {
             const { error } = await supabaseAdmin.from('gemini_token_usage').insert({
                 ...baseRow,
@@ -686,6 +720,7 @@ export async function analyzeWithGemini<T>(
         analysisType = 'unknown',
         requestId,
         skipTokenLog = false,
+        replayCapability,
         stage,
         aiStagePolicyVersion,
         abortSignal,
@@ -693,6 +728,7 @@ export async function analyzeWithGemini<T>(
         thinkingLevel,
         mediaResolution,
         maxOutputTokens,
+        maxImages,
         startingAttempt = 1,
         onTelemetry,
         onBeforeAttempt,
@@ -717,8 +753,15 @@ export async function analyzeWithGemini<T>(
     const explicitModel = validateExplicitModel(model);
     validateThinkingLevel(thinkingLevel);
     validateMediaResolution(mediaResolution);
-    if (stage && skipTokenLog) {
+    const statelessReplay = isReplayStatelessCapability(replayCapability);
+    if (replayCapability !== undefined && !statelessReplay) {
+        throw new Error('Gemini replay capability is invalid');
+    }
+    if (stage && skipTokenLog && !statelessReplay) {
         throw new Error('Gemini stage calls cannot skip durable token logging');
+    }
+    if (statelessReplay && (!stage || !skipTokenLog)) {
+        throw new Error('Stateless replay requires a staged call with token logging disabled');
     }
     if (
         stage
@@ -739,6 +782,15 @@ export async function analyzeWithGemini<T>(
         ? assertSupportedAiStagePolicyVersion(aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION)
         : AI_STAGE_POLICY_VERSION;
     const stagePolicy = stage ? getAiStagePolicy(resolvedPolicyVersion, stage) : null;
+    if (maxImages !== undefined && (
+        !Number.isSafeInteger(maxImages)
+        || maxImages < 0
+        || maxImages > 10
+        || stage !== 'genderTriage'
+        || resolvedPolicyVersion !== 'ai-stage-policy-v2.9'
+    )) {
+        throw new Error('Gemini maxImages override is restricted to bounded v2.9 gender batches');
+    }
     const modelName = explicitModel
         ?? stagePolicy?.model
         ?? resolveVertexAIModel(process.env.VERTEX_AI_MODEL, costOptimized);
@@ -754,10 +806,10 @@ export async function analyzeWithGemini<T>(
         ?? stagePolicy?.maxOutputTokens
         ?? (costOptimized ? 1_024 : undefined);
     const imagePolicy = getAnalysisImagePolicy(costOptimized);
-    const maxImages = stagePolicy
+    const policyMaxImages = stagePolicy
         ? stagePolicy.profileImageLimit + stagePolicy.feedImageLimit
         : imagePolicy.maxImages;
-    const selectedImages = images?.slice(0, maxImages) ?? [];
+    const selectedImages = images?.slice(0, maxImages ?? policyMaxImages) ?? [];
     const responseJsonSchema = zodToGeminiResponseJsonSchema(schema);
     const analysisStartedAt = performance.now();
 
@@ -1034,6 +1086,7 @@ export async function getDailyTokenUsage(days: number = 7): Promise<{
     latencySamples: number;
     averageLatencyMs: number | null;
 }[]> {
+    const { supabaseAdmin } = await import('@/lib/supabase/admin');
     const { data, error } = await supabaseAdmin
         .from('gemini_token_usage')
         .select('*')

@@ -10,6 +10,10 @@ export interface RelativeRiskCandidate {
     naturalDisplayScore: number;
     naturalRiskBand: RiskBand;
     partnerCapApplied: boolean;
+    /** Direct candidate-to-target evidence controls high-tier eligibility. */
+    isInbound: boolean;
+    /** Official group/brand accounts are retained but outside personal-relative ranking. */
+    personalRiskEligible: boolean;
 }
 
 export interface RelativeRiskAssignment {
@@ -79,15 +83,24 @@ export function assignRelativeRiskTiers(
 ): RelativeRiskAssignment[] {
     validateCandidates(candidates);
     const eligible = candidates
-        .filter(candidate => !candidate.partnerCapApplied)
+        .filter(candidate => !candidate.partnerCapApplied && candidate.personalRiskEligible)
         .slice()
         .sort((left, right) => (
             right.naturalPublicScore - left.naturalPublicScore
             || left.candidateId.localeCompare(right.candidateId)
         ));
 
+    const excluded = new Map(candidates
+        .filter(candidate => !candidate.personalRiskEligible)
+        .map(candidate => [candidate.candidateId, {
+            candidateId: candidate.candidateId,
+            displayScore: calibratedScore(candidate.naturalDisplayScore, 'normal'),
+            riskBand: 'normal' as const,
+            relativeTierApplied: false,
+        }]));
+
     if (eligible.length < 3) {
-        return candidates.map(naturalAssignment);
+        return candidates.map(candidate => excluded.get(candidate.candidateId) ?? naturalAssignment(candidate));
     }
 
     const naturalHighCount = eligible
@@ -96,30 +109,36 @@ export function assignRelativeRiskTiers(
     const naturalCautionOrHighCount = eligible
         .filter(candidate => candidate.naturalRiskBand !== 'normal')
         .length;
-    const highCount = Math.max(
+    const requestedHighCount = Math.max(
         1,
-        Math.min(eligible.length - 2, naturalHighCount)
+        Math.min(3, eligible.length - 2, naturalHighCount)
     );
+    const inboundEligible = eligible.filter(candidate => candidate.isInbound);
+    const highPool = inboundEligible.length > 0 ? inboundEligible : eligible;
+    const highCount = Math.min(requestedHighCount, highPool.length);
+    const highIds = new Set(highPool.slice(0, highCount).map(candidate => candidate.candidateId));
+    const remaining = eligible.filter(candidate => !highIds.has(candidate.candidateId));
     const cautionCount = Math.min(
-        eligible.length - highCount,
+        10,
+        remaining.length,
         Math.max(2, naturalCautionOrHighCount - highCount)
     );
     const assignments = new Map<string, RelativeRiskAssignment>();
 
-    for (const [index, candidate] of eligible.entries()) {
-        const riskBand: RiskBand = index < highCount
+    for (const candidate of eligible) {
+        const highIndex = highPool.findIndex(row => row.candidateId === candidate.candidateId);
+        const cautionIndex = remaining.findIndex(row => row.candidateId === candidate.candidateId);
+        const assignedBand: RiskBand = highIndex >= 0 && highIndex < highCount
             ? 'high_risk'
-            : index < highCount + cautionCount
-                ? 'caution'
-                : 'normal';
+            : cautionIndex >= 0 && cautionIndex < cautionCount ? 'caution' : 'normal';
         assignments.set(candidate.candidateId, {
             candidateId: candidate.candidateId,
-            displayScore: calibratedScore(candidate.naturalDisplayScore, riskBand),
-            riskBand,
+            displayScore: calibratedScore(candidate.naturalDisplayScore, assignedBand),
+            riskBand: assignedBand,
             relativeTierApplied: true,
         });
     }
 
     return candidates.map(candidate =>
-        assignments.get(candidate.candidateId) ?? naturalAssignment(candidate));
+        assignments.get(candidate.candidateId) ?? excluded.get(candidate.candidateId) ?? naturalAssignment(candidate));
 }

@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Logger, RemoteConfigClient } from '@amplitude/analytics-core';
+import { SessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';
 import { SessionReplayLocalConfig } from '@amplitude/session-replay-browser/lib/cjs/config/local-config.js';
 import { SessionReplayJoinedConfigGenerator } from '@amplitude/session-replay-browser/lib/cjs/config/joined-config.js';
 import { SessionReplay } from '@amplitude/session-replay-browser/lib/cjs/session-replay.js';
@@ -9,6 +11,7 @@ const amplitudeMocks = vi.hoisted(() => ({
     initAll: vi.fn(),
     moduleLoads: 0,
     reset: vi.fn(),
+    sessionReplay: vi.fn(),
     setUserId: vi.fn(),
     track: vi.fn(),
 }));
@@ -26,9 +29,61 @@ async function loadAnalytics() {
     return import('./analytics');
 }
 
+async function loadReplayAnalytics(demoAnalysisEnabled = false) {
+    const analytics = await loadAnalytics();
+    analytics.updateAmplitudeReplayRuntimeContext({ demoAnalysisEnabled });
+    return analytics;
+}
+
 function enableBrowser(apiKey = API_KEY) {
     vi.stubGlobal('window', {});
     vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', apiKey);
+}
+
+function enableReplayBrowser({
+    doNotTrack,
+    globalPrivacyControl,
+    hash = '',
+    pathname = '/',
+    search = '',
+}: {
+    doNotTrack?: string;
+    globalPrivacyControl?: boolean;
+    hash?: string;
+    pathname?: string;
+    search?: string;
+} = {}) {
+    const eventTarget = new EventTarget();
+    const location = {
+        hash,
+        href: `https://yeosachin.vercel.app${pathname}${search}${hash}`,
+        origin: 'https://yeosachin.vercel.app',
+        pathname,
+        search,
+    };
+    const applyUrl = (value: string | URL | null | undefined) => {
+        if (value === null || value === undefined) return;
+        const next = new URL(String(value), location.href);
+        location.hash = next.hash;
+        location.href = next.href;
+        location.pathname = next.pathname;
+        location.search = next.search;
+    };
+    vi.stubGlobal('window', {
+        addEventListener: eventTarget.addEventListener.bind(eventTarget),
+        dispatchEvent: eventTarget.dispatchEvent.bind(eventTarget),
+        history: {
+            pushState: (_data: unknown, _unused: string, url?: string | URL | null) => applyUrl(url),
+            replaceState: (_data: unknown, _unused: string, url?: string | URL | null) => applyUrl(url),
+        },
+        location,
+        navigator: { doNotTrack, globalPrivacyControl },
+        removeEventListener: eventTarget.removeEventListener.bind(eventTarget),
+    });
+    vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', API_KEY);
+    vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED', 'true');
+    vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', '0.1');
+    vi.stubEnv('NEXT_PUBLIC_VERCEL_ENV', 'production');
 }
 
 describe('Amplitude analytics adapter', () => {
@@ -39,6 +94,7 @@ describe('Amplitude analytics adapter', () => {
         amplitudeMocks.initAll.mockResolvedValue(undefined);
         amplitudeMocks.moduleLoads = 0;
         amplitudeMocks.reset.mockReset();
+        amplitudeMocks.sessionReplay.mockReset().mockReturnValue({ shutdown: vi.fn() });
         amplitudeMocks.setUserId.mockReset();
         amplitudeMocks.track.mockReset();
     });
@@ -67,6 +123,7 @@ describe('Amplitude analytics adapter', () => {
             PAYMENT_CONFIRMED_VIEWED: 'payment_confirmed_viewed',
             EARLYBIRD_STATUS_VIEWED: 'earlybird_status_viewed',
             ANALYSIS_STARTED: 'analysis_started',
+            ANALYSIS_DURATION_ESTIMATE_SHOWN: 'analysis_duration_estimate_shown',
             ANALYSIS_COMPLETED: 'analysis_completed',
             RESULT_VIEWED: 'result_viewed',
             RESULT_SHARED: 'result_shared',
@@ -142,17 +199,41 @@ describe('Amplitude analytics adapter', () => {
             },
             sessionReplay: {
                 sampleRate: 0,
-                privacyConfig: {
-                    defaultMaskLevel: 'conservative',
-                    maskSelector: ['.amp-mask', '[data-amp-mask]'],
-                    blockSelector: ['.amp-block', '[data-amp-block]'],
+                    privacyConfig: {
+                        defaultMaskLevel: 'conservative',
+                        maskSelector: [
+                            '.amp-mask',
+                            '[data-amp-mask]',
+                            'form',
+                            'input',
+                            'textarea',
+                            'select',
+                            'option',
+                            '[contenteditable]',
+                        ],
+                        blockSelector: [
+                            '.amp-block',
+                            '[data-amp-block]',
+                            '[data-amp-sensitive]',
+                            '[data-amp-private]',
+                            'img',
+                            'video',
+                            'audio',
+                            'canvas',
+                            'svg',
+                        ],
+                    },
+                    interactionConfig: { enabled: false, batch: false },
+                    performanceConfig: { enabled: false },
+                    captureDocumentTitle: false,
+                    enableUrlChangePolling: false,
+                    shouldInlineStylesheet: false,
+                    captureAdoptedStyleSheets: false,
+                    crossOriginIframes: { enabled: false },
+                    storeType: 'memory',
+                    handleFetchConfig: expect.any(Function),
+                    handleSendEvents: expect.any(Function),
                 },
-                interactionConfig: { enabled: false, batch: false },
-                performanceConfig: { enabled: false },
-                captureDocumentTitle: false,
-                enableUrlChangePolling: false,
-                handleFetchConfig: expect.any(Function),
-            },
             engagement: { skip: true },
         });
 
@@ -318,14 +399,14 @@ describe('Amplitude analytics adapter', () => {
                     batch: boolean;
                 };
                 handleFetchConfig: (request: unknown) => Promise<Response>;
-                handleSendEvents?: unknown;
+                handleSendEvents: (request: unknown) => Promise<Response>;
             };
         };
         expect(options.sessionReplay).toMatchObject({
             sampleRate: 0,
             interactionConfig: { enabled: false, batch: false },
         });
-        expect(options.sessionReplay.handleSendEvents).toBeUndefined();
+        expect(options.sessionReplay.handleSendEvents).toEqual(expect.any(Function));
 
         const deterministicResponse = await options.sessionReplay.handleFetchConfig({
             url: 'https://hostile.example/config',
@@ -382,6 +463,423 @@ describe('Amplitude analytics adapter', () => {
             currentUrl: sensitiveUrl,
             shouldRecord: replay.getShouldRecord(),
         })).toContain('"shouldRecord":false');
+    });
+
+    it('enables only the explicit bounded production sample after an exact remote acknowledgement', async () => {
+        enableReplayBrowser();
+        const hostileRemoteConfig = {
+            configs: {
+                sessionReplay: {
+                    sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 },
+                    sr_interaction_config: { enabled: true, batch: true },
+                    sr_logging_config: {
+                        console: { enabled: true },
+                        network: { enabled: true, body: { request: true, response: true } },
+                    },
+                    sr_privacy_config: { unmaskSelector: ['*'] },
+                },
+            },
+        };
+        const configFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(hostileRemoteConfig)));
+        vi.stubGlobal('fetch', configFetch);
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await expect(initAmplitude(null)).resolves.toBe(true);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                sampleRate: number;
+                handleFetchConfig: (request: {
+                    headers: Record<string, string>;
+                    method: 'GET';
+                    url: string;
+                }) => Promise<Response>;
+            };
+        };
+        expect(options.sessionReplay.sampleRate).toBe(0.1);
+        const response = await options.sessionReplay.handleFetchConfig({
+            headers: { accept: 'application/json' },
+            method: 'GET',
+            url: `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+        });
+        expect(configFetch).toHaveBeenCalledWith(
+            `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+            expect.objectContaining({
+                method: 'GET',
+                headers: { Accept: '*/*' },
+                credentials: 'omit',
+                redirect: 'error',
+                referrerPolicy: 'no-referrer',
+            }),
+        );
+        expect(await response.json()).toEqual({
+            configs: {
+                sessionReplay: {
+                    sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 },
+                },
+            },
+        });
+    });
+
+    it('normalizes the canonical 0.10 production sample to numeric 0.1', async () => {
+        enableReplayBrowser();
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', '0.10');
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await initAmplitude(null);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as { sessionReplay: { sampleRate: number } };
+        expect(options.sessionReplay.sampleRate).toBe(0.1);
+    });
+
+    it('accepts the exact URL generated by the installed Amplitude remote config client', async () => {
+        enableReplayBrowser();
+        const configFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+            configs: {
+                sessionReplay: {
+                    sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 },
+                },
+            },
+        })));
+        vi.stubGlobal('fetch', configFetch);
+        const { initAmplitude } = await loadReplayAnalytics();
+        await initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { handleFetchConfig: (request: { headers: Record<string, string>; method: 'GET'; signal?: AbortSignal; url: string }) => Promise<Response> };
+        };
+        const client = new RemoteConfigClient(
+            API_KEY,
+            new Logger(),
+            'US',
+            undefined,
+            options.sessionReplay.handleFetchConfig,
+        );
+        const generatedUrl = (client as unknown as { getUrlParams: () => string }).getUrlParams();
+
+        expect(generatedUrl).toBe(`https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`);
+        const response = await options.sessionReplay.handleFetchConfig({
+            headers: { Accept: '*/*' },
+            method: 'GET',
+            url: generatedUrl,
+        });
+        expect((await response.json()).configs.sessionReplay.sr_sampling_config).toEqual({
+            capture_enabled: true,
+            sample_rate: 0.1,
+        });
+    });
+
+    it.each(['', 'preview', 'development'])('never enables replay without the exact public production discriminator %j', async (publicEnvironment) => {
+        enableReplayBrowser();
+        vi.stubEnv('NEXT_PUBLIC_VERCEL_ENV', publicEnvironment);
+        vi.stubEnv('NODE_ENV', 'production');
+        vi.stubEnv('VERCEL_ENV', 'production');
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await initAmplitude(null);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as { sessionReplay: { sampleRate: number } };
+        expect(options.sessionReplay.sampleRate).toBe(0);
+    });
+
+    it.each([
+        ['development', 'true', '0.1', undefined, undefined],
+        ['production', 'false', '0.1', undefined, undefined],
+        ['production', 'true', '0', undefined, undefined],
+        ['production', 'true', '0.11', undefined, undefined],
+        ['production', 'true', '0.1', '1', undefined],
+        ['production', 'true', '0.1', undefined, true],
+    ] as const)('fails replay closed for env/privacy boundary %s/%s/%s', async (
+        nodeEnv,
+        enabled,
+        sampleRate,
+        doNotTrack,
+        globalPrivacyControl,
+    ) => {
+        enableReplayBrowser({ doNotTrack, globalPrivacyControl });
+        vi.stubEnv('NEXT_PUBLIC_VERCEL_ENV', nodeEnv);
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED', enabled);
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', sampleRate);
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await expect(initAmplitude(null)).resolves.toBe(true);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as { sessionReplay: { sampleRate: number } };
+        expect(options.sessionReplay.sampleRate).toBe(0);
+    });
+
+    it('fails replay closed for demo, query, fragment, and sensitive routes without changing funnel delivery', async () => {
+        enableReplayBrowser({ pathname: '/result/request-id' });
+        const analytics = await loadReplayAnalytics(true);
+
+        await expect(analytics.initAmplitude(null)).resolves.toBe(true);
+        analytics.markAnalyticsIdentityReady();
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, { source: 'direct' });
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as { sessionReplay: { sampleRate: number } };
+        expect(options.sessionReplay.sampleRate).toBe(0);
+        expect(amplitudeMocks.track).toHaveBeenCalledWith('landing_viewed', { source: 'direct' });
+    });
+
+    it('does not accept unavailable, malformed, or wrong-sample remote replay config', async () => {
+        enableReplayBrowser();
+        const configFetch = vi.fn()
+            .mockRejectedValueOnce(new Error('offline'))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ configs: { sessionReplay: {} } })))
+            .mockResolvedValueOnce(new Response(JSON.stringify({
+                configs: {
+                    sessionReplay: { sr_sampling_config: { capture_enabled: true, sample_rate: 0.01 } },
+                },
+            })));
+        vi.stubGlobal('fetch', configFetch);
+        const { initAmplitude } = await loadReplayAnalytics();
+        await initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { handleFetchConfig: (request: { headers: Record<string, string>; method: 'GET'; url: string }) => Promise<Response> };
+        };
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const response = await options.sessionReplay.handleFetchConfig({
+                headers: { Accept: '*/*' },
+                method: 'GET',
+                url: `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+            });
+            expect(await response.json()).toEqual({
+                configs: {
+                    sessionReplay: {
+                        sr_sampling_config: { capture_enabled: false, sample_rate: 0 },
+                    },
+                },
+            });
+        }
+        const untrusted = await options.sessionReplay.handleFetchConfig({
+            headers: {}, method: 'GET', url: 'https://attacker.invalid/config',
+        });
+        expect((await untrusted.json()).configs.sessionReplay.sr_sampling_config.capture_enabled).toBe(false);
+        expect(configFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([
+        `https://sr-client-cfg.amplitude.com:443/config/${API_KEY}?config_group=browser`,
+        `https://user@sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+        `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser&extra=1`,
+        `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser#fragment`,
+        `https://sr-client-cfg.amplitude.com/config/${SECOND_UUID}?config_group=browser`,
+        `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser&config_group=browser`,
+    ])('rejects non-canonical replay config URL %s without a network request', async (url) => {
+        enableReplayBrowser();
+        const configFetch = vi.fn();
+        vi.stubGlobal('fetch', configFetch);
+        const { initAmplitude } = await loadReplayAnalytics();
+        await initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { handleFetchConfig: (request: { headers: Record<string, string>; method: 'GET'; url: string }) => Promise<Response> };
+        };
+
+        const response = await options.sessionReplay.handleFetchConfig({
+            headers: { Accept: '*/*', Authorization: 'must-not-forward' },
+            method: 'GET',
+            url,
+        });
+
+        expect((await response.json()).configs.sessionReplay.sr_sampling_config.capture_enabled).toBe(false);
+        expect(configFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects a redirected replay config response even when its body looks valid', async () => {
+        enableReplayBrowser();
+        const redirectedResponse = new Response(JSON.stringify({
+            configs: {
+                sessionReplay: {
+                    sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 },
+                },
+            },
+        }));
+        Object.defineProperty(redirectedResponse, 'redirected', { value: true });
+        const configFetch = vi.fn().mockResolvedValue(redirectedResponse);
+        vi.stubGlobal('fetch', configFetch);
+        const { initAmplitude } = await loadReplayAnalytics();
+        await initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { handleFetchConfig: (request: { headers: Record<string, string>; method: 'GET'; url: string }) => Promise<Response> };
+        };
+
+        const response = await options.sessionReplay.handleFetchConfig({
+            headers: { Accept: '*/*' },
+            method: 'GET',
+            url: `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+        });
+
+        expect((await response.json()).configs.sessionReplay.sr_sampling_config.capture_enabled).toBe(false);
+        expect(configFetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+            credentials: 'omit',
+            redirect: 'error',
+            referrerPolicy: 'no-referrer',
+        }));
+    });
+
+    it('stops replay exactly once when a route becomes sensitive and on teardown', async () => {
+        enableReplayBrowser();
+        const shutdown = vi.fn();
+        amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+
+        const location = (window as unknown as { location: { pathname: string; search: string; hash: string } }).location;
+        location.pathname = '/analyze';
+        analytics.enforceAmplitudeReplayRoutePrivacy();
+        analytics.enforceAmplitudeReplayRoutePrivacy();
+        analytics.teardownAmplitudeSessionReplay();
+
+        expect(shutdown).toHaveBeenCalledTimes(1);
+        expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops a replay upload when the current location gains a query or hash', async () => {
+        enableReplayBrowser();
+        const replayFetch = vi.fn();
+        vi.stubGlobal('fetch', replayFetch);
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleSendEvents: (request: {
+                    body: string;
+                    headers: Record<string, string>;
+                    keepalive: boolean;
+                    method: 'POST';
+                    url: string;
+                }) => Promise<Response>;
+            };
+        };
+        const location = window.location as unknown as { hash: string; href: string };
+        location.hash = '#token';
+        location.href = 'https://yeosachin.vercel.app/#token';
+
+        const response = await options.sessionReplay.handleSendEvents({
+            body: 'safe-route-replay-payload',
+            headers: { Authorization: `Bearer ${API_KEY}`, 'X-Client-Url': location.href },
+            keepalive: true,
+            method: 'POST',
+            url: 'https://api-sr.amplitude.com/sessions/v2/track?device_id=device&session_id=1721234567890&type=replay',
+        });
+
+        expect(response.status).toBe(204);
+        expect(replayFetch).not.toHaveBeenCalled();
+    });
+
+    it('uploads a safe-route replay with only the fixed transport metadata', async () => {
+        enableReplayBrowser();
+        const replayFetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+        vi.stubGlobal('fetch', replayFetch);
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleSendEvents: (request: {
+                    body: string;
+                    headers: Record<string, string>;
+                    keepalive: boolean;
+                    method: 'POST';
+                    url: string;
+                }) => Promise<Response>;
+            };
+        };
+        const url = 'https://api-sr.amplitude.com/sessions/v2/track?device_id=device&session_id=1721234567890&type=replay';
+
+        const response = await options.sessionReplay.handleSendEvents({
+            body: 'safe-route-replay-payload',
+            headers: {
+                Accept: '*/*',
+                Authorization: `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json',
+                'X-Client-Library': 'plugin/1.33.4',
+                'X-Client-Sample-Rate': '0.1',
+                'X-Client-Url': 'https://yeosachin.vercel.app/',
+                'X-Client-Version': '1.33.4',
+                'X-Sampling-Hash-Alg': 'xxhash32',
+                Cookie: 'must-not-forward',
+            },
+            keepalive: true,
+            method: 'POST',
+            url,
+        });
+
+        expect(response.status).toBe(200);
+        expect(replayFetch).toHaveBeenCalledWith(url, {
+            method: 'POST',
+            headers: {
+                Accept: '*/*',
+                Authorization: `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json',
+                'X-Client-Library': 'plugin/1.33.4',
+                'X-Client-Sample-Rate': '0.1',
+                'X-Client-Version': '1.33.4',
+                'X-Sampling-Hash-Alg': 'xxhash32',
+            },
+            body: 'safe-route-replay-payload',
+            keepalive: true,
+            credentials: 'omit',
+            redirect: 'error',
+            referrerPolicy: 'no-referrer',
+        });
+        expect(JSON.stringify(replayFetch.mock.calls)).not.toContain('X-Client-Url');
+        expect(JSON.stringify(replayFetch.mock.calls)).not.toContain('Cookie');
+    });
+
+    it.each([
+        ['pushState', '/#token'],
+        ['pushState', '/?request_id=secret'],
+        ['replaceState', '/share/token'],
+    ] as const)('shuts down synchronously before native %s exposes %s', async (method, target) => {
+        enableReplayBrowser();
+        const shutdown = vi.fn();
+        amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const removeGuards = analytics.installAmplitudeReplayNavigationGuards();
+
+        window.history[method]({}, '', target);
+
+        expect(shutdown).toHaveBeenCalledTimes(1);
+        removeGuards();
+    });
+
+    it.each(['hashchange', 'popstate'])('shuts down for a native %s location mutation', async (eventName) => {
+        enableReplayBrowser();
+        const shutdown = vi.fn();
+        amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const removeGuards = analytics.installAmplitudeReplayNavigationGuards();
+        const location = window.location as unknown as { hash: string; href: string };
+        location.hash = '#token';
+        location.href = 'https://yeosachin.vercel.app/#token';
+
+        window.dispatchEvent(new Event(eventName));
+
+        expect(shutdown).toHaveBeenCalledTimes(1);
+        removeGuards();
+    });
+
+    it('keeps a sticky shutdown while initialization is deferred across a sensitive transition', async () => {
+        enableReplayBrowser();
+        const shutdown = vi.fn();
+        amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
+        let finishInitialization!: () => void;
+        amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            finishInitialization = resolve;
+        }));
+        const analytics = await loadReplayAnalytics();
+        const removeGuards = analytics.installAmplitudeReplayNavigationGuards();
+        const initialization = analytics.initAmplitude(null);
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+
+        window.history.pushState({}, '', '/#token');
+        finishInitialization();
+        await initialization;
+        analytics.markAnalyticsIdentityReady();
+
+        expect(shutdown).toHaveBeenCalledTimes(1);
+        expect(amplitudeMocks.track).not.toHaveBeenCalled();
+        removeGuards();
     });
 
     it('does not load or initialize Unified from a child event before auth resolves', async () => {
@@ -758,6 +1256,12 @@ describe('Amplitude analytics adapter', () => {
             request_id: value,
             share_channel: value,
         });
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_DURATION_ESTIMATE_SHOWN, {
+            stage: value,
+            estimate_version: value,
+            duration_range: value,
+            mutual_count: 474,
+        } as never);
 
         expect(amplitudeMocks.track.mock.calls).toEqual([
             ['landing_viewed', {}],
@@ -767,6 +1271,7 @@ describe('Amplitude analytics adapter', () => {
             ['exclusion_decided', {}],
             ['payment_confirmed_viewed', {}],
             ['result_shared', {}],
+            ['analysis_duration_estimate_shown', {}],
         ]);
         expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(value);
     });
@@ -796,6 +1301,11 @@ describe('Amplitude analytics adapter', () => {
             amount_krw: 14_900,
             status: 'paid',
         });
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_DURATION_ESTIMATE_SHOWN, {
+            stage: 'duration_workload',
+            estimate_version: 'v1',
+            duration_range: '5_8',
+        });
 
         expect(amplitudeMocks.track.mock.calls).toEqual([
             ['landing_viewed', {
@@ -816,6 +1326,11 @@ describe('Amplitude analytics adapter', () => {
                 plan_id: 'basic',
                 amount_krw: 14_900,
                 status: 'paid',
+            }],
+            ['analysis_duration_estimate_shown', {
+                stage: 'duration_workload',
+                estimate_version: 'v1',
+                duration_range: '5_8',
             }],
         ]);
     });
@@ -1003,6 +1518,53 @@ describe('Amplitude analytics adapter', () => {
         ]);
         expect(amplitudeMocks.reset).toHaveBeenCalledTimes(1);
         expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows the real replay plugin to add only its reserved replay ID property', async () => {
+        const replayProperty = '[Amplitude] Session Replay ID';
+        const sessionId = 1_721_234_567_890;
+        const plugin = new SessionReplayPlugin({ sampleRate: 0.1 });
+        const evaluateTargetingAndCapture = vi.fn().mockResolvedValue(undefined);
+        Object.assign(plugin as unknown as Record<string, unknown>, {
+            config: { sessionId },
+            sessionReplay: {
+                evaluateTargetingAndCapture,
+                getSessionId: () => sessionId,
+                getSessionReplayProperties: () => ({ [replayProperty]: 'device/session' }),
+            },
+        });
+        const event = {
+            device_id: 'pseudonymous-device',
+            event_properties: { plan_id: 'standard', stage: 'analysis' },
+            event_type: 'analysis_started',
+            session_id: sessionId,
+            user_id: VALID_USER_ID,
+        };
+
+        const output = await plugin.execute(event as never) as unknown as typeof event;
+
+        expect(output).toMatchObject({
+            device_id: 'pseudonymous-device',
+            event_type: 'analysis_started',
+            session_id: sessionId,
+            user_id: VALID_USER_ID,
+            event_properties: {
+                plan_id: 'standard',
+                stage: 'analysis',
+                [replayProperty]: 'device/session',
+            },
+        });
+        expect(Object.keys(output.event_properties)).toEqual([
+            'plan_id',
+            'stage',
+            replayProperty,
+        ]);
+        expect(JSON.stringify(output)).not.toContain('instagram');
+        expect(evaluateTargetingAndCapture).toHaveBeenCalledWith({
+            event: expect.objectContaining({ event_type: 'analysis_started' }),
+            page: undefined,
+            userProperties: undefined,
+        });
     });
 
     it('contains no static Unified SDK import', () => {

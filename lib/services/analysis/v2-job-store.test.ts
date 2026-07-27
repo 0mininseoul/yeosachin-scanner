@@ -458,6 +458,55 @@ describe('analysis V2 job store', () => {
         );
     });
 
+    it('atomically reserves the next generation for scheduler continuation', async () => {
+        const job = { ...claimedJob(), attemptCount: 3 };
+        const nextReservation = randomUUID();
+        const rpc = vi.fn().mockResolvedValue({
+            data: [{
+                reserved: true,
+                dispatch_generation: 2,
+                reservation_token: nextReservation,
+                job_status: 'pending',
+                dispatch_state: 'reserved',
+                task_name: null,
+                attempt_count: 2,
+                request_status: 'processing',
+            }],
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.continueScheduler(
+            job,
+            'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+            30,
+        )).resolves.toEqual({
+            requestId,
+            jobKey,
+            reserved: true,
+            generation: 2,
+            reservationToken: nextReservation,
+            status: 'pending',
+            dispatchState: 'reserved',
+            taskName: null,
+            attemptCount: 2,
+            requestStatus: 'processing',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_DATABASE_NAMES.continueSchedulerRpc,
+            expect.objectContaining({
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_claim_token: job.claimToken,
+                p_error_code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+                p_delay_seconds: 30,
+                p_dispatch_token: expect.stringMatching(
+                    /^[0-9a-f-]{36}$/
+                ),
+            })
+        );
+    });
+
     it('completes and fans out camelCase successor contracts atomically', async () => {
         const job = claimedJob();
         const rpc = vi.fn().mockResolvedValue({

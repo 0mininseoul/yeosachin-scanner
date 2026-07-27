@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 import {
     ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
     ANALYSIS_V2_RELATIONSHIPS_JOB_KEY,
@@ -20,6 +21,7 @@ import type {
 } from './v2-job-store';
 import { AnalysisV2JobFenceError } from './v2-job-store';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
+import { AnalysisV2SchedulerContinuationError } from './v2-ai-scheduler-continuation';
 import {
     ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS,
     ANALYSIS_V2_JOB_MAX_ATTEMPTS,
@@ -142,6 +144,18 @@ function store(
             attemptCount: claimed.attemptCount - 1,
             requestStatus: 'processing',
         })),
+        continueScheduler: vi.fn(async () => ({
+            requestId: claimed.requestId,
+            jobKey: claimed.jobKey,
+            reserved: true,
+            generation: claimed.generation + 1,
+            reservationToken,
+            status: 'pending' as const,
+            dispatchState: 'reserved' as const,
+            taskName: null,
+            attemptCount: claimed.attemptCount - 1,
+            requestStatus: 'processing',
+        })),
         releaseClaim: vi.fn(async (_claim, failure) => ({
             released: true,
             status: failure?.retryable === false ? 'failed' as const : 'pending' as const,
@@ -213,7 +227,10 @@ describe('analysis V2 durable DAG worker', () => {
         await expect(executeAnalysisV2DagJob(profileAiClaim, {
             stateStore: stateStore(initial),
             executors: { profile_ai: executor },
-            aiPolicyStore: { loadAiStagePolicyVersion },
+            aiPolicyStore: {
+                loadAiStagePolicyVersion,
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+            },
         })).rejects.toMatchObject({
             code: 'ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH',
             disposition: 'permanent',
@@ -221,6 +238,86 @@ describe('analysis V2 durable DAG worker', () => {
 
         expect(loadAiStagePolicyVersion).toHaveBeenCalledWith(requestId);
         expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('passes scheduler capability only from the exact immutable request snapshot', async () => {
+        const relationshipState: AnalysisV2DagState = {
+            ...baseState(), relationships: relationshipManifest(),
+        };
+        const fetchJob = buildAnalysisV2DagPlan(requestId, relationshipState).jobs
+            .find(job => job.jobKey === 'track:profiles:batch:0');
+        if (!fetchJob) throw new Error('Missing profile fetch fixture job');
+        const initial: AnalysisV2DagState = {
+            ...relationshipState,
+            profileFetchBatches: [{
+                batch: 0,
+                itemCount: relationshipState.relationships!.profileBatches[0]!.itemCount,
+                producerInputHash: fetchJob.inputHash,
+                revision: 1,
+                resultHash: digest('profile-fetch-result:0'),
+            }],
+        };
+        const claim = claimFor(initial, 'track:profile-ai:batch:0');
+        const persisted: AnalysisV2DagState = {
+            ...initial,
+            profileAiBatches: [{
+                batch: 0,
+                itemCount: 30,
+                producerInputHash: claim.inputHash,
+                revision: 1,
+                resultHash: digest('profile-ai-result:0'),
+            }],
+        };
+        const executor = vi.fn(async () => ({
+            checkpoint: {
+                kind: 'profile_ai_batch' as const,
+                manifest: persisted.profileAiBatches![0]!,
+            },
+        }));
+        const loadPolicyVersionsSnapshot = vi.fn(async () => ({
+            pipeline: 'v2', risk: 'risk-policy-v2.4',
+            aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+            scheduler: 'ai-scheduler-v1',
+        }));
+
+        await expect(executeAnalysisV2DagJob(claim, {
+            stateStore: stateStore(initial, {
+                checkpointManifest: vi.fn(async () => persisted),
+                load: vi.fn()
+                    .mockResolvedValueOnce(initial)
+                    .mockResolvedValue(persisted),
+            }),
+            executors: { profile_ai: executor },
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+                loadPolicyVersionsSnapshot,
+            },
+        })).resolves.toEqual(expect.any(Array));
+        expect(loadPolicyVersionsSnapshot).toHaveBeenCalledWith(requestId);
+        expect(executor).toHaveBeenCalledWith(expect.objectContaining({
+            schedulerCapability: 'scheduler-v1',
+        }));
+
+        const malformedExecutor = vi.fn();
+        await expect(executeAnalysisV2DagJob(claim, {
+            stateStore: stateStore(initial),
+            executors: { profile_ai: malformedExecutor },
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+                loadPolicyVersionsSnapshot: vi.fn(async () => ({
+                    pipeline: 'v2',
+                    risk: 'risk-policy-v2.4',
+                    aiStage: AI_STAGE_POLICY_LATEST_VERSION,
+                    scheduler: 'ai-scheduler-v2',
+                })),
+            },
+        })).rejects.toMatchObject({
+            code: 'ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH',
+            disposition: 'permanent',
+        });
+        expect(malformedExecutor).not.toHaveBeenCalled();
     });
 
     it('confirms provider cleanup before invoking the request failure RPC', async () => {
@@ -1086,6 +1183,66 @@ describe('analysis V2 durable DAG worker', () => {
         expect(jobStore.deferAiCapacity).toHaveBeenCalledWith(claimed, code);
         expect(jobStore.releaseClaim).not.toHaveBeenCalled();
         expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+    });
+
+    it('atomically continues scheduler admission without returning a Cloud Tasks retry', async () => {
+        const claimed = { ...bootstrapClaim, attemptCount: 3 };
+        const jobStore = store(claimed);
+        const dispatchReservedContinuation = vi.fn().mockRejectedValue(
+            new Error('queue temporarily unavailable')
+        );
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new AnalysisV2SchedulerContinuationError(
+                    'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+                );
+            },
+            dispatchReservedContinuation,
+        })).resolves.toEqual({
+            status: 'continuation',
+            errorCode: 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+            pendingRecoveryCount: 1,
+        });
+        expect(jobStore.continueScheduler).toHaveBeenCalledWith(
+            claimed,
+            'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+            1,
+        );
+        expect(dispatchReservedContinuation).toHaveBeenCalledOnce();
+        expect(jobStore.deferAiCapacity).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it('reports no pending recovery after a delayed continuation is enqueued', async () => {
+        const claimed = { ...bootstrapClaim, attemptCount: 3 };
+        const jobStore = store(claimed);
+        const dispatchReservedContinuation = vi.fn().mockResolvedValue('enqueued');
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new AnalysisV2SchedulerContinuationError(
+                    'ANALYSIS_V2_AI_CAPACITY_PENDING',
+                    37,
+                );
+            },
+            dispatchReservedContinuation,
+        })).resolves.toEqual({
+            status: 'continuation',
+            errorCode: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            pendingRecoveryCount: 0,
+        });
+        expect(dispatchReservedContinuation).toHaveBeenCalledWith(
+            expect.any(Object),
+            37,
+        );
+        expect(jobStore.continueScheduler).toHaveBeenCalledWith(
+            claimed,
+            'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            37,
+        );
     });
 
     it('defers a resolver recovery race and resumes after durable recovery settles it', async () => {

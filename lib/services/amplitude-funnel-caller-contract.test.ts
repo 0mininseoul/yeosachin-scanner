@@ -64,10 +64,10 @@ describe('Amplitude product funnel caller contract', () => {
 
         const progress = source('hooks/useAnalysisProgress.ts');
         expect(progress).toMatch(
-            /data\?\.status !== 'pending'[\s\S]*?data\?\.status !== 'processing'[\s\S]*?claimObservedAnalysisStart[\s\S]*?trackEvent\(EVENTS\.ANALYSIS_STARTED/,
+            /currentData\?\.status !== 'pending'[\s\S]*?currentData\?\.status !== 'processing'[\s\S]*?claimObservedAnalysisStart[\s\S]*?trackEvent\(EVENTS\.ANALYSIS_STARTED/,
         );
         expect(progress).toMatch(
-            /data\?\.status !== 'completed'[\s\S]*?analysisCompletedEventKey\(requestId\)[\s\S]*?trackEvent\(EVENTS\.ANALYSIS_COMPLETED/,
+            /currentData\?\.status !== 'completed'[\s\S]*?analysisCompletedEventKey\(requestId\)[\s\S]*?trackEvent\(EVENTS\.ANALYSIS_COMPLETED/,
         );
         expect(preflight).toContain('claimAnalysisStart(');
     });

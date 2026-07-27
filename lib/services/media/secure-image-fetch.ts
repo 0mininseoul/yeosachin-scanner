@@ -1,6 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
-import { isIP, type LookupFunction } from 'node:net';
+import { isIP, type LookupFunction, type Socket } from 'node:net';
 import { Readable } from 'node:stream';
 
 export const INSTAGRAM_MEDIA_HOST_SUFFIXES = [
@@ -99,7 +99,7 @@ async function defaultResolveHostname(hostname: string): Promise<ResolvedAddress
     return lookup(hostname, { all: true, verbatim: true });
 }
 
-function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
+export function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
     return (_hostname, options, callback) => {
         const requestedFamily = options.family || 0;
         const eligible = requestedFamily === 0
@@ -110,21 +110,25 @@ function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
                 'No validated image address matches the requested family'
             ) as NodeJS.ErrnoException;
             error.code = 'ENOTFOUND';
-            callback(error, '', 0);
+            queueMicrotask(() => callback(error, '', 0));
             return;
         }
         if (options.all) {
-            callback(null, eligible.map(({ address, family }) => ({ address, family })));
+            queueMicrotask(() => callback(
+                null,
+                eligible.map(({ address, family }) => ({ address, family })),
+            ));
             return;
         }
-        callback(null, eligible[0].address, eligible[0].family);
+        queueMicrotask(() => callback(null, eligible[0].address, eligible[0].family));
     };
 }
 
-async function requestPinnedHttpsImage(
+export async function requestPinnedHttpsImage(
     url: URL,
     options: SecureImageRequestOptions,
-    addresses: readonly ResolvedAddress[]
+    addresses: readonly ResolvedAddress[],
+    requestHttps: typeof httpsRequest = httpsRequest
 ): Promise<Response> {
     return new Promise((resolve, reject) => {
         const headers = new Headers(options.headers);
@@ -133,7 +137,13 @@ async function requestPinnedHttpsImage(
         headers.delete('host');
         headers.delete('transfer-encoding');
 
-        const request = httpsRequest(url, {
+        let settled = false;
+        const settleReject = (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            reject(error);
+        };
+        const request = requestHttps(url, {
             agent: false,
             method: 'GET',
             headers: Object.fromEntries(headers.entries()),
@@ -145,9 +155,10 @@ async function requestPinnedHttpsImage(
                 const status = response.statusCode;
                 if (!status || status < 200 || status > 599) {
                     response.destroy();
-                    reject(new Error('Image server returned an invalid HTTP status'));
+                    settleReject(new Error('Image server returned an invalid HTTP status'));
                     return;
                 }
+                response.on('error', settleReject);
                 const responseHeaders = new Headers();
                 for (let index = 0; index < response.rawHeaders.length; index += 2) {
                     responseHeaders.append(
@@ -155,20 +166,37 @@ async function requestPinnedHttpsImage(
                         response.rawHeaders[index + 1] ?? ''
                     );
                 }
-                resolve(new Response(
+                const webResponse = new Response(
                     Readable.toWeb(response) as ReadableStream<Uint8Array>,
                     {
                         status,
                         statusText: response.statusMessage,
                         headers: responseHeaders,
                     }
-                ));
+                );
+                if (!settled) {
+                    settled = true;
+                    resolve(webResponse);
+                }
             } catch (error) {
                 response.destroy();
-                reject(error);
+                settleReject(error);
             }
         });
-        request.once('error', reject);
+        // ClientRequest normally forwards socket failures, but custom lookup/connect/TLS
+        // failures can be emitted directly by the assigned socket. Keep both listeners
+        // for the transport lifetime: removing either after first settlement can turn a
+        // later socket error into an uncaught EventEmitter exception.
+        const onSocket = (socket: Socket) => {
+            socket.on('error', settleReject);
+            socket.once('close', () => socket.off('error', settleReject));
+        };
+        request.on('error', settleReject);
+        request.on('socket', onSocket);
+        request.once('close', () => {
+            request.off('error', settleReject);
+            request.off('socket', onSocket);
+        });
         request.end();
     });
 }

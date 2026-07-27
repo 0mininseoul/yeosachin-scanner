@@ -48,3 +48,7 @@ yarn-error.log*
 next-env.d.ts
 .gstack/
 /.worktrees/
+
+# Ephemeral encrypted Analysis V2 replay captures; never commit production inputs or keys.
+.analysis-v2-replay-*.enc
+.analysis-v2-replay-*.key

@@ -5,7 +5,12 @@ import {
     genderTriageResultSchema,
     partnerSafetyResultSchema,
 } from '@/lib/services/ai/v2-staged-analysis';
-import { analysisV2CheckpointProfileSchema } from './v2-profile-fetch-store';
+import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
+import {
+    analysisV2CheckpointProfileSchema,
+    type AnalysisV2CheckpointProfile,
+} from './v2-profile-fetch-store';
+import { screenAnalysisV2OfficialAccount } from './v2-official-account-screening';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     AnalysisV2AiScoringStageStore,
@@ -106,6 +111,57 @@ const mediaCoverageSchema = z.object({
     }
 });
 
+const mediaSelectionProvenanceSchema = z.object({
+    triageSelectedCount: z.number().int().min(0).max(5),
+    featureSelectedCount: z.number().int().min(0).max(11),
+    selectedKinds: z.object({
+        profile: z.number().int().min(0).max(1),
+        postRepresentative: z.number().int().min(0).max(10),
+        carouselContext: z.number().int().min(0).max(10),
+    }).strict(),
+}).strict().superRefine((value, context) => {
+    if (
+        value.selectedKinds.profile
+        + value.selectedKinds.postRepresentative
+        + value.selectedKinds.carouselContext
+        !== value.featureSelectedCount
+    ) {
+        context.addIssue({ code: 'custom', message: 'Media selection provenance drifted.' });
+    }
+});
+
+function canonicalV28MediaSelectionProvenance(profile: AnalysisV2CheckpointProfile) {
+    const latestPosts = profile.latestPosts ?? [];
+    if (
+        !profile.isPrivate
+        && latestPosts.length < Math.min(profile.postsCount, 8)
+    ) {
+        return null;
+    }
+    const selected = selectAnalysisMedia({
+        profile: profile.profilePicUrl
+            ? { id: profile.username, imageUrl: profile.profilePicUrl }
+            : undefined,
+        posts: latestPosts,
+    }, { carouselDiversity: true });
+    if (selected.carouselCoverage.incompletePostIds.length > 0) return null;
+    const selectedKinds = {
+        profile: 0,
+        postRepresentative: 0,
+        carouselContext: 0,
+    };
+    for (const media of selected.feature.media) {
+        if (media.role === 'profile') selectedKinds.profile += 1;
+        else if (media.role === 'post_representative') selectedKinds.postRepresentative += 1;
+        else if (media.role === 'carousel_context') selectedKinds.carouselContext += 1;
+    }
+    return {
+        triageSelectedCount: selected.triage.media.length,
+        featureSelectedCount: selected.feature.media.length,
+        selectedKinds,
+    };
+}
+
 const captionSchema = z.object({
     evidenceRefId: z.string().trim().min(1).max(240),
     selectionId: selectionIdSchema,
@@ -133,6 +189,25 @@ const profileOutcomeSchema = z.object({
     genderResolutionOperationKey: resolverOperationKeySchema.nullable().optional(),
     genderResolutionResultHash: hashSchema.nullable().optional(),
     mediaBundlePersisted: z.boolean(),
+    v29FeatureAdmission: z.enum([
+        'eligible',
+        'nonpersonal_or_official',
+        'unsupported_unknown',
+    ]).optional(),
+    aiStagePolicyVersion: z.enum([
+        'ai-stage-policy-v2.8',
+        'ai-stage-policy-v2.9',
+    ]).optional(),
+    mediaSelectionProvenance: mediaSelectionProvenanceSchema.optional(),
+    inputQualityPolicy: z.literal('input-quality-v2.8').optional(),
+    accountContextOverride: accountContextSchema.optional(),
+    officialScreeningStatus: z.enum([
+        'not_model_official',
+        'corroborated_official',
+        'uncorroborated_official',
+    ]).optional(),
+    officialExclusionReason: z.literal('model_group_context_plus_profile_signals')
+        .nullable().optional(),
 }).strict().transform(value => ({
     ...value,
     unavailableReason: value.unavailableReason
@@ -240,13 +315,88 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Analyzed outcome is incomplete.' });
     }
-    const featureRequired = [
+    const v29FeatureSkipped = value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        && value.v29FeatureAdmission !== undefined
+        && value.v29FeatureAdmission !== 'eligible';
+    if (v29FeatureSkipped && (
+        value.status !== 'unresolved'
+        || value.feature !== null
+        || value.featureOperationKey !== null
+        || value.featureResultHash !== null
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'A v2.9 pre-feature exclusion must remain an unresolved triage-only outcome.',
+        });
+    }
+    const featureRequired = !v29FeatureSkipped && [
         'verified_female', 'unresolved', 'unresolved_stage_conflict',
     ].includes(value.status);
     if (featureRequired && (
         !value.feature || !value.featureOperationKey || !value.featureResultHash
     )) {
         context.addIssue({ code: 'custom', message: 'Feature outcome is incomplete.' });
+    }
+    const hasV28Contamination = value.inputQualityPolicy !== undefined
+        || value.mediaSelectionProvenance !== undefined
+        || value.accountContextOverride !== undefined
+        || value.officialScreeningStatus !== undefined
+        || value.officialExclusionReason !== undefined;
+    const inputQualityPolicyFamily = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9';
+    const requiresInputQualityProvenance = inputQualityPolicyFamily && !v29FeatureSkipped;
+    if (!inputQualityPolicyFamily && hasV28Contamination) {
+        context.addIssue({
+            code: 'custom',
+                message: 'v2.8 input-quality fields require an exact v2.8-family AI-stage policy.',
+        });
+    }
+    if (requiresInputQualityProvenance && !value.feature) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Media selection provenance requires completed feature analysis.',
+        });
+    }
+    if (requiresInputQualityProvenance && (
+        value.inputQualityPolicy !== 'input-quality-v2.8'
+        || value.mediaSelectionProvenance === undefined
+        || value.accountContextOverride === undefined
+        || value.officialScreeningStatus === undefined
+        || value.officialExclusionReason === undefined
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'v2.8 input-quality provenance is incomplete.',
+        });
+    }
+    if (requiresInputQualityProvenance && value.feature && value.profile) {
+        const modelContext = value.feature.features.accountContext;
+        const screening = screenAnalysisV2OfficialAccount({
+            modelAccountContext: modelContext,
+            fullName: value.profile.fullName ?? null,
+            bio: value.profile.bio ?? null,
+        });
+        const expectedContext = modelContext === 'official_group_or_brand'
+            ? screening.accountContext
+            : modelContext;
+        const expectedStatus = modelContext !== 'official_group_or_brand'
+            ? 'not_model_official'
+            : screening.exclusionReason
+                ? 'corroborated_official'
+                : 'uncorroborated_official';
+        const expectedMedia = canonicalV28MediaSelectionProvenance(value.profile);
+        if (
+            value.accountContextOverride !== expectedContext
+            || value.officialScreeningStatus !== expectedStatus
+            || value.officialExclusionReason !== screening.exclusionReason
+            || expectedMedia === null
+            || JSON.stringify(value.mediaSelectionProvenance) !== JSON.stringify(expectedMedia)
+        ) {
+            context.addIssue({
+                code: 'custom',
+                message: 'v2.8 input-quality provenance does not match persisted source evidence.',
+            });
+        }
     }
     if (value.mediaBundlePersisted !== (value.status === 'verified_female')) {
         context.addIssue({ code: 'custom', message: 'Only verified women retain media bundles.' });
@@ -286,6 +436,24 @@ const preliminaryCandidateSchema = z.object({
     hasStrongPartnerEvidence: z.boolean(),
     uniqueTargetPostsLikedByCandidate: z.number().int().min(0).max(4),
     boundedCandidateCommentsOnTarget: z.number().int().min(0).max(12),
+    hasCandidateToTargetTagOrCaptionMention: z.boolean(),
+    hasTargetToCandidateTagOrCaptionMention: z.boolean(),
+    recentFemaleMutualRank: nullableRankSchema,
+    recentMutualBadgeRank: z.number().int().min(1).max(5).nullable(),
+    preScore: z.number().finite().min(0).max(95),
+    verificationShortlistRank: z.number().int().min(1).max(10).nullable(),
+}).strict();
+
+const legacyPreliminaryCandidateSchema = z.object({
+    candidateId: candidateIdSchema,
+    username: usernameSchema,
+    appearanceGrade: appearanceGradeSchema,
+    exposureScore: z.number().int().min(0).max(5),
+    accountContext: accountContextSchema,
+    hasWeakPartnerEvidence: z.boolean(),
+    hasStrongPartnerEvidence: z.boolean(),
+    uniqueTargetPostsLikedByCandidate: z.number().int().min(0).max(4),
+    boundedCandidateCommentsOnTarget: z.number().int().min(0).max(12),
     hasTagOrCaptionMention: z.boolean(),
     recentFemaleMutualRank: nullableRankSchema,
     recentMutualBadgeRank: z.number().int().min(1).max(5).nullable(),
@@ -294,6 +462,36 @@ const preliminaryCandidateSchema = z.object({
 }).strict();
 
 const scoreComponentsSchema = z.object({
+    candidateToTargetLikes: z.number().finite().min(0).max(24),
+    candidateToTargetComments: z.number().finite().min(0).max(30),
+    candidateToTargetTagOrCaptionMention: z.number().finite().min(0).max(12),
+    targetToCandidateTagOrCaptionMention: z.number().finite().min(0).max(8),
+    targetToCandidateLike: z.number().finite().min(0).max(5),
+    recentMutual: z.number().finite().min(0).max(5),
+    appearanceExposure: z.number().finite().min(0).max(16),
+}).strict();
+
+const riskResultSchema = z.object({
+    policyVersion: z.literal('risk-policy-v2.4'),
+    components: scoreComponentsSchema,
+    softContextBeforeBusinessAdjustment: z.object({
+        recentMutual: z.number().finite().min(0).max(5),
+        appearanceExposure: z.number().finite().min(0).max(16),
+    }).strict(),
+    softContextMultiplier: z.union([z.literal(0), z.literal(0.5), z.literal(1)]),
+    weakPartnerAdjustment: z.union([z.literal(-5), z.literal(0)]),
+    preScore: z.number().finite().min(0).max(95),
+    rawScore: z.number().finite().min(0).max(100),
+    possibleUpperBound: z.number().finite().min(0).max(100),
+    publicScore: z.number().finite().min(1).max(10),
+    displayScore: z.number().finite().min(1).max(10),
+    possibleUpperPublicScore: z.number().finite().min(1).max(10),
+    possibleUpperDisplayScore: z.number().finite().min(1).max(10),
+    riskBand: riskBandSchema,
+    partnerCapApplied: z.boolean(),
+}).strict();
+
+const legacyScoreComponentsSchema = z.object({
     candidateToTargetLikes: z.number().finite().min(0).max(20),
     candidateToTargetComments: z.number().finite().min(0).max(26),
     targetToCandidateLike: z.number().finite().min(0).max(3),
@@ -302,9 +500,9 @@ const scoreComponentsSchema = z.object({
     appearanceExposure: z.number().finite().min(0).max(20),
 }).strict();
 
-const riskResultSchema = z.object({
+const legacyRiskResultSchema = z.object({
     policyVersion: z.literal('risk-policy-v2.3'),
-    components: scoreComponentsSchema,
+    components: legacyScoreComponentsSchema,
     softContextBeforeBusinessAdjustment: z.object({
         recentMutual: z.number().finite().min(0).max(17),
         appearanceExposure: z.number().finite().min(0).max(20),
@@ -325,6 +523,17 @@ const riskResultSchema = z.object({
 const finalCandidateSchema = preliminaryCandidateSchema.extend({
     reverseLikeStatus: z.enum(['observed', 'not_observed', 'not_collected']),
     risk: riskResultSchema,
+    displayScore: z.number().finite().min(1).max(10)
+        .refine(value => Math.round(value * 10) === value * 10),
+    riskBand: riskBandSchema,
+    relativeTierApplied: z.boolean(),
+    featuredRank: z.number().int().min(1).max(10).nullable(),
+    relativeWatchRank: z.number().int().min(1).max(2).nullable(),
+}).strict();
+
+const legacyFinalCandidateSchema = legacyPreliminaryCandidateSchema.extend({
+    reverseLikeStatus: z.enum(['observed', 'not_observed', 'not_collected']),
+    risk: legacyRiskResultSchema,
     displayScore: z.number().finite().min(1).max(10)
         .refine(value => Math.round(value * 10) === value * 10),
     riskBand: riskBandSchema,
@@ -365,15 +574,53 @@ const narrativeRowSchema = z.object({
 });
 
 const profilePayloadSchema = z.object({
+    aiStagePolicyVersion: z.enum([
+        'ai-stage-policy-v2.8',
+        'ai-stage-policy-v2.9',
+    ]).optional(),
     outcomes: z.array(profileOutcomeSchema).min(1).max(30),
-}).strict();
+}).strict().superRefine((value, context) => {
+    const exactV28Family = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9';
+    for (const [index, outcome] of value.outcomes.entries()) {
+        const hasFeature = outcome.feature !== null;
+        if (exactV28Family && hasFeature && outcome.aiStagePolicyVersion !== value.aiStagePolicyVersion) {
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.8-family feature outcome is not bound to the batch policy.',
+            });
+        }
+        if (!exactV28Family && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8') {
+            // Preserve the exact legacy rejection contract for every stored v2.8 checkpoint.
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.8 outcome requires a v2.8 batch policy.',
+            });
+        }
+        if (!exactV28Family && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.9') {
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.9 outcome requires a v2.9 batch policy.',
+            });
+        }
+    }
+});
 const primaryPayloadSchema = z.object({
     candidates: z.array(primaryCandidateSchema).max(900),
 }).strict();
-const screeningPayloadSchema = z.object({
+const screeningPayloadV24Schema = z.object({
+    riskPolicyVersion: z.literal('risk-policy-v2.4'),
     shortlistHash: hashSchema,
     candidates: z.array(preliminaryCandidateSchema).max(900),
 }).strict();
+const screeningPayloadV23Schema = z.object({
+    shortlistHash: hashSchema,
+    candidates: z.array(legacyPreliminaryCandidateSchema).max(900),
+}).strict();
+const screeningPayloadSchema = z.union([screeningPayloadV24Schema, screeningPayloadV23Schema]);
 const reverseRowsPayloadSchema = z.object({
     rows: z.array(reverseLikeRowSchema).max(10),
 }).strict();
@@ -383,11 +630,18 @@ const partnerRowsPayloadSchema = z.object({
 const narrativeRowsPayloadSchema = z.object({
     rows: z.array(narrativeRowSchema).max(3),
 }).strict();
-const finalPayloadSchema = z.object({
+const finalPayloadV24Schema = z.object({
+    riskPolicyVersion: z.literal('risk-policy-v2.4'),
     candidates: z.array(finalCandidateSchema).max(900),
     narrativeCandidateIds: z.array(candidateIdSchema).max(3),
     narrativeBatchHash: hashSchema,
 }).strict();
+const finalPayloadV23Schema = z.object({
+    candidates: z.array(legacyFinalCandidateSchema).max(900),
+    narrativeCandidateIds: z.array(candidateIdSchema).max(3),
+    narrativeBatchHash: hashSchema,
+}).strict();
+const finalPayloadSchema = z.union([finalPayloadV24Schema, finalPayloadV23Schema]);
 
 const rpcEnvelopeSchema = z.object({
     stageKind: stageKindSchema,
@@ -574,12 +828,20 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointProfileAiBatch(input) {
             const outcomes = profileOutcomeSchema.array().min(1).max(30).parse(input.outcomes);
             uniqueCandidates(outcomes);
+            const payload = {
+                ...(
+                    input.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+                    || input.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                    ? { aiStagePolicyVersion: input.aiStagePolicyVersion }
+                    : {}),
+                outcomes,
+            };
             const envelope = await checkpoint(
                 input,
                 'profile_ai_batch',
                 input.batch,
                 outcomes.length,
-                { outcomes }
+                payload,
             );
             return {
                 revision: envelope.revision,
@@ -632,6 +894,8 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointScreening(input) {
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'screening', null, input.candidates.length, {
+                ...(input.riskPolicyVersion === 'risk-policy-v2.3'
+                    ? {} : { riskPolicyVersion: 'risk-policy-v2.4' }),
                 shortlistHash: input.shortlistHash,
                 candidates: input.candidates,
             });
@@ -639,6 +903,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
                 shortlistHash: envelope.payload.shortlistHash,
+                riskPolicyVersion: input.riskPolicyVersion ?? 'risk-policy-v2.4',
                 candidates: envelope.payload.candidates,
             }) as AnalysisV2ScreeningSnapshot;
         },
@@ -649,6 +914,9 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
                 shortlistHash: envelope.payload.shortlistHash,
+                riskPolicyVersion: 'riskPolicyVersion' in envelope.payload
+                    ? envelope.payload.riskPolicyVersion
+                    : 'risk-policy-v2.3',
                 candidates: envelope.payload.candidates,
             }) as AnalysisV2ScreeningSnapshot;
         },
@@ -698,6 +966,8 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
         async checkpointFinalScores(input) {
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'final_score', null, input.candidates.length, {
+                ...(input.riskPolicyVersion === 'risk-policy-v2.3'
+                    ? {} : { riskPolicyVersion: 'risk-policy-v2.4' }),
                 candidates: input.candidates,
                 narrativeCandidateIds: input.narrativeCandidateIds,
                 narrativeBatchHash: input.narrativeBatchHash,
@@ -705,6 +975,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             return Object.freeze({
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
+                riskPolicyVersion: input.riskPolicyVersion ?? 'risk-policy-v2.4',
                 candidates: envelope.payload.candidates,
                 narrativeCandidateIds: envelope.payload.narrativeCandidateIds,
                 narrativeBatchHash: envelope.payload.narrativeBatchHash,
@@ -716,6 +987,9 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             return envelope === null ? null : Object.freeze({
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
+                riskPolicyVersion: 'riskPolicyVersion' in envelope.payload
+                    ? envelope.payload.riskPolicyVersion
+                    : 'risk-policy-v2.3',
                 candidates: envelope.payload.candidates,
                 narrativeCandidateIds: envelope.payload.narrativeCandidateIds,
                 narrativeBatchHash: envelope.payload.narrativeBatchHash,

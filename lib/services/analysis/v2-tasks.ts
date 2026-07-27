@@ -10,6 +10,7 @@ import { createCloudTasksClient } from './background-tasks';
 import {
     analysisV2JobStore,
     assertAnalysisV2JobIdentity,
+    type AnalysisV2JobDispatchReservation,
     type AnalysisV2JobStore,
     type AnalysisV2TaskDelivery,
 } from './v2-job-store';
@@ -335,6 +336,28 @@ export async function dispatchAnalysisV2Job(
     const store = options.store ?? analysisV2JobStore;
     const reservation = await store.reserveDispatch({ requestId, jobKey });
     if (!reservation.reserved) return 'already_dispatched';
+    return dispatchReservedAnalysisV2Job(reservation, { ...options, config, store });
+}
+
+/**
+ * Completes a dispatch reservation created atomically with scheduler continuation. Replaying this
+ * function is safe because both the task id and the database dispatch fence are deterministic.
+ */
+export async function dispatchReservedAnalysisV2Job(
+    reservation: AnalysisV2JobDispatchReservation,
+    options: DispatchOptions = {}
+): Promise<AnalysisV2TaskEnqueueOutcome> {
+    const config = requireConfig(
+        options.config === undefined ? getAnalysisV2TasksConfig() : options.config
+    );
+    const store = options.store ?? analysisV2JobStore;
+    if (
+        !reservation.reserved
+        || reservation.status !== 'pending'
+        || reservation.dispatchState !== 'reserved'
+    ) {
+        throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: invalid reservation state.');
+    }
     if (!reservation.reservationToken) {
         throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: reservation token is missing.');
     }

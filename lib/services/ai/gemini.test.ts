@@ -532,6 +532,30 @@ describe('analyzeWithGemini stage request policy', () => {
         }
     );
 
+    it('admits only the bounded v2.9 two-account gender microbatch media override', async () => {
+        const images = Array.from({ length: 11 }, (_, index) => `image-${index}`);
+        await analyzeWithGemini('prompt', images, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            maxImages: 10,
+            ...stageAuditOptions(),
+        });
+
+        const request = mocks.generateContent.mock.calls[0][0];
+        expect(request.config).toMatchObject({ maxOutputTokens: 1_024 });
+        expect(request.contents[0].parts.filter(
+            (part: { inlineData?: unknown }) => part.inlineData
+        )).toHaveLength(10);
+        await expect(analyzeWithGemini('prompt', images, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            maxImages: 11,
+            ...stageAuditOptions(),
+        })).rejects.toThrow('maxImages override is restricted to bounded v2.9 gender batches');
+    });
+
     it('allows explicit model, thinking, resolution, and output overrides without cost-mode coupling', async () => {
         await analyzeWithGemini('prompt', ['image'], {
             schema: responseSchema,
@@ -643,6 +667,25 @@ describe('analyzeWithGemini stage request policy', () => {
             ...stageAuditOptions(),
             skipTokenLog: true,
         })).rejects.toThrow('cannot skip durable token logging');
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
+
+    it('rejects forged or legacy boolean stateless replay bypasses', async () => {
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            ...stageAuditOptions(),
+            skipTokenLog: true,
+            replayCapability: {} as never,
+        })).rejects.toThrow('Gemini replay capability is invalid');
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            ...stageAuditOptions(),
+            skipTokenLog: true,
+            statelessReplay: true,
+        } as never)).rejects.toThrow('cannot skip durable token logging');
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
@@ -900,6 +943,36 @@ describe('analyzeWithGemini process concurrency', () => {
         await expect(Promise.all(calls)).resolves.toHaveLength(concurrency + 1);
         expect(deferred.maximumActive()).toBe(concurrency);
     });
+
+    it.each([
+        ['genderTriage', 6],
+        ['featureAnalysis', 3],
+        ['privateAccountName', 2],
+    ] as const)(
+        'matches the v2.8 scheduler %s cap at %i without hidden queueing',
+        async (stage, concurrency) => {
+            const deferred = deferredGenerations();
+            const options = {
+                schema: responseSchema,
+                stage,
+                aiStagePolicyVersion: 'ai-stage-policy-v2.8' as const,
+                ...stageAuditOptions(),
+            };
+            const active = Array.from({ length: concurrency }, () =>
+                analyzeWithGemini('prompt', undefined, options)
+            );
+
+            await vi.waitFor(() => (
+                expect(mocks.generateContent).toHaveBeenCalledTimes(concurrency)
+            ));
+            await expect(analyzeWithGemini('prompt', undefined, options))
+                .rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+            expect(mocks.generateContent).toHaveBeenCalledTimes(concurrency);
+            deferred.releases.splice(0).forEach(release => release());
+            await expect(Promise.all(active)).resolves.toHaveLength(concurrency);
+            expect(deferred.maximumActive()).toBe(concurrency);
+        },
+    );
 
     it('never queues a resolver when either bounded slot is unavailable', async () => {
         const deferred = deferredGenerations();

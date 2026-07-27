@@ -1,10 +1,14 @@
 'use client';
 
 import Image from 'next/image';
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
+import {
+    HydrationSafePlanQueryObserver,
+    useHydrationSafePlanQuery,
+} from '@/hooks/useHydrationSafePlanQuery';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import {
     EARLYBIRD_DISCLOSURE_TEXT,
@@ -16,8 +20,9 @@ import {
     emitCurrentEarlybirdPricingEvent,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
+    isCurrentEarlybirdCheckoutStatusCta,
     isSafeGrobleCheckoutUrl,
-    parseEarlybirdPlanParam,
+    pendingEarlybirdCheckoutStatusPath,
     recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
@@ -42,12 +47,25 @@ import {
 } from '@/lib/services/earlybird/analytics-state';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
+import {
+    analysisDurationRangeLabel,
+    estimatePreflightAnalysisDuration,
+} from '@/lib/domain/analysis/duration-estimate';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     basic: 'Basic',
     standard: 'Standard',
     plus: 'Plus',
 };
+
+interface CheckoutStatusCta {
+    path: string;
+    message: string;
+    preflightId: string;
+    targetInstagramId: string | null;
+    planId: PlanId;
+    navigating: boolean;
+}
 
 function relationshipCapacityLabel(
     capacity: { followers: number; following: number },
@@ -72,6 +90,8 @@ export default function AnalyzePage() {
     const [disclosureModalOpen, setDisclosureModalOpen] = useState(false);
     const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
     const [waitlistComplete, setWaitlistComplete] = useState(false);
+    const [checkoutStatusCta, setCheckoutStatusCta] = useState<CheckoutStatusCta | null>(null);
+    const querySelectedPlan = useHydrationSafePlanQuery();
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
     const initializedRef = useRef(false);
@@ -98,11 +118,14 @@ export default function AnalyzePage() {
         stalePricingPreflightId,
     } = resolveEarlybirdPricingBoundary(preflight);
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
+    // Query-plan selection is a hydration-safe rendering fallback, not a state
+    // transition. It therefore cannot race the preflight resume effect.
+    const selectedPlanWithQueryFallback = selectedPlan ?? querySelectedPlan;
     // 모든 플랜을 선택(비교)할 수 있게 하되, 아무것도 안 고르면 적격 플랜을 기본 선택.
     // 부적격 플랜을 골라도 선택 상태는 유지하고, 구매 버튼만 비활성화한다.
     const effectiveSelectedPlan = readyPreflight
-        ? (selectedPlan ?? readyPreflight.requiredPlan)
-        : selectedPlan;
+        ? (selectedPlanWithQueryFallback ?? readyPreflight.requiredPlan)
+        : selectedPlanWithQueryFallback;
     const effectiveSelectedCard = readyPreflight && effectiveSelectedPlan
         ? readyPreflight.plans.find(plan => plan.planId === effectiveSelectedPlan) ?? null
         : null;
@@ -114,6 +137,26 @@ export default function AnalyzePage() {
             plan => isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
         )
         : false;
+    const activeCheckoutStatusCta = isCurrentEarlybirdCheckoutStatusCta(checkoutStatusCta, {
+        preflightId: readyPreflight?.preflightId,
+        targetInstagramId,
+        planId: effectiveSelectedPlan,
+    })
+        ? checkoutStatusCta
+        : null;
+    const preflightDurationEstimate = (
+        readyPreflight && effectiveSelectedCard
+            ? estimatePreflightAnalysisDuration({
+                followersCount: readyPreflight.target.followersCount,
+                followingCount: readyPreflight.target.followingCount,
+                planCapacity: effectiveSelectedCard.relationshipCapacity,
+            })
+            : null
+    );
+    // The pending-checkout copy belongs to the same submission binding as its
+    // CTA. A late 409 must not leave this message behind after the user has
+    // selected another plan or started a new preflight.
+    const visibleError = activeCheckoutStatusCta?.message ?? error;
 
     useEffect(() => {
         if (
@@ -182,8 +225,6 @@ export default function AnalyzePage() {
         initializedRef.current = true;
 
         const params = new URLSearchParams(window.location.search);
-        const linkedPlan = parseEarlybirdPlanParam(params.get('plan'));
-        if (linkedPlan) setSelectedPlan(linkedPlan);
         const resumablePreflightId = params.get('preflight');
         const shouldAutostart = params.get('autostart') === '1';
 
@@ -274,8 +315,17 @@ export default function AnalyzePage() {
     };
 
     const handlePlanSelection = (planId: PlanId) => {
+        setCheckoutStatusCta(null);
         setSelectedPlan(planId);
         trackPlanSelection(planId);
+    };
+
+    const handleCheckoutStatusNavigation = () => {
+        if (!activeCheckoutStatusCta || activeCheckoutStatusCta.navigating) return;
+        setCheckoutStatusCta(current => current === activeCheckoutStatusCta
+            ? { ...current, navigating: true }
+            : current);
+        router.push(activeCheckoutStatusCta.path);
     };
 
     const handleEarlybirdAction = async () => {
@@ -292,6 +342,7 @@ export default function AnalyzePage() {
 
         setPurchaseSubmitting(true);
         setWaitlistComplete(false);
+        setCheckoutStatusCta(null);
         setError(null);
         try {
             const paidPlan = isPaidEarlybirdPlanId(effectiveSelectedPlan);
@@ -328,6 +379,22 @@ export default function AnalyzePage() {
             );
             const payload: unknown = await response.json().catch(() => null);
             if (!response.ok) {
+                const pendingStatusPath = pendingEarlybirdCheckoutStatusPath(
+                    response.status,
+                    payload,
+                    effectiveSelectedPlan
+                );
+                if (pendingStatusPath) {
+                    setCheckoutStatusCta({
+                        path: pendingStatusPath,
+                        message: '기존 결제 처리 상태를 먼저 확인해주세요.',
+                        preflightId: readyPreflight.preflightId,
+                        targetInstagramId,
+                        planId: effectiveSelectedPlan,
+                        navigating: false,
+                    });
+                    return;
+                }
                 const message = payload && typeof payload === 'object' && 'error' in payload
                     && typeof payload.error === 'string' && payload.error.length <= 200
                     ? payload.error
@@ -399,6 +466,7 @@ export default function AnalyzePage() {
         setDisclosureAccepted(false);
         setPurchaseSubmitting(false);
         setWaitlistComplete(false);
+        setCheckoutStatusCta(null);
         initializedRef.current = true;
         router.replace('/analyze');
     };
@@ -431,6 +499,9 @@ export default function AnalyzePage() {
 
     return (
         <div className="min-h-dvh">
+            <Suspense fallback={null}>
+                <HydrationSafePlanQueryObserver />
+            </Suspense>
             <TopBar
                 right={user ? (
                     <button
@@ -442,7 +513,7 @@ export default function AnalyzePage() {
                 ) : undefined}
             />
 
-            <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
+            <main data-amp-block className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
                 {!preflight ? (
                     <>
                         <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
@@ -766,6 +837,18 @@ export default function AnalyzePage() {
                                         })}
                                     </fieldset>
 
+                                    {preflightDurationEstimate && (
+                                        <div className="mt-4 border border-line bg-ink-2 px-4 py-3" aria-live="polite">
+                                            <p className="eyebrow">예상 소요 시간</p>
+                                            <p className="mt-1 text-[15px] font-bold text-fg">
+                                                {analysisDurationRangeLabel(preflightDurationEstimate.range)}
+                                            </p>
+                                            <p className="mt-1 text-[11px] leading-relaxed text-fg-mute">
+                                                계정 규모와 선택한 플랜을 기준으로 한 범위예요. 실제 처리 상황에 따라 달라질 수 있어요.
+                                            </p>
+                                        </div>
+                                    )}
+
                                     {effectiveSelectedPlan
                                         && selectedPlanAvailable
                                         && isPaidEarlybirdPlanId(effectiveSelectedPlan) && (
@@ -784,9 +867,29 @@ export default function AnalyzePage() {
                                         </div>
                                     )}
 
-                                    {error && (
-                                        <div className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood" role="alert">
-                                            {error}
+                                    {visibleError && (
+                                        <div
+                                            id="checkout-recovery-message"
+                                            className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood"
+                                            role="alert"
+                                        >
+                                            {visibleError}
+                                        </div>
+                                    )}
+                                    {activeCheckoutStatusCta && (
+                                        <div className="mt-3">
+                                            <PrimaryButton
+                                                type="button"
+                                                onClick={handleCheckoutStatusNavigation}
+                                                disabled={activeCheckoutStatusCta.navigating}
+                                                aria-describedby={visibleError
+                                                    ? 'checkout-recovery-message'
+                                                    : undefined}
+                                            >
+                                                {activeCheckoutStatusCta.navigating
+                                                    ? '결제 상태 불러오는 중…'
+                                                    : '기존 결제창 확인하기'}
+                                            </PrimaryButton>
                                         </div>
                                     )}
                                     {waitlistComplete && (

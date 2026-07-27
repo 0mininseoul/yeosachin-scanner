@@ -220,8 +220,9 @@ describe('analysis V2 result checkpoint store', () => {
         const scoreComponents = {
             candidateToTargetLikes: 0,
             candidateToTargetComments: 0,
+            candidateToTargetTagOrCaptionMention: 0,
+            targetToCandidateTagOrCaptionMention: 0,
             targetToCandidateLike: 0,
-            tagOrCaptionMention: 0,
             recentMutual: 0,
             appearanceExposure: 0,
         };
@@ -230,7 +231,7 @@ describe('analysis V2 result checkpoint store', () => {
             ...claim('track:score'),
             rows: [{
                 candidateId: 'candidate-1', components: scoreComponents,
-                preScore: 0, possibleUpperBound: 3,
+                preScore: 0, possibleUpperBound: 5,
                 recentMutualRank: null, verificationShortlistRank: null,
             }],
         });
@@ -238,7 +239,7 @@ describe('analysis V2 result checkpoint store', () => {
             ...claim('track:score'),
             rows: [{
                 candidateId: 'candidate-1', status: 'observed',
-                componentScore: 3, evidenceRefIds: ['like:post-1'],
+                componentScore: 5, evidenceRefIds: ['like:post-1'],
             }],
         });
         await store.checkpointPartnerSafety({
@@ -254,15 +255,16 @@ describe('analysis V2 result checkpoint store', () => {
         await store.checkpointScores({
             ...claim('track:score'),
             rows: [{
-                candidateId: 'candidate-1', displayScore: 1, riskBand: 'normal',
+                candidateId: 'candidate-1', accountContext: 'personal',
+                displayScore: 1, riskBand: 'normal',
                 featuredRank: null, recentMutualRank: null,
                 verificationShortlistRank: null,
                 partnerSafetySource: 'not_collected',
                 partnerSafetyOperationKey: null, partnerSafetyResultHash: null,
                 components: scoreComponents, weakPartnerAdjustment: 0,
                 preScore: 0, rawScore: 0,
-                possibleUpperBound: 3, publicScore: 1,
-                possibleUpperPublicScore: 1.3, partnerCapApplied: false,
+                possibleUpperBound: 5, publicScore: 1,
+                possibleUpperPublicScore: 1.45, partnerCapApplied: false,
                 partnerEvidenceSelectionIds: [],
             }],
         });
@@ -299,11 +301,40 @@ describe('analysis V2 result checkpoint store', () => {
             ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointNarrativeRpc,
         ]);
         expect(fake.rpc.mock.calls[3]![1].p_risk_policy_version).toBe(RISK_POLICY_VERSION);
+        expect(fake.rpc.mock.calls[3]![1].p_rows).toEqual([expect.objectContaining({
+            accountContext: 'personal',
+        })]);
         expect(fake.rpc.mock.calls[5]![1].p_rows).toEqual([expect.objectContaining({
             source: 'checkpoint',
             operationKey: `high-risk-narrative:${hashA}`,
             aiResultHash: hashB,
         })]);
+    });
+
+    it('keeps recovered v2.3 preliminary checkpoints on the legacy five-argument RPC', async () => {
+        const fake = rpcClient({ data: manifest('track:score', null), error: null });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+        await store.checkpointPreliminaryScores({
+            ...claim('track:score'),
+            riskPolicyVersion: 'risk-policy-v2.3',
+            rows: [{
+                candidateId: 'candidate-legacy',
+                components: {
+                    candidateToTargetLikes: 0, candidateToTargetComments: 0,
+                    targetToCandidateLike: 0, tagOrCaptionMention: 0,
+                    recentMutual: 0, appearanceExposure: 0,
+                },
+                preScore: 0, possibleUpperBound: 3,
+                recentMutualRank: null, verificationShortlistRank: null,
+            }],
+        });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointPreliminaryLegacyRpc,
+            expect.objectContaining({ p_rows: [expect.objectContaining({
+                components: expect.objectContaining({ tagOrCaptionMention: 0 }),
+            })] })
+        );
+        expect(fake.rpc.mock.calls[0]?.[1]).not.toHaveProperty('p_risk_policy_version');
     });
 
     it.each([
@@ -327,19 +358,21 @@ describe('analysis V2 result checkpoint store', () => {
         await expect(store.checkpointScores({
             ...claim('coordinator:join:final-score'),
             rows: [{
-                candidateId: 'candidate-1', displayScore: 1, riskBand: 'normal',
+                candidateId: 'candidate-1', accountContext: 'personal',
+                displayScore: 1, riskBand: 'normal',
                 featuredRank: null, recentMutualRank: null,
                 verificationShortlistRank: 1,
                 partnerSafetySource: 'not_collected',
                 partnerSafetyOperationKey: null, partnerSafetyResultHash: null,
                 components: {
                     candidateToTargetLikes: 0, candidateToTargetComments: 0,
-                    targetToCandidateLike: 0, tagOrCaptionMention: 0,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0, targetToCandidateLike: 0,
                     recentMutual: 0, appearanceExposure: 0,
                 },
                 weakPartnerAdjustment: 0,
-                preScore: 0, rawScore: 0, possibleUpperBound: 3,
-                publicScore: 1, possibleUpperPublicScore: 1.3,
+                preScore: 0, rawScore: 0, possibleUpperBound: 5,
+                publicScore: 1, possibleUpperPublicScore: 1.45,
                 partnerCapApplied: false, partnerEvidenceSelectionIds: [],
             }],
         })).resolves.toMatchObject({ rowCount: 1 });
@@ -376,9 +409,10 @@ describe('analysis V2 result checkpoint store', () => {
             },
         ].map((row, index) => {
             const rawScore = (row.publicScore - 1) * 100 / 9;
-            const possibleUpperBound = rawScore + 3;
+            const possibleUpperBound = rawScore + 5;
             return {
                 ...row,
+                accountContext: 'personal' as const,
                 featuredRank: index + 1,
                 recentMutualRank: null,
                 verificationShortlistRank: null,
@@ -388,8 +422,9 @@ describe('analysis V2 result checkpoint store', () => {
                 components: {
                     candidateToTargetLikes: 0,
                     candidateToTargetComments: rawScore,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0,
                     targetToCandidateLike: 0,
-                    tagOrCaptionMention: 0,
                     recentMutual: 0,
                     appearanceExposure: 0,
                 },
@@ -432,6 +467,7 @@ describe('analysis V2 result checkpoint store', () => {
             ...claim('coordinator:join:final-score'),
             rows: [{
                 candidateId: 'candidate-1',
+                accountContext: 'personal',
                 displayScore: 6.8,
                 riskBand: 'normal',
                 featuredRank: null,
@@ -443,15 +479,16 @@ describe('analysis V2 result checkpoint store', () => {
                 components: {
                     candidateToTargetLikes: 0,
                     candidateToTargetComments: 0,
+                    candidateToTargetTagOrCaptionMention: 0,
+                    targetToCandidateTagOrCaptionMention: 0,
                     targetToCandidateLike: 0,
-                    tagOrCaptionMention: 0,
                     recentMutual: 0,
                     appearanceExposure: 0,
                 },
                 weakPartnerAdjustment: 0,
                 preScore: 0,
                 rawScore: 0,
-                possibleUpperBound: 3,
+                possibleUpperBound: 5,
                 publicScore: 1,
                 possibleUpperPublicScore: 1.3,
                 partnerCapApplied: false,

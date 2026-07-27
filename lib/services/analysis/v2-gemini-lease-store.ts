@@ -4,8 +4,10 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     AI_GEMINI_LEASE_SECONDS,
     AI_GEMINI_MIN_REMAINING_MS,
-    AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_VERSION,
+    AI_STAGE_POLICY_V28_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
+    aiStagePolicySupports,
     type AiStageName,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
@@ -23,6 +25,7 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     table: 'analysis_v2_gemini_leases',
     acquireRpc: 'acquire_analysis_v2_gemini_lease',
     acquireV2Rpc: 'acquire_analysis_v2_gemini_lease_v2',
+    acquireSchedulerV1Rpc: 'acquire_analysis_v2_scheduler_gemini_lease_v1',
     renewRpc: 'renew_analysis_v2_gemini_lease',
     renewV2Rpc: 'renew_analysis_v2_gemini_lease_v2',
     releaseRpc: 'release_analysis_v2_gemini_lease',
@@ -81,10 +84,13 @@ const acquireInputSchema = z.object({
     ]).optional(),
     aiStagePolicyVersion: z.enum([
         AI_STAGE_POLICY_VERSION,
-        AI_STAGE_POLICY_LATEST_VERSION,
+        'ai-stage-policy-v2.7',
+        AI_STAGE_POLICY_V28_VERSION,
+        AI_STAGE_POLICY_V29_VERSION,
     ]).optional(),
 }).strict().superRefine((input, context) => {
-    const v2 = input.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+    const v2 = input.aiStagePolicyVersion !== undefined
+        && aiStagePolicySupports(input.aiStagePolicyVersion, 'durableGeminiLease');
     if (v2 !== Boolean(input.operationKey && input.stage)) {
         context.addIssue({
             code: 'custom',
@@ -209,7 +215,8 @@ function parseLease(
         claimToken: value.lease_claim_token,
         fence: value.fence,
         expiresAt: value.expires_at,
-        ...(input.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION ? {
+        ...(input.aiStagePolicyVersion !== undefined
+            && aiStagePolicySupports(input.aiStagePolicyVersion, 'durableGeminiLease') ? {
             operationKey: input.operationKey,
             stage: input.stage,
             aiStagePolicyVersion: input.aiStagePolicyVersion,
@@ -220,9 +227,10 @@ function parseLease(
 function isV2Lease(lease: AnalysisV2GeminiLease): lease is AnalysisV2GeminiLease & {
     operationKey: string;
     stage: AiStageName;
-    aiStagePolicyVersion: typeof AI_STAGE_POLICY_LATEST_VERSION;
+    aiStagePolicyVersion: AiStagePolicyVersion;
 } {
-    return lease.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION
+    return lease.aiStagePolicyVersion !== undefined
+        && aiStagePolicySupports(lease.aiStagePolicyVersion, 'durableGeminiLease')
         && typeof lease.operationKey === 'string'
         && typeof lease.stage === 'string';
 }
@@ -246,9 +254,22 @@ export function createAnalysisV2GeminiLeaseStore(
             if (!UUID_PATTERN.test(proposedToken)) {
                 throw new AnalysisV2GeminiLeasePersistenceError();
             }
-            const usesV2 = input.data.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+            const usesV2 = input.data.aiStagePolicyVersion !== undefined
+                && aiStagePolicySupports(input.data.aiStagePolicyVersion, 'durableGeminiLease');
+            const usesSchedulerV1Admission =
+                (
+                    input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V28_VERSION
+                    || input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V29_VERSION
+                )
+                && (
+                    input.data.stage === 'genderTriage'
+                    || input.data.stage === 'featureAnalysis'
+                    || input.data.stage === 'privateAccountName'
+                );
             const { data, error } = await dependencies.rpc(
-                usesV2
+                usesSchedulerV1Admission
+                    ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc
+                    : usesV2
                     ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireV2Rpc
                     : ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireRpc,
                 usesV2 ? {

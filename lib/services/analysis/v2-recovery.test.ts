@@ -52,6 +52,7 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
         claim: vi.fn(),
         deferTerminalCleanup: vi.fn(),
         deferAiCapacity: vi.fn(),
+        continueScheduler: vi.fn(),
         releaseClaim: vi.fn(),
         completeAndFanout: vi.fn(),
         listDispatchable: vi.fn(async () => jobs),
@@ -62,6 +63,8 @@ function providerRecovery() {
     return {
         recoverGeminiCutoffAttempts: vi.fn(async () => 0),
         reapGeminiCutoffLeases: vi.fn(async () => 0),
+        recoverSchedulerOperations: vi.fn(async () => 0),
+        reapSchedulerGeminiLeases: vi.fn(async () => 0),
         recoverFulfillments: vi.fn(async () => ({
             reconciled: {
                 scanned: 0,
@@ -86,6 +89,7 @@ function providerRecovery() {
             failed: 0,
             hasMore: false,
         })),
+        recoverScoreAudits: vi.fn(async () => undefined),
     };
 }
 
@@ -122,6 +126,8 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsFailed: 0,
             geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
+            schedulerOperationsRecovered: 0,
+            schedulerGeminiLeasesReaped: 0,
         });
         expect(dispatch).toHaveBeenCalledTimes(2);
         expect(jobStore.deferRecovery).toHaveBeenCalledWith({
@@ -254,6 +260,8 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsFailed: 0,
             geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
+            schedulerOperationsRecovered: 0,
+            schedulerGeminiLeasesReaped: 0,
         });
     });
 
@@ -294,6 +302,8 @@ describe('analysis V2 dispatch recovery', () => {
             fulfillmentsFailed: 0,
             geminiCutoffAttemptsRecovered: 0,
             geminiCutoffLeasesReaped: 0,
+            schedulerOperationsRecovered: 0,
+            schedulerGeminiLeasesReaped: 0,
         });
         expect(cleanupProviderRuns).toHaveBeenCalledOnce();
         expect(reconcileProviderUsage).toHaveBeenCalledOnce();
@@ -345,5 +355,95 @@ describe('analysis V2 dispatch recovery', () => {
         expect(recoverGeminiCutoffAttempts).toHaveBeenCalledBefore(
             reapGeminiCutoffLeases
         );
+    });
+
+    it('terminalizes expired scheduler operations before reaping their leases', async () => {
+        const recoverSchedulerOperations = vi.fn(async () => 2);
+        const reapSchedulerGeminiLeases = vi.fn(async () => 1);
+
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverSchedulerOperations,
+            reapSchedulerGeminiLeases,
+        })).resolves.toMatchObject({
+            failed: 0,
+            schedulerOperationsRecovered: 2,
+            schedulerGeminiLeasesReaped: 1,
+        });
+        expect(recoverSchedulerOperations).toHaveBeenCalledBefore(
+            reapSchedulerGeminiLeases,
+        );
+    });
+
+    it('drains score audits only after media and provider safety cleanup', async () => {
+        const order: string[] = [];
+        await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            cleanupTerminalMedia: vi.fn(async () => {
+                order.push('media');
+            }),
+            cleanupProviderRuns: vi.fn(async () => {
+                order.push('provider');
+                return {
+                    scanned: 0, settled: 0, failed: 0,
+                    unconfirmedStarts: 0, hasMore: false,
+                };
+            }),
+            reconcileProviderUsage: vi.fn(async () => {
+                order.push('usage');
+                return {
+                    eligible: 0, reconciled: 0, failed: 0, hasMore: false,
+                };
+            }),
+            recoverScoreAudits: vi.fn(async () => {
+                order.push('audit');
+            }),
+        });
+        expect(order).toEqual(['media', 'provider', 'usage', 'audit']);
+    });
+
+    it('bounds a hung score-audit drain without changing recovery success', async () => {
+        const order: string[] = [];
+        const startedAt = performance.now();
+        const summary = await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            cleanupTerminalMedia: vi.fn(async () => {
+                order.push('media');
+            }),
+            cleanupProviderRuns: vi.fn(async () => {
+                order.push('provider');
+                return {
+                    scanned: 0, settled: 0, failed: 0,
+                    unconfirmedStarts: 0, hasMore: false,
+                };
+            }),
+            reconcileProviderUsage: vi.fn(async () => {
+                order.push('usage');
+                return {
+                    eligible: 0, reconciled: 0, failed: 0, hasMore: false,
+                };
+            }),
+            recoverScoreAudits: vi.fn(() => {
+                order.push('audit');
+                return new Promise<void>(() => undefined);
+            }),
+            scoreAuditTimeoutMs: 25,
+        });
+        expect(order).toEqual(['media', 'provider', 'usage', 'audit']);
+        expect(performance.now() - startedAt).toBeLessThan(250);
+        expect(summary.failed).toBe(0);
+    });
+
+    it('isolates a score-audit failure from analysis recovery', async () => {
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverScoreAudits: async () => {
+                throw new Error('audit service unavailable');
+            },
+        })).resolves.toMatchObject({ failed: 0 });
     });
 });

@@ -4,6 +4,8 @@ import {
     AI_STAGE_NAMES_V27,
     AI_STAGE_POLICIES,
     AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_V28_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -13,6 +15,7 @@ import {
     AI_GEMINI_SDK_TIMEOUT_MS,
     AI_SHARED_CONCURRENCY_LIMIT,
     assertSupportedAiStagePolicyVersion,
+    aiStagePolicySupports,
     getAiStagePolicy,
     isAiStageName,
     selectAiStagePolicyVersion,
@@ -174,6 +177,8 @@ describe('V2 AI stage policy', () => {
         expect(SUPPORTED_AI_STAGE_POLICY_VERSIONS).toEqual([
             'ai-stage-policy-v2.6',
             'ai-stage-policy-v2.7',
+            'ai-stage-policy-v2.8',
+            'ai-stage-policy-v2.9',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -187,6 +192,55 @@ describe('V2 AI stage policy', () => {
             expect(getAiStagePolicy('ai-stage-policy-v2.7', stage))
                 .toBe(getAiStagePolicy('ai-stage-policy-v2.6', stage));
         }
+    });
+
+    it('adds immutable v2.8 copy policy without changing v2.6 or v2.7 registries', () => {
+        expect(AI_STAGE_POLICY_V28_VERSION).toBe('ai-stage-policy-v2.8');
+        expect(SUPPORTED_AI_STAGE_POLICY_VERSIONS).toEqual([
+            'ai-stage-policy-v2.6',
+            'ai-stage-policy-v2.7',
+            'ai-stage-policy-v2.8',
+            'ai-stage-policy-v2.9',
+        ]);
+        expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
+        expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
+            promptVersion: 'feature-analysis-v4',
+            concurrency: 3,
+        });
+        expect(getAiStagePolicy('ai-stage-policy-v2.8', 'genderTriage')).toMatchObject({
+            model: 'gemini-3.1-flash-lite',
+            promptVersion: 'gender-triage-v3',
+            schemaVersion: 2,
+            concurrency: 6,
+        });
+        expect(getAiStagePolicy('ai-stage-policy-v2.8', 'privateAccountName').concurrency).toBe(2);
+        expect(getAiStagePolicy('ai-stage-policy-v2.8', 'highRiskNarrative')).toMatchObject({
+            promptVersion: 'high-risk-narrative-v3',
+            concurrency: 3,
+        });
+        expect(JSON.stringify(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.6']))
+            .toBe(JSON.stringify(V26_POLICY_SNAPSHOT));
+        expect(getAiStagePolicy('ai-stage-policy-v2.7', 'featureAnalysis').promptVersion)
+            .toBe('feature-analysis-v3');
+        expect(getAiStagePolicy('ai-stage-policy-v2.7', 'genderTriage').promptVersion)
+            .toBe('gender-triage-v2');
+    });
+
+    it('adds v2.9 as an explicit bounded microbatch policy without mutating v2.8', () => {
+        expect(AI_STAGE_POLICY_V29_VERSION).toBe('ai-stage-policy-v2.9');
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V29_VERSION, 'genderTriage')).toMatchObject({
+            promptVersion: 'gender-triage-microbatch-v1',
+            schemaVersion: 3,
+            maxOutputTokens: 1_024,
+            concurrency: 6,
+        });
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V28_VERSION, 'genderTriage')).toMatchObject({
+            promptVersion: 'gender-triage-v3',
+            schemaVersion: 2,
+            maxOutputTokens: 512,
+        });
+        expect(aiStagePolicySupports(AI_STAGE_POLICY_V29_VERSION, 'genderTriageMicrobatchV29'))
+            .toBe(true);
     });
 
     it('lowers only v2.7 scheduling concurrency for rate-limited early stages', () => {
@@ -230,10 +284,23 @@ describe('V2 AI stage policy', () => {
             .toBe('ai-stage-policy-v2.6');
         expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.7'))
             .toBe('ai-stage-policy-v2.7');
+        expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.8'))
+            .toBe('ai-stage-policy-v2.8');
+        expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.9'))
+            .toBe('ai-stage-policy-v2.9');
         expect(() => assertSupportedAiStagePolicyVersion('ai-stage-policy-v9'))
             .toThrow('Unsupported AI stage policy version');
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY)).toBe(true);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.7'])).toBe(true);
+    });
+
+    it('inherits resolver and durable lease capabilities from v2.7 into v2.8', () => {
+        expect(aiStagePolicySupports('ai-stage-policy-v2.6', 'genderResolution')).toBe(false);
+        for (const version of ['ai-stage-policy-v2.7', 'ai-stage-policy-v2.8'] as const) {
+            expect(aiStagePolicySupports(version, 'genderResolution')).toBe(true);
+            expect(aiStagePolicySupports(version, 'durableGeminiLease')).toBe(true);
+            expect(aiStagePolicySupports(version, 'partialMediaCoverage')).toBe(true);
+        }
     });
 
     it('selects v2.7 only for newly eligible rollout requests', () => {
@@ -241,6 +308,22 @@ describe('V2 AI stage policy', () => {
             rolloutMode: 'off',
             accessMode: 'production',
         })).toBe('ai-stage-policy-v2.6');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.9');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'test_entitlement',
+            narrativeV28RolloutMode: 'test_entitlement',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.6');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'test_entitlement',
+            narrativeV28RolloutMode: 'test_entitlement',
+            accessMode: 'test_entitlement',
+        })).toBe('ai-stage-policy-v2.8');
         expect(selectAiStagePolicyVersion({
             rolloutMode: 'test_entitlement',
             accessMode: 'test_entitlement',

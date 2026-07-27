@@ -18,7 +18,7 @@ function LoginContent() {
     }, [error]);
 
     return (
-        <div className="flex min-h-dvh flex-col items-center justify-center px-5 py-12">
+        <main data-amp-block className="flex min-h-dvh flex-col items-center justify-center px-5 py-12">
             <div className="w-full max-w-[400px]">
                 {/* brand + header */}
                 <div className="mb-8 text-center">
@@ -61,7 +61,7 @@ function LoginContent() {
                     에 동의하게 됩니다.
                 </p>
             </div>
-        </div>
+        </main>
     );
 }
 

@@ -7,8 +7,10 @@ import {
     emitCurrentEarlybirdPricingEvent,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
+    isCurrentEarlybirdCheckoutStatusCta,
     isSafeGrobleCheckoutUrl,
     parseEarlybirdPlanParam,
+    pendingEarlybirdCheckoutStatusPath,
     resolveAvailableEarlybirdPlan,
     resolveEarlybirdPricingBoundary,
 } from './ui-state';
@@ -505,6 +507,72 @@ describe('earlybird analyze UI state', () => {
         expect(guard.inFlight).toBe(false);
     });
 
+    it('routes only the exact unresolved-payment conflict to owner status for the selected plan', () => {
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+        }, 'standard')).toBe('/earlybird?plan=standard');
+
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_PRICING_REFRESH_REQUIRED',
+        }, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_ORDER_CONFLICT',
+        }, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(503, {
+            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+        }, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(409, null, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+        }, 'plus')).toBeNull();
+    });
+
+    it('hides a late Standard pending-checkout CTA and its bound message after selection changes', () => {
+        // Submit Standard, select Basic/Plus while its request is pending, then
+        // receive the exact 409. Both the stale Standard CTA and its conflict
+        // message must disappear under the newer selection.
+        const lateStandardCta = {
+            preflightId: '10000000-0000-4000-8000-000000000001',
+            targetInstagramId: 'pricing_target',
+            planId: 'standard' as const,
+        };
+
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'basic',
+        })).toBe(false);
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'plus',
+        })).toBe(false);
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'standard',
+        })).toBe(true);
+    });
+
+    it('hides a late Standard pending-checkout CTA and message after target or preflight changes', () => {
+        const lateStandardCta = {
+            preflightId: '10000000-0000-4000-8000-000000000001',
+            targetInstagramId: 'pricing_target',
+            planId: 'standard' as const,
+        };
+
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: lateStandardCta.preflightId,
+            targetInstagramId: 'new_target',
+            planId: 'standard',
+        })).toBe(false);
+        expect(isCurrentEarlybirdCheckoutStatusCta(lateStandardCta, {
+            preflightId: '20000000-0000-4000-8000-000000000002',
+            targetInstagramId: lateStandardCta.targetInstagramId,
+            planId: 'standard',
+        })).toBe(false);
+    });
+
     it.each([
         [
             409,
@@ -567,5 +635,44 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('recoverPendingEarlybirdCheckout(');
         expect(source).toContain('disabled={checkoutRecoveryPending}');
         expect(source).toContain('결제 계속하기');
+    });
+
+    it('wires only the exact checkout conflict on analyze to owner status without replaying checkout', () => {
+        const source = readFileSync(
+            new URL('../../../app/analyze/page.tsx', import.meta.url),
+            'utf8'
+        );
+        expect(source).toContain('pendingEarlybirdCheckoutStatusPath(');
+        expect(source).toContain('router.push(activeCheckoutStatusCta.path)');
+        expect(source).toContain('기존 결제창 확인하기');
+        expect(source).toContain("message: '기존 결제 처리 상태를 먼저 확인해주세요.'");
+        expect(source).toContain('const visibleError = activeCheckoutStatusCta?.message ?? error;');
+        expect(source).not.toContain("setError('기존 결제 처리 상태를 먼저 확인해주세요.')");
+        expect(source).not.toContain('recoverPendingEarlybirdCheckout(');
+        expect(source).not.toContain('checkoutRecoveryPreflightId');
+    });
+
+    it('derives stale owner-status CTA visibility without synchronous effect state cleanup', () => {
+        const source = readFileSync(
+            new URL('../../../app/analyze/page.tsx', import.meta.url),
+            'utf8'
+        );
+        expect(source).toContain('isCurrentEarlybirdCheckoutStatusCta(checkoutStatusCta, {');
+        expect(source).toContain('planId: effectiveSelectedPlan');
+        expect(source).not.toMatch(
+            /useEffect\(\(\) => \{\s*setCheckoutStatus(?:Path|Navigating)/
+        );
+
+        const submitIndex = source.indexOf('const handleEarlybirdAction');
+        const submitClearIndex = source.indexOf('setCheckoutStatusCta(null)', submitIndex);
+        const requestIndex = source.indexOf('const response = await fetch(', submitIndex);
+        expect(submitClearIndex).toBeGreaterThan(submitIndex);
+        expect(submitClearIndex).toBeLessThan(requestIndex);
+
+        const resetIndex = source.indexOf('const handleReset');
+        const resetClearIndex = source.indexOf('setCheckoutStatusCta(null)', resetIndex);
+        const resetRouteIndex = source.indexOf("router.replace('/analyze')", resetIndex);
+        expect(resetClearIndex).toBeGreaterThan(resetIndex);
+        expect(resetClearIndex).toBeLessThan(resetRouteIndex);
     });
 });

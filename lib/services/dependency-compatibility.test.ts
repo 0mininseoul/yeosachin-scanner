@@ -1,9 +1,16 @@
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 
 import { Linter } from "eslint";
 import { describe, expect, it } from "vitest";
 
 const runtimeRequire = createRequire(import.meta.url);
+
+function readPackageVersion(packageJsonPath: string): string {
+  return (JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+    version: string;
+  }).version;
+}
 
 type FlatPlugin = NonNullable<Linter.Config["plugins"]>[string];
 
@@ -20,6 +27,48 @@ const languageOptions = {
 };
 
 describe("ESLint transitive minimatch compatibility", () => {
+  it("pins every installed minimatch major to the patched brace-expansion release", () => {
+    const eslintRequire = createRequire(runtimeRequire.resolve("eslint"));
+    const minimatch3PackageJson = eslintRequire.resolve("minimatch/package.json");
+    const minimatch3Require = createRequire(minimatch3PackageJson);
+    const minimatch3BraceExpansionPackageJson = minimatch3Require.resolve(
+      "brace-expansion/package.json",
+    );
+
+    const typescriptEstreeRequire = createRequire(
+      runtimeRequire.resolve("@typescript-eslint/typescript-estree/package.json"),
+    );
+    const minimatch9PackageJson = typescriptEstreeRequire.resolve(
+      "minimatch/package.json",
+    );
+    const minimatch9Require = createRequire(minimatch9PackageJson);
+    const minimatch9BraceExpansionPackageJson = minimatch9Require.resolve(
+      "brace-expansion/package.json",
+    );
+
+    const googleGaxRequire = createRequire(runtimeRequire.resolve("google-gax"));
+    const rimrafRequire = createRequire(googleGaxRequire.resolve("rimraf"));
+    const globRequire = createRequire(rimrafRequire.resolve("glob"));
+    const minimatch10PackageJson = globRequire.resolve("minimatch/package.json");
+    const minimatch10Require = createRequire(minimatch10PackageJson);
+    const minimatch10BraceExpansionPackageJson = minimatch10Require.resolve(
+      "brace-expansion/package.json",
+    );
+
+    expect(readPackageVersion(minimatch3PackageJson)).toBe("3.1.5");
+    expect(readPackageVersion(minimatch3BraceExpansionPackageJson)).toBe("5.0.8");
+    const expandBrace = minimatch3Require("brace-expansion") as (
+      pattern: string,
+    ) => string[];
+    expect(expandBrace("x{1,2}y")).toEqual(["x1y", "x2y"]);
+
+    expect(readPackageVersion(minimatch9PackageJson)).toBe("9.0.9");
+    expect(readPackageVersion(minimatch9BraceExpansionPackageJson)).toBe("5.0.8");
+
+    expect(readPackageVersion(minimatch10PackageJson)).toBe("10.2.5");
+    expect(readPackageVersion(minimatch10BraceExpansionPackageJson)).toBe("5.0.8");
+  });
+
   it("keeps eslint-plugin-react custom component patterns callable", () => {
     const messages = new Linter({ configType: "flat" }).verify(
       "const CustomCard = () => <div />; const App = () => <CustomCard dangerouslySetInnerHTML={{ __html: 'x' }} />;",

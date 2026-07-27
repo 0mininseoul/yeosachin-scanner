@@ -208,6 +208,27 @@ describe('analysis V2 worker route', () => {
         });
     });
 
+    it('acknowledges an atomically reserved scheduler continuation with HTTP 200', async () => {
+        mocks.process.mockResolvedValueOnce({
+            status: 'continuation',
+            errorCode: 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+            pendingRecoveryCount: 1,
+        });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            status: 'continuation',
+            errorCode: 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+            pendingRecoveryCount: 1,
+        });
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'analysis_v2.worker_completed',
+            fields: expect.objectContaining({ disposition: 'continuation' }),
+        }));
+    });
+
     it('sanitizes a returned retry code before logging or responding', async () => {
         mocks.process.mockResolvedValueOnce({
             status: 'retry',

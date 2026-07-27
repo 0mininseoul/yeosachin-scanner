@@ -68,6 +68,15 @@ export interface AnalysisMediaPolicySelection {
     carouselCoverage: AnalysisCarouselCoverage;
 }
 
+/**
+ * v2.8 keeps the persisted v2.6/v2.7 selection byte-for-byte, but can opt into
+ * spreading the fixed feed budget across complete carousels.  This is deliberately
+ * an input-quality policy rather than a larger media budget.
+ */
+export interface AnalysisMediaSelectionOptions {
+    carouselDiversity?: boolean;
+}
+
 export interface AnalysisCarouselPostCoverage {
     postId: string;
     declaredMediaCount: number | null;
@@ -338,7 +347,8 @@ export function selectAnalysisMedia(
     input: {
         profile?: AnalysisProfileMediaInput;
         posts: readonly AnalysisPostMediaInput[];
-    }
+    },
+    options: AnalysisMediaSelectionOptions = {},
 ): AnalysisMediaPolicySelection {
     const posts = selectRecentPosts(input.posts);
     const candidatesByPost = new Map(
@@ -383,7 +393,7 @@ export function selectAnalysisMedia(
             );
         }
 
-        if (post.id !== latestCarousel?.id) continue;
+        if (options.carouselDiversity || post.id !== latestCarousel?.id) continue;
         const contextIndexes = [Math.floor(candidates.length / 2), candidates.length - 1];
         for (const index of contextIndexes) {
             const candidate = candidates[index];
@@ -394,6 +404,36 @@ export function selectAnalysisMedia(
                 asSelectedPostMedia(post, candidate, 'carousel_context'),
                 MAX_FEED_MEDIA
             );
+        }
+    }
+
+    if (options.carouselDiversity) {
+        // The representatives above preserve recency.  Fill any remaining fixed
+        // capacity with middle/last views, round-robin by post recency, so a
+        // meaningful person or logo later in a carousel is not systematically
+        // invisible. Complete coverage is required just as it is for legacy
+        // carousel context selection.
+        const diverseCarousels = posts.filter(post => (
+            post.type === 'carousel'
+            && completeCarouselIds.has(post.id)
+            && (candidatesByPost.get(post.id)?.length ?? 0) >= 3
+        ));
+        const diversityCandidates = [
+            ...diverseCarousels.flatMap(post => {
+                const candidates = candidatesByPost.get(post.id) ?? [];
+                const candidate = candidates[Math.floor(candidates.length / 2)];
+                return candidate
+                    ? [asSelectedPostMedia(post, candidate, 'carousel_context')]
+                    : [];
+            }),
+            ...diverseCarousels.flatMap(post => {
+                const candidates = candidatesByPost.get(post.id) ?? [];
+                const candidate = candidates[candidates.length - 1];
+                return candidate ? [asSelectedPostMedia(post, candidate, 'carousel_context')] : [];
+            }),
+        ];
+        for (const media of diversityCandidates) {
+            appendUnique(feed, feedUrls, media, MAX_FEED_MEDIA);
         }
     }
 

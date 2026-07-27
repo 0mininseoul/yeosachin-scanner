@@ -8,6 +8,7 @@ import { applyGenderResolution } from '@/lib/services/ai/v2-staged-analysis';
 import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import {
     calculateRiskPolicy,
+    type AccountContext,
     type AppearanceGrade,
     type RiskBand,
 } from '@/lib/domain/analysis/risk-policy';
@@ -16,11 +17,6 @@ import {
     resultImageOrderedManifestHash,
     type ResultImageCaptureSource,
 } from '@/lib/services/media/result-image-capture';
-import {
-    classifyAnalysisImagePreparationError,
-    type AnalysisImagePreparationFailureDisposition,
-    type AnalysisImagePreparationFailureReason,
-} from '@/lib/services/ai/image-preprocessing';
 import type {
     FeatureAnalysisResult,
     GenderTriageResult,
@@ -28,7 +24,12 @@ import type {
     NormalizedAiMediaSelection,
     PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
-import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
+import {
+    aiStagePolicySupports,
+    assertSupportedAiStagePolicyVersion,
+    type AiStagePolicyCapability,
+    type AiStagePolicyVersion,
+} from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
 import type {
     AnalysisV2CanonicalTargetEvidenceRow,
@@ -42,6 +43,12 @@ import {
     type V2FinalCandidateScore,
     type V2PreliminaryCandidateScore,
 } from './v2-candidate-scoring';
+import {
+    calculateLegacyV23FinalScores,
+    calculateLegacyV23PreliminaryRisk,
+    calculateLegacyV23PreliminaryScores,
+    type LegacyV23PreliminaryCandidate,
+} from './v2-legacy-risk-recovery';
 import {
     joinVerifiedFemaleTargetInteractions,
     summarizeCandidateTargetInteractions,
@@ -76,13 +83,50 @@ import {
 } from './v2-ai-stage-runtime';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
+import {
+    screenAnalysisV2OfficialAccount,
+    type AnalysisV2OfficialExclusionReason,
+} from './v2-official-account-screening';
+import { v29FeatureAdmission } from './v2-v29-feature-admission';
+import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
+import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
+import {
+    AnalysisV2TransientMediaPreparationError,
+    isAnalysisV2PartialMediaCoverageAllowed,
+    normalizeAnalysisV2MediaSelections,
+    type AnalysisV2ProfileMediaCoverage,
+} from './v2-media-normalization';
+export {
+    ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS,
+    AnalysisV2TransientMediaPreparationError,
+    isAnalysisV2PartialMediaCoverageAllowed,
+    normalizeAnalysisV2MediaSelections,
+    type AnalysisV2ProfileMediaCoverage,
+} from './v2-media-normalization';
 
 const PROFILE_BATCH_JOB_PREFIX = 'track:profiles:batch:';
-const MAX_PROFILE_AI_CONCURRENCY = 4;
+const LEGACY_MAX_PROFILE_AI_CONCURRENCY = 4;
+const SCHEDULER_V1_PROFILE_PIPELINE_CONCURRENCY = 6;
 const MAX_PARTNER_SAFETY_CONCURRENCY = 3;
 const MAX_NARRATIVE_CONCURRENCY = 3;
 const REVERSE_LIKE_LIMIT = 100;
-export const ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS = 2;
+export function analysisV2ProfilePipelineConcurrency(
+    aiStagePolicyVersion: string,
+    schedulerCapability: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>[
+        'schedulerCapability'
+    ],
+    configured?: number,
+): number {
+    return configured ?? (
+        (
+            aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        )
+        && schedulerCapability === 'scheduler-v1'
+            ? SCHEDULER_V1_PROFILE_PIPELINE_CONCURRENCY
+            : LEGACY_MAX_PROFILE_AI_CONCURRENCY
+    );
+}
 
 export type AnalysisV2ProfileAiTerminalStatus =
     | 'verified_female'
@@ -96,30 +140,6 @@ export type AnalysisV2ProfileAiTerminalStatus =
 export type AnalysisV2ProfileUnavailableReason =
     | 'profile_fetch'
     | 'ai_response';
-
-export interface AnalysisV2ProfileMediaCoverage {
-    selectedCount: number;
-    normalizedCount: number;
-    failures: readonly Readonly<{
-        selectionId: string;
-        reason: AnalysisImagePreparationFailureReason;
-        disposition: AnalysisImagePreparationFailureDisposition;
-    }>[];
-}
-
-export function isAnalysisV2PartialMediaCoverageAllowed(
-    coverage: AnalysisV2ProfileMediaCoverage,
-): boolean {
-    return coverage.normalizedCount >= 1
-        && coverage.failures.length * 5 <= coverage.selectedCount;
-}
-
-export class AnalysisV2TransientMediaPreparationError extends Error {
-    constructor() {
-        super('ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT');
-        this.name = 'AnalysisV2TransientMediaPreparationError';
-    }
-}
 
 export interface AnalysisV2StoredCaptionEvidence {
     evidenceRefId: string;
@@ -161,6 +181,27 @@ export interface AnalysisV2ProfileAiOutcome {
     genderResolutionOperationKey: string | null;
     genderResolutionResultHash: string | null;
     mediaBundlePersisted: boolean;
+    /** v2.8 provenance only: aggregate counts, never source URLs/captions/media. */
+    mediaSelectionProvenance?: Readonly<{
+        triageSelectedCount: number;
+        featureSelectedCount: number;
+        selectedKinds: Readonly<{
+            profile: number;
+            postRepresentative: number;
+            carouselContext: number;
+        }>;
+    }>;
+    aiStagePolicyVersion?: AiStagePolicyVersion;
+    inputQualityPolicy?: 'input-quality-v2.8';
+    /** v2.9-only pre-feature gate; prevents unsupported accounts from spending a feature call. */
+    v29FeatureAdmission?: 'eligible' | 'nonpersonal_or_official' | 'unsupported_unknown';
+    /** v2.8 screened context consumed by the existing v2.4 risk policy. */
+    accountContextOverride?: AccountContext;
+    officialScreeningStatus?:
+        | 'not_model_official'
+        | 'corroborated_official'
+        | 'uncorroborated_official';
+    officialExclusionReason?: AnalysisV2OfficialExclusionReason | null;
 }
 
 function analysisUnavailableOutcome(
@@ -247,6 +288,8 @@ export interface AnalysisV2ScreeningSnapshot {
     revision: number;
     resultHash: string;
     shortlistHash: string;
+    /** The persisted scoring contract; absent only on pre-policy in-memory test doubles. */
+    riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     candidates: readonly V2PreliminaryCandidateScore[];
 }
 
@@ -286,6 +329,8 @@ export interface AnalysisV2PartnerSafetySnapshot {
 export interface AnalysisV2FinalScoreSnapshot {
     revision: number;
     resultHash: string;
+    /** The persisted scoring contract; absent only on pre-policy in-memory test doubles. */
+    riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     candidates: readonly V2FinalCandidateScore[];
     narrativeCandidateIds: readonly string[];
     narrativeBatchHash: string;
@@ -319,6 +364,7 @@ export interface AnalysisV2AiScoringStageStore {
         claimToken: string;
         jobInputHash: string;
         batch: number;
+        aiStagePolicyVersion?: AiStagePolicyVersion;
         outcomes: readonly AnalysisV2ProfileAiOutcome[];
     }): Promise<AnalysisV2ProfileAiBatchCheckpoint>;
     loadProfileAiOutcomes(input: AnalysisV2StageReadClaim):
@@ -339,6 +385,7 @@ export interface AnalysisV2AiScoringStageStore {
         jobInputHash: string;
         candidates: readonly V2PreliminaryCandidateScore[];
         shortlistHash: string;
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     }): Promise<AnalysisV2ScreeningSnapshot>;
     loadScreening(input: AnalysisV2StageReadClaim): Promise<AnalysisV2ScreeningSnapshot | null>;
     checkpointReverseLikes(input: {
@@ -367,6 +414,7 @@ export interface AnalysisV2AiScoringStageStore {
         candidates: readonly V2FinalCandidateScore[];
         narrativeCandidateIds: readonly string[];
         narrativeBatchHash: string;
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     }): Promise<AnalysisV2FinalScoreSnapshot>;
     loadFinalScores(input: AnalysisV2StageReadClaim):
         Promise<AnalysisV2FinalScoreSnapshot | null>;
@@ -628,7 +676,10 @@ async function runBounded<T, R>(
     return results;
 }
 
-function mediaPolicy(profile: AnalysisV2CheckpointProfile) {
+function mediaPolicy(
+    profile: AnalysisV2CheckpointProfile,
+    inputQualityV28 = false,
+) {
     const latestPosts = profile.latestPosts ?? [];
     if (
         !profile.isPrivate
@@ -641,85 +692,49 @@ function mediaPolicy(profile: AnalysisV2CheckpointProfile) {
             ? { id: profile.username, imageUrl: profile.profilePicUrl }
             : undefined,
         posts: latestPosts,
-    });
+    }, inputQualityV28 ? { carouselDiversity: true } : undefined);
     if (policy.carouselCoverage.incompletePostIds.length > 0) {
         throw new Error('ANALYSIS_V2_PROFILE_MEDIA_STRUCTURAL_INCOMPLETE');
     }
     return policy;
 }
 
-async function normalizedSelections(
-    selected: readonly SelectedAnalysisMedia[],
-    normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>,
-    aiStagePolicyVersion: string = 'ai-stage-policy-v2.6',
-): Promise<Readonly<{
-    media: NormalizedAiMediaSelection[];
-    bytes: Map<string, Buffer>;
-    coverage: AnalysisV2ProfileMediaCoverage;
-}>> {
-    const prepared = await Promise.all(selected.map(async item => {
-        for (let attempt = 1; attempt <= ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS; attempt++) {
-            try {
-                return { status: 'success' as const, item, bytes: await normalizeMedia(item) };
-            } catch (error) {
-                const failure = classifyAnalysisImagePreparationError(error, 'download');
-                if (
-                    failure.disposition === 'transient'
-                    && attempt < ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS
-                ) {
-                    continue;
-                }
-                return {
-                    status: 'failure' as const,
-                    item,
-                    failure: {
-                        selectionId: item.selectionId,
-                        reason: failure.reason,
-                        disposition: failure.disposition,
-                    },
-                };
-            }
-        }
-        throw new Error('ANALYSIS_V2_MEDIA_PREPARATION_ATTEMPT_DRIFT');
-    }));
-    const successful = prepared.filter(item => item.status === 'success');
-    const failures = prepared.flatMap(item => item.status === 'failure' ? [item.failure] : []);
-    if (
-        aiStagePolicyVersion !== AI_STAGE_POLICY_LATEST_VERSION
-        && failures.some(failure => failure.disposition === 'transient')
-    ) {
-        const failureReasons = failures.reduce<Record<string, number>>((counts, failure) => {
-            counts[failure.reason] = (counts[failure.reason] ?? 0) + 1;
-            return counts;
-        }, {});
-        console.warn('Analysis V2 media preparation has transient failures', {
-            selectedCount: selected.length,
-            failureReasons,
-        });
-        throw new AnalysisV2TransientMediaPreparationError();
-    }
-    const media: NormalizedAiMediaSelection[] = successful.map(({ item, bytes }) => ({
-        selectionId: item.selectionId,
-        kind: item.role === 'profile' ? 'profile' : 'feed',
-        normalizedJpegBase64: bytes.toString('base64'),
-        ...(item.postId ? { postId: item.postId } : {}),
-    }));
-    return {
-        media,
-        bytes: new Map(successful.map(item => [item.item.selectionId, item.bytes])),
-        coverage: Object.freeze({
-            selectedCount: selected.length,
-            normalizedCount: successful.length,
-            failures: Object.freeze(failures),
-        }),
+function mediaSelectionProvenance(
+    policy: ReturnType<typeof mediaPolicy>
+): AnalysisV2ProfileAiOutcome['mediaSelectionProvenance'] {
+    const selectedKinds = {
+        profile: 0,
+        postRepresentative: 0,
+        carouselContext: 0,
     };
+    for (const media of policy.feature.media) {
+        if (media.role === 'profile') selectedKinds.profile += 1;
+        else if (media.role === 'post_representative') selectedKinds.postRepresentative += 1;
+        else if (media.role === 'carousel_context') selectedKinds.carouselContext += 1;
+    }
+    return Object.freeze({
+        triageSelectedCount: policy.triage.media.length,
+        featureSelectedCount: policy.feature.media.length,
+        selectedKinds: Object.freeze(selectedKinds),
+    });
+}
+
+function policySupports(
+    version: string,
+    capability: AiStagePolicyCapability,
+): boolean {
+    try {
+        return aiStagePolicySupports(assertSupportedAiStagePolicyVersion(version), capability);
+    } catch {
+        return false;
+    }
 }
 
 function isAnalysisV2StageMediaCoverageUsable(
     coverage: AnalysisV2ProfileMediaCoverage,
     aiStagePolicyVersion: string,
 ): boolean {
-    const usable = aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION
+    const usable = policySupports(aiStagePolicyVersion, 'partialMediaCoverage')
         ? isAnalysisV2PartialMediaCoverageAllowed(coverage)
         : coverage.normalizedCount >= 1 && coverage.failures.length === 0;
     if (!usable && coverage.failures.some(failure => failure.disposition === 'transient')) {
@@ -741,8 +756,8 @@ function isAnalysisV2StageMediaCoverageUsable(
 
 function mergeNormalizedSelections(
     selected: readonly SelectedAnalysisMedia[],
-    parts: readonly Awaited<ReturnType<typeof normalizedSelections>>[]
-): Awaited<ReturnType<typeof normalizedSelections>> {
+    parts: readonly Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>>[]
+): Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>> {
     const bytes = new Map(parts.flatMap(part => [...part.bytes.entries()]));
     const failures = new Map(parts.flatMap(part => part.coverage.failures.map(failure => [
         failure.selectionId,
@@ -810,7 +825,7 @@ function weakFeaturePartnerEvidence(feature: FeatureAnalysisResult): boolean {
 function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
     if (!outcome.profile) return [];
     const normalizedSelectionIds = new Set(outcome.normalizedSelectionIds);
-    const policy = mediaPolicy(outcome.profile);
+    const policy = mediaPolicy(outcome.profile, outcome.mediaSelectionProvenance !== undefined);
     const selectedPostIds = new Set([
         ...policy.triage.media,
         ...policy.feature.media,
@@ -830,7 +845,87 @@ function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
     });
 }
 
-function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2VerifiedFemaleFeatureRow {
+function screenedAccountContext(
+    outcome: AnalysisV2ProfileAiOutcome,
+    exactV28Policy = false,
+): AccountContext {
+    const modelContext = outcome.feature?.features.accountContext ?? 'uncertain';
+    // Legacy requests intentionally ignore v2.8-only fields. Exact request policy,
+    // not field sniffing, chooses the semantic branch.
+    if (!exactV28Policy) return modelContext;
+    const hasCompleteV28Provenance =
+        (
+            outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
+            || outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        )
+        && outcome.inputQualityPolicy === 'input-quality-v2.8'
+        && outcome.mediaSelectionProvenance !== undefined
+        && outcome.accountContextOverride !== undefined
+        && outcome.officialScreeningStatus !== undefined
+        && outcome.officialExclusionReason !== undefined;
+    if (!hasCompleteV28Provenance) return 'uncertain';
+    if (!outcome.profile) return 'uncertain';
+    let expectedMedia: AnalysisV2ProfileAiOutcome['mediaSelectionProvenance'];
+    try {
+        expectedMedia = mediaSelectionProvenance(mediaPolicy(outcome.profile, true));
+    } catch {
+        return 'uncertain';
+    }
+    if (
+        expectedMedia === undefined
+        || canonicalJson(expectedMedia) !== canonicalJson(outcome.mediaSelectionProvenance)
+    ) {
+        return 'uncertain';
+    }
+    const canonicalScreening = screenAnalysisV2OfficialAccount({
+        modelAccountContext: modelContext,
+        fullName: outcome.profile.fullName ?? null,
+        bio: outcome.profile.bio ?? null,
+    });
+    const canonicalContext = modelContext === 'official_group_or_brand'
+        ? canonicalScreening.accountContext
+        : modelContext;
+    const canonicalStatus = modelContext !== 'official_group_or_brand'
+        ? 'not_model_official'
+        : canonicalScreening.exclusionReason
+            ? 'corroborated_official'
+            : 'uncorroborated_official';
+    if (
+        outcome.accountContextOverride !== canonicalContext
+        || outcome.officialScreeningStatus !== canonicalStatus
+        || outcome.officialExclusionReason !== canonicalScreening.exclusionReason
+    ) {
+        return 'uncertain';
+    }
+    if (outcome.officialScreeningStatus === 'not_model_official') {
+        return modelContext !== 'official_group_or_brand'
+            && outcome.accountContextOverride === modelContext
+            && outcome.officialExclusionReason === null
+            ? modelContext
+            : 'uncertain';
+    }
+    if (modelContext !== 'official_group_or_brand') return 'uncertain';
+    if (
+        outcome.officialScreeningStatus === 'corroborated_official'
+        && outcome.accountContextOverride === 'official_group_or_brand'
+        && outcome.officialExclusionReason === 'model_group_context_plus_profile_signals'
+    ) {
+        return 'official_group_or_brand';
+    }
+    if (
+        outcome.officialScreeningStatus === 'uncorroborated_official'
+        && outcome.accountContextOverride === 'uncertain'
+        && outcome.officialExclusionReason === null
+    ) {
+        return 'uncertain';
+    }
+    return 'uncertain';
+}
+
+function publicFeatureRow(
+    outcome: AnalysisV2ProfileAiOutcome,
+    exactV28Policy = false,
+): AnalysisV2VerifiedFemaleFeatureRow {
     if (
         outcome.status === 'fetch_unavailable'
         || outcome.status === 'media_unavailable'
@@ -894,7 +989,7 @@ function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2Verifi
                 isBusinessAccount: [
                     'individual_creator',
                     'official_group_or_brand',
-                ].includes(outcome.feature.features.accountContext),
+                ].includes(screenedAccountContext(outcome, exactV28Policy)),
                 featurePartnerEvidenceStrong: strongFeaturePartnerEvidence(outcome.feature),
                 oneLineOverview: outcome.feature.features.oneLineOverview,
             }
@@ -1095,6 +1190,7 @@ function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSub
     return {
         ...checkpointClaim(context),
         aiStagePolicyVersion: context.aiStagePolicyVersion,
+        schedulerCapability: context.schedulerCapability,
         handlerDeadlineAtMs: context.handlerDeadlineAtMs,
     };
 }
@@ -1141,7 +1237,10 @@ function preliminaryStoreRow(
         uniqueTargetPostsLikedByCandidate: candidate.uniqueTargetPostsLikedByCandidate,
         boundedCandidateCommentsOnTarget: candidate.boundedCandidateCommentsOnTarget,
         reverseLikeStatus: 'not_collected',
-        hasTagOrCaptionMention: candidate.hasTagOrCaptionMention,
+        hasCandidateToTargetTagOrCaptionMention:
+            candidate.hasCandidateToTargetTagOrCaptionMention,
+        hasTargetToCandidateTagOrCaptionMention:
+            candidate.hasTargetToCandidateTagOrCaptionMention,
         recentFemaleMutualRank: candidate.recentFemaleMutualRank,
         appearanceGrade: candidate.appearanceGrade,
         exposureScore: candidate.exposureScore,
@@ -1167,8 +1266,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
 ): AnalysisV2StageExecutorRegistry {
     const createContactSheet = dependencies.createContactSheet
         ?? createPartnerSafetyContactSheet;
-    const profileConcurrency = dependencies.profileAiConcurrency
-        ?? MAX_PROFILE_AI_CONCURRENCY;
+    const configuredProfileConcurrency = dependencies.profileAiConcurrency;
     const partnerConcurrency = dependencies.partnerSafetyConcurrency
         ?? MAX_PARTNER_SAFETY_CONCURRENCY;
     const narrativeConcurrency = dependencies.narrativeConcurrency
@@ -1199,8 +1297,22 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 throw new Error('ANALYSIS_V2_PROFILE_AI_ITEM_COUNT_DRIFT');
             }
             const aiFence = aiJobFence(context);
-            const genderResolutionEnabled =
-                aiFence.aiStagePolicyVersion === AI_STAGE_POLICY_LATEST_VERSION;
+            const profileConcurrency = analysisV2ProfilePipelineConcurrency(
+                aiFence.aiStagePolicyVersion,
+                aiFence.schedulerCapability,
+                configuredProfileConcurrency,
+            );
+            const genderResolutionEnabled = policySupports(
+                aiFence.aiStagePolicyVersion,
+                'genderResolution',
+            );
+            const inputQualityV28 = policySupports(
+                aiFence.aiStagePolicyVersion,
+                'inputQualityV28',
+            );
+            const inputQualityPolicyVersion = aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                ? 'ai-stage-policy-v2.9' as const
+                : 'ai-stage-policy-v2.8' as const;
             const defaultGenderResolutionStatus = genderResolutionEnabled
                 ? 'not_eligible' as const
                 : 'disabled' as const;
@@ -1243,8 +1355,20 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     }
                     const profile = item.profile;
 
-                    const policy = mediaPolicy(profile);
-                    const triageNormalized = await normalizedSelections(
+                    const policy = mediaPolicy(profile, inputQualityV28);
+                    const selectionProvenance = inputQualityV28
+                        ? mediaSelectionProvenance(policy)
+                        : undefined;
+                    const profileEvidence = inputQualityV28
+                        ? {
+                            fullName: profile.fullName ?? null,
+                            hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
+                            ...(aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                                ? { bio: profile.bio ?? null }
+                                : {}),
+                        }
+                        : undefined;
+                    const triageNormalized = await normalizeAnalysisV2MediaSelections(
                         policy.triage.media,
                         dependencies.normalizeMedia,
                         aiFence.aiStagePolicyVersion,
@@ -1284,6 +1408,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     try {
                         gender = await dependencies.ai.gender({
                             media: triageNormalized.media,
+                            ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
                         }, aiFence);
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
@@ -1322,11 +1447,17 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
+                    const v29Admission = policySupports(
+                        aiFence.aiStagePolicyVersion,
+                        'genderTriageMicrobatchV29',
+                    )
+                        ? v29FeatureAdmission(gender.result, profile)
+                        : null;
                     const triageAttempted = new Set(policy.triage.selectionIds);
                     const featureRemainder = policy.feature.media.filter(media => (
                         !triageAttempted.has(media.selectionId)
                     ));
-                    const remainderNormalized = await normalizedSelections(
+                    const remainderNormalized = await normalizeAnalysisV2MediaSelections(
                         featureRemainder,
                         dependencies.normalizeMedia,
                         aiFence.aiStagePolicyVersion,
@@ -1376,26 +1507,155 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const captions = captionPolicy.featureCaptions.filter(caption => (
                         normalizedSelectionIds.has(caption.selectionId)
                     ));
-                    const featureTask = dependencies.ai.features({
-                        triage: gender.result,
-                        bio: item.profile.bio ?? null,
-                        media: normalized.media,
-                        captions,
-                    }, aiFence);
                     const triageAssessment = gender.result.assessment;
-                    const resolverEligible = genderResolutionEnabled && !(
-                        triageAssessment.inferredGender === 'female'
-                        && triageAssessment.confidence === 'high'
-                        && triageAssessment.ownerConsistency === 'same_person'
+                    const resolverMedia =
+                        aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                            ? selectAnalysisV2GenderResolverMedia(normalized.media)
+                            : normalized.media;
+                    const resolverEligible = genderResolutionEnabled && (
+                        aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                            ? v29GenderResolverAdmission(
+                                gender.result,
+                                resolverMedia.length,
+                            ) === 'eligible'
+                            : !(
+                                triageAssessment.inferredGender === 'female'
+                                && triageAssessment.confidence === 'high'
+                                && triageAssessment.ownerConsistency === 'same_person'
+                            )
                     );
                     const resolverHandle = resolverEligible
                         ? dependencies.ai.startGenderResolution({
-                            media: normalized.media,
+                            media: resolverMedia,
                         }, aiFence)
                         : null;
                     if (resolverHandle) {
                         startedResolverHandles.push(resolverHandle);
                     }
+                    if (v29Admission !== null && v29Admission !== 'eligible') {
+                        if (!resolverHandle) {
+                            return {
+                                candidateId,
+                                instagramId: normalizeUsername(item.username),
+                                status: 'unresolved' as const,
+                                unavailableReason: null,
+                                profile: item.profile,
+                                triage: gender.result,
+                                feature: null,
+                                normalizedSelectionIds: normalized.media.map(
+                                    row => row.selectionId
+                                ),
+                                mediaCoverage: normalized.coverage,
+                                captions,
+                                genderOperationKey: gender.operationKey,
+                                genderResultHash: gender.resultHash,
+                                featureOperationKey: null,
+                                featureResultHash: null,
+                                baselineClassification: 'unresolved' as const,
+                                classificationSource: 'unknown' as const,
+                                genderResolutionStatus: 'not_eligible' as const,
+                                genderResolutionOperationKey: null,
+                                genderResolutionResultHash: null,
+                                mediaBundlePersisted: false,
+                                aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+                                v29FeatureAdmission: v29Admission,
+                            };
+                        }
+                        return {
+                            kind: 'resolver_pending',
+                            resolverHandle,
+                            finalize: async settledResolverState => {
+                                const readyResolver =
+                                    settledResolverState?.status === 'ready'
+                                        ? settledResolverState.value
+                                        : null;
+                                const reconciliation = applyGenderResolution({
+                                    baselineClassification: 'unresolved',
+                                    baselineSource: 'unknown',
+                                    triage: gender.result.assessment,
+                                    feature: null,
+                                    resolver: readyResolver?.result ?? null,
+                                });
+                                const status = reconciliation.finalClassification;
+                                const genderResolutionStatus =
+                                    settledResolverState?.status === 'ready'
+                                        ? reconciliation.resolverApplied
+                                            ? 'ready_applied' as const
+                                            : 'ready_inconclusive' as const
+                                        : settledResolverState?.status === 'capacity_skipped'
+                                            ? 'capacity_skipped' as const
+                                            : settledResolverState?.status
+                                                === 'terminal_unavailable'
+                                                ? 'terminal_unavailable' as const
+                                                : 'cutoff' as const;
+                                let mediaBundlePersisted = false;
+                                if (status === 'verified_female' && readyResolver) {
+                                    const resolverMedia =
+                                        readyResolver.result.analyzedSelectionIds.map(
+                                            selectionId => {
+                                                const bytes = normalized.bytes.get(selectionId);
+                                                if (!bytes) {
+                                                    throw new Error(
+                                                        'ANALYSIS_V2_MEDIA_SELECTION_DRIFT'
+                                                    );
+                                                }
+                                                return { selectionId, normalizedJpeg: bytes };
+                                            },
+                                        );
+                                    await dependencies.mediaStore.persistBundle({
+                                        requestId: context.claim.requestId,
+                                        jobKey: context.claim.jobKey,
+                                        claimToken: context.claim.claimToken,
+                                        bundleId: analysisV2CandidateBundleId(candidateId),
+                                        media: resolverMedia,
+                                    });
+                                    mediaBundlePersisted = true;
+                                }
+                                return {
+                                    candidateId,
+                                    instagramId: normalizeUsername(item.username),
+                                    status,
+                                    unavailableReason: null,
+                                    profile,
+                                    triage: gender.result,
+                                    feature: null,
+                                    normalizedSelectionIds: normalized.media.map(
+                                        row => row.selectionId
+                                    ),
+                                    mediaCoverage: normalized.coverage,
+                                    captions,
+                                    genderOperationKey: gender.operationKey,
+                                    genderResultHash: gender.resultHash,
+                                    featureOperationKey: null,
+                                    featureResultHash: null,
+                                    baselineClassification: 'unresolved' as const,
+                                    classificationSource: reconciliation.classificationSource,
+                                    genderResolutionStatus,
+                                    genderResolutionOperationKey:
+                                        readyResolver?.operationKey ?? null,
+                                    genderResolutionResultHash:
+                                        readyResolver?.resultHash ?? null,
+                                    mediaBundlePersisted,
+                                    aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+                                    v29FeatureAdmission: v29Admission,
+                                    ...(selectionProvenance
+                                        ? {
+                                            mediaSelectionProvenance: selectionProvenance,
+                                            inputQualityPolicy:
+                                                'input-quality-v2.8' as const,
+                                        }
+                                        : {}),
+                                };
+                            },
+                        };
+                    }
+                    const featureTask = dependencies.ai.features({
+                        triage: gender.result,
+                        bio: item.profile.bio ?? null,
+                        media: normalized.media,
+                        captions,
+                        ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
+                    }, aiFence);
                     let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
                     try {
                         features = await featureTask;
@@ -1451,6 +1711,26 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         row => row.selectionId
                     );
                     const normalizedCoverage = normalized.coverage;
+                    const officialScreening = inputQualityV28
+                        ? screenAnalysisV2OfficialAccount({
+                            modelAccountContext: features.result.features.accountContext,
+                            fullName: profile.fullName ?? null,
+                            bio: profile.bio ?? null,
+                        })
+                        : null;
+                    const modelAccountContext = features.result.features.accountContext;
+                    const accountContextOverride = inputQualityV28
+                        ? modelAccountContext === 'official_group_or_brand'
+                            ? officialScreening!.accountContext
+                            : modelAccountContext
+                        : undefined;
+                    const officialScreeningStatus = inputQualityV28
+                        ? modelAccountContext !== 'official_group_or_brand'
+                            ? 'not_model_official' as const
+                            : officialScreening!.exclusionReason
+                                ? 'corroborated_official' as const
+                                : 'uncorroborated_official' as const
+                        : undefined;
                     const couldResolveFemale = resolverHandle !== null
                         && (
                             baselineClassification === 'unresolved'
@@ -1561,6 +1841,22 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 genderResolutionResultHash:
                                     readyResolver?.resultHash ?? null,
                                 mediaBundlePersisted,
+                                ...(selectionProvenance
+                                    ? {
+                                        aiStagePolicyVersion: inputQualityPolicyVersion,
+                                        mediaSelectionProvenance: selectionProvenance,
+                                        inputQualityPolicy: 'input-quality-v2.8' as const,
+                                    }
+                                    : {}),
+                                ...(accountContextOverride
+                                    ? { accountContextOverride }
+                                    : {}),
+                                ...(officialScreeningStatus
+                                    ? { officialScreeningStatus }
+                                    : {}),
+                                ...(officialScreening
+                                    ? { officialExclusionReason: officialScreening.exclusionReason }
+                                    : {}),
                             };
                         },
                     };
@@ -1596,12 +1892,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 ...checkpointClaim(context),
                 batch: context.job.batch!,
                 analyzedCount: outcomes.length,
-                rows: outcomes.map(publicFeatureRow),
+                rows: outcomes.map(outcome => publicFeatureRow(outcome, inputQualityV28)),
             });
             assertCheckpointCount(publicCheckpoint, outcomes.length, 'PROFILE_AI');
             const stored = await dependencies.stageStore.checkpointProfileAiBatch({
                 ...checkpointClaim(context),
                 batch: context.job.batch!,
+                ...(inputQualityV28
+                    ? { aiStagePolicyVersion: inputQualityPolicyVersion }
+                    : {}),
                 outcomes,
             });
             if (stored.itemCount !== topology.itemCount) {
@@ -1749,35 +2048,62 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const summaryByUsername = new Map(
                 summaries.map(summary => [summary.candidateUsername, summary])
             );
-            const preliminary = calculateV2PreliminaryScores({
-                candidates: verified.map(outcome => {
+            const candidateEvidence = verified.map(outcome => {
                     const summary = summaryByUsername.get(outcome.instagramId);
+                    const tagEvidence = hasCandidateTargetMention({
+                        targetUsername: target.username,
+                        candidateUsername: outcome.instagramId,
+                        targetPosts: target.latestPosts ?? [],
+                        candidatePosts: outcome.profile!.latestPosts ?? [],
+                    });
                     return {
                         candidateId: outcome.candidateId,
                         username: outcome.instagramId,
                         appearanceGrade: outcome.feature!.features.appearanceGrade as AppearanceGrade,
                         exposureScore: outcome.feature!.features.exposureScore,
-                        accountContext: outcome.feature!.features.accountContext,
+                        // v2.8 may conservatively downgrade an uncorroborated
+                        // model official label to uncertain. The v2.4 scorer then
+                        // consumes this existing account-context input unchanged.
+                        accountContext: screenedAccountContext(
+                            outcome,
+                            policySupports(
+                                aiJobFence(context).aiStagePolicyVersion,
+                                'inputQualityV28',
+                            ),
+                        ),
                         hasWeakPartnerEvidence: weakFeaturePartnerEvidence(outcome.feature!),
                         hasStrongPartnerEvidence: strongFeaturePartnerEvidence(outcome.feature!),
                         uniqueTargetPostsLikedByCandidate:
                             summary?.uniqueTargetPostsLikedByCandidate ?? 0,
                         boundedCandidateCommentsOnTarget:
                             summary?.boundedCandidateCommentsOnTarget ?? 0,
-                        hasTagOrCaptionMention: hasCandidateTargetMention({
-                            targetUsername: target.username,
-                            candidateUsername: outcome.instagramId,
-                            targetPosts: target.latestPosts ?? [],
-                            candidatePosts: outcome.profile!.latestPosts ?? [],
-                        }),
+                        hasCandidateToTargetTagOrCaptionMention:
+                            tagEvidence.candidateToTargetTagOrCaptionMention,
+                        hasTargetToCandidateTagOrCaptionMention:
+                            tagEvidence.targetToCandidateTagOrCaptionMention,
                     };
-                }),
-                orderedMutualUsernames: relationship.mutualRows
-                    .slice()
-                    .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal)
-                    .map(row => row.username),
-                excludedUsername: relationship.excludedUsername,
-            });
+                });
+            const orderedMutualUsernames = relationship.mutualRows
+                .slice()
+                .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal)
+                .map(row => row.username);
+            const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
+            const preliminary = legacyRecovery
+                ? calculateLegacyV23PreliminaryScores({
+                    candidates: candidateEvidence.map(row => ({
+                        ...row,
+                        hasTagOrCaptionMention:
+                            row.hasCandidateToTargetTagOrCaptionMention
+                            || row.hasTargetToCandidateTagOrCaptionMention,
+                    })),
+                    orderedMutualUsernames,
+                    excludedUsername: relationship.excludedUsername,
+                })
+                : calculateV2PreliminaryScores({
+                    candidates: candidateEvidence,
+                    orderedMutualUsernames,
+                    excludedUsername: relationship.excludedUsername,
+                });
             const shortlistIds = preliminary
                 .filter(row => row.verificationShortlistRank !== null)
                 .sort((left, right) => (
@@ -1787,13 +2113,28 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const shortlistHash = sha256('analysis-v2-verification-shortlist-v1', shortlistIds);
             const publicCheckpoint = await dependencies.resultStore.checkpointPreliminaryScores({
                 ...checkpointClaim(context),
-                rows: preliminary.map(preliminaryStoreRow),
+                rows: legacyRecovery
+                    ? (preliminary as readonly LegacyV23PreliminaryCandidate[]).map(candidate => {
+                        const risk = calculateLegacyV23PreliminaryRisk(candidate);
+                        return {
+                            candidateId: candidate.candidateId,
+                            components: risk.components,
+                            preScore: risk.preScore,
+                            possibleUpperBound: risk.possibleUpperBound,
+                            recentMutualRank: candidate.recentFemaleMutualRank,
+                            verificationShortlistRank: candidate.verificationShortlistRank,
+                        };
+                    })
+                    : (preliminary as readonly V2PreliminaryCandidateScore[])
+                        .map(preliminaryStoreRow),
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             assertCheckpointCount(publicCheckpoint, preliminary.length, 'SCREENING');
             const stored = await dependencies.stageStore.checkpointScreening({
                 ...checkpointClaim(context),
-                candidates: preliminary,
+                candidates: preliminary as readonly V2PreliminaryCandidateScore[],
                 shortlistHash,
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             if (stored.shortlistHash !== shortlistHash) {
                 throw new Error('ANALYSIS_V2_SHORTLIST_HASH_DRIFT');
@@ -1819,6 +2160,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 dependencies.targetProfiles.loadTargetProfile(checkpointClaim(context)),
             ]);
             if (!screening) throw new Error('ANALYSIS_V2_SCREENING_NOT_READY');
+            if ((screening.riskPolicyVersion ?? 'risk-policy-v2.4') !== context.riskPolicyVersion) {
+                throw new Error('ANALYSIS_V2_LEGACY_POLICY_INVALID');
+            }
+            const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const shortlist = screening.candidates
                 .filter(row => row.verificationShortlistRank !== null)
@@ -1860,7 +2205,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     return {
                         candidateId: candidate.candidateId,
                         status: status === 'observed_not_found' ? 'not_observed' : status,
-                        componentScore: status === 'observed' ? 3 : 0,
+                        componentScore: status === 'observed' ? (legacyRecovery ? 3 : 5) : 0,
                         evidenceRefIds: status === 'observed'
                             ? [evidenceRef(
                                 'analysis-v2-reverse-like-ref-v1',
@@ -1873,6 +2218,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const publicCheckpoint = await dependencies.resultStore.checkpointReverseLikes({
                 ...checkpointClaim(context),
                 rows: publicRows,
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             assertCheckpointCount(
                 publicCheckpoint,
@@ -1913,7 +2259,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 if (!outcome?.profile || !outcome.feature) {
                     throw new Error('ANALYSIS_V2_PARTNER_FEATURE_MISSING');
                 }
-                const selected = mediaPolicy(outcome.profile);
+                const selected = mediaPolicy(
+                    outcome.profile,
+                    policySupports(aiJobFence(context).aiStagePolicyVersion, 'inputQualityV28'),
+                );
                 const contactCandidates = selected.partnerSafetyContactSheetCandidates.media;
                 const captionPolicy = buildCarouselCaptionPolicy({
                     targetUsername: target.username,
@@ -1921,7 +2270,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     featureSelections: selected.feature.media,
                     partnerSelections: contactCandidates,
                 });
-                const normalized = await normalizedSelections(
+                const normalized = await normalizeAnalysisV2MediaSelections(
                     contactCandidates,
                     dependencies.normalizeMedia
                 );
@@ -2052,6 +2401,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (!screening || !reverse || !partner) {
                 throw new Error('ANALYSIS_V2_FINAL_SCORE_DEPENDENCY_MISSING');
             }
+            if ((screening.riskPolicyVersion ?? 'risk-policy-v2.4') !== context.riskPolicyVersion) {
+                throw new Error('ANALYSIS_V2_LEGACY_POLICY_INVALID');
+            }
+            const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
             const partnerById = new Map(partner.rows.map(row => [row.candidateId, row]));
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const preliminary = screening.candidates.map(candidate => {
@@ -2071,13 +2424,20 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const observed = new Set(reverse.rows
                 .filter(row => row.status === 'observed')
                 .map(row => row.candidateId));
-            const candidates = calculateV2FinalScores({
-                preliminary,
-                observedReverseLikeCandidateIds: observed,
-                notCollectedCandidateIds: new Set(reverse.rows
-                    .filter(row => row.status === 'not_collected')
-                    .map(row => row.candidateId)),
-            });
+            const notCollected = new Set(reverse.rows
+                .filter(row => row.status === 'not_collected')
+                .map(row => row.candidateId));
+            const candidates = legacyRecovery
+                ? calculateLegacyV23FinalScores({
+                    preliminary: preliminary as unknown as readonly LegacyV23PreliminaryCandidate[],
+                    observedReverseLikeCandidateIds: observed,
+                    notCollectedCandidateIds: notCollected,
+                })
+                : calculateV2FinalScores({
+                    preliminary,
+                    observedReverseLikeCandidateIds: observed,
+                    notCollectedCandidateIds: notCollected,
+                });
             const narrativeCandidateIds = candidates
                 .filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null)
                 .sort((left, right) => left.featuredRank! - right.featuredRank!)
@@ -2095,6 +2455,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 }
                 return {
                     candidateId: candidate.candidateId,
+                    ...(legacyRecovery ? {} : { accountContext: candidate.accountContext as AccountContext }),
                     displayScore: candidate.displayScore,
                     riskBand: candidate.riskBand as RiskBand,
                     featuredRank: candidate.featuredRank,
@@ -2116,18 +2477,20 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             outcome,
                             partnerRow?.result ?? null
                         ),
-                };
+                } as AnalysisV2CandidateScoreRow;
             });
             const publicCheckpoint = await dependencies.resultStore.checkpointScores({
                 ...checkpointClaim(context),
                 rows: scoreRows,
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             assertCheckpointCount(publicCheckpoint, candidates.length, 'FINAL_SCORE');
             const stored = await dependencies.stageStore.checkpointFinalScores({
                 ...checkpointClaim(context),
-                candidates,
+                candidates: candidates as unknown as readonly V2FinalCandidateScore[],
                 narrativeCandidateIds,
                 narrativeBatchHash,
+                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
             });
             return {
                 checkpoint: {
@@ -2154,6 +2517,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (!finalScores || !reverse) {
                 throw new Error('ANALYSIS_V2_NARRATIVE_DEPENDENCY_MISSING');
             }
+            if ((finalScores.riskPolicyVersion ?? 'risk-policy-v2.4') !== context.riskPolicyVersion) {
+                throw new Error('ANALYSIS_V2_LEGACY_POLICY_INVALID');
+            }
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const reverseById = new Map(reverse.rows.map(row => [row.candidateId, row]));
             const rows = await runBounded(
@@ -2176,7 +2542,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         expectedSelectionIds: outcome.feature.analyzedSelectionIds,
                     });
                     if (!bundle) throw new Error('ANALYSIS_V2_NARRATIVE_BUNDLE_MISSING');
-                    const selected = mediaPolicy(outcome.profile);
+                    const selected = mediaPolicy(
+                        outcome.profile,
+                        policySupports(aiJobFence(context).aiStagePolicyVersion, 'inputQualityV28'),
+                    );
                     const captionPolicy = buildCarouselCaptionPolicy({
                         targetUsername: target.username,
                         profile: outcome.profile,

@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { RECENT_FEMALE_MUTUAL_POINTS } from './risk-policy';
 import {
     assignRecentFemaleMutuals,
     type RecentFemaleMutualPolicyInput,
@@ -21,8 +20,8 @@ describe('recent verified female mutual policy', () => {
         });
 
         expect(result).toEqual([
-            { username: 'woman_a', rank: 1, score: 17, badgeRank: 1 },
-            { username: 'woman_b', rank: 2, score: 16, badgeRank: 2 },
+            { username: 'woman_a', rank: 1, score: 5, badgeRank: 1 },
+            { username: 'woman_b', rank: 2, score: 4.5, badgeRank: 2 },
         ]);
     });
 
@@ -48,14 +47,17 @@ describe('recent verified female mutual policy', () => {
     });
 
     it('uses the risk-policy score table and gives badges only to female ranks one to five', () => {
-        const women = Array.from({ length: 10 }, (_, index) => `woman_${index + 1}`);
+        const women = Array.from({ length: 11 }, (_, index) => `woman_${index + 1}`);
         const result = assignRecentFemaleMutuals({
             orderedMutualUsernames: women,
             verifiedFemaleUsernames: women,
             excludedUsername: null,
         });
 
-        expect(result.map(item => item.score)).toEqual([...RECENT_FEMALE_MUTUAL_POINTS]);
+        expect(result.map(item => item.score)).toEqual([
+            5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5,
+        ]);
+        expect(result.map(item => item.username)).not.toContain('woman_11');
         expect(result.map(item => item.badgeRank)).toEqual([
             1,
             2,

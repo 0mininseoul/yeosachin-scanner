@@ -50,13 +50,23 @@ import {
 import { analysisV2ResultStore } from './v2-result-store';
 import { assertSupportedAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
+    parseAiSchedulerPolicySnapshot,
+    type AiSchedulerCapability,
+} from '@/lib/services/ai/scheduler-policy';
+import {
     analysisV2AiPolicyStore,
     type AnalysisV2AiPolicyStore,
 } from './v2-ai-policy-store';
 import { prepareAnalysisV2ProviderRunsForTerminalFailure } from './v2-provider-lifecycle';
 import { analysisV2ProviderRunStore } from './v2-provider-run-store';
 import { getAnalysisV2ProductionExecutorRegistry } from './v2-production-executors';
-import { dispatchAnalysisV2Job } from './v2-tasks';
+import {
+    dispatchAnalysisV2Job,
+    dispatchReservedAnalysisV2Job,
+} from './v2-tasks';
+import {
+    AnalysisV2SchedulerContinuationError,
+} from './v2-ai-scheduler-continuation';
 import {
     ANALYSIS_V2_GENERIC_JOB_FAILURE_CODE,
     isAnalysisV2WorkerErrorCode,
@@ -95,6 +105,9 @@ const AI_PROVIDER_STAGES: ReadonlySet<AnalysisV2StageId> = new Set([
     'partner_safety',
     'narrative',
 ]);
+const RISK_POLICY_STAGES: ReadonlySet<AnalysisV2StageId> = new Set([
+    'screening', 'reverse_likes', 'partner_safety', 'final_score', 'narrative',
+]);
 
 type CheckpointWithKind<K extends AnalysisV2DagManifestCheckpoint['kind']> = Extract<
     AnalysisV2DagManifestCheckpoint extends infer Checkpoint
@@ -128,6 +141,9 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     job: AnalysisV2DagJob;
     state: AnalysisV2DagState;
     aiStagePolicyVersion: string | null;
+    /** Parsed once from this request's immutable policy snapshot. */
+    schedulerCapability?: AiSchedulerCapability;
+    riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null;
     handlerDeadlineAtMs?: number;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
     reportActiveProfile?: (username: string) => Promise<void>;
@@ -165,6 +181,11 @@ export type AnalysisV2WorkerOutcome =
     | Readonly<{ status: 'already_terminal' }>
     | Readonly<{ status: 'retry'; errorCode: string }>
     | Readonly<{ status: 'failed'; errorCode: string }>
+    | Readonly<{
+        status: 'continuation';
+        errorCode: AnalysisV2AiAdmissionErrorCode;
+        pendingRecoveryCount: number;
+    }>
     | Readonly<{
         status: 'completed';
         successorCount: number;
@@ -534,6 +555,7 @@ export async function executeAnalysisV2DagJob(
     }
 
     let aiStagePolicyVersion: string | null = null;
+    let schedulerCapability: AiSchedulerCapability = 'legacy';
     if (AI_PROVIDER_STAGES.has(current.stage)) {
         aiStagePolicyVersion = await aiPolicyStore.loadAiStagePolicyVersion(claim.requestId);
         try {
@@ -541,6 +563,28 @@ export async function executeAnalysisV2DagJob(
         } catch {
             executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
         }
+        // Older request fixtures and all historical policy snapshots stay on the exact legacy
+        // runtime. A production store supplies the full immutable snapshot; parsing it here
+        // makes scheduler admission independent of an environment value that can change mid-job.
+        if (aiPolicyStore.loadPolicyVersionsSnapshot) {
+            const snapshot = await aiPolicyStore.loadPolicyVersionsSnapshot(claim.requestId);
+            if (!snapshot || snapshot.aiStage !== aiStagePolicyVersion) {
+                executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
+            }
+            try {
+                schedulerCapability = parseAiSchedulerPolicySnapshot(snapshot).capability;
+            } catch {
+                executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
+            }
+        }
+    }
+    let riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null = null;
+    if (RISK_POLICY_STAGES.has(current.stage)) {
+        const loaded = await aiPolicyStore.loadRiskPolicyVersion(claim.requestId);
+        if (loaded !== 'risk-policy-v2.3' && loaded !== 'risk-policy-v2.4') {
+            executionError('ANALYSIS_V2_LEGACY_POLICY_INVALID', 'permanent');
+        }
+        riskPolicyVersion = loaded;
     }
 
     const activeProfileStage = current.stage === 'profile_fetch'
@@ -560,6 +604,8 @@ export async function executeAnalysisV2DagJob(
         job: current.job,
         state,
         aiStagePolicyVersion,
+        schedulerCapability,
+        riskPolicyVersion,
         handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
             reportActiveProfile: async (username: string) => {
@@ -866,6 +912,10 @@ export async function processAnalysisV2TaskDelivery(
         aiPolicyStore?: AnalysisV2AiPolicyStore;
         handler?: AnalysisV2JobHandler;
         dispatch?: AnalysisV2JobDispatcher;
+        dispatchReservedContinuation?: (
+            reservation: Awaited<ReturnType<AnalysisV2JobStore['continueScheduler']>>,
+            delaySeconds: number,
+        ) => Promise<unknown>;
         terminalFailureFinalizer?: AnalysisV2TerminalFailureFinalizer;
         terminalMediaCleanup?: AnalysisV2TerminalMediaCleanup;
         terminalFailureIntentLoader?: AnalysisV2TerminalFailureIntentLoader;
@@ -915,6 +965,32 @@ export async function processAnalysisV2TaskDelivery(
     try {
         successors = await handler(claim);
     } catch (error) {
+        if (error instanceof AnalysisV2SchedulerContinuationError) {
+            const reservation = await store.continueScheduler(
+                claim,
+                error.reason,
+                error.delaySeconds,
+            );
+            let pendingRecoveryCount = 0;
+            try {
+                await (
+                    dependencies.dispatchReservedContinuation
+                    ?? ((reserved, delaySeconds) => dispatchReservedAnalysisV2Job(
+                        reserved,
+                        { delaySeconds },
+                    ))
+                )(reservation, error.delaySeconds);
+            } catch {
+                // The atomic reservation remains redispatchable. Recovery will replay the same
+                // deterministic generation/task identity without re-opening provider admission.
+                pendingRecoveryCount = 1;
+            }
+            return Object.freeze({
+                status: 'continuation',
+                errorCode: error.reason,
+                pendingRecoveryCount,
+            });
+        }
         const failure = classifyAnalysisV2JobFailure(error);
         if (failure.disposition === 'fence') {
             throw new AnalysisV2JobFenceError();

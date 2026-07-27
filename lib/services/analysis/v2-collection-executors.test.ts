@@ -151,6 +151,7 @@ function stageContext<S extends 'relationships' | 'target_evidence' | 'profile_f
         },
         state: dagState,
         aiStagePolicyVersion: null,
+        riskPolicyVersion: null,
     } as AnalysisV2StageExecutorContext<S>;
 }
 

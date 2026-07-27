@@ -14,6 +14,7 @@ import { featureAnalysisInputSchema } from '@/lib/services/ai/v2-staged-analysis
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import {
     AI_STAGE_POLICY_LATEST_VERSION,
+    AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
@@ -40,6 +41,7 @@ import {
     analysisV2CandidateBundleId,
     analysisV2CandidateId,
     analysisV2PartnerSafetyBundleId,
+    analysisV2ProfilePipelineConcurrency,
     createAnalysisV2AiScoringExecutorRegistry,
     isAnalysisV2PartialMediaCoverageAllowed,
     type AnalysisV2AiScoringExecutorDependencies,
@@ -59,6 +61,32 @@ import {
 } from './v2-candidate-scoring';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+describe('analysis V2 profile AI scheduler concurrency', () => {
+    it('opens six candidate pipelines only for the exact persisted scheduler-v1 policy', () => {
+        expect(analysisV2ProfilePipelineConcurrency(
+            'ai-stage-policy-v2.8',
+            'scheduler-v1',
+        )).toBe(6);
+        expect(analysisV2ProfilePipelineConcurrency(
+            AI_STAGE_POLICY_V29_VERSION,
+            'scheduler-v1',
+        )).toBe(6);
+        expect(analysisV2ProfilePipelineConcurrency(
+            'ai-stage-policy-v2.8',
+            'legacy',
+        )).toBe(4);
+        expect(analysisV2ProfilePipelineConcurrency(
+            AI_STAGE_POLICY_VERSION,
+            'scheduler-v1',
+        )).toBe(4);
+        expect(analysisV2ProfilePipelineConcurrency(
+            'ai-stage-policy-v2.8',
+            'scheduler-v1',
+            2,
+        )).toBe(2);
+    });
+});
 
 const REQUEST_ID = '123e4567-e89b-42d3-a456-426614174000';
 const CLAIM_TOKEN = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow
@@ -120,6 +148,7 @@ function context<S extends AnalysisV2StageId>(
         state?: AnalysisV2DagState;
         reportActiveProfile?: (username: string) => Promise<void>;
         aiStagePolicyVersion?: string;
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     } = {}
 ): AnalysisV2StageExecutorContext<S> {
     const jobKey = options.jobKey ?? `test:${stage}`;
@@ -149,6 +178,7 @@ function context<S extends AnalysisV2StageId>(
         },
         state: options.state ?? state(),
         aiStagePolicyVersion: options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION,
+        riskPolicyVersion: options.riskPolicyVersion ?? 'risk-policy-v2.4',
         ...(options.reportActiveProfile
             ? { reportActiveProfile: options.reportActiveProfile }
             : {}),
@@ -289,6 +319,7 @@ function memoryStageStore(memory: MemoryState): AnalysisV2AiScoringStageStore {
             memory.screening = {
                 revision: 1,
                 resultHash: digest('screening'),
+                riskPolicyVersion: input.riskPolicyVersion,
                 shortlistHash: input.shortlistHash,
                 candidates: input.candidates,
             };
@@ -309,6 +340,7 @@ function memoryStageStore(memory: MemoryState): AnalysisV2AiScoringStageStore {
             memory.final = {
                 revision: 1,
                 resultHash: digest('final'),
+                riskPolicyVersion: input.riskPolicyVersion,
                 candidates: input.candidates,
                 narrativeCandidateIds: input.narrativeCandidateIds,
                 narrativeBatchHash: input.narrativeBatchHash,
@@ -474,7 +506,7 @@ function dependencies(
                     notScreenedMutuals: 0,
                     privateMutuals: 0,
                     exclusionApplied: false,
-                    scorePolicyVersion: 'risk-policy-v2.3' as const,
+                    scorePolicyVersion: 'risk-policy-v2.4' as const,
                 },
             })),
         },
@@ -684,6 +716,174 @@ describe('V2 AI and scoring executors', () => {
         ]);
     });
 
+    it('uses v2.8 profile evidence and records privacy-safe media/official provenance without extra normalization', async () => {
+        const memoryState = memory();
+        const account = profile('blackcherry.club', {
+            fullName: 'Black Cherry Club',
+            bio: 'Official band · new single out now',
+        });
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{ username: account.username, status: 'success' as const, profile: account }],
+                })),
+            },
+        });
+        deps.ai.features = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['features']>[0]
+        ) => {
+            const result = feature(input.media.map(row => row.selectionId));
+            result.features.accountContext = 'official_group_or_brand';
+            return {
+                result,
+                operationKey: `feature-analysis:${digest('official-feature')}`,
+                resultHash: digest('official-feature-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.profile_ai!(context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+            state: state({
+                relationships: {
+                    ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: 1, inputHash: digest('profile-topology') }],
+                },
+                profileFetchBatches: [{
+                    batch: 0,
+                    itemCount: 1,
+                    producerInputHash: digest('profile-producer'),
+                    revision: 1,
+                    resultHash: digest('profile-result'),
+                }],
+            }),
+        }));
+
+        expect(deps.ai.gender).toHaveBeenCalledWith(expect.objectContaining({
+            accountProfile: { fullName: 'Black Cherry Club', hasProfileImage: true },
+        }), expect.any(Object));
+        expect(deps.ai.features).toHaveBeenCalledWith(expect.objectContaining({
+            accountProfile: { fullName: 'Black Cherry Club', hasProfileImage: true },
+        }), expect.any(Object));
+        expect(deps.normalizeMedia).toHaveBeenCalledTimes(3);
+        expect(new Set(vi.mocked(deps.normalizeMedia).mock.calls.map(([row]) => row.selectionId)).size)
+            .toBe(3);
+        expect(memoryState.outcomes[0]).toMatchObject({
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+            inputQualityPolicy: 'input-quality-v2.8',
+            accountContextOverride: 'official_group_or_brand',
+            officialScreeningStatus: 'corroborated_official',
+            officialExclusionReason: 'model_group_context_plus_profile_signals',
+            mediaSelectionProvenance: {
+                triageSelectedCount: 3,
+                featureSelectedCount: 3,
+                selectedKinds: { profile: 1, postRepresentative: 2, carouselContext: 0 },
+            },
+        });
+    });
+
+    it('v2.9 spends feature analysis only on confirmed personal women, excluding Black Cherry, men, and unknowns first', async () => {
+        const memoryState = memory();
+        const male = profile('male.account');
+        const blackCherry = profile('blackcherry.club', {
+            fullName: 'Black Cherry Club',
+            bio: 'Official band · new single out now',
+        });
+        // "club" alone is adversarial text, not a source-bound official signal.
+        const personalClub = profile('alice.club', {
+            fullName: 'Alice Club',
+            bio: 'photographer and personal diary',
+        });
+        const unknown = profile('unknown.account');
+        const profiles = [male, blackCherry, personalClub, unknown];
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: profiles.map(item => item.username),
+                    results: profiles.map(item => ({
+                        username: item.username,
+                        status: 'success' as const,
+                        profile: item,
+                    })),
+                })),
+            },
+        });
+        const confirmed = (
+            mediaIds: readonly string[],
+            accountContext: NonNullable<GenderTriageResult['v29AccountContext']>,
+        ): GenderTriageResult => ({
+            assessment: {
+                inferredGender: 'female', confidence: 'high', ownerConsistency: 'same_person',
+                evidenceSelectionIds: mediaIds.slice(0, 2),
+            },
+            routingDecision: 'route_to_feature_analysis',
+            routingReason: 'conserve_female_recall',
+            analyzedSelectionIds: mediaIds.slice(0, 5),
+            v29AccountContext: accountContext,
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0]
+        ) => {
+            const mediaIds = input.media.map(item => item.selectionId);
+            if (mediaIds.some(id => id.includes('male.account'))) {
+                return {
+                    result: triage(mediaIds, 'male'),
+                    operationKey: `gender-triage:${digest('v29-male')}`,
+                    resultHash: digest('v29-male'), source: 'checkpoint' as const,
+                };
+            }
+            const accountContext = mediaIds.some(id => id.includes('blackcherry.club'))
+                ? 'official_group_or_brand' as const
+                : mediaIds.some(id => id.includes('alice.club'))
+                    ? 'personal' as const
+                    : 'uncertain' as const;
+            return {
+                result: accountContext === 'uncertain'
+                    ? { ...triage(mediaIds), v29AccountContext: accountContext }
+                    : confirmed(mediaIds, accountContext),
+                operationKey: `gender-triage:${digest(`v29:${accountContext}:${mediaIds[0]}`)}`,
+                resultHash: digest(`v29:${accountContext}:${mediaIds[0]}`),
+                source: 'checkpoint' as const,
+            };
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+        await registry.profile_ai!(context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            state: state({
+                relationships: {
+                    ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: profiles.length, inputHash: digest('v29-topology') }],
+                },
+                profileFetchBatches: [{
+                    batch: 0, itemCount: profiles.length,
+                    producerInputHash: digest('v29-producer'), revision: 1,
+                    resultHash: digest('v29-profile-result'),
+                }],
+            }),
+        }));
+
+        expect(deps.ai.features).toHaveBeenCalledTimes(1);
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        expect(vi.mocked(deps.ai.features).mock.calls[0]![0].accountProfile).toEqual({
+            fullName: 'Alice Club', hasProfileImage: true, bio: 'photographer and personal diary',
+        });
+        expect(memoryState.outcomes.map(outcome => outcome.status)).toEqual([
+            'verified_non_female', 'unresolved', 'verified_female', 'unresolved',
+        ]);
+        expect(memoryState.outcomes[1]).toMatchObject({
+            v29FeatureAdmission: 'nonpersonal_or_official', feature: null,
+        });
+        expect(memoryState.outcomes[3]).toMatchObject({
+            v29FeatureAdmission: 'unsupported_unknown', feature: null,
+        });
+    });
+
     it('starts feature and eligible resolver in the same turn and applies only a ready resolver', async () => {
         const memoryState = memory();
         const account = profile('resolver.ready');
@@ -749,8 +949,8 @@ describe('V2 AI and scoring executors', () => {
             expect(deps.ai.features).toHaveBeenCalledOnce();
             expect(deps.ai.startGenderResolution).toHaveBeenCalledOnce();
         });
-        expect(vi.mocked(deps.ai.features).mock.invocationCallOrder[0])
-            .toBeLessThan(vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0]!);
+        expect(vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(deps.ai.features).mock.invocationCallOrder[0]!);
         const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
         resolverState = {
             status: 'ready',
@@ -794,6 +994,105 @@ describe('V2 AI and scoring executors', () => {
             genderResolutionResultHash: resolverResultHash,
         });
         expect(cutoff).not.toHaveBeenCalled();
+    });
+
+    it('runs the v2.9 resolver for an ambiguous personal account without feature admission', async () => {
+        const memoryState = memory();
+        const account = profile('resolver.personal');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0],
+        ) => {
+            const mediaIds = input.media.map(row => row.selectionId);
+            return {
+                result: {
+                    ...triage(mediaIds),
+                    v29AccountContext: 'personal' as const,
+                },
+                operationKey: `gender-triage:${digest('resolver-personal-triage')}`,
+                resultHash: digest('resolver-personal-triage'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const resolverOperationKey =
+            `gender-resolution:${digest('resolver-personal-ready')}`;
+        const resolverResultHash = digest('resolver-personal-result');
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0],
+        ) => ({
+            operationKey: resolverOperationKey,
+            completion: Promise.resolve(),
+            peek: () => ({
+                status: 'ready' as const,
+                value: {
+                    result: {
+                        assessment: {
+                            inferredGender: 'female' as const,
+                            confidence: 'high' as const,
+                            ownerConsistency: 'same_person' as const,
+                            evidenceSelectionIds: input.media
+                                .slice(0, 2)
+                                .map(row => row.selectionId),
+                        },
+                        analyzedSelectionIds: input.media
+                            .slice(0, 5)
+                            .map(row => row.selectionId),
+                    },
+                    operationKey: resolverOperationKey,
+                    resultHash: resolverResultHash,
+                    source: 'checkpoint' as const,
+                },
+            }),
+            cutoff: vi.fn().mockResolvedValue(undefined),
+        }));
+        const base = state();
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('resolver-personal-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('resolver-personal-producer'),
+                        revision: 1,
+                        resultHash: digest('resolver-personal-profile-result'),
+                    }],
+                }),
+            }),
+        );
+
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).toHaveBeenCalledOnce();
+        expect(memoryState.outcomes[0]).toMatchObject({
+            status: 'verified_female',
+            baselineClassification: 'unresolved',
+            classificationSource: 'gender_resolution',
+            genderResolutionStatus: 'ready_applied',
+            genderResolutionOperationKey: resolverOperationKey,
+            genderResolutionResultHash: resolverResultHash,
+        });
     });
 
     it('keeps an early pending resolver alive until the profile batch barrier', async () => {
@@ -2727,7 +3026,8 @@ describe('V2 AI and scoring executors', () => {
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
                     boundedCandidateCommentsOnTarget: 0,
-                    hasTagOrCaptionMention: false,
+                    hasCandidateToTargetTagOrCaptionMention: false,
+                    hasTargetToCandidateTagOrCaptionMention: false,
                 }],
                 orderedMutualUsernames: [candidate.instagramId],
                 excludedUsername: null,
@@ -2839,7 +3139,8 @@ describe('V2 AI and scoring executors', () => {
                     hasStrongPartnerEvidence: false,
                     uniqueTargetPostsLikedByCandidate: 0,
                     boundedCandidateCommentsOnTarget: 0,
-                    hasTagOrCaptionMention: false,
+                    hasCandidateToTargetTagOrCaptionMention: false,
+                    hasTargetToCandidateTagOrCaptionMention: false,
                 }],
                 orderedMutualUsernames: [candidate.instagramId],
                 excludedUsername: null,
@@ -2929,6 +3230,149 @@ describe('V2 AI and scoring executors', () => {
         expect(new Set(shortlist.map(row => row.verificationShortlistRank)).size).toBe(10);
     });
 
+    it('feeds only corroborated v2.8 official screening into the unchanged v2.4 ranking input', async () => {
+        const provenance = {
+            triageSelectedCount: 3,
+            featureSelectedCount: 3,
+            selectedKinds: {
+                profile: 1,
+                postRepresentative: 2,
+                carouselContext: 0,
+            },
+        } as const;
+        const screened = verifiedOutcome('band.account');
+        screened.profile = {
+            ...screened.profile!,
+            fullName: 'Black Cherry Club',
+            bio: 'Single [콜드브루] Out now',
+        };
+        screened.feature!.features.accountContext = 'official_group_or_brand';
+        screened.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
+        screened.inputQualityPolicy = 'input-quality-v2.8';
+        screened.mediaSelectionProvenance = provenance;
+        screened.accountContextOverride = 'official_group_or_brand';
+        screened.officialScreeningStatus = 'corroborated_official';
+        screened.officialExclusionReason = 'model_group_context_plus_profile_signals';
+        const uncorroborated = verifiedOutcome('person.club');
+        uncorroborated.feature!.features.accountContext = 'official_group_or_brand';
+        uncorroborated.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
+        uncorroborated.inputQualityPolicy = 'input-quality-v2.8';
+        uncorroborated.mediaSelectionProvenance = provenance;
+        uncorroborated.accountContextOverride = 'uncertain';
+        uncorroborated.officialScreeningStatus = 'uncorroborated_official';
+        uncorroborated.officialExclusionReason = null;
+        const missingCheckpoint = verifiedOutcome('partial.checkpoint');
+        missingCheckpoint.feature!.features.accountContext = 'official_group_or_brand';
+        missingCheckpoint.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
+        missingCheckpoint.inputQualityPolicy = 'input-quality-v2.8';
+        missingCheckpoint.mediaSelectionProvenance = provenance;
+        const missingEntireCheckpoint = verifiedOutcome('missing.checkpoint');
+        missingEntireCheckpoint.feature!.features.accountContext = 'official_group_or_brand';
+        const screeningFieldsOnly = verifiedOutcome('screening.fields.only');
+        screeningFieldsOnly.feature!.features.accountContext = 'official_group_or_brand';
+        screeningFieldsOnly.accountContextOverride = 'official_group_or_brand';
+        screeningFieldsOnly.officialScreeningStatus = 'corroborated_official';
+        screeningFieldsOnly.officialExclusionReason =
+            'model_group_context_plus_profile_signals';
+        const forgedCoherent = verifiedOutcome('forged.coherent');
+        forgedCoherent.feature!.features.accountContext = 'official_group_or_brand';
+        forgedCoherent.aiStagePolicyVersion = 'ai-stage-policy-v2.8';
+        forgedCoherent.inputQualityPolicy = 'input-quality-v2.8';
+        forgedCoherent.mediaSelectionProvenance = provenance;
+        forgedCoherent.accountContextOverride = 'official_group_or_brand';
+        forgedCoherent.officialScreeningStatus = 'corroborated_official';
+        forgedCoherent.officialExclusionReason =
+            'model_group_context_plus_profile_signals';
+        const memoryState = memory();
+        memoryState.outcomes = [
+            screened,
+            uncorroborated,
+            missingCheckpoint,
+            missingEntireCheckpoint,
+            screeningFieldsOnly,
+            forgedCoherent,
+        ];
+        memoryState.primary = {
+            revision: 1,
+            resultHash: digest('primary'),
+            candidates: memoryState.outcomes.map(outcome => ({
+                candidateId: outcome.candidateId,
+                instagramId: outcome.instagramId,
+                interactions: [],
+            })),
+        };
+        const deps = dependencies(memoryState, {
+            evidence: {
+                loadRelationships: vi.fn(async () => relationshipSnapshot({
+                    excluded: null,
+                    usernames: [
+                        screened.instagramId,
+                        uncorroborated.instagramId,
+                        missingCheckpoint.instagramId,
+                        missingEntireCheckpoint.instagramId,
+                        screeningFieldsOnly.instagramId,
+                        forgedCoherent.instagramId,
+                    ],
+                })),
+                loadTargetEvidence: vi.fn(async () => targetEvidence()),
+            },
+        });
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).screening!(context('screening', {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+        }));
+
+        expect(memoryState.screening?.candidates.map(candidate => ({
+            username: candidate.username,
+            accountContext: candidate.accountContext,
+        }))).toEqual([
+            { username: 'band.account', accountContext: 'official_group_or_brand' },
+            { username: 'person.club', accountContext: 'uncertain' },
+            { username: 'partial.checkpoint', accountContext: 'uncertain' },
+            { username: 'missing.checkpoint', accountContext: 'uncertain' },
+            { username: 'screening.fields.only', accountContext: 'uncertain' },
+            { username: 'forged.coherent', accountContext: 'uncertain' },
+        ]);
+    });
+
+    it.each([
+        'ai-stage-policy-v2.6',
+        'ai-stage-policy-v2.7',
+    ])('preserves clean legacy official context under %s', async aiStagePolicyVersion => {
+        const legacyOfficial = verifiedOutcome('legacy.official');
+        legacyOfficial.feature!.features.accountContext = 'official_group_or_brand';
+        legacyOfficial.accountContextOverride = 'uncertain';
+        legacyOfficial.officialScreeningStatus = 'uncorroborated_official';
+        legacyOfficial.officialExclusionReason = null;
+        const memoryState = memory();
+        memoryState.outcomes = [legacyOfficial];
+        memoryState.primary = {
+            revision: 1,
+            resultHash: digest('legacy-primary'),
+            candidates: [{
+                candidateId: legacyOfficial.candidateId,
+                instagramId: legacyOfficial.instagramId,
+                interactions: [],
+            }],
+        };
+        const deps = dependencies(memoryState, {
+            evidence: {
+                loadRelationships: vi.fn(async () => relationshipSnapshot({
+                    excluded: null,
+                    usernames: [legacyOfficial.instagramId],
+                })),
+                loadTargetEvidence: vi.fn(async () => targetEvidence()),
+            },
+        });
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).screening!(context('screening', {
+            aiStagePolicyVersion,
+        }));
+
+        expect(memoryState.screening?.candidates[0]?.accountContext)
+            .toBe('official_group_or_brand');
+    });
+
     it('defers the weak-partner adjustment until final scoring', async () => {
         const memoryState = memory();
         const weakCandidate = verifiedOutcome('woman.weak', { weakPartner: true });
@@ -2998,7 +3442,8 @@ describe('V2 AI and scoring executors', () => {
                     outcome.feature!.features.marriageEvidence === 'strong',
                 uniqueTargetPostsLikedByCandidate: 0,
                 boundedCandidateCommentsOnTarget: 0,
-                hasTagOrCaptionMention: false,
+                hasCandidateToTargetTagOrCaptionMention: false,
+                hasTargetToCandidateTagOrCaptionMention: false,
             })),
             orderedMutualUsernames: women,
             excludedUsername: null,
@@ -3018,7 +3463,7 @@ describe('V2 AI and scoring executors', () => {
                     >[0]
                 ) => ({
                     operationKey,
-                    results: input.candidates.map(candidate => ({
+                    results: input.candidates.map((candidate: { candidateId: string }) => ({
                         candidateId: candidate.candidateId,
                         status: 'not_observed' as const,
                     })),
@@ -3075,6 +3520,7 @@ describe('V2 AI and scoring executors', () => {
         });
         expect(publicScoreStrong?.partnerEvidenceSelectionIds)
             .toEqual(publicPartnerStrong?.evidenceSelectionIds);
+        expect(publicScoreStrong?.accountContext).toBe('personal');
         const weakCandidate = memoryState.outcomes[0];
         const publicPartnerWeak = publicPartner.find(
             row => row.candidateId === weakCandidate.candidateId
@@ -3111,7 +3557,8 @@ describe('V2 AI and scoring executors', () => {
                 hasStrongPartnerEvidence: false,
                 uniqueTargetPostsLikedByCandidate: 4,
                 boundedCandidateCommentsOnTarget: 12,
-                hasTagOrCaptionMention: true,
+                hasCandidateToTargetTagOrCaptionMention: true,
+                hasTargetToCandidateTagOrCaptionMention: false,
             }],
             orderedMutualUsernames: [candidate.instagramId],
             excludedUsername: null,
@@ -3134,11 +3581,12 @@ describe('V2 AI and scoring executors', () => {
         };
         const deps = dependencies(memoryState);
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
-        await registry.final_score!(context('final_score'));
+        await expect(registry.final_score!(context('final_score')))
+            .resolves.toMatchObject({ checkpoint: { kind: 'final_score' } });
 
         expect(memoryState.final?.candidates[0].reverseLikeStatus).toBe('not_collected');
         expect(memoryState.final?.candidates[0].risk.possibleUpperBound)
-            .toBe(memoryState.final!.candidates[0].risk.preScore + 3);
+            .toBe(memoryState.final!.candidates[0].risk.preScore + 5);
     });
 
     it('reuses the exact private bundle for narrative grounding and never redownloads Instagram media', async () => {
@@ -3328,7 +3776,8 @@ describe('V2 final score invariants', () => {
             hasStrongPartnerEvidence: false,
             uniqueTargetPostsLikedByCandidate: 0,
             boundedCandidateCommentsOnTarget: 0,
-            hasTagOrCaptionMention: false,
+            hasCandidateToTargetTagOrCaptionMention: false,
+            hasTargetToCandidateTagOrCaptionMention: false,
             ...overrides,
         };
     }
@@ -3371,13 +3820,13 @@ describe('V2 final score invariants', () => {
         expect(business.risk.publicScore).toBeLessThanOrEqual(STRONG_PARTNER_PUBLIC_SCORE_CAP);
     });
 
-    it('keeps reverse-like verification inside the frozen Top 10 and enforces 3/15 featured caps', () => {
+    it('keeps reverse-like verification inside the frozen Top 10 and enforces 3/10 featured caps', () => {
         const candidates = Array.from({ length: 30 }, (_, index) => candidate(index + 1, {
             appearanceGrade: 5,
             exposureScore: 5,
             uniqueTargetPostsLikedByCandidate: index < 20 ? 4 : 2,
             boundedCandidateCommentsOnTarget: index < 20 ? 12 : 5,
-            hasTagOrCaptionMention: index < 20,
+            hasCandidateToTargetTagOrCaptionMention: index < 20,
         }));
         const preliminary = calculateV2PreliminaryScores({
             candidates,
@@ -3393,7 +3842,7 @@ describe('V2 final score invariants', () => {
 
         expect(shortlist).toHaveLength(10);
         expect(final.find(row => row.candidateId === observedId)!.risk.components.targetToCandidateLike)
-            .toBe(3);
+            .toBe(5);
         expect(final.filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null))
             .toHaveLength(FEATURED_RISK_LIMITS.high_risk);
         expect(final.filter(row => row.riskBand === 'caution' && row.featuredRank !== null).length)
@@ -3419,5 +3868,70 @@ describe('V2 final score invariants', () => {
         expect(final.filter(row => row.riskBand === 'caution')).toHaveLength(2);
         expect(final.filter(row => row.featuredRank !== null)).toHaveLength(3);
         expect(final.filter(row => row.relativeWatchRank !== null)).toHaveLength(2);
+    });
+
+    it('reclaims a persisted v2.3 screening checkpoint through final-score recovery', async () => {
+        const memoryState = memory();
+        const outcome = verifiedOutcome('woman.one');
+        memoryState.outcomes = [outcome];
+        memoryState.primary = {
+            revision: 1,
+            resultHash: digest('legacy-primary'),
+            candidates: [{
+                candidateId: outcome.candidateId,
+                instagramId: outcome.instagramId,
+                interactions: [],
+            }],
+        };
+        memoryState.reverse = { revision: 1, resultHash: digest('legacy-reverse'), rows: [] };
+        memoryState.partner = { revision: 1, resultHash: digest('legacy-partner'), rows: [] };
+        const deps = dependencies(memoryState, {
+            reverseLikes: {
+                collect: vi.fn(async (input: { candidates: readonly { candidateId: string }[] }) => ({
+                    operationKey: `candidate-likers:${digest('legacy-observed')}`,
+                    results: input.candidates.map(candidate => ({
+                        candidateId: candidate.candidateId,
+                        status: 'observed' as const,
+                    })),
+                })),
+            },
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        const legacyContext = { riskPolicyVersion: 'risk-policy-v2.3' as const };
+        await registry.screening!(context('screening', {
+            jobKey: 'coordinator:candidate-screening', ...legacyContext,
+        }));
+        expect(deps.resultStore.checkpointPreliminaryScores).toHaveBeenCalledWith(
+            expect.objectContaining({
+                riskPolicyVersion: 'risk-policy-v2.3',
+                rows: [expect.objectContaining({
+                    components: expect.objectContaining({ tagOrCaptionMention: 0 }),
+                    possibleUpperBound: expect.any(Number),
+                })],
+            })
+        );
+        expect(memoryState.screening?.riskPolicyVersion).toBe('risk-policy-v2.3');
+        await registry.reverse_likes!(context('reverse_likes', {
+            jobKey: 'track:reverse-likes:collect', ...legacyContext,
+        }));
+        expect(deps.resultStore.checkpointReverseLikes).toHaveBeenCalledWith(expect.objectContaining({
+            riskPolicyVersion: 'risk-policy-v2.3',
+            rows: [expect.objectContaining({ status: 'observed', componentScore: 3 })],
+        }));
+        await expect(registry.final_score!(context('final_score', {
+            jobKey: 'track:final-score', ...legacyContext,
+        }))).resolves.toMatchObject({ checkpoint: { kind: 'final_score' } });
+        expect(deps.resultStore.checkpointScores).toHaveBeenCalledWith(expect.objectContaining({
+            riskPolicyVersion: 'risk-policy-v2.3',
+            rows: [expect.objectContaining({
+                components: expect.objectContaining({
+                    tagOrCaptionMention: 0,
+                    targetToCandidateLike: 3,
+                }),
+                possibleUpperBound: expect.any(Number),
+            })],
+        }));
+        expect(memoryState.final?.riskPolicyVersion).toBe('risk-policy-v2.3');
     });
 });

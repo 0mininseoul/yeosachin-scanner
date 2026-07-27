@@ -23,6 +23,12 @@ import {
     type EarlybirdFulfillmentRecoverySummary,
 } from '@/lib/services/earlybird/fulfillment-store';
 import { analysisV2GeminiLeaseStore } from './v2-gemini-lease-store';
+import {
+    reapAnalysisV2SchedulerGeminiLeases,
+    recoverAnalysisV2SchedulerOperations,
+} from './v2-ai-scheduler-operation-store';
+import { recoverQueuedAnalysisScoreAudits } from './score-audit';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -43,6 +49,8 @@ export interface AnalysisV2RecoverySummary {
     fulfillmentsFailed: number;
     geminiCutoffAttemptsRecovered: number;
     geminiCutoffLeasesReaped: number;
+    schedulerOperationsRecovered: number;
+    schedulerGeminiLeasesReaped: number;
 }
 
 type RecoveryLookup = (job: {
@@ -58,6 +66,9 @@ type ProviderUsageReconciliation = () => Promise<AnalysisV2ProviderReconciliatio
 type FulfillmentRecovery = () => Promise<EarlybirdFulfillmentRecoverySummary>;
 type GeminiCutoffAttemptRecovery = () => Promise<number>;
 type GeminiCutoffLeaseReaper = () => Promise<number>;
+type SchedulerOperationRecovery = () => Promise<number>;
+type SchedulerGeminiLeaseReaper = () => Promise<number>;
+type ScoreAuditRecovery = () => Promise<void>;
 
 type RecoveryOutcome =
     | 'dispatched'
@@ -93,6 +104,23 @@ function assertRecoverableDelivery(job: AnalysisV2DispatchableJob): {
         status: job.status,
         leaseExpiresAt: job.leaseExpiresAt,
     };
+}
+
+async function boundedBestEffort(
+    operation: () => Promise<void>,
+    timeoutMs: number,
+): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await Promise.race([
+            operation(),
+            new Promise<void>(resolve => {
+                timer = setTimeout(resolve, timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 async function recoverOne(
@@ -156,6 +184,10 @@ export async function recoverAnalysisV2Jobs(
         recoverFulfillments?: FulfillmentRecovery;
         recoverGeminiCutoffAttempts?: GeminiCutoffAttemptRecovery;
         reapGeminiCutoffLeases?: GeminiCutoffLeaseReaper;
+        recoverSchedulerOperations?: SchedulerOperationRecovery;
+        reapSchedulerGeminiLeases?: SchedulerGeminiLeaseReaper;
+        recoverScoreAudits?: ScoreAuditRecovery;
+        scoreAuditTimeoutMs?: number;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -163,11 +195,19 @@ export async function recoverAnalysisV2Jobs(
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
     const limit = dependencies.limit ?? ANALYSIS_V2_RECOVERY_MAX_JOBS;
     const concurrency = dependencies.concurrency ?? ANALYSIS_V2_RECOVERY_CONCURRENCY;
+    const scoreAuditTimeoutMs = dependencies.scoreAuditTimeoutMs ?? 250;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > ANALYSIS_V2_RECOVERY_MAX_JOBS) {
         throw new Error('ANALYSIS_V2_RECOVERY_ERROR: invalid limit.');
     }
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 20) {
         throw new Error('ANALYSIS_V2_RECOVERY_ERROR: invalid concurrency.');
+    }
+    if (
+        !Number.isSafeInteger(scoreAuditTimeoutMs)
+        || scoreAuditTimeoutMs < 25
+        || scoreAuditTimeoutMs > 5_000
+    ) {
+        throw new Error('ANALYSIS_V2_RECOVERY_ERROR: invalid audit timeout.');
     }
 
     const jobs = await store.listDispatchable({ limit });
@@ -187,6 +227,8 @@ export async function recoverAnalysisV2Jobs(
         fulfillmentsFailed: 0,
         geminiCutoffAttemptsRecovered: 0,
         geminiCutoffLeasesReaped: 0,
+        schedulerOperationsRecovered: 0,
+        schedulerGeminiLeasesReaped: 0,
     };
     try {
         summary.geminiCutoffAttemptsRecovered = await (
@@ -200,6 +242,22 @@ export async function recoverAnalysisV2Jobs(
         summary.geminiCutoffLeasesReaped = await (
             dependencies.reapGeminiCutoffLeases
             ?? (() => analysisV2GeminiLeaseStore.reapCutoff({ limit: 8 }))
+        )();
+    } catch {
+        summary.failed += 1;
+    }
+    try {
+        summary.schedulerOperationsRecovered = await (
+            dependencies.recoverSchedulerOperations
+            ?? (() => recoverAnalysisV2SchedulerOperations({ limit: 8 }))
+        )();
+    } catch {
+        summary.failed += 1;
+    }
+    try {
+        summary.schedulerGeminiLeasesReaped = await (
+            dependencies.reapSchedulerGeminiLeases
+            ?? (() => reapAnalysisV2SchedulerGeminiLeases({ limit: 8 }))
         )();
     } catch {
         summary.failed += 1;
@@ -263,6 +321,17 @@ export async function recoverAnalysisV2Jobs(
         if (reconciliation.failed > 0 || reconciliation.hasMore) summary.failed += 1;
     } catch {
         summary.failed += 1;
+    }
+    // The durable audit outbox drains only after provider safety cleanup and reconciliation.
+    // A hung audit cannot extend this recovery pass beyond the small fixed budget.
+    try {
+        await boundedBestEffort(
+            dependencies.recoverScoreAudits
+                ?? (() => recoverQueuedAnalysisScoreAudits(supabaseAdmin, 5)),
+            scoreAuditTimeoutMs,
+        );
+    } catch {
+        // Audit observability never changes analysis/provider cleanup success.
     }
     return Object.freeze(summary);
 }

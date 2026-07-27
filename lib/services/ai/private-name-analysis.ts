@@ -11,6 +11,7 @@ import {
     getAiStagePolicy,
     type AiStagePolicyVersion,
 } from './stage-policy';
+import type { ReplayStatelessCapability } from './replay-stateless-capability';
 import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
@@ -176,6 +177,7 @@ async function analyzePrivateNameChunk(
     auditFactory?: PrivateNameAnalysisAudit,
     chunkIndex = 0,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+    replayCapability?: ReplayStatelessCapability,
 ): Promise<PrivateNameAnalysisResult[]> {
     const expectedIds = accounts.map(account => account.id);
     const schema = createPrivateNameBatchResponseSchema(expectedIds);
@@ -206,6 +208,9 @@ async function analyzePrivateNameChunk(
                             startingAttempt: prepared?.startingAttempt ?? 1,
                             onBeforeAttempt: audit.onBeforeAttempt,
                             onAttemptTelemetry: audit.onAttemptTelemetry,
+                            ...(replayCapability
+                                ? { skipTokenLog: true, replayCapability }
+                                : {}),
                         }
                         : {
                             // Preserve the legacy batch allowance when no durable V2 policy applies.
@@ -251,6 +256,26 @@ function privateNameChunkIdentity(
     });
 }
 
+/**
+ * Returns the durable identity used by the single private-name chunk owned by one V2 DAG job.
+ * Scheduler callers use this before admission; the provider path derives the same identity again
+ * and the audit sink rejects any drift.
+ */
+export function createPrivateNameBatchIdentity(
+    rawAccounts: readonly PrivateNameAccountInput[],
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+): PrivateNameAnalysisChunkIdentity {
+    const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
+    if (accounts.length < 1 || accounts.length > PRIVATE_NAME_BATCH_SIZE) {
+        throw new Error('ANALYSIS_V2_PRIVATE_NAME_SCHEDULER_BATCH_INVALID');
+    }
+    return privateNameChunkIdentity(
+        buildPrivateNamePrompt(accounts),
+        0,
+        policyVersion,
+    );
+}
+
 function chunkAuditSink(
     audit: PrivateNameAnalysisAudit | undefined,
     prompt: string,
@@ -286,7 +311,10 @@ export async function analyzePrivateAccountNames(
     rawAccounts: PrivateNameAccountInput[],
     requestId?: string,
     audit?: PrivateNameAnalysisAudit,
-    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
+    options: {
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+        replayCapability?: ReplayStatelessCapability;
+    } = {},
 ): Promise<PrivateNameAnalysisResult[]> {
     const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
     if (requestId !== undefined) {
@@ -318,6 +346,7 @@ export async function analyzePrivateAccountNames(
                     audit,
                     chunkIndex,
                     policyVersion,
+                    options.replayCapability,
                 );
             })
         );

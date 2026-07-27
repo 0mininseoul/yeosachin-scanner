@@ -918,11 +918,80 @@ describe('analysis V2 Gemini audit adapter', () => {
             });
 
             await expect(adapter.prepare()).rejects.toThrow(
-                'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED'
+                status === 'reserved' || status === 'ambiguous'
+                    ? 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'
+                    : 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED'
             );
             expect(resultStore.checkpointGlobalHit).not.toHaveBeenCalled();
         }
     );
+
+    it('never opens a paid attempt during scheduler checkpoint-only recovery', async () => {
+        const reserve = vi.fn();
+        const checkpointGlobalHit = vi.fn().mockResolvedValue(null);
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            resultIdentity: identity(),
+            resultSchema,
+            schedulerRecoveryOnly: true,
+            attemptStore: {
+                reserve,
+                terminalize: vi.fn(),
+                loadOperation: vi.fn().mockResolvedValue([]),
+            },
+            resultStore: {
+                terminalizeSuccess: vi.fn(),
+                loadRequest: vi.fn().mockResolvedValue(null),
+                checkpointGlobalHit,
+            } as unknown as AnalysisV2AiResultStore,
+        });
+
+        await expect(adapter.prepare()).rejects.toThrow(
+            'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'
+        );
+        expect(reserve).not.toHaveBeenCalled();
+        expect(checkpointGlobalHit).toHaveBeenCalledOnce();
+    });
+
+    it('forces a deterministic terminal fallback after bounded scheduler recovery', async () => {
+        const reserve = vi.fn();
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            resultIdentity: identity(),
+            resultSchema,
+            schedulerTerminalUnavailable: true,
+            attemptStore: {
+                reserve,
+                terminalize: vi.fn(),
+                loadOperation: vi.fn().mockResolvedValue([
+                    reservation({
+                        status: 'cutoff',
+                        usageMetadataStatus: 'missing',
+                        usageComplete: false,
+                        tokenUsage: null,
+                        latencyMs: 330_000,
+                        estimatedCostUsd: null,
+                        finishReason: null,
+                        terminalizedAt: '2026-07-27T00:06:00.000Z',
+                    }),
+                ]),
+            },
+            resultStore: {
+                terminalizeSuccess: vi.fn(),
+                loadRequest: vi.fn().mockResolvedValue(null),
+                checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+            } as unknown as AnalysisV2AiResultStore,
+        });
+
+        await expect(adapter.prepare()).rejects.toThrow(
+            'ANALYSIS_V2_AI_TERMINAL_UNAVAILABLE'
+        );
+        expect(reserve).not.toHaveBeenCalled();
+    });
 
     it.each([
         {
@@ -1103,23 +1172,48 @@ describe('analysis V2 Gemini audit adapter', () => {
             checkpointGlobalHit: vi.fn().mockResolvedValue(null),
         } as unknown as AnalysisV2AiResultStore;
 
-        for (const history of [
-            [makeAttempt(1), makeAttempt(2, 'success'), makeAttempt(3), makeAttempt(4)],
-            [makeAttempt(1), makeAttempt(2, 'ambiguous'), makeAttempt(3), makeAttempt(4)],
-            [makeAttempt(1), makeAttempt(2), makeAttempt(3), makeAttempt(4, 'reserved')],
-            [makeAttempt(1), makeAttempt(2), makeAttempt(4)],
-            [
-                makeAttempt(1),
-                makeAttempt(2),
-                makeAttempt(3),
-                makeAttempt(4, 'rate_limited', { maxOutputTokens: 4_096 }),
-            ],
-            [
-                makeAttempt(1),
-                makeAttempt(2),
-                makeAttempt(3),
-                makeAttempt(4, 'rate_limited', { mediaCount: 6 }),
-            ],
+        for (const { history, expected } of [
+            {
+                history: [
+                    makeAttempt(1), makeAttempt(2, 'success'), makeAttempt(3), makeAttempt(4),
+                ],
+                expected: 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+            },
+            {
+                history: [
+                    makeAttempt(1), makeAttempt(2, 'ambiguous'), makeAttempt(3), makeAttempt(4),
+                ],
+                expected: 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+            },
+            {
+                history: [
+                    makeAttempt(1), makeAttempt(2), makeAttempt(3),
+                    makeAttempt(4, 'reserved'),
+                ],
+                expected: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+            },
+            {
+                history: [makeAttempt(1), makeAttempt(2), makeAttempt(4)],
+                expected: 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+            },
+            {
+                history: [
+                    makeAttempt(1),
+                    makeAttempt(2),
+                    makeAttempt(3),
+                    makeAttempt(4, 'rate_limited', { maxOutputTokens: 4_096 }),
+                ],
+                expected: 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+            },
+            {
+                history: [
+                    makeAttempt(1),
+                    makeAttempt(2),
+                    makeAttempt(3),
+                    makeAttempt(4, 'rate_limited', { mediaCount: 6 }),
+                ],
+                expected: 'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+            },
         ]) {
             const reserve = vi.fn();
             const adapter = createAnalysisV2AiAuditAdapter({
@@ -1135,9 +1229,7 @@ describe('analysis V2 Gemini audit adapter', () => {
                 },
                 resultStore,
             });
-            await expect(adapter.prepare()).rejects.toThrow(
-                'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED'
-            );
+            await expect(adapter.prepare()).rejects.toThrow(expected);
             expect(reserve).not.toHaveBeenCalled();
         }
     });

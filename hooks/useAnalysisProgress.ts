@@ -45,8 +45,11 @@ function mapV2Status(status: ProgressSnapshotV1['status']): AnalysisProgress['st
 
 export function useAnalysisProgress(requestId: string) {
     const [data, setData] = useState<AnalysisProgress | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
+    const [outcome, setOutcome] = useState<{
+        requestId: string;
+        settled: boolean;
+        error: string | null;
+    }>({ requestId: '', settled: false, error: null });
     const hasDataRef = useRef(false);
     const v2ProgressUrlRef = useRef<string | null>(null);
     const v2EventsRef = useRef<ProgressEventV1[]>([]);
@@ -62,6 +65,7 @@ export function useAnalysisProgress(requestId: string) {
         controller: AbortController;
         promise: Promise<void>;
     } | null>(null);
+    const fetchDataRef = useRef<() => Promise<void>>(() => Promise.resolve());
     const supabase = useMemo(() => createClient(), []);
 
     const fetchData = useCallback((): Promise<void> => {
@@ -150,7 +154,7 @@ export function useAnalysisProgress(requestId: string) {
                         events: retainedEvents,
                     });
                     hasDataRef.current = true;
-                    setError(null);
+                    setOutcome({ requestId, settled: true, error: null });
                     return;
                 }
 
@@ -178,15 +182,17 @@ export function useAnalysisProgress(requestId: string) {
                     events: [],
                 });
                 hasDataRef.current = true;
-                setError(null);
+                setOutcome({ requestId, settled: true, error: null });
             } catch (err) {
                 if (controller.signal.aborted) return;
                 console.error('Failed to fetch analysis progress:', err);
                 if (!hasDataRef.current) {
-                    setError('분석 요청을 찾을 수 없습니다.');
+                    setOutcome({
+                        requestId,
+                        settled: true,
+                        error: '분석 요청을 찾을 수 없습니다.',
+                    });
                 }
-            } finally {
-                if (!controller.signal.aborted) setLoading(false);
             }
         };
 
@@ -196,12 +202,16 @@ export function useAnalysisProgress(requestId: string) {
             const shouldRefetch = fetchQueuedRef.current;
             fetchQueuedRef.current = false;
             if (shouldRefetch && activeRequestIdRef.current === requestId) {
-                void fetchData();
+                void fetchDataRef.current();
             }
         });
         fetchInFlightRef.current = { requestId, controller, promise };
         return promise;
     }, [requestId]);
+
+    useEffect(() => {
+        fetchDataRef.current = fetchData;
+    }, [fetchData]);
 
     useEffect(() => {
         activeRequestIdRef.current = requestId;
@@ -212,9 +222,6 @@ export function useAnalysisProgress(requestId: string) {
         v2LastEventSeqRef.current = 0;
         v2RevisionRef.current = -1;
         fetchQueuedRef.current = false;
-        setData(null);
-        setLoading(true);
-        setError(null);
         void fetchData();
         return () => {
             if (activeRequestIdRef.current === requestId) {
@@ -225,25 +232,28 @@ export function useAnalysisProgress(requestId: string) {
         };
     }, [fetchData, requestId]);
 
+    const currentData = data?.id === requestId ? data : null;
+    const currentOutcome = outcome.requestId === requestId ? outcome : null;
+
     useEffect(() => {
         if (
             !analyticsEligibleRef.current ||
-            (data?.status !== 'pending' && data?.status !== 'processing')
-            || data.id !== requestId
+            (currentData?.status !== 'pending' && currentData?.status !== 'processing')
+            || currentData.id !== requestId
         ) return;
         const eventKey = analysisStartedEventKey(requestId);
         if (analysisStartedTrackedRef.current.has(eventKey)) return;
         analysisStartedTrackedRef.current.add(eventKey);
         const startedAt = Date.now();
         if (!claimObservedAnalysisStart(availableAnalyticsStorage(), requestId, {
-            requestId: data.id,
-            status: data.status,
+            requestId: currentData.id,
+            status: currentData.status,
         }, startedAt)) return;
         trackEvent(EVENTS.ANALYSIS_STARTED, { request_id: requestId });
-    }, [data?.id, data?.status, requestId]);
+    }, [currentData?.id, currentData?.status, requestId]);
 
     useEffect(() => {
-        if (!analyticsEligibleRef.current || data?.status !== 'completed' || data.id !== requestId) return;
+        if (!analyticsEligibleRef.current || currentData?.status !== 'completed' || currentData.id !== requestId) return;
         const eventKey = analysisCompletedEventKey(requestId);
         if (completionTrackedRef.current.has(eventKey)) return;
         completionTrackedRef.current.add(eventKey);
@@ -258,13 +268,13 @@ export function useAnalysisProgress(requestId: string) {
             request_id: requestId,
             ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         });
-    }, [data?.id, data?.status, requestId]);
+    }, [currentData?.id, currentData?.status, requestId]);
 
     useEffect(() => {
         if (
-            data?.pipelineVersion !== 'v2'
-            || data.status === 'completed'
-            || data.status === 'failed'
+            currentData?.pipelineVersion !== 'v2'
+            || currentData.status === 'completed'
+            || currentData.status === 'failed'
         ) return;
 
         const refreshIfVisible = () => {
@@ -291,11 +301,11 @@ export function useAnalysisProgress(requestId: string) {
         return () => {
             void supabase.removeChannel(channel);
         };
-    }, [data?.pipelineVersion, data?.status, fetchData, requestId, supabase]);
+    }, [currentData?.pipelineVersion, currentData?.status, fetchData, requestId, supabase]);
 
     // Realtime accelerates visible updates; this bounded poll closes any reconnect/event gaps.
     useEffect(() => {
-        if (data?.status === 'completed' || data?.status === 'failed') return;
+        if (currentData?.status === 'completed' || currentData?.status === 'failed') return;
         const refreshIfVisible = () => {
             if (document.visibilityState === 'visible') void fetchData();
         };
@@ -305,7 +315,12 @@ export function useAnalysisProgress(requestId: string) {
             window.clearInterval(interval);
             document.removeEventListener('visibilitychange', refreshIfVisible);
         };
-    }, [data?.status, fetchData]);
+    }, [currentData?.status, fetchData]);
 
-    return { data, loading, error, refetch: fetchData };
+    return {
+        data: currentData,
+        loading: currentOutcome?.settled !== true,
+        error: currentOutcome?.error ?? null,
+        refetch: fetchData,
+    };
 }

@@ -243,6 +243,11 @@ const profileUsernameEnvelopeSchema = z.object({
     username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
 }).passthrough();
 
+export function attributedApifyProfileUsername(item: unknown): string | null {
+    const parsed = profileUsernameEnvelopeSchema.safeParse(item);
+    return parsed.success ? parsed.data.username.toLowerCase() : null;
+}
+
 const profileNotFoundEnvelopeSchema = z.object({
     username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
     statusCode: z.literal(404).optional(),
@@ -297,7 +302,12 @@ function exactInstagramProfileUsername(value: string): string | null {
     return username.toLowerCase();
 }
 
-function attributedProfileActorErrorUsername(item: unknown): string | null {
+export function attributedProfileActorErrorUsername(item: unknown): string | null {
+    if (
+        typeof item === 'object'
+        && item !== null
+        && Object.prototype.hasOwnProperty.call(item, 'username')
+    ) return null;
     const parsed = profileActorErrorEnvelopeSchema.safeParse(item);
     if (!parsed.success) return null;
     const inputUsername = exactInstagramProfileUsername(parsed.data.inputUrl);
@@ -307,6 +317,12 @@ function attributedProfileActorErrorUsername(item: unknown): string | null {
         if (resultUsername !== inputUsername) return null;
     }
     return inputUsername;
+}
+
+export function apifyProfileOmittedAccountError(): Error {
+    return new Error(
+        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
+    );
 }
 
 const latestPostSchema = z.object({
@@ -632,8 +648,8 @@ export function parseApifyProfileDataset(
             notFoundUsernames.add(key);
             continue;
         }
-        const envelope = profileUsernameEnvelopeSchema.safeParse(item);
-        if (!envelope.success) {
+        const envelopeUsername = attributedApifyProfileUsername(item);
+        if (!envelopeUsername) {
             const hasUsernameField = typeof item === 'object'
                 && item !== null
                 && Object.prototype.hasOwnProperty.call(item, 'username');
@@ -657,7 +673,7 @@ export function parseApifyProfileDataset(
             datasetContaminated = true;
             continue;
         }
-        const key = envelope.data.username.toLowerCase();
+        const key = envelopeUsername;
         if (!currentBatch.has(key)) {
             datasetContaminated = true;
             continue;
@@ -730,9 +746,7 @@ export function buildApifyProfileAttemptResults(
             return failedProfileAttempt({
                 requestedUsername,
                 source: 'apify',
-                error: new Error(
-                    'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
-                ),
+                error: apifyProfileOmittedAccountError(),
                 requestCount: 1,
                 latencyMs,
             });
