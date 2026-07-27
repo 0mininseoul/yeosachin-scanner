@@ -294,6 +294,41 @@ describe('OAuth callback profile persistence', () => {
         expect(routeMocks.deliverKakaoSignupDiscordNotifications).toHaveBeenCalledWith({ userId: USER_ID });
     });
 
+    it('returns the Discord delivery lifecycle to the post-response callback', async () => {
+        installCallbackSession('kakao', 'provider-token');
+        installCallbackProfileFetch();
+        let scheduledDelivery: (() => void | Promise<void>) | undefined;
+        let resolveDelivery: (result: number) => void;
+        routeMocks.after.mockImplementation((callback: () => void | Promise<void>) => {
+            scheduledDelivery = callback;
+        });
+        routeMocks.deliverKakaoSignupDiscordNotifications.mockImplementationOnce(
+            () => new Promise<number>((resolve) => {
+                resolveDelivery = resolve;
+            }),
+        );
+
+        const response = await authCallback(callbackRequest('deferred-discord-delivery'));
+
+        expect(response.status).toBeGreaterThanOrEqual(300);
+        expect(routeMocks.deliverKakaoSignupDiscordNotifications).not.toHaveBeenCalled();
+        expect(scheduledDelivery).toBeTypeOf('function');
+
+        const delivery = scheduledDelivery!();
+        let deliveryCompleted = false;
+        void Promise.resolve(delivery).then(() => {
+            deliveryCompleted = true;
+        });
+        await Promise.resolve();
+
+        expect(delivery).toBeInstanceOf(Promise);
+        expect(routeMocks.deliverKakaoSignupDiscordNotifications).toHaveBeenCalledWith({ userId: USER_ID });
+        expect(deliveryCompleted).toBe(false);
+
+        resolveDelivery!(0);
+        await expect(delivery).resolves.toBeUndefined();
+    });
+
     it.each([
         ['withdrawn', { omitPhone: true }],
         ['invalid', { phoneNumber: 'not-a-phone' }],

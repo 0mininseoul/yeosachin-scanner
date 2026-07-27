@@ -36,11 +36,11 @@ async function stageUnavailableKakaoSignupProfile(
 }
 
 function scheduleKakaoSignupDiscordDelivery(userId: string): void {
-    // `after` keeps this best-effort work outside the auth response. Keep the
-    // callback synchronous and absorb unexpected delivery rejections so they
-    // cannot become an unhandled rejection after the user has logged in.
-    const deliver = () => {
-        void deliverKakaoSignupDiscordNotifications({ userId }).catch(() => undefined);
+    // `after` keeps this best-effort work outside the auth response. Return the
+    // delivery lifecycle to Next so the runtime can keep it alive, while still
+    // absorbing unexpected delivery failures.
+    const deliver = async (): Promise<void> => {
+        await deliverKakaoSignupDiscordNotifications({ userId }).catch(() => undefined);
     };
 
     try {
@@ -48,7 +48,7 @@ function scheduleKakaoSignupDiscordDelivery(userId: string): void {
     } catch {
         // Local/test runtimes can reject `after`; still attempt delivery without
         // ever making the successful OAuth callback depend on it.
-        deliver();
+        void deliver();
     }
 }
 
