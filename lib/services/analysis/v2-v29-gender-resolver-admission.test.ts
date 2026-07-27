@@ -42,13 +42,17 @@ describe('v2.9 gender resolver admission', () => {
         expect(v29GenderResolverAdmission(
             triage({}, accountContext),
             2,
-        )).toBe('nonpersonal_or_unknown');
+        )).toBe(
+            accountContext === 'official_group_or_brand'
+                ? 'official_or_group'
+                : 'uncertain_or_absent',
+        );
     });
 
     it('fails closed when account context is absent', () => {
         const input = triage();
         delete input.v29AccountContext;
-        expect(v29GenderResolverAdmission(input, 2)).toBe('nonpersonal_or_unknown');
+        expect(v29GenderResolverAdmission(input, 2)).toBe('uncertain_or_absent');
     });
 
     it('requires at least two resolver media items', () => {

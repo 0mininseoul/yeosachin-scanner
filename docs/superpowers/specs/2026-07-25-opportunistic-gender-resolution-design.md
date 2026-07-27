@@ -590,7 +590,7 @@ flag 값은 요청 생성 후 해당 요청의 실행을 바꾸지 않는다. ru
 - 분석이 completed이고 owner 보관함에서 열림
 - `genderStats` 합이 screened public count와 일치
 - 관측 미상 비율
-  `genderStats.unknown / screenedMutuals <= 0.30`
+  `genderStats.unknown / screenedMutuals <= 0.20`
   (`screenedMutuals = 0`이면 이 gate는 평가 불가)
 - baseline unknown과 final unknown이 내부 지표에 각각 남음
 - resolver로 바뀐 모든 row가 같은 request/job의 유효한 operation key와 result

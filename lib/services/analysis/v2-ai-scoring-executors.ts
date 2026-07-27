@@ -89,6 +89,7 @@ import {
 } from './v2-official-account-screening';
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
+import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
 import {
     AnalysisV2TransientMediaPreparationError,
     isAnalysisV2PartialMediaCoverageAllowed,
@@ -1507,11 +1508,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         normalizedSelectionIds.has(caption.selectionId)
                     ));
                     const triageAssessment = gender.result.assessment;
+                    const resolverMedia =
+                        aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                            ? selectAnalysisV2GenderResolverMedia(normalized.media)
+                            : normalized.media;
                     const resolverEligible = genderResolutionEnabled && (
                         aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
                             ? v29GenderResolverAdmission(
                                 gender.result,
-                                normalized.media.length,
+                                resolverMedia.length,
                             ) === 'eligible'
                             : !(
                                 triageAssessment.inferredGender === 'female'
@@ -1521,7 +1526,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     );
                     const resolverHandle = resolverEligible
                         ? dependencies.ai.startGenderResolution({
-                            media: normalized.media,
+                            media: resolverMedia,
                         }, aiFence)
                         : null;
                     if (resolverHandle) {

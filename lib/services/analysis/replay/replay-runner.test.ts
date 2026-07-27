@@ -8,7 +8,11 @@ vi.mock('./replay-staged-ai-adapter', () => ({
     ),
 }));
 
-import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
+import {
+    analysisV2ReplayResolverReadyOutcome,
+    runAnalysisV2AiReplay,
+    type ReplayAiRunner,
+} from './replay-runner';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
 
@@ -48,6 +52,53 @@ const bundle = {
 };
 
 describe('AI-only replay runner', () => {
+    it.each([
+        {
+            expected: 'ready_high_confirmed',
+            assessment: {
+                inferredGender: 'female' as const,
+                confidence: 'high' as const,
+                ownerConsistency: 'same_person' as const,
+                evidenceSelectionIds: ['m1', 'm2'],
+            },
+        },
+        {
+            expected: 'evidence_insufficient',
+            assessment: {
+                inferredGender: 'female' as const,
+                confidence: 'medium' as const,
+                ownerConsistency: 'same_person' as const,
+                evidenceSelectionIds: ['m1'],
+            },
+        },
+        {
+            expected: 'mixed',
+            assessment: {
+                inferredGender: 'unknown' as const,
+                confidence: 'low' as const,
+                ownerConsistency: 'mixed_people' as const,
+                evidenceSelectionIds: ['m1', 'm2'],
+            },
+        },
+        {
+            expected: 'unknown',
+            assessment: {
+                inferredGender: 'unknown' as const,
+                confidence: 'low' as const,
+                ownerConsistency: 'not_visible' as const,
+                evidenceSelectionIds: [],
+            },
+        },
+    ])('classifies aggregate-only ready resolver outcome as $expected', ({
+        assessment,
+        expected,
+    }) => {
+        expect(analysisV2ReplayResolverReadyOutcome({
+            assessment,
+            analyzedSelectionIds: ['m1', 'm2'],
+        })).toBe(expected);
+    });
+
     function validPartialBundle(): Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }> {
         const sourceIdentities = [
             { ordinal: 1, username: 'public', partition: 'public' as const },
@@ -487,6 +538,23 @@ describe('AI-only replay runner', () => {
         expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
         expect(report.resolver).toMatchObject({
             ready: 1, applied: 1, inconclusive: 0, cutoff: 0, capacitySkipped: 0,
+            admission: {
+                eligible: 1,
+                alreadyVerified: 0,
+                officialOrGroup: 0,
+                uncertainOrAbsent: 0,
+                insufficientMedia: 0,
+            },
+            outcomes: {
+                readyHighConfirmed: 1,
+                evidenceInsufficient: 0,
+                mixed: 0,
+                unknown: 0,
+                reconciliationApplied: 1,
+                reconciliationInconclusive: 0,
+                cutoff: 0,
+                capacitySkipped: 0,
+            },
         });
     });
 
