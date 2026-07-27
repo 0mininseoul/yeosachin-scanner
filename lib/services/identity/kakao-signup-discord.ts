@@ -24,7 +24,7 @@ interface ClaimedOutboxItem {
 }
 
 interface DiscordConfig {
-    webhookUrl: string;
+    botToken: string;
     threadId: string;
 }
 
@@ -32,10 +32,10 @@ type FinishOutcome = 'sent' | 'retry' | 'failed' | 'ambiguous_failed';
 
 function configuredDiscord(): DiscordConfig | null {
     if (process.env.KAKAO_SIGNUP_DISCORD_ENABLED !== 'true') return null;
-    const webhookUrl = process.env.KAKAO_SIGNUP_DISCORD_WEBHOOK_URL?.trim();
+    const botToken = process.env.KAKAO_SIGNUP_DISCORD_BOT_TOKEN?.trim();
     const threadId = process.env.KAKAO_SIGNUP_DISCORD_THREAD_ID?.trim();
-    if (!webhookUrl || !threadId) return null;
-    return { webhookUrl, threadId };
+    if (!botToken || !threadId) return null;
+    return { botToken, threadId };
 }
 
 function unavailable(value: unknown): string | null {
@@ -117,9 +117,26 @@ function operationalFailure(code: string): void {
     }
 }
 
-function retryAfterSeconds(response: Response): number {
-    const raw = Number(response.headers.get('retry-after'));
-    return Number.isFinite(raw) ? Math.min(900, Math.max(1, Math.ceil(raw))) : 60;
+function boundedRetryAfterSeconds(value: unknown): number | null {
+    const seconds = typeof value === 'number' || typeof value === 'string'
+        ? Number(value)
+        : Number.NaN;
+    return Number.isFinite(seconds) ? Math.min(900, Math.max(1, Math.ceil(seconds))) : null;
+}
+
+async function retryAfterSeconds(response: Response): Promise<number> {
+    // Discord's JSON body is the authoritative fractional-second retry value;
+    // proxies can still expose Retry-After when the body is unavailable.
+    try {
+        const body: unknown = await response.json();
+        if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+            const fromBody = boundedRetryAfterSeconds((body as { retry_after?: unknown }).retry_after);
+            if (fromBody !== null) return fromBody;
+        }
+    } catch {
+        // Never record Discord's response body: it can contain operational details.
+    }
+    return boundedRetryAfterSeconds(response.headers.get('retry-after')) ?? 60;
 }
 
 async function finish(
@@ -151,18 +168,24 @@ async function sendClaimedItem(
     const controller = new AbortController();
     try {
         timeout = setTimeout(() => controller.abort(), DISCORD_TIMEOUT_MS);
-        const response = await fetcher(`${config.webhookUrl}?thread_id=${encodeURIComponent(config.threadId)}`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(buildKakaoSignupDiscordPayload(item)),
-            signal: controller.signal,
-        });
+        const response = await fetcher(
+            `https://discord.com/api/v10/channels/${encodeURIComponent(config.threadId)}/messages`,
+            {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bot ${config.botToken}`,
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify(buildKakaoSignupDiscordPayload(item)),
+                signal: controller.signal,
+            },
+        );
         if (response.ok) {
             await finish(item, 'sent');
             return;
         }
         if (response.status === 429 && item.attempts < MAX_DELIVERY_ATTEMPTS) {
-            await finish(item, 'retry', 'RATE_LIMITED', retryAfterSeconds(response));
+            await finish(item, 'retry', 'RATE_LIMITED', await retryAfterSeconds(response));
             return;
         }
         // A 5xx can be emitted after Discord accepted the body. Never resend it.

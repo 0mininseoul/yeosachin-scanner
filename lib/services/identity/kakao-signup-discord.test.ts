@@ -34,8 +34,8 @@ const ITEM = {
 
 function configured() {
     vi.stubEnv('KAKAO_SIGNUP_DISCORD_ENABLED', 'true');
-    vi.stubEnv('KAKAO_SIGNUP_DISCORD_WEBHOOK_URL', 'https://discord.com/api/webhooks/123/raw-webhook-secret');
-    vi.stubEnv('KAKAO_SIGNUP_DISCORD_THREAD_ID', 'thread-env-only');
+    vi.stubEnv('KAKAO_SIGNUP_DISCORD_BOT_TOKEN', 'test-bot-token');
+    vi.stubEnv('KAKAO_SIGNUP_DISCORD_THREAD_ID', 'thread-123');
 }
 
 describe('Kakao signup Discord notification', () => {
@@ -92,10 +92,32 @@ describe('Kakao signup Discord notification', () => {
         await deliverKakaoSignupDiscordNotifications({ userId: ITEM.id, fetcher });
 
         expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(fetcher).toHaveBeenCalledWith(
+            'https://discord.com/api/v10/channels/thread-123/messages',
+            expect.objectContaining({
+                method: 'POST',
+                headers: {
+                    Authorization: 'Bot test-bot-token',
+                    'content-type': 'application/json',
+                },
+            }),
+        );
+        expect(JSON.parse(fetcher.mock.calls[0][1].body).allowed_mentions).toEqual({ parse: [] });
         expect(mocks.rpc).toHaveBeenCalledWith('complete_kakao_signup_discord_outbox', expect.objectContaining({
             p_outcome: 'sent', p_outbox_id: ITEM.id,
         }));
-        expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('raw-webhook-secret');
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('test-bot-token');
+    });
+
+    it('does not fall back to the retired incoming-webhook configuration', async () => {
+        vi.stubEnv('KAKAO_SIGNUP_DISCORD_BOT_TOKEN', '');
+        vi.stubEnv('KAKAO_SIGNUP_DISCORD_WEBHOOK_URL', 'https://discord.com/api/webhooks/legacy/secret');
+        const fetcher = vi.fn();
+
+        await expect(deliverKakaoSignupDiscordNotifications({ fetcher })).resolves.toBe(0);
+
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
     it('retries only a known rejected 429, with bounded durable backoff', async () => {
@@ -105,16 +127,35 @@ describe('Kakao signup Discord notification', () => {
             .mockResolvedValueOnce({ data: [{ ...ITEM, attempts: 2 }], error: null })
             .mockResolvedValueOnce({ error: null });
         const fetcher = vi.fn()
-            .mockResolvedValueOnce(new Response(null, { status: 429, headers: { 'retry-after': '2' } }))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ retry_after: 2.2 }), {
+                status: 429,
+                headers: { 'content-type': 'application/json', 'retry-after': '2' },
+            }))
             .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
         await deliverKakaoSignupDiscordNotifications({ fetcher });
         await deliverKakaoSignupDiscordNotifications({ fetcher });
 
         expect(mocks.rpc).toHaveBeenCalledWith('complete_kakao_signup_discord_outbox', expect.objectContaining({
-            p_outcome: 'retry', p_failure_code: 'RATE_LIMITED', p_retry_after_seconds: 2,
+            p_outcome: 'retry', p_failure_code: 'RATE_LIMITED', p_retry_after_seconds: 3,
         }));
         expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses Retry-After when a 429 response has no usable Discord JSON retry value', async () => {
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ error: null });
+        const fetcher = vi.fn().mockResolvedValue(new Response('not-json', {
+            status: 429,
+            headers: { 'retry-after': '7' },
+        }));
+
+        await deliverKakaoSignupDiscordNotifications({ fetcher });
+
+        expect(mocks.rpc).toHaveBeenCalledWith('complete_kakao_signup_discord_outbox', expect.objectContaining({
+            p_outcome: 'retry', p_failure_code: 'RATE_LIMITED', p_retry_after_seconds: 7,
+        }));
     });
 
     it.each([
@@ -131,6 +172,30 @@ describe('Kakao signup Discord notification', () => {
             p_outcome: 'ambiguous_failed', p_failure_code: code,
         }));
         expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps bot credentials and recipient data out of logs and Sentry on a Discord rejection', async () => {
+        const privateName = '민감한수신자';
+        const privateToken = 'test-bot-token';
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [{ ...ITEM, masked_name: privateName }], error: null })
+            .mockResolvedValueOnce({ error: null });
+        const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 403 }));
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        await deliverKakaoSignupDiscordNotifications({ fetcher });
+
+        const observability = JSON.stringify([
+            errorSpy.mock.calls,
+            mocks.addBreadcrumb.mock.calls,
+            mocks.captureMessage.mock.calls,
+        ]);
+        expect(observability).not.toContain(privateName);
+        expect(observability).not.toContain(privateToken);
+        expect(mocks.captureMessage).toHaveBeenCalledWith(
+            'Kakao signup Discord delivery failed',
+            expect.objectContaining({ tags: { code: 'DISCORD_REJECTED' } }),
+        );
     });
 
     it('deduplicates concurrent callers through the database claim', async () => {
