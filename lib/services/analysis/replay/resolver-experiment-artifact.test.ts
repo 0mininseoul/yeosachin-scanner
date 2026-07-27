@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
+    assertStrongUncertainResolverExperiment,
     deriveStrongUncertainResolverExperiment,
     STRONG_UNCERTAIN_RESOLVER_EXPERIMENT,
 } from './resolver-experiment-artifact';
@@ -70,4 +71,24 @@ describe('strong uncertain resolver experiment artifact', () => {
         expect(() => deriveStrongUncertainResolverExperiment(invalid))
             .toThrow('ANALYSIS_V2_RESOLVER_EXPERIMENT_PARENT_MISMATCH');
     });
+
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    it.each([
+        ['scope', (value: any) => { value.capture.scope = 'ai-only-historical-partial-available'; }],
+        ['notProduction', (value: any) => { value.capture.notProduction = false; }],
+        ['fullE2e', (value: any) => { value.capture.fullE2eEvidence = true; }],
+        ['experiment', (value: any) => { value.capture.experiment.id = 'other'; }],
+        ['capability', (value: any) => { value.capture.evaluationPolicy.capability = 'other'; }],
+        ['parent fingerprint', (value: any) => { value.capture.experiment.parentRequestFingerprint = 'b'.repeat(64); }],
+        ['parent binding', (value: any) => { value.capture.experiment.parentBinding = 'b'.repeat(64); }],
+        ['source digest', (value: any) => { value.capture.partial.sourceUniverseDigest = 'b'.repeat(64); }],
+        ['lineage', (value: any) => { value.capture.sourceLineage.policyVersions.risk = 'risk-policy-v2.4'; }],
+        ['pilot', (value: any) => { value.capture.experiment.uncertainPilotLimit = 23; }],
+    ])('rejects mutated %s at the library runner boundary', (_label, mutate) => {
+        const value = structuredClone(deriveStrongUncertainResolverExperiment(parent()));
+        mutate(value);
+        expect(() => assertStrongUncertainResolverExperiment(value))
+            .toThrow('ANALYSIS_V2_RESOLVER_EXPERIMENT_CAPABILITY_MISMATCH');
+    });
+    /* eslint-enable @typescript-eslint/no-explicit-any */
 });

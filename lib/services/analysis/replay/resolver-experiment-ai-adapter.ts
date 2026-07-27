@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import {
-    createGenderResolutionResultIdentity,
+    createStrongUncertainGenderResolutionResultIdentity,
     createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
-    genderResolution,
+    prepareStrongUncertainGenderResolutionGeneration,
     genderTriageMicrobatch,
     type GenderTriageResult,
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
+import { runStrongUncertainGenderResolutionGeneration } from '@/lib/services/ai/gender-resolution-generation';
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type {
     GeminiAttemptStartTelemetry,
@@ -25,13 +26,6 @@ import type {
 
 const experimentRunnerBrand = Symbol('strong-uncertain-resolver-runner');
 const issuedExperimentRunners = new WeakSet<object>();
-const EXPERIMENT_POLICY = Object.freeze({
-    model: 'gemini-3-flash-preview' as const,
-    thinkingLevel: 'HIGH' as const,
-    mediaResolution: 'HIGH' as const,
-    maxOutputTokens: 512 as const,
-});
-
 type ExperimentRunner = Pick<ReplayAiRunner, 'triage' | 'resolveGender'> & {
     readonly [experimentRunnerBrand]: true;
 };
@@ -197,21 +191,20 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
         triage,
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
-            const identity = createGenderResolutionResultIdentity(
-                aiInput,
-                'ai-stage-policy-v2.9',
-                EXPERIMENT_POLICY,
-            );
-            return genderResolution(
+            const identity = createStrongUncertainGenderResolutionResultIdentity(aiInput);
+            const prepared = await prepareStrongUncertainGenderResolutionGeneration(
                 aiInput,
                 audit(requestId, identity, state),
                 {
                     abortSignal: input.signal,
-                    aiStagePolicyVersion: 'ai-stage-policy-v2.9',
                     replayCapability,
-                    experimentPolicy: EXPERIMENT_POLICY,
                 },
             );
+            const assessment = prepared.cached
+                ?? await runStrongUncertainGenderResolutionGeneration(
+                    prepared.generation,
+                );
+            return prepared.finalize(assessment);
         }),
     };
     Object.freeze(runner);

@@ -9,15 +9,19 @@ const mocks = vi.hoisted(() => ({
         void args;
         return { operationKey: `gender-resolution:${'b'.repeat(64)}` };
     }),
-    resolver: vi.fn(),
+    resolverPrepare: vi.fn(),
+    resolverRun: vi.fn(),
 }));
 vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     GENDER_TRIAGE_V29_MAX_ACCOUNTS_PER_BATCH: 2,
     createGenderTriageMicrobatchAccountId: mocks.accountId,
     createGenderTriageMicrobatchResultIdentity: mocks.batchIdentity,
     genderTriageMicrobatch: mocks.batch,
-    createGenderResolutionResultIdentity: mocks.resolverIdentity,
-    genderResolution: mocks.resolver,
+    createStrongUncertainGenderResolutionResultIdentity: mocks.resolverIdentity,
+    prepareStrongUncertainGenderResolutionGeneration: mocks.resolverPrepare,
+}));
+vi.mock('@/lib/services/ai/gender-resolution-generation', () => ({
+    runStrongUncertainGenderResolutionGeneration: mocks.resolverRun,
 }));
 
 import {
@@ -25,6 +29,8 @@ import {
     isStrongUncertainResolverExperimentAdapter,
 } from './resolver-experiment-ai-adapter';
 import { runStrongUncertainResolverExperiment } from './resolver-experiment-runner';
+import { deriveStrongUncertainResolverExperiment } from './resolver-experiment-artifact';
+import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
 
 const invocationResult = (accounts: readonly { accountId: string }[]) =>
     accounts.map(account => ({
@@ -45,12 +51,16 @@ describe('dedicated resolver experiment AI adapter', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.batch.mockImplementation(invocationResult);
-        mocks.resolver.mockResolvedValue({
+        mocks.resolverRun.mockResolvedValue({
             assessment: {
                 inferredGender: 'unknown', confidence: 'low',
                 ownerConsistency: 'not_visible', evidenceSelectionIds: [],
             },
-            analyzedSelectionIds: [],
+        });
+        mocks.resolverPrepare.mockResolvedValue({
+            cached: null,
+            generation: {},
+            finalize: (assessment: unknown) => ({ assessment, analyzedSelectionIds: [] }),
         });
     });
 
@@ -100,21 +110,11 @@ describe('dedicated resolver experiment AI adapter', () => {
         });
         expect(runner).not.toHaveProperty('feature');
         expect(runner).not.toHaveProperty('privateNames');
-        expect(mocks.resolverIdentity.mock.calls[0]?.[2]).toEqual({
-            model: 'gemini-3-flash-preview',
-            thinkingLevel: 'HIGH',
-            mediaResolution: 'HIGH',
-            maxOutputTokens: 512,
+        expect(mocks.resolverIdentity).toHaveBeenCalledWith({ media: [] });
+        expect(mocks.resolverPrepare.mock.calls[0]?.[2]).toMatchObject({
+            replayCapability: expect.any(Object),
         });
-        expect(mocks.resolver.mock.calls[0]?.[2]).toMatchObject({
-            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
-            experimentPolicy: {
-                model: 'gemini-3-flash-preview',
-                thinkingLevel: 'HIGH',
-                mediaResolution: 'HIGH',
-                maxOutputTokens: 512,
-            },
-        });
+        expect(mocks.resolverRun).toHaveBeenCalledWith(expect.any(Object));
     });
 
     it('the experiment runner queues the complete canonical triage order before awaiting', async () => {
@@ -137,21 +137,40 @@ describe('dedicated resolver experiment AI adapter', () => {
             captions: [],
             coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
         }));
-        const report = await runStrongUncertainResolverExperiment({
-            bundle: {
-                schemaVersion: 3,
-                capture: {
-                    evaluationPolicy: {
-                        capability: 'replay-only-resolver-experiment-strong-uncertain-v1',
-                        aiStage: 'ai-stage-policy-v2.9',
-                    },
-                    experiment: {
-                        id: 'strong-uncertain-v1',
-                        uncertainPilotLimit: 24,
+        const sourceIdentities = profiles.map(profile => ({
+            ordinal: profile.ordinal,
+            username: profile.username,
+            partition: 'public' as const,
+        }));
+        const bundle = deriveStrongUncertainResolverExperiment({
+            schemaVersion: 2,
+            createdAt: '2026-07-27T00:00:00.000Z',
+            expiresAt: '2026-07-27T01:00:00.000Z',
+            capture: {
+                requestFingerprint: 'a'.repeat(64),
+                scope: 'ai-only-historical-partial-available',
+                notExact: true, fullE2eEvidence: false, noMediaSubstitution: true,
+                sourceLineage: {
+                    selectedPlanId: 'standard',
+                    policyVersions: {
+                        pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7',
+                        risk: 'risk-policy-v2.3',
                     },
                 },
-                profiles,
-            } as never,
+                evaluationPolicy: {
+                    capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29',
+                    aiStage: 'ai-stage-policy-v2.9',
+                },
+                partial: {
+                    sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+                    sourceIdentities, mediaUnavailable: [],
+                },
+            },
+            profiles,
+            evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+        });
+        const report = await runStrongUncertainResolverExperiment({
+            bundle,
             runner,
         });
         expect(mocks.batch.mock.calls.map(call => call[0].length)).toEqual([2, 2, 1]);

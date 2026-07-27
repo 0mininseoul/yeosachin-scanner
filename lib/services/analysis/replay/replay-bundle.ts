@@ -163,6 +163,7 @@ const resolverExperimentBundleSchema = baseBundleSchema.extend({
     capture: baseBundleSchema.shape.capture.extend({
         ...partialCaptureFields,
         scope: z.literal('ai-only-resolver-experiment'),
+        notProduction: z.literal(true),
         evaluationPolicy: z.object({
             capability: z.literal(STRONG_UNCERTAIN_RESOLVER_EXPERIMENT_CAPABILITY),
             aiStage: z.literal('ai-stage-policy-v2.9'),
@@ -214,6 +215,18 @@ const resolverExperimentBundleSchema = baseBundleSchema.extend({
             message: 'Resolver experiment parent lineage binding is invalid.',
         });
     }
+    if (
+        value.capture.sourceLineage.selectedPlanId !== 'standard'
+        || value.capture.sourceLineage.policyVersions.pipeline !== 'v2'
+        || value.capture.sourceLineage.policyVersions.aiStage !== 'ai-stage-policy-v2.7'
+        || value.capture.sourceLineage.policyVersions.risk !== 'risk-policy-v2.3'
+    ) {
+        context.addIssue({
+            code: 'custom',
+            path: ['capture', 'sourceLineage'],
+            message: 'Resolver experiment source lineage is invalid.',
+        });
+    }
 });
 const bundleSchema = z.union([
     exactBundleSchema,
@@ -222,6 +235,18 @@ const bundleSchema = z.union([
 ]);
 
 export type AnalysisV2ReplayBundle = z.infer<typeof bundleSchema>;
+
+export function parseStrongUncertainResolverExperimentBundle(
+    value: unknown,
+): Extract<AnalysisV2ReplayBundle, { schemaVersion: 3 }> {
+    const parsed = resolverExperimentBundleSchema.safeParse(value);
+    if (!parsed.success) {
+        throw new AnalysisV2ReplayBundleError(
+            'ANALYSIS_V2_RESOLVER_EXPERIMENT_CAPABILITY_MISMATCH',
+        );
+    }
+    return parsed.data;
+}
 
 export function replayBundleSizeLimits(
     schemaVersion: AnalysisV2ReplayBundle['schemaVersion'],

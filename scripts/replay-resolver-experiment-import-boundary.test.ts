@@ -51,6 +51,20 @@ describe('resolver experiment static execution boundary', () => {
         const sources = staticGraph(join(root, 'scripts/replay-resolver-experiment.ts'))
             .map(file => readFileSync(join(root, file), 'utf8')).join('\n');
         expect(sources).not.toMatch(/export\s+(?:function|const)\s+issueResolverExperimentCapability/);
+        const productionApi = readFileSync(
+            join(root, 'lib/services/ai/v2-staged-analysis.ts'),
+            'utf8',
+        );
+        expect(productionApi).not.toContain('experimentPolicy');
+        expect(productionApi).not.toContain('resolverExperimentCapability');
+        const generation = readFileSync(
+            join(root, 'lib/services/ai/gender-resolution-generation.ts'),
+            'utf8',
+        );
+        expect(generation).toContain("model: 'gemini-3-flash-preview'");
+        expect(generation).toContain("thinkingLevel: 'HIGH'");
+        expect(generation).toContain("mediaResolution: 'HIGH'");
+        expect(generation).toContain('maxOutputTokens: 512');
     });
 
     it('is not imported by app or non-replay production modules', () => {

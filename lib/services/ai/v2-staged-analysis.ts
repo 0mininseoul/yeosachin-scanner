@@ -35,6 +35,10 @@ import {
 import {
     isAmbiguousGeminiGenerationError,
 } from './gemini-generation-policy';
+import {
+    runCanonicalGenderResolutionGeneration,
+    type PreparedGenderResolutionGeneration,
+} from './gender-resolution-generation';
 export {
     applyGenderResolution,
     type GenderBaselineClassification,
@@ -936,22 +940,16 @@ function stagedResultIdentity(
     media: readonly AnalysisV2AiIdentityMediaPart[],
     cacheScope: 'request' | 'global_ttl',
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
-    experimentPolicy?: {
-        model: string;
-        thinkingLevel: 'HIGH';
-        mediaResolution: 'HIGH';
-        maxOutputTokens: 512;
-    },
 ): AnalysisV2AiResultIdentity {
     const policy = getAiStagePolicy(policyVersion, stage);
     return createAnalysisV2AiResultIdentity({
         stage,
-        modelName: experimentPolicy?.model ?? policy.model,
-        thinkingLevel: experimentPolicy?.thinkingLevel ?? policy.thinkingLevel,
-        mediaResolution: experimentPolicy?.mediaResolution ?? policy.mediaResolution,
+        modelName: policy.model,
+        thinkingLevel: policy.thinkingLevel,
+        mediaResolution: policy.mediaResolution,
         promptVersion: policy.promptVersion,
         schemaVersion: policy.schemaVersion,
-        maxOutputTokens: experimentPolicy?.maxOutputTokens ?? policy.maxOutputTokens,
+        maxOutputTokens: policy.maxOutputTokens,
         inputHash: createAnalysisV2AiResultInputHash(prompt),
         mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
         cacheScope,
@@ -1819,12 +1817,6 @@ export async function genderTriageMicrobatch(
 export function createGenderResolutionResultIdentity(
     rawInput: GenderResolutionInput,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_LATEST_VERSION,
-    experimentPolicy?: {
-        model: 'gemini-3-flash-preview';
-        thinkingLevel: 'HIGH';
-        mediaResolution: 'HIGH';
-        maxOutputTokens: 512;
-    },
 ): AnalysisV2AiResultIdentity {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
@@ -1835,8 +1827,29 @@ export function createGenderResolutionResultIdentity(
         media,
         'request',
         policyVersion,
-        experimentPolicy,
     );
+}
+
+export function createStrongUncertainGenderResolutionResultIdentity(
+    rawInput: GenderResolutionInput,
+): AnalysisV2AiResultIdentity {
+    const input = genderResolutionInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
+    const projection = genderResolutionMediaProjection(media);
+    const prompt = genderResolutionPrompt(projection.projectedMedia);
+    const policy = getAiStagePolicy('ai-stage-policy-v2.9', 'genderResolution');
+    return createAnalysisV2AiResultIdentity({
+        stage: 'genderResolution',
+        modelName: 'gemini-3-flash-preview',
+        thinkingLevel: 'HIGH',
+        mediaResolution: 'HIGH',
+        promptVersion: policy.promptVersion,
+        schemaVersion: policy.schemaVersion,
+        maxOutputTokens: 512,
+        inputHash: createAnalysisV2AiResultInputHash(prompt),
+        mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
+        cacheScope: 'request',
+    });
 }
 
 export function createFeatureAnalysisResultIdentity(
@@ -1911,52 +1924,73 @@ export async function genderResolution(
         abortSignal?: AbortSignal;
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
-        experimentPolicy?: {
-            model: 'gemini-3-flash-preview';
-            thinkingLevel: 'HIGH';
-            mediaResolution: 'HIGH';
-            maxOutputTokens: 512;
-        };
     } = {},
 ): Promise<GenderResolutionResult> {
+    const prepared = await prepareGenderResolutionGeneration(
+        rawInput,
+        rawAuditContext,
+        options,
+    );
+    const checkpointAssessment = prepared.cached
+        ?? await runCanonicalGenderResolutionGeneration(prepared.generation);
+    return prepared.finalize(checkpointAssessment);
+}
+
+export async function prepareStrongUncertainGenderResolutionGeneration(
+    rawInput: GenderResolutionInput,
+    rawAuditContext: StagedAiAuditContext,
+    options: {
+        abortSignal?: AbortSignal;
+        replayCapability: ReplayStatelessCapability;
+    },
+) {
+    return prepareGenderResolutionGeneration(
+        rawInput,
+        rawAuditContext,
+        {
+            ...options,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+        },
+        true,
+    );
+}
+
+async function prepareGenderResolutionGeneration(
+    rawInput: GenderResolutionInput,
+    rawAuditContext: StagedAiAuditContext,
+    options: {
+        abortSignal?: AbortSignal;
+        replayCapability?: ReplayStatelessCapability;
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+    },
+    strongUncertain = false,
+) {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
     const projection = genderResolutionMediaProjection(media);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_LATEST_VERSION;
     const prompt = genderResolutionPrompt(projection.projectedMedia);
-    const identity = stagedResultIdentity(
-        'genderResolution',
-        prompt,
-        media,
-        'request',
-        policyVersion,
-        options.experimentPolicy,
-    );
+    const identity = strongUncertain
+        ? createAnalysisV2AiResultIdentity({
+            stage: 'genderResolution',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'HIGH',
+            mediaResolution: 'HIGH',
+            promptVersion: getAiStagePolicy(policyVersion, 'genderResolution').promptVersion,
+            schemaVersion: getAiStagePolicy(policyVersion, 'genderResolution').schemaVersion,
+            maxOutputTokens: 512,
+            inputHash: createAnalysisV2AiResultInputHash(prompt),
+            mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
+            cacheScope: 'request',
+        })
+        : stagedResultIdentity('genderResolution', prompt, media, 'request', policyVersion);
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderResolutionModelResponseSchemaFor(
         projection.projectedMedia
     );
     const prepared = await prepareStagedResult(audit, responseSchema);
-    const checkpointAssessment = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
-        prompt,
-        media.map(item => item.normalizedJpegBase64),
-        {
-            schema: responseSchema,
-            analysisType: 'v2_gender_resolution',
-            stage: 'genderResolution',
-            aiStagePolicyVersion: policyVersion,
-            requestId: audit.requestId,
-            startingAttempt: prepared.startingAttempt,
-            abortSignal: options.abortSignal,
-            onBeforeAttempt: audit.onBeforeAttempt,
-            onAttemptTelemetry: audit.onAttemptTelemetry,
-            ...(options.replayCapability
-                ? { skipTokenLog: true, replayCapability: options.replayCapability }
-                : {}),
-            ...(options.experimentPolicy ?? {}),
-        },
-    ));
-    const assessment = genderResolutionModelResponseSchema.parse({
+    const finalize = (checkpointAssessment: z.infer<typeof genderResolutionModelResponseSchema>) => {
+      const assessment = genderResolutionModelResponseSchema.parse({
         ...checkpointAssessment,
         evidenceSelectionIds: checkpointAssessment.evidenceSelectionIds.map(
             selectionId => {
@@ -1968,10 +2002,28 @@ export async function genderResolution(
             }
         ),
     });
-    return genderResolutionResultSchema.parse({
+      return genderResolutionResultSchema.parse({
         assessment,
         analyzedSelectionIds: media.map(item => item.selectionId),
-    });
+      });
+    };
+    return {
+        cached: prepared.cached,
+        generation: {
+            prompt,
+            images: media.map(item => item.normalizedJpegBase64),
+            schema: responseSchema,
+            policyVersion,
+            audit,
+            startingAttempt: prepared.startingAttempt,
+            abortSignal: options.abortSignal,
+            replayCapability: options.replayCapability,
+        } satisfies PreparedGenderResolutionGeneration<
+            z.infer<typeof genderResolutionModelResponseSchema>
+        >,
+        finalize,
+        identity,
+    };
 }
 
 export async function featureAnalysis(

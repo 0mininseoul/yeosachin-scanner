@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
     STRONG_UNCERTAIN_RESOLVER_EXPERIMENT,
     STRONG_UNCERTAIN_RESOLVER_EXPERIMENT_CAPABILITY,
+    parseStrongUncertainResolverExperimentBundle,
     type AnalysisV2ReplayBundle,
 } from './replay-bundle';
 import { HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY } from './replay-source-lineage';
@@ -48,6 +49,7 @@ export function deriveStrongUncertainResolverExperiment(
         capture: {
             ...parent.capture,
             scope: 'ai-only-resolver-experiment',
+            notProduction: true,
             evaluationPolicy: {
                 capability: STRONG_UNCERTAIN_RESOLVER_EXPERIMENT_CAPABILITY,
                 aiStage: 'ai-stage-policy-v2.9',
@@ -69,13 +71,5 @@ export function deriveStrongUncertainResolverExperiment(
 export function assertStrongUncertainResolverExperiment(
     bundle: AnalysisV2ReplayBundle,
 ): asserts bundle is StrongUncertainResolverExperimentBundle {
-    if (
-        bundle.schemaVersion !== 3
-        || bundle.capture.experiment.id !== STRONG_UNCERTAIN_RESOLVER_EXPERIMENT
-        || bundle.capture.evaluationPolicy.capability
-            !== STRONG_UNCERTAIN_RESOLVER_EXPERIMENT_CAPABILITY
-        || bundle.capture.evaluationPolicy.aiStage !== 'ai-stage-policy-v2.9'
-    ) {
-        throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_CAPABILITY_MISMATCH');
-    }
+    parseStrongUncertainResolverExperimentBundle(bundle);
 }
