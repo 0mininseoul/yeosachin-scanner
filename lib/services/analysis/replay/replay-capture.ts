@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { MAX_RECENT_POSTS, selectAnalysisMedia, type SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import type { AnalysisV2CheckpointProfile } from '@/lib/services/analysis/v2-profile-fetch-store';
-import { ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS } from '@/lib/services/analysis/v2-ai-scoring-executors';
-import { classifyAnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
+import {
+    isAnalysisV2PartialMediaCoverageAllowed,
+    normalizeAnalysisV2MediaSelections,
+} from '@/lib/services/analysis/v2-ai-scoring-executors';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import type { ReplayProviderLedgerIdentity } from './replay-readonly-apify';
 import {
@@ -52,23 +54,6 @@ function selectionMedia(profile: AnalysisV2CheckpointProfile): readonly Selected
     return policy.feature.media;
 }
 
-async function normalizeExact(
-    media: SelectedAnalysisMedia,
-    normalize: (media: SelectedAnalysisMedia) => Promise<Buffer>,
-): Promise<Buffer> {
-    for (let attempt = 1; attempt <= ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS; attempt++) {
-        try {
-            return await normalize(media);
-        } catch (error) {
-            const failure = classifyAnalysisImagePreparationError(error, 'download');
-            if (failure.disposition !== 'transient' || attempt === ANALYSIS_V2_MEDIA_NORMALIZATION_MAX_ATTEMPTS) {
-                fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
-            }
-        }
-    }
-    return fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
-}
-
 function jpeg(buffer: Buffer): boolean {
     return buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
 }
@@ -103,10 +88,18 @@ export async function captureAnalysisV2ReplayBundle(input: {
             profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
             posts: profile.latestPosts ?? [],
         });
-        const normalized = await Promise.all(selected.map(async media => ({ media, bytes: await normalizeExact(media, input.normalizeMedia) })));
-        if (normalized.length !== selected.length || normalized.some(item => !jpeg(item.bytes))) {
+        const normalized = await normalizeAnalysisV2MediaSelections(
+            selected,
+            input.normalizeMedia,
+            request.sourceLineage.policyVersions.aiStage,
+        );
+        if (
+            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
+            || normalized.media.some(item => !jpeg(normalized.bytes.get(item.selectionId)!))
+        ) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         }
+        const normalizedSelectionIds = new Set(normalized.media.map(item => item.selectionId));
         profiles.push({
             ordinal: index + 1,
             isPrivate: profile.isPrivate,
@@ -114,30 +107,30 @@ export async function captureAnalysisV2ReplayBundle(input: {
             fullName: profile.fullName ?? null,
             hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
             bio: profile.isPrivate ? undefined : profile.bio ?? null,
-            media: normalized.map(({ media, bytes }) => ({
+            media: normalized.media.map(media => ({
                 selectionId: media.selectionId,
-                kind: media.role === 'profile' ? 'profile' as const : 'feed' as const,
+                kind: media.kind === 'profile' ? 'profile' as const : 'feed' as const,
                 ...(media.postId ? { postId: media.postId } : {}),
                 caption: media.postId
                     ? profile.latestPosts?.find(post => post.id === media.postId)?.caption ?? null
                     : null,
-                jpegBase64: bytes.toString('base64'),
+                jpegBase64: normalized.bytes.get(media.selectionId)!.toString('base64'),
             })),
-            triageSelectionIds: policy?.triage.selectionIds ?? [],
-            featureSelectionIds: policy?.feature.selectionIds ?? [],
+            triageSelectionIds: (policy?.triage.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
+            featureSelectionIds: (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
             // Production passes the complete normalized feature set to the resolver;
             // the resolver applies its own current projection/media limit.
-            resolverSelectionIds: policy?.feature.selectionIds ?? [],
+            resolverSelectionIds: (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
             captions: policy ? buildCarouselCaptionPolicy({
                 targetUsername: profile.username,
                 profile,
                 featureSelections: policy.feature.media,
                 partnerSelections: policy.partnerSafetyContactSheetCandidates.media,
-            }).featureCaptions : [],
+            }).featureCaptions.filter(caption => normalizedSelectionIds.has(caption.selectionId)) : [],
             coverage: {
-                selectedCount: selected.length,
-                normalizedCount: normalized.length,
-                failures: [],
+                selectedCount: normalized.coverage.selectedCount,
+                normalizedCount: normalized.coverage.normalizedCount,
+                failures: normalized.coverage.failures.map(failure => ({ ...failure })),
             },
         });
     }

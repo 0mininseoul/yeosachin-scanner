@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { captureAnalysisV2ReplayBundle } from './replay-capture';
+import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 
 const STANDARD_SOURCE_LINEAGE = {
     selectedPlanId: 'standard' as const,
@@ -193,5 +194,40 @@ describe('analysis V2 replay capture', () => {
                 loadReplaySource: async () => ({ profiles: [profile], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] }, providerRuns: [] }),
             }, normalizeMedia: async () => Buffer.alloc(0),
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
+    });
+
+    it('records only production-usable partial media coverage for a v2.7 source', async () => {
+        const richProfile = {
+            ...profile,
+            postsCount: 4,
+            latestPosts: Array.from({ length: 4 }, (_, index) => ({
+                ...profile.latestPosts[0],
+                id: `post-${index}`,
+                shortCode: `post-${index}`,
+                imageUrl: `https://cdninstagram.com/post-${index}.jpg`,
+            })),
+        };
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({ requestFingerprint: 'e'.repeat(64), sourceLineage: STANDARD_SOURCE_LINEAGE, completed: true }),
+                loadReplaySource: async () => ({ profiles: [richProfile], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] }, providerRuns: [] }),
+            },
+            normalizeMedia: async media => {
+                if (media.selectionId.includes('post-0')) {
+                    throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                }
+                return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+            },
+        });
+
+        const captured = bundle.profiles[0]!;
+        expect(captured.coverage).toMatchObject({
+            selectedCount: 5,
+            normalizedCount: 4,
+            failures: [{ reason: 'source_missing', disposition: 'permanent' }],
+        });
+        expect(captured.featureSelectionIds).toEqual(captured.media.map(media => media.selectionId));
+        expect(captured.triageSelectionIds.every(id => captured.media.some(media => media.selectionId === id))).toBe(true);
     });
 });

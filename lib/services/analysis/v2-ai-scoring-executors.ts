@@ -746,7 +746,7 @@ function policySupports(
     }
 }
 
-async function normalizedSelections(
+export async function normalizeAnalysisV2MediaSelections(
     selected: readonly SelectedAnalysisMedia[],
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>,
     aiStagePolicyVersion: string = 'ai-stage-policy-v2.6',
@@ -839,8 +839,8 @@ function isAnalysisV2StageMediaCoverageUsable(
 
 function mergeNormalizedSelections(
     selected: readonly SelectedAnalysisMedia[],
-    parts: readonly Awaited<ReturnType<typeof normalizedSelections>>[]
-): Awaited<ReturnType<typeof normalizedSelections>> {
+    parts: readonly Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>>[]
+): Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>> {
     const bytes = new Map(parts.flatMap(part => [...part.bytes.entries()]));
     const failures = new Map(parts.flatMap(part => part.coverage.failures.map(failure => [
         failure.selectionId,
@@ -1451,7 +1451,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 : {}),
                         }
                         : undefined;
-                    const triageNormalized = await normalizedSelections(
+                    const triageNormalized = await normalizeAnalysisV2MediaSelections(
                         policy.triage.media,
                         dependencies.normalizeMedia,
                         aiFence.aiStagePolicyVersion,
@@ -1568,7 +1568,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const featureRemainder = policy.feature.media.filter(media => (
                         !triageAttempted.has(media.selectionId)
                     ));
-                    const remainderNormalized = await normalizedSelections(
+                    const remainderNormalized = await normalizeAnalysisV2MediaSelections(
                         featureRemainder,
                         dependencies.normalizeMedia,
                         aiFence.aiStagePolicyVersion,
@@ -2253,7 +2253,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     featureSelections: selected.feature.media,
                     partnerSelections: contactCandidates,
                 });
-                const normalized = await normalizedSelections(
+                const normalized = await normalizeAnalysisV2MediaSelections(
                     contactCandidates,
                     dependencies.normalizeMedia
                 );

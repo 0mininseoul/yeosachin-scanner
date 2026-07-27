@@ -243,9 +243,15 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
             || profile.resolverSelectionIds.length > 0
             || profile.captions.length > 0
         );
-        const invalidCoverage = profile.coverage.selectedCount !== profile.media.length
+        const failureIds = new Set(profile.coverage.failures.map(failure => failure.selectionId));
+        const invalidCoverage = profile.coverage.selectedCount !== profile.media.length + profile.coverage.failures.length
             || profile.coverage.normalizedCount !== profile.media.length
-            || profile.coverage.failures.length > 0;
+            || failureIds.size !== profile.coverage.failures.length
+            || [...failureIds].some(id => ids.has(id))
+            || (!profile.isPrivate && (
+                profile.coverage.normalizedCount < 1
+                || profile.coverage.failures.length * 5 > profile.coverage.selectedCount
+            ));
         if (invalidPublic || invalidPrivate || invalidCoverage) {
             throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
         }
