@@ -5,6 +5,7 @@ import {
     downloadSecureImage,
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
     isPublicNetworkAddress,
+    pinnedLookup,
     requestPinnedHttpsImage,
     SecureImageFetchError,
     validateAllowedRemoteImageUrl,
@@ -71,6 +72,63 @@ describe('secure image URL validation', () => {
 });
 
 describe('secure image downloads', () => {
+    it('always defers pinned lookup success and ENOTFOUND callbacks without changing validated addresses', async () => {
+        const lookup = pinnedLookup([
+            { address: '2606:4700:4700::1111', family: 6 },
+            { address: '93.184.216.34', family: 4 },
+        ]);
+        const events: string[] = [];
+        const all = new Promise<unknown[]>((resolve, reject) => {
+            lookup('ignored.invalid', { all: true }, (error, addresses) => {
+                events.push('all');
+                if (error) reject(error);
+                else resolve(Array.isArray(addresses) ? addresses : []);
+            });
+        });
+        const missing = new Promise<NodeJS.ErrnoException>((resolve) => {
+            pinnedLookup([{ address: '2606:4700:4700::1111', family: 6 }])(
+                'ignored.invalid',
+                { family: 4 },
+                error => {
+                events.push('missing');
+                resolve(error as NodeJS.ErrnoException);
+                },
+            );
+        });
+        events.push('returned');
+
+        expect(events).toEqual(['returned']);
+        await expect(all).resolves.toEqual([
+            { address: '2606:4700:4700::1111', family: 6 },
+            { address: '93.184.216.34', family: 4 },
+        ]);
+        await expect(missing).resolves.toMatchObject({ code: 'ENOTFOUND' });
+        expect(events).toEqual(['returned', 'all', 'missing']);
+    });
+
+    it('lets real https.request return before a bounded IPv6 connection failure can emit', async () => {
+        const controller = new AbortController();
+        const uncaught: unknown[] = [];
+        const onUncaught = (error: unknown) => uncaught.push(error);
+        process.on('uncaughtExceptionMonitor', onUncaught);
+        let returned = false;
+        try {
+            const pending = requestPinnedHttpsImage(
+                new URL('https://controlled.invalid/image.jpg'),
+                { signal: controller.signal },
+                [{ address: '2606:4700:4700::1111', family: 6 }],
+            );
+            returned = true;
+            setTimeout(() => controller.abort(), 25);
+            await expect(pending).rejects.toBeInstanceOf(Error);
+            await new Promise(resolve => setImmediate(resolve));
+        } finally {
+            process.off('uncaughtExceptionMonitor', onUncaught);
+        }
+        expect(returned).toBe(true);
+        expect(uncaught).toEqual([]);
+    });
+
     it('captures a direct asynchronous TLS socket EHOSTUNREACH and cleans transport listeners', async () => {
         const request = new EventEmitter() as EventEmitter & { end: () => void };
         const socket = new EventEmitter();
@@ -102,15 +160,11 @@ describe('secure image downloads', () => {
     });
 
     it('maps an IPv6 unreachable transport rejection to bounded network failure semantics', async () => {
-        const error = Object.assign(new Error('connect EHOSTUNREACH'), {
-            code: 'EHOSTUNREACH',
-        });
         await expect(downloadSecureImage('https://cdninstagram.com/image.jpg', {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            requestImpl: async () => { throw error; },
             resolveHostname: async () => [{ address: '2606:4700:4700::1111', family: 6 }],
             maxBytes: 100,
-            timeoutMs: 1_000,
+            timeoutMs: 250,
         })).rejects.toMatchObject({
             reason: 'network_failure',
             disposition: 'transient',

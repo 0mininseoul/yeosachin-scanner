@@ -99,7 +99,7 @@ async function defaultResolveHostname(hostname: string): Promise<ResolvedAddress
     return lookup(hostname, { all: true, verbatim: true });
 }
 
-function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
+export function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
     return (_hostname, options, callback) => {
         const requestedFamily = options.family || 0;
         const eligible = requestedFamily === 0
@@ -110,14 +110,17 @@ function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
                 'No validated image address matches the requested family'
             ) as NodeJS.ErrnoException;
             error.code = 'ENOTFOUND';
-            callback(error, '', 0);
+            queueMicrotask(() => callback(error, '', 0));
             return;
         }
         if (options.all) {
-            callback(null, eligible.map(({ address, family }) => ({ address, family })));
+            queueMicrotask(() => callback(
+                null,
+                eligible.map(({ address, family }) => ({ address, family })),
+            ));
             return;
         }
-        callback(null, eligible[0].address, eligible[0].family);
+        queueMicrotask(() => callback(null, eligible[0].address, eligible[0].family));
     };
 }
 
