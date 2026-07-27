@@ -1,12 +1,16 @@
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
 import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
+import {
+    deliverKakaoSignupDiscordNotifications,
+    stageKakaoSignupDiscordProfile,
+} from '@/lib/services/identity/kakao-signup-discord';
 import {
     observeRoute,
     type OperationalRequestContext,
@@ -19,12 +23,42 @@ function asRecord(value: unknown): Record<string, unknown> {
         : {};
 }
 
+async function stageUnavailableKakaoSignupProfile(
+    userId: string,
+    signedUpAt: Date,
+): Promise<void> {
+    await stageKakaoSignupDiscordProfile(userId, {
+        name: null,
+        birthyear: null,
+        gender: null,
+        signedUpAt,
+    });
+}
+
+function scheduleKakaoSignupDiscordDelivery(userId: string): void {
+    // `after` keeps this best-effort work outside the auth response. Return the
+    // delivery lifecycle to Next so the runtime can keep it alive, while still
+    // absorbing unexpected delivery failures.
+    const deliver = async (): Promise<void> => {
+        await deliverKakaoSignupDiscordNotifications({ userId }).catch(() => undefined);
+    };
+
+    try {
+        after(deliver);
+    } catch {
+        // Local/test runtimes can reject `after`; still attempt delivery without
+        // ever making the successful OAuth callback depend on it.
+        void deliver();
+    }
+}
+
 // 카카오 성별·출생연도·전화번호 등은 OIDC ID 토큰에 없고 REST API(/v2/user/me)에만 있으므로,
 // 로그인 직후 확보한 provider_token(카카오 access token)으로 직접 조회해 users 테이블에 저장한다.
 async function syncKakaoProfile(
     userId: string,
     email: string | undefined,
-    providerToken: string
+    providerToken: string,
+    signedUpAt: Date,
 ): Promise<'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null> {
     const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${providerToken}` },
@@ -32,6 +66,7 @@ async function syncKakaoProfile(
     });
     if (!res.ok) {
         console.error('Kakao /v2/user/me failed:', res.status);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt);
         return 'PROVIDER_ERROR';
     }
     const data: unknown = await res.json();
@@ -69,8 +104,15 @@ async function syncKakaoProfile(
         }, { onConflict: 'id' });
     if (error) {
         console.error('users upsert (kakao profile) failed:', error.code);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt);
         return 'INTERNAL_ERROR';
     }
+    await stageKakaoSignupDiscordProfile(userId, {
+        name: account.name ?? profile.nickname,
+        birthyear: account.birthyear,
+        gender: account.gender,
+        signedUpAt,
+    });
     return null;
 }
 
@@ -150,18 +192,22 @@ async function handleGET(
     const authedUser = exchange?.user;
     const provider = authProvider(authedUser?.app_metadata?.provider);
     if (authedUser && provider === 'kakao') {
+        const signedUpAt = new Date(authedUser.created_at ?? Date.now());
         let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
         if (!session?.provider_token) {
+            await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt);
             errorCode = 'PROVIDER_ERROR';
         } else {
             try {
                 errorCode = await syncKakaoProfile(
                     authedUser.id,
                     authedUser.email ?? undefined,
-                    session.provider_token
+                    session.provider_token,
+                    signedUpAt,
                 );
             } catch {
                 console.error('Kakao profile sync failed');
+                await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt);
                 errorCode = 'INTERNAL_ERROR';
             }
         }
@@ -179,6 +225,9 @@ async function handleGET(
                 },
             });
         }
+        // The first-signup DB trigger is the only enqueue authority. Delivery runs
+        // asynchronously so Discord cannot delay or fail a completed login.
+        scheduleKakaoSignupDiscordDelivery(authedUser.id);
     }
 
     const redirectUrl = appRedirectUrlForRequest(request.url, searchParams.get('next'));

@@ -10,6 +10,8 @@ const createLandingLeads = migration('20260719160000_add_landing_leads.sql');
 const addInputContext = migration(
     '20260725021500_add_landing_lead_input_context.sql',
 );
+// WASM/Postgres startup can exceed Vitest's default on cold CI workers.
+const PGLITE_TEST_TIMEOUT_MS = 30_000;
 const databases: PGlite[] = [];
 
 async function createDatabase(): Promise<PGlite> {
@@ -99,7 +101,7 @@ describe('landing_leads input context database behavior', () => {
             { input_context: 'excluded', count: 1 },
             { input_context: 'target', count: 3 },
         ]);
-    });
+    }, PGLITE_TEST_TIMEOUT_MS);
 
     it('rejects malformed context rows and keeps client roles locked out', async () => {
         const db = await createDatabase();
@@ -125,5 +127,5 @@ describe('landing_leads input context database behavior', () => {
                 'SELECT instagram_id FROM public.landing_leads',
             ))).rejects.toThrow();
         }
-    });
+    }, PGLITE_TEST_TIMEOUT_MS);
 });

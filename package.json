@@ -31,6 +31,7 @@
     "@axiomhq/nextjs": "0.3.0",
     "@google-cloud/tasks": "6.2.3",
     "@google/genai": "^2.7.0",
+    "@sentry/nextjs": "^10.68.0",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.91.0",
     "@vercel/analytics": "^2.0.1",
