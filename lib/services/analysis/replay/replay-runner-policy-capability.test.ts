@@ -195,8 +195,9 @@ describe('replay staged AI runner policy capability', () => {
     });
 
     it('fails closed before AI when a legacy bundle lacks v2.9 profile-image evidence', async () => {
-        const { hasProfileImage: _omitted, ...legacyProfile } =
+        const { hasProfileImage, ...legacyProfile } =
             v28ToV29Bundle.profiles[0]!;
+        void hasProfileImage;
         await expect(runAnalysisV2AiReplay({
             bundle: {
                 ...v28ToV29Bundle,
@@ -211,8 +212,9 @@ describe('replay staged AI runner policy capability', () => {
     });
 
     it('prevalidates every public v2.9 profile before starting private or public AI', async () => {
-        const { hasProfileImage: _omitted, ...legacyProfile } =
+        const { hasProfileImage, ...legacyProfile } =
             v28ToV29Bundle.profiles[0]!;
+        void hasProfileImage;
         const privateProfile = {
             ordinal: 2,
             isPrivate: true,
@@ -680,8 +682,9 @@ describe('replay staged AI runner policy capability', () => {
     });
 
     it('keeps legacy v2.8 replay unchanged when historical bundles lack profile-image evidence', async () => {
-        const { hasProfileImage: _omitted, ...legacyProfile } =
+        const { hasProfileImage, ...legacyProfile } =
             v28Bundle.profiles[0]!;
+        void hasProfileImage;
         await expect(runAnalysisV2AiReplay({
             bundle: { ...v28Bundle, profiles: [legacyProfile] },
             runner: createReplayStagedAiAdapter('ai-stage-policy-v2.8'),
