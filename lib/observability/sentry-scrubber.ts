@@ -2,7 +2,7 @@ import type { SpanJSON, TransactionEvent } from '@sentry/core';
 import type { Breadcrumb, ErrorEvent } from '@sentry/nextjs';
 
 const REDACTED = '[Filtered]';
-const SENSITIVE_KEY = /(?:pass(?:word)?|otp|authorization|cookie|token|secret|session|email|e-?mail|phone|birth(?:year|date)?|user[_-]?id|account[_-]?id|instagram|profile(?:[_-]?image)?|webhook|supabase|discord)/iu;
+const SENSITIVE_KEY = /(?:pass(?:word)?|otp|authorization|cookie|token|secret|session|email|e-?mail|phone|birth(?:year|date)?|user[_-]?id|account[_-]?id|(?:analysis|candidate|target|preflight|suspect)[_-]?(?:id|key|run)?|run[_-]?id|request[_-]?id|instagram|profile(?:[_-]?image)?|webhook|supabase|discord)/iu;
 const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
 const PHONE = /(?<!\d)(?:\+?\d[\d ()-]{7,}\d)(?!\d)/gu;
 const BIRTHDATE = /\b(?:19|20)\d{2}[-/.](?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])\b/g;

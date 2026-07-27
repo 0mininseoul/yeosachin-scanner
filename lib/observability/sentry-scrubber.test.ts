@@ -14,6 +14,12 @@ describe('Sentry privacy scrubber', () => {
             user: { id: '123e4567-e89b-42d3-a456-426614174000', email: 'user@example.com' },
             request: { url: 'https://example.test/?token=top-secret', headers: { authorization: 'Bearer top-secret' } },
             extra: { password: 'nope' },
+            tags: {
+                run_id: 'analysis-run-raw',
+                requestId: 'request-raw',
+                candidateKey: 'candidate-raw',
+                accountIdentifier: 'account-raw',
+            },
             contexts: { custom: { birthyear: '1994' } },
             breadcrumbs: [{
                 category: 'fetch',
@@ -42,6 +48,10 @@ describe('Sentry privacy scrubber', () => {
         expect(serialised).not.toContain(webhook);
         expect(serialised).not.toContain('cdninstagram.com');
         expect(serialised).not.toContain('423e4567-e89b-42d3-a456-426614174000');
+        expect(serialised).not.toContain('analysis-run-raw');
+        expect(serialised).not.toContain('request-raw');
+        expect(serialised).not.toContain('candidate-raw');
+        expect(serialised).not.toContain('account-raw');
     });
 
     it('scrubs transaction URL/query attributes and child span descriptions before tracing transport', () => {
@@ -56,6 +66,9 @@ describe('Sentry privacy scrubber', () => {
                 data: {
                     'http.url': 'https://discord.com/api/webhooks/123/secret?thread_id=private',
                     authorization: 'Basic private',
+                    analysisRunId: 'analysis-run-raw',
+                    preflight_key: 'preflight-raw',
+                    targetId: 'target-raw',
                 },
                 description: 'GET https://scontent.cdninstagram.com/avatar.jpg?token=private',
             }],
@@ -71,5 +84,8 @@ describe('Sentry privacy scrubber', () => {
         expect(serialised).not.toContain('discord.com');
         expect(serialised).not.toContain('cdninstagram.com');
         expect(serialised).not.toContain('private');
+        expect(serialised).not.toContain('analysis-run-raw');
+        expect(serialised).not.toContain('preflight-raw');
+        expect(serialised).not.toContain('target-raw');
     });
 });
