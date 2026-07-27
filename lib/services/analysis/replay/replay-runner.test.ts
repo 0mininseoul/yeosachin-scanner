@@ -778,4 +778,124 @@ describe('AI-only replay runner', () => {
         expect(report.resolver.cutoff).toBe(5);
         expect(report.gender.unknown).toBe(5);
     });
+
+    it('aborts and observes a launched resolver when private-name work rejects', async () => {
+        let rejectPrivate!: (error: Error) => void;
+        let resolverSignal: AbortSignal | undefined;
+        let resolverRejected = false;
+        const privateNames = vi.fn(() => new Promise<never>((_, reject) => {
+            rejectPrivate = reject;
+        }));
+        const resolveGender = vi.fn((input: Parameters<
+            NonNullable<ReplayAiRunner['resolveGender']>
+        >[0]) => new Promise<never>((_, reject) => {
+            resolverSignal = input.signal;
+            input.signal.addEventListener('abort', () => {
+                resolverRejected = true;
+                reject(new Error('resolver aborted'));
+            }, { once: true });
+        }));
+        const pending = runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 10,
+            runner: v27Runner({
+                privateNames,
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        features: {
+                            gender: 'unknown',
+                            genderConfidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            appearanceGrade: 3,
+                            exposureScore: 0,
+                            businessClassification: 'uncertain',
+                            businessConfidence: 'low',
+                            accountContext: 'uncertain',
+                            marriageEvidence: 'none',
+                            partnerEvidence: 'none',
+                            partnerExclusionContext: 'none',
+                            evidenceSelectionIds: {
+                                gender: [], appearance: [], exposure: [],
+                                business: [], accountContext: [], marriagePartner: [],
+                            },
+                            oneLineOverview: '공개 단서가 부족해 계정 맥락을 확정하기 어렵습니다.',
+                        },
+                        finalGenderDecision: 'unresolved',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                resolveGender,
+            }),
+        });
+
+        await vi.waitFor(() => expect(resolveGender).toHaveBeenCalledOnce());
+        rejectPrivate(new Error('private failed'));
+        await expect(pending).rejects.toThrow('private failed');
+        expect(resolverSignal?.aborted).toBe(true);
+        expect(resolverRejected).toBe(true);
+    });
+
+    it('aborts and observes a launched resolver when feature work rejects', async () => {
+        let rejectFeature!: (error: Error) => void;
+        let resolverSignal: AbortSignal | undefined;
+        let resolverRejected = false;
+        const resolveGender = vi.fn((input: Parameters<
+            NonNullable<ReplayAiRunner['resolveGender']>
+        >[0]) => new Promise<never>((_, reject) => {
+            resolverSignal = input.signal;
+            input.signal.addEventListener('abort', () => {
+                resolverRejected = true;
+                reject(new Error('resolver aborted'));
+            }, { once: true });
+        }));
+        const pending = runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: [bundle.profiles[0]!] },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 10,
+            runner: v27Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: () => new Promise<never>((_, reject) => {
+                    rejectFeature = reject;
+                }),
+                resolveGender,
+            }),
+        });
+
+        await vi.waitFor(() => expect(resolveGender).toHaveBeenCalledOnce());
+        rejectFeature(new Error('feature failed'));
+        await expect(pending).rejects.toThrow('feature failed');
+        expect(resolverSignal?.aborted).toBe(true);
+        expect(resolverRejected).toBe(true);
+    });
 });

@@ -127,6 +127,29 @@ interface PreparedPublicReplay {
     resolver?: TrackedResolver;
 }
 
+async function abortAndObserveResolvers(
+    resolvers: readonly TrackedResolver[],
+    timeoutMs: number,
+): Promise<void> {
+    resolvers.forEach(resolver => {
+        if (!resolver.settled) resolver.abort.abort();
+    });
+    await Promise.all(resolvers.map(async resolver => {
+        if (!resolver.promise) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await Promise.race([
+                resolver.promise.catch(() => undefined),
+                new Promise<undefined>(resolve => {
+                    timer = setTimeout(() => resolve(undefined), timeoutMs);
+                }),
+            ]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }));
+}
+
 function metrics(): ReplayStageMetrics {
     return {
         calls: 0,
@@ -430,11 +453,21 @@ export async function runAnalysisV2AiReplay(input: {
                 username: profile.username,
                 ...(profile.fullName ? { fullName: profile.fullName } : {}),
             }));
-        const privateTask = privateAccounts.length && runner.privateNames
+        let replayWorkFailed = false;
+        const launchedResolvers: TrackedResolver[] = [];
+        const observeRequiredTask = async <T>(task: Promise<T>): Promise<T> => {
+            try {
+                return await task;
+            } catch (error) {
+                replayWorkFailed = true;
+                throw error;
+            }
+        };
+        const privateTask = observeRequiredTask(privateAccounts.length && runner.privateNames
             ? runner.privateNames(privateAccounts).then(result => {
                 collect(stages.privateAccountName, durations.privateAccountName, result);
             })
-            : Promise.resolve();
+            : Promise.resolve());
 
         const prepared: PreparedPublicReplay[] = [];
         const v29AccountProfile = (
@@ -453,6 +486,7 @@ export async function runAnalysisV2AiReplay(input: {
             profile: typeof publicProfiles[number],
             triage: GenderTriageResult,
         ) => {
+            if (replayWorkFailed) return;
             if (triage.routingDecision === 'exclude_high_confidence_male') {
                 gender.male++;
                 return;
@@ -499,6 +533,7 @@ export async function runAnalysisV2AiReplay(input: {
                         pendingAttemptStartedAt: undefined,
                     },
                 };
+                launchedResolvers.push(trackedResolver);
                 const resolverPromise = runner.resolveGender({
                     ordinal: profile.ordinal,
                     media: mediaFor(profile, profile.resolverSelectionIds),
@@ -535,6 +570,7 @@ export async function runAnalysisV2AiReplay(input: {
                     trackedResolver!.value = value;
                     return value;
                 });
+                void trackedResolver.promise.catch(() => undefined);
             }
             const feature = featurePromise ? await featurePromise : undefined;
             if (feature) collect(stages.featureAnalysis, durations.featureAnalysis, feature);
@@ -557,10 +593,11 @@ export async function runAnalysisV2AiReplay(input: {
                 resolver: trackedResolver,
             });
         };
-        const publicTask = runBounded(
+        const publicTask = observeRequiredTask(runBounded(
             publicProfiles,
             replayAiPolicy === 'ai-stage-policy-v2.9' ? 6 : 4,
             async profile => {
+                if (replayWorkFailed) return;
                 if (!runner.triage) return;
                 const triage = await runner.triage({
                     ordinal: profile.ordinal,
@@ -569,6 +606,7 @@ export async function runAnalysisV2AiReplay(input: {
                         ? { accountProfile: v29AccountProfile(profile) }
                         : {}),
                 });
+                if (replayWorkFailed) return;
                 collect(stages.genderTriage, durations.genderTriage, triage);
                 if (triage.outcome !== 'ok' || !triage.value) {
                     gender.unknown++;
@@ -576,8 +614,13 @@ export async function runAnalysisV2AiReplay(input: {
                 }
                 await processTriageResult(profile, triage.value);
             },
-        );
-        await Promise.all([privateTask, publicTask]);
+        ));
+        try {
+            await Promise.all([privateTask, publicTask]);
+        } catch (error) {
+            await abortAndObserveResolvers(launchedResolvers, cutoffBookkeepingMs);
+            throw error;
+        }
 
         await Promise.all(prepared.map(async outcome => {
             let resolved: ReplayInvocation<GenderResolutionResult> | undefined;
