@@ -22,10 +22,9 @@ export function sentryOptions(options: {
     enabled: string | undefined;
 }) {
     const environment = sentryEnvironment();
-    const explicitlyEnabled = options.enabled === 'true';
     return {
         dsn: options.dsn,
-        enabled: Boolean(options.dsn) && (environment !== 'development' || explicitlyEnabled),
+        enabled: Boolean(options.dsn) && options.enabled === 'true',
         environment,
         sendDefaultPii: false,
         tracesSampleRate: sampleRate(

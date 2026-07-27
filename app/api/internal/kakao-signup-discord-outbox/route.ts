@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import {
     deliverKakaoSignupDiscordNotifications,
+    recoverUnstagedKakaoSignupDiscordNotifications,
     reconcileStaleKakaoSignupDiscordClaims,
 } from '@/lib/services/identity/kakao-signup-discord';
 
@@ -14,7 +15,8 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
 
     // The response contains no recipient or Discord information.
+    const recovered = await recoverUnstagedKakaoSignupDiscordNotifications();
     const reconciled = await reconcileStaleKakaoSignupDiscordClaims();
     const claimed = await deliverKakaoSignupDiscordNotifications({ limit: 10 });
-    return NextResponse.json({ claimed, reconciled });
+    return NextResponse.json({ claimed, reconciled, recovered });
 }

@@ -14,6 +14,7 @@ describe('Sentry build source-map upload gate', () => {
         expect(options.org).toBeUndefined();
         expect(options.project).toBeUndefined();
         expect(options.sourcemaps.disable).toBe(true);
+        expect(options.webpack.disableSentryConfig).toBe(true);
     });
 
     it('permits upload only when CI and the dedicated gate are both explicitly true', () => {
@@ -26,5 +27,6 @@ describe('Sentry build source-map upload gate', () => {
         });
         expect(options.authToken).toBe('ci-build-token');
         expect(options.sourcemaps.disable).toBe(false);
+        expect(options.webpack.disableSentryConfig).toBe(false);
     });
 });

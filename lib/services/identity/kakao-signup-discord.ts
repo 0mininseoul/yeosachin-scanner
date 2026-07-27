@@ -251,3 +251,21 @@ export async function reconcileStaleKakaoSignupDiscordClaims(): Promise<number> 
         return 0;
     }
 }
+
+/** Recovers a profile-stage persistence outage after the callback grace window. */
+export async function recoverUnstagedKakaoSignupDiscordNotifications(): Promise<number> {
+    if (!configuredDiscord()) return 0;
+    try {
+        const { data, error } = await supabaseAdmin.rpc('recover_unstaged_kakao_signup_discord_outbox');
+        if (error) {
+            operationalFailure('OUTBOX_PROFILE_STAGE_RECOVERY_FAILED');
+            return 0;
+        }
+        const recovered = typeof data === 'number' ? data : 0;
+        if (recovered > 0) operationalFailure('OUTBOX_PROFILE_STAGE_RECOVERED_UNAVAILABLE');
+        return recovered;
+    } catch {
+        operationalFailure('OUTBOX_PROFILE_STAGE_RECOVERY_FAILED');
+        return 0;
+    }
+}

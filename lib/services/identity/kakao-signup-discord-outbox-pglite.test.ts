@@ -10,6 +10,10 @@ const hardening = readFileSync(new URL(
     '../../../supabase/migrations/20260727150000_harden_kakao_signup_discord_outbox.sql',
     import.meta.url,
 ), 'utf8');
+const recovery = readFileSync(new URL(
+    '../../../supabase/migrations/20260727160000_recover_unstaged_kakao_signup_discord_outbox.sql',
+    import.meta.url,
+), 'utf8');
 const KAKAO_ID = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite;
 
@@ -31,7 +35,8 @@ beforeAll(async () => {
     `);
     await db.exec(foundation);
     await db.exec(hardening);
-});
+    await db.exec(recovery);
+}, 30_000);
 
 afterAll(async () => db.close());
 
@@ -59,7 +64,7 @@ describe('Kakao signup Discord durable outbox', () => {
         );
         await db.exec('RESET ROLE');
         expect(afterStage.rows).toHaveLength(1);
-    });
+    }, 30_000);
 
     it('concurrent claims produce one sender and stale senders terminalize without another claim', async () => {
         await db.exec(`
@@ -97,5 +102,27 @@ describe('Kakao signup Discord durable outbox', () => {
             status: 'ambiguous_failed',
             failure_code: 'DISCORD_CLAIM_LEASE_EXPIRED_AMBIGUOUS',
         });
-    });
+    }, 30_000);
+
+    it('recovers a callback profile-stage failure only after its grace period, then claims once', async () => {
+        const userId = '423e4567-e89b-42d3-a456-426614174000';
+        await db.exec(`
+            INSERT INTO auth.users (id, raw_app_meta_data) VALUES
+                ('${userId}', '{"provider":"kakao"}');
+            UPDATE public.kakao_signup_discord_outbox
+            SET created_at = clock_timestamp() - interval '10 minutes'
+            WHERE user_id = '${userId}';
+            SET ROLE service_role;
+        `);
+        const recovered = await db.query<{ recover_unstaged_kakao_signup_discord_outbox: number }>(
+            'SELECT public.recover_unstaged_kakao_signup_discord_outbox(60)',
+        );
+        const claimed = await db.query<{ id: string }>(
+            'SELECT id FROM public.claim_kakao_signup_discord_outbox($1, 1)', [userId],
+        );
+        await db.exec('RESET ROLE');
+
+        expect(recovered.rows[0]?.recover_unstaged_kakao_signup_discord_outbox).toBe(1);
+        expect(claimed.rows).toHaveLength(1);
+    }, 30_000);
 });

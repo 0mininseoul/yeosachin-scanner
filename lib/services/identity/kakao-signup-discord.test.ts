@@ -154,6 +154,14 @@ describe('Kakao signup Discord notification', () => {
         await expect(reconcileStaleKakaoSignupDiscordClaims()).resolves.toBe(1);
         expect(mocks.rpc).toHaveBeenCalledWith('reconcile_stale_kakao_signup_discord_claims');
     });
+
+    it('recovers an unstaged callback failure as unavailable data before a later claim', async () => {
+        mocks.rpc.mockResolvedValueOnce({ data: 1, error: null });
+        const { recoverUnstagedKakaoSignupDiscordNotifications } = await import('./kakao-signup-discord');
+
+        await expect(recoverUnstagedKakaoSignupDiscordNotifications()).resolves.toBe(1);
+        expect(mocks.rpc).toHaveBeenCalledWith('recover_unstaged_kakao_signup_discord_outbox');
+    });
 });
 
 describe('Kakao signup outbox migration contract', () => {

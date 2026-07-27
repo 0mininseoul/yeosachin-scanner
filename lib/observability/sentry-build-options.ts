@@ -12,6 +12,8 @@ export function sentryBuildOptions(
         project: uploadEnabled ? environment.SENTRY_PROJECT : undefined,
         silent: true,
         sourcemaps: { disable: !uploadEnabled },
+        // Prevent withSentryConfig from installing the webpack plugin/release hooks at all.
+        webpack: { disableSentryConfig: !uploadEnabled },
         telemetry: false,
     };
 }
