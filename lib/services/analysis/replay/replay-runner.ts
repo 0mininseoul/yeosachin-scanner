@@ -30,8 +30,22 @@ export interface ReplayMedia {
     jpegBase64: string;
 }
 
+export interface ReplayTriageInput {
+    ordinal: number;
+    media: readonly ReplayMedia[];
+}
+
+export interface ReplayTriageBatch {
+    ordinals: readonly number[];
+    invocation: ReplayInvocation<readonly {
+        ordinal: number;
+        result: GenderTriageResult;
+    }[]>;
+}
+
 export interface ReplayAiRunner {
-    triage?(input: { ordinal: number; media: readonly ReplayMedia[] }): Promise<ReplayInvocation<GenderTriageResult>>;
+    triage?(input: ReplayTriageInput): Promise<ReplayInvocation<GenderTriageResult>>;
+    triageMany?(inputs: readonly ReplayTriageInput[]): Promise<readonly ReplayTriageBatch[]>;
     feature?(input: { ordinal: number; bio: string | null; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
     resolveGender?(input: {
@@ -351,21 +365,16 @@ export async function runAnalysisV2AiReplay(input: {
             : Promise.resolve();
 
         const prepared: PreparedPublicReplay[] = [];
-        const publicTask = runBounded(
-            input.bundle.profiles.filter(profile => !profile.isPrivate),
-            4,
-            async profile => {
-            if (!runner.triage) return;
-            const triage = await runner.triage({
-                ordinal: profile.ordinal,
-                media: mediaFor(profile, profile.triageSelectionIds),
-            });
-            collect(stages.genderTriage, durations.genderTriage, triage);
-            if (triage.outcome !== 'ok' || !triage.value) {
-                gender.unknown++;
-                return;
-            }
-            if (triage.value.routingDecision === 'exclude_high_confidence_male') {
+        const publicProfiles = input.bundle.profiles.filter(profile => !profile.isPrivate);
+        const profileByOrdinal = new Map(publicProfiles.map(profile => [
+            profile.ordinal,
+            profile,
+        ]));
+        const processTriageResult = async (
+            profile: typeof publicProfiles[number],
+            triage: GenderTriageResult,
+        ) => {
+            if (triage.routingDecision === 'exclude_high_confidence_male') {
                 gender.male++;
                 return;
             }
@@ -374,9 +383,9 @@ export async function runAnalysisV2AiReplay(input: {
                 bio: profile.bio ?? null,
                 media: mediaFor(profile, profile.featureSelectionIds),
                 captions: profile.captions,
-                triage: triage.value,
+                triage,
             });
-            const assessment = triage.value.assessment;
+            const assessment = triage.assessment;
             const eligible = !(
                 assessment.inferredGender === 'female'
                 && assessment.confidence === 'high'
@@ -448,11 +457,64 @@ export async function runAnalysisV2AiReplay(input: {
             }
             prepared.push({
                 baseline,
-                triage: triage.value,
+                triage,
                 feature,
                 resolver: trackedResolver,
             });
-        });
+        };
+        const publicTask = replayAiPolicy === 'ai-stage-policy-v2.9'
+            ? (async () => {
+                if (!runner.triageMany) {
+                    throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+                }
+                const batches = await runner.triageMany(publicProfiles.map(profile => ({
+                    ordinal: profile.ordinal,
+                    media: mediaFor(profile, profile.triageSelectionIds),
+                })));
+                const mapped: Array<{
+                    profile: typeof publicProfiles[number];
+                    triage: GenderTriageResult;
+                }> = [];
+                for (const batch of batches) {
+                    collect(
+                        stages.genderTriage,
+                        durations.genderTriage,
+                        batch.invocation,
+                    );
+                    if (
+                        batch.invocation.outcome !== 'ok'
+                        || !batch.invocation.value
+                    ) {
+                        gender.unknown += batch.ordinals.length;
+                        continue;
+                    }
+                    for (const result of batch.invocation.value) {
+                        const profile = profileByOrdinal.get(result.ordinal);
+                        if (!profile) {
+                            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+                        }
+                        mapped.push({ profile, triage: result.result });
+                    }
+                }
+                await runBounded(
+                    mapped,
+                    3,
+                    item => processTriageResult(item.profile, item.triage),
+                );
+            })()
+            : runBounded(publicProfiles, 4, async profile => {
+                if (!runner.triage) return;
+                const triage = await runner.triage({
+                    ordinal: profile.ordinal,
+                    media: mediaFor(profile, profile.triageSelectionIds),
+                });
+                collect(stages.genderTriage, durations.genderTriage, triage);
+                if (triage.outcome !== 'ok' || !triage.value) {
+                    gender.unknown++;
+                    return;
+                }
+                await processTriageResult(profile, triage.value);
+            });
         await Promise.all([privateTask, publicTask]);
 
         await Promise.all(prepared.map(async outcome => {

@@ -153,6 +153,86 @@ describe('replay staged AI runner policy capability', () => {
         expect(ai.genderTriage).not.toHaveBeenCalled();
     });
 
+    it('reports 120 provider calls for 240 v2.9 profiles instead of 240 logical accounts', async () => {
+        const profiles = Array.from({ length: 240 }, (_, index) => ({
+            ...v28Bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `public-${index + 1}`,
+            media: [{
+                ...v28Bundle.profiles[0]!.media[0]!,
+                selectionId: `m${index + 1}`,
+            }],
+            triageSelectionIds: [`m${index + 1}`],
+            featureSelectionIds: [`m${index + 1}`],
+            resolverSelectionIds: [`m${index + 1}`],
+        }));
+        ai.createGenderTriageMicrobatchAccountId.mockImplementation(
+            (input: { media: Array<{ selectionId: string }> }) => {
+                const ordinal = Number(input.media[0]!.selectionId.slice(1));
+                return `account:${ordinal.toString(16).padStart(64, '0')}`;
+            },
+        );
+        ai.genderTriageMicrobatch.mockImplementation(async (
+            accounts: Array<{ accountId: string; input: { media: Array<{ selectionId: string }> } }>,
+            audit: {
+                onBeforeAttempt(value: { attempt: number; retryCount: number }): void;
+                onAttemptTelemetry(value: {
+                    attempt: number;
+                    retryCount: number;
+                    disposition: 'success';
+                    latencyMs: number;
+                }): void;
+            },
+        ) => {
+            audit.onBeforeAttempt({ attempt: 1, retryCount: 0 });
+            audit.onAttemptTelemetry({
+                attempt: 1,
+                retryCount: 0,
+                disposition: 'success',
+                latencyMs: 10,
+            });
+            return accounts.map(account => ({
+                accountId: account.accountId,
+                source: 'checkpoint',
+                result: {
+                    assessment: {
+                        inferredGender: 'male',
+                        confidence: 'high',
+                        ownerConsistency: 'same_person',
+                        evidenceSelectionIds: [account.input.media[0]!.selectionId],
+                    },
+                    routingDecision: 'exclude_high_confidence_male',
+                    routingReason: 'high_confidence_same_owner_male',
+                    analyzedSelectionIds: [account.input.media[0]!.selectionId],
+                },
+            }));
+        });
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: { ...v28ToV29Bundle, profiles },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        });
+
+        expect(ai.genderTriageMicrobatch).toHaveBeenCalledTimes(120);
+        expect(ai.genderTriageMicrobatch.mock.calls.every(call => call[0].length === 2))
+            .toBe(true);
+        expect(report.stages.genderTriage).toMatchObject({
+            calls: 120,
+            meanLatencyMs: 10,
+            p50LatencyMs: 10,
+            p95LatencyMs: 10,
+        });
+        expect(report.gender).toEqual({
+            male: 240,
+            female: 0,
+            unknown: 0,
+            unknownRate: 0,
+        });
+    });
+
     it('rejects a missing or different runtime evaluation before any AI call', async () => {
         const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.9');
         await expect(runAnalysisV2AiReplay({

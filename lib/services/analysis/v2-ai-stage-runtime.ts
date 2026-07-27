@@ -47,6 +47,7 @@ import {
     type PartnerSafetyInput,
     type PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
+import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
 import {
     AnalysisV2AiResultRecoveredCutoffError,
     AnalysisV2AiResultRecoveryPendingError,
@@ -452,13 +453,10 @@ export function createDurableAnalysisV2AiStageRuntime(
         const group = pendingGenderMicrobatches.get(groupKey);
         if (!group) return;
         pendingGenderMicrobatches.delete(groupKey);
-        const plans = [...group.plans].sort((left, right) => (
-            left.accountId.localeCompare(right.accountId)
-        ));
-        const chunks: PendingGenderMicrobatchPlan[][] = [];
-        for (let index = 0; index < plans.length; index += 2) {
-            chunks.push(plans.slice(index, index + 2));
-        }
+        const chunks = planGenderTriageMicrobatches(group.plans.map(plan => ({
+            accountId: plan.accountId,
+            value: plan,
+        }))).map(batch => batch.map(member => member.value));
         await Promise.all(chunks.map(async chunk => {
             const accounts: GenderTriageMicrobatchAccountInput[] = chunk.map(plan => ({
                 accountId: plan.accountId,

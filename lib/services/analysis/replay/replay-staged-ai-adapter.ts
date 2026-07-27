@@ -15,12 +15,22 @@ import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
-import type { ReplayAiRunner, ReplayInvocation, ReplayMedia, ReplayOutcome } from './replay-runner';
+import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
+import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
+import type {
+    ReplayAiRunner,
+    ReplayInvocation,
+    ReplayMedia,
+    ReplayOutcome,
+    ReplayTriageBatch,
+    ReplayTriageInput,
+} from './replay-runner';
 import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineage';
 
 interface IssuedReplayRunner {
     policyVersion: ReplaySupportedAiStagePolicyVersion;
     triage: ReplayAiRunner['triage'];
+    triageMany: ReplayAiRunner['triageMany'];
     feature: ReplayAiRunner['feature'];
     privateNames: ReplayAiRunner['privateNames'];
     resolveGender: ReplayAiRunner['resolveGender'];
@@ -37,6 +47,7 @@ export function lookupReplayStagedAiAdapterPolicy(
         !issued
         || !Object.isFrozen(runner)
         || runner.triage !== issued.triage
+        || runner.triageMany !== issued.triageMany
         || runner.feature !== issued.feature
         || runner.privateNames !== issued.privateNames
         || runner.resolveGender !== issued.resolveGender
@@ -152,6 +163,22 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
     }
 }
 
+async function runBounded<T>(
+    values: readonly T[],
+    concurrency: number,
+    task: (value: T) => Promise<void>,
+): Promise<void> {
+    let next = 0;
+    await Promise.all(Array.from(
+        { length: Math.min(concurrency, values.length) },
+        async () => {
+            while (next < values.length) {
+                await task(values[next++]!);
+            }
+        },
+    ));
+}
+
 /** Stateless paid-AI adapter. It imports no Supabase, provider, R2, job, result, or archive module. */
 export function createReplayStagedAiAdapter(
     aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
@@ -159,23 +186,75 @@ export function createReplayStagedAiAdapter(
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
     const runner: ReplayAiRunner = {
-        triage: input => invoke(async state => {
-            const aiInput = { media: normalized(input.media) };
-            if (aiStagePolicyVersion === 'ai-stage-policy-v2.9') {
-                const accounts = [{
-                    accountId: createGenderTriageMicrobatchAccountId(aiInput),
-                    input: aiInput,
-                }];
-                const identity = createGenderTriageMicrobatchResultIdentity(accounts);
-                const results = await genderTriageMicrobatch(
-                    accounts,
-                    statelessAudit(requestId, identity, state),
-                    { replayCapability },
+        ...(aiStagePolicyVersion === 'ai-stage-policy-v2.9' ? {
+            async triageMany(inputs: readonly ReplayTriageInput[]) {
+                const members = inputs.map(input => {
+                    const aiInput = { media: normalized(input.media) };
+                    return {
+                        accountId: createGenderTriageMicrobatchAccountId(aiInput),
+                        value: { input, aiInput },
+                    };
+                });
+                const batches = planGenderTriageMicrobatches(members);
+                const ordinalsByAccount = new Map<string, number[]>();
+                for (const member of members) {
+                    const ordinals = ordinalsByAccount.get(member.accountId) ?? [];
+                    ordinals.push(member.value.input.ordinal);
+                    ordinalsByAccount.set(member.accountId, ordinals);
+                }
+                const completed = new Array<ReplayTriageBatch>(batches.length);
+                await runBounded(
+                    batches.map((batch, index) => ({ batch, index })),
+                    ANALYSIS_V2_SCHEDULER_V1_POLICY.genderTriageConcurrency,
+                    async ({ batch, index }) => {
+                        const accounts = batch.map(member => ({
+                            accountId: member.accountId,
+                            input: member.value.aiInput,
+                        }));
+                        const ordinals = batch.flatMap(member => (
+                            ordinalsByAccount.get(member.accountId) ?? []
+                        ));
+                        const invocation = await invoke(async state => {
+                            const identity =
+                                createGenderTriageMicrobatchResultIdentity(accounts);
+                            const results = await genderTriageMicrobatch(
+                                accounts,
+                                statelessAudit(requestId, identity, state),
+                                { replayCapability },
+                            );
+                            const byAccount = new Map(results.map(result => [
+                                result.accountId,
+                                result.result,
+                            ]));
+                            return batch.flatMap(member => {
+                                const result = byAccount.get(member.accountId);
+                                if (!result) {
+                                    throw new Error(
+                                        'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_RESULT_MISSING',
+                                    );
+                                }
+                                return (ordinalsByAccount.get(member.accountId) ?? [])
+                                    .map(ordinal => ({ ordinal, result }));
+                            });
+                        });
+                        completed[index] = { ordinals, invocation };
+                    },
                 );
-                return results[0]!.result;
-            }
-            const identity = createGenderTriageResultIdentity(aiInput, aiStagePolicyVersion);
-            return genderTriage(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
+                return completed;
+            },
+        } : {
+            triage: (input: ReplayTriageInput) => invoke(async state => {
+                const aiInput = { media: normalized(input.media) };
+                const identity = createGenderTriageResultIdentity(
+                    aiInput,
+                    aiStagePolicyVersion,
+                );
+                return genderTriage(
+                    aiInput,
+                    statelessAudit(requestId, identity, state),
+                    { aiStagePolicyVersion, replayCapability },
+                );
+            }),
         }),
         feature: input => invoke(async state => {
             const aiInput = { triage: input.triage, bio: input.bio, media: normalized(input.media), captions: [...input.captions] };
@@ -221,6 +300,7 @@ export function createReplayStagedAiAdapter(
     issuedReplayRunners.set(runner, {
         policyVersion: aiStagePolicyVersion,
         triage: runner.triage,
+        triageMany: runner.triageMany,
         feature: runner.feature,
         privateNames: runner.privateNames,
         resolveGender: runner.resolveGender,
