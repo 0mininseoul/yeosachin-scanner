@@ -88,19 +88,43 @@ function isProductionAllowedCandidateProfileFailure(error: Error): boolean {
         || error.message.startsWith('SCRAPING_INCOMPLETE_ERROR:');
 }
 
-function isProductionCompleteCandidateProfileDataset(input: {
+type CandidateProfileAttempt =
+    | { status: 'success'; profile: AnalysisV2CheckpointProfile }
+    | { status: 'failed'; error: Error }
+    | { status: 'unavailable' };
+
+function candidateProfileAttempts(input: {
     usernames: readonly string[];
     parsed: ReturnType<typeof parseApifyProfileDataset>;
-}): boolean {
-    const { usernames, parsed } = input;
-    const allowedFailures = usernames.length - Math.ceil(0.9 * usernames.length);
-    return !parsed.datasetContaminated
-        && parsed.profilesByUsername.size
-            + parsed.failuresByUsername.size
-            + parsed.notFoundUsernames.size === usernames.length
-        && parsed.failuresByUsername.size <= allowedFailures
-        && [...parsed.failuresByUsername.values()]
-            .every(isProductionAllowedCandidateProfileFailure);
+}): Map<string, CandidateProfileAttempt> | null {
+    const attempts = new Map<string, CandidateProfileAttempt>();
+    for (const [username, profile] of input.parsed.profilesByUsername) {
+        attempts.set(username, { status: 'success', profile: asCheckpoint(profile) });
+    }
+    for (const [username, error] of input.parsed.failuresByUsername) {
+        if (attempts.has(username)) return null;
+        attempts.set(username, { status: 'failed', error });
+    }
+    for (const username of input.parsed.notFoundUsernames) {
+        if (attempts.has(username)) return null;
+        attempts.set(username, { status: 'unavailable' });
+    }
+    return input.parsed.datasetContaminated || attempts.size !== input.usernames.length
+        ? null
+        : attempts;
+}
+
+function isProductionCompleteCandidateProfileBatch(
+    attempts: readonly CandidateProfileAttempt[],
+): boolean {
+    const failures = attempts.filter(
+        (attempt): attempt is Extract<CandidateProfileAttempt, { status: 'failed' }> => (
+            attempt.status === 'failed'
+        ),
+    );
+    const allowedFailures = attempts.length - Math.ceil(0.9 * attempts.length);
+    return failures.length <= allowedFailures
+        && failures.every(attempt => isProductionAllowedCandidateProfileFailure(attempt.error));
 }
 
 function asCheckpoint(profile: ReturnType<typeof parseApifyProfileDataset>['profilesByUsername'] extends Map<string, infer P> ? P : never): AnalysisV2CheckpointProfile {
@@ -164,6 +188,9 @@ export async function loadReplaySourceFromExistingRuns(input: {
 
     const profiles = new Map<string, AnalysisV2CheckpointProfile>();
     const terminalCandidateProfileUsernames = new Set<string>();
+    const fallbackBatches: Array<Map<string, CandidateProfileAttempt>> = [];
+    const fallbackByUsername = new Map<string, CandidateProfileAttempt>();
+    const repairByUsername = new Map<string, CandidateProfileAttempt>();
     for (const [run, items] of datasets) {
         const kind = operationKind(run);
         if (![
@@ -175,35 +202,70 @@ export async function loadReplaySourceFromExistingRuns(input: {
         const usernames = profileUsernames(items);
         const parsed = parseApifyProfileDataset(items, usernames);
         const isCandidateProfile = kind === 'profile-fallback' || kind === 'profile-repair';
+        if (isCandidateProfile) {
+            const attempts = candidateProfileAttempts({ usernames, parsed });
+            if (!attempts) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+            const destination = kind === 'profile-fallback'
+                ? fallbackByUsername
+                : repairByUsername;
+            for (const [username, attempt] of attempts) {
+                if (destination.has(username)) {
+                    throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+                }
+                destination.set(username, attempt);
+            }
+            if (kind === 'profile-fallback') fallbackBatches.push(attempts);
+            continue;
+        }
         if (
-            isCandidateProfile
-                ? !isProductionCompleteCandidateProfileDataset({ usernames, parsed })
-                : parsed.datasetContaminated
-                    || parsed.failuresByUsername.size > 0
-                    || parsed.notFoundUsernames.size > 0
-                    || parsed.profilesByUsername.size !== usernames.length
+            parsed.datasetContaminated
+            || parsed.failuresByUsername.size > 0
+            || parsed.notFoundUsernames.size > 0
+            || parsed.profilesByUsername.size !== usernames.length
         ) {
             throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
         }
-        if (isCandidateProfile) {
-            for (const username of [
-                ...parsed.failuresByUsername.keys(),
-                ...parsed.notFoundUsernames,
-            ]) {
+        for (const [username, profile] of parsed.profilesByUsername) {
+            const mapped = asCheckpoint(profile);
+            const existing = profiles.get(username);
+            if (existing && JSON.stringify(existing) !== JSON.stringify(mapped)) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DUPLICATE_DRIFT');
+            profiles.set(username, mapped);
+        }
+    }
+    for (const [username, attempt] of repairByUsername) {
+        if (fallbackByUsername.get(username)?.status !== 'failed') {
+            throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+        }
+        fallbackByUsername.set(username, attempt);
+    }
+    for (const batch of fallbackBatches) {
+        const finalAttempts = [...batch.keys()].map(username => fallbackByUsername.get(username));
+        if (
+            finalAttempts.some((attempt): attempt is undefined => attempt === undefined)
+            || !isProductionCompleteCandidateProfileBatch(
+                finalAttempts as CandidateProfileAttempt[],
+            )
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+        }
+        for (const username of batch.keys()) {
+            const attempt = fallbackByUsername.get(username);
+            if (!attempt) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+            if (attempt.status !== 'success') {
                 if (profiles.has(username)) {
                     throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
                 }
                 terminalCandidateProfileUsernames.add(username);
+                continue;
             }
-        }
-        for (const [username, profile] of parsed.profilesByUsername) {
-            const mapped = asCheckpoint(profile);
             if (terminalCandidateProfileUsernames.has(username)) {
                 throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
             }
             const existing = profiles.get(username);
-            if (existing && JSON.stringify(existing) !== JSON.stringify(mapped)) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DUPLICATE_DRIFT');
-            profiles.set(username, mapped);
+            if (existing && JSON.stringify(existing) !== JSON.stringify(attempt.profile)) {
+                throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DUPLICATE_DRIFT');
+            }
+            profiles.set(username, attempt.profile);
         }
     }
     const targetUsername = historical
