@@ -1,26 +1,52 @@
 import 'server-only';
 
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { DEMO_FIXTURE_VERSION, DEMO_TARGET_USERNAME, demoDurationSeconds } from './demo-analysis';
+import {
+    DEMO_FIXTURE_VERSION,
+    LEGACY_DEMO_FIXTURE_VERSION,
+    DEMO_TARGET_USERNAME,
+    demoDurationSeconds,
+} from './demo-analysis';
 
 const uuid = z.string().uuid();
-const rowSchema = z.object({
+const rowFields = {
     id: uuid,
     user_id: uuid,
     target_instagram_id: z.literal(DEMO_TARGET_USERNAME),
-    fixture_version: z.literal(DEMO_FIXTURE_VERSION),
     idempotency_key: z.string().min(16).max(128),
-    duration_seconds: z.number().int().min(60).max(90),
     created_at: z.string().datetime({ offset: true }),
     started_at: z.string().datetime({ offset: true }).nullable(),
-}).passthrough();
+} as const;
+
+const rowSchema = z.union([
+    z.object({
+        ...rowFields,
+        fixture_version: z.literal(LEGACY_DEMO_FIXTURE_VERSION),
+        duration_seconds: z.number().int().min(60).max(90),
+    }).passthrough(),
+    z.object({
+        ...rowFields,
+        fixture_version: z.literal(DEMO_FIXTURE_VERSION),
+        duration_seconds: z.number().int().min(30).max(45),
+    }).passthrough(),
+]);
 
 export type DemoAnalysisRun = z.infer<typeof rowSchema>;
+
+export function isCurrentDemoFixtureRun(run: DemoAnalysisRun): run is Extract<DemoAnalysisRun, { fixture_version: typeof DEMO_FIXTURE_VERSION }> {
+    return run.fixture_version === DEMO_FIXTURE_VERSION;
+}
 
 function parseRow(value: unknown): DemoAnalysisRun | null {
     const parsed = rowSchema.safeParse(value);
     return parsed.success ? parsed.data : null;
+}
+
+/** New fixture versions cannot replay a persisted run from an earlier fixture namespace. */
+export function demoFixtureIdempotencyKey(idempotencyKey: string): string {
+    return `fixture-v2-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
 }
 
 export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({
@@ -34,7 +60,7 @@ export const demoAnalysisStore = {
         const { data, error } = await supabaseAdmin.rpc(DEMO_ANALYSIS_DATABASE_NAMES.createRpc, {
             p_user_id: input.userId,
             p_target_instagram_id: DEMO_TARGET_USERNAME,
-            p_idempotency_key: input.idempotencyKey,
+            p_idempotency_key: demoFixtureIdempotencyKey(input.idempotencyKey),
             p_duration_seconds: demoDurationSeconds(),
         });
         if (error || !Array.isArray(data) || data.length !== 1) return null;

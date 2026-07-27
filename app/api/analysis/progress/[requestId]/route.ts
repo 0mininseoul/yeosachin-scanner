@@ -65,6 +65,7 @@ export async function GET(
             if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at) return demoJson({ error: 'Analysis progress not found.' }, 404);
             const progress = projectDemoProgress({
                 requestId: demo.id,
+                fixtureVersion: demo.fixture_version,
                 startedAt: new Date(demo.started_at),
                 durationSeconds: demo.duration_seconds,
                 now: new Date(),

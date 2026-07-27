@@ -157,6 +157,23 @@ describe('analysis V2 owner progress route', () => {
         vi.unstubAllEnvs();
     });
 
+    it('dispatches a legacy run to the legacy progress profile instead of v2 source text', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-progress-key-000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date(Date.now() - 20_000).toISOString(),
+        });
+
+        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
+        await expect(response.json()).resolves.toMatchObject({
+            snapshot: { activeProfile: { maskedUsername: 'profile.***' } },
+        });
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
     it.each([
         'afterSeq=-1',
         'limit=201',

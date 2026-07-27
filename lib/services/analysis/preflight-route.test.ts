@@ -105,6 +105,7 @@ import {
 import { PreflightTaskEnqueueError } from './preflight-tasks';
 import { createAnalysisTestAdmission } from './test-entitlement';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import { demoReadyPreflight, LEGACY_DEMO_FIXTURE_VERSION } from '@/lib/services/demo-analysis/demo-analysis';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -947,6 +948,9 @@ describe('preflight owner routes', () => {
 
         const ready = await getPreflight(new Request('https://example.com'), context());
         expect(ready.status).toBe(200);
+        await expect(ready.json()).resolves.toMatchObject({
+            target: demoReadyPreflight(demo, LEGACY_DEMO_FIXTURE_VERSION).target,
+        });
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(ready);
 
         mocks.suppressOperationalObservation.mockClear();
