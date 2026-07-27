@@ -8,6 +8,7 @@ import {
     analysisV2JobInputHash,
 } from './v2-coordinator';
 import {
+    ANALYSIS_V2_CANDIDATE_SCREENING_JOB_KEY,
     ANALYSIS_V2_FINALIZE_JOB_KEY,
     buildAnalysisV2DagPlan,
     type AnalysisV2DagRelationshipManifest,
@@ -202,6 +203,52 @@ function progressReporter(): AnalysisV2ProgressReporter {
 }
 
 describe('analysis V2 durable DAG worker', () => {
+    it('passes the immutable AI stage policy to the screening executor', async () => {
+        const screeningState: AnalysisV2DagState = {
+            ...baseState(),
+            relationships: {
+                revision: 1,
+                resultHash: digest('empty-relationships'),
+                detectedMutualCount: 0,
+                publicCount: 0,
+                privateCount: 0,
+                detailedSelectedPublicCount: 0,
+                notScreenedPublicCount: 0,
+                profileBatches: [],
+                privateNameBatches: [],
+            },
+            targetEvidence: {
+                revision: 1,
+                resultHash: digest('empty-target-evidence'),
+                interactorCount: 0,
+            },
+            primaryJoin: {
+                revision: 1,
+                resultHash: digest('empty-primary-join'),
+                verifiedFemaleCount: 0,
+            },
+        };
+        const screeningClaim = claimFor(
+            screeningState,
+            ANALYSIS_V2_CANDIDATE_SCREENING_JOB_KEY
+        );
+        const executor = vi.fn(async context => {
+            expect(context.aiStagePolicyVersion).toBe(AI_STAGE_POLICY_LATEST_VERSION);
+            throw new Error('SCREENING_EXECUTOR_REACHED');
+        });
+
+        await expect(executeAnalysisV2DagJob(screeningClaim, {
+            stateStore: stateStore(screeningState),
+            executors: { screening: executor },
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+            },
+        })).rejects.toThrow('SCREENING_EXECUTOR_REACHED');
+
+        expect(executor).toHaveBeenCalledOnce();
+    });
+
     it('blocks a cross-version AI stage before invoking its executor', async () => {
         const relationshipState: AnalysisV2DagState = {
             ...baseState(),
