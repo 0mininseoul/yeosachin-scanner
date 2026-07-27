@@ -13,8 +13,19 @@ const riskPolicyMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260726090000_add_risk_policy_v24.sql',
     import.meta.url,
 ), 'utf8');
+const finalScoreCheckpointPayload =
+    '{"riskPolicyVersion":"risk-policy-v2.4","candidates":[]}';
 let first: Client;
 let second: Client;
+
+describe('score-audit PostgreSQL fixture', () => {
+    it('provides a structurally valid final-score checkpoint payload', () => {
+        expect(JSON.parse(finalScoreCheckpointPayload)).toEqual({
+            riskPolicyVersion: 'risk-policy-v2.4',
+            candidates: [],
+        });
+    });
+});
 
 function functionDefinition(source: string, name: string, occurrence = 0): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -140,7 +151,7 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
                 `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints
                  VALUES (
                     $1, 'final_score', -1, $2,
-                    '{"riskPolicyVersion":"risk-policy-v2.4","candidates":[]"}',
+                    '${finalScoreCheckpointPayload}',
                     DEFAULT
                  )`,
                 [requestId, resultHash],
@@ -185,7 +196,8 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
                 await blocked.query('COMMIT');
             } else {
                 const skipped = await blocked.query<{ count: number }>(
-                    'SELECT public.purge_expired_analysis_v2_score_audit_evidence(100)',
+                    `SELECT public.purge_expired_analysis_v2_score_audit_evidence(100)
+                     AS count`,
                 );
                 expect(skipped.rows[0]?.count).toBe(0);
                 await winner.query(
