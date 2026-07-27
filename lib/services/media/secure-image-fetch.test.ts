@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
+import { EventEmitter } from 'node:events';
 import {
     downloadSecureImage,
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
     isPublicNetworkAddress,
+    requestPinnedHttpsImage,
     SecureImageFetchError,
     validateAllowedRemoteImageUrl,
     type ResolveHostname,
@@ -69,6 +71,53 @@ describe('secure image URL validation', () => {
 });
 
 describe('secure image downloads', () => {
+    it('captures a direct asynchronous TLS socket EHOSTUNREACH and cleans transport listeners', async () => {
+        const request = new EventEmitter() as EventEmitter & { end: () => void };
+        const socket = new EventEmitter();
+        request.end = () => {
+            request.emit('socket', socket);
+            queueMicrotask(() => {
+                const error = Object.assign(new Error('connect EHOSTUNREACH'), {
+                    code: 'EHOSTUNREACH',
+                });
+                socket.emit('error', error);
+                request.emit('error', error);
+                socket.emit('close');
+                request.emit('close');
+            });
+        };
+        const requestHttps = (() => request) as unknown as typeof import('node:https').request;
+
+        await expect(requestPinnedHttpsImage(
+            new URL('https://cdninstagram.com/image.jpg'),
+            { signal: new AbortController().signal },
+            [{ address: '2606:4700:4700::1111', family: 6 }],
+            requestHttps,
+        )).rejects.toMatchObject({ code: 'EHOSTUNREACH' });
+        await new Promise(resolve => setImmediate(resolve));
+
+        expect(socket.listenerCount('error')).toBe(0);
+        expect(request.listenerCount('error')).toBe(0);
+        expect(request.listenerCount('socket')).toBe(0);
+    });
+
+    it('maps an IPv6 unreachable transport rejection to bounded network failure semantics', async () => {
+        const error = Object.assign(new Error('connect EHOSTUNREACH'), {
+            code: 'EHOSTUNREACH',
+        });
+        await expect(downloadSecureImage('https://cdninstagram.com/image.jpg', {
+            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            requestImpl: async () => { throw error; },
+            resolveHostname: async () => [{ address: '2606:4700:4700::1111', family: 6 }],
+            maxBytes: 100,
+            timeoutMs: 1_000,
+        })).rejects.toMatchObject({
+            reason: 'network_failure',
+            disposition: 'transient',
+            message: 'Image download failed due to a network error',
+        });
+    });
+
     it('revalidates redirects and blocks a redirect to a malicious suffix', async () => {
         const requestImpl = vi.fn<SecureImageRequest>(async () => new Response(null, {
             status: 302,
