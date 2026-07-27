@@ -9,6 +9,11 @@ const ai = vi.hoisted(() => ({
     genderTriage: vi.fn(),
     featureAnalysis: vi.fn(),
     genderResolution: vi.fn(),
+    privateNames: vi.fn(),
+}));
+
+vi.mock('@/lib/services/ai/private-name-analysis', () => ({
+    analyzePrivateAccountNames: ai.privateNames,
 }));
 
 vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => {
@@ -203,6 +208,45 @@ describe('replay staged AI runner policy capability', () => {
             evaluationPolicy: v29EvaluationPolicy,
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
         expect(ai.genderTriageMicrobatch).not.toHaveBeenCalled();
+    });
+
+    it('prevalidates every public v2.9 profile before starting private or public AI', async () => {
+        const { hasProfileImage: _omitted, ...legacyProfile } =
+            v28ToV29Bundle.profiles[0]!;
+        const privateProfile = {
+            ordinal: 2,
+            isPrivate: true,
+            username: 'private',
+            fullName: 'Private',
+            hasProfileImage: false,
+            bio: undefined,
+            media: [],
+            triageSelectionIds: [],
+            featureSelectionIds: [],
+            resolverSelectionIds: [],
+            captions: [],
+            coverage: {
+                selectedCount: 0,
+                normalizedCount: 0,
+                failures: [],
+            },
+        };
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: {
+                ...v28ToV29Bundle,
+                profiles: [legacyProfile, privateProfile],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+
+        expect(ai.privateNames).not.toHaveBeenCalled();
+        expect(ai.genderTriageMicrobatch).not.toHaveBeenCalled();
+        expect(ai.featureAnalysis).not.toHaveBeenCalled();
+        expect(ai.genderResolution).not.toHaveBeenCalled();
     });
 
     it('admits a confirmed personal female to feature without resolver', async () => {

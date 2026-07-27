@@ -359,6 +359,17 @@ export async function runAnalysisV2AiReplay(input: {
     const resolver = { ready: 0, applied: 0, inconclusive: 0, cutoff: 0, capacitySkipped: 0 };
     if (input.mode === 'paid-ai') {
         const runner = paidRunner!;
+        const publicProfiles = input.bundle.profiles.filter(
+            profile => !profile.isPrivate,
+        );
+        if (
+            replayAiPolicy === 'ai-stage-policy-v2.9'
+            && publicProfiles.some(profile => (
+                typeof profile.hasProfileImage !== 'boolean'
+            ))
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        }
         const privateAccounts = input.bundle.profiles
             .filter(profile => profile.isPrivate)
             .map(profile => ({
@@ -373,7 +384,6 @@ export async function runAnalysisV2AiReplay(input: {
             : Promise.resolve();
 
         const prepared: PreparedPublicReplay[] = [];
-        const publicProfiles = input.bundle.profiles.filter(profile => !profile.isPrivate);
         const profileByOrdinal = new Map(publicProfiles.map(profile => [
             profile.ordinal,
             profile,
