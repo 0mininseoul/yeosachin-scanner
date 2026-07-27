@@ -103,13 +103,13 @@ describe('analysis V2 replay CLI', () => {
 
     it('creates the real frozen v2.9 paid adapter under canonical runtime conditions without invoking AI', () => {
         const result = spawnSync(
-            'npx',
+            process.execPath,
             [
-                'tsx',
                 '--conditions=react-server',
-                '--env-file=.env.local',
+                '--import',
+                'tsx',
                 '--eval',
-                "import('./scripts/replay-analysis-v2.ts').then(async m => { const runner = await m.createPaidReplayRunner('ai-stage-policy-v2.9'); process.stdout.write(JSON.stringify({ frozen: Object.isFrozen(runner), stages: Object.keys(runner).sort() })); })",
+                "import('./scripts/replay-analysis-v2.ts').then(async m => { const create = m.createPaidReplayRunner ?? m.default?.createPaidReplayRunner; if (typeof create !== 'function') throw new Error('ANALYSIS_V2_REPLAY_MODULE_EXPORT_MISSING'); const runner = await create('ai-stage-policy-v2.9'); process.stdout.write(JSON.stringify({ frozen: Object.isFrozen(runner), stages: Object.keys(runner).sort() })); })",
             ],
             { cwd: process.cwd(), encoding: 'utf8', timeout: 10_000 },
         );
@@ -129,7 +129,7 @@ describe('analysis V2 replay CLI', () => {
                 '--import',
                 'tsx',
                 '--eval',
-                "import('./scripts/replay-analysis-v2.ts').then(m => m.createPaidReplayRunner('ai-stage-policy-v2.9')).catch(error => { process.stderr.write(error.message); process.exitCode = 1; })",
+                "import('./scripts/replay-analysis-v2.ts').then(m => { const create = m.createPaidReplayRunner ?? m.default?.createPaidReplayRunner; if (typeof create !== 'function') throw new Error('ANALYSIS_V2_REPLAY_MODULE_EXPORT_MISSING'); return create('ai-stage-policy-v2.9'); }).catch(error => { process.stderr.write(error.message); process.exitCode = 1; })",
             ],
             { cwd: process.cwd(), encoding: 'utf8', timeout: 10_000 },
         );
