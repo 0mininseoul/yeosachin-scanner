@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { captureAnalysisV2ReplayBundle } from './replay-capture';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
+import type { ReplaySourceLineage } from './replay-source-lineage';
 
 const STANDARD_SOURCE_LINEAGE = {
     selectedPlanId: 'standard' as const,
@@ -252,5 +253,32 @@ describe('analysis V2 replay capture', () => {
                 return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
             },
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
+    });
+
+    it('uses frozen v2.8 carousel diversity rather than the legacy v2.7 selection', async () => {
+        const multiCarousel = {
+            ...profile, profilePicUrl: undefined, postsCount: 3,
+            latestPosts: Array.from({ length: 3 }, (_, index) => ({
+                ...profile.latestPosts[0], id: `carousel-${index}`, shortCode: `carousel-${index}`,
+                type: 'carousel' as const, declaredMediaCount: 3, childrenComplete: true,
+                mediaItems: Array.from({ length: 3 }, (_child, child) => ({
+                    id: `${index}-${child}`, type: 'image' as const,
+                    imageUrl: `https://cdninstagram.com/${index}-${child}.jpg`,
+                })),
+            })),
+        };
+        const capture = (sourceLineage: ReplaySourceLineage) => captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({ requestFingerprint: '1'.repeat(64), sourceLineage, completed: true }),
+                loadReplaySource: async () => ({ profiles: [multiCarousel], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] }, providerRuns: [] }),
+            }, normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+        const legacy = await capture(STANDARD_SOURCE_LINEAGE);
+        const v28 = await capture({ selectedPlanId: 'standard', policyVersions: {
+            pipeline: 'v2', aiStage: 'ai-stage-policy-v2.8', risk: 'risk-policy-v2.4', scheduler: 'ai-scheduler-v1',
+        } });
+        expect(legacy.profiles[0]?.featureSelectionIds).toHaveLength(5);
+        expect(v28.profiles[0]?.featureSelectionIds).toHaveLength(9);
     });
 });

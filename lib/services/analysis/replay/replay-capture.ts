@@ -14,6 +14,7 @@ import {
     type ReplayEvaluationPolicy,
     type ReplaySourceLineage,
 } from './replay-source-lineage';
+import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 
 export interface ReplayCaptureSelector { targetUsername: string; }
 export interface ReplayCompletedRequest {
@@ -85,6 +86,10 @@ export async function captureAnalysisV2ReplayBundle(input: {
         fail('ANALYSIS_V2_REPLAY_REQUEST_INELIGIBLE');
     }
     resolveReplayAiStagePolicyVersion(request.sourceLineage, input.evaluationPolicy);
+    const carouselDiversity = aiStagePolicySupports(
+        request.sourceLineage.policyVersions.aiStage as Parameters<typeof aiStagePolicySupports>[0],
+        'inputQualityV28',
+    );
     const source = await input.repository.loadReplaySource(request);
     const profiles: AnalysisV2ReplayBundle['profiles'] = [];
     for (const [index, profile] of source.profiles.entries()) {
@@ -94,7 +99,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
         const policy = profile.isPrivate ? null : selectAnalysisMedia({
             profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
             posts: profile.latestPosts ?? [],
-        });
+        }, carouselDiversity ? { carouselDiversity: true } : undefined);
         if (policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
         const triageNormalized = await normalizeAnalysisV2MediaSelections(
             policy?.triage.media ?? [],
