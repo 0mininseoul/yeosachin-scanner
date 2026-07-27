@@ -182,18 +182,33 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
             media: ReturnType<typeof normalized>;
             accountProfile?: ReplayTriageInput['accountProfile'];
         };
-        resolve(value: ReplayInvocation<GenderTriageResult>): void;
+        waiters: Array<(value: ReplayInvocation<GenderTriageResult>) => void>;
     };
     let scheduled = false;
-    const pending: Pending[] = [];
+    const pending = new Map<string, Pending>();
     const flush = async () => {
         scheduled = false;
-        const queued = pending.splice(0);
+        const queued = [...pending.values()];
+        pending.clear();
         const batches = planGenderTriageMicrobatches(queued.map(item => ({
             accountId: item.accountId,
             value: item,
         })));
-        await Promise.all(batches.map(async batch => {
+        let nextBatch = 0;
+        let dispatchFailed = false;
+        const resolveBatch = async (batch: typeof batches[number]) => {
+            if (dispatchFailed) {
+                for (const member of batch) {
+                    for (const resolve of member.value.waiters) {
+                        resolve({
+                            outcome: 'failed', calls: 0, rateLimited: 0,
+                            retries: 0, attempts: 0, failureDisposition: {},
+                            attemptLatenciesMs: [], elapsedMs: 0,
+                        });
+                    }
+                }
+                return;
+            }
             const accounts = batch.map(member => ({
                 accountId: member.accountId,
                 input: member.value.input,
@@ -206,27 +221,36 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
                     { replayCapability },
                 );
             });
+            if (invocation.outcome !== 'ok') dispatchFailed = true;
             const results = new Map(invocation.value?.map(value => [
                 value.accountId, value.result,
             ]));
             let ownsMetrics = true;
             for (const member of batch) {
                 const value = results.get(member.accountId);
-                const metrics = ownsMetrics;
-                ownsMetrics = false;
-                member.value.resolve({
-                    outcome: value ? invocation.outcome : 'failed',
-                    ...(value ? { value } : {}),
-                    calls: metrics ? invocation.calls : 0,
-                    rateLimited: metrics ? invocation.rateLimited : 0,
-                    retries: metrics ? invocation.retries : 0,
-                    attempts: metrics ? invocation.attempts : 0,
-                    failureDisposition: metrics ? invocation.failureDisposition : {},
-                    attemptLatenciesMs: metrics ? invocation.attemptLatenciesMs : [],
-                    elapsedMs: metrics ? invocation.elapsedMs : 0,
-                });
+                for (const resolve of member.value.waiters) {
+                    const metrics = ownsMetrics;
+                    ownsMetrics = false;
+                    resolve({
+                        outcome: value ? invocation.outcome : 'failed',
+                        ...(value ? { value } : {}),
+                        calls: metrics ? invocation.calls : 0,
+                        rateLimited: metrics ? invocation.rateLimited : 0,
+                        retries: metrics ? invocation.retries : 0,
+                        attempts: metrics ? invocation.attempts : 0,
+                        failureDisposition: metrics ? invocation.failureDisposition : {},
+                        attemptLatenciesMs: metrics ? invocation.attemptLatenciesMs : [],
+                        elapsedMs: metrics ? invocation.elapsedMs : 0,
+                    });
+                }
             }
-        }));
+        };
+        const worker = async () => {
+            while (nextBatch < batches.length) {
+                await resolveBatch(batches[nextBatch++]);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(6, batches.length) }, worker));
     };
     const triage = (input: ReplayTriageInput) => new Promise<
         ReplayInvocation<GenderTriageResult>
@@ -235,11 +259,10 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
             media: normalized(input.media),
             ...(input.accountProfile ? { accountProfile: input.accountProfile } : {}),
         };
-        pending.push({
-            accountId: createGenderTriageMicrobatchAccountId(aiInput),
-            input: aiInput,
-            resolve,
-        });
+        const accountId = createGenderTriageMicrobatchAccountId(aiInput);
+        const existing = pending.get(accountId);
+        if (existing) existing.waiters.push(resolve);
+        else pending.set(accountId, { accountId, input: aiInput, waiters: [resolve] });
         if (!scheduled) {
             scheduled = true;
             queueMicrotask(() => void flush());

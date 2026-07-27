@@ -32,6 +32,13 @@ export interface ResolverExperimentReport {
     failed: number;
     resolvedHighConfidence: number;
     inconclusive: number;
+    limits: {
+        existingEligible: 40;
+        uncertainPilot: 24;
+        totalResolvers: 64;
+        maxAttempts: 256;
+    };
+    preflightPassed: true;
 }
 
 function mediaFor(
@@ -88,10 +95,14 @@ export async function runStrongUncertainResolverExperiment(input: {
             }),
         };
     });
-    for (const { profile, promise } of triageInputs) {
+    const triageResults = await Promise.all(
+        triageInputs.map(async ({ profile, promise }) => ({ profile, triage: await promise })),
+    );
+    for (const { profile, triage } of triageResults) {
         if (input.signal?.aborted) throw input.signal.reason;
-        const triage = await promise;
-        if (triage.outcome !== 'ok' || !triage.value) continue;
+        if (triage.outcome !== 'ok' || !triage.value) {
+            throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_TRIAGE_FAILED');
+        }
         triaged++;
         const resolverMedia = selectAnalysisV2GenderResolverMedia(
             mediaFor(profile, profile.resolverSelectionIds),
@@ -112,25 +123,39 @@ export async function runStrongUncertainResolverExperiment(input: {
             admitted.push({ cohort: 'uncertain', ordinal: profile.ordinal, media: resolverMedia });
         }
     }
+    const existingEligible = admitted.filter(item => item.cohort === 'existing').length;
+    const uncertainPilotSelected = admitted.length - existingEligible;
+    if (
+        existingEligible > input.bundle.capture.experiment.existingEligibleLimit
+        || admitted.length > input.bundle.capture.experiment.totalResolverLimit
+        || admitted.length * 4 > input.bundle.capture.experiment.maxResolverAttempts
+    ) {
+        throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_COST_BOUND_EXCEEDED');
+    }
     let next = 0;
     let succeeded = 0;
     let failed = 0;
     let resolvedHighConfidence = 0;
+    let resolverFailed = false;
     const abort = new AbortController();
     input.signal?.addEventListener('abort', () => abort.abort(input.signal?.reason), { once: true });
     const worker = async () => {
-        while (next < admitted.length) {
+        while (next < admitted.length && !resolverFailed) {
+            if (abort.signal.aborted) break;
             const candidate = admitted[next++];
             const result = await input.runner.resolveGender!({
                 ordinal: candidate.ordinal,
                 media: candidate.media,
                 signal: abort.signal,
             });
+            if (abort.signal.aborted) break;
             if (result.outcome === 'ok' && result.value) {
                 succeeded++;
                 if (highConfidence(result.value)) resolvedHighConfidence++;
             } else {
                 failed++;
+                resolverFailed = true;
+                abort.abort(new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_RESOLVER_FAILED'));
             }
         }
     };
@@ -138,8 +163,9 @@ export async function runStrongUncertainResolverExperiment(input: {
         { length: Math.min(STRONG_UNCERTAIN_RESOLVER_CONFIG.concurrency, admitted.length) },
         worker,
     ));
-    const existingEligible = admitted.filter(item => item.cohort === 'existing').length;
-    const uncertainPilotSelected = admitted.length - existingEligible;
+    if (resolverFailed) {
+        throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_RESOLVER_FAILED');
+    }
     return {
         experimentId: 'strong-uncertain-v1',
         evaluationAiStage: 'ai-stage-policy-v2.9',
@@ -152,5 +178,12 @@ export async function runStrongUncertainResolverExperiment(input: {
         failed,
         resolvedHighConfidence,
         inconclusive: succeeded - resolvedHighConfidence,
+        limits: {
+            existingEligible: 40,
+            uncertainPilot: 24,
+            totalResolvers: 64,
+            maxAttempts: 256,
+        },
+        preflightPassed: true,
     };
 }

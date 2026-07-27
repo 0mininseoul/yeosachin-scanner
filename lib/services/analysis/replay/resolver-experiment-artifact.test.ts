@@ -56,7 +56,10 @@ describe('strong uncertain resolver experiment artifact', () => {
         expect(derived.capture.experiment).toMatchObject({
             id: STRONG_UNCERTAIN_RESOLVER_EXPERIMENT,
             evaluationAiStage: 'ai-stage-policy-v2.9',
+            existingEligibleLimit: 40,
             uncertainPilotLimit: 24,
+            totalResolverLimit: 64,
+            maxResolverAttempts: 256,
         });
         expect(derived.capture.experiment.parentRequestFingerprint).toBe('a'.repeat(64));
         expect(derived.capture.experiment.sourceUniverseDigest)
