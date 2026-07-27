@@ -1,14 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import {
-    createStrongUncertainGenderResolutionResultIdentity,
     createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
-    prepareStrongUncertainGenderResolutionGeneration,
     genderTriageMicrobatch,
     type GenderTriageResult,
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
-import { runStrongUncertainGenderResolutionGeneration } from '@/lib/services/ai/gender-resolution-generation';
+import { analyzeWithGemini } from '@/lib/services/ai/gemini';
+import { projectGenderResolutionMedia } from '@/lib/services/ai/gender-resolution-pure';
+import {
+    createAnalysisV2AiMediaSnapshotHashFromParts,
+    createAnalysisV2AiResultIdentity,
+    createAnalysisV2AiResultInputHash,
+} from '@/lib/services/analysis/v2-ai-result-identity';
+import { getAiStagePolicy } from '@/lib/services/ai/stage-policy';
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type {
     GeminiAttemptStartTelemetry,
@@ -71,6 +76,60 @@ function audit(
         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
         onBeforeAttempt: value => recordStart(state, value),
         onAttemptTelemetry: value => recordTerminal(state, value),
+    };
+}
+
+function resolverIdentity(media: ReturnType<typeof normalized>) {
+    const projected = projectGenderResolutionMedia(media);
+    const policy = getAiStagePolicy('ai-stage-policy-v2.9', 'genderResolution');
+    return createAnalysisV2AiResultIdentity({
+        stage: 'genderResolution',
+        modelName: 'gemini-3-flash-preview',
+        thinkingLevel: 'HIGH',
+        mediaResolution: 'HIGH',
+        promptVersion: policy.promptVersion,
+        schemaVersion: policy.schemaVersion,
+        maxOutputTokens: 512,
+        inputHash: createAnalysisV2AiResultInputHash(projected.prompt),
+        mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(projected.media),
+        cacheScope: 'request',
+    });
+}
+
+async function resolveGender(
+    requestId: string,
+    media: ReturnType<typeof normalized>,
+    state: InvocationState,
+    replayCapability: ReturnType<typeof issueReplayStatelessCapability>,
+    signal: AbortSignal,
+) {
+    const projected = projectGenderResolutionMedia(media);
+    const identity = resolverIdentity(media);
+    const context = audit(requestId, identity, state);
+    const assessment = projected.schema.parse(await analyzeWithGemini(
+        projected.prompt,
+        projected.media.map(item => item.normalizedJpegBase64),
+        {
+            schema: projected.schema,
+            analysisType: 'v2_gender_resolution',
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            requestId,
+            startingAttempt: 1,
+            abortSignal: signal,
+            onBeforeAttempt: context.onBeforeAttempt,
+            onAttemptTelemetry: context.onAttemptTelemetry,
+            skipTokenLog: true,
+            replayCapability,
+            model: 'gemini-3-flash-preview',
+            thinkingLevel: 'HIGH',
+            mediaResolution: 'HIGH',
+            maxOutputTokens: 512,
+        },
+    ));
+    return {
+        assessment: projected.finalize(assessment),
+        analyzedSelectionIds: projected.media.map(item => item.selectionId),
     };
 }
 function outcome(error: unknown, state: InvocationState): ReplayOutcome {
@@ -191,20 +250,13 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
         triage,
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
-            const identity = createStrongUncertainGenderResolutionResultIdentity(aiInput);
-            const prepared = await prepareStrongUncertainGenderResolutionGeneration(
-                aiInput,
-                audit(requestId, identity, state),
-                {
-                    abortSignal: input.signal,
-                    replayCapability,
-                },
+            return resolveGender(
+                requestId,
+                aiInput.media,
+                state,
+                replayCapability,
+                input.signal,
             );
-            const assessment = prepared.cached
-                ?? await runStrongUncertainGenderResolutionGeneration(
-                    prepared.generation,
-                );
-            return prepared.finalize(assessment);
         }),
     };
     Object.freeze(runner);

@@ -5,23 +5,16 @@ const mocks = vi.hoisted(() => ({
         `account:${input.media[0]?.selectionId}`),
     batchIdentity: vi.fn(() => ({ operationKey: `gender-triage:${'a'.repeat(64)}` })),
     batch: vi.fn(),
-    resolverIdentity: vi.fn((...args: unknown[]) => {
-        void args;
-        return { operationKey: `gender-resolution:${'b'.repeat(64)}` };
-    }),
-    resolverPrepare: vi.fn(),
-    resolverRun: vi.fn(),
+    analyze: vi.fn(),
 }));
 vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     GENDER_TRIAGE_V29_MAX_ACCOUNTS_PER_BATCH: 2,
     createGenderTriageMicrobatchAccountId: mocks.accountId,
     createGenderTriageMicrobatchResultIdentity: mocks.batchIdentity,
     genderTriageMicrobatch: mocks.batch,
-    createStrongUncertainGenderResolutionResultIdentity: mocks.resolverIdentity,
-    prepareStrongUncertainGenderResolutionGeneration: mocks.resolverPrepare,
 }));
-vi.mock('@/lib/services/ai/gender-resolution-generation', () => ({
-    runStrongUncertainGenderResolutionGeneration: mocks.resolverRun,
+vi.mock('@/lib/services/ai/gemini', () => ({
+    analyzeWithGemini: mocks.analyze,
 }));
 
 import {
@@ -51,16 +44,9 @@ describe('dedicated resolver experiment AI adapter', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.batch.mockImplementation(invocationResult);
-        mocks.resolverRun.mockResolvedValue({
-            assessment: {
-                inferredGender: 'unknown', confidence: 'low',
-                ownerConsistency: 'not_visible', evidenceSelectionIds: [],
-            },
-        });
-        mocks.resolverPrepare.mockResolvedValue({
-            cached: null,
-            generation: {},
-            finalize: (assessment: unknown) => ({ assessment, analyzedSelectionIds: [] }),
+        mocks.analyze.mockResolvedValue({
+            inferredGender: 'unknown', confidence: 'low',
+            ownerConsistency: 'not_visible', evidenceSelectionIds: [],
         });
     });
 
@@ -110,11 +96,14 @@ describe('dedicated resolver experiment AI adapter', () => {
         });
         expect(runner).not.toHaveProperty('feature');
         expect(runner).not.toHaveProperty('privateNames');
-        expect(mocks.resolverIdentity).toHaveBeenCalledWith({ media: [] });
-        expect(mocks.resolverPrepare.mock.calls[0]?.[2]).toMatchObject({
+        expect(mocks.analyze.mock.calls[0]?.[2]).toMatchObject({
+            model: 'gemini-3-flash-preview',
+            thinkingLevel: 'HIGH',
+            mediaResolution: 'HIGH',
+            maxOutputTokens: 512,
+            skipTokenLog: true,
             replayCapability: expect.any(Object),
         });
-        expect(mocks.resolverRun).toHaveBeenCalledWith(expect.any(Object));
     });
 
     it('the experiment runner queues the complete canonical triage order before awaiting', async () => {

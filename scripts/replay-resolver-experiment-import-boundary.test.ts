@@ -57,14 +57,25 @@ describe('resolver experiment static execution boundary', () => {
         );
         expect(productionApi).not.toContain('experimentPolicy');
         expect(productionApi).not.toContain('resolverExperimentCapability');
-        const generation = readFileSync(
-            join(root, 'lib/services/ai/gender-resolution-generation.ts'),
+        const experimentAdapter = readFileSync(
+            join(root, 'lib/services/analysis/replay/resolver-experiment-ai-adapter.ts'),
             'utf8',
         );
-        expect(generation).toContain("model: 'gemini-3-flash-preview'");
-        expect(generation).toContain("thinkingLevel: 'HIGH'");
-        expect(generation).toContain("mediaResolution: 'HIGH'");
-        expect(generation).toContain('maxOutputTokens: 512');
+        expect(experimentAdapter).toContain("model: 'gemini-3-flash-preview'");
+        expect(experimentAdapter).toContain("thinkingLevel: 'HIGH'");
+        expect(experimentAdapter).toContain("mediaResolution: 'HIGH'");
+        expect(experimentAdapter).toContain('maxOutputTokens: 512');
+        for (const file of [
+            'lib/services/ai/v2-staged-analysis.ts',
+            'lib/services/ai/gender-resolution-generation.ts',
+            'lib/services/ai/gender-resolution-pure.ts',
+        ]) {
+            const source = readFileSync(join(root, file), 'utf8');
+            expect(source).not.toMatch(
+                /export\s+(?:async\s+)?(?:function|const|class)\s+\w*(?:StrongUncertain|Experiment)\w*/i,
+            );
+            expect(source).not.toContain('gemini-3-flash-preview');
+        }
     });
 
     it('is not imported by app or non-replay production modules', () => {

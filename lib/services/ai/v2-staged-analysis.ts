@@ -39,6 +39,7 @@ import {
     runCanonicalGenderResolutionGeneration,
     type PreparedGenderResolutionGeneration,
 } from './gender-resolution-generation';
+import { projectGenderResolutionMedia } from './gender-resolution-pure';
 export {
     applyGenderResolution,
     type GenderBaselineClassification,
@@ -1361,46 +1362,13 @@ function genderTriagePrompt(
         : genderTriagePromptLegacy(media);
 }
 
-function genderResolutionPrompt(media: readonly NormalizedAiMediaSelection[]): string {
-    return [
-        '아래 이미지만 보고 계정 소유자의 성별을 독립적으로 재판정하세요.',
-        '추측을 강요하지 말고 보이는 시각 근거만 사용하세요.',
-        '여러 사람이 섞이면 ownerConsistency=mixed_people로 반환하세요.',
-        '근거가 없으면 inferredGender=unknown, confidence=low, ownerConsistency=not_visible로 반환하세요.',
-        'high confidence 이진 판정에는 서로 다른 이미지 근거가 최소 2개 필요합니다.',
-        `사용 가능한 selectionId: ${media.map(item => item.selectionId).join(', ')}`,
-    ].join('\n');
-}
-
-function genderResolutionMediaProjection(
-    media: readonly NormalizedAiMediaSelection[]
-) {
-    const originalByOpaqueId = new Map<string, string>();
-    const opaqueByOriginalId = new Map<string, string>();
-    const projectedMedia = media.map((item, index) => {
-        const opaqueId = `resolver-media:${index + 1}`;
-        originalByOpaqueId.set(opaqueId, item.selectionId);
-        opaqueByOriginalId.set(item.selectionId, opaqueId);
-        return {
-            ...item,
-            selectionId: opaqueId,
-            postId: undefined,
-        };
-    });
-    return {
-        projectedMedia,
-        originalByOpaqueId,
-        opaqueByOriginalId,
-    };
-}
-
 export function genderResolutionCheckpointAssessment(
     rawInput: GenderResolutionInput,
     rawAssessment: GenderResolutionResult['assessment']
 ): z.infer<typeof genderResolutionModelResponseSchema> {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = genderResolutionMediaProjection(media);
+    const projection = projectGenderResolutionMedia(media);
     const assessment = genderResolutionModelResponseSchema.parse(rawAssessment);
     const evidenceSelectionIds = assessment.evidenceSelectionIds.map(selectionId => {
         const opaqueId = projection.opaqueByOriginalId.get(selectionId);
@@ -1820,36 +1788,14 @@ export function createGenderResolutionResultIdentity(
 ): AnalysisV2AiResultIdentity {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = genderResolutionMediaProjection(media);
+    const projection = projectGenderResolutionMedia(media);
     return stagedResultIdentity(
         'genderResolution',
-        genderResolutionPrompt(projection.projectedMedia),
+        projection.prompt,
         media,
         'request',
         policyVersion,
     );
-}
-
-export function createStrongUncertainGenderResolutionResultIdentity(
-    rawInput: GenderResolutionInput,
-): AnalysisV2AiResultIdentity {
-    const input = genderResolutionInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = genderResolutionMediaProjection(media);
-    const prompt = genderResolutionPrompt(projection.projectedMedia);
-    const policy = getAiStagePolicy('ai-stage-policy-v2.9', 'genderResolution');
-    return createAnalysisV2AiResultIdentity({
-        stage: 'genderResolution',
-        modelName: 'gemini-3-flash-preview',
-        thinkingLevel: 'HIGH',
-        mediaResolution: 'HIGH',
-        promptVersion: policy.promptVersion,
-        schemaVersion: policy.schemaVersion,
-        maxOutputTokens: 512,
-        inputHash: createAnalysisV2AiResultInputHash(prompt),
-        mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
-        cacheScope: 'request',
-    });
 }
 
 export function createFeatureAnalysisResultIdentity(
@@ -1936,25 +1882,6 @@ export async function genderResolution(
     return prepared.finalize(checkpointAssessment);
 }
 
-export async function prepareStrongUncertainGenderResolutionGeneration(
-    rawInput: GenderResolutionInput,
-    rawAuditContext: StagedAiAuditContext,
-    options: {
-        abortSignal?: AbortSignal;
-        replayCapability: ReplayStatelessCapability;
-    },
-) {
-    return prepareGenderResolutionGeneration(
-        rawInput,
-        rawAuditContext,
-        {
-            ...options,
-            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
-        },
-        true,
-    );
-}
-
 async function prepareGenderResolutionGeneration(
     rawInput: GenderResolutionInput,
     rawAuditContext: StagedAiAuditContext,
@@ -1963,27 +1890,15 @@ async function prepareGenderResolutionGeneration(
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
     },
-    strongUncertain = false,
 ) {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = genderResolutionMediaProjection(media);
+    const projection = projectGenderResolutionMedia(media);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_LATEST_VERSION;
-    const prompt = genderResolutionPrompt(projection.projectedMedia);
-    const identity = strongUncertain
-        ? createAnalysisV2AiResultIdentity({
-            stage: 'genderResolution',
-            modelName: 'gemini-3-flash-preview',
-            thinkingLevel: 'HIGH',
-            mediaResolution: 'HIGH',
-            promptVersion: getAiStagePolicy(policyVersion, 'genderResolution').promptVersion,
-            schemaVersion: getAiStagePolicy(policyVersion, 'genderResolution').schemaVersion,
-            maxOutputTokens: 512,
-            inputHash: createAnalysisV2AiResultInputHash(prompt),
-            mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
-            cacheScope: 'request',
-        })
-        : stagedResultIdentity('genderResolution', prompt, media, 'request', policyVersion);
+    const prompt = projection.prompt;
+    const identity = stagedResultIdentity(
+        'genderResolution', prompt, media, 'request', policyVersion,
+    );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderResolutionModelResponseSchemaFor(
         projection.projectedMedia
