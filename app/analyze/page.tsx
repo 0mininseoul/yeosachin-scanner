@@ -38,6 +38,7 @@ import {
     planViewEventKey,
 } from '@/lib/services/earlybird/analytics-state';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
+import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     basic: 'Basic',
@@ -420,6 +421,7 @@ export default function AnalyzePage() {
                                     className="w-full border border-line bg-ink py-3.5 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
                                 />
                             </div>
+                            <InstagramLookupLink />
                             <div className="mt-4 border border-amber/30 bg-amber/[0.06] px-3 py-2.5">
                                 <p className="text-[12px] leading-relaxed text-fg-dim">
                                     <span className="font-semibold text-amber">공개 계정</span>만 판독 가능합니다.

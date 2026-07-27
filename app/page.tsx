@@ -36,6 +36,7 @@ import {
 } from '@/components/case-ui';
 import { LandingSignatureCard } from '@/components/landing-signature-card';
 import { LandingReviews } from '@/components/landing-reviews';
+import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 
 const STEPS = [
   {
@@ -209,6 +210,7 @@ export default function LandingPage() {
                 className="w-full border border-line bg-ink-2 py-4 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
               />
             </div>
+            <InstagramLookupLink />
             {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
             <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
               {starting ? (
