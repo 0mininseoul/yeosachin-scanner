@@ -66,6 +66,52 @@ describe('AI-only replay runner', () => {
         };
     }
 
+    function eligiblePaidPartialBundle(): ReturnType<typeof validPartialBundle> {
+        const publicProfiles = Array.from({ length: 379 }, (_, profileIndex) => {
+            const mediaCount = 5 + (profileIndex < 9 ? 1 : 0);
+            const media = Array.from({ length: mediaCount }, (_, mediaIndex) => {
+                const selectionId = `m-${profileIndex + 1}-${mediaIndex + 1}`;
+                return { selectionId, kind: 'feed' as const, postId: `p-${profileIndex + 1}-${mediaIndex + 1}`, caption: null, jpegBase64: '/9j/2Q==' };
+            });
+            return {
+                ordinal: profileIndex + 1,
+                isPrivate: false,
+                username: `public_${profileIndex + 1}`,
+                fullName: null,
+                hasProfileImage: true,
+                bio: null,
+                media,
+                triageSelectionIds: media.slice(0, 2).map(item => item.selectionId),
+                featureSelectionIds: media.map(item => item.selectionId),
+                resolverSelectionIds: media.map(item => item.selectionId),
+                captions: [],
+                coverage: {
+                    selectedCount: mediaCount + (profileIndex < 11 ? 1 : 0),
+                    normalizedCount: mediaCount,
+                    failures: profileIndex < 11
+                        ? [{ selectionId: `failed-${profileIndex + 1}`, reason: 'normalization_failed', disposition: 'permanent' as const }]
+                        : [],
+                },
+            };
+        });
+        const privateProfile = { ...bundle.profiles[1]!, ordinal: 380, username: 'private_380' };
+        const sourceIdentities = [
+            ...publicProfiles.map(profile => ({ ordinal: profile.ordinal, username: profile.username, partition: 'public' as const })),
+            { ordinal: 380, username: 'private_380', partition: 'private' as const },
+            ...Array.from({ length: 5 }, (_, index) => ({ ordinal: 381 + index, username: `terminal_${381 + index}`, partition: 'fetch_terminal' as const })),
+        ];
+        const value = validPartialBundle();
+        return {
+            ...value,
+            profiles: [...publicProfiles, privateProfile],
+            capture: { ...value.capture, partial: {
+                sourceIdentities,
+                sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+                mediaUnavailable: [],
+            } },
+        };
+    }
+
     const withIdentities = (
         value: ReturnType<typeof validPartialBundle>,
         sourceIdentities: ReturnType<typeof validPartialBundle>['capture']['partial']['sourceIdentities'],
@@ -133,7 +179,7 @@ describe('AI-only replay runner', () => {
         const feature = vi.fn(async () => ({ outcome: 'rate_limited' as const, attempts: 1, retries: 0, elapsedMs: 1 }));
         const privateNames = vi.fn(async () => ({ outcome: 'ok' as const, attempts: 1, retries: 0, elapsedMs: 1 }));
         const lines: string[] = [];
-        const partial = validPartialBundle();
+        const partial = eligiblePaidPartialBundle();
         await runAnalysisV2AiReplay({
             bundle: partial,
             runner: v29Runner({ triage, feature, privateNames }),
@@ -142,8 +188,8 @@ describe('AI-only replay runner', () => {
             evaluationPolicy: partial.capture.evaluationPolicy,
             write: line => lines.push(line),
         });
-        expect(triage).toHaveBeenCalledOnce();
-        expect(feature).toHaveBeenCalledOnce();
+        expect(triage).toHaveBeenCalledTimes(379);
+        expect(feature).toHaveBeenCalledTimes(379);
         expect(privateNames).toHaveBeenCalledOnce();
         expect(JSON.parse(lines[0]!)).toMatchObject({
             benchmark_scope: 'ai-only-historical-partial-available',

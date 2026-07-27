@@ -27,12 +27,18 @@ function coverage(retainedProfiles: number, sourceProfiles: number, retainedMedi
 
 describe('historical partial paid coverage', () => {
     it('accepts observed profile coverage and rejects the immediately lower retained profile count', () => {
-        expect(coverage(380, 385, 990, 1_000).eligible).toBe(true);
-        expect(coverage(379, 385, 990, 1_000).eligible).toBe(false);
+        expect(coverage(380, 385, 1_904, 1_915).eligible).toBe(true);
+        expect(coverage(379, 385, 1_904, 1_915).eligible).toBe(false);
     });
 
-    it('accepts exactly 99% media coverage and rejects one item below it', () => {
-        expect(coverage(200, 200, 990, 1_000).eligible).toBe(true);
-        expect(coverage(200, 200, 989, 1_000).eligible).toBe(false);
+    it('seals the audited media floor and rejects exactly one fewer item with either denominator', () => {
+        expect(coverage(385, 385, 1_904, 1_915).eligible).toBe(true);
+        expect(coverage(385, 385, 1_903, 1_915).eligible).toBe(false);
+        expect(coverage(385, 385, 1_903, 1_916).eligible).toBe(false);
+    });
+
+    it('also retains the conservative 99% missing-media ratio fence above the audited volume floor', () => {
+        expect(coverage(385, 385, 1_904, 1_923).eligible).toBe(true);
+        expect(coverage(385, 385, 1_904, 1_924).eligible).toBe(false);
     });
 });

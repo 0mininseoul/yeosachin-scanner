@@ -21,6 +21,7 @@ type PartialInvariantInput = {
 
 export const HISTORICAL_PARTIAL_PAID_MIN_PROFILE_RETENTION_BPS = 9_850;
 export const HISTORICAL_PARTIAL_PAID_MIN_MEDIA_RETENTION_BPS = 9_900;
+export const HISTORICAL_PARTIAL_PAID_MIN_RETAINED_MEDIA = 1_904;
 const MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE = 12;
 
 export function historicalPartialPaidCoverage(input: PartialInvariantInput): {
@@ -41,6 +42,7 @@ export function historicalPartialPaidCoverage(input: PartialInvariantInput): {
         eligible: sourceProfiles > 0
             && conservativeSourceMedia > 0
             && retainedProfiles * 10_000 >= sourceProfiles * HISTORICAL_PARTIAL_PAID_MIN_PROFILE_RETENTION_BPS
+            && retainedMedia >= HISTORICAL_PARTIAL_PAID_MIN_RETAINED_MEDIA
             && retainedMedia * 10_000 >= conservativeSourceMedia * HISTORICAL_PARTIAL_PAID_MIN_MEDIA_RETENTION_BPS,
         retainedProfiles,
         sourceProfiles,
