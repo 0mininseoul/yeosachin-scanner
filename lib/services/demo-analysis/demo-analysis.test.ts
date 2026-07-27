@@ -64,6 +64,28 @@ describe('isolated demo fixtures', () => {
         expect(current.version).toBe(DEMO_FIXTURE_VERSION);
         expect(legacy.publicAccounts[0]?.instagramId).not.toBe(current.publicAccounts[0]?.instagramId);
     });
+
+    it('retains the original canonical v1 fixture layout for every legacy row', () => {
+        const legacy = createDemoFixture(requestId, LEGACY_DEMO_FIXTURE_VERSION);
+
+        expect(legacy.publicAccounts).toHaveLength(242);
+        expect(legacy.privateAccounts).toHaveLength(142);
+        expect(legacy.publicAccounts.slice(0, 4).map(row => row.displayScore)).toEqual([8, 5, 5, 3]);
+        expect(new Set(legacy.publicAccounts.map(row => row.fullName)).size).toBe(4);
+        expect(new Set(legacy.privateAccounts.map(row => row.fullName)).size).toBe(4);
+        expect(legacy.publicAccounts.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(legacy.publicAccounts.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+    });
+
+    it('dispatches unstarted legacy preflights to their canonical v1 presentation', () => {
+        const run = { id: requestId, created_at: '2026-07-01T00:00:00.000Z' };
+        const legacy = demoReadyPreflight(run, LEGACY_DEMO_FIXTURE_VERSION);
+        const current = demoReadyPreflight(run, DEMO_FIXTURE_VERSION);
+
+        expect(legacy.target).not.toEqual(current.target);
+        expect(legacy.target.profileImage).toBe(current.target.profileImage);
+        expect(legacy.plans).toEqual(current.plans);
+    });
     it('uses only existing local permanently defocused raster assets', async () => {
         await expect(validateDemoAssetManifest()).resolves.toEqual([
             '/demo-avatars/synthetic-blurred-avatar-1-v1.png',

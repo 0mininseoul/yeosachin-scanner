@@ -714,28 +714,49 @@ function publicAccount(index: number): FemaleResultRowV1 {
     };
 }
 
-/** Original v1 synthetic account generator, retained only for existing v1 rows. */
+/**
+ * Canonical first-release v1 generator, retained for every persisted v1 row.
+ * A later development-only rewrite mistakenly reused the same v1 version
+ * marker, so its layout cannot be identified safely; historical rows always
+ * use this original versioned presentation.
+ */
+function legacyFixtureIdentifier(index: number): string {
+    const stems = ['mira.lane', 'sori.park', 'dana.river', 'june.willow'];
+    return `${stems[index % stems.length]}.${String(index + 1).padStart(3, '0')}`;
+}
+
 function legacyPublicAccount(index: number): FemaleResultRowV1 {
-    const variant = DEMO_FIXTURE_VARIANTS[index % DEMO_FIXTURE_VARIANTS.length]!;
     const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
-    const displayScore = index === 0 ? 8 : index === 1 ? 6 : index === 2 ? 5 : [3, 3, 2, 2, 1][index % 5]!;
+    const displayScore = index === 0 ? 8 : index < 3 ? 5 : 3;
     return {
-        instagramId: fixtureIdentifier(DEMO_PUBLIC_HANDLES, variant.handleIndex + index * DEMO_PUBLIC_HANDLES.length),
-        fullName: DEMO_PUBLIC_NAMES[variant.nameIndex]!,
+        instagramId: legacyFixtureIdentifier(index),
+        fullName: ['미라 류', '서린 박', '다나 윤', '주은 한'][index % 4],
         profileImage: avatar(index),
-        bio: DEMO_PUBLIC_BIOS[variant.bioIndex]!,
+        bio: '일상과 취미를 기록하는 공개 프로필입니다.',
         displayScore,
         riskBand,
         featuredRank: index === 0 ? 1 : index < 3 ? index + 1 : null,
         recentMutualRank: index < 10 ? index + 1 : null,
         analysisDepth: index === 0 ? 'narrative' : 'features',
-        oneLineOverview: DEMO_PUBLIC_OVERVIEWS[variant.overviewIndex]!,
+        oneLineOverview: index === 0
+            ? '공개 프로필의 표현과 흐름이 눈에 띄지만 단정할 근거는 아닙니다.'
+            : index < 3
+                ? '공개 프로필의 최근 표현을 참고 신호로 살펴볼 수 있습니다.'
+                : '공개 프로필에서 특별한 주의 신호는 확인되지 않았습니다.',
         highRiskNarrative: index === 0
             ? [
-                '공개 프로필과 최근 흐름은 굳이 눈에 띄지만, 단정할 근거는 아닙니다.',
-                '좋아요 흔적은 제법 친절하지만 수집 범위 밖의 맥락까지 없다고 믿기는 이릅니다.',
+                '공개 프로필의 표현과 흐름이 눈에 띄지만, 굳이 단정할 근거는 아닙니다.',
+                '공개 범위에서 확인된 좋아요 표현은 참고 신호이며 수집 범위의 한계가 있습니다.',
             ]
             : null,
+    };
+}
+
+function legacyPrivateAccount(index: number): PrivateResultRowV1 {
+    return {
+        instagramId: `quiet.${['mira', 'sori', 'dana', 'june'][index % 4]}.${String(index + 1).padStart(3, '0')}`,
+        fullName: ['민아 류', '소연 박', '다은 윤', '지우 한'][index % 4],
+        profileImage: avatar(index),
     };
 }
 
@@ -759,7 +780,10 @@ export interface DemoFixture {
     privateAccounts: PrivateResultRowV1[];
 }
 
-export function demoReadyPreflight(run: { id: string; created_at: string }) {
+export function demoReadyPreflight(
+    run: { id: string; created_at: string },
+    fixtureVersion: DemoFixtureVersion = DEMO_FIXTURE_VERSION,
+) {
     const counts = { followers: 600, following: 580 };
     const catalog = {
         ...ANALYSIS_PLAN_CATALOG,
@@ -774,8 +798,12 @@ export function demoReadyPreflight(run: { id: string; created_at: string }) {
         exclusionDecision: 'skip' as const,
         target: {
             username: DEMO_TARGET_USERNAME,
-            fullName: '모의 분석용 공개 계정',
-            bio: '산책과 사진을 기록하는 데모 프로필입니다.',
+            fullName: fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+                ? '준호의 공개 프로필'
+                : '모의 분석용 공개 계정',
+            bio: fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+                ? '사진과 일상을 기록하는 공개 프로필입니다.'
+                : '산책과 사진을 기록하는 데모 프로필입니다.',
             profileImage: avatar(0),
             followersCount: counts.followers,
             followingCount: counts.following,
@@ -808,7 +836,9 @@ export function createDemoFixture(
     const publicAccounts = Array.from({ length: 242 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
         ? legacyPublicAccount(index)
         : publicAccount(index));
-    const privateAccounts = Array.from({ length: 142 }, (_, index) => privateAccount(index));
+    const privateAccounts = Array.from({ length: 142 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+        ? legacyPrivateAccount(index)
+        : privateAccount(index));
     return {
         version: fixtureVersion,
         summary: {

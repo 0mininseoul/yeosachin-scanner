@@ -135,7 +135,7 @@ async function handleGET(
                 return suppressOperationalObservation(demoErrorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.'));
             }
             return suppressOperationalObservation(NextResponse.json(
-                demoReadyPreflight(demo),
+                demoReadyPreflight(demo, demo.fixture_version),
                 { headers: demoResponseHeaders() }
             ));
         }
