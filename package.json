@@ -62,6 +62,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
+    "jsdom": "^26.1.0",
     "pg": "8.22.0",
     "supabase": "^2.72.8",
     "tailwindcss": "^4",

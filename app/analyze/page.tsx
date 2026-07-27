@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
+import { useHydrationSafePlanQuery } from '@/hooks/useHydrationSafePlanQuery';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import {
     EARLYBIRD_DISCLOSURE_TEXT,
@@ -18,7 +19,6 @@ import {
     isEarlybirdPlanSoldOut,
     isCurrentEarlybirdCheckoutStatusCta,
     isSafeGrobleCheckoutUrl,
-    parseEarlybirdPlanParam,
     pendingEarlybirdCheckoutStatusPath,
     recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
@@ -88,6 +88,7 @@ export default function AnalyzePage() {
     const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
     const [waitlistComplete, setWaitlistComplete] = useState(false);
     const [checkoutStatusCta, setCheckoutStatusCta] = useState<CheckoutStatusCta | null>(null);
+    const querySelectedPlan = useHydrationSafePlanQuery();
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
     const initializedRef = useRef(false);
@@ -114,11 +115,8 @@ export default function AnalyzePage() {
         stalePricingPreflightId,
     } = resolveEarlybirdPricingBoundary(preflight);
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
-    // Query-plan selection is a rendering fallback, not a state transition. This
-    // keeps a login-return URL deterministic without racing the preflight resume.
-    const querySelectedPlan = typeof window === 'undefined'
-        ? null
-        : parseEarlybirdPlanParam(new URLSearchParams(window.location.search).get('plan'));
+    // Query-plan selection is a hydration-safe rendering fallback, not a state
+    // transition. It therefore cannot race the preflight resume effect.
     const selectedPlanWithQueryFallback = selectedPlan ?? querySelectedPlan;
     // 모든 플랜을 선택(비교)할 수 있게 하되, 아무것도 안 고르면 적격 플랜을 기본 선택.
     // 부적격 플랜을 골라도 선택 상태는 유지하고, 구매 버튼만 비활성화한다.
