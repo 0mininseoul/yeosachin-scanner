@@ -64,6 +64,14 @@ export const replaySourceLineageSchema = z.union([
 
 export type ReplaySourceLineage = z.infer<typeof replaySourceLineageSchema>;
 
+export const REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY =
+    'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29' as const;
+export const replayEvaluationPolicySchema = z.object({
+    capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
+}).strict();
+export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
+
 export type ReplaySupportedAiStagePolicyVersion = Extract<
     AiStagePolicyVersion,
     | typeof AI_STAGE_POLICY_V27_VERSION
@@ -88,4 +96,30 @@ export function replayAiStagePolicyVersion(
         return version;
     }
     throw new Error('ANALYSIS_V2_REPLAY_AI_POLICY_UNSUPPORTED');
+}
+
+export function resolveReplayAiStagePolicyVersion(
+    lineage: ReplaySourceLineage,
+    evaluationPolicy?: ReplayEvaluationPolicy,
+): ReplaySupportedAiStagePolicyVersion {
+    if (!evaluationPolicy) return replayAiStagePolicyVersion(lineage);
+    const parsed = replayEvaluationPolicySchema.safeParse(evaluationPolicy);
+    if (!parsed.success) {
+        throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    }
+    const policy = lineage.policyVersions;
+    if (
+        lineage.selectedPlanId !== 'standard'
+        || policy.pipeline !== 'v2'
+        || policy.risk !== 'risk-policy-v2.4'
+        || !('scheduler' in policy)
+        || policy.scheduler !== 'ai-scheduler-v1'
+        || (
+            policy.aiStage !== AI_STAGE_POLICY_V27_VERSION
+            && policy.aiStage !== AI_STAGE_POLICY_V28_VERSION
+        )
+    ) {
+        throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+    }
+    return parsed.data.aiStage;
 }

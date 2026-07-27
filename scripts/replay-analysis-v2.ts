@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import { createAnalysisV2SelectedMediaNormalizer } from '../lib/services/ai/image-preprocessing';
+import { AI_STAGE_POLICY_V29_VERSION } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
 import { captureAnalysisV2ReplayBundle } from '../lib/services/analysis/replay/replay-capture';
 import {
@@ -17,12 +18,16 @@ import {
 import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } from '../lib/services/analysis/replay/replay-live-source';
 import { runAnalysisV2AiReplay } from '../lib/services/analysis/replay/replay-runner';
 import { createReplayStagedAiAdapter } from '../lib/services/analysis/replay/replay-staged-ai-adapter';
-import { replayAiStagePolicyVersion } from '../lib/services/analysis/replay/replay-source-lineage';
+import {
+    REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
+    resolveReplayAiStagePolicyVersion,
+    type ReplayEvaluationPolicy,
+} from '../lib/services/analysis/replay/replay-source-lineage';
 import { loadReplayCaptureDescriptor, type ReplaySourceRpcClient } from '../lib/services/analysis/replay/replay-supabase-repository';
 
 type ReplayCliOptions =
-    | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string }
-    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string }
+    | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy }
+    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -44,6 +49,17 @@ const VALUELESS_FLAGS = new Set([
     '--confirm-paid-ai',
 ]);
 
+function evaluationPolicy(value: string | undefined): ReplayEvaluationPolicy | undefined {
+    if (value === undefined) return undefined;
+    if (value !== AI_STAGE_POLICY_V29_VERSION) {
+        throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    }
+    return {
+        capability: REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
+        aiStage: AI_STAGE_POLICY_V29_VERSION,
+    };
+}
+
 export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     if (args.some(arg => {
         const equalsIndex = arg.indexOf('=');
@@ -63,9 +79,10 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     }
     if (parsed.has('--capture')) {
         const target = parsed.get('--target')?.trim();
-        const allowed = new Set(['--capture', '--target', '--request-id', '--bundle', '--key']);
+        const allowed = new Set(['--capture', '--target', '--request-id', '--bundle', '--key', '--evaluation-ai-policy']);
         if (!target || [...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-        return { command: 'capture', target, ...(parsed.get('--request-id') ? { requestId: parsed.get('--request-id') } : {}), bundlePath, keyPath };
+        const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'));
+        return { command: 'capture', target, ...(parsed.get('--request-id') ? { requestId: parsed.get('--request-id') } : {}), bundlePath, keyPath, ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
     }
     if (parsed.has('--cleanup')) {
         if (parsed.size !== 3) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
@@ -75,9 +92,10 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const paid = parsed.has('--paid-ai');
     const confirmed = parsed.has('--confirm-paid-ai');
     if (paid !== confirmed || (paid && parsed.has('--dry-run'))) throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_DOUBLE_CONFIRM_REQUIRED');
-    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--bundle', '--key']);
+    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--bundle', '--key', '--evaluation-ai-policy']);
     if ([...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath };
+    const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'));
+    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
 }
 
 function requiredEnvironment(name: string): string {
@@ -138,7 +156,10 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         if (serviceKey.startsWith('sb_publishable_') || serviceKey === process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()) throw new Error('ANALYSIS_V2_REPLAY_CONFIGURATION_INVALID');
         const supabase = createClient(requiredEnvironment('NEXT_PUBLIC_SUPABASE_URL'), serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
         const descriptor = await loadReplayCaptureDescriptor(supabase as unknown as ReplaySourceRpcClient, { targetUsername: options.target, ...(options.requestId ? { requestId: options.requestId } : {}) });
-        const replayAiPolicy = replayAiStagePolicyVersion(descriptor.sourceLineage);
+        const replayAiPolicy = resolveReplayAiStagePolicyVersion(
+            descriptor.sourceLineage,
+            options.evaluationPolicy,
+        );
         const clients = new Map<string, ReturnType<typeof createReplayReadonlyApifyClient>>();
         const source = await loadReplaySourceFromExistingRuns({ descriptor, clientForSlot: slot => {
             const existing = clients.get(slot); if (existing) return existing;
@@ -155,6 +176,9 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
                 loadReplaySource: async () => source,
             },
             normalizeMedia: createAnalysisV2SelectedMediaNormalizer(),
+            ...(options.evaluationPolicy
+                ? { evaluationPolicy: options.evaluationPolicy }
+                : {}),
         });
         ownership.ownedKey = await createReplayKeyFile(options.keyPath, {
             scope: creationScope,
@@ -174,6 +198,7 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             source_pipeline: descriptor.sourceLineage.policyVersions.pipeline,
             source_ai_policy: descriptor.sourceLineage.policyVersions.aiStage,
             source_risk_policy: descriptor.sourceLineage.policyVersions.risk,
+            evaluation_ai_policy: options.evaluationPolicy?.aiStage ?? null,
             replay_ai_policy: replayAiPolicy,
             full_e2e_evidence: false,
             profiles: bundle.profiles.length,
@@ -221,10 +246,22 @@ export async function runReplayCli(
         if (authenticated.expired) {
             throw new Error('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
         }
-        const replayAiPolicy = replayAiStagePolicyVersion(
+        const replayAiPolicy = resolveReplayAiStagePolicyVersion(
             authenticated.bundle.capture.sourceLineage,
+            options.evaluationPolicy,
         );
-        await runAnalysisV2AiReplay({ bundle: authenticated.bundle, runner: options.mode === 'paid-ai' ? createReplayStagedAiAdapter(replayAiPolicy) : {}, mode: options.mode, paidAiOptIn: options.mode === 'paid-ai', write: line => process.stdout.write(`${line}\n`) });
+        await runAnalysisV2AiReplay({
+            bundle: authenticated.bundle,
+            runner: options.mode === 'paid-ai'
+                ? createReplayStagedAiAdapter(replayAiPolicy)
+                : {},
+            mode: options.mode,
+            paidAiOptIn: options.mode === 'paid-ai',
+            ...(options.evaluationPolicy
+                ? { evaluationPolicy: options.evaluationPolicy }
+                : {}),
+            write: line => process.stdout.write(`${line}\n`),
+        });
         return { exitCode: 0 };
     } finally {
         uninstallSignals();

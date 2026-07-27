@@ -49,7 +49,7 @@ describe('analysis V2 replay safety contract', () => {
             replayCapability.pathname,
             stagedAdapter.pathname,
         ].sort());
-        expect(source).toContain('replayAiStagePolicyVersion');
+        expect(source).toContain('resolveReplayAiStagePolicyVersion');
         expect(source).not.toContain('AI_STAGE_POLICY_LATEST_VERSION');
         const sourceLineagePolicy = await readFile(sourceLineage, 'utf8');
         expect(sourceLineagePolicy).toContain(

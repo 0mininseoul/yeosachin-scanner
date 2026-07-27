@@ -83,6 +83,58 @@ describe('analysis V2 replay bundle', () => {
             .rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_PERMISSIONS');
     });
 
+    it('authenticates source lineage, fingerprint, and evaluation policy as GCM AAD', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        const bundlePath = join(directory, 'bundle.enc');
+        const value: AnalysisV2ReplayBundle = {
+            ...bundle(),
+            capture: {
+                ...bundle().capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard',
+                    policyVersions: {
+                        pipeline: 'v2',
+                        aiStage: 'ai-stage-policy-v2.8',
+                        risk: 'risk-policy-v2.4',
+                        scheduler: 'ai-scheduler-v1',
+                    },
+                },
+                evaluationPolicy: {
+                    capability: 'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29',
+                    aiStage: 'ai-stage-policy-v2.9',
+                },
+            },
+        };
+        await createReplayKeyFile(keyPath);
+        await writeReplayBundle({
+            bundle: value,
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+        const envelope = JSON.parse(await readFile(bundlePath, 'utf8')) as {
+            aad: string;
+        };
+        const aad = JSON.parse(Buffer.from(envelope.aad, 'base64').toString('utf8'));
+        expect(aad).toMatchObject({
+            requestFingerprint: value.capture.requestFingerprint,
+            sourceLineage: value.capture.sourceLineage,
+            evaluationPolicy: value.capture.evaluationPolicy,
+        });
+        envelope.aad = Buffer.from(JSON.stringify({
+            ...aad,
+            evaluationPolicy: null,
+        })).toString('base64');
+        await writeFile(bundlePath, JSON.stringify(envelope), { mode: 0o600 });
+        await expect(readReplayBundle({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:20:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_AUTH_FAILED');
+    });
+
     it('unlinks only exact validated replay artifacts', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
         temporaryPaths.push(directory);

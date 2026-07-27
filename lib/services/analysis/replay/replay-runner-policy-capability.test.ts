@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ai = vi.hoisted(() => ({
+    createGenderTriageMicrobatchAccountId: vi.fn(),
+    createGenderTriageMicrobatchResultIdentity: vi.fn(),
     createGenderTriageResultIdentity: vi.fn(),
+    genderTriageMicrobatch: vi.fn(),
     genderTriage: vi.fn(),
     featureAnalysis: vi.fn(),
     genderResolution: vi.fn(),
@@ -13,7 +16,12 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => {
     >();
     return {
         ...actual,
+        createGenderTriageMicrobatchAccountId:
+            ai.createGenderTriageMicrobatchAccountId,
+        createGenderTriageMicrobatchResultIdentity:
+            ai.createGenderTriageMicrobatchResultIdentity,
         createGenderTriageResultIdentity: ai.createGenderTriageResultIdentity,
+        genderTriageMicrobatch: ai.genderTriageMicrobatch,
         genderTriage: ai.genderTriage,
         featureAnalysis: ai.featureAnalysis,
         genderResolution: ai.genderResolution,
@@ -22,6 +30,10 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => {
 
 import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
 import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
+import {
+    REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
+    type ReplayEvaluationPolicy,
+} from './replay-source-lineage';
 
 const v28Bundle = {
     schemaVersion: 1 as const,
@@ -70,11 +82,30 @@ async function runPaid(runner: ReplayAiRunner) {
     });
 }
 
+const v29EvaluationPolicy: ReplayEvaluationPolicy = {
+    capability: REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.9',
+};
+
+const v28ToV29Bundle = {
+    ...v28Bundle,
+    capture: {
+        ...v28Bundle.capture,
+        evaluationPolicy: v29EvaluationPolicy,
+    },
+};
+
 describe('replay staged AI runner policy capability', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         ai.createGenderTriageResultIdentity.mockReturnValue({
             operationKey: 'triage:identity',
+        });
+        ai.createGenderTriageMicrobatchAccountId.mockReturnValue(
+            `account:${'b'.repeat(64)}`,
+        );
+        ai.createGenderTriageMicrobatchResultIdentity.mockReturnValue({
+            operationKey: 'triage:microbatch:identity',
         });
         ai.genderTriage.mockResolvedValue({
             assessment: {
@@ -87,6 +118,51 @@ describe('replay staged AI runner policy capability', () => {
             routingReason: 'high_confidence_same_owner_male',
             analyzedSelectionIds: ['m1'],
         });
+    });
+
+    it('runs the actual v2.9 microbatch adapter only for an authenticated explicit evaluation', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'male',
+                    confidence: 'high',
+                    ownerConsistency: 'same_person',
+                    evidenceSelectionIds: ['m1'],
+                },
+                routingDecision: 'exclude_high_confidence_male',
+                routingReason: 'high_confidence_same_owner_male',
+                analyzedSelectionIds: ['m1'],
+            },
+            source: 'checkpoint',
+        }]);
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v28ToV29Bundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        })).resolves.toMatchObject({
+            sourceAiPolicy: 'ai-stage-policy-v2.8',
+            evaluationAiPolicy: 'ai-stage-policy-v2.9',
+            replayAiPolicy: 'ai-stage-policy-v2.9',
+            gender: { male: 1 },
+        });
+        expect(ai.genderTriageMicrobatch).toHaveBeenCalledOnce();
+        expect(ai.genderTriage).not.toHaveBeenCalled();
+    });
+
+    it('rejects a missing or different runtime evaluation before any AI call', async () => {
+        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.9');
+        await expect(runAnalysisV2AiReplay({
+            bundle: v28ToV29Bundle,
+            runner: adapter,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_MISMATCH');
+        expect(ai.genderTriageMicrobatch).not.toHaveBeenCalled();
+        expect(ai.genderTriage).not.toHaveBeenCalled();
     });
 
     it('accepts only the exact factory-issued policy adapter', async () => {

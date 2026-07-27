@@ -8,6 +8,8 @@ import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import type { ReplayProviderLedgerIdentity } from './replay-readonly-apify';
 import {
     replaySourceLineageSchema,
+    resolveReplayAiStagePolicyVersion,
+    type ReplayEvaluationPolicy,
     type ReplaySourceLineage,
 } from './replay-source-lineage';
 
@@ -79,6 +81,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
     selector: ReplayCaptureSelector;
     repository: ReplayCaptureRepository;
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>;
+    evaluationPolicy?: ReplayEvaluationPolicy;
     now?: number;
 }): Promise<AnalysisV2ReplayBundle> {
     const targetUsername = normalizedUsername(input.selector.targetUsername);
@@ -91,6 +94,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
     ) {
         fail('ANALYSIS_V2_REPLAY_REQUEST_INELIGIBLE');
     }
+    resolveReplayAiStagePolicyVersion(request.sourceLineage, input.evaluationPolicy);
     const source = await input.repository.loadReplaySource(request);
     const profiles: AnalysisV2ReplayBundle['profiles'] = [];
     for (const [index, profile] of source.profiles.entries()) {
@@ -143,6 +147,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
         expiresAt: new Date(now + 24 * 60 * 60 * 1_000).toISOString(),
         capture: {
             requestFingerprint: request.requestFingerprint,
+            ...(input.evaluationPolicy ? { evaluationPolicy: input.evaluationPolicy } : {}),
             sourceLineage: request.sourceLineage,
         },
         profiles,

@@ -100,6 +100,30 @@ describe('analysis V2 replay CLI', () => {
             .toEqual({ command: 'run', mode: 'paid-ai', bundlePath: 'a.enc', keyPath: 'a.key' });
     });
 
+    it('requires the exact v2.9 evaluation flag alongside both paid confirmations', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toMatchObject({
+            command: 'run',
+            mode: 'paid-ai',
+            evaluationPolicy: {
+                aiStage: 'ai-stage-policy-v2.9',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--evaluation-ai-policy=ai-stage-policy-v2.8',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_PAID_AI_DOUBLE_CONFIRM_REQUIRED');
+    });
+
     it.each([
         '--paid-ai=false',
         '--paid-ai=true',

@@ -12,7 +12,10 @@ import type { FileHandle as NodeFileHandle } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
-import { replaySourceLineageSchema } from './replay-source-lineage';
+import {
+    replayEvaluationPolicySchema,
+    replaySourceLineageSchema,
+} from './replay-source-lineage';
 
 const MAX_TTL_MS = 24 * 60 * 60 * 1_000;
 const MAX_PLAINTEXT_BYTES = 256 * 1024 * 1024;
@@ -21,7 +24,7 @@ const MAX_MEDIA_BYTES = 192 * 1024 * 1024;
 const MAX_PROFILES = 1_500;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
-const ENVELOPE_VERSION = 1;
+const ENVELOPE_VERSION = 2;
 const replayArtifactOwnershipBrand = Symbol('replay-artifact-ownership');
 
 const jpegBase64Schema = z.string().min(4).max(12 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/);
@@ -41,6 +44,7 @@ const bundleSchema = z.object({
     capture: z.object({
         requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
         sourceLineage: replaySourceLineageSchema,
+        evaluationPolicy: replayEvaluationPolicySchema.optional(),
     }).strict(),
     profiles: z.array(z.object({
         ordinal: z.number().int().positive(),
@@ -410,13 +414,24 @@ function canonicalPayload(
     return payload;
 }
 
-function envelope(payload: Buffer, key: Buffer): Buffer {
+function authenticationContext(bundle: AnalysisV2ReplayBundle): Buffer {
+    return Buffer.from(JSON.stringify({
+        schemaVersion: bundle.schemaVersion,
+        requestFingerprint: bundle.capture.requestFingerprint,
+        sourceLineage: bundle.capture.sourceLineage,
+        evaluationPolicy: bundle.capture.evaluationPolicy ?? null,
+    }), 'utf8');
+}
+
+function envelope(payload: Buffer, key: Buffer, aad: Buffer): Buffer {
     const iv = randomBytes(IV_BYTES);
     const cipher = createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(aad);
     const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
     const tag = cipher.getAuthTag();
     return Buffer.from(JSON.stringify({
         v: ENVELOPE_VERSION,
+        aad: aad.toString('base64'),
         iv: iv.toString('base64'),
         tag: tag.toString('base64'),
         ciphertext: encrypted.toString('base64'),
@@ -424,18 +439,25 @@ function envelope(payload: Buffer, key: Buffer): Buffer {
     }), 'utf8');
 }
 
-function decryptEnvelope(raw: Buffer, key: Buffer): Buffer {
-    let parsed: { v: number; iv: string; tag: string; ciphertext: string; sha256: string };
+function decryptEnvelope(raw: Buffer, key: Buffer): { payload: Buffer; aad: Buffer | null } {
+    let parsed: { v: number; aad?: string; iv: string; tag: string; ciphertext: string; sha256: string };
     try { parsed = JSON.parse(raw.toString('utf8')) as typeof parsed; } catch { return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_AUTH_FAILED'); }
-    if (parsed.v !== ENVELOPE_VERSION || !/^[a-f0-9]{64}$/.test(parsed.sha256 ?? '')) {
+    if (![1, ENVELOPE_VERSION].includes(parsed.v) || !/^[a-f0-9]{64}$/.test(parsed.sha256 ?? '')) {
         return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_AUTH_FAILED');
     }
     try {
+        const aad = parsed.v === ENVELOPE_VERSION
+            ? Buffer.from(parsed.aad ?? '', 'base64')
+            : null;
+        if (parsed.v === ENVELOPE_VERSION && !parsed.aad) {
+            return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_AUTH_FAILED');
+        }
         const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(parsed.iv, 'base64'));
+        if (aad) decipher.setAAD(aad);
         decipher.setAuthTag(Buffer.from(parsed.tag, 'base64'));
         const payload = Buffer.concat([decipher.update(Buffer.from(parsed.ciphertext, 'base64')), decipher.final()]);
         if (hash(payload) !== parsed.sha256) return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_AUTH_FAILED');
-        return payload;
+        return { payload, aad };
     } catch { return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_AUTH_FAILED'); }
 }
 
@@ -532,7 +554,7 @@ export async function writeReplayBundle(input: {
     await assertExplicitReplayTempDirectory(dirname(input.bundlePath));
     return securelyCreateReplayArtifact(
         input.bundlePath,
-        envelope(payload, key),
+        envelope(payload, key, authenticationContext(input.bundle)),
         input.artifactWrite,
     );
 }
@@ -566,9 +588,15 @@ export async function readAuthenticatedReplayBundle(input: {
     const keyArtifact = await readKey(input.keyPath, input.artifactRead);
     const decrypted = decryptEnvelope(raw, keyArtifact.key);
     let json: unknown;
-    try { json = JSON.parse(decrypted.toString('utf8')); } catch { return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_INVALID'); }
+    try { json = JSON.parse(decrypted.payload.toString('utf8')); } catch { return bundleError('ANALYSIS_V2_REPLAY_BUNDLE_INVALID'); }
     const parsed = bundleSchema.safeParse(json);
     if (!parsed.success) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    if (
+        decrypted.aad
+        && !decrypted.aad.equals(authenticationContext(parsed.data))
+    ) {
+        bundleError('ANALYSIS_V2_REPLAY_BUNDLE_AUTH_FAILED');
+    }
     const now = input.now ?? Date.now();
     canonicalPayload(parsed.data, now, true);
     return {

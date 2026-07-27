@@ -38,6 +38,70 @@ describe('analysis V2 replay capture', () => {
         expect(normalize).toHaveBeenCalledTimes(2);
     });
 
+    it('captures an explicit v2.7-to-v2.9 evaluation intent without changing source lineage', async () => {
+        const sourceLineage = {
+            ...STANDARD_SOURCE_LINEAGE,
+            policyVersions: {
+                ...STANDARD_SOURCE_LINEAGE.policyVersions,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        };
+        const evaluationPolicy = {
+            capability: 'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29' as const,
+            aiStage: 'ai-stage-policy-v2.9' as const,
+        };
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'c'.repeat(64),
+                    sourceLineage,
+                    completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles: [profile],
+                    evidence: {
+                        relationship: [],
+                        targetInteractions: [],
+                        reverseInteractions: [],
+                    },
+                    providerRuns: [],
+                }),
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+            evaluationPolicy,
+        });
+
+        expect(bundle.capture).toEqual({
+            requestFingerprint: 'c'.repeat(64),
+            sourceLineage,
+            evaluationPolicy,
+        });
+    });
+
+    it('rejects an incomplete cross-policy source before loading provider evidence', async () => {
+        const loadReplaySource = vi.fn();
+        await expect(captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'd'.repeat(64),
+                    sourceLineage: STANDARD_SOURCE_LINEAGE,
+                    completed: true,
+                }),
+                loadReplaySource,
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+            evaluationPolicy: {
+                capability: 'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29',
+                aiStage: 'ai-stage-policy-v2.9',
+            },
+        })).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE',
+        );
+        expect(loadReplaySource).not.toHaveBeenCalled();
+    });
+
     it('keeps 8-post carousel selection, caption evidence, and private-name inputs in parity', async () => {
         const publicProfile = {
             ...profile,

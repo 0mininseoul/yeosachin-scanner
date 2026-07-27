@@ -2,7 +2,8 @@ import { applyGenderResolution, type FeatureAnalysisResult, type GenderResolutio
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
-    replayAiStagePolicyVersion,
+    resolveReplayAiStagePolicyVersion,
+    type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { lookupReplayStagedAiAdapterPolicy } from './replay-staged-ai-adapter';
 
@@ -44,7 +45,7 @@ export interface ReplayAiRunner {
 
 function assertReplayAiRunnerPolicy(
     runner: ReplayAiRunner | undefined,
-    expected: ReturnType<typeof replayAiStagePolicyVersion>,
+    expected: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
 ): ReplayAiRunner {
     if (!runner || lookupReplayStagedAiAdapterPolicy(runner) !== expected) {
         throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
@@ -67,6 +68,7 @@ export interface AnalysisV2AiReplayReport {
     sourcePipeline: 'v2';
     sourceAiPolicy: string;
     sourceRiskPolicy: string;
+    evaluationAiPolicy: string | null;
     replayAiPolicy: string;
     fullE2eEvidence: false;
     stages: Record<'genderTriage' | 'featureAnalysis' | 'privateAccountName' | 'genderResolution', ReplayStageMetrics>;
@@ -263,6 +265,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         source_pipeline: report.sourcePipeline,
         source_ai_policy: report.sourceAiPolicy,
         source_risk_policy: report.sourceRiskPolicy,
+        evaluation_ai_policy: report.evaluationAiPolicy,
         replay_ai_policy: report.replayAiPolicy,
         full_e2e_evidence: report.fullE2eEvidence,
         total_elapsed_ms: report.totalElapsedMs,
@@ -288,13 +291,29 @@ export async function runAnalysisV2AiReplay(input: {
     runner?: ReplayAiRunner;
     mode: ReplayMode;
     paidAiOptIn?: boolean;
+    evaluationPolicy?: ReplayEvaluationPolicy;
     write?: (line: string) => void;
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
     assertReplayInput(input.bundle);
-    const replayAiPolicy = replayAiStagePolicyVersion(
+    const authenticatedEvaluationPolicy = input.bundle.capture.evaluationPolicy;
+    if (
+        Boolean(authenticatedEvaluationPolicy) !== Boolean(input.evaluationPolicy)
+        || (
+            authenticatedEvaluationPolicy
+            && input.evaluationPolicy
+            && (
+                authenticatedEvaluationPolicy.capability !== input.evaluationPolicy.capability
+                || authenticatedEvaluationPolicy.aiStage !== input.evaluationPolicy.aiStage
+            )
+        )
+    ) {
+        throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_MISMATCH');
+    }
+    const replayAiPolicy = resolveReplayAiStagePolicyVersion(
         input.bundle.capture.sourceLineage,
+        input.evaluationPolicy,
     );
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
@@ -500,6 +519,7 @@ export async function runAnalysisV2AiReplay(input: {
         sourcePipeline: input.bundle.capture.sourceLineage.policyVersions.pipeline,
         sourceAiPolicy: input.bundle.capture.sourceLineage.policyVersions.aiStage,
         sourceRiskPolicy: input.bundle.capture.sourceLineage.policyVersions.risk,
+        evaluationAiPolicy: input.evaluationPolicy?.aiStage ?? null,
         replayAiPolicy,
         fullE2eEvidence: false as const,
         stages,
