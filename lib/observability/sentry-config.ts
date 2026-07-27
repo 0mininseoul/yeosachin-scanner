@@ -1,4 +1,9 @@
-import { scrubSentryBreadcrumb, scrubSentryEvent } from './sentry-scrubber';
+import {
+    scrubSentryBreadcrumb,
+    scrubSentryEvent,
+    scrubSentrySpan,
+    scrubSentryTransaction,
+} from './sentry-scrubber';
 
 function sampleRate(value: string | undefined, fallback: number): number {
     const parsed = Number(value);
@@ -28,6 +33,8 @@ export function sentryOptions(options: {
             environment === 'production' ? 0.05 : environment === 'preview' ? 0.1 : 0,
         ),
         beforeSend: scrubSentryEvent,
+        beforeSendTransaction: scrubSentryTransaction,
+        beforeSendSpan: scrubSentrySpan,
         beforeBreadcrumb: scrubSentryBreadcrumb,
     };
 }

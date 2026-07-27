@@ -146,20 +146,35 @@ describe('Kakao signup Discord notification', () => {
         ]);
         expect(fetcher).toHaveBeenCalledTimes(1);
     });
+
+    it('terminalizes a stale sending lease without attempting a Discord POST', async () => {
+        mocks.rpc.mockResolvedValueOnce({ data: 1, error: null });
+        const { reconcileStaleKakaoSignupDiscordClaims } = await import('./kakao-signup-discord');
+
+        await expect(reconcileStaleKakaoSignupDiscordClaims()).resolves.toBe(1);
+        expect(mocks.rpc).toHaveBeenCalledWith('reconcile_stale_kakao_signup_discord_claims');
+    });
 });
 
 describe('Kakao signup outbox migration contract', () => {
-    const source = readFileSync(new URL(
+    const foundation = readFileSync(new URL(
         '../../../supabase/migrations/20260727140000_add_kakao_signup_discord_outbox.sql',
+        import.meta.url,
+    ), 'utf8');
+    const source = readFileSync(new URL(
+        '../../../supabase/migrations/20260727150000_harden_kakao_signup_discord_outbox.sql',
         import.meta.url,
     ), 'utf8');
 
     it('creates rows only from a first Kakao auth identity and provides a SKIP LOCKED claim', () => {
-        expect(source).toContain("AFTER INSERT ON auth.users");
-        expect(source).toContain("NEW.raw_app_meta_data ->> 'provider' = 'kakao'");
-        expect(source).toContain('ON CONFLICT (user_id) DO NOTHING');
+        expect(foundation).toContain("AFTER INSERT ON auth.users");
+        expect(foundation).toContain("NEW.raw_app_meta_data ->> 'provider' = 'kakao'");
+        expect(foundation).toContain('ON CONFLICT (user_id) DO NOTHING');
         expect(source).toContain('FOR UPDATE SKIP LOCKED');
+        expect(source).toContain('profile_staged_at IS NOT NULL');
+        expect(source).toContain('reconcile_stale_kakao_signup_discord_claims');
         expect(source).toContain("'ambiguous_failed'");
-        expect(source).not.toContain('last_sign_in_at');
+        expect(source).toContain("'ambiguous_failed'");
+        expect(`${foundation}\n${source}`).not.toContain('last_sign_in_at');
     });
 });

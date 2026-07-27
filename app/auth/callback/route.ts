@@ -23,6 +23,18 @@ function asRecord(value: unknown): Record<string, unknown> {
         : {};
 }
 
+async function stageUnavailableKakaoSignupProfile(
+    userId: string,
+    signedUpAt: Date,
+): Promise<void> {
+    await stageKakaoSignupDiscordProfile(userId, {
+        name: null,
+        birthyear: null,
+        gender: null,
+        signedUpAt,
+    });
+}
+
 // 카카오 성별·출생연도·전화번호 등은 OIDC ID 토큰에 없고 REST API(/v2/user/me)에만 있으므로,
 // 로그인 직후 확보한 provider_token(카카오 access token)으로 직접 조회해 users 테이블에 저장한다.
 async function syncKakaoProfile(
@@ -37,6 +49,7 @@ async function syncKakaoProfile(
     });
     if (!res.ok) {
         console.error('Kakao /v2/user/me failed:', res.status);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt);
         return 'PROVIDER_ERROR';
     }
     const data: unknown = await res.json();
@@ -74,18 +87,15 @@ async function syncKakaoProfile(
         }, { onConflict: 'id' });
     if (error) {
         console.error('users upsert (kakao profile) failed:', error.code);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt);
         return 'INTERNAL_ERROR';
     }
-    try {
-        await stageKakaoSignupDiscordProfile(userId, {
-            name: account.name ?? profile.nickname,
-            birthyear: account.birthyear,
-            gender: account.gender,
-            signedUpAt,
-        });
-    } catch {
-        // A notification outbox issue never changes the authentication result.
-    }
+    await stageKakaoSignupDiscordProfile(userId, {
+        name: account.name ?? profile.nickname,
+        birthyear: account.birthyear,
+        gender: account.gender,
+        signedUpAt,
+    });
     return null;
 }
 
@@ -165,8 +175,10 @@ async function handleGET(
     const authedUser = exchange?.user;
     const provider = authProvider(authedUser?.app_metadata?.provider);
     if (authedUser && provider === 'kakao') {
+        const signedUpAt = new Date(authedUser.created_at ?? Date.now());
         let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
         if (!session?.provider_token) {
+            await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt);
             errorCode = 'PROVIDER_ERROR';
         } else {
             try {
@@ -174,10 +186,11 @@ async function handleGET(
                     authedUser.id,
                     authedUser.email ?? undefined,
                     session.provider_token,
-                    new Date(authedUser.created_at ?? Date.now()),
+                    signedUpAt,
                 );
             } catch {
                 console.error('Kakao profile sync failed');
+                await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt);
                 errorCode = 'INTERNAL_ERROR';
             }
         }

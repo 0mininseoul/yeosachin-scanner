@@ -220,12 +220,34 @@ export async function stageKakaoSignupDiscordProfile(
     profile: KakaoSignupProfile,
 ): Promise<void> {
     const payload = kakaoSignupProfileForOutbox(profile);
-    const { error } = await supabaseAdmin.rpc('set_kakao_signup_discord_outbox_profile', {
-        p_user_id: userId,
-        p_masked_name: payload.masked_name,
-        p_birthyear: payload.birthyear,
-        p_gender: payload.gender,
-        p_signed_up_at: payload.signed_up_at,
-    });
-    if (error) operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
+    try {
+        const { error } = await supabaseAdmin.rpc('set_kakao_signup_discord_outbox_profile', {
+            p_user_id: userId,
+            p_masked_name: payload.masked_name,
+            p_birthyear: payload.birthyear,
+            p_gender: payload.gender,
+            p_signed_up_at: payload.signed_up_at,
+        });
+        if (error) operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
+    } catch {
+        operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
+    }
+}
+
+/** Terminalize expired claims without a second Discord request (at-most-once priority). */
+export async function reconcileStaleKakaoSignupDiscordClaims(): Promise<number> {
+    if (!configuredDiscord()) return 0;
+    try {
+        const { data, error } = await supabaseAdmin.rpc('reconcile_stale_kakao_signup_discord_claims');
+        if (error) {
+            operationalFailure('OUTBOX_STALE_CLAIM_RECONCILE_FAILED');
+            return 0;
+        }
+        const reconciled = typeof data === 'number' ? data : 0;
+        if (reconciled > 0) operationalFailure('OUTBOX_STALE_CLAIM_AMBIGUOUS');
+        return reconciled;
+    } catch {
+        operationalFailure('OUTBOX_STALE_CLAIM_RECONCILE_FAILED');
+        return 0;
+    }
 }

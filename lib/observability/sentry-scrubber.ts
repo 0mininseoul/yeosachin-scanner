@@ -1,3 +1,4 @@
+import type { SpanJSON, TransactionEvent } from '@sentry/core';
 import type { Breadcrumb, ErrorEvent } from '@sentry/nextjs';
 
 const REDACTED = '[Filtered]';
@@ -6,14 +7,24 @@ const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
 const PHONE = /(?<!\d)(?:\+?\d[\d ()-]{7,}\d)(?!\d)/gu;
 const BIRTHDATE = /\b(?:19|20)\d{2}[-/.](?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])\b/g;
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
-const SECRET_VALUE = /(?:bearer\s+|(?:access|refresh|provider|service)[_-]?token[=:]\s*|(?:api[_-]?key|password|otp|secret)[=:]\s*)[^\s,;]+/giu;
+const AUTHORIZATION_VALUE = /\b(?:authorization\s*[:=]\s*)?(?:basic|bearer|digest|hmac|negotiate|token|apikey)\s+[^\s,;]+/giu;
+const SECRET_VALUE = /(?:\b(?:access|refresh|provider|id|service)[_-]?(?:token|key)|\b(?:api[_-]?key|password|otp|secret|session(?:[_-]?(?:id|key))?|supabase(?:[_-]?(?:key|token))?))\s*[:=]\s*[^\s,;]+/giu;
+const COOKIE_VALUE = /\b(?:set[-_ ]?cookie|cookie(?:2)?)\s*[:=]\s*[^\n;]+(?:;[^\n]*)?/giu;
+const QUERY_SECRET = /([?&](?:[^=&\s]*?(?:token|session|cookie|authorization|password|otp|secret|key|email|phone|birth(?:year|date)?|user(?:[_-]?id)?|account(?:[_-]?id)?)[^=&\s]*)=)[^&#\s]*/giu;
+const BARE_SECRET_ASSIGNMENT = /(\b(?:access[_-]?token|refresh[_-]?token|provider[_-]?token|id[_-]?token|service[_-]?key|supabase[_-]?(?:key|token)|token|session|cookie|authorization|password|otp|secret|api[_-]?key)=)[^\s&#,;]*/giu;
+const JWT = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/gu;
 const DISCORD_WEBHOOK_URL = /https?:\/\/(?:canary\.)?discord(?:app)?\.com\/api\/webhooks\/[^\s"']+/giu;
-const INSTAGRAM_URL = /https?:\/\/(?:www\.)?instagram\.com\/[^\s"']+/giu;
+const INSTAGRAM_URL = /https?:\/\/[^\s"']*(?:instagram\.com|cdninstagram\.com|fbcdn\.net)[^\s"']*/giu;
 
 function scrubString(value: string): string {
     return value
         .replace(DISCORD_WEBHOOK_URL, REDACTED)
         .replace(INSTAGRAM_URL, REDACTED)
+        .replace(COOKIE_VALUE, REDACTED)
+        .replace(AUTHORIZATION_VALUE, REDACTED)
+        .replace(QUERY_SECRET, '$1[Filtered]')
+        .replace(BARE_SECRET_ASSIGNMENT, '$1[Filtered]')
+        .replace(JWT, REDACTED)
         .replace(EMAIL, REDACTED)
         .replace(PHONE, REDACTED)
         .replace(BIRTHDATE, REDACTED)
@@ -63,4 +74,29 @@ export function scrubSentryBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb {
         data: scrubValue(breadcrumb.data) as Record<string, unknown> | undefined,
         message: breadcrumb.message ? scrubString(breadcrumb.message) : undefined,
     };
+}
+
+function scrubTraceEvent<T extends TransactionEvent>(event: T): T {
+    const sanitized = scrubValue(event) as T;
+    delete sanitized.user;
+    delete sanitized.request;
+    delete sanitized.extra;
+    delete sanitized.contexts;
+    delete sanitized.sdkProcessingMetadata;
+    if (sanitized.transaction) sanitized.transaction = scrubString(sanitized.transaction);
+    if (sanitized.spans) sanitized.spans = sanitized.spans.map(scrubSentrySpan);
+    return sanitized;
+}
+
+/** Transactions have their own SDK pipeline and must not bypass request URL filtering. */
+export function scrubSentryTransaction(event: TransactionEvent): TransactionEvent | null {
+    return scrubTraceEvent(event);
+}
+
+/** Span attributes frequently contain HTTP URLs and request identifiers. */
+export function scrubSentrySpan(span: SpanJSON): SpanJSON {
+    const sanitized = scrubValue(span) as SpanJSON;
+    if (sanitized.description) sanitized.description = scrubString(sanitized.description);
+    sanitized.data = scrubValue(sanitized.data) as SpanJSON['data'];
+    return sanitized;
 }
