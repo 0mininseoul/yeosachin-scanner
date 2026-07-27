@@ -204,6 +204,9 @@ export function analysisV2ReplayResolverReadyOutcome(
 }
 
 function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
+    if (bundle.schemaVersion === 3) {
+        throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
+    }
     const capture = bundle.capture as AnalysisV2ReplayBundle['capture'] & {
         evaluationPolicy?: { capability?: string };
         scope?: string; notExact?: boolean; fullE2eEvidence?: boolean;

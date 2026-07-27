@@ -16,6 +16,10 @@ import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
+import {
+    issueResolverExperimentCapability,
+    type ResolverExperimentCapability,
+} from '@/lib/services/ai/resolver-experiment-capability';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import type {
@@ -181,6 +185,7 @@ function createSemaphore(limit: number) {
 /** Stateless paid-AI adapter. It imports no Supabase, provider, R2, job, result, or archive module. */
 export function createReplayStagedAiAdapter(
     aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
+    resolverExperimentCapability?: ResolverExperimentCapability,
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
@@ -311,10 +316,16 @@ export function createReplayStagedAiAdapter(
         })),
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
-            const identity = createGenderResolutionResultIdentity(
-                aiInput,
-                aiStagePolicyVersion,
-            );
+            const identity = resolverExperimentCapability
+                ? createGenderResolutionResultIdentity(
+                    aiInput,
+                    aiStagePolicyVersion,
+                    resolverExperimentCapability,
+                )
+                : createGenderResolutionResultIdentity(
+                    aiInput,
+                    aiStagePolicyVersion,
+                );
             return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
                 onAttemptStart: value => input.onAttemptStart?.({
                     attempt: value.attempt,
@@ -326,7 +337,14 @@ export function createReplayStagedAiAdapter(
                     disposition: value.disposition,
                     latencyMs: value.latencyMs,
                 }),
-            }), { abortSignal: input.signal, aiStagePolicyVersion, replayCapability });
+            }), {
+                abortSignal: input.signal,
+                aiStagePolicyVersion,
+                replayCapability,
+                ...(resolverExperimentCapability
+                    ? { resolverExperimentCapability }
+                    : {}),
+            });
         }),
         privateNames: accounts => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {
@@ -353,4 +371,12 @@ export function createReplayStagedAiAdapter(
         resolveGender: runner.resolveGender,
     });
     return runner;
+}
+
+/** The only public issuer for the fixed, replay-only resolver experiment. */
+export function createStrongUncertainResolverExperimentAdapter(): ReplayAiRunner {
+    return createReplayStagedAiAdapter(
+        'ai-stage-policy-v2.9',
+        issueResolverExperimentCapability(),
+    );
 }

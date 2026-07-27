@@ -23,6 +23,7 @@
     "canary:instagram-profile-provider:finalize": "tsx --env-file=.env.local scripts/finalize-profile-provider-canary.ts",
     "verify:gender-resolution-e2e": "tsx --env-file=.env.local scripts/verify-analysis-v2-gender-resolution-e2e.ts",
     "replay:analysis-v2": "tsx --conditions=react-server --env-file=.env.local scripts/replay-analysis-v2.ts",
+    "replay:resolver-experiment": "tsx --conditions=react-server --env-file=.env.local scripts/replay-resolver-experiment.ts",
     "benchmark:analysis-v2-scheduler": "tsx scripts/benchmark-analysis-v2-scheduler.ts"
   },
   "dependencies": {

@@ -31,6 +31,10 @@ const KEY_BYTES = 32;
 const IV_BYTES = 12;
 const ENVELOPE_VERSION = 2;
 const replayArtifactOwnershipBrand = Symbol('replay-artifact-ownership');
+export const STRONG_UNCERTAIN_RESOLVER_EXPERIMENT =
+    'strong-uncertain-v1' as const;
+export const STRONG_UNCERTAIN_RESOLVER_EXPERIMENT_CAPABILITY =
+    'replay-only-resolver-experiment-strong-uncertain-v1' as const;
 
 const jpegBase64Schema = z.string().min(4).max(12 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/);
 const usernameSchema = z.string().regex(/^[a-z0-9._]{1,30}$/);
@@ -114,32 +118,36 @@ const exactBundleSchema = baseBundleSchema.superRefine((value, context) => {
 });
 
 /** A sealed, non-exact artifact. Exact schema-v1 artifacts remain unchanged. */
+const partialCaptureFields = {
+    scope: z.literal('ai-only-historical-partial-available'),
+    notExact: z.literal(true),
+    fullE2eEvidence: z.literal(false),
+    noMediaSubstitution: z.literal(true),
+    evaluationPolicy: z.object({
+        capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY),
+        aiStage: z.literal('ai-stage-policy-v2.9'),
+    }).strict(),
+    partial: z.object({
+        sourceUniverseDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        sourceIdentities: z.array(z.object({
+            ordinal: z.number().int().positive(),
+            username: normalizedUsernameSchema,
+            partition: z.enum(['private', 'public', 'fetch_terminal']),
+        }).strict()).max(MAX_PROFILES),
+        mediaUnavailable: z.array(z.object({
+            ordinal: z.number().int().positive(),
+            terminal: z.literal('media_unavailable'),
+            triageFailures: z.number().int().min(0).max(12),
+            featureFailures: z.number().int().min(0).max(12),
+            reasons: z.array(z.string().regex(/^[a-z_]{1,64}$/)).max(13),
+        }).strict()).max(MAX_PROFILES),
+    }).strict(),
+};
+
 const partialAvailableBundleSchema = baseBundleSchema.extend({
     schemaVersion: z.literal(2),
     capture: baseBundleSchema.shape.capture.extend({
-        scope: z.literal('ai-only-historical-partial-available'),
-        notExact: z.literal(true),
-        fullE2eEvidence: z.literal(false),
-        noMediaSubstitution: z.literal(true),
-        evaluationPolicy: z.object({
-            capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY),
-            aiStage: z.literal('ai-stage-policy-v2.9'),
-        }).strict(),
-        partial: z.object({
-            sourceUniverseDigest: z.string().regex(/^[a-f0-9]{64}$/),
-            sourceIdentities: z.array(z.object({
-                ordinal: z.number().int().positive(),
-                username: normalizedUsernameSchema,
-                partition: z.enum(['private', 'public', 'fetch_terminal']),
-            }).strict()).max(MAX_PROFILES),
-            mediaUnavailable: z.array(z.object({
-                ordinal: z.number().int().positive(),
-                terminal: z.literal('media_unavailable'),
-                triageFailures: z.number().int().min(0).max(12),
-                featureFailures: z.number().int().min(0).max(12),
-                reasons: z.array(z.string().regex(/^[a-z_]{1,64}$/)).max(13),
-            }).strict()).max(MAX_PROFILES),
-        }).strict(),
+        ...partialCaptureFields,
     }).strict(),
 }).strict().superRefine((value, context) => {
     for (const issue of historicalPartialBundleInvariantIssues({
@@ -149,14 +157,76 @@ const partialAvailableBundleSchema = baseBundleSchema.extend({
         context.addIssue({ code: 'custom', path: ['capture', 'partial'], message: issue });
     }
 });
-const bundleSchema = z.union([exactBundleSchema, partialAvailableBundleSchema]);
+
+const resolverExperimentBundleSchema = baseBundleSchema.extend({
+    schemaVersion: z.literal(3),
+    capture: baseBundleSchema.shape.capture.extend({
+        ...partialCaptureFields,
+        scope: z.literal('ai-only-resolver-experiment'),
+        evaluationPolicy: z.object({
+            capability: z.literal(STRONG_UNCERTAIN_RESOLVER_EXPERIMENT_CAPABILITY),
+            aiStage: z.literal('ai-stage-policy-v2.9'),
+        }).strict(),
+        experiment: z.object({
+            id: z.literal(STRONG_UNCERTAIN_RESOLVER_EXPERIMENT),
+            parentSchemaVersion: z.literal(2),
+            parentRequestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+            parentBinding: z.string().regex(/^[a-f0-9]{64}$/),
+            sourceUniverseDigest: z.string().regex(/^[a-f0-9]{64}$/),
+            evaluationAiStage: z.literal('ai-stage-policy-v2.9'),
+            uncertainPilotLimit: z.literal(24),
+            candidateOrder: z.literal('source_ordinal_ascending'),
+        }).strict(),
+    }).strict(),
+}).strict().superRefine((value, context) => {
+    for (const issue of historicalPartialBundleInvariantIssues({
+        ...value.capture.partial,
+        profiles: value.profiles,
+    })) {
+        context.addIssue({ code: 'custom', path: ['capture', 'partial'], message: issue });
+    }
+    if (
+        value.capture.experiment.parentRequestFingerprint
+            !== value.capture.requestFingerprint
+        || value.capture.experiment.sourceUniverseDigest
+            !== value.capture.partial.sourceUniverseDigest
+    ) {
+        context.addIssue({
+            code: 'custom',
+            path: ['capture', 'experiment'],
+            message: 'Resolver experiment parent binding metadata mismatched.',
+        });
+    }
+    const expectedParentBinding = createHash('sha256').update(JSON.stringify({
+        schemaVersion: 2,
+        requestFingerprint: value.capture.requestFingerprint,
+        sourceLineage: value.capture.sourceLineage,
+        sourceUniverseDigest: value.capture.partial.sourceUniverseDigest,
+        evaluationPolicy: {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.9',
+        },
+    })).digest('hex');
+    if (value.capture.experiment.parentBinding !== expectedParentBinding) {
+        context.addIssue({
+            code: 'custom',
+            path: ['capture', 'experiment', 'parentBinding'],
+            message: 'Resolver experiment parent lineage binding is invalid.',
+        });
+    }
+});
+const bundleSchema = z.union([
+    exactBundleSchema,
+    partialAvailableBundleSchema,
+    resolverExperimentBundleSchema,
+]);
 
 export type AnalysisV2ReplayBundle = z.infer<typeof bundleSchema>;
 
 export function replayBundleSizeLimits(
     schemaVersion: AnalysisV2ReplayBundle['schemaVersion'],
 ): { maxMediaBytes: number; maxPlaintextBytes: number } {
-    return schemaVersion === 2
+    return schemaVersion === 2 || schemaVersion === 3
         ? {
             maxMediaBytes: PARTIAL_MAX_MEDIA_BYTES,
             maxPlaintextBytes: PARTIAL_MAX_PLAINTEXT_BYTES,
@@ -490,6 +560,9 @@ function authenticationContext(bundle: AnalysisV2ReplayBundle): Buffer {
         requestFingerprint: bundle.capture.requestFingerprint,
         sourceLineage: bundle.capture.sourceLineage,
         evaluationPolicy: bundle.capture.evaluationPolicy ?? null,
+        ...(bundle.schemaVersion === 3
+            ? { resolverExperiment: bundle.capture.experiment }
+            : {}),
     }), 'utf8');
 }
 

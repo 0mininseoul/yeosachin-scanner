@@ -30,7 +30,10 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     genderTriageMicrobatch: mocks.genderTriageMicrobatch,
 }));
 
-import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
+import {
+    createReplayStagedAiAdapter,
+    createStrongUncertainResolverExperimentAdapter,
+} from './replay-staged-ai-adapter';
 
 describe('replay staged AI adapter telemetry', () => {
     beforeEach(() => vi.clearAllMocks());
@@ -478,4 +481,24 @@ describe('replay staged AI adapter telemetry', () => {
             );
         },
     );
+
+    it('issues an opaque v2.9 capability only for the strong-uncertain resolver adapter', async () => {
+        mocks.createGenderResolutionResultIdentity.mockReturnValue({
+            operationKey: 'resolver:experiment',
+        });
+        mocks.genderResolution.mockResolvedValue({ assessment: {} });
+        await createStrongUncertainResolverExperimentAdapter().resolveGender?.({
+            ordinal: 1,
+            media: [],
+            signal: new AbortController().signal,
+        });
+        const identityCapability =
+            mocks.createGenderResolutionResultIdentity.mock.calls[0]?.[2];
+        const executionOptions = mocks.genderResolution.mock.calls[0]?.[2];
+        expect(identityCapability).toEqual(expect.any(Object));
+        expect(executionOptions).toMatchObject({
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            resolverExperimentCapability: identityCapability,
+        });
+    });
 });
