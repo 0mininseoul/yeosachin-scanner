@@ -10,9 +10,11 @@ const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a
 const AUTHORIZATION_VALUE = /\b(?:authorization\s*[:=]\s*)?(?:basic|bearer|digest|hmac|negotiate|token|apikey)\s+[^\s,;]+/giu;
 const SECRET_VALUE = /(?:\b(?:access|refresh|provider|id|service)[_-]?(?:token|key)|\b(?:api[_-]?key|password|otp|secret|session(?:[_-]?(?:id|key))?|supabase(?:[_-]?(?:key|token))?))\s*[:=]\s*[^\s,;]+/giu;
 const COOKIE_VALUE = /\b(?:set[-_ ]?cookie|cookie(?:2)?)\s*[:=]\s*[^\n;]+(?:;[^\n]*)?/giu;
-const QUERY_SECRET = /([?&](?:[^=&\s]*?(?:token|session|cookie|authorization|password|otp|secret|key|email|phone|birth(?:year|date)?|user(?:[_-]?id)?|account(?:[_-]?id)?)[^=&\s]*)=)[^&#\s]*/giu;
-const BARE_SECRET_ASSIGNMENT = /(\b(?:access[_-]?token|refresh[_-]?token|provider[_-]?token|id[_-]?token|service[_-]?key|supabase[_-]?(?:key|token)|token|session|cookie|authorization|password|otp|secret|api[_-]?key)=)[^\s&#,;]*/giu;
+const QUERY_SECRET = /([?&](?:[^=&\s]*?(?:token|session|cookie|authorization|password|otp|secret|key|email|phone|dob|birth(?:year|date)?|code(?:[_-]?(?:verifier|challenge))?|state|user(?:[_-]?id)?|account(?:[_-]?id)?)[^=&\s]*)=)[^&#\s]*/giu;
+const BARE_SECRET_ASSIGNMENT = /(\b(?:access[_-]?token|refresh[_-]?token|provider[_-]?token|id[_-]?token|service[_-]?key|supabase[_-]?(?:key|token)|token|session|cookie|authorization|password|otp|secret|api[_-]?key|code(?:[_-]?(?:verifier|challenge))?|state|dob)=)[^\s&#,;]*/giu;
 const JWT = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/gu;
+const COMPACT_BIRTHDATE = /\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\b/g;
+const CONTEXTUAL_BIRTHYEAR = /\b(?:birth[_ ]?year|dob)\s*[:=]?\s*(?:19|20)\d{2}\b/giu;
 const DISCORD_WEBHOOK_URL = /https?:\/\/(?:canary\.)?discord(?:app)?\.com\/api\/webhooks\/[^\s"']+/giu;
 const INSTAGRAM_URL = /https?:\/\/[^\s"']*(?:instagram\.com|cdninstagram\.com|fbcdn\.net)[^\s"']*/giu;
 
@@ -28,6 +30,8 @@ function scrubString(value: string): string {
         .replace(EMAIL, REDACTED)
         .replace(PHONE, REDACTED)
         .replace(BIRTHDATE, REDACTED)
+        .replace(COMPACT_BIRTHDATE, REDACTED)
+        .replace(CONTEXTUAL_BIRTHYEAR, REDACTED)
         .replace(UUID, REDACTED)
         .replace(SECRET_VALUE, REDACTED);
 }
