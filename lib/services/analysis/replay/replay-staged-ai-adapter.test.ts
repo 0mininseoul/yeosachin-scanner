@@ -369,6 +369,52 @@ describe('replay staged AI adapter telemetry', () => {
         expect(results.flatMap(item => item.attemptLatenciesMs ?? [])).toEqual([7]);
     });
 
+    it('caps six concurrent v2.9 feature provider calls at three', async () => {
+        let active = 0;
+        let maximumActive = 0;
+        mocks.createFeatureAnalysisResultIdentity.mockReturnValue({
+            operationKey: 'feature',
+        });
+        mocks.featureAnalysis.mockImplementation(async () => {
+            active++;
+            maximumActive = Math.max(maximumActive, active);
+            await new Promise(resolve => setTimeout(resolve, 5));
+            active--;
+            return { finalGenderDecision: 'verified_female' };
+        });
+        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.9');
+        const triage = {
+            assessment: {
+                inferredGender: 'female' as const,
+                confidence: 'high' as const,
+                ownerConsistency: 'same_person' as const,
+                evidenceSelectionIds: ['m1', 'm2'],
+            },
+            routingDecision: 'route_to_feature_analysis' as const,
+            routingReason: 'conserve_female_recall' as const,
+            analyzedSelectionIds: ['m1'],
+            v29AccountContext: 'personal' as const,
+        };
+
+        await Promise.all(Array.from({ length: 6 }, (_, index) => (
+            adapter.feature!({
+                ordinal: index + 1,
+                bio: null,
+                accountProfile: {
+                    fullName: `Profile ${index + 1}`,
+                    hasProfileImage: true,
+                    bio: null,
+                },
+                media: [],
+                captions: [],
+                triage,
+            })
+        )));
+
+        expect(mocks.featureAnalysis).toHaveBeenCalledTimes(6);
+        expect(maximumActive).toBe(3);
+    });
+
     it('keeps an ambiguous paired safe fallback as one provider call without split replay', async () => {
         mocks.createGenderTriageMicrobatchAccountId
             .mockReturnValueOnce(`account:${'a'.repeat(64)}`)

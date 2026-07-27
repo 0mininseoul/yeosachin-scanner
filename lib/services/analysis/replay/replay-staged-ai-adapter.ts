@@ -17,6 +17,7 @@ import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generati
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
+import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import type {
     ReplayAiRunner,
     ReplayInvocation,
@@ -160,12 +161,34 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
     }
 }
 
+function createSemaphore(limit: number) {
+    let active = 0;
+    const waiters: Array<() => void> = [];
+    return async function run<T>(task: () => Promise<T>): Promise<T> {
+        if (active >= limit) {
+            await new Promise<void>(resolve => waiters.push(resolve));
+        }
+        active++;
+        try {
+            return await task();
+        } finally {
+            active--;
+            waiters.shift()?.();
+        }
+    };
+}
+
 /** Stateless paid-AI adapter. It imports no Supabase, provider, R2, job, result, or archive module. */
 export function createReplayStagedAiAdapter(
     aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
+    const runFeature = aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        ? createSemaphore(
+            ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
+        )
+        : async <T>(task: () => Promise<T>) => task();
     type PendingTriage = {
         accountId: string;
         aiInput: {
@@ -273,7 +296,7 @@ export function createReplayStagedAiAdapter(
                 );
             }),
         }),
-        feature: input => invoke(async state => {
+        feature: input => runFeature(() => invoke(async state => {
             const aiInput = {
                 triage: input.triage,
                 bio: input.bio,
@@ -285,7 +308,7 @@ export function createReplayStagedAiAdapter(
             };
             const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
             return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
-        }),
+        })),
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderResolutionResultIdentity(

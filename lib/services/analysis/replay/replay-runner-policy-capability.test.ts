@@ -567,6 +567,97 @@ describe('replay staged AI runner policy capability', () => {
         await running;
     });
 
+    it('keeps the seventh profile waiting while three features run and three hold queued slots', async () => {
+        const profiles = Array.from({ length: 7 }, (_, index) => ({
+            ...v28Bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `public-${index + 1}`,
+            media: [{
+                ...v28Bundle.profiles[0]!.media[0]!,
+                selectionId: `m${index + 1}`,
+            }],
+            triageSelectionIds: [`m${index + 1}`],
+            featureSelectionIds: [`m${index + 1}`],
+            resolverSelectionIds: [`m${index + 1}`],
+        }));
+        ai.createGenderTriageMicrobatchAccountId.mockImplementation(
+            (input: { media: Array<{ selectionId: string }> }) => {
+                const ordinal = Number(input.media[0]!.selectionId.slice(1));
+                return `account:${ordinal.toString(16).padStart(64, '0')}`;
+            },
+        );
+        ai.genderTriageMicrobatch.mockImplementation(async accounts => (
+            accounts.map((account: {
+                accountId: string;
+                input: { media: Array<{ selectionId: string }> };
+            }) => ({
+                accountId: account.accountId,
+                source: 'checkpoint',
+                result: {
+                    ...highFemale('personal'),
+                    assessment: {
+                        ...highFemale('personal').assessment,
+                        evidenceSelectionIds: [
+                            account.input.media[0]!.selectionId,
+                            'corroborating',
+                        ],
+                    },
+                },
+            }))
+        ));
+        const featureResult = {
+            features: {
+                gender: 'female',
+                genderConfidence: 'high',
+                ownerConsistency: 'same_person',
+                appearanceGrade: 3,
+                exposureScore: 1,
+                businessClassification: 'personal',
+                businessConfidence: 'high',
+                accountContext: 'personal',
+                marriageEvidence: 'none',
+                partnerEvidence: 'none',
+                partnerExclusionContext: 'none',
+                evidenceSelectionIds: {
+                    gender: ['m1'], appearance: ['m1'], exposure: ['m1'],
+                    business: ['m1'], accountContext: ['m1'], marriagePartner: [],
+                },
+                oneLineOverview: '관찰된 단서를 바탕으로 개인 계정의 특징을 구체적으로 정리했습니다.',
+            },
+            finalGenderDecision: 'verified_female',
+            analyzedSelectionIds: ['m1'],
+        };
+        let gate = true;
+        const featureReleases: Array<() => void> = [];
+        ai.featureAnalysis.mockImplementation(async () => {
+            if (gate) {
+                await new Promise<void>(resolve => featureReleases.push(resolve));
+            }
+            return featureResult;
+        });
+
+        const running = runAnalysisV2AiReplay({
+            bundle: { ...v28ToV29Bundle, profiles },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        });
+        await vi.waitFor(() => expect(ai.featureAnalysis).toHaveBeenCalledTimes(3));
+        expect(ai.genderTriageMicrobatch).toHaveBeenCalledTimes(3);
+        expect(ai.genderTriageMicrobatch.mock.calls.flatMap(call => call[0])
+            .some(account => account.input.media[0]!.selectionId === 'm7'))
+            .toBe(false);
+
+        gate = false;
+        featureReleases.shift()?.();
+        await vi.waitFor(() => expect(ai.genderTriageMicrobatch).toHaveBeenCalledTimes(4));
+        expect(ai.genderTriageMicrobatch.mock.calls[3]![0][0]!
+            .input.media[0]!.selectionId).toBe('m7');
+        featureReleases.forEach(release => release());
+        await running;
+    });
+
     it('rejects a missing or different runtime evaluation before any AI call', async () => {
         const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.9');
         await expect(runAnalysisV2AiReplay({
