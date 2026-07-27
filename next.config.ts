@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 import { withSentryConfig } from '@sentry/nextjs';
-import { sentryBuildOptions } from './lib/observability/sentry-build-options';
+import {
+  sentryBuildOptions,
+  shouldConfigureSentryBuild,
+} from './lib/observability/sentry-build-options';
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ["@google-cloud/tasks", "google-auth-library", "google-gax"],
@@ -14,4 +17,10 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default withSentryConfig(nextConfig, sentryBuildOptions());
+const shouldConfigureSentry = shouldConfigureSentryBuild();
+
+// Do not invoke withSentryConfig at all outside the explicit CI upload gate.
+// Turbopack's runAfterProductionCompile lifecycle can otherwise instantiate release work.
+export default shouldConfigureSentry
+  ? withSentryConfig(nextConfig, sentryBuildOptions())
+  : nextConfig;

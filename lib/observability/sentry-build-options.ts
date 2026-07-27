@@ -1,10 +1,18 @@
+export type BuildEnvironment = Readonly<Record<string, string | undefined>>;
+
 /** Source-map upload is an explicit CI-only release action, never a local token side effect. */
-export function sentryBuildOptions(
-    environment: Readonly<Record<string, string | undefined>> = process.env,
-) {
-    const uploadEnabled = environment.CI === 'true'
+export function shouldConfigureSentryBuild(
+    environment: BuildEnvironment = process.env,
+): boolean {
+    return environment.CI === 'true'
         && environment.SENTRY_SOURCEMAPS_UPLOAD === 'true'
         && Boolean(environment.SENTRY_AUTH_TOKEN);
+}
+
+export function sentryBuildOptions(
+    environment: BuildEnvironment = process.env,
+) {
+    const uploadEnabled = shouldConfigureSentryBuild(environment);
 
     return {
         authToken: uploadEnabled ? environment.SENTRY_AUTH_TOKEN : undefined,
