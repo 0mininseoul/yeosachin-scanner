@@ -869,6 +869,7 @@ describe('V2 AI and scoring executors', () => {
         }));
 
         expect(deps.ai.features).toHaveBeenCalledTimes(1);
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
         expect(vi.mocked(deps.ai.features).mock.calls[0]![0].accountProfile).toEqual({
             fullName: 'Alice Club', hasProfileImage: true, bio: 'photographer and personal diary',
         });
@@ -948,8 +949,8 @@ describe('V2 AI and scoring executors', () => {
             expect(deps.ai.features).toHaveBeenCalledOnce();
             expect(deps.ai.startGenderResolution).toHaveBeenCalledOnce();
         });
-        expect(vi.mocked(deps.ai.features).mock.invocationCallOrder[0])
-            .toBeLessThan(vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0]!);
+        expect(vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(deps.ai.features).mock.invocationCallOrder[0]!);
         const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
         resolverState = {
             status: 'ready',
@@ -993,6 +994,105 @@ describe('V2 AI and scoring executors', () => {
             genderResolutionResultHash: resolverResultHash,
         });
         expect(cutoff).not.toHaveBeenCalled();
+    });
+
+    it('runs the v2.9 resolver for an ambiguous personal account without feature admission', async () => {
+        const memoryState = memory();
+        const account = profile('resolver.personal');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0],
+        ) => {
+            const mediaIds = input.media.map(row => row.selectionId);
+            return {
+                result: {
+                    ...triage(mediaIds),
+                    v29AccountContext: 'personal' as const,
+                },
+                operationKey: `gender-triage:${digest('resolver-personal-triage')}`,
+                resultHash: digest('resolver-personal-triage'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const resolverOperationKey =
+            `gender-resolution:${digest('resolver-personal-ready')}`;
+        const resolverResultHash = digest('resolver-personal-result');
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0],
+        ) => ({
+            operationKey: resolverOperationKey,
+            completion: Promise.resolve(),
+            peek: () => ({
+                status: 'ready' as const,
+                value: {
+                    result: {
+                        assessment: {
+                            inferredGender: 'female' as const,
+                            confidence: 'high' as const,
+                            ownerConsistency: 'same_person' as const,
+                            evidenceSelectionIds: input.media
+                                .slice(0, 2)
+                                .map(row => row.selectionId),
+                        },
+                        analyzedSelectionIds: input.media
+                            .slice(0, 5)
+                            .map(row => row.selectionId),
+                    },
+                    operationKey: resolverOperationKey,
+                    resultHash: resolverResultHash,
+                    source: 'checkpoint' as const,
+                },
+            }),
+            cutoff: vi.fn().mockResolvedValue(undefined),
+        }));
+        const base = state();
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('resolver-personal-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('resolver-personal-producer'),
+                        revision: 1,
+                        resultHash: digest('resolver-personal-profile-result'),
+                    }],
+                }),
+            }),
+        );
+
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).toHaveBeenCalledOnce();
+        expect(memoryState.outcomes[0]).toMatchObject({
+            status: 'verified_female',
+            baselineClassification: 'unresolved',
+            classificationSource: 'gender_resolution',
+            genderResolutionStatus: 'ready_applied',
+            genderResolutionOperationKey: resolverOperationKey,
+            genderResolutionResultHash: resolverResultHash,
+        });
     });
 
     it('keeps an early pending resolver alive until the profile batch barrier', async () => {

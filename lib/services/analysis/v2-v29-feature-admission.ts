@@ -7,7 +7,7 @@ export type AnalysisV29FeatureAdmission =
     | 'unsupported_unknown';
 
 /**
- * Shared production/replay admission for the v2.9 feature and resolver stages.
+ * Shared production/replay admission for the v2.9 feature stage.
  */
 export function v29FeatureAdmission(
     triage: GenderTriageResult,

@@ -8,6 +8,7 @@ import {
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
+import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
 import { historicalPartialBundleInvariantIssues, historicalPartialPaidCoverage } from './historical-partial-available-artifact';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
@@ -456,14 +457,9 @@ export async function runAnalysisV2AiReplay(input: {
                 gender.male++;
                 return;
             }
-            if (
-                replayAiPolicy === 'ai-stage-policy-v2.9'
-                && v29FeatureAdmission(triage, profile) !== 'eligible'
-            ) {
-                gender.unknown++;
-                return;
-            }
-            const featurePromise = runner.feature?.({
+            const featureAdmitted = replayAiPolicy !== 'ai-stage-policy-v2.9'
+                || v29FeatureAdmission(triage, profile) === 'eligible';
+            const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
                 ...(replayAiPolicy === 'ai-stage-policy-v2.9' ? {
@@ -472,13 +468,22 @@ export async function runAnalysisV2AiReplay(input: {
                 media: mediaFor(profile, profile.featureSelectionIds),
                 captions: profile.captions,
                 triage,
-            });
+            }) : undefined;
             const assessment = triage.assessment;
-            const eligible = !(
-                assessment.inferredGender === 'female'
-                && assessment.confidence === 'high'
-                && assessment.ownerConsistency === 'same_person'
-            );
+            const eligible = replayAiPolicy === 'ai-stage-policy-v2.9'
+                ? v29GenderResolverAdmission(
+                    triage,
+                    profile.resolverSelectionIds.length,
+                ) === 'eligible'
+                : !(
+                    assessment.inferredGender === 'female'
+                    && assessment.confidence === 'high'
+                    && assessment.ownerConsistency === 'same_person'
+                );
+            if (!featureAdmitted && !eligible) {
+                gender.unknown++;
+                return;
+            }
             const abort = new AbortController();
             let trackedResolver: TrackedResolver | undefined;
             if (eligible && runner.resolveGender) {
@@ -533,7 +538,9 @@ export async function runAnalysisV2AiReplay(input: {
             }
             const feature = featurePromise ? await featurePromise : undefined;
             if (feature) collect(stages.featureAnalysis, durations.featureAnalysis, feature);
-            let baseline: ReplayBaselineClassification = 'analysis_unavailable';
+            let baseline: ReplayBaselineClassification = featureAdmitted
+                ? 'analysis_unavailable'
+                : 'unresolved';
             if (feature?.outcome === 'ok' && feature.value) {
                 baseline = feature.value.finalGenderDecision === 'verified_female'
                     ? 'verified_female'

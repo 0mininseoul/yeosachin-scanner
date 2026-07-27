@@ -88,6 +88,7 @@ import {
     type AnalysisV2OfficialExclusionReason,
 } from './v2-official-account-screening';
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
+import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
 import {
     AnalysisV2TransientMediaPreparationError,
     isAnalysisV2PartialMediaCoverageAllowed,
@@ -1445,40 +1446,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
-                    if (policySupports(
+                    const v29Admission = policySupports(
                         aiFence.aiStagePolicyVersion,
                         'genderTriageMicrobatchV29',
-                    )) {
-                        const admission = v29FeatureAdmission(gender.result, profile);
-                        if (admission !== 'eligible') {
-                            return {
-                                candidateId,
-                                instagramId: normalizeUsername(item.username),
-                                status: 'unresolved' as const,
-                                unavailableReason: null,
-                                profile: item.profile,
-                                triage: gender.result,
-                                feature: null,
-                                normalizedSelectionIds: triageNormalized.media.map(
-                                    row => row.selectionId
-                                ),
-                                mediaCoverage: triageNormalized.coverage,
-                                captions: [],
-                                genderOperationKey: gender.operationKey,
-                                genderResultHash: gender.resultHash,
-                                featureOperationKey: null,
-                                featureResultHash: null,
-                                baselineClassification: 'unresolved' as const,
-                                classificationSource: 'unknown' as const,
-                                genderResolutionStatus: 'not_eligible' as const,
-                                genderResolutionOperationKey: null,
-                                genderResolutionResultHash: null,
-                                mediaBundlePersisted: false,
-                                aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
-                                v29FeatureAdmission: admission,
-                            };
-                        }
-                    }
+                    )
+                        ? v29FeatureAdmission(gender.result, profile)
+                        : null;
                     const triageAttempted = new Set(policy.triage.selectionIds);
                     const featureRemainder = policy.feature.media.filter(media => (
                         !triageAttempted.has(media.selectionId)
@@ -1533,18 +1506,18 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const captions = captionPolicy.featureCaptions.filter(caption => (
                         normalizedSelectionIds.has(caption.selectionId)
                     ));
-                    const featureTask = dependencies.ai.features({
-                        triage: gender.result,
-                        bio: item.profile.bio ?? null,
-                        media: normalized.media,
-                        captions,
-                        ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
-                    }, aiFence);
                     const triageAssessment = gender.result.assessment;
-                    const resolverEligible = genderResolutionEnabled && !(
-                        triageAssessment.inferredGender === 'female'
-                        && triageAssessment.confidence === 'high'
-                        && triageAssessment.ownerConsistency === 'same_person'
+                    const resolverEligible = genderResolutionEnabled && (
+                        aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                            ? v29GenderResolverAdmission(
+                                gender.result,
+                                normalized.media.length,
+                            ) === 'eligible'
+                            : !(
+                                triageAssessment.inferredGender === 'female'
+                                && triageAssessment.confidence === 'high'
+                                && triageAssessment.ownerConsistency === 'same_person'
+                            )
                     );
                     const resolverHandle = resolverEligible
                         ? dependencies.ai.startGenderResolution({
@@ -1554,6 +1527,130 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     if (resolverHandle) {
                         startedResolverHandles.push(resolverHandle);
                     }
+                    if (v29Admission !== null && v29Admission !== 'eligible') {
+                        if (!resolverHandle) {
+                            return {
+                                candidateId,
+                                instagramId: normalizeUsername(item.username),
+                                status: 'unresolved' as const,
+                                unavailableReason: null,
+                                profile: item.profile,
+                                triage: gender.result,
+                                feature: null,
+                                normalizedSelectionIds: normalized.media.map(
+                                    row => row.selectionId
+                                ),
+                                mediaCoverage: normalized.coverage,
+                                captions,
+                                genderOperationKey: gender.operationKey,
+                                genderResultHash: gender.resultHash,
+                                featureOperationKey: null,
+                                featureResultHash: null,
+                                baselineClassification: 'unresolved' as const,
+                                classificationSource: 'unknown' as const,
+                                genderResolutionStatus: 'not_eligible' as const,
+                                genderResolutionOperationKey: null,
+                                genderResolutionResultHash: null,
+                                mediaBundlePersisted: false,
+                                aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+                                v29FeatureAdmission: v29Admission,
+                            };
+                        }
+                        return {
+                            kind: 'resolver_pending',
+                            resolverHandle,
+                            finalize: async settledResolverState => {
+                                const readyResolver =
+                                    settledResolverState?.status === 'ready'
+                                        ? settledResolverState.value
+                                        : null;
+                                const reconciliation = applyGenderResolution({
+                                    baselineClassification: 'unresolved',
+                                    baselineSource: 'unknown',
+                                    triage: gender.result.assessment,
+                                    feature: null,
+                                    resolver: readyResolver?.result ?? null,
+                                });
+                                const status = reconciliation.finalClassification;
+                                const genderResolutionStatus =
+                                    settledResolverState?.status === 'ready'
+                                        ? reconciliation.resolverApplied
+                                            ? 'ready_applied' as const
+                                            : 'ready_inconclusive' as const
+                                        : settledResolverState?.status === 'capacity_skipped'
+                                            ? 'capacity_skipped' as const
+                                            : settledResolverState?.status
+                                                === 'terminal_unavailable'
+                                                ? 'terminal_unavailable' as const
+                                                : 'cutoff' as const;
+                                let mediaBundlePersisted = false;
+                                if (status === 'verified_female' && readyResolver) {
+                                    const resolverMedia =
+                                        readyResolver.result.analyzedSelectionIds.map(
+                                            selectionId => {
+                                                const bytes = normalized.bytes.get(selectionId);
+                                                if (!bytes) {
+                                                    throw new Error(
+                                                        'ANALYSIS_V2_MEDIA_SELECTION_DRIFT'
+                                                    );
+                                                }
+                                                return { selectionId, normalizedJpeg: bytes };
+                                            },
+                                        );
+                                    await dependencies.mediaStore.persistBundle({
+                                        requestId: context.claim.requestId,
+                                        jobKey: context.claim.jobKey,
+                                        claimToken: context.claim.claimToken,
+                                        bundleId: analysisV2CandidateBundleId(candidateId),
+                                        media: resolverMedia,
+                                    });
+                                    mediaBundlePersisted = true;
+                                }
+                                return {
+                                    candidateId,
+                                    instagramId: normalizeUsername(item.username),
+                                    status,
+                                    unavailableReason: null,
+                                    profile,
+                                    triage: gender.result,
+                                    feature: null,
+                                    normalizedSelectionIds: normalized.media.map(
+                                        row => row.selectionId
+                                    ),
+                                    mediaCoverage: normalized.coverage,
+                                    captions,
+                                    genderOperationKey: gender.operationKey,
+                                    genderResultHash: gender.resultHash,
+                                    featureOperationKey: null,
+                                    featureResultHash: null,
+                                    baselineClassification: 'unresolved' as const,
+                                    classificationSource: reconciliation.classificationSource,
+                                    genderResolutionStatus,
+                                    genderResolutionOperationKey:
+                                        readyResolver?.operationKey ?? null,
+                                    genderResolutionResultHash:
+                                        readyResolver?.resultHash ?? null,
+                                    mediaBundlePersisted,
+                                    aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+                                    v29FeatureAdmission: v29Admission,
+                                    ...(selectionProvenance
+                                        ? {
+                                            mediaSelectionProvenance: selectionProvenance,
+                                            inputQualityPolicy:
+                                                'input-quality-v2.8' as const,
+                                        }
+                                        : {}),
+                                };
+                            },
+                        };
+                    }
+                    const featureTask = dependencies.ai.features({
+                        triage: gender.result,
+                        bio: item.profile.bio ?? null,
+                        media: normalized.media,
+                        captions,
+                        ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
+                    }, aiFence);
                     let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
                     try {
                         features = await featureTask;

@@ -427,6 +427,69 @@ describe('AI-only replay runner', () => {
         expect(report.resolver).toMatchObject({ ready: 1, applied: 1, inconclusive: 0, cutoff: 0 });
     });
 
+    it('runs the v2.9 resolver for an ambiguous personal account without admitting feature', async () => {
+        const feature = vi.fn();
+        const resolveGender = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 3,
+            value: {
+                assessment: {
+                    inferredGender: 'female' as const,
+                    confidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    evidenceSelectionIds: ['m1', 'm2'],
+                },
+                analyzedSelectionIds: ['m1', 'm2'],
+            },
+        }));
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    ...bundle.capture,
+                    sourceLineage: {
+                        ...bundle.capture.sourceLineage,
+                        policyVersions: {
+                            ...bundle.capture.sourceLineage.policyVersions,
+                            aiStage: 'ai-stage-policy-v2.9',
+                            scheduler: 'ai-scheduler-v1',
+                        },
+                    },
+                },
+            },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                        v29AccountContext: 'personal',
+                    },
+                }),
+                feature,
+                resolveGender,
+            }),
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(resolveGender).toHaveBeenCalledOnce();
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+        expect(report.resolver).toMatchObject({
+            ready: 1, applied: 1, inconclusive: 0, cutoff: 0, capacitySkipped: 0,
+        });
+    });
+
     it('caps concurrently active public profiles at four', async () => {
         let active = 0;
         let maximum = 0;
