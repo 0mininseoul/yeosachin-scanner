@@ -6,7 +6,6 @@ import {
     type Part,
 } from '@google/genai';
 import { toJSONSchema, type ZodType } from 'zod';
-import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     estimateGeminiRequestCost,
     isVertexAICostOptimized,
@@ -661,6 +660,7 @@ export async function logTokenUsage(
     };
 
     try {
+        const { supabaseAdmin } = await import('@/lib/supabase/admin');
         if (extendedTelemetrySupported !== false) {
             const { error } = await supabaseAdmin.from('gemini_token_usage').insert({
                 ...baseRow,
@@ -1086,6 +1086,7 @@ export async function getDailyTokenUsage(days: number = 7): Promise<{
     latencySamples: number;
     averageLatencyMs: number | null;
 }[]> {
+    const { supabaseAdmin } = await import('@/lib/supabase/admin');
     const { data, error } = await supabaseAdmin
         .from('gemini_token_usage')
         .select('*')

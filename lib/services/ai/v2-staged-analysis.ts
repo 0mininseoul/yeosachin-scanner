@@ -30,10 +30,6 @@ import {
 } from './stage-policy';
 import type { ReplayStatelessCapability } from './replay-stateless-capability';
 import {
-    isResolverExperimentCapability,
-    type ResolverExperimentCapability,
-} from './resolver-experiment-capability';
-import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
 import {
@@ -54,7 +50,7 @@ import {
     type AnalysisV2AiIdentityMediaPart,
     type AnalysisV2AiPreparedResult,
     type AnalysisV2AiResultIdentity,
-} from '@/lib/services/analysis/v2-ai-result-store';
+} from '@/lib/services/analysis/v2-ai-result-identity';
 
 const MAX_NORMALIZED_IMAGE_BASE64_LENGTH = 12 * 1024 * 1024;
 const MAX_PROFILE_BIO_LENGTH = 2_200;
@@ -1823,29 +1819,23 @@ export async function genderTriageMicrobatch(
 export function createGenderResolutionResultIdentity(
     rawInput: GenderResolutionInput,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_LATEST_VERSION,
-    resolverExperimentCapability?: ResolverExperimentCapability,
+    experimentPolicy?: {
+        model: 'gemini-3-flash-preview';
+        thinkingLevel: 'HIGH';
+        mediaResolution: 'HIGH';
+        maxOutputTokens: 512;
+    },
 ): AnalysisV2AiResultIdentity {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
     const projection = genderResolutionMediaProjection(media);
-    const experiment = isResolverExperimentCapability(resolverExperimentCapability)
-        ? {
-            model: 'gemini-3-flash-preview',
-            thinkingLevel: 'HIGH' as const,
-            mediaResolution: 'HIGH' as const,
-            maxOutputTokens: 512 as const,
-        }
-        : undefined;
-    if (resolverExperimentCapability !== undefined && !experiment) {
-        throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_CAPABILITY_INVALID');
-    }
     return stagedResultIdentity(
         'genderResolution',
         genderResolutionPrompt(projection.projectedMedia),
         media,
         'request',
         policyVersion,
-        experiment,
+        experimentPolicy,
     );
 }
 
@@ -1921,7 +1911,12 @@ export async function genderResolution(
         abortSignal?: AbortSignal;
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
-        resolverExperimentCapability?: ResolverExperimentCapability;
+        experimentPolicy?: {
+            model: 'gemini-3-flash-preview';
+            thinkingLevel: 'HIGH';
+            mediaResolution: 'HIGH';
+            maxOutputTokens: 512;
+        };
     } = {},
 ): Promise<GenderResolutionResult> {
     const input = genderResolutionInputSchema.parse(rawInput);
@@ -1929,24 +1924,13 @@ export async function genderResolution(
     const projection = genderResolutionMediaProjection(media);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_LATEST_VERSION;
     const prompt = genderResolutionPrompt(projection.projectedMedia);
-    const experiment = isResolverExperimentCapability(
-        options.resolverExperimentCapability,
-    ) ? {
-            model: 'gemini-3-flash-preview',
-            thinkingLevel: 'HIGH' as const,
-            mediaResolution: 'HIGH' as const,
-            maxOutputTokens: 512 as const,
-        } : undefined;
-    if (options.resolverExperimentCapability !== undefined && !experiment) {
-        throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_CAPABILITY_INVALID');
-    }
     const identity = stagedResultIdentity(
         'genderResolution',
         prompt,
         media,
         'request',
         policyVersion,
-        experiment,
+        options.experimentPolicy,
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderResolutionModelResponseSchemaFor(
@@ -1969,7 +1953,7 @@ export async function genderResolution(
             ...(options.replayCapability
                 ? { skipTokenLog: true, replayCapability: options.replayCapability }
                 : {}),
-            ...(experiment ?? {}),
+            ...(options.experimentPolicy ?? {}),
         },
     ));
     const assessment = genderResolutionModelResponseSchema.parse({

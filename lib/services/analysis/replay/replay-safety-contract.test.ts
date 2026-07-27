@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 
 const liveSource = new URL('./replay-live-source.ts', import.meta.url);
 const stagedAdapter = new URL('./replay-staged-ai-adapter.ts', import.meta.url);
+const resolverExperimentAdapter =
+    new URL('./resolver-experiment-ai-adapter.ts', import.meta.url);
 const runner = new URL('./replay-runner.ts', import.meta.url);
 const cli = new URL('../../../../scripts/replay-analysis-v2.ts', import.meta.url);
 const libRoot = new URL('../../../', import.meta.url);
@@ -47,6 +49,7 @@ describe('analysis V2 replay safety contract', () => {
         }
         expect(capabilityIssuers.sort()).toEqual([
             replayCapability.pathname,
+            resolverExperimentAdapter.pathname,
             stagedAdapter.pathname,
         ].sort());
         expect(source).toContain('resolveReplayAiStagePolicyVersion');

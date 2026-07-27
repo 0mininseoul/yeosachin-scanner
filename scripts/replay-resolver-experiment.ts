@@ -11,7 +11,7 @@ import {
     STRONG_UNCERTAIN_RESOLVER_EXPERIMENT,
 } from '../lib/services/analysis/replay/resolver-experiment-artifact';
 import { runStrongUncertainResolverExperiment } from '../lib/services/analysis/replay/resolver-experiment-runner';
-import { createStrongUncertainResolverExperimentAdapter } from '../lib/services/analysis/replay/replay-staged-ai-adapter';
+import { createStrongUncertainResolverExperimentAdapter } from '../lib/services/analysis/replay/resolver-experiment-ai-adapter';
 
 export type ResolverExperimentCliOptions =
     | {

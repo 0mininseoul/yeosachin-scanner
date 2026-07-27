@@ -9,6 +9,7 @@ import {
     assertStrongUncertainResolverExperiment,
     type StrongUncertainResolverExperimentBundle,
 } from './resolver-experiment-artifact';
+import { isStrongUncertainResolverExperimentAdapter } from './resolver-experiment-ai-adapter';
 
 export const STRONG_UNCERTAIN_RESOLVER_CONFIG = Object.freeze({
     model: 'gemini-3-flash-preview',
@@ -56,7 +57,11 @@ export async function runStrongUncertainResolverExperiment(input: {
     signal?: AbortSignal;
 }): Promise<ResolverExperimentReport> {
     assertStrongUncertainResolverExperiment(input.bundle);
-    if (!input.runner.triage || !input.runner.resolveGender) {
+    if (
+        !input.runner.triage
+        || !input.runner.resolveGender
+        || !isStrongUncertainResolverExperimentAdapter(input.runner)
+    ) {
         throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_RUNNER_INVALID');
     }
     const profiles = input.bundle.profiles
@@ -68,10 +73,11 @@ export async function runStrongUncertainResolverExperiment(input: {
         media: ReplayMedia[];
     }> = [];
     let triaged = 0;
-    for (const profile of profiles) {
-        if (input.signal?.aborted) throw input.signal.reason;
+    const triageInputs = profiles.map(profile => {
         const triageMedia = mediaFor(profile, profile.triageSelectionIds);
-        const triage = await input.runner.triage({
+        return {
+            profile,
+            promise: input.runner.triage!({
             ordinal: profile.ordinal,
             media: triageMedia,
             accountProfile: {
@@ -79,7 +85,12 @@ export async function runStrongUncertainResolverExperiment(input: {
                 hasProfileImage: profile.hasProfileImage ?? false,
                 bio: profile.bio ?? null,
             },
-        });
+            }),
+        };
+    });
+    for (const { profile, promise } of triageInputs) {
+        if (input.signal?.aborted) throw input.signal.reason;
+        const triage = await promise;
         if (triage.outcome !== 'ok' || !triage.value) continue;
         triaged++;
         const resolverMedia = selectAnalysisV2GenderResolverMedia(
