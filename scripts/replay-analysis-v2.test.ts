@@ -10,6 +10,7 @@ import {
 } from '../lib/services/analysis/replay/replay-bundle';
 import { parseReplayCliArgs, runReplayCli } from './replay-analysis-v2';
 import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/replay/historical-partial-available-artifact';
+import packageJson from '../package.json';
 
 const temporaryPaths: string[] = [];
 
@@ -94,6 +95,50 @@ async function partialArtifacts(now: number) {
 }
 
 describe('analysis V2 replay CLI', () => {
+    it('runs the canonical replay command under the React server condition', () => {
+        expect(packageJson.scripts['replay:analysis-v2']).toBe(
+            'tsx --conditions=react-server --env-file=.env.local scripts/replay-analysis-v2.ts',
+        );
+    });
+
+    it('creates the real frozen v2.9 paid adapter under canonical runtime conditions without invoking AI', () => {
+        const result = spawnSync(
+            'npx',
+            [
+                'tsx',
+                '--conditions=react-server',
+                '--env-file=.env.local',
+                '--eval',
+                "import('./scripts/replay-analysis-v2.ts').then(async m => { const runner = await m.createPaidReplayRunner('ai-stage-policy-v2.9'); process.stdout.write(JSON.stringify({ frozen: Object.isFrozen(runner), stages: Object.keys(runner).sort() })); })",
+            ],
+            { cwd: process.cwd(), encoding: 'utf8', timeout: 10_000 },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({
+            frozen: true,
+            stages: ['feature', 'privateNames', 'resolveGender', 'triage'],
+        });
+        expect(result.stderr).toBe('');
+    });
+
+    it('maps a missing React server condition to a bounded paid-runtime error', () => {
+        const result = spawnSync(
+            process.execPath,
+            [
+                '--import',
+                'tsx',
+                '--eval',
+                "import('./scripts/replay-analysis-v2.ts').then(m => m.createPaidReplayRunner('ai-stage-policy-v2.9')).catch(error => { process.stderr.write(error.message); process.exitCode = 1; })",
+            ],
+            { cwd: process.cwd(), encoding: 'utf8', timeout: 10_000 },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(1);
+        expect(result.stderr).toBe('ANALYSIS_V2_REPLAY_SERVER_RUNTIME_REQUIRED');
+        expect(result.stderr).not.toContain('Client Component');
+    });
+
     it('loads replay CLI without React server module conditions', () => {
         const result = spawnSync(
             process.execPath,

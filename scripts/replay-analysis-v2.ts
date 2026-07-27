@@ -142,6 +142,25 @@ function requiredEnvironment(name: string): string {
     return value;
 }
 
+const SERVER_ONLY_RUNTIME_MESSAGE =
+    'This module cannot be imported from a Client Component module. It should only be used from a Server Component.';
+
+export async function createPaidReplayRunner(
+    replayAiPolicy: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
+) {
+    try {
+        const adapter = await import(
+            '../lib/services/analysis/replay/replay-staged-ai-adapter'
+        );
+        return adapter.createReplayStagedAiAdapter(replayAiPolicy);
+    } catch (error) {
+        if (error instanceof Error && error.message === SERVER_ONLY_RUNTIME_MESSAGE) {
+            throw new Error('ANALYSIS_V2_REPLAY_SERVER_RUNTIME_REQUIRED');
+        }
+        throw error;
+    }
+}
+
 function tokenForSlot(slot: string): string {
     const key = slot === 'primary' ? 'APIFY_API_TOKEN' : `APIFY_${slot.toUpperCase()}_API_TOKEN`;
     return requiredEnvironment(key);
@@ -318,8 +337,7 @@ export async function runReplayCli(
             options.evaluationPolicy,
         );
         const runner = options.mode === 'paid-ai'
-            ? (await import('../lib/services/analysis/replay/replay-staged-ai-adapter'))
-                .createReplayStagedAiAdapter(replayAiPolicy)
+            ? await createPaidReplayRunner(replayAiPolicy)
             : {};
         const { runAnalysisV2AiReplay } = await import('../lib/services/analysis/replay/replay-runner');
         await runAnalysisV2AiReplay({
