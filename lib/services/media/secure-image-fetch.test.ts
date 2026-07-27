@@ -78,6 +78,7 @@ describe('secure image downloads', () => {
         events: string[],
         observedSockets: Socket[],
         closes: Promise<void>[],
+        connectedAddresses: string[],
     ) {
         return ((
             url: URL,
@@ -95,6 +96,14 @@ describe('secure image downloads', () => {
                     events.push('lookup-called');
                     lookup(hostname, lookupOptions, (...result) => {
                         events.push('lookup-callback');
+                        const resolved = result[1];
+                        connectedAddresses.push(...(
+                            Array.isArray(resolved)
+                                ? resolved.map(item => item.address)
+                                : typeof resolved === 'string'
+                                    ? [resolved]
+                                    : []
+                        ));
                         lookupCallback(...result);
                     });
                 }) as LookupFunction,
@@ -154,6 +163,7 @@ describe('secure image downloads', () => {
         const events: string[] = [];
         const sockets: Socket[] = [];
         const closes: Promise<void>[] = [];
+        const connectedAddresses: string[] = [];
         const uncaught: unknown[] = [];
         const onUncaught = (error: unknown) => uncaught.push(error);
         process.on('uncaughtExceptionMonitor', onUncaught);
@@ -162,7 +172,7 @@ describe('secure image downloads', () => {
                 new URL('https://controlled.invalid:9/image.jpg'),
                 { signal: new AbortController().signal },
                 [{ address: '::1', family: 6 }],
-                controlledUnreachableRequest(events, sockets, closes),
+                controlledUnreachableRequest(events, sockets, closes, connectedAddresses),
             )).rejects.toMatchObject({ code: 'EHOSTUNREACH' });
             await Promise.all(closes);
         } finally {
@@ -177,6 +187,7 @@ describe('secure image downloads', () => {
         ]);
         expect(uncaught).toEqual([]);
         expect(sockets).toHaveLength(1);
+        expect(connectedAddresses).toEqual(['::1']);
         expect(sockets[0]!.listeners('error').map(listener => listener.name))
             .not.toContain('settleReject');
     });
@@ -185,14 +196,24 @@ describe('secure image downloads', () => {
         const events: string[] = [];
         const sockets: Socket[] = [];
         const closes: Promise<void>[] = [];
+        const connectedAddresses: string[] = [];
+        const validatedAddresses: string[] = [];
         await expect(downloadSecureImage('https://cdninstagram.com/image.jpg', {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-            requestImpl: (url, options, addresses) => requestPinnedHttpsImage(
-                url,
-                options,
-                addresses,
-                controlledUnreachableRequest(events, sockets, closes),
-            ),
+            requestImpl: (url, options, addresses) => {
+                validatedAddresses.push(...addresses.map(item => item.address));
+                return requestPinnedHttpsImage(
+                    url,
+                    options,
+                    [{ address: '::1', family: 6 }],
+                    controlledUnreachableRequest(
+                        events,
+                        sockets,
+                        closes,
+                        connectedAddresses,
+                    ),
+                );
+            },
             resolveHostname: publicResolver,
             maxBytes: 100,
             timeoutMs: 1_000,
@@ -202,6 +223,8 @@ describe('secure image downloads', () => {
             message: 'Image download failed due to a network error',
         });
         expect(events.indexOf('request-returned')).toBeLessThan(events.indexOf('lookup-callback'));
+        expect(validatedAddresses).toEqual(['93.184.216.34']);
+        expect(connectedAddresses).toEqual(['::1']);
         expect(sockets).toHaveLength(1);
         await Promise.all(closes);
     });
