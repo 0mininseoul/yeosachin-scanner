@@ -61,7 +61,9 @@ const baseBundleSchema = z.object({
         media: z.array(canonicalMediaSchema).max(12),
         triageSelectionIds: z.array(selectionIdSchema).max(9),
         featureSelectionIds: z.array(selectionIdSchema).max(12),
-        resolverSelectionIds: z.array(selectionIdSchema).max(9),
+        // Capture stores the complete canonical feature set. The resolver applies
+        // its own policy-specific projection when the workload is invoked.
+        resolverSelectionIds: z.array(selectionIdSchema).max(12),
         captions: z.array(z.object({
             evidenceRefId: z.string().min(1).max(240),
             selectionId: selectionIdSchema,

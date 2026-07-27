@@ -159,6 +159,24 @@ describe('analysis V2 replay bundle', () => {
         const readPath = join(directory, 'digest-read.enc'); await writeRawEncrypted(readPath, keyPath, invalid);
         await expect(readReplayBundle({ bundlePath: readPath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
     });
+
+    it('accepts the complete canonical feature set for deferred resolver projection', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key'); const bundlePath = join(directory, 'resolver.enc');
+        await createReplayKeyFile(keyPath);
+        const base = partialBundle() as Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
+        const media = Array.from({ length: 10 }, (_, index) => ({
+            selectionId: `media-${index}`, kind: 'feed' as const,
+            jpegBase64: Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64'),
+        }));
+        const value: Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }> = {
+            ...base,
+            profiles: [{ ...base.profiles[0]!, media, triageSelectionIds: media.slice(0, 5).map(item => item.selectionId), featureSelectionIds: media.map(item => item.selectionId), resolverSelectionIds: media.map(item => item.selectionId), coverage: { selectedCount: 10, normalizedCount: 10, failures: [] } }],
+        };
+        await expect(writeReplayBundle({ bundle: value, bundlePath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).resolves.toBeDefined();
+        await expect(readReplayBundle({ bundlePath, keyPath, now: Date.parse('2026-07-27T00:20:00.000Z') })).resolves.toEqual(value);
+    });
     it('encrypts private payloads with 0700/0600 artifact permissions and decrypts only with its key', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
         temporaryPaths.push(directory);
