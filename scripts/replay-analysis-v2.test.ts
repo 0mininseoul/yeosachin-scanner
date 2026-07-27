@@ -59,14 +59,14 @@ async function artifacts(now: number) {
 }
 
 describe('analysis V2 replay CLI', () => {
-    it('loads replay capture without React server module conditions', () => {
+    it('loads replay CLI without React server module conditions', () => {
         const result = spawnSync(
             process.execPath,
             [
                 '--import',
                 'tsx',
                 '--eval',
-                "import('./lib/services/analysis/replay/replay-capture.ts').then(() => process.stdout.write('ok'))",
+                "import('./scripts/replay-analysis-v2.ts').then(() => process.stdout.write('ok'))",
             ],
             { cwd: process.cwd(), encoding: 'utf8' },
         );

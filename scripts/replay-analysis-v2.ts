@@ -16,8 +16,6 @@ import {
     writeReplayBundle,
 } from '../lib/services/analysis/replay/replay-bundle';
 import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } from '../lib/services/analysis/replay/replay-live-source';
-import { runAnalysisV2AiReplay } from '../lib/services/analysis/replay/replay-runner';
-import { createReplayStagedAiAdapter } from '../lib/services/analysis/replay/replay-staged-ai-adapter';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
@@ -279,11 +277,14 @@ export async function runReplayCli(
             authenticated.bundle.capture.sourceLineage,
             options.evaluationPolicy,
         );
+        const runner = options.mode === 'paid-ai'
+            ? (await import('../lib/services/analysis/replay/replay-staged-ai-adapter'))
+                .createReplayStagedAiAdapter(replayAiPolicy)
+            : {};
+        const { runAnalysisV2AiReplay } = await import('../lib/services/analysis/replay/replay-runner');
         await runAnalysisV2AiReplay({
             bundle: authenticated.bundle,
-            runner: options.mode === 'paid-ai'
-                ? createReplayStagedAiAdapter(replayAiPolicy)
-                : {},
+            runner,
             mode: options.mode,
             paidAiOptIn: options.mode === 'paid-ai',
             ...(options.evaluationPolicy
