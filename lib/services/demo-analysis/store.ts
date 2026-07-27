@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
+    AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION,
     DEMO_FIXTURE_VERSION,
     LEGACY_DEMO_FIXTURE_VERSION,
     DEMO_TARGET_USERNAME,
@@ -28,6 +29,11 @@ const rowSchema = z.union([
     }).passthrough(),
     z.object({
         ...rowFields,
+        fixture_version: z.literal(AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION),
+        duration_seconds: z.number().int().min(30).max(45),
+    }).passthrough(),
+    z.object({
+        ...rowFields,
         fixture_version: z.literal(DEMO_FIXTURE_VERSION),
         duration_seconds: z.number().int().min(30).max(45),
     }).passthrough(),
@@ -46,7 +52,7 @@ function parseRow(value: unknown): DemoAnalysisRun | null {
 
 /** New fixture versions cannot replay a persisted run from an earlier fixture namespace. */
 export function demoFixtureIdempotencyKey(idempotencyKey: string): string {
-    return `fixture-v2-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
+    return `fixture-v3-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
 }
 
 export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({

@@ -12,14 +12,22 @@ import type {
 } from '@/lib/contracts/analysis-v2';
 import { paginateAnalysisResults } from '@/lib/domain/analysis/result-pagination';
 import { ANALYSIS_PLAN_CATALOG, PLAN_PRICING_VERSION, buildPlanSelectionCards } from '@/lib/domain/analysis/plan-catalog';
+import { DEMO_V3_SOURCE_FIXTURE } from './demo-v3-source-fixture';
 
 /** The only canonical demo target. Do not duplicate this value in route or SQL code. */
 export const DEMO_TARGET_USERNAME = 'junho_dem' as const;
 /** Legacy run rows must retain their original deterministic presentation. */
 export const LEGACY_DEMO_FIXTURE_VERSION = 'synthetic-fixture-v1' as const;
-export const DEMO_FIXTURE_VERSION = 'authorized-text-fixture-v2' as const;
-export type DemoFixtureVersion = typeof LEGACY_DEMO_FIXTURE_VERSION | typeof DEMO_FIXTURE_VERSION;
+/** Existing v2 rows remain replayable after v3 becomes the default. */
+export const AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION = 'authorized-text-fixture-v2' as const;
+/** New runs use redacted text and locally baked source-derived avatar assets. */
+export const DEMO_FIXTURE_VERSION = 'authorized-redacted-fixture-v3' as const;
+export type DemoFixtureVersion =
+    | typeof LEGACY_DEMO_FIXTURE_VERSION
+    | typeof AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION
+    | typeof DEMO_FIXTURE_VERSION;
 export const DEMO_ASSET_PREFIX = '/demo-avatars/synthetic-blurred-avatar-' as const;
+export const DEMO_V3_ASSET_PREFIX = '/demo-avatars/demo-v3-' as const;
 export const DEMO_PREFLIGHT_TTL_MS = 30 * 60_000;
 
 export function demoResponseCapabilities() {
@@ -45,12 +53,17 @@ export function demoResponseHeaders() {
 
 /** Deployment/test guard: demo profiles may only reference these local rasters. */
 export async function validateDemoAssetManifest(): Promise<string[]> {
-    const assets = [1, 2, 3, 4].map(index => `${DEMO_ASSET_PREFIX}${index}-v1.png`);
+    const assets = [
+        ...[1, 2, 3, 4].map(index => `${DEMO_ASSET_PREFIX}${index}-v1.png`),
+        `${DEMO_V3_ASSET_PREFIX}target-000.webp`,
+        ...Array.from({ length: 84 }, (_, index) => `${DEMO_V3_ASSET_PREFIX}female-${String(index + 1).padStart(3, '0')}.webp`),
+        ...Array.from({ length: 145 }, (_, index) => `${DEMO_V3_ASSET_PREFIX}private-${String(index + 85).padStart(3, '0')}.webp`),
+    ];
     await Promise.all(assets.map(async asset => {
         const diskPath = path.join(process.cwd(), 'public', asset);
         await access(diskPath);
         const metadata = await sharp(diskPath).metadata();
-        if (metadata.format !== 'png' || !metadata.width || !metadata.height) {
+        if (!['png', 'webp'].includes(metadata.format ?? '') || !metadata.width || !metadata.height) {
             throw new Error(`Invalid demo fixture image: ${asset}`);
         }
         const { data, info } = await sharp(diskPath).removeAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -109,6 +122,14 @@ export function isDemoOperator(userId: string, env: DemoEnvironment = process.en
 
 function avatar(index: number): string {
     return `${DEMO_ASSET_PREFIX}${(index % 4) + 1}-v1.png`;
+}
+
+function v3Avatar(kind: 'target' | 'female' | 'private', sortOrdinal: number): string {
+    return `${DEMO_V3_ASSET_PREFIX}${kind}-${String(sortOrdinal).padStart(3, '0')}.webp`;
+}
+
+function isV3Fixture(fixtureVersion: DemoFixtureVersion | undefined): boolean {
+    return (fixtureVersion ?? DEMO_FIXTURE_VERSION) === DEMO_FIXTURE_VERSION;
 }
 
 export type DemoSourceProfileFixture = Readonly<{
@@ -714,6 +735,25 @@ function publicAccount(index: number): FemaleResultRowV1 {
     };
 }
 
+function v3PublicAccount(index: number): FemaleResultRowV1 {
+    const source = DEMO_V3_SOURCE_FIXTURE.public[index]!;
+    return {
+        instagramId: source.instagramId,
+        fullName: source.fullName,
+        profileImage: v3Avatar('female', source.imageSortOrdinal),
+        bio: source.bio,
+        displayScore: source.displayScore,
+        riskBand: source.riskBand,
+        featuredRank: source.featuredRank,
+        recentMutualRank: source.recentMutualRank,
+        analysisDepth: source.analysisDepth,
+        oneLineOverview: source.oneLineOverview,
+        highRiskNarrative: source.highRiskNarrative
+            ? [source.highRiskNarrative[0], source.highRiskNarrative[1]]
+            : null,
+    };
+}
+
 /**
  * Canonical first-release v1 generator, retained for every persisted v1 row.
  * A later development-only rewrite mistakenly reused the same v1 version
@@ -765,11 +805,25 @@ function demoProgressProfileId(progressBp: number): string {
     return `${DEMO_SOURCE_HANDLE_FIXTURE[index] ?? 'demo.profile'}*`;
 }
 
+function v3ProgressProfileId(progressBp: number): string {
+    const index = Math.floor(progressBp / 1_000) % DEMO_V3_SOURCE_FIXTURE.public.length;
+    return `${DEMO_V3_SOURCE_FIXTURE.public[index]!.instagramId}*`;
+}
+
 function privateAccount(index: number): PrivateResultRowV1 {
     return {
         instagramId: fixtureIdentifier(DEMO_PRIVATE_HANDLES, index),
         fullName: DEMO_PRIVATE_NAMES[index % DEMO_PRIVATE_NAMES.length]!,
         profileImage: avatar(index),
+    };
+}
+
+function v3PrivateAccount(index: number): PrivateResultRowV1 {
+    const source = DEMO_V3_SOURCE_FIXTURE.private[index % DEMO_V3_SOURCE_FIXTURE.private.length]!;
+    return {
+        instagramId: source.instagramId,
+        fullName: source.fullName,
+        profileImage: v3Avatar('private', source.imageSortOrdinal),
     };
 }
 
@@ -804,7 +858,7 @@ export function demoReadyPreflight(
             bio: fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                 ? '사진과 일상을 기록하는 공개 프로필입니다.'
                 : '산책과 사진을 기록하는 데모 프로필입니다.',
-            profileImage: avatar(0),
+            profileImage: isV3Fixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             followersCount: counts.followers,
             followingCount: counts.following,
             isPrivate: false,
@@ -835,15 +889,19 @@ export function createDemoFixture(
     if (!requestId) throw new TypeError('A demo run id is required.');
     const publicAccounts = Array.from({ length: 242 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
         ? legacyPublicAccount(index)
-        : publicAccount(index));
+        : isV3Fixture(fixtureVersion)
+            ? v3PublicAccount(index)
+            : publicAccount(index));
     const privateAccounts = Array.from({ length: 142 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
         ? legacyPrivateAccount(index)
-        : privateAccount(index));
+        : isV3Fixture(fixtureVersion)
+            ? v3PrivateAccount(index)
+            : privateAccount(index));
     return {
         version: fixtureVersion,
         summary: {
             targetInstagramId: DEMO_TARGET_USERNAME,
-            targetProfileImage: avatar(0),
+            targetProfileImage: isV3Fixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             planId: 'standard',
             followers: { declared: 600, collected: 600, coverageRatio: 1, meetsCoverageGate: true, exactCountMatch: true },
             following: { declared: 580, collected: 580, coverageRatio: 1, meetsCoverageGate: true, exactCountMatch: true },
@@ -970,8 +1028,10 @@ export function projectDemoProgress(input: {
             activeProfile: completed ? null : {
                 maskedUsername: input.fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                     ? 'profile.***'
-                    : demoProgressProfileId(progressBp),
-                imageUrl: avatar(0),
+                    : isV3Fixture(input.fixtureVersion)
+                        ? v3ProgressProfileId(progressBp)
+                        : demoProgressProfileId(progressBp),
+                imageUrl: isV3Fixture(input.fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
             lastEventSeq: allEvents.length,

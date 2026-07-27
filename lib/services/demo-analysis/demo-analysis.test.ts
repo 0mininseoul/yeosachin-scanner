@@ -1,11 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+    AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION,
     DEMO_FIXTURE_VARIANTS,
     DEMO_FIXTURE_VERSION,
     LEGACY_DEMO_FIXTURE_VERSION,
-    DEMO_SOURCE_HANDLE_FIXTURE,
-    DEMO_SOURCE_PROFILE_FIXTURE,
     DEMO_TARGET_USERNAME,
     createDemoFixture,
     demoReadyPreflight,
@@ -17,6 +16,7 @@ import {
     validateDemoAssetManifest,
 } from './demo-analysis';
 import { analysisV2ProgressCopy } from '@/lib/services/analysis/owner-view-presentation';
+import { parseSafePublicRiskNarrative } from '@/lib/services/analysis/narrative-privacy';
 import { analysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
@@ -41,7 +41,7 @@ describe('synthetic demo analysis policy', () => {
         expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(30);
         expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '999' })).toBe(45);
         expect(demoDurationSeconds({})).toBe(38);
-        expect(DEMO_FIXTURE_VERSION).toBe('authorized-text-fixture-v2');
+        expect(DEMO_FIXTURE_VERSION).toBe('authorized-redacted-fixture-v3');
     });
 
     it('expires an unstarted preflight exactly at its boundary but preserves a started replay', () => {
@@ -55,7 +55,7 @@ describe('synthetic demo analysis policy', () => {
 });
 
 describe('isolated demo fixtures', () => {
-    it('dispatches legacy and v2 runs to distinct static fixtures', () => {
+    it('dispatches legacy and v3 runs to distinct static fixtures', () => {
         const requestId = '123e4567-e89b-42d3-a456-426614174000';
         const legacy = createDemoFixture(requestId, LEGACY_DEMO_FIXTURE_VERSION);
         const current = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
@@ -77,22 +77,28 @@ describe('isolated demo fixtures', () => {
         expect(legacy.publicAccounts.filter(row => row.riskBand === 'caution')).toHaveLength(2);
     });
 
+    it('keeps persisted v2 rows on their original fixture namespace', () => {
+        const v2 = createDemoFixture(requestId, AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION);
+        const v3 = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
+        expect(v2.version).toBe(AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION);
+        expect(v2.publicAccounts[0]?.profileImage).toMatch(/^\/demo-avatars\/synthetic-blurred-avatar-/u);
+        expect(v3.publicAccounts[0]?.profileImage).toMatch(/^\/demo-avatars\/demo-v3-female-/u);
+    });
+
     it('dispatches unstarted legacy preflights to their canonical v1 presentation', () => {
         const run = { id: requestId, created_at: '2026-07-01T00:00:00.000Z' };
         const legacy = demoReadyPreflight(run, LEGACY_DEMO_FIXTURE_VERSION);
         const current = demoReadyPreflight(run, DEMO_FIXTURE_VERSION);
 
         expect(legacy.target).not.toEqual(current.target);
-        expect(legacy.target.profileImage).toBe(current.target.profileImage);
+        expect(legacy.target.profileImage).not.toBe(current.target.profileImage);
         expect(legacy.plans).toEqual(current.plans);
     });
     it('uses only existing local permanently defocused raster assets', async () => {
-        await expect(validateDemoAssetManifest()).resolves.toEqual([
-            '/demo-avatars/synthetic-blurred-avatar-1-v1.png',
-            '/demo-avatars/synthetic-blurred-avatar-2-v1.png',
-            '/demo-avatars/synthetic-blurred-avatar-3-v1.png',
-            '/demo-avatars/synthetic-blurred-avatar-4-v1.png',
-        ]);
+        const assets = await validateDemoAssetManifest();
+        expect(assets).toHaveLength(234);
+        expect(assets).toContain('/demo-avatars/demo-v3-target-000.webp');
+        expect(assets.filter(asset => asset.endsWith('.webp'))).toHaveLength(230);
     });
 
     it('is deterministic and has exact fixture relationship totals', () => {
@@ -101,59 +107,39 @@ describe('isolated demo fixtures', () => {
         expect(first.publicAccounts).toHaveLength(242);
         expect(first.privateAccounts).toHaveLength(142);
         expect(new Set(first.publicAccounts.map(row => row.instagramId)).size).toBe(242);
+        expect(new Set(first.publicAccounts.map(row => `${row.fullName}|${row.bio}|${row.oneLineOverview}`)).size).toBe(242);
         expect(first.publicAccounts.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
         expect(first.publicAccounts.filter(row => row.riskBand === 'caution').length).toBeGreaterThanOrEqual(2);
         expect(first.publicAccounts.every(row => Number.isInteger(row.displayScore))).toBe(true);
         expect(first.publicAccounts.every(row => row.displayScore >= 1 && row.displayScore <= 10)).toBe(true);
         expect(first.publicAccounts.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+        expect(first.publicAccounts.flatMap(row => row.featuredRank ?? [])).toEqual([1, 2, 3]);
+        expect(first.publicAccounts.flatMap(row => row.recentMutualRank ?? [])).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        expect(parseSafePublicRiskNarrative(first.publicAccounts[0]?.highRiskNarrative)).not.toBeNull();
+        expect(first.publicAccounts.every(row => !/[\u0000-\u001f\ufffd]/u.test([
+            row.fullName ?? '', row.bio ?? '', row.oneLineOverview, ...(row.highRiskNarrative ?? []),
+        ].join('')))).toBe(true);
         expect(first.publicAccounts.every(row => !row.instagramId.startsWith('synth.'))).toBe(true);
         expect(first.publicAccounts.every(row => !/가상 프로필|비공개 프로필/u.test(row.fullName ?? ''))).toBe(true);
-        expect(DEMO_SOURCE_HANDLE_FIXTURE).toHaveLength(86);
-        expect(first.publicAccounts.slice(0, DEMO_SOURCE_HANDLE_FIXTURE.length).map(row => row.instagramId))
-            .toEqual(DEMO_SOURCE_HANDLE_FIXTURE);
-        expect(first.publicAccounts.slice(0, DEMO_SOURCE_PROFILE_FIXTURE.length).map(row => ({
-            fullName: row.fullName,
-            bio: row.bio,
-        }))).toEqual(DEMO_SOURCE_PROFILE_FIXTURE.map(row => ({
-            fullName: row.fullName,
-            bio: row.bio,
-        })));
         expect(first.summary.genderStats.male + first.summary.genderStats.female + first.summary.genderStats.unknown)
             .toBe(first.summary.screenedMutuals);
     });
 
-    it('uses authorized static v2 text, fictional fallback copy, and only local blurred avatars', () => {
+    it('uses static redacted v3 text and only local baked blurred avatars', () => {
         const fixture = createDemoFixture(requestId);
         const publicRows = fixture.publicAccounts;
         const preflight = demoReadyPreflight({ id: requestId, created_at: '2026-07-01T00:00:00.000Z' });
         const renderedFixtureText = [
-            fixture.version,
-            fixture.summary.targetProfileImage ?? '',
-            fixture.summary.planId,
-            fixture.summary.scorePolicyVersion,
-            preflight.target.username,
             preflight.target.fullName ?? '',
             preflight.target.bio ?? '',
-            preflight.target.profileImage ?? '',
-            ...preflight.plans.flatMap(plan => [
-                plan.planId,
-                plan.launchStatus,
-                plan.selectionState,
-                plan.unavailableReason ?? '',
-                plan.pricingVersion,
-                plan.price.status,
-                plan.price.currency,
-            ]),
             ...publicRows.flatMap(row => [
             row.fullName ?? '',
-            row.profileImage ?? '',
             row.bio ?? '',
             row.oneLineOverview,
             ...(row.highRiskNarrative ?? []),
             ]),
             ...fixture.privateAccounts.flatMap(row => [
                 row.fullName ?? '',
-                row.profileImage ?? '',
             ]),
         ];
         const renderedFixtureIdentifiers = [
@@ -167,7 +153,7 @@ describe('isolated demo fixtures', () => {
         expect(new Set(publicRows.map(row => row.bio)).size).toBeGreaterThanOrEqual(12);
         expect(new Set(publicRows.map(row => row.oneLineOverview)).size).toBeGreaterThanOrEqual(12);
         expect(new Set(fixture.privateAccounts.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
-        expect(renderedFixtureText.every(value => !externalFixtureReferencePattern.test(value))).toBe(true);
+        expect(renderedFixtureText.every(value => !/(?:https?:\/\/|www\.|instagram(?:\.com)?)/iu.test(value))).toBe(true);
         expect(renderedFixtureIdentifiers.every(value => !unsafeFixtureIdentifierPattern.test(value))).toBe(true);
         expect(externalFixtureReferencePattern.test('preview.example.xyz/path')).toBe(true);
         expect(externalFixtureReferencePattern.test('(example.xyz)')).toBe(true);
@@ -178,7 +164,7 @@ describe('isolated demo fixtures', () => {
         expect(externalFixtureReferencePattern.test('링크,example.xyz')).toBe(true);
         expect(externalFixtureReferencePattern.test('링크[example.xyz]')).toBe(true);
         expect([...publicRows, ...fixture.privateAccounts].every(row =>
-            /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(row.profileImage ?? ''),
+            /^\/demo-avatars\/demo-v3-(female|private)-\d{3}\.webp$/u.test(row.profileImage ?? ''),
         )).toBe(true);
     });
 
@@ -255,7 +241,8 @@ describe('isolated demo fixtures', () => {
 
     it('continues to emit the production result-page DTO for the demo UI', () => {
         const page = demoResultPage({ requestId, femaleCursor: null, privateCursor: null, pageSize: 50 });
-        expect(analysisResultPageV1Schema.safeParse(page).success).toBe(true);
+        const parsed = analysisResultPageV1Schema.safeParse(page);
+        expect(parsed.success).toBe(true);
         expect(page.femaleAccounts).toHaveLength(50);
         expect(page.privateAccounts).toHaveLength(50);
     });
@@ -263,5 +250,27 @@ describe('isolated demo fixtures', () => {
     it('uses only static fixture data at runtime', () => {
         const source = readFileSync(new URL('./demo-analysis.ts', import.meta.url), 'utf8');
         expect(source).not.toMatch(/supabase|createClient|analysis_results|fetch\(/iu);
+    });
+
+    it('pins the v3 source importers to one fully-ready sealed registry selector and deterministic 30 percent mutation', () => {
+        const avatarBuilder = readFileSync(new URL('../../../scripts/build-demo-v3-avatars.ts', import.meta.url), 'utf8');
+        const fixtureBuilder = readFileSync(new URL('../../../scripts/build-demo-v3-fixture.ts', import.meta.url), 'utf8');
+        [avatarBuilder, fixtureBuilder].forEach(source => {
+            expect(source).toMatch(/total_objects\s*=\s*230/u);
+            expect(source).toMatch(/total_target\s*=\s*1/u);
+            expect(source).toMatch(/total_female\s*=\s*84/u);
+            expect(source).toMatch(/total_private\s*=\s*145/u);
+            expect(source).toMatch(/ready_total\s*=\s*230/u);
+            expect(source).toMatch(/ready_target\s*=\s*1/u);
+            expect(source).toMatch(/ready_female\s*=\s*84/u);
+            expect(source).toMatch(/ready_private\s*=\s*145/u);
+        });
+        expect(fixtureBuilder).toContain('Math.round(indexes.length * 0.3)');
+        expect(fixtureBuilder).toContain('Array.from({ length: 242 }');
+        expect(fixtureBuilder).toContain('parseSafePublicRiskNarrative(highRiskNarrative)');
+        expect(fixtureBuilder).toContain('narrativeSource.narrative_line_one');
+        expect(fixtureBuilder).toContain('const orderedPublicRows = [narrativeSource');
+        expect(fixtureBuilder).toContain('KOREAN_WORD_ALTERNATIVES');
+        expect(fixtureBuilder).not.toContain('String.fromCodePoint');
     });
 });
