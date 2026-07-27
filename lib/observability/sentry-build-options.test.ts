@@ -29,4 +29,18 @@ describe('Sentry build source-map upload gate', () => {
         expect(options.sourcemaps.disable).toBe(false);
         expect(options.webpack.disableSentryConfig).toBe(false);
     });
+
+    it('permits upload for Vercel builds that expose CI as 1', () => {
+        const options = sentryBuildOptions({
+            CI: '1',
+            SENTRY_SOURCEMAPS_UPLOAD: 'true',
+            SENTRY_AUTH_TOKEN: 'ci-build-token',
+            SENTRY_ORG: 'org',
+            SENTRY_PROJECT: 'project',
+        });
+
+        expect(options.authToken).toBe('ci-build-token');
+        expect(options.sourcemaps.disable).toBe(false);
+        expect(options.webpack.disableSentryConfig).toBe(false);
+    });
 });
