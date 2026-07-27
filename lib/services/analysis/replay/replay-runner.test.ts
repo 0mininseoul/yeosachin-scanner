@@ -18,6 +18,12 @@ function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     return runner;
 }
 
+function v29Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.9');
+    return runner;
+}
+
 const bundle = {
     schemaVersion: 1 as const,
     createdAt: '2026-07-27T00:00:00.000Z', expiresAt: '2026-07-27T01:00:00.000Z',
@@ -109,6 +115,42 @@ describe('AI-only replay runner', () => {
             source_risk_policy: 'risk-policy-v2.4',
             replay_ai_policy: 'ai-stage-policy-v2.7',
             full_e2e_evidence: false,
+        });
+    });
+
+    it('runs eligible partial paid replay through the authenticated v2.9 stages and preserves aggregate-only scope labels', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            value: {
+                assessment: { inferredGender: 'female' as const, confidence: 'high' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1', 'm2'] },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'personal' as const,
+            },
+            attempts: 1, retries: 0, elapsedMs: 1,
+        }));
+        const feature = vi.fn(async () => ({ outcome: 'rate_limited' as const, attempts: 1, retries: 0, elapsedMs: 1 }));
+        const privateNames = vi.fn(async () => ({ outcome: 'ok' as const, attempts: 1, retries: 0, elapsedMs: 1 }));
+        const lines: string[] = [];
+        const partial = validPartialBundle();
+        await runAnalysisV2AiReplay({
+            bundle: partial,
+            runner: v29Runner({ triage, feature, privateNames }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: partial.capture.evaluationPolicy,
+            write: line => lines.push(line),
+        });
+        expect(triage).toHaveBeenCalledOnce();
+        expect(feature).toHaveBeenCalledOnce();
+        expect(privateNames).toHaveBeenCalledOnce();
+        expect(JSON.parse(lines[0]!)).toMatchObject({
+            benchmark_scope: 'ai-only-historical-partial-available',
+            not_exact: true,
+            full_e2e_evidence: false,
+            no_media_substitution: true,
+            replay_ai_policy: 'ai-stage-policy-v2.9',
         });
     });
 

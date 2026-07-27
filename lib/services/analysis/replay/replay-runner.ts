@@ -8,7 +8,7 @@ import {
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
-import { historicalPartialBundleInvariantIssues } from './historical-partial-available-artifact';
+import { historicalPartialBundleInvariantIssues, historicalPartialPaidCoverage } from './historical-partial-available-artifact';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -358,8 +358,17 @@ export async function runAnalysisV2AiReplay(input: {
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
     assertArtifactCapability(input.bundle);
-    if (input.bundle.schemaVersion === 2 && input.mode !== 'dry-run') {
-        throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
+    if (
+        input.bundle.schemaVersion === 2
+        && input.mode === 'paid-ai'
+        && !historicalPartialPaidCoverage({
+            sourceUniverseDigest: input.bundle.capture.partial.sourceUniverseDigest,
+            sourceIdentities: input.bundle.capture.partial.sourceIdentities,
+            mediaUnavailable: input.bundle.capture.partial.mediaUnavailable,
+            profiles: input.bundle.profiles,
+        }).eligible
+    ) {
+        throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
     }
     assertReplayInput(input.bundle);
     const authenticatedEvaluationPolicy = input.bundle.capture.evaluationPolicy;

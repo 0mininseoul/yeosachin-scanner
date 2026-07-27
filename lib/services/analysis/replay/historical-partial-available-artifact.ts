@@ -15,8 +15,39 @@ type PartialInvariantInput = {
         username: string;
         isPrivate: boolean;
         media: readonly unknown[];
+        coverage?: { selectedCount: number };
     }[];
 };
+
+export const HISTORICAL_PARTIAL_PAID_MIN_PROFILE_RETENTION_BPS = 9_850;
+export const HISTORICAL_PARTIAL_PAID_MIN_MEDIA_RETENTION_BPS = 9_900;
+const MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE = 12;
+
+export function historicalPartialPaidCoverage(input: PartialInvariantInput): {
+    eligible: boolean;
+    retainedProfiles: number;
+    sourceProfiles: number;
+    retainedMedia: number;
+    conservativeSourceMedia: number;
+} {
+    const sourceProfiles = input.sourceIdentities.length;
+    const retainedProfiles = input.profiles.length;
+    const retainedMedia = input.profiles.reduce((sum, profile) => sum + profile.media.length, 0);
+    const conservativeSourceMedia = input.profiles.reduce(
+        (sum, profile) => sum + (profile.coverage?.selectedCount ?? profile.media.length),
+        input.mediaUnavailable.length * MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE,
+    );
+    return {
+        eligible: sourceProfiles > 0
+            && conservativeSourceMedia > 0
+            && retainedProfiles * 10_000 >= sourceProfiles * HISTORICAL_PARTIAL_PAID_MIN_PROFILE_RETENTION_BPS
+            && retainedMedia * 10_000 >= conservativeSourceMedia * HISTORICAL_PARTIAL_PAID_MIN_MEDIA_RETENTION_BPS,
+        retainedProfiles,
+        sourceProfiles,
+        retainedMedia,
+        conservativeSourceMedia,
+    };
+}
 
 export function normalizeHistoricalPartialUsername(value: string): string {
     const normalized = value.trim().replace(/^@/, '').toLowerCase();

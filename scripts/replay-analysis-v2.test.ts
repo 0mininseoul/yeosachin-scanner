@@ -170,7 +170,7 @@ describe('analysis V2 replay CLI', () => {
         ])).toThrow('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
     });
 
-    it('seals historical partial capture and dry-run behind its own explicit flag and never parses it as paid', () => {
+    it('seals historical partial capture and replay behind its explicit scope and v2.9 capability', () => {
         expect(parseReplayCliArgs([
             '--capture', '--historical-partial-available',
             '--request-id=10000000-0000-4000-8000-000000000001',
@@ -180,10 +180,18 @@ describe('analysis V2 replay CLI', () => {
             '--run', '--dry-run', '--historical-partial-available',
             '--evaluation-ai-policy=ai-stage-policy-v2.9', '--bundle=a.enc', '--key=a.key',
         ])).toMatchObject({ command: 'run', mode: 'dry-run', historicalPartialAvailable: true });
-        expect(() => parseReplayCliArgs([
+        expect(parseReplayCliArgs([
             '--run', '--paid-ai', '--confirm-paid-ai', '--historical-partial-available',
             '--evaluation-ai-policy=ai-stage-policy-v2.9', '--bundle=a.enc', '--key=a.key',
-        ])).toThrow('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
+        ])).toMatchObject({ command: 'run', mode: 'paid-ai', historicalPartialAvailable: true });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9', '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_PAID_AI_DOUBLE_CONFIRM_REQUIRED');
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--historical-partial-available',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
     });
 
     it('rejects partial artifacts from exact runs and exact artifacts from partial dry-runs', async () => {
@@ -208,7 +216,14 @@ describe('analysis V2 replay CLI', () => {
                 '--evaluation-ai-policy=ai-stage-policy-v2.9', `--bundle=${partial.bundlePath}`, `--key=${partial.keyPath}`,
             ]);
         } finally { process.stdout.write = original; }
-        expect(JSON.parse(output.join(''))).toMatchObject({ benchmark_scope: 'ai-only-historical-partial-available', not_exact: true, no_media_substitution: true });
+        expect(JSON.parse(output.join(''))).toMatchObject({
+            benchmark_scope: 'ai-only-historical-partial-available',
+            not_exact: true,
+            full_e2e_evidence: false,
+            no_media_substitution: true,
+        });
+        await expect(stat(partial.bundlePath)).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(stat(partial.keyPath)).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
     it('parses an exact capture selector and artifact paths', () => {

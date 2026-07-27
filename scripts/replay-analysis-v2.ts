@@ -128,12 +128,11 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const historicalOfficialE2E = parsed.has('--historical-official-e2e');
     const historicalPartialAvailable = parsed.has('--historical-partial-available');
     if (historicalOfficialE2E && historicalPartialAvailable) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    if (historicalPartialAvailable && paid) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
     const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--bundle', '--key', '--evaluation-ai-policy']);
     if ([...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
     const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E, historicalPartialAvailable);
     if (historicalOfficialE2E && (!paid || !evaluation)) throw new Error('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
-    if (historicalPartialAvailable && (!evaluation || paid)) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    if (historicalPartialAvailable && !evaluation) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
     return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
 }
 
@@ -313,9 +312,6 @@ export async function runReplayCli(
         const partialArtifact = authenticated.bundle.schemaVersion === 2;
         if (partialArtifact !== Boolean(options.historicalPartialAvailable)) {
             throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_SCOPE_MISMATCH');
-        }
-        if (options.historicalPartialAvailable && options.mode !== 'dry-run') {
-            throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
         }
         const replayAiPolicy = resolveReplayAiStagePolicyVersion(
             authenticated.bundle.capture.sourceLineage,
