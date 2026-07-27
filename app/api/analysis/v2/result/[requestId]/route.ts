@@ -84,7 +84,11 @@ export async function GET(
                 return demoJson({ error: 'Analysis result not found.' }, 404);
             }
             return demoJson(analysisResultPageV1Schema.parse(demoResultPage({
-                requestId: demo.id, femaleCursor, privateCursor, pageSize: pageSize.data,
+                requestId: demo.id,
+                fixtureVersion: demo.fixture_version,
+                femaleCursor,
+                privateCursor,
+                pageSize: pageSize.data,
             })), 200);
         }
 

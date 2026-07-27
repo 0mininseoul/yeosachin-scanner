@@ -187,6 +187,30 @@ describe('analysis V2 owner result route', () => {
         vi.unstubAllEnvs();
     });
 
+    it('dispatches a legacy run to the legacy fixture instead of rendering the v2 fixture', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        const startedAt = new Date(Date.now() - 80_000).toISOString();
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-result-key-00000000000', duration_seconds: 75,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: startedAt,
+        });
+        const legacy = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}?pageSize=1`), context());
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'authorized-text-fixture-v2',
+            idempotency_key: 'demo-result-key-00000000001', duration_seconds: 38,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: startedAt,
+        });
+        const current = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}?pageSize=1`), context());
+
+        const legacyPayload = await legacy.json() as { femaleAccounts: Array<{ instagramId: string }> };
+        const currentPayload = await current.json() as { femaleAccounts: Array<{ instagramId: string }> };
+        expect(legacyPayload.femaleAccounts[0]?.instagramId).not.toBe(currentPayload.femaleAccounts[0]?.instagramId);
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
     it('returns a safe 404 for a demo row that is not owned by the authenticated operator', async () => {
         vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
         vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.rpc, from: mocks.from } }));
 
-import { demoAnalysisStore } from './store';
+import { demoAnalysisStore, isCurrentDemoFixtureRun } from './store';
 import { DEMO_FIXTURE_VERSION } from './demo-analysis';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
@@ -45,14 +45,17 @@ describe('demo analysis store idempotency and ownership boundary', () => {
         }));
     });
 
-    it('does not reinterpret a legacy v1 run as the current fixture', async () => {
+    it('recognizes a legacy v1 run without reinterpreting it as the current fixture', async () => {
         mocks.rpc.mockResolvedValue({
             data: [{ ...row(), fixture_version: 'synthetic-fixture-v1', duration_seconds: 75, created: false }],
             error: null,
         });
 
-        await expect(demoAnalysisStore.createOrReplay({ userId: ownerId, idempotencyKey: 'demo-idempotency-key-000000' }))
-            .resolves.toBeNull();
+        const result = await demoAnalysisStore.createOrReplay({ userId: ownerId, idempotencyKey: 'demo-idempotency-key-000000' });
+
+        expect(result?.run.fixture_version).toBe('synthetic-fixture-v1');
+        expect(result?.run.duration_seconds).toBe(75);
+        expect(result && isCurrentDemoFixtureRun(result.run)).toBe(false);
     });
 
     it('fails closed when the database returns a row for another owner', async () => {

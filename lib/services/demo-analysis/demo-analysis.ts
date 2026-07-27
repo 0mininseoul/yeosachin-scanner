@@ -15,7 +15,10 @@ import { ANALYSIS_PLAN_CATALOG, PLAN_PRICING_VERSION, buildPlanSelectionCards } 
 
 /** The only canonical demo target. Do not duplicate this value in route or SQL code. */
 export const DEMO_TARGET_USERNAME = 'junho_dem' as const;
+/** Legacy run rows must retain their original deterministic presentation. */
+export const LEGACY_DEMO_FIXTURE_VERSION = 'synthetic-fixture-v1' as const;
 export const DEMO_FIXTURE_VERSION = 'authorized-text-fixture-v2' as const;
+export type DemoFixtureVersion = typeof LEGACY_DEMO_FIXTURE_VERSION | typeof DEMO_FIXTURE_VERSION;
 export const DEMO_ASSET_PREFIX = '/demo-avatars/synthetic-blurred-avatar-' as const;
 export const DEMO_PREFLIGHT_TTL_MS = 30 * 60_000;
 
@@ -29,7 +32,7 @@ export function demoResponseCapabilities() {
 
 /**
  * Public contract for every response after a request has been recognized as a
- * synthetic demo request.  Keep this free of internal run state: clients only
+ * demo fixture request. Keep this free of internal run state: clients only
  * need to know that analytics and actionable result affordances are disabled.
  */
 export function demoResponseHeaders() {
@@ -40,7 +43,7 @@ export function demoResponseHeaders() {
     } as const;
 }
 
-/** Deployment/test guard: synthetic profiles may only reference these local rasters. */
+/** Deployment/test guard: demo profiles may only reference these local rasters. */
 export async function validateDemoAssetManifest(): Promise<string[]> {
     const assets = [1, 2, 3, 4].map(index => `${DEMO_ASSET_PREFIX}${index}-v1.png`);
     await Promise.all(assets.map(async asset => {
@@ -48,7 +51,7 @@ export async function validateDemoAssetManifest(): Promise<string[]> {
         await access(diskPath);
         const metadata = await sharp(diskPath).metadata();
         if (metadata.format !== 'png' || !metadata.width || !metadata.height) {
-            throw new Error(`Invalid synthetic demo image: ${asset}`);
+            throw new Error(`Invalid demo fixture image: ${asset}`);
         }
         const { data, info } = await sharp(diskPath).removeAlpha().raw().toBuffer({ resolveWithObject: true });
         let edgeTotal = 0;
@@ -554,9 +557,10 @@ export const DEMO_SOURCE_PROFILE_FIXTURE: readonly DemoSourceProfileFixture[] = 
 export const DEMO_SOURCE_HANDLE_FIXTURE = DEMO_SOURCE_PROFILE_FIXTURE.map(row => row.instagramId);
 
 /**
- * Deliberately fictional, hand-written derivatives for the isolated fixture.
- * They make the result screens read naturally without carrying a source handle,
- * name, profile image, URL, or verbatim account copy into the demo domain.
+ * Deliberately fictional fallback copy for legacy v1 rows and the v2 rows
+ * beyond the approved source profile subset. V2's approved source handles and
+ * text are defined above; no version contains source images, URLs, or runtime
+ * reads from a production data source.
  */
 const DEMO_PUBLIC_HANDLES = [
     'dawn.notebook', 'mood.weekend', 'olive.window', 'slow.morning',
@@ -617,9 +621,10 @@ const DEMO_PUBLIC_OVERVIEWS = [
 ] as const;
 
 /**
- * One-time transformed fixture selectors. Each named value chooses only a
- * fictional handle/name/bio/overview variant; the static fixture contains no
- * source identifier, profile copy, image path, URL, or source hash.
+ * Static selectors for the deterministic fixture. V2 uses authorized static
+ * source handles/text for its first public rows; all remaining selectors are
+ * fictional fixture copy. Neither version contains source images, URLs, or
+ * runtime reads from a production data source.
  */
 export type DemoFixtureVariant = Readonly<{
     handleIndex: number;
@@ -709,6 +714,31 @@ function publicAccount(index: number): FemaleResultRowV1 {
     };
 }
 
+/** Original v1 synthetic account generator, retained only for existing v1 rows. */
+function legacyPublicAccount(index: number): FemaleResultRowV1 {
+    const variant = DEMO_FIXTURE_VARIANTS[index % DEMO_FIXTURE_VARIANTS.length]!;
+    const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
+    const displayScore = index === 0 ? 8 : index === 1 ? 6 : index === 2 ? 5 : [3, 3, 2, 2, 1][index % 5]!;
+    return {
+        instagramId: fixtureIdentifier(DEMO_PUBLIC_HANDLES, variant.handleIndex + index * DEMO_PUBLIC_HANDLES.length),
+        fullName: DEMO_PUBLIC_NAMES[variant.nameIndex]!,
+        profileImage: avatar(index),
+        bio: DEMO_PUBLIC_BIOS[variant.bioIndex]!,
+        displayScore,
+        riskBand,
+        featuredRank: index === 0 ? 1 : index < 3 ? index + 1 : null,
+        recentMutualRank: index < 10 ? index + 1 : null,
+        analysisDepth: index === 0 ? 'narrative' : 'features',
+        oneLineOverview: DEMO_PUBLIC_OVERVIEWS[variant.overviewIndex]!,
+        highRiskNarrative: index === 0
+            ? [
+                '공개 프로필과 최근 흐름은 굳이 눈에 띄지만, 단정할 근거는 아닙니다.',
+                '좋아요 흔적은 제법 친절하지만 수집 범위 밖의 맥락까지 없다고 믿기는 이릅니다.',
+            ]
+            : null,
+    };
+}
+
 function demoProgressProfileId(progressBp: number): string {
     const index = Math.floor(progressBp / 1_000) % DEMO_SOURCE_HANDLE_FIXTURE.length;
     return `${DEMO_SOURCE_HANDLE_FIXTURE[index] ?? 'demo.profile'}*`;
@@ -723,7 +753,7 @@ function privateAccount(index: number): PrivateResultRowV1 {
 }
 
 export interface DemoFixture {
-    version: typeof DEMO_FIXTURE_VERSION;
+    version: DemoFixtureVersion;
     summary: AnalysisResultSummaryV1;
     publicAccounts: FemaleResultRowV1[];
     privateAccounts: PrivateResultRowV1[];
@@ -769,13 +799,18 @@ export function demoReadyPreflight(run: { id: string; created_at: string }) {
     };
 }
 
-/** Fixed seed-equivalent generator: only its request-independent namespace is rendered. */
-export function createDemoFixture(requestId: string): DemoFixture {
+/** Fixed seed-equivalent generator that dispatches only between persisted fixture versions. */
+export function createDemoFixture(
+    requestId: string,
+    fixtureVersion: DemoFixtureVersion = DEMO_FIXTURE_VERSION,
+): DemoFixture {
     if (!requestId) throw new TypeError('A demo run id is required.');
-    const publicAccounts = Array.from({ length: 242 }, (_, index) => publicAccount(index));
+    const publicAccounts = Array.from({ length: 242 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+        ? legacyPublicAccount(index)
+        : publicAccount(index));
     const privateAccounts = Array.from({ length: 142 }, (_, index) => privateAccount(index));
     return {
-        version: DEMO_FIXTURE_VERSION,
+        version: fixtureVersion,
         summary: {
             targetInstagramId: DEMO_TARGET_USERNAME,
             targetProfileImage: avatar(0),
@@ -798,11 +833,12 @@ export function createDemoFixture(requestId: string): DemoFixture {
 
 export function demoResultPage(input: {
     requestId: string;
+    fixtureVersion?: DemoFixtureVersion;
     femaleCursor: string | null;
     privateCursor: string | null;
     pageSize: number;
 }) {
-    const fixture = createDemoFixture(input.requestId);
+    const fixture = createDemoFixture(input.requestId, input.fixtureVersion);
     const publicPage = paginateAnalysisResults(fixture.publicAccounts, {
         list: 'public', direction: 'desc', sortKeyType: 'number', cursor: input.femaleCursor,
         pageSize: input.pageSize, getSortKey: row => row.displayScore, getCandidateId: row => row.instagramId,
@@ -865,6 +901,7 @@ export const DEMO_PROGRESS_STAGE_SCHEDULE = [
 
 export function projectDemoProgress(input: {
     requestId: string;
+    fixtureVersion?: DemoFixtureVersion;
     startedAt: Date;
     durationSeconds: number;
     now: Date;
@@ -899,7 +936,13 @@ export function projectDemoProgress(input: {
         snapshot: {
             schemaVersion: 1, requestId: input.requestId, revision: allEvents.length,
             status: completed ? 'completed' : 'processing', progressBp, backgroundProcessing: !completed,
-            tracks, activeProfile: completed ? null : { maskedUsername: demoProgressProfileId(progressBp), imageUrl: avatar(0) },
+            tracks,
+            activeProfile: completed ? null : {
+                maskedUsername: input.fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+                    ? 'profile.***'
+                    : demoProgressProfileId(progressBp),
+                imageUrl: avatar(0),
+            },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
             lastEventSeq: allEvents.length,
         },

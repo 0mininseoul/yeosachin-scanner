@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     DEMO_FIXTURE_VARIANTS,
     DEMO_FIXTURE_VERSION,
+    LEGACY_DEMO_FIXTURE_VERSION,
     DEMO_SOURCE_HANDLE_FIXTURE,
     DEMO_SOURCE_PROFILE_FIXTURE,
     DEMO_TARGET_USERNAME,
@@ -53,7 +54,16 @@ describe('synthetic demo analysis policy', () => {
     });
 });
 
-describe('synthetic demo fixture', () => {
+describe('isolated demo fixtures', () => {
+    it('dispatches legacy and v2 runs to distinct static fixtures', () => {
+        const requestId = '123e4567-e89b-42d3-a456-426614174000';
+        const legacy = createDemoFixture(requestId, LEGACY_DEMO_FIXTURE_VERSION);
+        const current = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
+
+        expect(legacy.version).toBe(LEGACY_DEMO_FIXTURE_VERSION);
+        expect(current.version).toBe(DEMO_FIXTURE_VERSION);
+        expect(legacy.publicAccounts[0]?.instagramId).not.toBe(current.publicAccounts[0]?.instagramId);
+    });
     it('uses only existing local permanently defocused raster assets', async () => {
         await expect(validateDemoAssetManifest()).resolves.toEqual([
             '/demo-avatars/synthetic-blurred-avatar-1-v1.png',
@@ -63,7 +73,7 @@ describe('synthetic demo fixture', () => {
         ]);
     });
 
-    it('is deterministic and has exact synthetic relationship totals', () => {
+    it('is deterministic and has exact fixture relationship totals', () => {
         const first = createDemoFixture(requestId);
         expect(first).toEqual(createDemoFixture(requestId));
         expect(first.publicAccounts).toHaveLength(242);
@@ -90,7 +100,7 @@ describe('synthetic demo fixture', () => {
             .toBe(first.summary.screenedMutuals);
     });
 
-    it('uses varied, one-line synthetic account copy with only local blurred avatars', () => {
+    it('uses authorized static v2 text, fictional fallback copy, and only local blurred avatars', () => {
         const fixture = createDemoFixture(requestId);
         const publicRows = fixture.publicAccounts;
         const preflight = demoReadyPreflight({ id: requestId, created_at: '2026-07-01T00:00:00.000Z' });
