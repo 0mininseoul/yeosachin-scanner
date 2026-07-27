@@ -1,11 +1,14 @@
 'use client';
 
 import Image from 'next/image';
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
-import { useHydrationSafePlanQuery } from '@/hooks/useHydrationSafePlanQuery';
+import {
+    HydrationSafePlanQueryObserver,
+    useHydrationSafePlanQuery,
+} from '@/hooks/useHydrationSafePlanQuery';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import {
     EARLYBIRD_DISCLOSURE_TEXT,
@@ -496,6 +499,9 @@ export default function AnalyzePage() {
 
     return (
         <div className="min-h-dvh">
+            <Suspense fallback={null}>
+                <HydrationSafePlanQueryObserver />
+            </Suspense>
             <TopBar
                 right={user ? (
                     <button

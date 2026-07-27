@@ -19,6 +19,8 @@ describe('analyze autostart handoff', () => {
 
     it('keeps a plan query as a render fallback instead of racing preflight resume state', () => {
         expect(source).toContain('useHydrationSafePlanQuery');
+        expect(source).toContain('<HydrationSafePlanQueryObserver />');
+        expect(source).toContain('<Suspense fallback={null}>');
         expect(source).toContain('const selectedPlanWithQueryFallback = selectedPlan ?? querySelectedPlan;');
         expect(source).toContain('? (selectedPlanWithQueryFallback ?? readyPreflight.requiredPlan)');
         expect(source).not.toContain('setSelectedPlan(linkedPlan)');
