@@ -35,6 +35,23 @@ async function stageUnavailableKakaoSignupProfile(
     });
 }
 
+function scheduleKakaoSignupDiscordDelivery(userId: string): void {
+    // `after` keeps this best-effort work outside the auth response. Keep the
+    // callback synchronous and absorb unexpected delivery rejections so they
+    // cannot become an unhandled rejection after the user has logged in.
+    const deliver = () => {
+        void deliverKakaoSignupDiscordNotifications({ userId }).catch(() => undefined);
+    };
+
+    try {
+        after(deliver);
+    } catch {
+        // Local/test runtimes can reject `after`; still attempt delivery without
+        // ever making the successful OAuth callback depend on it.
+        deliver();
+    }
+}
+
 // 카카오 성별·출생연도·전화번호 등은 OIDC ID 토큰에 없고 REST API(/v2/user/me)에만 있으므로,
 // 로그인 직후 확보한 provider_token(카카오 access token)으로 직접 조회해 users 테이블에 저장한다.
 async function syncKakaoProfile(
@@ -210,11 +227,7 @@ async function handleGET(
         }
         // The first-signup DB trigger is the only enqueue authority. Delivery runs
         // asynchronously so Discord cannot delay or fail a completed login.
-        try {
-            after(() => deliverKakaoSignupDiscordNotifications({ userId: authedUser.id }));
-        } catch {
-            void deliverKakaoSignupDiscordNotifications({ userId: authedUser.id });
-        }
+        scheduleKakaoSignupDiscordDelivery(authedUser.id);
     }
 
     const redirectUrl = appRedirectUrlForRequest(request.url, searchParams.get('next'));

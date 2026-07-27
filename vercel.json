@@ -27,7 +27,7 @@
     "crons": [
         {
             "path": "/api/internal/kakao-signup-discord-outbox",
-            "schedule": "*/5 * * * *"
+            "schedule": "0 0 * * *"
         }
     ],
     "git": {

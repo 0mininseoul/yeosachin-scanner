@@ -20,6 +20,7 @@ const routeMocks = vi.hoisted(() => ({
     insert: vi.fn(),
     update: vi.fn(),
     emit: vi.fn(),
+    after: vi.fn(),
     stageKakaoSignupDiscordProfile: vi.fn(),
     deliverKakaoSignupDiscordNotifications: vi.fn(),
     observeRoute: vi.fn((
@@ -40,7 +41,7 @@ vi.mock('@supabase/ssr', () => ({
 }));
 vi.mock('next/server', async () => {
     const actual = await vi.importActual<typeof import('next/server')>('next/server');
-    return { ...actual, after: (callback: () => void | Promise<void>) => { void callback(); } };
+    return { ...actual, after: routeMocks.after };
 });
 vi.mock('@/lib/supabase/server', () => ({
     createClient: routeMocks.createClient,
@@ -173,6 +174,9 @@ describe('OAuth callback profile persistence', () => {
             return { upsert: routeMocks.upsert };
         });
         routeMocks.upsert.mockResolvedValue({ error: null });
+        routeMocks.after.mockImplementation((callback: () => void | Promise<void>) => {
+            void callback();
+        });
         routeMocks.stageKakaoSignupDiscordProfile.mockResolvedValue(undefined);
         routeMocks.deliverKakaoSignupDiscordNotifications.mockResolvedValue(0);
     });
@@ -242,6 +246,7 @@ describe('OAuth callback profile persistence', () => {
 
         expect(responses.every(response => response.status >= 300 && response.status < 400)).toBe(true);
         expect(routeMocks.stageKakaoSignupDiscordProfile).toHaveBeenCalledTimes(3);
+        expect(routeMocks.after).toHaveBeenCalledTimes(3);
         expect(routeMocks.deliverKakaoSignupDiscordNotifications).toHaveBeenCalledTimes(3);
         expect(routeMocks.stageKakaoSignupDiscordProfile).toHaveBeenCalledWith(USER_ID, expect.objectContaining({
             name: '  Account Name  ', birthyear: 1997, gender: '  female  ',
@@ -271,6 +276,22 @@ describe('OAuth callback profile persistence', () => {
         }));
         expect(routeMocks.deliverKakaoSignupDiscordNotifications).toHaveBeenCalledWith({ userId: USER_ID });
         expect(errorSpy).toHaveBeenCalled();
+    });
+
+    it('keeps the Kakao callback successful when best-effort Discord delivery rejects', async () => {
+        installCallbackSession('kakao', 'provider-token');
+        installCallbackProfileFetch();
+        routeMocks.deliverKakaoSignupDiscordNotifications.mockRejectedValueOnce(
+            new Error('Discord delivery unavailable'),
+        );
+
+        const response = await authCallback(callbackRequest('discord-delivery-failure'));
+        await Promise.resolve();
+
+        expect(response.status).toBeGreaterThanOrEqual(300);
+        expect(response.status).toBeLessThan(400);
+        expect(routeMocks.after).toHaveBeenCalledTimes(1);
+        expect(routeMocks.deliverKakaoSignupDiscordNotifications).toHaveBeenCalledWith({ userId: USER_ID });
     });
 
     it.each([
