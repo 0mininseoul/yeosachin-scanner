@@ -58,6 +58,39 @@ async function artifacts(now: number) {
 }
 
 describe('analysis V2 replay CLI', () => {
+    it('requires the UUID-only historical official E2E capability on both capture and paid run', () => {
+        const capture = [
+            '--capture', '--historical-official-e2e',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9',
+            '--bundle=/private/bundle.enc', '--key=/private/key.key',
+        ];
+        expect(parseReplayCliArgs(capture)).toMatchObject({
+            command: 'capture',
+            historicalOfficialE2E: true,
+            requestId: '10000000-0000-4000-8000-000000000001',
+            evaluationPolicy: { aiStage: 'ai-stage-policy-v2.9' },
+        });
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toMatchObject({
+            command: 'run', mode: 'paid-ai', historicalOfficialE2E: true,
+            evaluationPolicy: { aiStage: 'ai-stage-policy-v2.9' },
+        });
+        expect(() => parseReplayCliArgs([
+            '--capture', '--historical-official-e2e', '--target=ambient_target',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9', '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        expect(() => parseReplayCliArgs([
+            '--capture', '--historical-official-e2e',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
+    });
+
     it('parses an exact capture selector and artifact paths', () => {
         expect(parseReplayCliArgs([
             '--capture', '--target=target', '--request-id=10000000-0000-4000-8000-000000000001',

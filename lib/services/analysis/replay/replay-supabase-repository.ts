@@ -14,6 +14,13 @@ export interface ReplaySourceRpcClient {
     }): PromiseLike<RpcResult>;
 }
 
+/** UUID-only, service-role RPC for the one historical official E2E source. */
+export interface HistoricalOfficialE2EReplaySourceRpcClient {
+    rpc(name: 'read_analysis_v2_historical_official_e2e_replay_source', params: {
+        p_request_id: string;
+    }): PromiseLike<RpcResult>;
+}
+
 const run = z.object({
     actorId: z.string().min(3).max(200),
     credentialSlot: z.string().regex(/^(?:primary|secondary|tertiary|quaternary|quinary|senary)$/),
@@ -40,6 +47,16 @@ const source = z.object({
     }).strict(),
     preflightRuns: z.array(run).max(4),
     providerRuns: z.array(run).max(128),
+}).strict();
+
+const historicalOfficialE2ESource = source.extend({
+    targetUsername: z.string().regex(/^replay_[a-f0-9]{23}$/),
+    selectedPlanId: z.literal('standard'),
+    policyVersions: z.object({
+        pipeline: z.literal('v2'),
+        risk: z.literal('risk-policy-v2.3'),
+        aiStage: z.literal('ai-stage-policy-v2.7'),
+    }).strict(),
 }).strict();
 
 export type ReplayCaptureDescriptor = Omit<
@@ -79,6 +96,46 @@ export async function loadReplayCaptureDescriptor(
     if (parsed.targetUsername !== target) {
         throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
     }
+    const lineageResult = replaySourceLineageSchema.safeParse({
+        selectedPlanId: parsed.selectedPlanId,
+        policyVersions: parsed.policyVersions,
+    });
+    if (!lineageResult.success) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    return {
+        requestId: parsed.requestId,
+        preflightId: parsed.preflightId,
+        targetUsername: parsed.targetUsername,
+        target: parsed.target,
+        preflightRuns: parsed.preflightRuns,
+        providerRuns: parsed.providerRuns,
+        sourceLineage: lineageResult.data,
+        requestFingerprint: createHash('sha256')
+            .update(`analysis-v2-replay-request-v1\n${parsed.requestId}`)
+            .digest('hex'),
+    };
+}
+
+/**
+ * Loads the single historical, entitlement-backed source by its required UUID.
+ * The returned target is an opaque replay handle, never a request/preflight value.
+ */
+export async function loadHistoricalOfficialE2EReplayCaptureDescriptor(
+    client: HistoricalOfficialE2EReplaySourceRpcClient,
+    requestId: string,
+): Promise<ReplayCaptureDescriptor> {
+    const exactRequestId = z.string().uuid().parse(requestId);
+    const result = await client.rpc(
+        'read_analysis_v2_historical_official_e2e_replay_source',
+        { p_request_id: exactRequestId },
+    );
+    if (result.error) throw new Error('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
+    const parsedResult = historicalOfficialE2ESource.safeParse(result.data);
+    if (!parsedResult.success || parsedResult.data.requestId !== exactRequestId) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    const parsed = parsedResult.data;
     const lineageResult = replaySourceLineageSchema.safeParse({
         selectedPlanId: parsed.selectedPlanId,
         policyVersions: parsed.policyVersions,

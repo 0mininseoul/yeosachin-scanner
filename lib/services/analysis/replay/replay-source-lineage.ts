@@ -66,10 +66,20 @@ export type ReplaySourceLineage = z.infer<typeof replaySourceLineageSchema>;
 
 export const REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY =
     'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29' as const;
-export const replayEvaluationPolicySchema = z.object({
+export const HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY =
+    'historical-official-e2e-standard-v27-risk-v23-to-ai-v29' as const;
+const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
 }).strict();
+const historicalOfficialE2EEvaluationPolicySchema = z.object({
+    capability: z.literal(HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
+}).strict();
+export const replayEvaluationPolicySchema = z.union([
+    currentEvaluationPolicySchema,
+    historicalOfficialE2EEvaluationPolicySchema,
+]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
 export type ReplaySupportedAiStagePolicyVersion = Extract<
@@ -108,6 +118,20 @@ export function resolveReplayAiStagePolicyVersion(
         throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     }
     const policy = lineage.policyVersions;
+    // The historical v2.7/risk-v2.3 snapshot predates risk/scheduler telemetry;
+    // that missing telemetry does not change the replayed AI semantics.
+    if (parsed.data.capability === HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY) {
+        if (
+            lineage.selectedPlanId !== 'standard'
+            || policy.pipeline !== 'v2'
+            || policy.risk !== 'risk-policy-v2.3'
+            || policy.aiStage !== AI_STAGE_POLICY_V27_VERSION
+            || 'scheduler' in policy
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+        }
+        return parsed.data.aiStage;
+    }
     if (
         lineage.selectedPlanId !== 'standard'
         || policy.pipeline !== 'v2'

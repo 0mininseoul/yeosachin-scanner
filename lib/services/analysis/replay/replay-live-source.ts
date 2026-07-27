@@ -124,7 +124,22 @@ export async function loadReplaySourceFromExistingRuns(input: {
             profiles.set(username, mapped);
         }
     }
-    const targetProfile = profiles.get(input.descriptor.targetUsername);
+    // Historical privacy scrubbing can replace both stored target fields. The
+    // target-profile provider ledger is the exact immutable source, so derive
+    // its username in-memory rather than trusting or returning a stored target.
+    const targetProfileUsernames = new Set<string>();
+    for (const [run, items] of datasets) {
+        if (
+            run.operationKey !== 'target-profile-fallback'
+            && !/^target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100)$/.test(run.operationKey)
+        ) continue;
+        for (const username of profileUsernames(items)) targetProfileUsernames.add(username);
+    }
+    if (targetProfileUsernames.size !== 1) {
+        throw new Error('ANALYSIS_V2_REPLAY_TARGET_PROFILE_MISSING');
+    }
+    const targetUsername = [...targetProfileUsernames][0]!;
+    const targetProfile = profiles.get(targetUsername);
     if (!targetProfile) throw new Error('ANALYSIS_V2_REPLAY_TARGET_PROFILE_MISSING');
 
     const relationship: AnalysisV2ReplayBundle['evidence']['relationship'] = [];
@@ -132,7 +147,7 @@ export async function loadReplaySourceFromExistingRuns(input: {
         const kind = operationKind(run);
         if (kind !== 'relationship-followers' && kind !== 'relationship-following') continue;
         const side = kind === 'relationship-followers' ? 'followers' as const : 'following' as const;
-        const parsed = parseApifyRelationshipDataset(items.map(item => record.parse(item)), input.descriptor.targetUsername, side, 1_200);
+        const parsed = parseApifyRelationshipDataset(items.map(item => record.parse(item)), targetUsername, side, 1_200);
         parsed.forEach((row, index) => relationship.push({ username: row.username.toLowerCase(), side: side === 'followers' ? 'follower' : 'following', isPrivate: row.isPrivate, isVerified: row.isVerified, fullName: row.fullName ?? null, ordinal: index + 1 }));
     }
     if (!relationship.some(row => row.side === 'follower') || !relationship.some(row => row.side === 'following')) throw new Error('ANALYSIS_V2_REPLAY_RELATIONSHIP_DATASET_MISSING');
@@ -157,7 +172,7 @@ export async function loadReplaySourceFromExistingRuns(input: {
         targetPosts,
         likers: targetLikers,
         comments: targetComments,
-        excludedUsernames: [input.descriptor.targetUsername],
+        excludedUsernames: [targetUsername],
     });
     const targetInteractions: AnalysisV2ReplayBundle['evidence']['targetInteractions'] =
         extractedTarget.evidence.map(row => ({
@@ -193,7 +208,7 @@ export async function loadReplaySourceFromExistingRuns(input: {
             const usernames = new Set(likers
                 .filter(row => row.postUrl === url)
                 .map(row => row.username.toLowerCase()));
-            const observed = usernames.has(input.descriptor.targetUsername);
+            const observed = usernames.has(targetUsername);
             const absenceConfirmed = owner.post.likesCountHidden !== true
                 && owner.post.likesCount <= 100
                 && usernames.size >= owner.post.likesCount;

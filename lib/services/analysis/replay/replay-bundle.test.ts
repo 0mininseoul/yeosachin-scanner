@@ -96,13 +96,12 @@ describe('analysis V2 replay bundle', () => {
                     selectedPlanId: 'standard',
                     policyVersions: {
                         pipeline: 'v2',
-                        aiStage: 'ai-stage-policy-v2.8',
-                        risk: 'risk-policy-v2.4',
-                        scheduler: 'ai-scheduler-v1',
+                        aiStage: 'ai-stage-policy-v2.7',
+                        risk: 'risk-policy-v2.3',
                     },
                 },
                 evaluationPolicy: {
-                    capability: 'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29',
+                    capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29',
                     aiStage: 'ai-stage-policy-v2.9',
                 },
             },

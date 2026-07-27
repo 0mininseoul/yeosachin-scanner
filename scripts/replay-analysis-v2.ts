@@ -19,15 +19,22 @@ import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } fro
 import { runAnalysisV2AiReplay } from '../lib/services/analysis/replay/replay-runner';
 import { createReplayStagedAiAdapter } from '../lib/services/analysis/replay/replay-staged-ai-adapter';
 import {
+    HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from '../lib/services/analysis/replay/replay-source-lineage';
-import { loadReplayCaptureDescriptor, type ReplaySourceRpcClient } from '../lib/services/analysis/replay/replay-supabase-repository';
+import {
+    loadHistoricalOfficialE2EReplayCaptureDescriptor,
+    loadReplayCaptureDescriptor,
+    type HistoricalOfficialE2EReplaySourceRpcClient,
+    type ReplaySourceRpcClient,
+} from '../lib/services/analysis/replay/replay-supabase-repository';
 
 type ReplayCliOptions =
-    | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy }
-    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy }
+    | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: false }
+    | { command: 'capture'; historicalOfficialE2E: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
+    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -47,15 +54,18 @@ const VALUELESS_FLAGS = new Set([
     '--dry-run',
     '--paid-ai',
     '--confirm-paid-ai',
+    '--historical-official-e2e',
 ]);
 
-function evaluationPolicy(value: string | undefined): ReplayEvaluationPolicy | undefined {
+function evaluationPolicy(value: string | undefined, historicalOfficialE2E = false): ReplayEvaluationPolicy | undefined {
     if (value === undefined) return undefined;
     if (value !== AI_STAGE_POLICY_V29_VERSION) {
         throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     }
     return {
-        capability: REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
+        capability: historicalOfficialE2E
+            ? HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY
+            : REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
         aiStage: AI_STAGE_POLICY_V29_VERSION,
     };
 }
@@ -78,6 +88,15 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
         throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_PATH_INVALID');
     }
     if (parsed.has('--capture')) {
+        const historicalOfficialE2E = parsed.has('--historical-official-e2e');
+        if (historicalOfficialE2E) {
+            const allowed = new Set(['--capture', '--historical-official-e2e', '--request-id', '--evaluation-ai-policy', '--bundle', '--key']);
+            const requestId = parsed.get('--request-id')?.trim();
+            if (!requestId || [...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+            const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), true);
+            if (!evaluation) throw new Error('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
+            return { command: 'capture', historicalOfficialE2E: true, requestId, bundlePath, keyPath, evaluationPolicy: evaluation };
+        }
         const target = parsed.get('--target')?.trim();
         const allowed = new Set(['--capture', '--target', '--request-id', '--bundle', '--key', '--evaluation-ai-policy']);
         if (!target || [...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
@@ -92,10 +111,12 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const paid = parsed.has('--paid-ai');
     const confirmed = parsed.has('--confirm-paid-ai');
     if (paid !== confirmed || (paid && parsed.has('--dry-run'))) throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_DOUBLE_CONFIRM_REQUIRED');
-    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--bundle', '--key', '--evaluation-ai-policy']);
+    const historicalOfficialE2E = parsed.has('--historical-official-e2e');
+    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--bundle', '--key', '--evaluation-ai-policy']);
     if ([...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'));
-    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
+    const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E);
+    if (historicalOfficialE2E && (!paid || !evaluation)) throw new Error('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
+    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
 }
 
 function requiredEnvironment(name: string): string {
@@ -155,7 +176,15 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         const serviceKey = requiredEnvironment('SUPABASE_SERVICE_ROLE_KEY');
         if (serviceKey.startsWith('sb_publishable_') || serviceKey === process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()) throw new Error('ANALYSIS_V2_REPLAY_CONFIGURATION_INVALID');
         const supabase = createClient(requiredEnvironment('NEXT_PUBLIC_SUPABASE_URL'), serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
-        const descriptor = await loadReplayCaptureDescriptor(supabase as unknown as ReplaySourceRpcClient, { targetUsername: options.target, ...(options.requestId ? { requestId: options.requestId } : {}) });
+        const descriptor = options.historicalOfficialE2E
+            ? await loadHistoricalOfficialE2EReplayCaptureDescriptor(
+                supabase as unknown as HistoricalOfficialE2EReplaySourceRpcClient,
+                options.requestId,
+            )
+            : await loadReplayCaptureDescriptor(
+                supabase as unknown as ReplaySourceRpcClient,
+                { targetUsername: options.target, ...(options.requestId ? { requestId: options.requestId } : {}) },
+            );
         const replayAiPolicy = resolveReplayAiStagePolicyVersion(
             descriptor.sourceLineage,
             options.evaluationPolicy,

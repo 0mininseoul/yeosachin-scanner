@@ -55,7 +55,7 @@ describe('live replay source mapping', () => {
         const descriptor: ReplayCaptureDescriptor = {
             requestId: '10000000-0000-4000-8000-000000000001',
             preflightId: '20000000-0000-4000-8000-000000000001',
-            requestFingerprint: 'a'.repeat(64), targetUsername: 'target',
+            requestFingerprint: 'a'.repeat(64), targetUsername: 'replay_0123456789abcdef0123456',
             sourceLineage: {
                 selectedPlanId: 'standard',
                 policyVersions: {

@@ -60,6 +60,35 @@ describe('AI-only replay runner', () => {
         });
     });
 
+    it('requires the authenticated historical capability on every run', async () => {
+        const historicalBundle = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        aiStage: 'ai-stage-policy-v2.7' as const,
+                        risk: 'risk-policy-v2.3' as const,
+                    },
+                },
+                evaluationPolicy: {
+                    capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29' as const,
+                    aiStage: 'ai-stage-policy-v2.9' as const,
+                },
+            },
+        };
+        await expect(runAnalysisV2AiReplay({
+            bundle: historicalBundle, mode: 'dry-run',
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_MISMATCH');
+        await expect(runAnalysisV2AiReplay({
+            bundle: historicalBundle,
+            mode: 'dry-run',
+            evaluationPolicy: historicalBundle.capture.evaluationPolicy,
+        })).resolves.toMatchObject({ replayAiPolicy: 'ai-stage-policy-v2.9' });
+    });
+
     it('rejects malformed normalized input during dry-run before invoking AI', async () => {
         const triage = vi.fn();
         await expect(runAnalysisV2AiReplay({
