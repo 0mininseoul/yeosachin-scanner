@@ -28,7 +28,8 @@ const languageOptions = {
 
 describe("ESLint transitive minimatch compatibility", () => {
   it("pins every installed minimatch major to the patched brace-expansion release", () => {
-    const minimatch3PackageJson = runtimeRequire.resolve("minimatch/package.json");
+    const eslintRequire = createRequire(runtimeRequire.resolve("eslint"));
+    const minimatch3PackageJson = eslintRequire.resolve("minimatch/package.json");
     const minimatch3Require = createRequire(minimatch3PackageJson);
     const minimatch3BraceExpansionPackageJson = minimatch3Require.resolve(
       "brace-expansion/package.json",
@@ -45,7 +46,9 @@ describe("ESLint transitive minimatch compatibility", () => {
       "brace-expansion/package.json",
     );
 
-    const globRequire = createRequire(runtimeRequire.resolve("glob/package.json"));
+    const googleGaxRequire = createRequire(runtimeRequire.resolve("google-gax"));
+    const rimrafRequire = createRequire(googleGaxRequire.resolve("rimraf"));
+    const globRequire = createRequire(rimrafRequire.resolve("glob"));
     const minimatch10PackageJson = globRequire.resolve("minimatch/package.json");
     const minimatch10Require = createRequire(minimatch10PackageJson);
     const minimatch10BraceExpansionPackageJson = minimatch10Require.resolve(
@@ -54,7 +57,10 @@ describe("ESLint transitive minimatch compatibility", () => {
 
     expect(readPackageVersion(minimatch3PackageJson)).toBe("3.1.5");
     expect(readPackageVersion(minimatch3BraceExpansionPackageJson)).toBe("5.0.8");
-    expect(typeof minimatch3Require("brace-expansion")).toBe("function");
+    const expandBrace = minimatch3Require("brace-expansion") as (
+      pattern: string,
+    ) => string[];
+    expect(expandBrace("x{1,2}y")).toEqual(["x1y", "x2y"]);
 
     expect(readPackageVersion(minimatch9PackageJson)).toBe("9.0.9");
     expect(readPackageVersion(minimatch9BraceExpansionPackageJson)).toBe("5.0.8");
