@@ -192,19 +192,25 @@ describe('analysis V2 live scheduler migration', () => {
                 id: '163e4567-e89b-42d3-a456-426614174000',
                 jobClaim: '193e4567-e89b-42d3-a456-426614174000',
                 operationClaim: '223e4567-e89b-42d3-a456-426614174000',
-                policy: ['ai-stage-policy-v2.7'],
+                aiStage: 'ai-stage-policy-v2.7',
+                risk: undefined,
+                scheduler: undefined,
             },
             {
                 id: '173e4567-e89b-42d3-a456-426614174000',
                 jobClaim: '203e4567-e89b-42d3-a456-426614174000',
                 operationClaim: '233e4567-e89b-42d3-a456-426614174000',
-                policy: ['ai-stage-policy-v2.9', 'risk-policy-v2.3'],
+                aiStage: 'ai-stage-policy-v2.9',
+                risk: 'risk-policy-v2.3',
+                scheduler: undefined,
             },
             {
                 id: '183e4567-e89b-42d3-a456-426614174000',
                 jobClaim: '213e4567-e89b-42d3-a456-426614174000',
                 operationClaim: '243e4567-e89b-42d3-a456-426614174000',
-                policy: ['ai-stage-policy-v2.9', 'risk-policy-v2.4', 'ai-scheduler-v2'],
+                aiStage: 'ai-stage-policy-v2.9',
+                risk: 'risk-policy-v2.4',
+                scheduler: 'ai-scheduler-v2',
             },
         ] as const;
         const privateNameOperation = `private-account-name:${'d'.repeat(64)}`;
@@ -258,7 +264,7 @@ describe('analysis V2 live scheduler migration', () => {
             for (const rejected of rejectedRequests) {
                 await insertClaimableRequest(
                     rejected.id,
-                    policy(...rejected.policy),
+                    policy(rejected.aiStage, rejected.risk, rejected.scheduler),
                     rejected.jobClaim
                 );
                 await expect(claim(rejected.id, rejected.jobClaim, rejected.operationClaim))
