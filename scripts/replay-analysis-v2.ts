@@ -6,6 +6,7 @@ import { createAnalysisV2SelectedMediaNormalizer } from '../lib/services/ai/imag
 import { AI_STAGE_POLICY_V29_VERSION } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
 import { captureAnalysisV2ReplayBundle } from '../lib/services/analysis/replay/replay-capture';
+import { captureHistoricalPartialAvailableReplayBundle, partialAvailableSafeReport } from '../lib/services/analysis/replay/historical-partial-available-capture';
 import {
     createReplayArtifactCreationScope,
     createReplayKeyFile,
@@ -18,6 +19,7 @@ import {
 import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } from '../lib/services/analysis/replay/replay-live-source';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
@@ -32,7 +34,8 @@ import {
 type ReplayCliOptions =
     | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: false }
     | { command: 'capture'; historicalOfficialE2E: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
-    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true }
+    | { command: 'capture'; historicalPartialAvailable: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
+    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -53,15 +56,18 @@ const VALUELESS_FLAGS = new Set([
     '--paid-ai',
     '--confirm-paid-ai',
     '--historical-official-e2e',
+    '--historical-partial-available',
 ]);
 
-function evaluationPolicy(value: string | undefined, historicalOfficialE2E = false): ReplayEvaluationPolicy | undefined {
+function evaluationPolicy(value: string | undefined, historicalOfficialE2E = false, historicalPartialAvailable = false): ReplayEvaluationPolicy | undefined {
     if (value === undefined) return undefined;
     if (value !== AI_STAGE_POLICY_V29_VERSION) {
         throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     }
     return {
-        capability: historicalOfficialE2E
+        capability: historicalPartialAvailable
+            ? HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+            : historicalOfficialE2E
             ? HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY
             : REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
         aiStage: AI_STAGE_POLICY_V29_VERSION,
@@ -87,6 +93,16 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     }
     if (parsed.has('--capture')) {
         const historicalOfficialE2E = parsed.has('--historical-official-e2e');
+        const historicalPartialAvailable = parsed.has('--historical-partial-available');
+        if (historicalOfficialE2E && historicalPartialAvailable) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        if (historicalPartialAvailable) {
+            const allowed = new Set(['--capture', '--historical-partial-available', '--request-id', '--evaluation-ai-policy', '--bundle', '--key']);
+            const requestId = parsed.get('--request-id')?.trim();
+            if (!requestId || [...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+            const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), false, true);
+            if (!evaluation) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+            return { command: 'capture', historicalPartialAvailable: true, requestId, bundlePath, keyPath, evaluationPolicy: evaluation };
+        }
         if (historicalOfficialE2E) {
             const allowed = new Set(['--capture', '--historical-official-e2e', '--request-id', '--evaluation-ai-policy', '--bundle', '--key']);
             const requestId = parsed.get('--request-id')?.trim();
@@ -110,11 +126,15 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const confirmed = parsed.has('--confirm-paid-ai');
     if (paid !== confirmed || (paid && parsed.has('--dry-run'))) throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_DOUBLE_CONFIRM_REQUIRED');
     const historicalOfficialE2E = parsed.has('--historical-official-e2e');
-    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--bundle', '--key', '--evaluation-ai-policy']);
+    const historicalPartialAvailable = parsed.has('--historical-partial-available');
+    if (historicalOfficialE2E && historicalPartialAvailable) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    if (historicalPartialAvailable && paid) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
+    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--bundle', '--key', '--evaluation-ai-policy']);
     if ([...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E);
+    const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E, historicalPartialAvailable);
     if (historicalOfficialE2E && (!paid || !evaluation)) throw new Error('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
-    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
+    if (historicalPartialAvailable && (!evaluation || paid)) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
 }
 
 function requiredEnvironment(name: string): string {
@@ -174,25 +194,38 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         const serviceKey = requiredEnvironment('SUPABASE_SERVICE_ROLE_KEY');
         if (serviceKey.startsWith('sb_publishable_') || serviceKey === process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()) throw new Error('ANALYSIS_V2_REPLAY_CONFIGURATION_INVALID');
         const supabase = createClient(requiredEnvironment('NEXT_PUBLIC_SUPABASE_URL'), serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
-        const descriptor = options.historicalOfficialE2E
+        const historicalOfficial = 'historicalOfficialE2E' in options && options.historicalOfficialE2E === true;
+        const historicalPartial = 'historicalPartialAvailable' in options && options.historicalPartialAvailable === true;
+        const descriptor = historicalOfficial || historicalPartial
             ? await loadHistoricalOfficialE2EReplayCaptureDescriptor(
                 supabase as unknown as HistoricalOfficialE2EReplaySourceRpcClient,
-                options.requestId,
+                options.requestId!,
             )
             : await loadReplayCaptureDescriptor(
                 supabase as unknown as ReplaySourceRpcClient,
-                { targetUsername: options.target, ...(options.requestId ? { requestId: options.requestId } : {}) },
+                { targetUsername: (options as Extract<ReplayCliOptions, { target: string }>).target, ...(options.requestId ? { requestId: options.requestId } : {}) },
             );
         const replayAiPolicy = resolveReplayAiStagePolicyVersion(
             descriptor.sourceLineage,
             options.evaluationPolicy,
         );
         const clients = new Map<string, ReturnType<typeof createReplayReadonlyApifyClient>>();
-        const source = await loadReplaySourceFromExistingRuns({ descriptor, clientForSlot: slot => {
+        const source = await loadReplaySourceFromExistingRuns({ descriptor, ...(historicalPartial ? { allowHistoricalPartialAvailable: true } : {}), clientForSlot: slot => {
             const existing = clients.get(slot); if (existing) return existing;
             const created = createReplayReadonlyApifyClient(tokenForSlot(slot)); clients.set(slot, created); return created;
         } });
-        const bundle = await captureAnalysisV2ReplayBundle({
+        const captured = historicalPartial
+            ? await captureHistoricalPartialAvailableReplayBundle({
+                requestFingerprint: descriptor.requestFingerprint,
+                sourceLineage: descriptor.sourceLineage,
+                evaluationPolicy: options.evaluationPolicy,
+                source: {
+                    profiles: source.historicalPartialProfiles,
+                    evidence: source.evidence,
+                },
+                normalizeMedia: createAnalysisV2SelectedMediaNormalizer(),
+            })
+            : { bundle: await captureAnalysisV2ReplayBundle({
             selector: { targetUsername: descriptor.targetUsername },
             repository: {
                 findCompletedReplaySourceExact: async () => ({
@@ -206,7 +239,8 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             ...(options.evaluationPolicy
                 ? { evaluationPolicy: options.evaluationPolicy }
                 : {}),
-        });
+        }), report: undefined };
+        const bundle = captured.bundle;
         ownership.ownedKey = await createReplayKeyFile(options.keyPath, {
             scope: creationScope,
         });
@@ -220,7 +254,9 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         process.stdout.write(`${JSON.stringify({
             status: 'ok',
             command: 'capture',
-            benchmark_scope: 'ai-only-exact-replay',
+            ...(historicalPartial
+                ? { benchmark_scope: 'ai-only-historical-partial-available' }
+                : { benchmark_scope: 'ai-only-exact-replay' }),
             source_plan: descriptor.sourceLineage.selectedPlanId,
             source_pipeline: descriptor.sourceLineage.policyVersions.pipeline,
             source_ai_policy: descriptor.sourceLineage.policyVersions.aiStage,
@@ -228,6 +264,7 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             evaluation_ai_policy: options.evaluationPolicy?.aiStage ?? null,
             replay_ai_policy: replayAiPolicy,
             full_e2e_evidence: false,
+            ...(historicalPartial ? { not_exact: true, no_media_substitution: true, partial: partialAvailableSafeReport(captured.report!) } : {}),
             profiles: bundle.profiles.length,
             public: bundle.profiles.filter(p => !p.isPrivate).length,
             private: bundle.profiles.filter(p => p.isPrivate).length,
@@ -272,6 +309,13 @@ export async function runReplayCli(
         ownership.ownedKey = authenticated.ownedKey;
         if (authenticated.expired) {
             throw new Error('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
+        }
+        const partialArtifact = authenticated.bundle.schemaVersion === 2;
+        if (partialArtifact !== Boolean(options.historicalPartialAvailable)) {
+            throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_SCOPE_MISMATCH');
+        }
+        if (options.historicalPartialAvailable && options.mode !== 'dry-run') {
+            throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
         }
         const replayAiPolicy = resolveReplayAiStagePolicyVersion(
             authenticated.bundle.capture.sourceLineage,

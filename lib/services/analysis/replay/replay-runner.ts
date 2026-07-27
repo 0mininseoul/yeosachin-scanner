@@ -79,7 +79,7 @@ export interface ReplayStageMetrics {
     calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: Record<string, number>;
 }
 export interface AnalysisV2AiReplayReport {
-    benchmarkScope: 'ai-only-exact-replay';
+    benchmarkScope: 'ai-only-exact-replay' | 'ai-only-historical-partial-available';
     sourcePlan: 'standard' | 'plus';
     sourcePipeline: 'v2';
     sourceAiPolicy: string;
@@ -87,6 +87,8 @@ export interface AnalysisV2AiReplayReport {
     evaluationAiPolicy: string | null;
     replayAiPolicy: string;
     fullE2eEvidence: false;
+    notExact?: true;
+    noMediaSubstitution?: true;
     stages: Record<'genderTriage' | 'featureAnalysis' | 'privateAccountName' | 'genderResolution', ReplayStageMetrics>;
     gender: { male: number; female: number; unknown: number; unknownRate: number };
     resolver: { ready: number; applied: number; inconclusive: number; cutoff: number; capacitySkipped: number };
@@ -290,6 +292,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         evaluation_ai_policy: report.evaluationAiPolicy,
         replay_ai_policy: report.replayAiPolicy,
         full_e2e_evidence: report.fullE2eEvidence,
+        ...(report.notExact ? { not_exact: true, no_media_substitution: true } : {}),
         total_elapsed_ms: report.totalElapsedMs,
         stages: Object.fromEntries(Object.entries(report.stages).map(([stage, values]) => [
             stage,
@@ -318,6 +321,9 @@ export async function runAnalysisV2AiReplay(input: {
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
+    if (input.bundle.schemaVersion === 2 && input.mode !== 'dry-run') {
+        throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
+    }
     assertReplayInput(input.bundle);
     const authenticatedEvaluationPolicy = input.bundle.capture.evaluationPolicy;
     if (
@@ -579,7 +585,9 @@ export async function runAnalysisV2AiReplay(input: {
     gender.unknownRate = total ? Number((gender.unknown / total).toFixed(4)) : 0;
     for (const name of names) finalize(stages[name], durations[name]);
     const report = {
-        benchmarkScope: 'ai-only-exact-replay' as const,
+        benchmarkScope: input.bundle.schemaVersion === 2
+            ? 'ai-only-historical-partial-available' as const
+            : 'ai-only-exact-replay' as const,
         sourcePlan: input.bundle.capture.sourceLineage.selectedPlanId,
         sourcePipeline: input.bundle.capture.sourceLineage.policyVersions.pipeline,
         sourceAiPolicy: input.bundle.capture.sourceLineage.policyVersions.aiStage,
@@ -587,6 +595,7 @@ export async function runAnalysisV2AiReplay(input: {
         evaluationAiPolicy: input.evaluationPolicy?.aiStage ?? null,
         replayAiPolicy,
         fullE2eEvidence: false as const,
+        ...(input.bundle.schemaVersion === 2 ? { notExact: true as const, noMediaSubstitution: true as const } : {}),
         stages,
         gender,
         resolver,

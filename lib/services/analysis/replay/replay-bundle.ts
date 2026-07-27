@@ -37,7 +37,7 @@ const canonicalMediaSchema = z.object({
     caption: z.string().max(5_000).nullable().optional(),
     jpegBase64: jpegBase64Schema,
 }).strict();
-const bundleSchema = z.object({
+const exactBundleSchema = z.object({
     schemaVersion: z.literal(1),
     createdAt: z.string().datetime({ offset: true }),
     expiresAt: z.string().datetime({ offset: true }),
@@ -97,6 +97,28 @@ const bundleSchema = z.object({
         }).strict()).max(10_000),
     }).strict(),
 }).strict();
+
+/** A sealed, non-exact artifact. Exact schema-v1 artifacts remain unchanged. */
+const partialAvailableBundleSchema = exactBundleSchema.extend({
+    schemaVersion: z.literal(2),
+    capture: exactBundleSchema.shape.capture.extend({
+        scope: z.literal('ai-only-historical-partial-available'),
+        notExact: z.literal(true),
+        fullE2eEvidence: z.literal(false),
+        noMediaSubstitution: z.literal(true),
+        partial: z.object({
+            sourceUniverseDigest: z.string().regex(/^[a-f0-9]{64}$/),
+            mediaUnavailable: z.array(z.object({
+                ordinal: z.number().int().positive(),
+                terminal: z.literal('media_unavailable'),
+                triageFailures: z.number().int().min(0).max(12),
+                featureFailures: z.number().int().min(0).max(12),
+                reasons: z.array(z.string().regex(/^[a-z_]{1,64}$/)).max(13),
+            }).strict()).max(MAX_PROFILES),
+        }).strict(),
+    }).strict(),
+}).strict();
+const bundleSchema = z.union([exactBundleSchema, partialAvailableBundleSchema]);
 
 export type AnalysisV2ReplayBundle = z.infer<typeof bundleSchema>;
 

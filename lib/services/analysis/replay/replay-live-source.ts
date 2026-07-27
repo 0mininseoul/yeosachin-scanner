@@ -18,6 +18,7 @@ import {
 import { extractRawTargetInteractions } from '@/lib/services/analysis/v2-target-interactions';
 import type { AnalysisV2CheckpointProfile } from '@/lib/services/analysis/v2-profile-fetch-store';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
+import type { HistoricalPartialSourceProfile } from './historical-partial-available-capture';
 import { readCompletedApifyDatasetOnce, type ReplayReadonlyApifyClient } from './replay-readonly-apify';
 import type {
     HistoricalOfficialE2EReplayCaptureDescriptor,
@@ -188,7 +189,9 @@ function historicalAuthoritativeTargetProfileRuns(runs: readonly Run[]): readonl
 export async function loadReplaySourceFromExistingRuns(input: {
     descriptor: ReplayCaptureDescriptor | HistoricalOfficialE2EReplayCaptureDescriptor;
     clientForSlot(slot: string): ReplayReadonlyApifyClient;
-}): Promise<{ profiles: AnalysisV2CheckpointProfile[]; evidence: AnalysisV2ReplayBundle['evidence']; providerRuns: Run[] }> {
+    /** Partial audit only: preserve unavailable public source members as terminals. */
+    allowHistoricalPartialAvailable?: boolean;
+}): Promise<{ profiles: AnalysisV2CheckpointProfile[]; evidence: AnalysisV2ReplayBundle['evidence']; providerRuns: Run[]; historicalPartialProfiles: HistoricalPartialSourceProfile[] }> {
     const historical = isHistoricalDescriptor(input.descriptor);
     const preflightRuns = historical
         ? historicalAuthoritativeTargetProfileRuns(input.descriptor.preflightRuns)
@@ -395,22 +398,40 @@ export async function loadReplaySourceFromExistingRuns(input: {
     const reverseInteractions = [...reverseByCandidate.values()]
         .filter(row => mutual.has(row.candidateUsername));
 
+    const historicalPartialProfiles: HistoricalPartialSourceProfile[] = [];
     const profileList = [...mutual.values()].flatMap(row => {
         const detailed = profiles.get(row.username);
-        if (detailed) return [detailed];
+        if (detailed) {
+            historicalPartialProfiles.push({
+                ordinal: row.ordinal,
+                partition: detailed.isPrivate ? 'private' : 'public',
+                profile: detailed,
+                username: row.username,
+            });
+            return [detailed];
+        }
         // These are the exact terminal `failed`/`unavailable` outcomes production permits
         // below the per-batch 90% profile-evidence floor. They have no profile media and
         // therefore no AI workload; accepting only this recorded set preserves the old
         // fail-closed check for public accounts absent from the retained Apify evidence.
-        if (terminalCandidateProfileUsernames.has(row.username)) return [];
+        if (terminalCandidateProfileUsernames.has(row.username)) {
+            historicalPartialProfiles.push({ ordinal: row.ordinal, partition: 'fetch_terminal', username: row.username });
+            return [];
+        }
         if (!row.isPrivate) {
             // Completed requests purge selfhosted profile checkpoints. Never treat the
             // surviving Apify fallback subset as an exact AI workload benchmark.
+            if (input.allowHistoricalPartialAvailable) {
+                historicalPartialProfiles.push({ ordinal: row.ordinal, partition: 'public', username: row.username });
+                return [];
+            }
             throw new Error('ANALYSIS_V2_REPLAY_EXACT_PUBLIC_COVERAGE_INCOMPLETE');
         }
-        return [{ username: row.username, fullName: row.fullName ?? undefined, followersCount: 0, followingCount: 0, postsCount: 0, isPrivate: true, isVerified: row.isVerified } satisfies AnalysisV2CheckpointProfile];
+        const privateProfile = { username: row.username, fullName: row.fullName ?? undefined, followersCount: 0, followingCount: 0, postsCount: 0, isPrivate: true, isVerified: row.isVerified } satisfies AnalysisV2CheckpointProfile;
+        historicalPartialProfiles.push({ ordinal: row.ordinal, partition: 'private', profile: privateProfile, username: row.username });
+        return [privateProfile];
     });
-    return { profiles: profileList, evidence: { relationship, targetInteractions, reverseInteractions }, providerRuns: input.descriptor.providerRuns };
+    return { profiles: profileList, evidence: { relationship, targetInteractions, reverseInteractions }, providerRuns: input.descriptor.providerRuns, historicalPartialProfiles };
 }
 
 /** Only the explicit historical descriptor derives a target from provider data. */

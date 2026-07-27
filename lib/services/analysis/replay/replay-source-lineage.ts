@@ -68,6 +68,9 @@ export const REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY =
     'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29' as const;
 export const HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY =
     'historical-official-e2e-standard-v27-risk-v23-to-ai-v29' as const;
+/** Explicitly sealed non-exact historical media-availability audit capability. */
+export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY =
+    'historical-partial-available-standard-v27-risk-v23-to-ai-v29' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -76,9 +79,14 @@ const historicalOfficialE2EEvaluationPolicySchema = z.object({
     capability: z.literal(HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
 }).strict();
+const historicalPartialAvailableEvaluationPolicySchema = z.object({
+    capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
+}).strict();
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
+    historicalPartialAvailableEvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -120,7 +128,10 @@ export function resolveReplayAiStagePolicyVersion(
     const policy = lineage.policyVersions;
     // The historical v2.7/risk-v2.3 snapshot predates risk/scheduler telemetry;
     // that missing telemetry does not change the replayed AI semantics.
-    if (parsed.data.capability === HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY) {
+    if (
+        parsed.data.capability === HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY
+        || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+    ) {
         if (
             lineage.selectedPlanId !== 'standard'
             || policy.pipeline !== 'v2'

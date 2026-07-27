@@ -43,6 +43,30 @@ function replayBundle(now: number): AnalysisV2ReplayBundle {
     };
 }
 
+function partialReplayBundle(now: number): AnalysisV2ReplayBundle {
+    const exact = replayBundle(now);
+    return {
+        ...exact,
+        schemaVersion: 2,
+        capture: {
+            ...exact.capture,
+            scope: 'ai-only-historical-partial-available',
+            notExact: true,
+            fullE2eEvidence: false,
+            noMediaSubstitution: true,
+            evaluationPolicy: {
+                capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29',
+                aiStage: 'ai-stage-policy-v2.9',
+            },
+            sourceLineage: {
+                selectedPlanId: 'standard',
+                policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' },
+            },
+            partial: { sourceUniverseDigest: 'c'.repeat(64), mediaUnavailable: [] },
+        },
+    };
+}
+
 async function artifacts(now: number) {
     const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-cli-'));
     temporaryPaths.push(directory);
@@ -55,6 +79,16 @@ async function artifacts(now: number) {
         keyPath,
         now,
     });
+    return { bundlePath, keyPath };
+}
+
+async function partialArtifacts(now: number) {
+    const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-partial-cli-'));
+    temporaryPaths.push(directory);
+    const bundlePath = join(directory, 'bundle.enc');
+    const keyPath = join(directory, 'bundle.key');
+    await createReplayKeyFile(keyPath);
+    await writeReplayBundle({ bundle: partialReplayBundle(now), bundlePath, keyPath, now });
     return { bundlePath, keyPath };
 }
 
@@ -133,6 +167,47 @@ describe('analysis V2 replay CLI', () => {
             '--request-id=10000000-0000-4000-8000-000000000001',
             '--bundle=a.enc', '--key=a.key',
         ])).toThrow('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
+    });
+
+    it('seals historical partial capture and dry-run behind its own explicit flag and never parses it as paid', () => {
+        expect(parseReplayCliArgs([
+            '--capture', '--historical-partial-available',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9', '--bundle=a.enc', '--key=a.key',
+        ])).toMatchObject({ command: 'capture', historicalPartialAvailable: true });
+        expect(parseReplayCliArgs([
+            '--run', '--dry-run', '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9', '--bundle=a.enc', '--key=a.key',
+        ])).toMatchObject({ command: 'run', mode: 'dry-run', historicalPartialAvailable: true });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9', '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_PARTIAL_PAID_DISABLED');
+    });
+
+    it('rejects partial artifacts from exact runs and exact artifacts from partial dry-runs', async () => {
+        const partial = await partialArtifacts(Date.now());
+        await expect(runReplayCli(['--run', `--bundle=${partial.bundlePath}`, `--key=${partial.keyPath}`]))
+            .rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_SCOPE_MISMATCH');
+        const exact = await artifacts(Date.now());
+        await expect(runReplayCli([
+            '--run', '--dry-run', '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.9', `--bundle=${exact.bundlePath}`, `--key=${exact.keyPath}`,
+        ])).rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_SCOPE_MISMATCH');
+    });
+
+    it('runs a partial artifact only in explicit dry-run mode and reports its non-exact scope', async () => {
+        const partial = await partialArtifacts(Date.now());
+        const output: string[] = [];
+        const original = process.stdout.write;
+        process.stdout.write = ((line: string) => { output.push(line); return true; }) as typeof process.stdout.write;
+        try {
+            await runReplayCli([
+                '--run', '--dry-run', '--historical-partial-available',
+                '--evaluation-ai-policy=ai-stage-policy-v2.9', `--bundle=${partial.bundlePath}`, `--key=${partial.keyPath}`,
+            ]);
+        } finally { process.stdout.write = original; }
+        expect(JSON.parse(output.join(''))).toMatchObject({ benchmark_scope: 'ai-only-historical-partial-available', not_exact: true, no_media_substitution: true });
     });
 
     it('parses an exact capture selector and artifact paths', () => {

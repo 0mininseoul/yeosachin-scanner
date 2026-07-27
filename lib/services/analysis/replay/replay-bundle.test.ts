@@ -88,7 +88,7 @@ describe('analysis V2 replay bundle', () => {
         temporaryPaths.push(directory);
         const keyPath = join(directory, 'key.key');
         const bundlePath = join(directory, 'bundle.enc');
-        const value: AnalysisV2ReplayBundle = {
+        const value = {
             ...bundle(),
             capture: {
                 ...bundle().capture,
@@ -105,7 +105,7 @@ describe('analysis V2 replay bundle', () => {
                     aiStage: 'ai-stage-policy-v2.9',
                 },
             },
-        };
+        } as AnalysisV2ReplayBundle;
         await createReplayKeyFile(keyPath);
         await writeReplayBundle({
             bundle: value,
