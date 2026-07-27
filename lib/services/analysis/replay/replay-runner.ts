@@ -6,6 +6,7 @@ import {
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { lookupReplayStagedAiAdapterPolicy } from './replay-staged-ai-adapter';
+import { v29FeatureAdmission } from '../v2-v29-feature-admission';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -33,6 +34,13 @@ export interface ReplayMedia {
 export interface ReplayTriageInput {
     ordinal: number;
     media: readonly ReplayMedia[];
+    accountProfile?: ReplayAccountProfile;
+}
+
+export interface ReplayAccountProfile {
+    fullName: string | null;
+    hasProfileImage: boolean;
+    bio: string | null;
 }
 
 export interface ReplayTriageBatch {
@@ -46,7 +54,7 @@ export interface ReplayTriageBatch {
 export interface ReplayAiRunner {
     triage?(input: ReplayTriageInput): Promise<ReplayInvocation<GenderTriageResult>>;
     triageMany?(inputs: readonly ReplayTriageInput[]): Promise<readonly ReplayTriageBatch[]>;
-    feature?(input: { ordinal: number; bio: string | null; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
+    feature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
     resolveGender?(input: {
         ordinal: number;
@@ -370,6 +378,18 @@ export async function runAnalysisV2AiReplay(input: {
             profile.ordinal,
             profile,
         ]));
+        const v29AccountProfile = (
+            profile: typeof publicProfiles[number],
+        ): ReplayAccountProfile => {
+            if (typeof profile.hasProfileImage !== 'boolean') {
+                throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+            }
+            return {
+                fullName: profile.fullName,
+                hasProfileImage: profile.hasProfileImage,
+                bio: profile.bio ?? null,
+            };
+        };
         const processTriageResult = async (
             profile: typeof publicProfiles[number],
             triage: GenderTriageResult,
@@ -378,9 +398,19 @@ export async function runAnalysisV2AiReplay(input: {
                 gender.male++;
                 return;
             }
+            if (
+                replayAiPolicy === 'ai-stage-policy-v2.9'
+                && v29FeatureAdmission(triage, profile) !== 'eligible'
+            ) {
+                gender.unknown++;
+                return;
+            }
             const featurePromise = runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
+                ...(replayAiPolicy === 'ai-stage-policy-v2.9' ? {
+                    accountProfile: v29AccountProfile(profile),
+                } : {}),
                 media: mediaFor(profile, profile.featureSelectionIds),
                 captions: profile.captions,
                 triage,
@@ -470,6 +500,7 @@ export async function runAnalysisV2AiReplay(input: {
                 const batches = await runner.triageMany(publicProfiles.map(profile => ({
                     ordinal: profile.ordinal,
                     media: mediaFor(profile, profile.triageSelectionIds),
+                    accountProfile: v29AccountProfile(profile),
                 })));
                 const mapped: Array<{
                     profile: typeof publicProfiles[number];

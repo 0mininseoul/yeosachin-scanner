@@ -92,6 +92,7 @@ import {
     screenAnalysisV2OfficialAccount,
     type AnalysisV2OfficialExclusionReason,
 } from './v2-official-account-screening';
+import { v29FeatureAdmission } from './v2-v29-feature-admission';
 
 const PROFILE_BATCH_JOB_PREFIX = 'track:profiles:batch:';
 const LEGACY_MAX_PROFILE_AI_CONCURRENCY = 4;
@@ -147,43 +148,6 @@ export function isAnalysisV2PartialMediaCoverageAllowed(
 ): boolean {
     return coverage.normalizedCount >= 1
         && coverage.failures.length * 5 <= coverage.selectedCount;
-}
-
-/**
- * v2.9 moves the existing source-bound official-page screen ahead of feature admission.  This
- * does not change the v2.4 risk calculation: it only avoids paying for feature extraction where
- * the triage evidence cannot establish a personal female candidate.
- */
-function v29FeatureAdmission(
-    triage: GenderTriageResult,
-    profile: AnalysisV2CheckpointProfile,
-): 'eligible' | 'nonpersonal_or_official' | 'unsupported_unknown' {
-    const assessment = triage.assessment;
-    const confirmedFemale = assessment.inferredGender === 'female'
-        && assessment.confidence === 'high'
-        && assessment.ownerConsistency === 'same_person'
-        && new Set(assessment.evidenceSelectionIds).size >= 2;
-    if (!confirmedFemale) return 'unsupported_unknown';
-
-    const modelAccountContext = triage.v29AccountContext;
-    // Keep the v2.8 source-bound corroboration as a mandatory admission input.  In particular,
-    // organization-looking profile text alone can never block a personal account: this helper
-    // only excludes when the visual/model context independently says official too.
-    if (!modelAccountContext) return 'unsupported_unknown';
-    const screened = screenAnalysisV2OfficialAccount({
-        modelAccountContext,
-        fullName: profile.fullName ?? null,
-        bio: profile.bio ?? null,
-    });
-    if (modelAccountContext === 'official_group_or_brand') {
-        return screened.exclusionReason
-            ? 'nonpersonal_or_official'
-            : 'unsupported_unknown';
-    }
-    if (modelAccountContext === 'personal' || modelAccountContext === 'individual_creator') {
-        return 'eligible';
-    }
-    return 'unsupported_unknown';
 }
 
 export class AnalysisV2TransientMediaPreparationError extends Error {

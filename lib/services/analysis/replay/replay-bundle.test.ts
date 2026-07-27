@@ -37,7 +37,7 @@ function bundle(): AnalysisV2ReplayBundle {
                 },
             },
         },
-        profiles: [{ ordinal: 1, isPrivate: false, username: 'example', fullName: null, bio: 'private bundle text', media: [{
+        profiles: [{ ordinal: 1, isPrivate: false, username: 'example', fullName: null, hasProfileImage: false, bio: 'private bundle text', media: [{
             selectionId: 'post:1',
             kind: 'feed', postId: '1',
             caption: 'caption',

@@ -189,7 +189,12 @@ export function createReplayStagedAiAdapter(
         ...(aiStagePolicyVersion === 'ai-stage-policy-v2.9' ? {
             async triageMany(inputs: readonly ReplayTriageInput[]) {
                 const members = inputs.map(input => {
-                    const aiInput = { media: normalized(input.media) };
+                    const aiInput = {
+                        media: normalized(input.media),
+                        ...(input.accountProfile
+                            ? { accountProfile: input.accountProfile }
+                            : {}),
+                    };
                     return {
                         accountId: createGenderTriageMicrobatchAccountId(aiInput),
                         value: { input, aiInput },
@@ -257,7 +262,15 @@ export function createReplayStagedAiAdapter(
             }),
         }),
         feature: input => invoke(async state => {
-            const aiInput = { triage: input.triage, bio: input.bio, media: normalized(input.media), captions: [...input.captions] };
+            const aiInput = {
+                triage: input.triage,
+                bio: input.bio,
+                ...(input.accountProfile
+                    ? { accountProfile: input.accountProfile }
+                    : {}),
+                media: normalized(input.media),
+                captions: [...input.captions],
+            };
             const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
             return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
         }),

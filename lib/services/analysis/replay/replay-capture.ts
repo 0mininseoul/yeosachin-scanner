@@ -112,6 +112,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
             isPrivate: profile.isPrivate,
             username: profile.username.toLowerCase(),
             fullName: profile.fullName ?? null,
+            hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
             bio: profile.isPrivate ? undefined : profile.bio ?? null,
             media: normalized.map(({ media, bytes }) => ({
                 selectionId: media.selectionId,

@@ -131,11 +131,26 @@ describe('replay staged AI adapter telemetry', () => {
         await adapter.triageMany?.([{
             ordinal: 1,
             media: [],
+            accountProfile: {
+                fullName: 'Exact Name',
+                hasProfileImage: false,
+                bio: 'Exact bio',
+            },
         }]);
 
         expect(mocks.genderTriage).not.toHaveBeenCalled();
         expect(mocks.genderTriageMicrobatch).toHaveBeenCalledWith(
-            [{ accountId: `account:${'a'.repeat(64)}`, input: { media: [] } }],
+            [{
+                accountId: `account:${'a'.repeat(64)}`,
+                input: {
+                    media: [],
+                    accountProfile: {
+                        fullName: 'Exact Name',
+                        hasProfileImage: false,
+                        bio: 'Exact bio',
+                    },
+                },
+            }],
             expect.any(Object),
             expect.any(Object),
         );

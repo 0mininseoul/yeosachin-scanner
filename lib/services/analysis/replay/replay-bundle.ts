@@ -51,6 +51,8 @@ const bundleSchema = z.object({
         isPrivate: z.boolean(),
         username: usernameSchema,
         fullName: z.string().max(200).nullable(),
+        /** Required by new captures; optional only for legacy exact-policy bundles. */
+        hasProfileImage: z.boolean().optional(),
         bio: z.string().max(2_200).nullable().optional(),
         media: z.array(canonicalMediaSchema).max(12),
         triageSelectionIds: z.array(selectionIdSchema).max(9),

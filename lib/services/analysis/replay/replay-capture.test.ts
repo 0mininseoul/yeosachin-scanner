@@ -35,6 +35,11 @@ describe('analysis V2 replay capture', () => {
         expect(bundle.profiles[0]?.media.map(item => item.selectionId)).toEqual(expect.arrayContaining([
             expect.stringMatching(/^profile:/), expect.stringMatching(/^post:/),
         ]));
+        expect(bundle.profiles[0]).toMatchObject({
+            fullName: 'Target',
+            hasProfileImage: true,
+            bio: 'bio',
+        });
         expect(normalize).toHaveBeenCalledTimes(2);
     });
 

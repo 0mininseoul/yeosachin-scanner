@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ai = vi.hoisted(() => ({
+    createFeatureAnalysisResultIdentity: vi.fn(),
     createGenderTriageMicrobatchAccountId: vi.fn(),
     createGenderTriageMicrobatchResultIdentity: vi.fn(),
     createGenderTriageResultIdentity: vi.fn(),
@@ -16,6 +17,8 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => {
     >();
     return {
         ...actual,
+        createFeatureAnalysisResultIdentity:
+            ai.createFeatureAnalysisResultIdentity,
         createGenderTriageMicrobatchAccountId:
             ai.createGenderTriageMicrobatchAccountId,
         createGenderTriageMicrobatchResultIdentity:
@@ -56,6 +59,7 @@ const v28Bundle = {
         isPrivate: false,
         username: 'public',
         fullName: null,
+        hasProfileImage: true,
         bio: null,
         media: [{
             selectionId: 'm1',
@@ -107,6 +111,9 @@ describe('replay staged AI runner policy capability', () => {
         ai.createGenderTriageMicrobatchResultIdentity.mockReturnValue({
             operationKey: 'triage:microbatch:identity',
         });
+        ai.createFeatureAnalysisResultIdentity.mockReturnValue({
+            operationKey: 'feature:identity',
+        });
         ai.genderTriage.mockResolvedValue({
             assessment: {
                 inferredGender: 'male',
@@ -118,6 +125,130 @@ describe('replay staged AI runner policy capability', () => {
             routingReason: 'high_confidence_same_owner_male',
             analyzedSelectionIds: ['m1'],
         });
+    });
+
+    const highFemale = (accountContext:
+        | 'personal'
+        | 'individual_creator'
+        | 'official_group_or_brand'
+        | 'uncertain') => ({
+        assessment: {
+            inferredGender: 'female' as const,
+            confidence: 'high' as const,
+            ownerConsistency: 'same_person' as const,
+            evidenceSelectionIds: ['m1', 'm2'],
+        },
+        routingDecision: 'route_to_feature_analysis' as const,
+        routingReason: 'conserve_female_recall' as const,
+        analyzedSelectionIds: ['m1'],
+        v29AccountContext: accountContext,
+    });
+
+    async function runV29Triage(result: ReturnType<typeof highFemale>, profile = {}) {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result,
+            source: 'checkpoint',
+        }]);
+        return runAnalysisV2AiReplay({
+            bundle: {
+                ...v28ToV29Bundle,
+                profiles: [{
+                    ...v28ToV29Bundle.profiles[0]!,
+                    ...profile,
+                }],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        });
+    }
+
+    it('blocks an official high-female v2.9 account before feature and resolver', async () => {
+        const report = await runV29Triage(
+            highFemale('official_group_or_brand'),
+            {
+                fullName: 'Example Records Official',
+                bio: 'New album out now. Booking and shop inquiries.',
+            },
+        );
+
+        expect(ai.featureAnalysis).not.toHaveBeenCalled();
+        expect(ai.genderResolution).not.toHaveBeenCalled();
+        expect(report.gender).toEqual({
+            male: 0, female: 0, unknown: 1, unknownRate: 1,
+        });
+    });
+
+    it('blocks unsupported v2.9 unknown context before feature and resolver', async () => {
+        const report = await runV29Triage(highFemale('uncertain'));
+
+        expect(ai.featureAnalysis).not.toHaveBeenCalled();
+        expect(ai.genderResolution).not.toHaveBeenCalled();
+        expect(report.gender.unknown).toBe(1);
+    });
+
+    it('fails closed before AI when a legacy bundle lacks v2.9 profile-image evidence', async () => {
+        const { hasProfileImage: _omitted, ...legacyProfile } =
+            v28ToV29Bundle.profiles[0]!;
+        await expect(runAnalysisV2AiReplay({
+            bundle: {
+                ...v28ToV29Bundle,
+                profiles: [legacyProfile],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.9'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: v29EvaluationPolicy,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        expect(ai.genderTriageMicrobatch).not.toHaveBeenCalled();
+    });
+
+    it('admits a confirmed personal female to feature without resolver', async () => {
+        ai.featureAnalysis.mockResolvedValue({
+            features: {
+                gender: 'female',
+                genderConfidence: 'high',
+                ownerConsistency: 'same_person',
+                appearanceGrade: 3,
+                exposureScore: 1,
+                businessClassification: 'personal',
+                businessConfidence: 'high',
+                accountContext: 'personal',
+                marriageEvidence: 'none',
+                partnerEvidence: 'none',
+                partnerExclusionContext: 'none',
+                evidenceSelectionIds: {
+                    gender: ['m1'],
+                    appearance: ['m1'],
+                    exposure: ['m1'],
+                    business: ['m1'],
+                    accountContext: ['m1'],
+                    marriagePartner: [],
+                },
+                oneLineOverview: '관찰된 단서를 바탕으로 개인 계정의 특징을 구체적으로 정리했습니다.',
+            },
+            finalGenderDecision: 'verified_female',
+            analyzedSelectionIds: ['m1'],
+        });
+
+        const report = await runV29Triage(highFemale('personal'), {
+            fullName: 'Exact Name',
+            hasProfileImage: false,
+            bio: 'Exact bio',
+        });
+
+        expect(ai.featureAnalysis).toHaveBeenCalledOnce();
+        expect(ai.featureAnalysis.mock.calls[0]![0]).toMatchObject({
+            accountProfile: {
+                fullName: 'Exact Name',
+                hasProfileImage: false,
+                bio: 'Exact bio',
+            },
+        });
+        expect(ai.genderResolution).not.toHaveBeenCalled();
+        expect(report.gender.female).toBe(1);
     });
 
     it('runs the actual v2.9 microbatch adapter only for an authenticated explicit evaluation', async () => {
@@ -252,6 +383,23 @@ describe('replay staged AI runner policy capability', () => {
             gender: { male: 1 },
         });
         expect(ai.genderTriage).toHaveBeenCalledOnce();
+    });
+
+    it('keeps legacy v2.8 replay unchanged when historical bundles lack profile-image evidence', async () => {
+        const { hasProfileImage: _omitted, ...legacyProfile } =
+            v28Bundle.profiles[0]!;
+        await expect(runAnalysisV2AiReplay({
+            bundle: { ...v28Bundle, profiles: [legacyProfile] },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.8'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+        })).resolves.toMatchObject({
+            replayAiPolicy: 'ai-stage-policy-v2.8',
+            gender: { male: 1 },
+        });
+        expect(ai.genderTriage).toHaveBeenCalledOnce();
+        expect(ai.createGenderTriageResultIdentity.mock.calls[0]![0])
+            .not.toHaveProperty('accountProfile');
     });
 
     it('cannot restamp a real v2.7 adapter as v2.8', async () => {
