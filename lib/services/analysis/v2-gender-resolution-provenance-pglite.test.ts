@@ -16,6 +16,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const qualityGateV2Migration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260727171000_update_gender_resolution_unknown_gate_20_percent.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const resultRuntimeBoundaryMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260713213000_harden_analysis_v2_result_runtime_boundary.sql',
@@ -45,6 +52,8 @@ const REQUEST_RECOVERY = '123e4567-e89b-42d3-a456-426614174002';
 const REQUEST_PURGED_PASS = '123e4567-e89b-42d3-a456-426614174003';
 const REQUEST_PURGED_STALE = '123e4567-e89b-42d3-a456-426614174004';
 const REQUEST_PURGED_TAMPER = '123e4567-e89b-42d3-a456-426614174005';
+const REQUEST_UNKNOWN_20 = '123e4567-e89b-42d3-a456-426614174006';
+const REQUEST_UNKNOWN_25 = '123e4567-e89b-42d3-a456-426614174007';
 const RESOLVER_OPERATION = `gender-resolution:${'a'.repeat(64)}`;
 const RESOLVER_HASH = 'b'.repeat(64);
 
@@ -214,7 +223,9 @@ describe('gender resolver provenance migration', () => {
                 ('${REQUEST_RECOVERY}', 'v2', 'processing', 'standard'),
                 ('${REQUEST_PURGED_PASS}', 'v2', 'processing', 'standard'),
                 ('${REQUEST_PURGED_STALE}', 'v2', 'processing', 'standard'),
-                ('${REQUEST_PURGED_TAMPER}', 'v2', 'processing', 'standard');
+                ('${REQUEST_PURGED_TAMPER}', 'v2', 'processing', 'standard'),
+                ('${REQUEST_UNKNOWN_20}', 'v2', 'processing', 'standard'),
+                ('${REQUEST_UNKNOWN_25}', 'v2', 'processing', 'standard');
 
             CREATE TABLE public.analysis_v2_candidate_feature_manifests (
                 request_id UUID NOT NULL,
@@ -328,6 +339,7 @@ describe('gender resolver provenance migration', () => {
             AS $$ SELECT 'ai-stage-policy-v2.7'::TEXT $$;
         `);
         await db.exec(migration);
+        await db.exec(qualityGateV2Migration);
         await db.exec(purgeResultWorkingSet);
     });
 
@@ -669,6 +681,41 @@ describe('gender resolver provenance migration', () => {
             metricsFresh: true,
             unknownGatePassed: true,
             qualityGatePassed: true,
+        });
+    });
+
+    it('derives the 20 percent boundary from retained historical metrics at query time', async () => {
+        await finalizeAndPurgeWithResolverAttempt(REQUEST_UNKNOWN_20);
+        await db.query(
+            `UPDATE public.analysis_v2_gender_resolution_metrics
+             SET screened_count = 5,
+                 baseline_unknown_count = 1,
+                 final_unknown_count = 1
+             WHERE request_id = $1`,
+            [REQUEST_UNKNOWN_20]
+        );
+        await expect(loadQuality(REQUEST_UNKNOWN_20)).resolves.toMatchObject({
+            screenedCount: 5,
+            finalUnknownCount: 1,
+            finalUnknownRatio: 0.2,
+            unknownGatePassed: true,
+            qualityGatePassed: true,
+        });
+
+        await finalizeAndPurgeWithResolverAttempt(REQUEST_UNKNOWN_25);
+        await db.query(
+            `UPDATE public.analysis_v2_gender_resolution_metrics
+             SET baseline_unknown_count = 1,
+                 final_unknown_count = 1
+             WHERE request_id = $1`,
+            [REQUEST_UNKNOWN_25]
+        );
+        await expect(loadQuality(REQUEST_UNKNOWN_25)).resolves.toMatchObject({
+            screenedCount: 4,
+            finalUnknownCount: 1,
+            finalUnknownRatio: 0.25,
+            unknownGatePassed: false,
+            qualityGatePassed: false,
         });
     });
 

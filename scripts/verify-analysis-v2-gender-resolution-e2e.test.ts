@@ -16,8 +16,8 @@ function quality(
         screenedCount: 10,
         resolverEligibleCount: 5,
         baselineUnknownCount: 5,
-        finalUnknownCount: 3,
-        finalUnknownRatio: 0.3,
+        finalUnknownCount: 2,
+        finalUnknownRatio: 0.2,
         readyCount: 3,
         appliedCount: 2,
         appliedWithFencedResultCount: 2,
@@ -68,7 +68,7 @@ describe('gender resolution E2E quality CLI', () => {
         ])).toThrow();
     });
 
-    it('prints only bounded aggregate gates and passes exactly 30 percent', async () => {
+    it('prints only bounded aggregate gates and passes exactly 20 percent', async () => {
         const writeStdout = vi.fn();
         const result = await runGenderResolutionE2EQualityCli([
             `--request-id=${requestId}`,
@@ -80,8 +80,8 @@ describe('gender resolution E2E quality CLI', () => {
         const output = JSON.parse(writeStdout.mock.calls[0]![0]);
         expect(output).toMatchObject({
             screenedCount: 10,
-            finalUnknownCount: 3,
-            finalUnknownRatio: 0.3,
+            finalUnknownCount: 2,
+            finalUnknownRatio: 0.2,
             resolverUsageCompleteCount: 2,
             resolverUsageMissingCount: 1,
             resolverCostKnownCount: 2,
@@ -106,11 +106,12 @@ describe('gender resolution E2E quality CLI', () => {
         }
     });
 
-    it('returns nonzero above 30 percent without mutating classifications', async () => {
+    it('returns nonzero just above 20 percent without mutating classifications', async () => {
         const writeStdout = vi.fn();
         const loadQuality = vi.fn(async () => quality({
-            finalUnknownCount: 4,
-            finalUnknownRatio: 0.4,
+            screenedCount: 100,
+            finalUnknownCount: 21,
+            finalUnknownRatio: 0.21,
             unknownGatePassed: false,
             qualityGatePassed: false,
         }));
@@ -120,7 +121,7 @@ describe('gender resolution E2E quality CLI', () => {
         expect(result.exitCode).toBe(1);
         expect(loadQuality).toHaveBeenCalledOnce();
         expect(JSON.parse(writeStdout.mock.calls[0]![0])).toMatchObject({
-            finalUnknownRatio: 0.4,
+            finalUnknownRatio: 0.21,
             unknownGatePassed: false,
             qualityGatePassed: false,
         });
