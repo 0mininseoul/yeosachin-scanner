@@ -16,7 +16,10 @@ import { extractRawTargetInteractions } from '@/lib/services/analysis/v2-target-
 import type { AnalysisV2CheckpointProfile } from '@/lib/services/analysis/v2-profile-fetch-store';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import { readCompletedApifyDatasetOnce, type ReplayReadonlyApifyClient } from './replay-readonly-apify';
-import type { ReplayCaptureDescriptor } from './replay-supabase-repository';
+import type {
+    HistoricalOfficialE2EReplayCaptureDescriptor,
+    ReplayCaptureDescriptor,
+} from './replay-supabase-repository';
 
 type Run = ReplayCaptureDescriptor['providerRuns'][number];
 const record = z.record(z.string(), z.unknown());
@@ -89,7 +92,7 @@ function postIdFromUrl(value: string): string {
 }
 
 export async function loadReplaySourceFromExistingRuns(input: {
-    descriptor: ReplayCaptureDescriptor;
+    descriptor: ReplayCaptureDescriptor | HistoricalOfficialE2EReplayCaptureDescriptor;
     clientForSlot(slot: string): ReplayReadonlyApifyClient;
 }): Promise<{ profiles: AnalysisV2CheckpointProfile[]; evidence: AnalysisV2ReplayBundle['evidence']; providerRuns: Run[] }> {
     const allRuns = [...input.descriptor.preflightRuns, ...input.descriptor.providerRuns];
@@ -124,21 +127,10 @@ export async function loadReplaySourceFromExistingRuns(input: {
             profiles.set(username, mapped);
         }
     }
-    // Historical privacy scrubbing can replace both stored target fields. The
-    // target-profile provider ledger is the exact immutable source, so derive
-    // its username in-memory rather than trusting or returning a stored target.
-    const targetProfileUsernames = new Set<string>();
-    for (const [run, items] of datasets) {
-        if (
-            run.operationKey !== 'target-profile-fallback'
-            && !/^target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100)$/.test(run.operationKey)
-        ) continue;
-        for (const username of profileUsernames(items)) targetProfileUsernames.add(username);
-    }
-    if (targetProfileUsernames.size !== 1) {
-        throw new Error('ANALYSIS_V2_REPLAY_TARGET_PROFILE_MISSING');
-    }
-    const targetUsername = [...targetProfileUsernames][0]!;
+    const targetUsername = 'targetResolution' in input.descriptor
+        && input.descriptor.targetResolution === 'provider_ledger'
+        ? replayTargetUsernameFromProviderLedger(datasets)
+        : input.descriptor.targetUsername;
     const targetProfile = profiles.get(targetUsername);
     if (!targetProfile) throw new Error('ANALYSIS_V2_REPLAY_TARGET_PROFILE_MISSING');
 
@@ -237,4 +229,22 @@ export async function loadReplaySourceFromExistingRuns(input: {
         return { username: row.username, fullName: row.fullName ?? undefined, followersCount: 0, followingCount: 0, postsCount: 0, isPrivate: true, isVerified: row.isVerified } satisfies AnalysisV2CheckpointProfile;
     });
     return { profiles: profileList, evidence: { relationship, targetInteractions, reverseInteractions }, providerRuns: input.descriptor.providerRuns };
+}
+
+/** Only the explicit historical descriptor derives a target from provider data. */
+function replayTargetUsernameFromProviderLedger(
+    datasets: ReadonlyMap<Run, unknown[]>,
+): string {
+    const targetProfileUsernames = new Set<string>();
+    for (const [run, items] of datasets) {
+        if (
+            run.operationKey !== 'target-profile-fallback'
+            && !/^target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100)$/.test(run.operationKey)
+        ) continue;
+        for (const username of profileUsernames(items)) targetProfileUsernames.add(username);
+    }
+    if (targetProfileUsernames.size !== 1) {
+        throw new Error('ANALYSIS_V2_REPLAY_TARGET_PROFILE_MISSING');
+    }
+    return [...targetProfileUsernames][0]!;
 }

@@ -33,7 +33,7 @@ describe('live replay source mapping', () => {
         const targetPosts = posts('target');
         const candidatePosts = posts('canddd');
         const datasets: Record<string, unknown[]> = {
-            RUNPROF1: [profile('target', 'target')],
+            RUNPROF1: [profile('target', 'target'), profile('extra_profile', 'extra')],
             RUNPROF2: [profile('candidate', 'canddd')],
             RUNFOLL1: [{ username_scrape: 'target', type: 'Followers', id: '1', username: 'candidate', full_name: 'Candidate', is_private: false, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/candidate.jpg' }],
             RUNFOLL2: [{ username_scrape: 'target', type: 'Following', id: '1', username: 'candidate', full_name: 'Candidate', is_private: false, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/candidate.jpg' }],
@@ -55,7 +55,7 @@ describe('live replay source mapping', () => {
         const descriptor: ReplayCaptureDescriptor = {
             requestId: '10000000-0000-4000-8000-000000000001',
             preflightId: '20000000-0000-4000-8000-000000000001',
-            requestFingerprint: 'a'.repeat(64), targetUsername: 'replay_0123456789abcdef0123456',
+            requestFingerprint: 'a'.repeat(64), targetUsername: 'target',
             sourceLineage: {
                 selectedPlanId: 'standard',
                 policyVersions: {
@@ -107,6 +107,55 @@ describe('live replay source mapping', () => {
             expect.objectContaining({ candidateUsername: 'candidate', status: 'observed' }),
         ]);
         expect(listItems).toHaveBeenCalled();
+    });
+
+    it('derives the real target only for an explicit opaque historical descriptor', async () => {
+        const datasets: Record<string, unknown[]> = {
+            RUNHIST1: [profile('target', 'target')],
+            RUNHIST2: [{ username_scrape: 'target', type: 'Followers', id: '1', username: 'private_candidate', full_name: 'Private', is_private: true, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/private.jpg' }],
+            RUNHIST3: [{ username_scrape: 'target', type: 'Following', id: '1', username: 'private_candidate', full_name: 'Private', is_private: true, is_verified: false, profile_pic_url: 'https://scontent.cdninstagram.com/private.jpg' }],
+            RUNHIST4: [],
+            RUNHIST5: [],
+        };
+        const descriptor = {
+            requestId: '10000000-0000-4000-8000-000000000001',
+            preflightId: '20000000-0000-4000-8000-000000000001',
+            requestFingerprint: 'a'.repeat(64),
+            targetUsername: 'replay_0123456789abcdef0123456',
+            targetResolution: 'provider_ledger' as const,
+            sourceLineage: {
+                selectedPlanId: 'standard' as const,
+                policyVersions: { pipeline: 'v2' as const, risk: 'risk-policy-v2.3' as const, aiStage: 'ai-stage-policy-v2.7' as const },
+            },
+            target: { fullName: null, bio: null, profileImageUrl: null, followersCount: 1, followingCount: 1 },
+            preflightRuns: [run('target-profile-fallback', 'RUNHIST1', APIFY_PROFILE_ACTOR_ID)],
+            providerRuns: [
+                run(`relationship-followers:${'a'.repeat(64)}`, 'RUNHIST2', APIFY_RELATIONSHIP_ACTOR_ID),
+                run(`relationship-following:${'b'.repeat(64)}`, 'RUNHIST3', APIFY_RELATIONSHIP_ACTOR_ID),
+                run(`target-likers:${'c'.repeat(64)}`, 'RUNHIST4', APIFY_LIKERS_ACTOR_ID),
+                run(`target-comments:${'d'.repeat(64)}`, 'RUNHIST5', APIFY_COMMENTS_ACTOR_ID),
+            ],
+        };
+        const actors = new Map(
+            [...descriptor.preflightRuns, ...descriptor.providerRuns]
+                .map(item => [item.runId, 'canonicalActorId']),
+        );
+        const client: ReplayReadonlyApifyClient = {
+            resolveActorId: async () => 'canonicalActorId',
+            run: runId => ({ get: async () => ({ id: runId, actId: actors.get(runId), status: 'SUCCEEDED', defaultDatasetId: `D${runId}` }) }),
+            dataset: datasetId => ({ listItems: async ({ offset, limit }) => {
+                const items = datasets[datasetId.slice(1)] ?? [];
+                const page = items.slice(offset, offset + limit);
+                return { offset, count: page.length, total: items.length, items: page };
+            } }),
+        };
+
+        await expect(loadReplaySourceFromExistingRuns({
+            descriptor,
+            clientForSlot: () => client,
+        })).resolves.toMatchObject({
+            profiles: [expect.objectContaining({ username: 'private_candidate' })],
+        });
     });
 
     it('fails before reading a dataset when an operation or Actor identity is not production-exact', async () => {

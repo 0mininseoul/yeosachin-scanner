@@ -41,6 +41,7 @@ describe('historical official E2E replay source', () => {
             'read_analysis_v2_historical_official_e2e_replay_source', { p_request_id: requestId },
         );
         expect(descriptor.targetUsername).toBe(source().targetUsername);
+        expect(descriptor.targetResolution).toBe('provider_ledger');
         expect(descriptor.sourceLineage).toEqual({
             selectedPlanId: 'standard', policyVersions: source().policyVersions,
         });

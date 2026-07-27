@@ -67,6 +67,11 @@ export type ReplayCaptureDescriptor = Omit<
     requestFingerprint: string;
 };
 
+/** Historical descriptors deliberately carry no stored target identifier. */
+export type HistoricalOfficialE2EReplayCaptureDescriptor = ReplayCaptureDescriptor & {
+    targetResolution: 'provider_ledger';
+};
+
 function normalizedTarget(value: string): string {
     const target = value.trim().replace(/^@/, '').toLowerCase();
     if (!/^[a-z0-9._]{1,30}$/.test(target)) {
@@ -124,7 +129,7 @@ export async function loadReplayCaptureDescriptor(
 export async function loadHistoricalOfficialE2EReplayCaptureDescriptor(
     client: HistoricalOfficialE2EReplaySourceRpcClient,
     requestId: string,
-): Promise<ReplayCaptureDescriptor> {
+): Promise<HistoricalOfficialE2EReplayCaptureDescriptor> {
     const exactRequestId = z.string().uuid().parse(requestId);
     const result = await client.rpc(
         'read_analysis_v2_historical_official_e2e_replay_source',
@@ -154,5 +159,6 @@ export async function loadHistoricalOfficialE2EReplayCaptureDescriptor(
         requestFingerprint: createHash('sha256')
             .update(`analysis-v2-replay-request-v1\n${parsed.requestId}`)
             .digest('hex'),
+        targetResolution: 'provider_ledger',
     };
 }
