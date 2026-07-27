@@ -12,6 +12,7 @@ import {
     readAuthenticatedReplayBundle,
     removeReplayArtifacts,
     writeReplayBundle,
+    replayBundleSizeLimits,
     type AnalysisV2ReplayBundle,
 } from './replay-bundle';
 import { installReplayArtifactSignalCleanup } from './replay-artifact-lifecycle';
@@ -78,6 +79,20 @@ async function writeRawEncrypted(bundlePath: string, keyPath: string, value: unk
 }
 
 describe('analysis V2 replay bundle', () => {
+    it('keeps exact limits frozen while bounding the measured partial artifact with narrow headroom', () => {
+        expect(replayBundleSizeLimits(1)).toEqual({
+            maxMediaBytes: 192 * 1024 * 1024,
+            maxPlaintextBytes: 256 * 1024 * 1024,
+        });
+        const partial = replayBundleSizeLimits(2);
+        expect(partial).toEqual({
+            maxMediaBytes: 208 * 1024 * 1024,
+            maxPlaintextBytes: 272 * 1024 * 1024,
+        });
+        expect(partial.maxMediaBytes).toBeGreaterThan(204_053_284);
+        expect(partial.maxPlaintextBytes).toBeGreaterThan(273_704_429);
+    });
+
     it('seals evaluation capabilities to their artifact schema at write', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
         temporaryPaths.push(directory);

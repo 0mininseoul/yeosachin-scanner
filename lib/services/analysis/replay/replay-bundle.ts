@@ -21,8 +21,11 @@ import { historicalPartialBundleInvariantIssues, normalizeHistoricalPartialUsern
 
 const MAX_TTL_MS = 24 * 60 * 60 * 1_000;
 const MAX_PLAINTEXT_BYTES = 256 * 1024 * 1024;
-const MAX_ENVELOPE_BYTES = Math.ceil(MAX_PLAINTEXT_BYTES * 4 / 3) + 4_096;
 const MAX_MEDIA_BYTES = 192 * 1024 * 1024;
+const PARTIAL_MAX_PLAINTEXT_BYTES = 272 * 1024 * 1024;
+const PARTIAL_MAX_MEDIA_BYTES = 208 * 1024 * 1024;
+const MAX_ENVELOPE_BYTES =
+    Math.ceil(PARTIAL_MAX_PLAINTEXT_BYTES * 4 / 3) + 4_096;
 const MAX_PROFILES = 1_500;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
@@ -149,6 +152,20 @@ const partialAvailableBundleSchema = baseBundleSchema.extend({
 const bundleSchema = z.union([exactBundleSchema, partialAvailableBundleSchema]);
 
 export type AnalysisV2ReplayBundle = z.infer<typeof bundleSchema>;
+
+export function replayBundleSizeLimits(
+    schemaVersion: AnalysisV2ReplayBundle['schemaVersion'],
+): { maxMediaBytes: number; maxPlaintextBytes: number } {
+    return schemaVersion === 2
+        ? {
+            maxMediaBytes: PARTIAL_MAX_MEDIA_BYTES,
+            maxPlaintextBytes: PARTIAL_MAX_PLAINTEXT_BYTES,
+        }
+        : {
+            maxMediaBytes: MAX_MEDIA_BYTES,
+            maxPlaintextBytes: MAX_PLAINTEXT_BYTES,
+        };
+}
 
 export class AnalysisV2ReplayBundleError extends Error {
     constructor(readonly code: string) {
@@ -458,11 +475,12 @@ function canonicalPayload(
     for (const profile of parsed.data.profiles) {
         for (const media of profile.media) {
             mediaBytes += Buffer.byteLength(media.jpegBase64, 'base64');
-            if (mediaBytes > MAX_MEDIA_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
         }
     }
     const payload = Buffer.from(JSON.stringify(parsed.data), 'utf8');
-    if (payload.byteLength > MAX_PLAINTEXT_BYTES) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
+    const limits = replayBundleSizeLimits(parsed.data.schemaVersion);
+    if (mediaBytes > limits.maxMediaBytes) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
+    if (payload.byteLength > limits.maxPlaintextBytes) bundleError('ANALYSIS_V2_REPLAY_BUNDLE_LIMIT');
     return payload;
 }
 
