@@ -4,7 +4,12 @@ import type {
 } from '@/lib/services/ai/v2-staged-analysis';
 import { selectAnalysisV2GenderResolverMedia } from '../v2-gender-resolver-media-policy';
 import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
-import type { ReplayAiRunner, ReplayMedia } from './replay-runner';
+import type {
+    ReplayAiRunner,
+    ReplayInvocation,
+    ReplayMedia,
+    ReplayStageMetrics,
+} from './replay-runner';
 import {
     assertStrongUncertainResolverExperiment,
     type StrongUncertainResolverExperimentBundle,
@@ -34,9 +39,16 @@ export interface ResolverExperimentReport {
     resolvedHighConfidence: number;
     inconclusive: number;
     cohorts: {
-        existing: { attempted: number; succeeded: number; failed: number };
-        uncertain: { attempted: number; succeeded: number; failed: number };
+        existing: {
+            attempted: number; succeeded: number; failed: number;
+            resolverTelemetry: ReplayStageMetrics;
+        };
+        uncertain: {
+            attempted: number; succeeded: number; failed: number;
+            resolverTelemetry: ReplayStageMetrics;
+        };
     };
+    resolverTelemetry: ReplayStageMetrics;
     failureOutcomes: {
         rateLimited: number;
         rejected: number;
@@ -70,6 +82,65 @@ function highConfidence(result: GenderResolutionResult): boolean {
         && assessment.confidence === 'high'
         && assessment.inferredGender !== 'unknown'
         && new Set(assessment.evidenceSelectionIds).size >= 2;
+}
+
+function emptyResolverTelemetry(): ReplayStageMetrics {
+    return {
+        calls: 0,
+        rateLimited: 0,
+        retries: 0,
+        meanLatencyMs: 0,
+        p50LatencyMs: 0,
+        p95LatencyMs: 0,
+        failureDisposition: {},
+    };
+}
+
+function collectResolverTelemetry(
+    stage: ReplayStageMetrics,
+    durations: number[],
+    invocation: ReplayInvocation<unknown>,
+): void {
+    const calls = invocation.calls ?? 1;
+    stage.calls += calls;
+    stage.retries += Math.max(0, invocation.retries);
+    stage.rateLimited += invocation.rateLimited
+        ?? (invocation.outcome === 'rate_limited' ? 1 : 0);
+    const attemptLatencies = invocation.attemptLatenciesMs?.filter(
+        value => Number.isFinite(value) && value >= 0,
+    );
+    if (attemptLatencies?.length) durations.push(...attemptLatencies);
+    else if (calls > 0) durations.push(Math.max(0, invocation.elapsedMs));
+    const recordedFailures = Object.entries(invocation.failureDisposition ?? {})
+        .filter(([, count]) => Number.isInteger(count) && count > 0);
+    for (const [disposition, count] of recordedFailures) {
+        stage.failureDisposition[disposition] =
+            (stage.failureDisposition[disposition] ?? 0) + count;
+    }
+    if (invocation.outcome !== 'ok' && recordedFailures.length === 0) {
+        stage.failureDisposition[invocation.outcome] =
+            (stage.failureDisposition[invocation.outcome] ?? 0) + 1;
+    }
+}
+
+function percentile(values: readonly number[], fraction: number): number {
+    if (!values.length) return 0;
+    const ordered = [...values].sort((left, right) => left - right);
+    return ordered[
+        Math.min(ordered.length - 1, Math.ceil(ordered.length * fraction) - 1)
+    ] ?? 0;
+}
+
+function finalizeResolverTelemetry(
+    stage: ReplayStageMetrics,
+    durations: readonly number[],
+): void {
+    if (!durations.length) return;
+    stage.meanLatencyMs = Math.round(
+        durations.reduce((sum, value) => sum + value, 0) / durations.length,
+    );
+    stage.p50LatencyMs = percentile(durations, 0.5);
+    stage.p95LatencyMs = percentile(durations, 0.95);
 }
 
 export async function runStrongUncertainResolverExperiment(input: {
@@ -150,10 +221,19 @@ export async function runStrongUncertainResolverExperiment(input: {
     let succeeded = 0;
     let failed = 0;
     let resolvedHighConfidence = 0;
+    const resolverTelemetry = emptyResolverTelemetry();
+    const resolverDurations: number[] = [];
     const cohorts = {
-        existing: { attempted: 0, succeeded: 0, failed: 0 },
-        uncertain: { attempted: 0, succeeded: 0, failed: 0 },
+        existing: {
+            attempted: 0, succeeded: 0, failed: 0,
+            resolverTelemetry: emptyResolverTelemetry(),
+        },
+        uncertain: {
+            attempted: 0, succeeded: 0, failed: 0,
+            resolverTelemetry: emptyResolverTelemetry(),
+        },
     };
+    const cohortDurations = { existing: [] as number[], uncertain: [] as number[] };
     const failureOutcomes = {
         rateLimited: 0,
         rejected: 0,
@@ -183,6 +263,12 @@ export async function runStrongUncertainResolverExperiment(input: {
                 }
                 break;
             }
+            collectResolverTelemetry(resolverTelemetry, resolverDurations, result);
+            collectResolverTelemetry(
+                cohorts[candidate.cohort].resolverTelemetry,
+                cohortDurations[candidate.cohort],
+                result,
+            );
             if (abort.signal.aborted) break;
             if (result.outcome === 'ok' && result.value) {
                 succeeded++;
@@ -207,6 +293,15 @@ export async function runStrongUncertainResolverExperiment(input: {
         worker,
     ));
     if (fatalError !== undefined) throw fatalError;
+    finalizeResolverTelemetry(resolverTelemetry, resolverDurations);
+    finalizeResolverTelemetry(
+        cohorts.existing.resolverTelemetry,
+        cohortDurations.existing,
+    );
+    finalizeResolverTelemetry(
+        cohorts.uncertain.resolverTelemetry,
+        cohortDurations.uncertain,
+    );
     const inconclusive = succeeded - resolvedHighConfidence;
     return {
         experimentId: 'strong-uncertain-v1',
@@ -222,6 +317,7 @@ export async function runStrongUncertainResolverExperiment(input: {
         resolvedHighConfidence,
         inconclusive,
         cohorts,
+        resolverTelemetry,
         failureOutcomes,
         limits: {
             existingEligible: 40,

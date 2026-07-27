@@ -315,19 +315,22 @@ describe('dedicated resolver experiment AI adapter', () => {
     });
 
     it('isolates concurrent rejected and ambiguous generations and completes the cohort', async () => {
-        mocks.batch.mockImplementation(async accounts => accounts.map((account: { accountId: string }) => ({
-            accountId: account.accountId,
-            result: {
-                assessment: {
-                    inferredGender: 'unknown', confidence: 'low',
-                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+        mocks.batch.mockImplementation(async accounts => accounts.map((account: { accountId: string }) => {
+            const ordinal = Number(/m(\d+)-/.exec(account.accountId)?.[1]);
+            return {
+                accountId: account.accountId,
+                result: {
+                    assessment: {
+                        inferredGender: 'unknown', confidence: 'low',
+                        ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis',
+                    routingReason: 'conserve_female_recall',
+                    analyzedSelectionIds: [],
+                    v29AccountContext: ordinal % 2 ? 'personal' : 'uncertain',
                 },
-                routingDecision: 'route_to_feature_analysis',
-                routingReason: 'conserve_female_recall',
-                analyzedSelectionIds: [],
-                v29AccountContext: 'personal',
-            },
-        })));
+            };
+        }));
         mocks.analyze
             .mockImplementationOnce(async (_prompt, _media, options) => {
                 await options.onBeforeAttempt({ retryCount: 0 });
@@ -358,14 +361,34 @@ describe('dedicated resolver experiment AI adapter', () => {
             failed: 2,
             finalUnknown: 4,
             cohorts: {
-                existing: { attempted: 4, succeeded: 2, failed: 2 },
-                uncertain: { attempted: 0, succeeded: 0, failed: 0 },
+                existing: { attempted: 2, succeeded: 1, failed: 1 },
+                uncertain: { attempted: 2, succeeded: 1, failed: 1 },
             },
             failureOutcomes: {
                 rejected: 1,
                 failed: 1,
                 ambiguous: 1,
             },
+            resolverTelemetry: {
+                calls: 2,
+                rateLimited: 0,
+                retries: 0,
+                meanLatencyMs: 1,
+                p50LatencyMs: 1,
+                p95LatencyMs: 1,
+                failureDisposition: {
+                    response_rejected: 1,
+                    ambiguous: 1,
+                },
+            },
+        });
+        expect(report.cohorts.existing.resolverTelemetry).toMatchObject({
+            calls: 1,
+            failureDisposition: { response_rejected: 1 },
+        });
+        expect(report.cohorts.uncertain.resolverTelemetry).toMatchObject({
+            calls: 1,
+            failureDisposition: { ambiguous: 1 },
         });
     });
 
@@ -391,6 +414,51 @@ describe('dedicated resolver experiment AI adapter', () => {
             failureDisposition: { ambiguous: 1 },
         });
         expect(mocks.analyze).toHaveBeenCalledOnce();
+    });
+
+    it('aggregates a rate limit retry as two calls and one retry', async () => {
+        mocks.batch.mockImplementation(async accounts => accounts.map((account: { accountId: string }) => ({
+            accountId: account.accountId,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: [],
+                v29AccountContext: 'personal',
+            },
+        })));
+        mocks.analyze.mockImplementationOnce(async (_prompt, _media, options) => {
+            await options.onBeforeAttempt({ retryCount: 0 });
+            await options.onAttemptTelemetry({
+                latencyMs: 10, disposition: 'rate_limited',
+            });
+            await options.onBeforeAttempt({ retryCount: 1 });
+            await options.onAttemptTelemetry({
+                latencyMs: 30, disposition: 'success',
+            });
+            return {
+                inferredGender: 'unknown', confidence: 'low',
+                ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+            };
+        });
+        const report = await runStrongUncertainResolverExperiment({
+            bundle: sealedBundle(1),
+            runner: createStrongUncertainResolverExperimentAdapter(),
+        });
+        expect(report.resolverTelemetry).toEqual({
+            calls: 2,
+            rateLimited: 1,
+            retries: 1,
+            meanLatencyMs: 20,
+            p50LatencyMs: 10,
+            p95LatencyMs: 30,
+            failureDisposition: { rate_limited: 1 },
+        });
+        expect(report.cohorts.existing.resolverTelemetry)
+            .toEqual(report.resolverTelemetry);
     });
 
     it('fails the whole experiment on a structural resolver fault', async () => {
