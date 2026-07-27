@@ -713,6 +713,31 @@ describe('replay staged AI runner policy capability', () => {
         expect(ai.genderTriage).not.toHaveBeenCalled();
     });
 
+    it('rejects a frozen forged runner with factory-shaped operations', async () => {
+        const forged = Object.freeze({
+            triage: vi.fn(),
+            feature: vi.fn(),
+            privateNames: vi.fn(),
+            resolveGender: vi.fn(),
+        }) satisfies ReplayAiRunner;
+
+        await expect(runPaid(forged))
+            .rejects.toThrow('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+        expect(forged.triage).not.toHaveBeenCalled();
+    });
+
+    it('exposes no registration capability and cannot retag a genuine adapter', async () => {
+        const adapterModule = await import('./replay-staged-ai-adapter');
+        expect('registerReplayAiRunnerPolicy' in adapterModule).toBe(false);
+        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.7');
+        expect(Reflect.set(adapter, 'policyVersion', 'ai-stage-policy-v2.8'))
+            .toBe(false);
+
+        await expect(runPaid(adapter))
+            .rejects.toThrow('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+        expect(ai.genderTriage).not.toHaveBeenCalled();
+    });
+
     it.each([
         ['raw', () => ({ triage: vi.fn() }) as ReplayAiRunner],
         ['copy', () => ({ ...createReplayStagedAiAdapter('ai-stage-policy-v2.8') })],

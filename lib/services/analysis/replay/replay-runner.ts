@@ -6,7 +6,6 @@ import {
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
-import { lookupReplayAiRunnerPolicy } from './replay-runner-policy-registry';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
@@ -57,11 +56,14 @@ export interface ReplayAiRunner {
     }): Promise<ReplayInvocation<GenderResolutionResult>>;
 }
 
-function assertReplayAiRunnerPolicy(
+async function assertReplayAiRunnerPolicy(
     runner: ReplayAiRunner | undefined,
     expected: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
-): ReplayAiRunner {
-    if (!runner || lookupReplayAiRunnerPolicy(runner) !== expected) {
+): Promise<ReplayAiRunner> {
+    const { lookupReplayStagedAiAdapterPolicy } = await import(
+        './replay-staged-ai-adapter'
+    );
+    if (!runner || lookupReplayStagedAiAdapterPolicy(runner) !== expected) {
         throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
     }
     return runner;
@@ -339,7 +341,7 @@ export async function runAnalysisV2AiReplay(input: {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
     const paidRunner = input.mode === 'paid-ai'
-        ? assertReplayAiRunnerPolicy(input.runner, replayAiPolicy)
+        ? await assertReplayAiRunnerPolicy(input.runner, replayAiPolicy)
         : undefined;
     const cutoffBookkeepingMs = input.resolverCutoffMs ?? 25;
     if (

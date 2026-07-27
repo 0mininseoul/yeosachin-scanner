@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 const testRunnerPolicies = vi.hoisted(() => new WeakMap<object, string>());
 
-vi.mock('./replay-runner-policy-registry', () => ({
-    lookupReplayAiRunnerPolicy: (runner: object) => (
+vi.mock('./replay-staged-ai-adapter', () => ({
+    lookupReplayStagedAiAdapterPolicy: (runner: object) => (
         testRunnerPolicies.get(runner)
     ),
 }));

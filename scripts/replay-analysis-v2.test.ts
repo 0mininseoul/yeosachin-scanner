@@ -68,8 +68,10 @@ describe('analysis V2 replay CLI', () => {
                 '--eval',
                 "import('./scripts/replay-analysis-v2.ts').then(() => process.stdout.write('ok'))",
             ],
-            { cwd: process.cwd(), encoding: 'utf8' },
+            { cwd: process.cwd(), encoding: 'utf8', timeout: 10_000 },
         );
+        expect(result.error).toBeUndefined();
+        expect(result.signal).toBeNull();
         expect(result.status).toBe(0);
         expect(result.stdout).toBe('ok');
         expect(result.stderr).not.toContain('server-only');
@@ -88,8 +90,10 @@ describe('analysis V2 replay CLI', () => {
                 `--bundle=${bundlePath}`,
                 `--key=${keyPath}`,
             ],
-            { cwd: process.cwd(), encoding: 'utf8' },
+            { cwd: process.cwd(), encoding: 'utf8', timeout: 10_000 },
         );
+        expect(result.error).toBeUndefined();
+        expect(result.signal).toBeNull();
         expect(result.status).toBe(0);
         expect(JSON.parse(result.stdout)).toMatchObject({
             status: 'ok',
