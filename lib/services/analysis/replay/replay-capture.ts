@@ -5,7 +5,7 @@ import type { AnalysisV2CheckpointProfile } from '@/lib/services/analysis/v2-pro
 import {
     isAnalysisV2PartialMediaCoverageAllowed,
     normalizeAnalysisV2MediaSelections,
-} from '@/lib/services/analysis/v2-ai-scoring-executors';
+} from '@/lib/services/analysis/v2-media-normalization';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import type { ReplayProviderLedgerIdentity } from './replay-readonly-apify';
 import {

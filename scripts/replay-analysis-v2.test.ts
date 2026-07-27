@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
     createReplayKeyFile,
@@ -58,6 +59,22 @@ async function artifacts(now: number) {
 }
 
 describe('analysis V2 replay CLI', () => {
+    it('loads replay capture without React server module conditions', () => {
+        const result = spawnSync(
+            process.execPath,
+            [
+                '--import',
+                'tsx',
+                '--eval',
+                "import('./lib/services/analysis/replay/replay-capture.ts').then(() => process.stdout.write('ok'))",
+            ],
+            { cwd: process.cwd(), encoding: 'utf8' },
+        );
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe('ok');
+        expect(result.stderr).not.toContain('server-only');
+    });
+
     it('requires the UUID-only historical official E2E capability on both capture and paid run', () => {
         const capture = [
             '--capture', '--historical-official-e2e',
