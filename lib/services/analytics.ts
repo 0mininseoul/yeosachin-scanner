@@ -16,6 +16,7 @@ export const EVENTS = {
     PAYMENT_CONFIRMED_VIEWED: 'payment_confirmed_viewed',
     EARLYBIRD_STATUS_VIEWED: 'earlybird_status_viewed',
     ANALYSIS_STARTED: 'analysis_started',
+    ANALYSIS_DURATION_ESTIMATE_SHOWN: 'analysis_duration_estimate_shown',
     ANALYSIS_COMPLETED: 'analysis_completed',
     RESULT_VIEWED: 'result_viewed',
     RESULT_SHARED: 'result_shared',
@@ -35,6 +36,8 @@ type PropertyName =
     | 'content'
     | 'decision'
     | 'duration_ms'
+    | 'duration_range'
+    | 'estimate_version'
     | 'error_code'
     | 'followers_bucket'
     | 'following_bucket'
@@ -127,7 +130,9 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     content: enumValidator(['hero-a']),
     decision: enumValidator(['exclude', 'skip']),
     duration_ms: integerValidator(0, 86_400_000),
+    duration_range: enumValidator(['4_6', '5_8', '8_12', '10_15', '60_90_seconds']),
     error_code: registeredErrorCodeValidator,
+    estimate_version: enumValidator(['v1', 'demo-v1']),
     followers_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
     following_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
     is_shared: (value) => typeof value === 'boolean' ? value : undefined,
@@ -146,6 +151,9 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
         'anonymous',
         'authenticated',
         'checkout',
+        'duration_demo',
+        'duration_preflight',
+        'duration_workload',
         'preflight',
         'profile',
         'relationships',
@@ -187,6 +195,7 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     [EVENTS.PAYMENT_CONFIRMED_VIEWED]: ['order_id', 'plan_id', 'amount_krw', 'status'],
     [EVENTS.EARLYBIRD_STATUS_VIEWED]: ['order_id', 'plan_id', 'amount_krw', 'status'],
     [EVENTS.ANALYSIS_STARTED]: ['request_id', 'plan_id', 'preflight_id'],
+    [EVENTS.ANALYSIS_DURATION_ESTIMATE_SHOWN]: ['stage', 'estimate_version', 'duration_range'],
     [EVENTS.ANALYSIS_COMPLETED]: ['request_id', 'duration_ms'],
     [EVENTS.RESULT_VIEWED]: ['request_id', 'result_count', 'is_shared'],
     [EVENTS.RESULT_SHARED]: ['request_id', 'share_channel'],

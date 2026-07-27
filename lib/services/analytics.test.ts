@@ -123,6 +123,7 @@ describe('Amplitude analytics adapter', () => {
             PAYMENT_CONFIRMED_VIEWED: 'payment_confirmed_viewed',
             EARLYBIRD_STATUS_VIEWED: 'earlybird_status_viewed',
             ANALYSIS_STARTED: 'analysis_started',
+            ANALYSIS_DURATION_ESTIMATE_SHOWN: 'analysis_duration_estimate_shown',
             ANALYSIS_COMPLETED: 'analysis_completed',
             RESULT_VIEWED: 'result_viewed',
             RESULT_SHARED: 'result_shared',
@@ -1255,6 +1256,12 @@ describe('Amplitude analytics adapter', () => {
             request_id: value,
             share_channel: value,
         });
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_DURATION_ESTIMATE_SHOWN, {
+            stage: value,
+            estimate_version: value,
+            duration_range: value,
+            mutual_count: 474,
+        } as never);
 
         expect(amplitudeMocks.track.mock.calls).toEqual([
             ['landing_viewed', {}],
@@ -1264,6 +1271,7 @@ describe('Amplitude analytics adapter', () => {
             ['exclusion_decided', {}],
             ['payment_confirmed_viewed', {}],
             ['result_shared', {}],
+            ['analysis_duration_estimate_shown', {}],
         ]);
         expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(value);
     });
@@ -1293,6 +1301,11 @@ describe('Amplitude analytics adapter', () => {
             amount_krw: 14_900,
             status: 'paid',
         });
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_DURATION_ESTIMATE_SHOWN, {
+            stage: 'duration_workload',
+            estimate_version: 'v1',
+            duration_range: '5_8',
+        });
 
         expect(amplitudeMocks.track.mock.calls).toEqual([
             ['landing_viewed', {
@@ -1313,6 +1326,11 @@ describe('Amplitude analytics adapter', () => {
                 plan_id: 'basic',
                 amount_krw: 14_900,
                 status: 'paid',
+            }],
+            ['analysis_duration_estimate_shown', {
+                stage: 'duration_workload',
+                estimate_version: 'v1',
+                duration_range: '5_8',
             }],
         ]);
     });
