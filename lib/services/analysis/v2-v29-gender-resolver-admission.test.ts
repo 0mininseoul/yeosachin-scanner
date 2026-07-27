@@ -35,6 +35,15 @@ describe('v2.9 gender resolver admission', () => {
         }), 2)).toBe('already_verified');
     });
 
+    it('reports explicit official context before already-verified appearance', () => {
+        expect(v29GenderResolverAdmission(triage({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['m1', 'm2'],
+        }, 'official_group_or_brand'), 2)).toBe('official_or_group');
+    });
+
     it.each([
         'official_group_or_brand',
         'uncertain',

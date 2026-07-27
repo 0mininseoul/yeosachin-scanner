@@ -558,6 +558,58 @@ describe('AI-only replay runner', () => {
         });
     });
 
+    it('counts a verified-looking official account as official rather than already verified', async () => {
+        const feature = vi.fn();
+        const resolveGender = vi.fn();
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    ...bundle.capture,
+                    sourceLineage: {
+                        ...bundle.capture.sourceLineage,
+                        policyVersions: {
+                            ...bundle.capture.sourceLineage.policyVersions,
+                            aiStage: 'ai-stage-policy-v2.9',
+                            scheduler: 'ai-scheduler-v1',
+                        },
+                    },
+                },
+            },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'female',
+                            confidence: 'high',
+                            ownerConsistency: 'same_person',
+                            evidenceSelectionIds: ['m1', 'm2'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                        v29AccountContext: 'official_group_or_brand',
+                    },
+                }),
+                feature,
+                resolveGender,
+            }),
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(resolveGender).not.toHaveBeenCalled();
+        expect(report.resolver.admission).toEqual({
+            eligible: 0,
+            alreadyVerified: 0,
+            officialOrGroup: 1,
+            uncertainOrAbsent: 0,
+            insufficientMedia: 0,
+        });
+    });
+
     it('caps concurrently active public profiles at four', async () => {
         let active = 0;
         let maximum = 0;
