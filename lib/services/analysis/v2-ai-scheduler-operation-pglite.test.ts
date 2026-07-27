@@ -7,6 +7,10 @@ const migrationPath = path.join(
     process.cwd(),
     'supabase/migrations/20260727034000_add_analysis_v2_scheduler_live_operations.sql'
 );
+const v29ClaimPolicyMigrationPath = path.join(
+    process.cwd(),
+    'supabase/migrations/20260728100000_allow_scheduler_claim_ai_stage_v29.sql'
+);
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const jobClaim = '223e4567-e89b-42d3-a456-426614174000';
 const operationClaim = '323e4567-e89b-42d3-a456-426614174000';
@@ -152,6 +156,7 @@ beforeAll(async () => {
         $$;
     `);
     await db.exec(await readFile(migrationPath, 'utf8'));
+    await db.exec(await readFile(v29ClaimPolicyMigrationPath, 'utf8'));
     await db.query(`
         INSERT INTO public.analysis_requests (
             id, pipeline_version, status, policy_versions_snapshot
@@ -178,6 +183,108 @@ afterAll(async () => {
 });
 
 describe('analysis V2 live scheduler migration', () => {
+    it('admits only canonical v2.8/v2.9 snapshots for scheduler claims', async () => {
+        const v29RequestId = '133e4567-e89b-42d3-a456-426614174000';
+        const v29JobClaim = '143e4567-e89b-42d3-a456-426614174000';
+        const v29OperationClaim = '153e4567-e89b-42d3-a456-426614174000';
+        const rejectedRequests = [
+            {
+                id: '163e4567-e89b-42d3-a456-426614174000',
+                jobClaim: '193e4567-e89b-42d3-a456-426614174000',
+                operationClaim: '223e4567-e89b-42d3-a456-426614174000',
+                aiStage: 'ai-stage-policy-v2.7',
+                risk: undefined,
+                scheduler: undefined,
+            },
+            {
+                id: '173e4567-e89b-42d3-a456-426614174000',
+                jobClaim: '203e4567-e89b-42d3-a456-426614174000',
+                operationClaim: '233e4567-e89b-42d3-a456-426614174000',
+                aiStage: 'ai-stage-policy-v2.9',
+                risk: 'risk-policy-v2.3',
+                scheduler: undefined,
+            },
+            {
+                id: '183e4567-e89b-42d3-a456-426614174000',
+                jobClaim: '213e4567-e89b-42d3-a456-426614174000',
+                operationClaim: '243e4567-e89b-42d3-a456-426614174000',
+                aiStage: 'ai-stage-policy-v2.9',
+                risk: 'risk-policy-v2.4',
+                scheduler: 'ai-scheduler-v2',
+            },
+        ] as const;
+        const privateNameOperation = `private-account-name:${'d'.repeat(64)}`;
+        const policy = (aiStage: string, risk = 'risk-policy-v2.4', scheduler = 'ai-scheduler-v1') =>
+            JSON.stringify({ pipeline: 'v2', risk, aiStage, scheduler });
+        const insertClaimableRequest = async (
+            id: string,
+            snapshot: string,
+            claimToken: string
+        ) => {
+            await db.query(`
+                INSERT INTO public.analysis_requests (
+                    id, pipeline_version, status, policy_versions_snapshot
+                ) VALUES ($1, 'v2', 'processing', $2::jsonb)
+            `, [id, snapshot]);
+            await db.query(`
+                INSERT INTO public.analysis_pipeline_jobs (
+                    request_id, job_key, status, dispatch_state, dispatch_generation,
+                    dispatch_reservation_token, delivered_at, lease_token, lease_expires_at,
+                    attempt_count
+                ) VALUES (
+                    $1, 'private-names:batch:0', 'processing', 'delivered', 1,
+                    '423e4567-e89b-42d3-a456-426614174000', clock_timestamp(), $2,
+                    clock_timestamp() + interval '10 minutes', 1
+                )
+            `, [id, claimToken]);
+        };
+        const claim = (id: string, claimToken: string, operationClaimToken: string) => db.query<{
+            decision: string;
+            operation_claim_token: string | null;
+        }>(`
+            SELECT * FROM public.claim_analysis_v2_scheduler_operation(
+                $1, 'private-names:batch:0', $2, $3, 'privateAccountName', $4, 330
+            )
+        `, [id, claimToken, privateNameOperation, operationClaimToken]);
+
+        try {
+            await insertClaimableRequest(
+                v29RequestId,
+                policy('ai-stage-policy-v2.9'),
+                v29JobClaim
+            );
+            expect((await claim(v29RequestId, v29JobClaim, v29OperationClaim)).rows).toEqual([{
+                decision: 'execute',
+                operation_claim_token: v29OperationClaim,
+                recovery_only: false,
+                result_json: null,
+                not_before_at: null,
+            }]);
+
+            for (const rejected of rejectedRequests) {
+                await insertClaimableRequest(
+                    rejected.id,
+                    policy(rejected.aiStage, rejected.risk, rejected.scheduler),
+                    rejected.jobClaim
+                );
+                await expect(claim(rejected.id, rejected.jobClaim, rejected.operationClaim))
+                    .rejects.toThrow('ANALYSIS_V2_SCHEDULER_OPERATION_POLICY_MISMATCH');
+            }
+        } finally {
+            for (const id of [v29RequestId, ...rejectedRequests.map(({ id }) => id)]) {
+                await db.query(
+                    'DELETE FROM public.analysis_v2_scheduler_operations WHERE request_id = $1',
+                    [id]
+                );
+                await db.query(
+                    'DELETE FROM public.analysis_pipeline_jobs WHERE request_id = $1',
+                    [id]
+                );
+                await db.query('DELETE FROM public.analysis_requests WHERE id = $1', [id]);
+            }
+        }
+    });
+
     it('claims, defers without generation churn, recovers from a checkpoint, and commits once', async () => {
         const claim = async (token: string) => db.query<{
             decision: string;
