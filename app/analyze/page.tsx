@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
@@ -114,11 +114,17 @@ export default function AnalyzePage() {
         stalePricingPreflightId,
     } = resolveEarlybirdPricingBoundary(preflight);
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
+    // Query-plan selection is a rendering fallback, not a state transition. This
+    // keeps a login-return URL deterministic without racing the preflight resume.
+    const querySelectedPlan = typeof window === 'undefined'
+        ? null
+        : parseEarlybirdPlanParam(new URLSearchParams(window.location.search).get('plan'));
+    const selectedPlanWithQueryFallback = selectedPlan ?? querySelectedPlan;
     // 모든 플랜을 선택(비교)할 수 있게 하되, 아무것도 안 고르면 적격 플랜을 기본 선택.
     // 부적격 플랜을 골라도 선택 상태는 유지하고, 구매 버튼만 비활성화한다.
     const effectiveSelectedPlan = readyPreflight
-        ? (selectedPlan ?? readyPreflight.requiredPlan)
-        : selectedPlan;
+        ? (selectedPlanWithQueryFallback ?? readyPreflight.requiredPlan)
+        : selectedPlanWithQueryFallback;
     const effectiveSelectedCard = readyPreflight && effectiveSelectedPlan
         ? readyPreflight.plans.find(plan => plan.planId === effectiveSelectedPlan) ?? null
         : null;
@@ -137,7 +143,7 @@ export default function AnalyzePage() {
     })
         ? checkoutStatusCta
         : null;
-    const preflightDurationEstimate = useMemo(() => (
+    const preflightDurationEstimate = (
         readyPreflight && effectiveSelectedCard
             ? estimatePreflightAnalysisDuration({
                 followersCount: readyPreflight.target.followersCount,
@@ -145,7 +151,7 @@ export default function AnalyzePage() {
                 planCapacity: effectiveSelectedCard.relationshipCapacity,
             })
             : null
-    ), [effectiveSelectedCard, readyPreflight]);
+    );
     // The pending-checkout copy belongs to the same submission binding as its
     // CTA. A late 409 must not leave this message behind after the user has
     // selected another plan or started a new preflight.
@@ -218,8 +224,6 @@ export default function AnalyzePage() {
         initializedRef.current = true;
 
         const params = new URLSearchParams(window.location.search);
-        const linkedPlan = parseEarlybirdPlanParam(params.get('plan'));
-        if (linkedPlan) setSelectedPlan(linkedPlan);
         const resumablePreflightId = params.get('preflight');
         const shouldAutostart = params.get('autostart') === '1';
 

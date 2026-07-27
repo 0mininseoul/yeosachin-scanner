@@ -16,4 +16,10 @@ describe('analyze autostart handoff', () => {
         const autostartCalls = source.match(/startPreflight\(pending\)/g) ?? [];
         expect(autostartCalls.length).toBe(0);
     });
+
+    it('keeps a plan query as a render fallback instead of racing preflight resume state', () => {
+        expect(source).toContain('const selectedPlanWithQueryFallback = selectedPlan ?? querySelectedPlan;');
+        expect(source).toContain('? (selectedPlanWithQueryFallback ?? readyPreflight.requiredPlan)');
+        expect(source).not.toContain('setSelectedPlan(linkedPlan)');
+    });
 });
