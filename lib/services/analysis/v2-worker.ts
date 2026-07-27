@@ -102,6 +102,7 @@ export type AnalysisV2StageId =
 const AI_PROVIDER_STAGES: ReadonlySet<AnalysisV2StageId> = new Set([
     'profile_ai',
     'private_names',
+    'screening',
     'partner_safety',
     'narrative',
 ]);
