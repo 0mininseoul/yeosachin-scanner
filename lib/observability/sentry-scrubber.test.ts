@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     scrubSentryEvent,
+    scrubSentryBreadcrumb,
     scrubSentrySpan,
     scrubSentryTransaction,
 } from './sentry-scrubber';
@@ -103,5 +104,24 @@ describe('Sentry privacy scrubber', () => {
         expect(serialised).not.toContain('span-state');
         expect(serialised).not.toContain('19940102');
         expect(serialised).not.toContain('birthyear 1994');
+    });
+
+    it('drops OAuth credential object keys across every public scrub entrypoint', () => {
+        const raw = {
+            code: 'oauth-code-raw',
+            state: 'oauth-state-raw',
+            authorizationCode: 'authorization-code-raw',
+            code_verifier: 'verifier-raw',
+            codeChallenge: 'challenge-raw',
+        };
+        const event = scrubSentryEvent({ type: undefined, tags: raw });
+        const breadcrumb = scrubSentryBreadcrumb({ category: 'oauth', data: raw });
+        const transaction = scrubSentryTransaction({ type: 'transaction', tags: raw, contexts: { custom: raw } });
+        const span = scrubSentrySpan({
+            trace_id: 'e'.repeat(32), span_id: 'f'.repeat(16), start_timestamp: 1, data: raw,
+        });
+        const serialised = JSON.stringify({ event, breadcrumb, transaction, span });
+
+        for (const value of Object.values(raw)) expect(serialised).not.toContain(value);
     });
 });

@@ -2,7 +2,7 @@ import type { SpanJSON, TransactionEvent } from '@sentry/core';
 import type { Breadcrumb, ErrorEvent } from '@sentry/nextjs';
 
 const REDACTED = '[Filtered]';
-const SENSITIVE_KEY = /(?:pass(?:word)?|otp|authorization|cookie|token|secret|session|email|e-?mail|phone|birth(?:year|date)?|user[_-]?id|account[_-]?id|(?:analysis|candidate|target|preflight|suspect)[_-]?(?:id|key|run)?|run[_-]?id|request[_-]?id|instagram|profile(?:[_-]?image)?|webhook|supabase|discord)/iu;
+const SENSITIVE_KEY = /(?:pass(?:word)?|otp|authorization(?:[_-]?code)?|code(?:[_-]?(?:verifier|challenge))?|state|cookie|token|secret|session|email|e-?mail|phone|birth(?:year|date)?|user[_-]?id|account[_-]?id|(?:analysis|candidate|target|preflight|suspect)[_-]?(?:id|key|run)?|run[_-]?id|request[_-]?id|instagram|profile(?:[_-]?image)?|webhook|supabase|discord)/iu;
 const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
 const PHONE = /(?<!\d)(?:\+?\d[\d ()-]{7,}\d)(?!\d)/gu;
 const BIRTHDATE = /\b(?:19|20)\d{2}[-/.](?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])\b/g;
@@ -11,7 +11,7 @@ const AUTHORIZATION_VALUE = /\b(?:authorization\s*[:=]\s*)?(?:basic|bearer|diges
 const SECRET_VALUE = /(?:\b(?:access|refresh|provider|id|service)[_-]?(?:token|key)|\b(?:api[_-]?key|password|otp|secret|session(?:[_-]?(?:id|key))?|supabase(?:[_-]?(?:key|token))?))\s*[:=]\s*[^\s,;]+/giu;
 const COOKIE_VALUE = /\b(?:set[-_ ]?cookie|cookie(?:2)?)\s*[:=]\s*[^\n;]+(?:;[^\n]*)?/giu;
 const QUERY_SECRET = /([?&](?:[^=&\s]*?(?:token|session|cookie|authorization|password|otp|secret|key|email|phone|dob|birth(?:year|date)?|code(?:[_-]?(?:verifier|challenge))?|state|user(?:[_-]?id)?|account(?:[_-]?id)?)[^=&\s]*)=)[^&#\s]*/giu;
-const BARE_SECRET_ASSIGNMENT = /(\b(?:access[_-]?token|refresh[_-]?token|provider[_-]?token|id[_-]?token|service[_-]?key|supabase[_-]?(?:key|token)|token|session|cookie|authorization|password|otp|secret|api[_-]?key|code(?:[_-]?(?:verifier|challenge))?|state|dob)=)[^\s&#,;]*/giu;
+const BARE_SECRET_ASSIGNMENT = /(\b(?:access[_-]?token|refresh[_-]?token|provider[_-]?token|id[_-]?token|service[_-]?key|supabase[_-]?(?:key|token)|token|session|cookie|authorization(?:[_-]?code)?|password|otp|secret|api[_-]?key|code(?:[_-]?(?:verifier|challenge))?|state|dob)=)[^\s&#,;]*/giu;
 const JWT = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/gu;
 const COMPACT_BIRTHDATE = /\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\b/g;
 const CONTEXTUAL_BIRTHYEAR = /\b(?:birth[_ ]?year|dob)\s*[:=]?\s*(?:19|20)\d{2}\b/giu;
