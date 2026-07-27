@@ -16,7 +16,7 @@ import { analysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
 const requestId = '223e4567-e89b-42d3-a456-426614174000';
-const externalFixtureReferencePattern = /(?:https?:)?\/\/|www\.|(?:^|\s)[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,63}(?:[\/?#:;,!?)]|$|\.(?![a-z0-9-]))|@|[\r\n]/iu;
+const externalFixtureReferencePattern = /(?:https?:)?\/\/|www\.|(?:^|[\s([{'"])[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:xn--[a-z0-9-]{2,59}|\p{L}{2,63})(?:[\/?#:;,!?)]|$|\.(?![\p{L}\p{N}-]))|@|[\r\n]/iu;
 
 describe('synthetic demo analysis policy', () => {
     it('requires strict flag, allowlisted owner, and the exact raw target', () => {
@@ -118,6 +118,9 @@ describe('synthetic demo fixture', () => {
         expect(new Set(fixture.privateAccounts.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
         expect(renderedFixtureText.every(value => !externalFixtureReferencePattern.test(value))).toBe(true);
         expect(externalFixtureReferencePattern.test('preview.example.xyz/path')).toBe(true);
+        expect(externalFixtureReferencePattern.test('(example.xyz)')).toBe(true);
+        expect(externalFixtureReferencePattern.test('xn--bcher-kva.xn--p1ai')).toBe(true);
+        expect(externalFixtureReferencePattern.test('유니코드.한국')).toBe(true);
         expect([...publicRows, ...fixture.privateAccounts].every(row =>
             /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(row.profileImage ?? ''),
         )).toBe(true);
