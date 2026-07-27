@@ -172,33 +172,40 @@ const DEMO_PUBLIC_OVERVIEWS = [
 ] as const;
 
 /**
- * One-time, in-memory transformation of the authorized source result.  Each
- * tuple selects fictional handle/name/bio/overview variants only; it contains
- * no source identifier, profile copy, image path, URL, or source hash.
+ * One-time transformed fixture selectors. Each named value chooses only a
+ * fictional handle/name/bio/overview variant; the static fixture contains no
+ * source identifier, profile copy, image path, URL, or source hash.
  */
-const DEMO_AUTHORIZED_SOURCE_VARIANTS = [
-    [4, 18, 0, 6], [13, 21, 7, 4], [20, 11, 2, 12], [8, 0, 10, 12],
-    [9, 20, 1, 0], [6, 13, 6, 0], [8, 23, 16, 7], [3, 5, 4, 3],
-    [18, 23, 10, 17], [13, 23, 9, 10], [5, 0, 15, 5], [6, 21, 16, 12],
-    [2, 3, 0, 4], [10, 18, 15, 7], [4, 22, 13, 6], [23, 23, 16, 2],
-    [20, 4, 7, 8], [6, 12, 2, 13], [2, 20, 10, 14], [22, 5, 3, 12],
-    [18, 8, 2, 10], [13, 21, 3, 3], [5, 11, 0, 10], [5, 2, 9, 14],
-    [23, 1, 16, 0], [14, 5, 2, 5], [5, 17, 0, 2], [2, 9, 12, 7],
-    [18, 16, 8, 16], [7, 6, 17, 12], [18, 14, 4, 0], [17, 19, 5, 6],
-    [13, 3, 1, 5], [8, 4, 13, 2], [12, 3, 3, 6], [22, 9, 8, 1],
-    [14, 0, 4, 16], [12, 8, 5, 13], [9, 4, 1, 4], [17, 23, 12, 8],
-    [0, 0, 2, 4], [22, 8, 1, 6], [12, 1, 5, 5], [7, 5, 1, 0],
-    [14, 22, 4, 2], [1, 21, 10, 0], [14, 7, 13, 13], [11, 4, 9, 13],
-    [12, 4, 0, 7], [5, 5, 6, 6], [17, 18, 7, 8], [6, 20, 13, 10],
-    [4, 21, 3, 11], [13, 15, 2, 5], [16, 0, 2, 17], [5, 6, 5, 4],
-    [20, 7, 12, 11], [8, 6, 7, 0], [6, 19, 17, 7], [17, 8, 12, 15],
-    [7, 20, 5, 17], [3, 4, 8, 10], [6, 8, 16, 13], [0, 8, 16, 9],
-    [14, 11, 3, 6], [0, 20, 4, 17], [1, 2, 11, 7], [1, 12, 2, 14],
-    [16, 1, 2, 11], [1, 13, 16, 1], [2, 17, 12, 13], [23, 3, 15, 6],
-    [10, 21, 1, 13], [8, 23, 16, 4], [12, 2, 9, 10], [16, 2, 9, 2],
-    [13, 11, 2, 2], [12, 0, 7, 10], [1, 6, 9, 7], [14, 5, 17, 4],
-    [5, 17, 11, 15], [3, 12, 11, 10], [18, 6, 1, 3], [2, 23, 9, 16],
-    [18, 17, 11, 1], [19, 14, 2, 4],
+export type DemoFixtureVariant = Readonly<{
+    handleIndex: number;
+    nameIndex: number;
+    bioIndex: number;
+    overviewIndex: number;
+}>;
+
+export const DEMO_FIXTURE_VARIANTS: readonly DemoFixtureVariant[] = [
+    { handleIndex: 4, nameIndex: 18, bioIndex: 0, overviewIndex: 6 }, { handleIndex: 13, nameIndex: 21, bioIndex: 7, overviewIndex: 4 }, { handleIndex: 20, nameIndex: 11, bioIndex: 2, overviewIndex: 12 }, { handleIndex: 8, nameIndex: 0, bioIndex: 10, overviewIndex: 12 },
+    { handleIndex: 9, nameIndex: 20, bioIndex: 1, overviewIndex: 0 }, { handleIndex: 6, nameIndex: 13, bioIndex: 6, overviewIndex: 0 }, { handleIndex: 8, nameIndex: 23, bioIndex: 16, overviewIndex: 7 }, { handleIndex: 3, nameIndex: 5, bioIndex: 4, overviewIndex: 3 },
+    { handleIndex: 18, nameIndex: 23, bioIndex: 10, overviewIndex: 17 }, { handleIndex: 13, nameIndex: 23, bioIndex: 9, overviewIndex: 10 }, { handleIndex: 5, nameIndex: 0, bioIndex: 15, overviewIndex: 5 }, { handleIndex: 6, nameIndex: 21, bioIndex: 16, overviewIndex: 12 },
+    { handleIndex: 2, nameIndex: 3, bioIndex: 0, overviewIndex: 4 }, { handleIndex: 10, nameIndex: 18, bioIndex: 15, overviewIndex: 7 }, { handleIndex: 4, nameIndex: 22, bioIndex: 13, overviewIndex: 6 }, { handleIndex: 23, nameIndex: 23, bioIndex: 16, overviewIndex: 2 },
+    { handleIndex: 20, nameIndex: 4, bioIndex: 7, overviewIndex: 8 }, { handleIndex: 6, nameIndex: 12, bioIndex: 2, overviewIndex: 13 }, { handleIndex: 2, nameIndex: 20, bioIndex: 10, overviewIndex: 14 }, { handleIndex: 22, nameIndex: 5, bioIndex: 3, overviewIndex: 12 },
+    { handleIndex: 18, nameIndex: 8, bioIndex: 2, overviewIndex: 10 }, { handleIndex: 13, nameIndex: 21, bioIndex: 3, overviewIndex: 3 }, { handleIndex: 5, nameIndex: 11, bioIndex: 0, overviewIndex: 10 }, { handleIndex: 5, nameIndex: 2, bioIndex: 9, overviewIndex: 14 },
+    { handleIndex: 23, nameIndex: 1, bioIndex: 16, overviewIndex: 0 }, { handleIndex: 14, nameIndex: 5, bioIndex: 2, overviewIndex: 5 }, { handleIndex: 5, nameIndex: 17, bioIndex: 0, overviewIndex: 2 }, { handleIndex: 2, nameIndex: 9, bioIndex: 12, overviewIndex: 7 },
+    { handleIndex: 18, nameIndex: 16, bioIndex: 8, overviewIndex: 16 }, { handleIndex: 7, nameIndex: 6, bioIndex: 17, overviewIndex: 12 }, { handleIndex: 18, nameIndex: 14, bioIndex: 4, overviewIndex: 0 }, { handleIndex: 17, nameIndex: 19, bioIndex: 5, overviewIndex: 6 },
+    { handleIndex: 13, nameIndex: 3, bioIndex: 1, overviewIndex: 5 }, { handleIndex: 8, nameIndex: 4, bioIndex: 13, overviewIndex: 2 }, { handleIndex: 12, nameIndex: 3, bioIndex: 3, overviewIndex: 6 }, { handleIndex: 22, nameIndex: 9, bioIndex: 8, overviewIndex: 1 },
+    { handleIndex: 14, nameIndex: 0, bioIndex: 4, overviewIndex: 16 }, { handleIndex: 12, nameIndex: 8, bioIndex: 5, overviewIndex: 13 }, { handleIndex: 9, nameIndex: 4, bioIndex: 1, overviewIndex: 4 }, { handleIndex: 17, nameIndex: 23, bioIndex: 12, overviewIndex: 8 },
+    { handleIndex: 0, nameIndex: 0, bioIndex: 2, overviewIndex: 4 }, { handleIndex: 22, nameIndex: 8, bioIndex: 1, overviewIndex: 6 }, { handleIndex: 12, nameIndex: 1, bioIndex: 5, overviewIndex: 5 }, { handleIndex: 7, nameIndex: 5, bioIndex: 1, overviewIndex: 0 },
+    { handleIndex: 14, nameIndex: 22, bioIndex: 4, overviewIndex: 2 }, { handleIndex: 1, nameIndex: 21, bioIndex: 10, overviewIndex: 0 }, { handleIndex: 14, nameIndex: 7, bioIndex: 13, overviewIndex: 13 }, { handleIndex: 11, nameIndex: 4, bioIndex: 9, overviewIndex: 13 },
+    { handleIndex: 12, nameIndex: 4, bioIndex: 0, overviewIndex: 7 }, { handleIndex: 5, nameIndex: 5, bioIndex: 6, overviewIndex: 6 }, { handleIndex: 17, nameIndex: 18, bioIndex: 7, overviewIndex: 8 }, { handleIndex: 6, nameIndex: 20, bioIndex: 13, overviewIndex: 10 },
+    { handleIndex: 4, nameIndex: 21, bioIndex: 3, overviewIndex: 11 }, { handleIndex: 13, nameIndex: 15, bioIndex: 2, overviewIndex: 5 }, { handleIndex: 16, nameIndex: 0, bioIndex: 2, overviewIndex: 17 }, { handleIndex: 5, nameIndex: 6, bioIndex: 5, overviewIndex: 4 },
+    { handleIndex: 20, nameIndex: 7, bioIndex: 12, overviewIndex: 11 }, { handleIndex: 8, nameIndex: 6, bioIndex: 7, overviewIndex: 0 }, { handleIndex: 6, nameIndex: 19, bioIndex: 17, overviewIndex: 7 }, { handleIndex: 17, nameIndex: 8, bioIndex: 12, overviewIndex: 15 },
+    { handleIndex: 7, nameIndex: 20, bioIndex: 5, overviewIndex: 17 }, { handleIndex: 3, nameIndex: 4, bioIndex: 8, overviewIndex: 10 }, { handleIndex: 6, nameIndex: 8, bioIndex: 16, overviewIndex: 13 }, { handleIndex: 0, nameIndex: 8, bioIndex: 16, overviewIndex: 9 },
+    { handleIndex: 14, nameIndex: 11, bioIndex: 3, overviewIndex: 6 }, { handleIndex: 0, nameIndex: 20, bioIndex: 4, overviewIndex: 17 }, { handleIndex: 1, nameIndex: 2, bioIndex: 11, overviewIndex: 7 }, { handleIndex: 1, nameIndex: 12, bioIndex: 2, overviewIndex: 14 },
+    { handleIndex: 16, nameIndex: 1, bioIndex: 2, overviewIndex: 11 }, { handleIndex: 1, nameIndex: 13, bioIndex: 16, overviewIndex: 1 }, { handleIndex: 2, nameIndex: 17, bioIndex: 12, overviewIndex: 13 }, { handleIndex: 23, nameIndex: 3, bioIndex: 15, overviewIndex: 6 },
+    { handleIndex: 10, nameIndex: 21, bioIndex: 1, overviewIndex: 13 }, { handleIndex: 8, nameIndex: 23, bioIndex: 16, overviewIndex: 4 }, { handleIndex: 12, nameIndex: 2, bioIndex: 9, overviewIndex: 10 }, { handleIndex: 16, nameIndex: 2, bioIndex: 9, overviewIndex: 2 },
+    { handleIndex: 13, nameIndex: 11, bioIndex: 2, overviewIndex: 2 }, { handleIndex: 12, nameIndex: 0, bioIndex: 7, overviewIndex: 10 }, { handleIndex: 1, nameIndex: 6, bioIndex: 9, overviewIndex: 7 }, { handleIndex: 14, nameIndex: 5, bioIndex: 17, overviewIndex: 4 },
+    { handleIndex: 5, nameIndex: 17, bioIndex: 11, overviewIndex: 15 }, { handleIndex: 3, nameIndex: 12, bioIndex: 11, overviewIndex: 10 }, { handleIndex: 18, nameIndex: 6, bioIndex: 1, overviewIndex: 3 }, { handleIndex: 2, nameIndex: 23, bioIndex: 9, overviewIndex: 16 },
+    { handleIndex: 18, nameIndex: 17, bioIndex: 11, overviewIndex: 1 }, { handleIndex: 19, nameIndex: 14, bioIndex: 2, overviewIndex: 4 },
 ] as const;
 
 const DEMO_PRIVATE_HANDLES = [
@@ -222,22 +229,22 @@ function fixtureIdentifier(stems: readonly string[], index: number): string {
 }
 
 function publicAccount(index: number): FemaleResultRowV1 {
-    const [handleIndex, nameIndex, bioIndex, overviewIndex] = DEMO_AUTHORIZED_SOURCE_VARIANTS[
-        index % DEMO_AUTHORIZED_SOURCE_VARIANTS.length
+    const variant = DEMO_FIXTURE_VARIANTS[
+        index % DEMO_FIXTURE_VARIANTS.length
     ]!;
     const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
     const displayScore = index === 0 ? 8 : index === 1 ? 6 : index === 2 ? 5 : [3, 3, 2, 2, 1][index % 5]!;
     return {
-        instagramId: fixtureIdentifier(DEMO_PUBLIC_HANDLES, handleIndex + index * DEMO_PUBLIC_HANDLES.length),
-        fullName: DEMO_PUBLIC_NAMES[nameIndex]!,
+        instagramId: fixtureIdentifier(DEMO_PUBLIC_HANDLES, variant.handleIndex + index * DEMO_PUBLIC_HANDLES.length),
+        fullName: DEMO_PUBLIC_NAMES[variant.nameIndex]!,
         profileImage: avatar(index),
-        bio: DEMO_PUBLIC_BIOS[bioIndex]!,
+        bio: DEMO_PUBLIC_BIOS[variant.bioIndex]!,
         displayScore,
         riskBand,
         featuredRank: index === 0 ? 1 : index < 3 ? index + 1 : null,
         recentMutualRank: index < 10 ? index + 1 : null,
         analysisDepth: index === 0 ? 'narrative' : 'features',
-        oneLineOverview: DEMO_PUBLIC_OVERVIEWS[overviewIndex]!,
+        oneLineOverview: DEMO_PUBLIC_OVERVIEWS[variant.overviewIndex]!,
         highRiskNarrative: index === 0
             ? [
                 '공개 프로필과 최근 흐름은 굳이 눈에 띄지만, 단정할 근거는 아닙니다.',

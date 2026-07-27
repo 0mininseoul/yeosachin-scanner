@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+    DEMO_FIXTURE_VARIANTS,
     DEMO_TARGET_USERNAME,
     createDemoFixture,
+    demoReadyPreflight,
     demoDurationSeconds,
     demoPreflightLifecycle,
     isDemoEligible,
@@ -74,22 +76,63 @@ describe('synthetic demo fixture', () => {
     it('uses varied, one-line synthetic account copy with only local blurred avatars', () => {
         const fixture = createDemoFixture(requestId);
         const publicRows = fixture.publicAccounts;
-        const fixtureText = publicRows.flatMap(row => [
+        const preflight = demoReadyPreflight({ id: requestId, created_at: '2026-07-01T00:00:00.000Z' });
+        const renderedFixtureText = [
+            fixture.version,
+            fixture.summary.targetInstagramId,
+            fixture.summary.targetProfileImage ?? '',
+            fixture.summary.planId,
+            fixture.summary.scorePolicyVersion,
+            preflight.target.username,
+            preflight.target.fullName ?? '',
+            preflight.target.bio ?? '',
+            preflight.target.profileImage ?? '',
+            ...preflight.plans.flatMap(plan => [
+                plan.planId,
+                plan.launchStatus,
+                plan.selectionState,
+                plan.unavailableReason ?? '',
+                plan.pricingVersion,
+                plan.price.status,
+                plan.price.currency,
+            ]),
+            ...publicRows.flatMap(row => [
             row.instagramId,
             row.fullName ?? '',
+            row.profileImage ?? '',
             row.bio ?? '',
             row.oneLineOverview,
             ...(row.highRiskNarrative ?? []),
-        ]);
+            ]),
+            ...fixture.privateAccounts.flatMap(row => [
+                row.instagramId,
+                row.fullName ?? '',
+                row.profileImage ?? '',
+            ]),
+        ];
 
         expect(new Set(publicRows.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
         expect(new Set(publicRows.map(row => row.bio)).size).toBeGreaterThanOrEqual(12);
         expect(new Set(publicRows.map(row => row.oneLineOverview)).size).toBeGreaterThanOrEqual(12);
         expect(new Set(fixture.privateAccounts.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
-        expect(fixtureText.every(value => !/https?:\/\/|www\.|@|[\r\n]/iu.test(value))).toBe(true);
+        expect(renderedFixtureText.every(value => !/(?:https?:)?\/\/|www\.|(?:^|\s)[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|co|kr|dev|app)(?:[\/?#:]|$)|@|[\r\n]/iu.test(value))).toBe(true);
         expect([...publicRows, ...fixture.privateAccounts].every(row =>
             /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(row.profileImage ?? ''),
         )).toBe(true);
+    });
+
+    it('keeps every named fixture selector within its template range', () => {
+        expect(DEMO_FIXTURE_VARIANTS).toHaveLength(86);
+        DEMO_FIXTURE_VARIANTS.forEach(variant => {
+            expect(variant.handleIndex).toBeGreaterThanOrEqual(0);
+            expect(variant.handleIndex).toBeLessThan(24);
+            expect(variant.nameIndex).toBeGreaterThanOrEqual(0);
+            expect(variant.nameIndex).toBeLessThan(24);
+            expect(variant.bioIndex).toBeGreaterThanOrEqual(0);
+            expect(variant.bioIndex).toBeLessThan(18);
+            expect(variant.overviewIndex).toBeGreaterThanOrEqual(0);
+            expect(variant.overviewIndex).toBeLessThan(18);
+        });
     });
 
     it('derives monotonic server progress from persisted start time and never fails', () => {
