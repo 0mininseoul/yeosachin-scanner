@@ -59,7 +59,7 @@ function partialBundle(): AnalysisV2ReplayBundle {
             fullE2eEvidence: false, noMediaSubstitution: true,
             sourceLineage: { selectedPlanId: 'standard', policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' } },
             evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
-            partial: { sourceUniverseDigest: 'd'.repeat(64), mediaUnavailable: [] },
+            partial: { sourceUniverseDigest: 'd'.repeat(64), sourceIdentities: [{ ordinal: 1, username: 'example', partition: 'public' }], mediaUnavailable: [] },
         },
     };
 }
@@ -107,6 +107,20 @@ describe('analysis V2 replay bundle', () => {
         const base = partialBundle() as Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
         const invalid = { ...base, capture: { ...base.capture, partial: { ...base.capture.partial!, mediaUnavailable: [{ ordinal: 1, terminal: 'media_unavailable' as const, triageFailures: 0, featureFailures: 0, reasons: ['profile_unavailable'] }] } } };
         await expect(writeReplayBundle({ bundle: invalid as AnalysisV2ReplayBundle, bundlePath: join(directory, 'overlap.enc'), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('rejects duplicate normalized usernames across retained and terminal identities at write and read', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key'); await createReplayKeyFile(keyPath);
+        const base = partialBundle() as Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
+        const invalid = { ...base, capture: { ...base.capture, partial: { ...base.capture.partial, sourceIdentities: [
+            { ordinal: 1, username: 'example', partition: 'public' as const },
+            { ordinal: 9, username: 'EXAMPLE', partition: 'fetch_terminal' as const },
+        ] } } };
+        await expect(writeReplayBundle({ bundle: invalid as AnalysisV2ReplayBundle, bundlePath: join(directory, 'write.enc'), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+        const readPath = join(directory, 'read.enc'); await writeRawEncrypted(readPath, keyPath, invalid);
+        await expect(readReplayBundle({ bundlePath: readPath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
     });
     it('encrypts private payloads with 0700/0600 artifact permissions and decrypts only with its key', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));

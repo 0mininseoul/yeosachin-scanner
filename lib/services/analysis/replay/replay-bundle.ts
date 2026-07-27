@@ -30,6 +30,8 @@ const replayArtifactOwnershipBrand = Symbol('replay-artifact-ownership');
 
 const jpegBase64Schema = z.string().min(4).max(12 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/);
 const usernameSchema = z.string().regex(/^[a-z0-9._]{1,30}$/);
+const normalizedUsernameSchema = z.string().trim().min(1).max(30)
+    .regex(/^@?[A-Za-z0-9._]+$/).transform(value => value.replace(/^@/, '').toLowerCase());
 const selectionIdSchema = z.string().min(1).max(255);
 const canonicalMediaSchema = z.object({
     selectionId: selectionIdSchema,
@@ -119,6 +121,11 @@ const partialAvailableBundleSchema = baseBundleSchema.extend({
         }).strict(),
         partial: z.object({
             sourceUniverseDigest: z.string().regex(/^[a-f0-9]{64}$/),
+            sourceIdentities: z.array(z.object({
+                ordinal: z.number().int().positive(),
+                username: normalizedUsernameSchema,
+                partition: z.enum(['private', 'public', 'fetch_terminal']),
+            }).strict()).max(MAX_PROFILES),
             mediaUnavailable: z.array(z.object({
                 ordinal: z.number().int().positive(),
                 terminal: z.literal('media_unavailable'),
@@ -129,18 +136,35 @@ const partialAvailableBundleSchema = baseBundleSchema.extend({
         }).strict(),
     }).strict(),
 }).strict().superRefine((value, context) => {
+    const identitiesByOrdinal = new Map<number, typeof value.capture.partial.sourceIdentities[number]>();
+    const identityUsernames = new Set<string>();
+    for (const [index, identity] of value.capture.partial.sourceIdentities.entries()) {
+        if (identitiesByOrdinal.has(identity.ordinal) || identityUsernames.has(identity.username)) {
+            context.addIssue({ code: 'custom', path: ['capture', 'partial', 'sourceIdentities', index], message: 'Source identities must have unique ordinals and normalized usernames.' });
+        }
+        identitiesByOrdinal.set(identity.ordinal, identity); identityUsernames.add(identity.username);
+    }
     const retained = new Set<number>();
     for (const [index, profile] of value.profiles.entries()) {
         if (retained.has(profile.ordinal)) context.addIssue({ code: 'custom', path: ['profiles', index, 'ordinal'], message: 'Retained profile ordinals must be unique.' });
         if ((profile.isPrivate && profile.media.length !== 0) || (!profile.isPrivate && profile.media.length === 0)) {
             context.addIssue({ code: 'custom', path: ['profiles', index, 'media'], message: 'Partial retained partition does not match its media workload.' });
         }
+        const identity = identitiesByOrdinal.get(profile.ordinal);
+        if (!identity || identity.username !== profile.username || identity.partition !== (profile.isPrivate ? 'private' : 'public')) {
+            context.addIssue({ code: 'custom', path: ['profiles', index], message: 'Retained profile does not match its source identity.' });
+        }
         retained.add(profile.ordinal);
     }
     const unavailable = new Set<number>();
     for (const [index, terminal] of value.capture.partial.mediaUnavailable.entries()) {
         if (unavailable.has(terminal.ordinal) || retained.has(terminal.ordinal)) context.addIssue({ code: 'custom', path: ['capture', 'partial', 'mediaUnavailable', index, 'ordinal'], message: 'Terminal ordinals must be unique and disjoint.' });
+        if (identitiesByOrdinal.get(terminal.ordinal)?.partition !== 'public') context.addIssue({ code: 'custom', path: ['capture', 'partial', 'mediaUnavailable', index], message: 'Media terminal must match a public source identity.' });
         unavailable.add(terminal.ordinal);
+    }
+    for (const identity of identitiesByOrdinal.values()) {
+        const accounted = retained.has(identity.ordinal) || unavailable.has(identity.ordinal);
+        if (accounted !== (identity.partition !== 'fetch_terminal')) context.addIssue({ code: 'custom', path: ['capture', 'partial', 'sourceIdentities'], message: 'Source identity partition is not exactly accounted.' });
     }
 });
 const bundleSchema = z.union([exactBundleSchema, partialAvailableBundleSchema]);

@@ -158,4 +158,19 @@ describe('historical partial-available replay capture', () => {
             normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
     });
+
+    it('rejects duplicate normalized usernames at distinct source ordinals', async () => {
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '1'.repeat(64), sourceLineage: lineage,
+            evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
+            source: {
+                profiles: [
+                    { ordinal: 1, partition: 'public', profile: publicProfile('duplicate') },
+                    { ordinal: 7, partition: 'fetch_terminal', username: '@DUPLICATE' },
+                ],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    });
 });

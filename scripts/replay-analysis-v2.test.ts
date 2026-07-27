@@ -62,7 +62,7 @@ function partialReplayBundle(now: number): AnalysisV2ReplayBundle {
                 selectedPlanId: 'standard',
                 policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' },
             },
-            partial: { sourceUniverseDigest: 'c'.repeat(64), mediaUnavailable: [] },
+            partial: { sourceUniverseDigest: 'c'.repeat(64), sourceIdentities: [], mediaUnavailable: [] },
         },
     };
 }

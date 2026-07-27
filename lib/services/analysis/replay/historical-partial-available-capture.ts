@@ -42,10 +42,13 @@ function merge(selected: readonly SelectedAnalysisMedia[], parts: readonly Await
     return { media: selected.flatMap(item => bytes.has(item.selectionId) ? [{ ...item, bytes: bytes.get(item.selectionId)! }] : []), coverage: { selectedCount: selected.length, normalizedCount: bytes.size, failures: parts.flatMap(part => part.coverage.failures) } };
 }
 function universeDigest(profiles: readonly HistoricalPartialSourceProfile[]): string {
-    const value = profiles.map(profile => ({ ordinal: profile.ordinal, username: normalizedCandidateUsername(profile.username ?? profile.profile?.username ?? ''), partition: profile.partition }))
-        .sort((left, right) => left.ordinal - right.ordinal || left.username.localeCompare(right.username))
+    const value = sourceIdentities(profiles)
         .map(profile => `${profile.ordinal}\u0000${profile.username}\u0000${profile.partition}`).join('\n');
     return createHash('sha256').update(`analysis-v2-historical-partial-universe-v1\n${value}`).digest('hex');
+}
+function sourceIdentities(profiles: readonly HistoricalPartialSourceProfile[]) {
+    return profiles.map(profile => ({ ordinal: profile.ordinal, username: normalizedCandidateUsername(profile.username ?? profile.profile?.username ?? ''), partition: profile.partition }))
+        .sort((left, right) => left.ordinal - right.ordinal || left.username.localeCompare(right.username));
 }
 function normalizedCandidateUsername(value: string): string {
     const normalized = value.trim().replace(/^@/, '').toLowerCase();
@@ -66,10 +69,13 @@ export async function captureHistoricalPartialAvailableReplayBundle(input: {
     if (input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
     if (input.sourceLineage.selectedPlanId !== 'standard' || input.sourceLineage.policyVersions.aiStage !== 'ai-stage-policy-v2.7' || input.sourceLineage.policyVersions.risk !== 'risk-policy-v2.3' || 'scheduler' in input.sourceLineage.policyVersions) throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
     const seen = new Set<number>();
+    const seenUsernames = new Set<string>();
     for (const candidate of input.source.profiles) {
         if (!Number.isInteger(candidate.ordinal) || candidate.ordinal < 1 || seen.has(candidate.ordinal)) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
         seen.add(candidate.ordinal);
         const candidateUsername = normalizedCandidateUsername(candidate.username ?? candidate.profile?.username ?? '');
+        if (seenUsernames.has(candidateUsername)) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        seenUsernames.add(candidateUsername);
         if (candidate.profile && normalizedCandidateUsername(candidate.profile.username) !== candidateUsername) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
         if (
             (candidate.partition === 'fetch_terminal' && candidate.profile !== undefined)
@@ -120,7 +126,7 @@ export async function captureHistoricalPartialAvailableReplayBundle(input: {
     }
     report.retained.profiles = profiles.length; report.retained.media = profiles.reduce((sum, profile) => sum + profile.media.length, 0); report.retained.profileRatio = report.sourceProfiles ? Number((profiles.length / report.sourceProfiles).toFixed(4)) : 0; report.retained.mediaRatio = report.sourceSelectedMedia ? Number((report.retained.media / report.sourceSelectedMedia).toFixed(4)) : 0;
     const now = input.now ?? Date.now();
-    return { bundle: { schemaVersion: 2, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), capture: { scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, requestFingerprint: input.requestFingerprint, sourceLineage: input.sourceLineage, evaluationPolicy: input.evaluationPolicy, partial: { sourceUniverseDigest: universeDigest(input.source.profiles), mediaUnavailable } }, profiles, evidence: input.source.evidence }, report };
+    return { bundle: { schemaVersion: 2, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), capture: { scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, requestFingerprint: input.requestFingerprint, sourceLineage: input.sourceLineage, evaluationPolicy: input.evaluationPolicy, partial: { sourceUniverseDigest: universeDigest(input.source.profiles), sourceIdentities: sourceIdentities(input.source.profiles), mediaUnavailable } }, profiles, evidence: input.source.evidence }, report };
 }
 
 /** Deliberately omits all profile identifiers, URLs, ordinals and universe digest. */
