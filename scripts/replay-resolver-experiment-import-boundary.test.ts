@@ -64,7 +64,7 @@ describe('resolver experiment static execution boundary', () => {
         expect(experimentAdapter).toContain("model: 'gemini-3-flash-preview'");
         expect(experimentAdapter).toContain("thinkingLevel: 'HIGH'");
         expect(experimentAdapter).toContain("mediaResolution: 'HIGH'");
-        expect(experimentAdapter).toContain('maxOutputTokens: 512');
+        expect(experimentAdapter).toContain('maxOutputTokens: 2_048');
         for (const file of [
             'lib/services/ai/v2-staged-analysis.ts',
             'lib/services/ai/gender-resolution-generation.ts',

@@ -179,6 +179,7 @@ const resolverExperimentBundleSchema = baseBundleSchema.extend({
             uncertainPilotLimit: z.literal(24),
             totalResolverLimit: z.literal(64),
             maxResolverAttempts: z.literal(256),
+            resolverMaxOutputTokens: z.literal(2048),
             candidateOrder: z.literal('source_ordinal_ascending'),
         }).strict(),
     }).strict(),

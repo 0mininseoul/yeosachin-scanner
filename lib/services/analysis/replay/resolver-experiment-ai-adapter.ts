@@ -14,7 +14,12 @@ import {
     createAnalysisV2AiResultInputHash,
 } from '@/lib/services/analysis/v2-ai-result-identity';
 import { getAiStagePolicy } from '@/lib/services/ai/stage-policy';
-import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
+import {
+    classifyGeminiGenerationError,
+    isAmbiguousGeminiGenerationError,
+    isGeminiRateLimitError,
+    isRecoverableGeminiResponseError,
+} from '@/lib/services/ai/gemini-generation-policy';
 import type {
     GeminiAttemptStartTelemetry,
     GeminiAttemptTelemetry,
@@ -89,7 +94,7 @@ function resolverIdentity(media: ReturnType<typeof normalized>) {
         mediaResolution: 'HIGH',
         promptVersion: policy.promptVersion,
         schemaVersion: policy.schemaVersion,
-        maxOutputTokens: 512,
+        maxOutputTokens: 2_048,
         inputHash: createAnalysisV2AiResultInputHash(projected.prompt),
         mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(projected.media),
         cacheScope: 'request',
@@ -124,7 +129,7 @@ async function resolveGender(
             model: 'gemini-3-flash-preview',
             thinkingLevel: 'HIGH',
             mediaResolution: 'HIGH',
-            maxOutputTokens: 512,
+            maxOutputTokens: 2_048,
         },
     ));
     return {
@@ -138,12 +143,16 @@ function outcome(error: unknown, state: InvocationState): ReplayOutcome {
         error instanceof Error
         && error.message === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
     ) return 'capacity_skipped';
+    if (isGeminiRateLimitError(error)) return 'rate_limited';
+    if (isRecoverableGeminiResponseError(error)) return 'rejected';
+    if (isAmbiguousGeminiGenerationError(error)) return 'failed';
     const disposition = classifyGeminiGenerationError(error);
     return disposition === 'rate_limited' ? 'rate_limited'
         : disposition === 'rejected' ? 'rejected' : 'failed';
 }
 async function invoke<T>(
     task: (state: InvocationState) => Promise<T>,
+    isolateError: (error: unknown) => boolean = () => true,
 ): Promise<ReplayInvocation<T>> {
     const started = performance.now();
     const state: InvocationState = {
@@ -161,6 +170,7 @@ async function invoke<T>(
             elapsedMs: Math.round(performance.now() - started),
         };
     } catch (error) {
+        if (!isolateError(error)) throw error;
         return {
             outcome: outcome(error, state), calls: state.calls,
             rateLimited: state.rateLimited, retries: state.retries,
@@ -280,7 +290,10 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
                 replayCapability,
                 input.signal,
             );
-        }),
+        }, error =>
+            isGeminiRateLimitError(error)
+            || isRecoverableGeminiResponseError(error)
+            || isAmbiguousGeminiGenerationError(error)),
     };
     Object.freeze(runner);
     issuedExperimentRunners.add(runner);

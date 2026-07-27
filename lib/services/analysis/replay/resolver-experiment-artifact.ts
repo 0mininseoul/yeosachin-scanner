@@ -65,6 +65,7 @@ export function deriveStrongUncertainResolverExperiment(
                 uncertainPilotLimit: 24,
                 totalResolverLimit: 64,
                 maxResolverAttempts: 256,
+                resolverMaxOutputTokens: 2048,
                 candidateOrder: 'source_ordinal_ascending',
             },
         },

@@ -60,6 +60,7 @@ describe('strong uncertain resolver experiment artifact', () => {
             uncertainPilotLimit: 24,
             totalResolverLimit: 64,
             maxResolverAttempts: 256,
+            resolverMaxOutputTokens: 2048,
         });
         expect(derived.capture.experiment.parentRequestFingerprint).toBe('a'.repeat(64));
         expect(derived.capture.experiment.sourceUniverseDigest)
@@ -87,6 +88,7 @@ describe('strong uncertain resolver experiment artifact', () => {
         ['source digest', (value: any) => { value.capture.partial.sourceUniverseDigest = 'b'.repeat(64); }],
         ['lineage', (value: any) => { value.capture.sourceLineage.policyVersions.risk = 'risk-policy-v2.4'; }],
         ['pilot', (value: any) => { value.capture.experiment.uncertainPilotLimit = 23; }],
+        ['resolver output budget', (value: any) => { value.capture.experiment.resolverMaxOutputTokens = 512; }],
     ])('rejects mutated %s at the library runner boundary', (_label, mutate) => {
         const value = structuredClone(deriveStrongUncertainResolverExperiment(parent()));
         mutate(value);

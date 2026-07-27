@@ -213,7 +213,7 @@ describe('dedicated resolver experiment AI adapter', () => {
             model: 'gemini-3-flash-preview',
             thinkingLevel: 'HIGH',
             mediaResolution: 'HIGH',
-            maxOutputTokens: 512,
+            maxOutputTokens: 2048,
             skipTokenLog: true,
             replayCapability: expect.any(Object),
         });
@@ -312,6 +312,107 @@ describe('dedicated resolver experiment AI adapter', () => {
             limits: { maxAttempts: 256 },
         });
         expect(mocks.analyze).toHaveBeenCalledTimes(64);
+    });
+
+    it('isolates concurrent rejected and ambiguous generations and completes the cohort', async () => {
+        mocks.batch.mockImplementation(async accounts => accounts.map((account: { accountId: string }) => ({
+            accountId: account.accountId,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: [],
+                v29AccountContext: 'personal',
+            },
+        })));
+        mocks.analyze
+            .mockImplementationOnce(async (_prompt, _media, options) => {
+                await options.onBeforeAttempt({ retryCount: 0 });
+                await options.onAttemptTelemetry({
+                    latencyMs: 1, disposition: 'response_rejected',
+                });
+                throw new Error(
+                    'AI_GENERATION_RESPONSE_REJECTED_ERROR: finishReason=MAX_TOKENS',
+                );
+            })
+            .mockImplementationOnce(async (_prompt, _media, options) => {
+                await options.onBeforeAttempt({ retryCount: 0 });
+                await options.onAttemptTelemetry({
+                    latencyMs: 1, disposition: 'ambiguous',
+                });
+                throw new Error('AI_AMBIGUOUS_GENERATION_ERROR: transport status unknown');
+            });
+
+        const report = await runStrongUncertainResolverExperiment({
+            bundle: sealedBundle(4),
+            runner: createStrongUncertainResolverExperimentAdapter(),
+        });
+
+        expect(mocks.analyze).toHaveBeenCalledTimes(4);
+        expect(report).toMatchObject({
+            attempted: 4,
+            succeeded: 2,
+            failed: 2,
+            finalUnknown: 4,
+            cohorts: {
+                existing: { attempted: 4, succeeded: 2, failed: 2 },
+                uncertain: { attempted: 0, succeeded: 0, failed: 0 },
+            },
+            failureOutcomes: {
+                rejected: 1,
+                failed: 1,
+                ambiguous: 1,
+            },
+        });
+    });
+
+    it('charges an ambiguous generation once without retrying it', async () => {
+        mocks.analyze.mockImplementationOnce(async (_prompt, _media, options) => {
+            await options.onBeforeAttempt({ retryCount: 0 });
+            await options.onAttemptTelemetry({
+                latencyMs: 1, disposition: 'ambiguous',
+            });
+            throw new Error('AI_AMBIGUOUS_GENERATION_ERROR: transport status unknown');
+        });
+        const runner = createStrongUncertainResolverExperimentAdapter();
+        const result = await runner.resolveGender!({
+            ordinal: 1,
+            media: [],
+            signal: new AbortController().signal,
+        });
+        expect(result).toMatchObject({
+            outcome: 'failed',
+            calls: 1,
+            attempts: 1,
+            retries: 0,
+            failureDisposition: { ambiguous: 1 },
+        });
+        expect(mocks.analyze).toHaveBeenCalledOnce();
+    });
+
+    it('fails the whole experiment on a structural resolver fault', async () => {
+        mocks.batch.mockImplementation(async accounts => accounts.map((account: { accountId: string }) => ({
+            accountId: account.accountId,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: [],
+                v29AccountContext: 'personal',
+            },
+        })));
+        mocks.analyze.mockRejectedValue(new Error('programmer invariant'));
+        await expect(runStrongUncertainResolverExperiment({
+            bundle: sealedBundle(4),
+            runner: createStrongUncertainResolverExperimentAdapter(),
+        })).rejects.toThrow('programmer invariant');
+        expect(mocks.analyze.mock.calls.length).toBeLessThanOrEqual(2);
     });
 
     it('fails closed at 41 existing candidates before any resolver call', async () => {
