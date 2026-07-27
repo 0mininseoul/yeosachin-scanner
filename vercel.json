@@ -5,6 +5,9 @@
         "icn1"
     ],
     "functions": {
+        "app/api/internal/kakao-signup-discord-outbox/route.ts": {
+            "maxDuration": 60
+        },
         "app/api/analysis/run/route.ts": {
             "maxDuration": 300
         },
@@ -21,6 +24,12 @@
             "maxDuration": 60
         }
     },
+    "crons": [
+        {
+            "path": "/api/internal/kakao-signup-discord-outbox",
+            "schedule": "0 0 * * *"
+        }
+    ],
     "git": {
         "deploymentEnabled": {
             "main": true

@@ -43,7 +43,8 @@ const boundedImageUrlSchema = z.string()
     .min(1)
     .max(2_048)
     .refine(value => value.startsWith('/api/image-proxy?')
-        || /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(value), {
+        || /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(value)
+        || /^\/demo-avatars\/demo-v3-(?:target|female|private)-\d{3}\.webp$/u.test(value), {
         message: 'Public image URLs must use the signed proxy or a fixed local synthetic asset.',
     })
     .nullable();
