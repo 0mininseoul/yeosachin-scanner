@@ -23,6 +23,8 @@ import type {
 
 type Run = ReplayCaptureDescriptor['providerRuns'][number];
 const record = z.record(z.string(), z.unknown());
+const FRESH_TARGET_PROFILE_OPERATION =
+    /^target-profile-fresh-admission:g([1-9]|[1-9][0-9]|100)$/;
 
 /** The returned object exposes only Actor/run GET and dataset list operations. */
 export function createReplayReadonlyApifyClient(token: string): ReplayReadonlyApifyClient {
@@ -52,7 +54,7 @@ export function createReplayReadonlyApifyClient(token: string): ReplayReadonlyAp
 function operationKind(run: Run): string { return run.operationKey.split(':', 1)[0] ?? ''; }
 function assertActorForOperation(run: Run): void {
     const isTargetProfile = run.operationKey === 'target-profile-fallback'
-        || /^target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100)$/.test(run.operationKey);
+        || FRESH_TARGET_PROFILE_OPERATION.test(run.operationKey);
     const isCandidateProfile = /^(?:profile-fallback|profile-repair):[a-f0-9]{64}$/.test(run.operationKey);
     const isRelationship = /^(?:relationship-followers|relationship-following):[a-f0-9]{64}$/.test(run.operationKey);
     const isLikers = /^(?:target-likers|candidate-likers):[a-f0-9]{64}$/.test(run.operationKey);
@@ -91,11 +93,44 @@ function postIdFromUrl(value: string): string {
     return parsed[1];
 }
 
+function isHistoricalDescriptor(
+    descriptor: ReplayCaptureDescriptor | HistoricalOfficialE2EReplayCaptureDescriptor,
+): descriptor is HistoricalOfficialE2EReplayCaptureDescriptor {
+    return 'targetResolution' in descriptor
+        && descriptor.targetResolution === 'provider_ledger';
+}
+
+/**
+ * Fresh admission is the production target-evidence source when it exists. The earlier
+ * preflight fallback is retained in the ledger for cost/audit history but is superseded by the
+ * largest fresh-admission generation; selecting by the generation in its operation key is an
+ * explicit pipeline rule, not last-write-wins record merging.
+ */
+function historicalAuthoritativeTargetProfileRuns(runs: readonly Run[]): readonly Run[] {
+    const fresh = runs.flatMap(run => {
+        const matched = FRESH_TARGET_PROFILE_OPERATION.exec(run.operationKey);
+        return matched?.[1] === undefined ? [] : [{ run, generation: Number(matched[1]) }];
+    });
+    if (fresh.length > 0) {
+        const generation = Math.max(...fresh.map(item => item.generation));
+        const latest = fresh.filter(item => item.generation === generation);
+        if (latest.length !== 1) throw new Error('ANALYSIS_V2_REPLAY_TARGET_PROFILE_MISSING');
+        return [latest[0]!.run];
+    }
+    const fallback = runs.filter(run => run.operationKey === 'target-profile-fallback');
+    if (fallback.length !== 1) throw new Error('ANALYSIS_V2_REPLAY_TARGET_PROFILE_MISSING');
+    return fallback;
+}
+
 export async function loadReplaySourceFromExistingRuns(input: {
     descriptor: ReplayCaptureDescriptor | HistoricalOfficialE2EReplayCaptureDescriptor;
     clientForSlot(slot: string): ReplayReadonlyApifyClient;
 }): Promise<{ profiles: AnalysisV2CheckpointProfile[]; evidence: AnalysisV2ReplayBundle['evidence']; providerRuns: Run[] }> {
-    const allRuns = [...input.descriptor.preflightRuns, ...input.descriptor.providerRuns];
+    const historical = isHistoricalDescriptor(input.descriptor);
+    const preflightRuns = historical
+        ? historicalAuthoritativeTargetProfileRuns(input.descriptor.preflightRuns)
+        : input.descriptor.preflightRuns;
+    const allRuns = [...preflightRuns, ...input.descriptor.providerRuns];
     const readState = new Set<string>();
     const datasets = new Map<Run, unknown[]>();
     for (const run of allRuns) {
@@ -127,8 +162,7 @@ export async function loadReplaySourceFromExistingRuns(input: {
             profiles.set(username, mapped);
         }
     }
-    const targetUsername = 'targetResolution' in input.descriptor
-        && input.descriptor.targetResolution === 'provider_ledger'
+    const targetUsername = historical
         ? replayTargetUsernameFromProviderLedger(datasets)
         : input.descriptor.targetUsername;
     const targetProfile = profiles.get(targetUsername);
@@ -239,7 +273,7 @@ function replayTargetUsernameFromProviderLedger(
     for (const [run, items] of datasets) {
         if (
             run.operationKey !== 'target-profile-fallback'
-            && !/^target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100)$/.test(run.operationKey)
+            && !FRESH_TARGET_PROFILE_OPERATION.test(run.operationKey)
         ) continue;
         for (const username of profileUsernames(items)) targetProfileUsernames.add(username);
     }
