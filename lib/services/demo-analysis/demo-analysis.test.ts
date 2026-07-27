@@ -10,6 +10,7 @@ import {
     validateDemoAssetManifest,
 } from './demo-analysis';
 import { analysisV2ProgressCopy } from '@/lib/services/analysis/owner-view-presentation';
+import { analysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
 const requestId = '223e4567-e89b-42d3-a456-426614174000';
@@ -70,6 +71,27 @@ describe('synthetic demo fixture', () => {
             .toBe(first.summary.screenedMutuals);
     });
 
+    it('uses varied, one-line synthetic account copy with only local blurred avatars', () => {
+        const fixture = createDemoFixture(requestId);
+        const publicRows = fixture.publicAccounts;
+        const fixtureText = publicRows.flatMap(row => [
+            row.instagramId,
+            row.fullName ?? '',
+            row.bio ?? '',
+            row.oneLineOverview,
+            ...(row.highRiskNarrative ?? []),
+        ]);
+
+        expect(new Set(publicRows.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
+        expect(new Set(publicRows.map(row => row.bio)).size).toBeGreaterThanOrEqual(12);
+        expect(new Set(publicRows.map(row => row.oneLineOverview)).size).toBeGreaterThanOrEqual(12);
+        expect(new Set(fixture.privateAccounts.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
+        expect(fixtureText.every(value => !/https?:\/\/|www\.|@|[\r\n]/iu.test(value))).toBe(true);
+        expect([...publicRows, ...fixture.privateAccounts].every(row =>
+            /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(row.profileImage ?? ''),
+        )).toBe(true);
+    });
+
     it('derives monotonic server progress from persisted start time and never fails', () => {
         const startedAt = new Date('2026-07-01T00:00:00.000Z');
         const early = projectDemoProgress({ requestId, startedAt, durationSeconds: 75, now: new Date(+startedAt + 10_000) });
@@ -121,5 +143,12 @@ describe('synthetic demo fixture', () => {
         } while (publicCursor || privateCursor);
         expect(publicIds).toHaveLength(242);
         expect(privateIds).toHaveLength(142);
+    });
+
+    it('continues to emit the production result-page DTO for the demo UI', () => {
+        const page = demoResultPage({ requestId, femaleCursor: null, privateCursor: null, pageSize: 50 });
+        expect(analysisResultPageV1Schema.safeParse(page).success).toBe(true);
+        expect(page.femaleAccounts).toHaveLength(50);
+        expect(page.privateAccounts).toHaveLength(50);
     });
 });
