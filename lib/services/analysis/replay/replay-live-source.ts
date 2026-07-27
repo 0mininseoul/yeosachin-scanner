@@ -127,6 +127,11 @@ function isProductionCompleteCandidateProfileBatch(
         && failures.every(attempt => isProductionAllowedCandidateProfileFailure(attempt.error));
 }
 
+function sameOrderedUsernames(left: readonly string[], right: readonly string[]): boolean {
+    return left.length === right.length
+        && left.every((username, index) => username === right[index]);
+}
+
 function asCheckpoint(profile: ReturnType<typeof parseApifyProfileDataset>['profilesByUsername'] extends Map<string, infer P> ? P : never): AnalysisV2CheckpointProfile {
     return profile as AnalysisV2CheckpointProfile;
 }
@@ -189,8 +194,8 @@ export async function loadReplaySourceFromExistingRuns(input: {
     const profiles = new Map<string, AnalysisV2CheckpointProfile>();
     const terminalCandidateProfileUsernames = new Set<string>();
     const fallbackBatches: Array<Map<string, CandidateProfileAttempt>> = [];
-    const fallbackByUsername = new Map<string, CandidateProfileAttempt>();
-    const repairByUsername = new Map<string, CandidateProfileAttempt>();
+    const fallbackUsernames = new Set<string>();
+    const repairBatches: Array<Map<string, CandidateProfileAttempt>> = [];
     for (const [run, items] of datasets) {
         const kind = operationKind(run);
         if (![
@@ -205,16 +210,17 @@ export async function loadReplaySourceFromExistingRuns(input: {
         if (isCandidateProfile) {
             const attempts = candidateProfileAttempts({ usernames, parsed });
             if (!attempts) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
-            const destination = kind === 'profile-fallback'
-                ? fallbackByUsername
-                : repairByUsername;
-            for (const [username, attempt] of attempts) {
-                if (destination.has(username)) {
-                    throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+            if (kind === 'profile-fallback') {
+                for (const username of attempts.keys()) {
+                    if (fallbackUsernames.has(username)) {
+                        throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+                    }
+                    fallbackUsernames.add(username);
                 }
-                destination.set(username, attempt);
+                fallbackBatches.push(attempts);
+            } else {
+                repairBatches.push(attempts);
             }
-            if (kind === 'profile-fallback') fallbackBatches.push(attempts);
             continue;
         }
         if (
@@ -232,25 +238,36 @@ export async function loadReplaySourceFromExistingRuns(input: {
             profiles.set(username, mapped);
         }
     }
-    for (const [username, attempt] of repairByUsername) {
-        if (fallbackByUsername.get(username)?.status !== 'failed') {
+    const repairedFallbackBatches = new Set<Map<string, CandidateProfileAttempt>>();
+    for (const repair of repairBatches) {
+        const repairUsernames = [...repair.keys()];
+        const matchingFallbackBatches = fallbackBatches.filter(batch => (
+            sameOrderedUsernames(
+                repairUsernames,
+                [...batch].flatMap(([username, attempt]) => (
+                    attempt.status === 'failed' ? [username] : []
+                )),
+            )
+        ));
+        if (matchingFallbackBatches.length !== 1) {
             throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
         }
-        fallbackByUsername.set(username, attempt);
-    }
-    for (const batch of fallbackBatches) {
-        const finalAttempts = [...batch.keys()].map(username => fallbackByUsername.get(username));
+        const fallback = matchingFallbackBatches[0]!;
         if (
-            finalAttempts.some((attempt): attempt is undefined => attempt === undefined)
-            || !isProductionCompleteCandidateProfileBatch(
-                finalAttempts as CandidateProfileAttempt[],
-            )
+            repairedFallbackBatches.has(fallback)
+            || isProductionCompleteCandidateProfileBatch([...fallback.values()])
         ) {
             throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
         }
-        for (const username of batch.keys()) {
-            const attempt = fallbackByUsername.get(username);
-            if (!attempt) throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+        repairedFallbackBatches.add(fallback);
+        for (const [username, attempt] of repair) fallback.set(username, attempt);
+    }
+    for (const batch of fallbackBatches) {
+        const finalAttempts = [...batch.values()];
+        if (!isProductionCompleteCandidateProfileBatch(finalAttempts)) {
+            throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
+        }
+        for (const [username, attempt] of batch) {
             if (attempt.status !== 'success') {
                 if (profiles.has(username)) {
                     throw new Error('ANALYSIS_V2_REPLAY_PROFILE_DATASET_INVALID');
