@@ -8,6 +8,7 @@ import {
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
+import { historicalPartialBundleInvariantIssues } from './historical-partial-available-artifact';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -142,7 +143,11 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         evaluationPolicy?: { capability?: string };
         scope?: string; notExact?: boolean; fullE2eEvidence?: boolean;
         noMediaSubstitution?: boolean;
-        partial?: { mediaUnavailable?: readonly { ordinal?: number }[] };
+        partial?: {
+            sourceUniverseDigest?: string;
+            sourceIdentities?: readonly { ordinal: number; username: string; partition: 'private' | 'public' | 'fetch_terminal' }[];
+            mediaUnavailable?: readonly { ordinal: number }[];
+        };
     };
     const capability = capture.evaluationPolicy?.capability;
     if (
@@ -155,21 +160,16 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         || capture.notExact !== true
         || capture.fullE2eEvidence !== false
         || capture.noMediaSubstitution !== true
+        || typeof capture.partial?.sourceUniverseDigest !== 'string'
+        || !Array.isArray(capture.partial?.sourceIdentities)
         || !Array.isArray(capture.partial?.mediaUnavailable)
     ) throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
-    const ordinals = new Set<number>();
-    for (const profile of bundle.profiles) {
-        if (ordinals.has(profile.ordinal) || (profile.isPrivate ? profile.media.length !== 0 : profile.media.length === 0)) {
-            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
-        }
-        ordinals.add(profile.ordinal);
-    }
-    for (const terminal of capture.partial.mediaUnavailable) {
-        if (!Number.isInteger(terminal.ordinal) || terminal.ordinal! < 1 || ordinals.has(terminal.ordinal!)) {
-            throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
-        }
-        ordinals.add(terminal.ordinal!);
-    }
+    if (historicalPartialBundleInvariantIssues({
+        sourceUniverseDigest: capture.partial.sourceUniverseDigest,
+        sourceIdentities: capture.partial.sourceIdentities,
+        mediaUnavailable: capture.partial.mediaUnavailable,
+        profiles: bundle.profiles,
+    }).length) throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
 }
 
 function percentile(values: number[], p: number): number {

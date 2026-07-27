@@ -15,6 +15,7 @@ import {
     type AnalysisV2ReplayBundle,
 } from './replay-bundle';
 import { installReplayArtifactSignalCleanup } from './replay-artifact-lifecycle';
+import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
 
 const temporaryPaths: string[] = [];
 
@@ -50,6 +51,7 @@ function bundle(): AnalysisV2ReplayBundle {
 
 function partialBundle(): AnalysisV2ReplayBundle {
     const base = bundle();
+    const sourceIdentities = [{ ordinal: 1, username: 'example', partition: 'public' as const }];
     return {
         ...base,
         schemaVersion: 2,
@@ -59,7 +61,7 @@ function partialBundle(): AnalysisV2ReplayBundle {
             fullE2eEvidence: false, noMediaSubstitution: true,
             sourceLineage: { selectedPlanId: 'standard', policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' } },
             evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
-            partial: { sourceUniverseDigest: 'd'.repeat(64), sourceIdentities: [{ ordinal: 1, username: 'example', partition: 'public' }], mediaUnavailable: [] },
+            partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities), sourceIdentities, mediaUnavailable: [] },
         },
     };
 }
@@ -120,6 +122,17 @@ describe('analysis V2 replay bundle', () => {
         ] } } };
         await expect(writeReplayBundle({ bundle: invalid as AnalysisV2ReplayBundle, bundlePath: join(directory, 'write.enc'), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
         const readPath = join(directory, 'read.enc'); await writeRawEncrypted(readPath, keyPath, invalid);
+        await expect(readReplayBundle({ bundlePath: readPath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('rejects a source universe digest that does not authenticate canonical identities at write and read', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key'); await createReplayKeyFile(keyPath);
+        const base = partialBundle() as Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
+        const invalid = { ...base, capture: { ...base.capture, partial: { ...base.capture.partial, sourceUniverseDigest: '0'.repeat(64) } } };
+        await expect(writeReplayBundle({ bundle: invalid, bundlePath: join(directory, 'digest-write.enc'), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+        const readPath = join(directory, 'digest-read.enc'); await writeRawEncrypted(readPath, keyPath, invalid);
         await expect(readReplayBundle({ bundlePath: readPath, keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
     });
     it('encrypts private payloads with 0700/0600 artifact permissions and decrypts only with its key', async () => {

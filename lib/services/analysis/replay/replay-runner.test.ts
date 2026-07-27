@@ -10,6 +10,7 @@ vi.mock('./replay-staged-ai-adapter', () => ({
 
 import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
+import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
 
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
@@ -41,10 +42,38 @@ const bundle = {
 };
 
 describe('AI-only replay runner', () => {
+    function validPartialBundle(): Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }> {
+        const sourceIdentities = [
+            { ordinal: 1, username: 'public', partition: 'public' as const },
+            { ordinal: 2, username: 'private', partition: 'private' as const },
+        ];
+        return {
+            ...bundle,
+            schemaVersion: 2,
+            capture: {
+                ...bundle.capture,
+                scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true,
+                sourceLineage: { selectedPlanId: 'standard', policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' } },
+                evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
+                partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities), sourceIdentities, mediaUnavailable: [] },
+            },
+        };
+    }
+
+    it.each([
+        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceUniverseDigest: '0'.repeat(64) } } }),
+        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceIdentities: [...value.capture.partial.sourceIdentities, { ordinal: 8, username: 'PUBLIC', partition: 'fetch_terminal' as const }] } } }),
+        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceIdentities: value.capture.partial.sourceIdentities.slice(0, 1) } } }),
+        (value: ReturnType<typeof validPartialBundle>) => ({ ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceIdentities: value.capture.partial.sourceIdentities.map(identity => identity.ordinal === 1 ? { ...identity, partition: 'private' as const } : identity) } } }),
+    ])('rejects invalid partial identity invariants before a direct runner invocation %#', async mutate => {
+        const invalid = mutate(validPartialBundle());
+        await expect(runAnalysisV2AiReplay({ bundle: invalid, mode: 'dry-run', evaluationPolicy: invalid.capture.evaluationPolicy })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    });
+
     it.each([
         { ...bundle, capture: { ...bundle.capture, evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' } } },
-        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, partial: { sourceUniverseDigest: 'd'.repeat(64), sourceIdentities: [], mediaUnavailable: [] } } },
-        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, evaluationPolicy: { capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' }, partial: { sourceUniverseDigest: 'd'.repeat(64), sourceIdentities: [], mediaUnavailable: [] } } },
+        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest([]), sourceIdentities: [], mediaUnavailable: [] } } },
+        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, evaluationPolicy: { capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' }, partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest([]), sourceIdentities: [], mediaUnavailable: [] } } },
     ])('rejects cross-version artifact capability at the runner boundary %#', async invalid => {
         await expect(runAnalysisV2AiReplay({ bundle: invalid as AnalysisV2ReplayBundle, mode: 'dry-run', ...('evaluationPolicy' in invalid.capture ? { evaluationPolicy: invalid.capture.evaluationPolicy as never } : {}) })).rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
     });

@@ -9,6 +9,7 @@ import {
     type AnalysisV2ReplayBundle,
 } from '../lib/services/analysis/replay/replay-bundle';
 import { parseReplayCliArgs, runReplayCli } from './replay-analysis-v2';
+import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/replay/historical-partial-available-artifact';
 
 const temporaryPaths: string[] = [];
 
@@ -62,7 +63,7 @@ function partialReplayBundle(now: number): AnalysisV2ReplayBundle {
                 selectedPlanId: 'standard',
                 policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' },
             },
-            partial: { sourceUniverseDigest: 'c'.repeat(64), sourceIdentities: [], mediaUnavailable: [] },
+            partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest([]), sourceIdentities: [], mediaUnavailable: [] },
         },
     };
 }
