@@ -1,11 +1,12 @@
-import { applyGenderResolution, type FeatureAnalysisResult, type GenderResolutionResult, type GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
+import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
+import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-reconciliation';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
-import { lookupReplayStagedAiAdapterPolicy } from './replay-staged-ai-adapter';
+import { lookupReplayAiRunnerPolicy } from './replay-runner-policy-registry';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
@@ -60,7 +61,7 @@ function assertReplayAiRunnerPolicy(
     runner: ReplayAiRunner | undefined,
     expected: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
 ): ReplayAiRunner {
-    if (!runner || lookupReplayStagedAiAdapterPolicy(runner) !== expected) {
+    if (!runner || lookupReplayAiRunnerPolicy(runner) !== expected) {
         throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
     }
     return runner;

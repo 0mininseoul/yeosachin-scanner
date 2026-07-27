@@ -75,6 +75,29 @@ describe('analysis V2 replay CLI', () => {
         expect(result.stderr).not.toContain('server-only');
     });
 
+    it('runs an authenticated dry replay without React server module conditions', async () => {
+        const { bundlePath, keyPath } = await artifacts(Date.now());
+        const result = spawnSync(
+            process.execPath,
+            [
+                '--import',
+                'tsx',
+                'scripts/replay-analysis-v2.ts',
+                '--run',
+                '--dry-run',
+                `--bundle=${bundlePath}`,
+                `--key=${keyPath}`,
+            ],
+            { cwd: process.cwd(), encoding: 'utf8' },
+        );
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+            status: 'ok',
+            benchmark_scope: 'ai-only-exact-replay',
+        });
+        expect(result.stderr).not.toContain('server-only');
+    });
+
     it('requires the UUID-only historical official E2E capability on both capture and paid run', () => {
         const capture = [
             '--capture', '--historical-official-e2e',
