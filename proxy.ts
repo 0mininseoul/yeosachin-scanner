@@ -4,7 +4,7 @@ import {
     appRedirectUrlForRequest,
     CANONICAL_APP_ORIGIN,
 } from '@/lib/constants/app-url';
-import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution } from '@/lib/services/identity/kakao-signup-attribution';
+import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution, encodeKakaoSignupAttribution, normalizeKakaoReferrerOrigin } from '@/lib/services/identity/kakao-signup-attribution';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
     'www.yeosachin.com',
@@ -42,7 +42,7 @@ export async function proxy(request: NextRequest) {
     // stores a URL, query string, referrer, click ID, or other identifier.
     if (request.method === 'GET' && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
         supabaseResponse.cookies.set(KAKAO_ATTRIBUTION_COOKIE,
-            classifyKakaoSignupAttribution(request.nextUrl.search, request.headers.get('referer') ?? ''), {
+            encodeKakaoSignupAttribution(classifyKakaoSignupAttribution(request.nextUrl.search, request.headers.get('referer') ?? ''), normalizeKakaoReferrerOrigin(request.headers.get('referer') ?? '')), {
                 maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax', secure: true,
             });
     }
@@ -63,9 +63,9 @@ export async function proxy(request: NextRequest) {
                         request,
                     });
                     const attribution = request.cookies.get(KAKAO_ATTRIBUTION_COOKIE)
-                        ?? { name: KAKAO_ATTRIBUTION_COOKIE, value: classifyKakaoSignupAttribution(
+                        ?? { name: KAKAO_ATTRIBUTION_COOKIE, value: encodeKakaoSignupAttribution(classifyKakaoSignupAttribution(
                             request.nextUrl.search, request.headers.get('referer') ?? '',
-                        ), maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true };
+                        ), normalizeKakaoReferrerOrigin(request.headers.get('referer') ?? '')), maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true };
                     if (!request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
                         supabaseResponse.cookies.set(attribution);
                     }

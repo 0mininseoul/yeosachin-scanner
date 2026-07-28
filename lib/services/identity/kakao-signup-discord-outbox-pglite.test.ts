@@ -18,6 +18,10 @@ const attribution = readFileSync(new URL(
     '../../../supabase/migrations/20260729100000_add_kakao_signup_discord_attribution.sql',
     import.meta.url,
 ), 'utf8');
+const attributionOrigin = readFileSync(new URL(
+    '../../../supabase/migrations/20260729110000_add_kakao_signup_discord_attribution_origin.sql',
+    import.meta.url,
+), 'utf8');
 const KAKAO_ID = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite;
 
@@ -41,6 +45,7 @@ beforeAll(async () => {
     await db.exec(hardening);
     await db.exec(recovery);
     await db.exec(attribution);
+    await db.exec(attributionOrigin);
 }, 30_000);
 
 afterAll(async () => db.close());
@@ -136,14 +141,14 @@ describe('Kakao signup Discord durable outbox', () => {
         const userId = '523e4567-e89b-42d3-a456-426614174000';
         await db.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('${userId}', '{"provider":"kakao"}'); SET ROLE service_role;`);
         await db.query(
-            'SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp(), $2)',
-            [userId, '외부 참조: 구글'],
+            'SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp(), $2, $3)',
+            [userId, '외부 참조: 구글', 'https://everytime.kr/'],
         );
-        const claimed = await db.query<{ attribution_label: string }>(
-            'SELECT attribution_label FROM public.claim_kakao_signup_discord_outbox($1, 1)', [userId],
+        const claimed = await db.query<{ attribution_label: string; attribution_origin: string }>(
+            'SELECT attribution_label, attribution_origin FROM public.claim_kakao_signup_discord_outbox($1, 1)', [userId],
         );
         await db.exec('RESET ROLE');
-        expect(claimed.rows).toEqual([{ attribution_label: '외부 참조: 구글' }]);
+        expect(claimed.rows).toEqual([{ attribution_label: '외부 참조: 구글', attribution_origin: 'https://everytime.kr/' }]);
     });
 
     it('keeps five-argument staging compatible and rejects invalid attribution at both boundaries', async () => {
