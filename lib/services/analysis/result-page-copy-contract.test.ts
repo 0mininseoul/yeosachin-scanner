@@ -36,6 +36,11 @@ const compactSummary = resultPage.slice(
     resultPage.indexOf(') : gr ? ('),
 );
 
+const reportHeader = resultPage.slice(
+    resultPage.indexOf('<Eyebrow className="shrink-0">판독 리포트</Eyebrow>'),
+    resultPage.indexOf('{/* pipeline-specific summary */}'),
+);
+
 describe('result page pagination copy contract', () => {
     it('drops the range/plus counters and the old load-more buttons', () => {
         for (const forbidden of [
@@ -88,29 +93,111 @@ describe('result page pagination copy contract', () => {
         expect(resultPage).not.toContain("data.pipelineVersion === 'v2' && <div className=\"mt-9\">");
     });
 
-    it('keeps the compact result summary limited to user-facing Instagram metrics', () => {
-        expect(resultPage).toContain("{ label: '맞팔', value: counts.mutual }");
-        expect(resultPage).toContain("{ label: '공개', value: counts.publicCount }");
-        expect(resultPage).toContain("{ label: '비공개', value: counts.privateCount }");
-        expect(resultPage).toContain("{ label: '팔로워', value: summary.v2.followers.declared }");
-        expect(resultPage).toContain("{ label: '팔로잉', value: summary.v2.following.declared }");
+    it('states the analysis scope once and drops profile vanity metrics', () => {
+        // Mutual count describes what was analysed, so it rides the verdict line.
+        expect(compactSummary).toContain('counts.mutual.toLocaleString()');
+        // Follower/following describe the account, not the result, and preflight
+        // already showed them; repeating them here only thickened the header.
+        expect(resultPage).not.toContain('summary.v2.followers.declared.toLocaleString()');
+        expect(resultPage).not.toContain('summary.v2.following.declared.toLocaleString()');
+        // Internal screening scope is never surfaced to the owner.
         expect(resultPage).not.toContain('summary.v2.screenedMutuals.toLocaleString()');
     });
 
-    it('renders primary summary metrics as one compact desktop strip instead of stacked cells', () => {
-        expect(compactSummary).toContain('data-summary-primary-metrics');
-        expect(compactSummary).toContain('sm:h-6 sm:flex-nowrap sm:py-0');
-        expect(compactSummary).toContain('inline-flex items-baseline');
+    it('keeps the share control inside the report, not in the app chrome', () => {
+        // In the TopBar it read as a site-level menu item rather than an action
+        // on this result.
+        expect(reportHeader).toContain('handleKakaoShare');
+        const topBar = resultPage.slice(resultPage.indexOf('<TopBar'), resultPage.indexOf('</TopBar>') + 1);
+        expect(topBar).not.toContain('handleKakaoShare');
+    });
+
+    it('states the public/private split once, on the tabs', () => {
+        // Both numbers already label the tabs below the summary, so a separate
+        // metric strip repeating them would be dead weight.
+        expect(resultPage).not.toContain('MetricStrip');
+        expect(resultPage).toContain('summary.v2.publicMutuals.toLocaleString()');
+        expect(resultPage).toContain('summary.v2.privateMutuals.toLocaleString()');
+    });
+
+    it('positions each gender label under its own share of the bar', () => {
+        // Position carries the proportion, which is why the printed percentages
+        // could be dropped; a flat left-aligned legend would lose that.
+        expect(resultPage).toContain('style={{ width: `${row.c.percentage}%` }}');
+        expect(resultPage).toContain('flex min-w-0 justify-center');
+        expect(resultPage).not.toContain('{row.c.percentage}%</span>');
+    });
+
+    it('gives the report a headline naming the analysed account', () => {
+        expect(compactSummary).toContain('님의 위장 여사친');
+        // Instagram display names are optional, so the handle backs the headline
+        // until (and when) targetFullName is absent.
+        expect(compactSummary).toContain('summary.targetFullName ?? summary.targetInstagramId');
+        expect(resultPage).toContain('targetFullName?: string | null');
+    });
+
+    it('never rebuilds the summary as a grid of bordered cells', () => {
         expect(compactSummary).not.toContain('mt-2 grid grid-cols-3');
+        expect(compactSummary).not.toContain('grid-cols-2 gap-px bg-line');
         expect(compactSummary).not.toContain('block text-[10px]');
     });
 
+    it('leads the summary with the high-risk verdict rather than raw counts', () => {
+        // The verdict used to sit outside the summary container in 13px grey
+        // while secondary counts held the frame; it now opens the page.
+        expect(compactSummary).toContain('{highCount}');
+        expect(compactSummary).toContain('고위험 계정');
+        expect(compactSummary).not.toContain('INSTAGRAM 원지표');
+    });
+
+    it('does not paint a clean verdict in the danger accent', () => {
+        // Zero high-risk accounts is the best outcome; rendering it in crimson
+        // would make the safest result read as the most alarming one.
+        expect(compactSummary).toContain("highCount > 0 ? 'text-blood-2' : 'text-jade'");
+        // The rail is an absolutely-positioned span so it can draw downward.
+        expect(compactSummary).toContain("highCount > 0 ? 'bg-blood' : 'bg-jade'");
+    });
+
+    it('reveals the header in hierarchy order and survives reduced motion', () => {
+        // Motion should teach the reading order — subject, verdict, context,
+        // distribution — rather than fade everything in at once.
+        // Anchored on class names: in JSX the style attribute follows className,
+        // so the nearest delay after the anchor belongs to that element.
+        const delayOf = (className: string) => {
+            const at = compactSummary.indexOf(className);
+            expect(at, `missing anchor: ${className}`).toBeGreaterThan(-1);
+            const found = /animationDelay: '(\d+)ms'/.exec(compactSummary.slice(at, at + 400));
+            return Number(found?.[1] ?? NaN);
+        };
+        const lockup = delayOf('reveal mt-5 flex items-start');
+        const rail = delayOf('reveal-rail absolute');
+        const label = delayOf('reveal mt-3 text-[17px]');
+        const context = delayOf('reveal mt-1 text-[12.5px]');
+        expect(lockup).toBeLessThan(rail);
+        expect(rail).toBeLessThan(label);
+        expect(label).toBeLessThan(context);
+        // The count-up is JS-driven, so the CSS reduced-motion block cannot cover
+        // it; the hook has to opt out on its own.
+        expect(resultPage).toContain('useCountUp');
+        expect(globals).toContain('prefers-reduced-motion');
+    });
+
+    it('drops the bordered container and corner brackets from the summary', () => {
+        // Corner brackets are reserved for the screen's verdict (high-risk rows,
+        // errors); a summary wrapped in them makes the device meaningless.
+        expect(compactSummary).not.toContain('<CaseCard');
+    });
+
     it('uses WCAG-AA text colors for every essential summary metric', () => {
-        expect(compactSummary).not.toMatch(/text-\[10px\][^"]*text-fg-mute/);
+        // fg-mute clears neither ground at AA, so it must never carry a metric
+        // label or value at any size — demotion is size and weight, not contrast.
+        expect(compactSummary).not.toContain('text-fg-mute');
+        expect(reportHeader).not.toContain('text-fg-mute');
         expect(resultPage).toContain("txt: 'text-blood-2'");
         for (const foreground of ['fg', 'fg-dim', 'blood-2']) {
             expect(contrastRatio(themeHex(foreground), themeHex('ink-2'))).toBeGreaterThanOrEqual(4.5);
             expect(contrastRatio(themeHex(foreground), themeHex('panel'))).toBeGreaterThanOrEqual(4.5);
         }
+        expect(contrastRatio(themeHex('fg-mute'), themeHex('ink'))).toBeLessThan(4.5);
     });
 });

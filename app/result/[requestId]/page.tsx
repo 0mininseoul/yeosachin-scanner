@@ -14,6 +14,8 @@ import {
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
 import { shareResult } from '@/lib/services/result-share';
+import { kakaoJavascriptKey, shareResultToKakao } from '@/lib/services/kakao-share';
+import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
@@ -27,7 +29,6 @@ import {
     resolveResultPageCursor,
     resultPaginationModel,
     resultSummaryCounts,
-    roundedOwnerScore,
     v2ResultFailureAction,
     type OwnerProgressStatus,
 } from '@/lib/services/analysis/owner-view-presentation';
@@ -35,13 +36,15 @@ import {
     TopBar,
     Eyebrow,
     CaseCard,
-    ThreatBar,
-    RiskTag,
-    RecentMutualBadge,
-    DeepRiskAnalysis,
+    InstaButton,
     PrimaryButton,
+    ProfileFallback,
 } from '@/components/case-ui';
+import { SuspectRow } from '@/components/suspect-row';
+import { ResultActions } from '@/components/result-actions';
+import { ResultFeedback } from '@/components/result-feedback';
 import { ResultPagination } from '@/components/result-pagination';
+import { useCountUp } from '@/hooks/useCountUp';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
@@ -53,24 +56,6 @@ const getProxyImageUrl = (url: string | undefined): string | undefined => {
         ? url
         : undefined;
 };
-
-function FallbackGlyph({ variant }: { variant: 'person' | 'private' }) {
-    return (
-        <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5 text-fg-mute" aria-hidden="true">
-            {variant === 'private' ? (
-                <>
-                    <rect x="5" y="10.5" width="14" height="9" rx="1" stroke="currentColor" strokeWidth="1.5" />
-                    <path d="M8 10.5V8a4 4 0 018 0v2.5" stroke="currentColor" strokeWidth="1.5" />
-                </>
-            ) : (
-                <>
-                    <circle cx="12" cy="8.5" r="3.5" stroke="currentColor" strokeWidth="1.5" />
-                    <path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6" stroke="currentColor" strokeWidth="1.5" />
-                </>
-            )}
-        </svg>
-    );
-}
 
 // 프로필 이미지 컴포넌트 (로드 실패 시 fallback)
 function ProfileImage({
@@ -86,11 +71,7 @@ function ProfileImage({
     const proxiedSrc = getProxyImageUrl(src);
 
     if (!proxiedSrc || error) {
-        return (
-            <div className="flex h-full w-full items-center justify-center">
-                <FallbackGlyph variant={variant} />
-            </div>
-        );
+        return <ProfileFallback variant={variant} />;
     }
 
     return (
@@ -139,6 +120,7 @@ interface ResultData {
     pipelineVersion: 'v1' | 'v2';
     summary: {
         targetInstagramId: string;
+        targetFullName?: string;
         targetProfileImage?: string;
         mutualFollows: number;
         genderRatio: GenderRatio | null;
@@ -194,36 +176,19 @@ function initialResultPageNavigation(
     };
 }
 
-const InstaLink = ({ url }: { url: string }) => (
-    <a
-        href={url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-fg-mute transition-colors hover:text-blood"
-        aria-label="인스타그램에서 보기"
-    >
-        <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
-        </svg>
-    </a>
-);
-
-const BRACKET_BY_GRADE: Record<string, string> = {
-    high_risk: 'var(--color-blood)',
-    caution: 'var(--color-amber)',
-    normal: 'var(--color-line-2)',
-};
-
 function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
     return (
         <>
-            <div className="flex h-2 w-full overflow-hidden bg-line">
+            <div className="reveal-wipe flex h-1.5 w-full overflow-hidden bg-line" style={{ animationDelay: '900ms' }}>
                 <div className="h-full bg-fg-dim" style={{ width: `${gr.male.percentage}%` }} />
                 <div className="h-full bg-blood" style={{ width: `${gr.female.percentage}%` }} />
                 <div className="h-full bg-line-2" style={{ width: `${gr.unknown.percentage}%` }} />
             </div>
 
-            <div className="mt-1.5 grid grid-cols-3 gap-2 sm:gap-3">
+            {/* Each label is centred under its own segment of the bar, so the
+                legend doubles as an axis: position carries the proportion and
+                the bar needs no printed percentages. */}
+            <div className="reveal mt-2 flex w-full" style={{ animationDelay: '1120ms' }}>
                 {[
                     { label: OWNER_GENDER_LABELS.male, c: gr.male, Icon: Mars, txt: 'text-fg' },
                     { label: OWNER_GENDER_LABELS.female, c: gr.female, Icon: Venus, txt: 'text-blood-2' },
@@ -231,18 +196,18 @@ function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
                 ].map((row) => (
                     <div
                         key={row.label}
-                        className="flex min-w-0 flex-wrap items-baseline gap-x-1 border-l border-line pl-2 sm:flex-nowrap sm:pl-3"
+                        className="flex min-w-0 justify-center"
+                        style={{ width: `${row.c.percentage}%` }}
                     >
-                        <row.Icon aria-hidden="true"
-                            className={`h-3 w-3 shrink-0 self-center ${row.txt}`}
-                            strokeWidth={2.25}
-                        />
-                        <span className="shrink-0 text-[11px] text-fg-dim">{row.label}</span>
-                        <span className={`num text-[15px] font-extrabold leading-tight ${row.txt}`}>
-                            {row.c.count}
-                        </span>
-                        <span className="num text-[10px] leading-tight text-fg-dim">
-                            {row.c.percentage}%
+                        <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
+                            <row.Icon aria-hidden="true"
+                                className={`h-3 w-3 shrink-0 self-center ${row.txt}`}
+                                strokeWidth={2.25}
+                            />
+                            <span className="text-[11px] text-fg-dim">{row.label}</span>
+                            <span className={`num text-[13px] font-extrabold leading-tight ${row.txt}`}>
+                                {row.c.count}
+                            </span>
                         </span>
                     </div>
                 ))}
@@ -257,12 +222,16 @@ export function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks =
     const genderStats = (result.summary as {
         genderStats?: { male: number; female: number; unknown: number };
     }).genderStats;
+    // targetFullName is likewise additive: the headline falls back to the handle
+    // until the backend contract carries the Instagram display name.
+    const targetFullName = (result.summary as { targetFullName?: string | null }).targetFullName;
     return {
         requestId: result.requestId,
         status: 'completed',
         pipelineVersion: 'v2',
         summary: {
             targetInstagramId: result.summary.targetInstagramId,
+            targetFullName: targetFullName || undefined,
             targetProfileImage: result.summary.targetProfileImage || undefined,
             mutualFollows: result.summary.detectedMutuals,
             genderRatio: genderStats ? genderBreakdownFromStats(genderStats) : null,
@@ -308,6 +277,7 @@ export default function ResultPage({ params }: PageProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [shareLoading, setShareLoading] = useState(false);
+    const [kakaoShareLoading, setKakaoShareLoading] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [pageAction, setPageAction] = useState<ResultPageAction | null>(null);
     const [pageError, setPageError] = useState<ResultPageAction | null>(null);
@@ -520,6 +490,49 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
+    // V2 results have no public URL: /result is auth-gated and /api/share/enable
+    // rejects v2, so there is no share token to hand out. The button therefore
+    // shares the service itself with a teaser rather than a link that would land
+    // a recipient on a login screen.
+    const handleKakaoShare = async () => {
+        if (kakaoShareLoading) return;
+        setKakaoShareLoading(true);
+        try {
+            // Both the link and the thumbnail must sit on the domain registered in
+            // Kakao Developers, so they are pinned to the canonical origin even when
+            // this page is served from localhost.
+            const detected = data?.summary.v2?.highRiskCount
+                ?? data?.femaleAccounts.filter(account => account.riskGrade === 'high_risk').length
+                ?? 0;
+            const channel = await shareResultToKakao(
+                {
+                    url: CANONICAL_APP_ORIGIN,
+                    title: '위장여사친 판독기',
+                    description: detected > 0
+                        ? `방금 판독했더니 고위험 계정 ${detected}건이 나왔어요.`
+                        : '남자친구가 맞팔 중인 여자들, AI가 5분이면 판독해줍니다.',
+                    imageUrl: `${CANONICAL_APP_ORIGIN}/og.png`,
+                },
+                {
+                    ...(navigator.share
+                        ? { share: (payload: { title: string; text: string; url: string }) => navigator.share(payload) }
+                        : {}),
+                    ...(navigator.clipboard?.writeText
+                        ? { writeText: (text: string) => navigator.clipboard.writeText(text) }
+                        : {}),
+                },
+            );
+            if (!channel) {
+                alert('공유하기에 실패했습니다.');
+                return;
+            }
+            trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: channel });
+            if (channel === 'clipboard') alert('링크가 클립보드에 복사되었습니다!');
+        } finally {
+            setKakaoShareLoading(false);
+        }
+    };
+
     const handleShare = async () => {
         setShareLoading(true);
 
@@ -600,6 +613,14 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
+    // Hooks cannot sit behind the early returns below, so the verdict count is
+    // derived here and simply reads 0 until the result lands.
+    const highRiskCount = data
+        ? data.summary.v2?.highRiskCount
+            ?? data.femaleAccounts.filter((account) => account.riskGrade === 'high_risk').length
+        : 0;
+    const revealedHighCount = useCountUp(highRiskCount, { delayMs: 300, durationMs: 800 });
+
     if (loading) {
         return (
             <div className="flex min-h-dvh items-center justify-center">
@@ -677,89 +698,124 @@ export default function ResultPage({ params }: PageProps) {
 
             <main data-amp-block className="mx-auto max-w-[480px] px-5 pt-7">
                 {/* case header */}
+                {/* The share control belongs to the report, not to the app chrome:
+                    in the top bar it read as a site-level menu item rather than
+                    "share this result". */}
                 <div className="flex items-center justify-between gap-3">
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
-                    <div className="flex min-w-0 max-w-[62%] items-center gap-2">
-                        <div className="relative h-9 w-9 shrink-0 overflow-hidden border border-line-2 bg-panel">
-                            <ProfileImage src={summary.targetProfileImage} variant="person" />
-                        </div>
-                        <span className="num block truncate text-[10px] text-fg-mute">
-                            @{summary.targetInstagramId}
-                        </span>
-                    </div>
+                    <ResultActions
+                        onKakaoShare={handleKakaoShare}
+                        kakaoBusy={kakaoShareLoading}
+                        kakaoAvailable={kakaoJavascriptKey() !== null}
+                        copyUrl={CANONICAL_APP_ORIGIN}
+                    />
                 </div>
-                <h1 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">판독 결과</h1>
-                {highCount > 0 && (
-                    <p className="mt-2 text-[13px] text-fg-dim">
-                        위협 등급 <span className="font-bold text-blood">고위험 {highCount}건</span>이 감지됐습니다.
-                    </p>
-                )}
-
                 {/* pipeline-specific summary */}
                 {summary.v2 && counts ? (
-                    <CaseCard className="mt-5 p-3">
-                        <div className="flex items-center justify-between gap-3">
-                            <span className="eyebrow">맞팔 계정 분석</span>
-                            <span className="text-[10px] font-medium tracking-wide text-fg-dim">INSTAGRAM 원지표</span>
-                        </div>
-                        <div
-                            data-summary-primary-metrics
-                            className="num mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 border-y border-line py-1 sm:h-6 sm:flex-nowrap sm:py-0"
-                        >
-                            {[
-                                { label: '맞팔', value: counts.mutual },
-                                { label: '공개', value: counts.publicCount },
-                                { label: '비공개', value: counts.privateCount },
-                            ].map((item, index) => (
-                                <div key={item.label} className="inline-flex items-baseline gap-1 whitespace-nowrap">
-                                    <span className="text-[10px] leading-tight text-fg-dim">{item.label}</span>
-                                    <span className="text-[16px] font-extrabold leading-tight text-fg">
-                                        {item.value.toLocaleString()}
-                                    </span>
-                                    {index < 2 && (
-                                        <span aria-hidden="true" className="ml-1 text-[10px] text-fg-dim">·</span>
-                                    )}
-                                </div>
-                            ))}
-                        </div>
+                    <>
+                        {/* The reveal is scoped to the verdict block so the sweep's
+                            overflow clipping never reaches the actions menu above. */}
+                        <div className="relative overflow-hidden">
+                        <span
+                            aria-hidden="true"
+                            className="reveal-sweep pointer-events-none absolute inset-x-0 z-10 h-16"
+                            style={{
+                                background:
+                                    'linear-gradient(180deg, transparent, rgb(var(--glow-rgb) / 0.16), transparent)',
+                            }}
+                        />
 
-                        {gr && (
-                            <div className="mt-2.5">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-[11px] font-semibold text-fg-dim">공개 계정 판독 분포</span>
-                                </div>
-                                <div className="mt-1.5">
-                                    <GenderRatioBreakdown gr={gr} />
-                                </div>
+                        {/* Profile lockup: the page needs a subject before it states
+                            a number, and the handle confirms which account that
+                            display name belongs to. */}
+                        <div className="reveal mt-5 flex items-start gap-3" style={{ animationDelay: '80ms' }}>
+                            <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line-2 bg-panel">
+                                <ProfileImage src={summary.targetProfileImage} variant="person" />
                             </div>
-                        )}
-
-                        <div className="mt-2.5 grid grid-cols-2 gap-px bg-line">
-                            {[
-                                { label: '팔로워', value: summary.v2.followers.declared },
-                                { label: '팔로잉', value: summary.v2.following.declared },
-                            ].map((item) => (
-                                <div
-                                    key={item.label}
-                                    className="flex items-baseline justify-between gap-2 bg-ink-2 px-2.5 py-1 sm:px-3"
-                                >
-                                    <span className="text-[10px] leading-tight text-fg-dim">{item.label}</span>
-                                    <span className="num text-[15px] font-bold leading-tight text-fg">
-                                        {item.value.toLocaleString()}
+                            <div className="min-w-0">
+                                <h1 className="text-[23px] font-extrabold leading-snug tracking-tight text-fg">
+                                    <span className="break-all">
+                                        {summary.targetFullName ?? summary.targetInstagramId}
                                     </span>
-                                </div>
-                            ))}
-                        </div>
-                    </CaseCard>
-                ) : gr ? (
-                    <CaseCard className="mt-6 p-5">
-                        <div className="mb-4 flex items-center justify-between">
-                            <span className="eyebrow">맞팔 계정 성별 분석</span>
-                            <span className="num text-[12px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
+                                    님의 위장 여사친
+                                </h1>
+                                <p className="num mt-1 truncate text-[12px] text-fg-dim">
+                                    @{summary.targetInstagramId}
+                                </p>
+                            </div>
                         </div>
 
-                        <GenderRatioBreakdown gr={gr} />
-                    </CaseCard>
+                        {/* The verdict. It used to sit outside the summary card in
+                            13px grey while secondary counts held the frame. Crimson
+                            means danger, so a clean result must not wear it — zero
+                            high-risk accounts is the best outcome, not the loudest. */}
+                        <div className="relative mt-5 pl-4">
+                            <span
+                                aria-hidden="true"
+                                className={`reveal-rail absolute inset-y-0 left-0 w-0.5 ${
+                                    highCount > 0 ? 'bg-blood' : 'bg-jade'
+                                }`}
+                                style={{ animationDelay: '300ms' }}
+                            />
+                            <div
+                                className={`num text-[56px] font-extrabold leading-[0.85] tracking-[-0.045em] ${
+                                    highCount > 0 ? 'text-blood-2' : 'text-jade'
+                                }`}
+                                aria-label={`고위험 계정 ${highCount}건`}
+                            >
+                                <span aria-hidden="true">{revealedHighCount}</span>
+                            </div>
+                            <p
+                                className="reveal mt-3 text-[17px] font-extrabold tracking-tight text-fg"
+                                style={{ animationDelay: '700ms' }}
+                            >
+                                고위험 계정
+                            </p>
+                            {/* The exact public count is already on the tab below. */}
+                            <p
+                                className="reveal mt-1 text-[12.5px] text-fg-dim"
+                                style={{ animationDelay: '780ms' }}
+                            >
+                                맞팔 <span className="num">{counts.mutual.toLocaleString()}</span>명 중 모든 공개 계정들을 판독했습니다.
+                            </p>
+                        </div>
+                        </div>
+
+                        <div className="mt-6 border-t border-line pt-5">
+                            {gr && (
+                                <>
+                                    <div className="flex items-baseline justify-between gap-3">
+                                        <span className="label-ko">공개 계정 판독 분포</span>
+                                        <span className="num text-[10.5px] text-fg-dim">
+                                            {counts.publicCount.toLocaleString()}명
+                                        </span>
+                                    </div>
+                                    <div className="mt-2.5">
+                                        <GenderRatioBreakdown gr={gr} />
+                                    </div>
+                                </>
+                            )}
+
+                        </div>
+                    </>
+                ) : gr ? (
+                    <>
+                    <h1 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">판독 결과</h1>
+                    {highCount > 0 && (
+                        <p className="mt-2 text-[13px] text-fg-dim">
+                            위협 등급 <span className="font-bold text-blood">고위험 {highCount}건</span>이 감지됐습니다.
+                        </p>
+                    )}
+                    <div className="mt-6 border-t border-line pt-5">
+                        <div className="flex items-baseline justify-between gap-3">
+                            <span className="label-ko">맞팔 계정 성별 분석</span>
+                            <span className="num text-[10.5px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
+                        </div>
+                        <div className="mt-2.5">
+                            <GenderRatioBreakdown gr={gr} />
+                        </div>
+                    </div>
+                    </>
                 ) : null}
 
                 {/* public / private tabs */}
@@ -802,73 +858,20 @@ export default function ResultPage({ params }: PageProps) {
                             <p className="text-[13px] text-fg-mute">판독된 여성 계정이 없습니다.</p>
                         </CaseCard>
                     ) : (
-                        <div className="mt-5 space-y-2.5">
+                        <div className="mt-5">
                             {femaleAccounts.map((account, i) => (
-                                <CaseCard
+                                <SuspectRow
                                     key={account.instagramId}
-                                    bracket={BRACKET_BY_GRADE[account.riskGrade]}
-                                    className="p-4"
-                                >
-                                    <div className="flex items-start gap-3">
-                                        <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line bg-panel">
-                                            <ProfileImage src={account.profileImage} variant="person" />
-                                        </div>
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex items-center gap-2">
-                                                <span className="num shrink-0 text-[12px] font-bold tracking-widest text-fg-mute">
-                                                    #{String(
-                                                        pageNavigation.public.pageIndex
-                                                        * OWNER_RESULT_PAGE_SIZE
-                                                        + i
-                                                        + 1
-                                                    ).padStart(2, '0')}
-                                                </span>
-                                                {account.instagramUrl ? <a
-                                                    href={account.instagramUrl}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="truncate text-[14px] font-bold text-fg transition-colors hover:text-blood"
-                                                >
-                                                    @{account.instagramId}
-                                                </a> : <span className="truncate text-[14px] font-bold text-fg">@{account.instagramId}</span>}
-                                                <RiskTag grade={account.riskGrade} className="ml-auto" />
-                                            </div>
-                                            {(account.fullName || account.bio) && (
-                                                <p className="mt-1 truncate text-[12px] text-fg-dim">
-                                                    {account.fullName && <span>{account.fullName}</span>}
-                                                    {account.fullName && account.bio && ' · '}
-                                                    {account.bio}
-                                                </p>
-                                            )}
-                                            {account.recentMutualRank && (
-                                                <div className="mt-2 flex flex-wrap items-center gap-2">
-                                                    <RecentMutualBadge rank={account.recentMutualRank} />
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                    {account.oneLineOverview && (
-                                        <p className="mt-3 border-t border-line pt-3 text-[12px] leading-relaxed text-fg-dim">
-                                            {account.oneLineOverview}
-                                        </p>
-                                    )}
-                                    {account.riskGrade === 'high_risk' && account.riskAnalysis.length > 0 && (
-                                        <DeepRiskAnalysis lines={account.riskAnalysis} className="mt-3" />
-                                    )}
-                                    <div className="mt-3 flex items-center gap-3">
-                                        <ThreatBar
-                                            grade={account.riskGrade}
-                                            score={account.displayScore}
-                                            className="flex-1"
-                                        />
-                                        {account.displayScore !== undefined && (
-                                            <span className="num shrink-0 text-[12px] font-bold text-fg">
-                                                {roundedOwnerScore(account.displayScore)}/10
-                                            </span>
-                                        )}
-                                        {account.instagramUrl && externalProfileLinks && <InstaLink url={account.instagramUrl} />}
-                                    </div>
-                                </CaseCard>
+                                    account={account}
+                                    rank={
+                                        pageNavigation.public.pageIndex
+                                        * OWNER_RESULT_PAGE_SIZE
+                                        + i
+                                        + 1
+                                    }
+                                    avatar={<ProfileImage src={account.profileImage} variant="person" />}
+                                    externalProfileLinks={externalProfileLinks}
+                                />
                             ))}
                         </div>
                     )}
@@ -895,13 +898,13 @@ export default function ResultPage({ params }: PageProps) {
                             <p className="text-[13px] text-fg-mute">비공개 계정이 없습니다.</p>
                         </CaseCard>
                     ) : (
-                        <div className="mt-5 space-y-2.5">
+                        <div className="mt-5">
                             {privateAccounts.map((account) => (
                                 <div
                                     key={account.instagramId}
-                                    className="flex items-start gap-3 border border-line bg-ink-2/60 p-3.5"
+                                    className="flex items-center gap-3.5 border-b border-line py-3.5"
                                 >
-                                    <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line bg-panel">
+                                    <div className="relative h-10 w-10 shrink-0 overflow-hidden border border-line bg-panel">
                                         <ProfileImage src={account.profileImage} variant="private" />
                                     </div>
                                     <div className="min-w-0 flex-1">
@@ -921,7 +924,9 @@ export default function ResultPage({ params }: PageProps) {
                                             </p>
                                         )}
                                     </div>
-                                    {account.instagramUrl && externalProfileLinks && <InstaLink url={account.instagramUrl} />}
+                                    {account.instagramUrl && externalProfileLinks && (
+                                        <InstaButton url={account.instagramUrl} />
+                                    )}
                                 </div>
                             ))}
                         </div>
@@ -962,6 +967,8 @@ export default function ResultPage({ params }: PageProps) {
                 <p className="mt-5 text-center text-[11px] text-fg-mute">
                     AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 사용해 주세요.
                 </p>
+
+                <ResultFeedback requestId={requestId} />
 
                 <div className="mt-8 border-t border-line pt-6 text-center">
                     <button

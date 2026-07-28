@@ -75,12 +75,26 @@ body::before {
 }
 
 /* ---- typographic utilities ---- */
+/* Every eyebrow in the product is Korean. Latin-width tracking (0.26em) tears
+   Korean syllable blocks apart — "맞 팔 계 정 분 석" — so the label reads as
+   broken rather than deliberate. 0.08em still separates it from body copy while
+   keeping the word intact; weight carries the rest of the emphasis. */
 .eyebrow {
   font-size: 11px;
   line-height: 1;
-  font-weight: 600;
-  letter-spacing: 0.26em;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  color: var(--color-fg-dim);
+}
+
+/* Inline field label — sits inside a block rather than above it, so it stays
+   quieter than .eyebrow and takes no tracking at all. */
+.label-ko {
+  font-size: 11.5px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.01em;
   color: var(--color-fg-dim);
 }
 
@@ -144,6 +158,33 @@ body::before {
   to { transform: rotate(360deg); }
 }
 
+/* ---- verdict reveal ----
+   One-shot sequence for the result header. Each step maps to a rung of the
+   hierarchy — subject, then verdict, then context, then distribution — so the
+   motion teaches the reading order instead of decorating it. */
+@keyframes verdict-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes verdict-rail {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+
+@keyframes verdict-wipe {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+/* Driven by `top` as a percentage of the positioned parent, matching scan-sweep. */
+@keyframes verdict-sweep {
+  0% { top: -30%; opacity: 0; }
+  12% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { top: 130%; opacity: 0; }
+}
+
 @keyframes marquee {
   from { transform: translateX(0); }
   to { transform: translateX(-50%); }
@@ -161,6 +202,12 @@ body::before {
 .anim-radar { animation: radar-sweep 3.2s linear infinite; }
 .anim-marquee { animation: marquee 22s linear infinite; }
 .anim-indeterminate { animation: indeterminate-bar 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+
+/* `both` holds the from-state before the delay, so nothing flashes in early. */
+.reveal { animation: verdict-rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.reveal-rail { transform-origin: top; animation: verdict-rail 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.reveal-wipe { transform-origin: left; animation: verdict-wipe 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.reveal-sweep { animation: verdict-sweep 1s cubic-bezier(0.4, 0, 0.2, 1) both; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
