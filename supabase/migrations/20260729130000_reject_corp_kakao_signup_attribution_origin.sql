@@ -1,3 +1,11 @@
+-- `.corp` was legal immediately before this migration; null it before adding
+-- the tighter CHECK so upgrades cannot fail on historic safe-origin rows.
+UPDATE public.kakao_signup_discord_outbox SET attribution_origin = NULL
+WHERE attribution_origin IS NOT NULL
+  AND NOT (attribution_origin ~ '^https?://[a-z0-9][a-z0-9.-]{0,251}/$'
+    AND attribution_origin ~ '^https?://[^/]*\.[^/]+/$'
+    AND attribution_origin !~ '^https?://(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})/'
+    AND attribution_origin !~ '\.(localhost|local|internal|test|example|invalid|home|lan|localdomain|corp)/$');
 ALTER TABLE public.kakao_signup_discord_outbox DROP CONSTRAINT kakao_signup_discord_outbox_attribution_origin_check;
 ALTER TABLE public.kakao_signup_discord_outbox ADD CONSTRAINT kakao_signup_discord_outbox_attribution_origin_check CHECK (attribution_origin IS NULL OR (attribution_origin ~ '^https?://[a-z0-9][a-z0-9.-]{0,251}/$' AND attribution_origin ~ '^https?://[^/]*\.[^/]+/$' AND attribution_origin !~ '^https?://(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})/' AND attribution_origin !~ '\.(localhost|local|internal|test|example|invalid|home|lan|localdomain|corp)/$'));
 DROP FUNCTION public.set_kakao_signup_discord_outbox_profile(uuid,text,char,text,timestamptz,text,text);

@@ -197,3 +197,18 @@ describe('Kakao signup Discord durable outbox', () => {
         await expect(db.query("UPDATE public.kakao_signup_discord_outbox SET attribution_origin='https://intranet/' WHERE user_id=$1", [userId])).rejects.toThrow();
         await expect(db.query("UPDATE public.kakao_signup_discord_outbox SET attribution_origin='https://portal.corp/' WHERE user_id=$1", [userId])).rejects.toThrow();
     });
+
+    it('nulls historic legal internal/corp origins before each hardening CHECK', async () => {
+        const transitionDb = await PGlite.create();
+        try {
+            await transitionDb.exec(`CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN; CREATE SCHEMA auth; CREATE FUNCTION public.uuid_generate_v4() RETURNS uuid LANGUAGE sql VOLATILE AS $$ SELECT pg_catalog.gen_random_uuid() $$; CREATE TABLE auth.users (id uuid PRIMARY KEY, raw_app_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT clock_timestamp());`);
+            await transitionDb.exec(foundation); await transitionDb.exec(hardening); await transitionDb.exec(recovery); await transitionDb.exec(attribution); await transitionDb.exec(attributionOrigin);
+            await transitionDb.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('923e4567-e89b-42d3-a456-426614174000', '{"provider":"kakao"}'), ('a23e4567-e89b-42d3-a456-426614174000', '{"provider":"kakao"}'); UPDATE public.kakao_signup_discord_outbox SET attribution_origin = CASE WHEN user_id='923e4567-e89b-42d3-a456-426614174000' THEN 'https://intranet/' ELSE 'https://portal.corp/' END;`);
+            await transitionDb.exec(hardenedAttributionOrigin);
+            const afterInternal = await transitionDb.query<{ attribution_origin: string | null }>("SELECT attribution_origin FROM public.kakao_signup_discord_outbox WHERE user_id='923e4567-e89b-42d3-a456-426614174000'");
+            await transitionDb.exec(corpOrigin);
+            const afterCorp = await transitionDb.query<{ attribution_origin: string | null }>("SELECT attribution_origin FROM public.kakao_signup_discord_outbox WHERE user_id='a23e4567-e89b-42d3-a456-426614174000'");
+            expect(afterInternal.rows).toEqual([{ attribution_origin: null }]);
+            expect(afterCorp.rows).toEqual([{ attribution_origin: null }]);
+        } finally { await transitionDb.close(); }
+    }, 30_000);
