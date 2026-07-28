@@ -29,6 +29,7 @@ import {
 } from './gemini-generation-policy';
 import {
     AI_STAGE_POLICY_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
     AI_GEMINI_SDK_TIMEOUT_MS,
     aiStagePolicySupports,
@@ -342,7 +343,7 @@ export interface AnalyzeWithGeminiOptions<T> {
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: T
     ) => void | Promise<void>;
-    /** Own admission and fence one SDK attempt, once for every provider attempt/retry. */
+    /** Stateless v2.11 replay-only outer admission fence, once for every provider attempt/retry. */
     runProviderAttempt?: <R>(task: () => Promise<R>) => Promise<R>;
     /** Absolute v2.11 resolver admission budget; retries must not reset it. */
     admissionDeadlineAtMs?: number;
@@ -825,6 +826,22 @@ export async function analyzeWithGemini<T>(
     const resolvedPolicyVersion = stage
         ? assertSupportedAiStagePolicyVersion(aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION)
         : AI_STAGE_POLICY_VERSION;
+    const replayProviderAdmission = Boolean(
+        runProviderAttempt
+        && statelessReplay
+        && resolvedPolicyVersion === AI_STAGE_POLICY_V211_VERSION
+        && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+        && (
+            stage === 'genderTriage'
+            || stage === 'featureAnalysis'
+            || stage === 'privateAccountName'
+        )
+    );
+    if (runProviderAttempt && !replayProviderAdmission) {
+        throw new Error(
+            'Gemini provider attempt fence is restricted to stateless replay v2.11 gender-quality stages'
+        );
+    }
     const stagePolicy = stage ? getAiStagePolicy(resolvedPolicyVersion, stage) : null;
     if (maxImages !== undefined && (
         !Number.isSafeInteger(maxImages)
@@ -996,9 +1013,9 @@ export async function analyzeWithGemini<T>(
                     },
                     abortSignal,
                     resolverAdmissionDeadlineAtMs,
-                    Boolean(runProviderAttempt),
+                    replayProviderAdmission,
                 );
-                response = runProviderAttempt
+                response = replayProviderAdmission && runProviderAttempt
                     ? await runProviderAttempt(dispatchGeneration)
                     : await dispatchGeneration();
             } catch (generationError) {

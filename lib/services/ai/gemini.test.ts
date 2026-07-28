@@ -216,8 +216,12 @@ describe('analyzeWithGemini generation retry policy', () => {
         ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
         const result = analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
             skipTokenLog: true,
+            replayCapability: issueReplayStatelessCapability(),
             runProviderAttempt: fence,
+            ...stageAuditOptions(),
         });
         await vi.runAllTimersAsync();
         await expect(result).resolves.toEqual({ value: 'ok' });
@@ -708,6 +712,38 @@ describe('analyzeWithGemini stage request policy', () => {
             skipTokenLog: true,
             statelessReplay: true,
         } as never)).rejects.toThrow('cannot skip durable token logging');
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
+
+    it('rejects non-replay and invalid-policy provider fences before an SDK call', async () => {
+        mocks.generateContent.mockResolvedValue(successfulResponse());
+        const identityFence = vi.fn(
+            <T,>(task: () => Promise<T>): Promise<T> => task(),
+        ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
+        const replayCapability = issueReplayStatelessCapability();
+        const calls = [
+            analyzeWithGemini('prompt', undefined, {
+                schema: responseSchema,
+                stage: 'genderTriage',
+                aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+                runProviderAttempt: identityFence,
+                ...stageAuditOptions(),
+            }),
+            analyzeWithGemini('prompt', undefined, {
+                schema: responseSchema,
+                stage: 'genderTriage',
+                aiStagePolicyVersion: 'ai-stage-policy-v2.10',
+                skipTokenLog: true,
+                replayCapability,
+                runProviderAttempt: identityFence,
+                ...stageAuditOptions(),
+            }),
+        ];
+
+        await expect(Promise.all(calls)).rejects.toThrow(
+            'Gemini provider attempt fence is restricted to stateless replay v2.11 gender-quality stages',
+        );
+        expect(identityFence).not.toHaveBeenCalled();
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
