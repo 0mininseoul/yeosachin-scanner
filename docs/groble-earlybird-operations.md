@@ -180,9 +180,14 @@ npm run report:earlybird-demand -- --start 2026-07-24 --end 2026-08-01
 
 출력은 플랜별 결제 건수·매출·남은 수량과 환불 책임·기한 초과·미확인 결제·대기 checkout·Plus 대기 수의 집계만 포함한다. 사용자명, 구매자 연락처, 주문·결제·webhook ID, seller reference, 공급자 식별자는 조회 결과와 stdout에 포함하지 않는다. 미확인 유료 주문 또는 기한 초과 작업이 하나라도 있으면 JSON은 출력하되 종료 코드는 `1`이므로 운영자가 먼저 확인해야 한다. 확정 수요 건수는 Starter 전환 판단 자료일 뿐 구독 구매나 credential 교체를 승인하거나 자동 실행하지 않는다.
 
-### 운영자 승인 후 유료 주문 이행
+### 유료 주문 이행 gate
 
 reference가 확인된 `paid` 주문은 webhook transaction에서 `earlybird_fulfillments.awaiting_operator` 행만 만든다. 이 시점에는 `analysis_requests`, provider run, Gemini attempt, Cloud Task를 만들지 않는다.
+기본 설정 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`에서는 recovery가 `awaiting_operator`를 자동 승인하지 않는다. 값이 정확히 `true`일 때만 canonical `analysis-worker` recovery가 검증된 Basic/Standard 주문을 bounded batch로 자동 승인한다. `analysis-worker-secondary-e2e`에서는 항상 `false`여야 한다.
+
+자동 gate는 webhook 동작을 바꾸지 않는다. reference 확인, `paid` 상태, payment ID, 금액과 상품 일치, 불변 preflight 소유권·production access·미소비 상태·launch/catalog/pricing/policy snapshot을 모두 통과한 행만 `admission_pending`으로 전진한다. 기존의 유효한 `awaiting_operator` 행도 다음 bounded 복구 pass에서 처리된다. gate를 false로 되돌리면 새 자동 승인은 멈추지만 이미 admission_pending인 작업은 기존 recovery에서 계속 drain된다.
+
+기본값이 `false`이거나 플래그가 없을 때는 아래 운영자 명령 경계가 그대로 유지된다.
 아래 명령의 exact flag가 결제 API 호출 가능성을 인지한 운영자의 명시적 승인 경계다.
 
 ```bash
@@ -199,8 +204,7 @@ preflight를 그 snapshot으로 한 시간만 재활성화한 뒤 로그인 없�
 production V2 요청 하나와 `coordinator:bootstrap`을 원자적으로 만들고 dispatch한다.
 
 첫 실행 결과가 `admission_pending`이면 오류가 아니라 최신 사전점검 대기 상태다.
-maintenance recovery가 이미 운영자 승인된 행만 재실행한다.
-`awaiting_operator` 행은 recovery가 자동 승인하지 않는다. 요청 생성 뒤에는 V2 job
+maintenance recovery는 운영자가 승인했거나 위 canonical gate로 검증·승인된 행을 재실행한다. 요청 생성 뒤에는 V2 job
 recovery가 같은 request/job identity를 재사용하며, 완료 요청만 주문과 outbox를
 `completed`로 맞춘다. 결제·snapshot·소유권 불일치, 새 수량에서의 플랜 불가, 분석
 실패는 새 유료 요청을 임의 생성하지 않고 `manual_review`로 보낸다.

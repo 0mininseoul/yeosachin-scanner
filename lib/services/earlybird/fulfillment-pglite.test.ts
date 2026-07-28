@@ -364,6 +364,80 @@ describe('operator-approved earlybird fulfillment migration', () => {
         )).rows[0].status).toBe('awaiting_operator');
     });
 
+    it('does not let old snapshot conflicts starve a later eligible order at the promotion limit', async () => {
+        const invalidPreflights = [
+            '623e4567-e89b-42d3-a456-426614174001',
+            '723e4567-e89b-42d3-a456-426614174001',
+        ];
+        const invalidOrders = [
+            '823e4567-e89b-42d3-a456-426614174001',
+            '923e4567-e89b-42d3-a456-426614174001',
+        ];
+        for (let index = 0; index < invalidPreflights.length; index += 1) {
+            await db.query(
+                `INSERT INTO public.analysis_preflights(
+                    id, user_id, target_instagram_id,
+                    target_followers_count, target_following_count,
+                    target_is_private, exclusion_decision, status, access_mode,
+                    launch_status_snapshot, plan_catalog_snapshot,
+                    plan_cards_snapshot, pricing_version, pricing_snapshot,
+                    policy_versions_snapshot, capacity_required_plan_id,
+                    required_plan_id, ready_at, expires_at, admission_status
+                )
+                SELECT $2, user_id, target_instagram_id || $3,
+                    target_followers_count, target_following_count,
+                    target_is_private, exclusion_decision, status, 'test',
+                    launch_status_snapshot, plan_catalog_snapshot,
+                    plan_cards_snapshot, pricing_version, pricing_snapshot,
+                    policy_versions_snapshot, capacity_required_plan_id,
+                    required_plan_id, ready_at, expires_at, admission_status
+                FROM public.analysis_preflights WHERE id = $1`,
+                [PREFLIGHT, invalidPreflights[index], `-invalid-${index}`]
+            );
+            await db.query(
+                `INSERT INTO public.earlybird_orders(
+                    id, user_id, preflight_id, target_instagram_id,
+                    target_followers_count, target_following_count,
+                    exclusion_decision, plan_id, status,
+                    expected_groble_product_id, expected_amount_krw,
+                    payment_id, actual_groble_product_id, actual_amount_krw,
+                    seller_reference_confirmed_at
+                )
+                SELECT $2, user_id, $3, target_instagram_id || $4,
+                    target_followers_count, target_following_count,
+                    exclusion_decision, plan_id, status,
+                    expected_groble_product_id, expected_amount_krw,
+                    payment_id || $4, actual_groble_product_id,
+                    actual_amount_krw, seller_reference_confirmed_at
+                FROM public.earlybird_orders WHERE id = $1`,
+                [ORDER, invalidOrders[index], invalidPreflights[index], `-invalid-${index}`]
+            );
+        }
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET created_at = pg_catalog.clock_timestamp() - INTERVAL '1 day'
+             WHERE order_id = ANY($1::UUID[])`,
+            [invalidOrders]
+        );
+
+        const admitted = await asService<FulfillmentIdentity>(
+            'SELECT * FROM public.auto_admit_eligible_earlybird_fulfillments(1)'
+        );
+
+        expect(admitted.rows).toEqual([expect.objectContaining({
+            order_id: ORDER,
+            fulfillment_status: 'admission_pending',
+        })]);
+        expect((await db.query<{ status: string }>(
+            `SELECT status FROM public.earlybird_fulfillments
+             WHERE order_id = ANY($1::UUID[]) ORDER BY order_id`,
+            [invalidOrders]
+        )).rows).toEqual([
+            { status: 'awaiting_operator' },
+            { status: 'awaiting_operator' },
+        ]);
+    });
+
     it('reactivates only the immutable paid preflight after explicit admission', async () => {
         await expect(admit()).resolves.toMatchObject({
             order_id: ORDER,

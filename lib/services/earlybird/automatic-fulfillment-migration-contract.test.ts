@@ -36,7 +36,29 @@ describe('automatic earlybird fulfillment migration contract', () => {
             'earlybird_order.actual_groble_product_id IS NOT DISTINCT FROM earlybird_order.expected_groble_product_id'
         );
         expect(admission).toContain("earlybird_order.plan_id IN ('basic', 'standard')");
-        expect(admission).toContain('FOR UPDATE OF fulfillment, earlybird_order SKIP LOCKED');
+        expect(admission).toContain(
+            'preflight.user_id IS NOT DISTINCT FROM earlybird_order.user_id'
+        );
+        expect(admission).toContain("preflight.access_mode = 'production'");
+        expect(admission).toContain('preflight.consumed_request_id IS NULL');
+        expect(admission).toContain(
+            'public.analysis_v2_valid_launch_snapshot(preflight.launch_status_snapshot)'
+        );
+        expect(admission).toContain(
+            'public.analysis_v2_valid_plan_catalog_snapshot(preflight.plan_catalog_snapshot)'
+        );
+        expect(admission).toContain(
+            'public.analysis_v2_valid_pricing_snapshot(preflight.pricing_snapshot)'
+        );
+        expect(admission).toContain(
+            'public.analysis_v2_valid_policy_versions_snapshot(preflight.policy_versions_snapshot)'
+        );
+        expect(admission).toContain(
+            "preflight.plan_catalog_snapshot ->earlybird_order.plan_id->>'launchStatus' = 'production'"
+        );
+        expect(admission).toContain(
+            'FOR UPDATE OF earlybird_order, fulfillment, preflight SKIP LOCKED'
+        );
         expect(admission).toContain('LIMIT p_limit');
         expect(admission).toContain('public.admit_earlybird_fulfillment');
     });

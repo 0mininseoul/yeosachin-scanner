@@ -31,6 +31,8 @@ BEGIN
         FROM public.earlybird_fulfillments AS fulfillment
         INNER JOIN public.earlybird_orders AS earlybird_order
             ON earlybird_order.id = fulfillment.order_id
+        INNER JOIN public.analysis_preflights AS preflight
+            ON preflight.id = earlybird_order.preflight_id
         WHERE fulfillment.status = 'awaiting_operator'
           AND earlybird_order.status = 'paid'
           AND earlybird_order.seller_reference_confirmed_at IS NOT NULL
@@ -39,9 +41,18 @@ BEGIN
           AND earlybird_order.actual_amount_krw BETWEEN 0 AND earlybird_order.expected_amount_krw
           AND earlybird_order.actual_groble_product_id IS NOT DISTINCT FROM earlybird_order.expected_groble_product_id
           AND earlybird_order.plan_id IN ('basic', 'standard')
+          AND preflight.user_id IS NOT DISTINCT FROM earlybird_order.user_id
+          AND preflight.access_mode = 'production'
+          AND preflight.consumed_request_id IS NULL
+          AND preflight.plan_catalog_snapshot IS NOT NULL
+          AND public.analysis_v2_valid_launch_snapshot(preflight.launch_status_snapshot)
+          AND public.analysis_v2_valid_plan_catalog_snapshot(preflight.plan_catalog_snapshot)
+          AND public.analysis_v2_valid_pricing_snapshot(preflight.pricing_snapshot)
+          AND public.analysis_v2_valid_policy_versions_snapshot(preflight.policy_versions_snapshot)
+          AND preflight.plan_catalog_snapshot ->earlybird_order.plan_id->>'launchStatus' = 'production'
         ORDER BY fulfillment.created_at, fulfillment.order_id
         LIMIT p_limit
-        FOR UPDATE OF fulfillment, earlybird_order SKIP LOCKED
+        FOR UPDATE OF earlybird_order, fulfillment, preflight SKIP LOCKED
     LOOP
         BEGIN
             SELECT * INTO v_admitted
