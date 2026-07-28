@@ -3,6 +3,7 @@ import {
     advanceAdmittedEarlybirdFulfillment,
     createEarlybirdFulfillmentStore,
     earlybirdFulfillmentAdmissionHash,
+    isEarlybirdAutomaticFulfillmentEnabled,
     recoverEarlybirdFulfillments,
     type EarlybirdFulfillmentIdentity,
     type EarlybirdFulfillmentStore,
@@ -37,6 +38,7 @@ function store(
 ): EarlybirdFulfillmentStore {
     return {
         admit: vi.fn(async () => identity()),
+        autoAdmitEligible: vi.fn(async () => []),
         listRecoverable: vi.fn(async () => [identity()]),
         claim: vi.fn(async () => ({
             claimed: true,
@@ -64,6 +66,39 @@ function store(
 }
 
 describe('earlybird fulfillment store', () => {
+    it('opens automatic fulfillment only for the exact true flag', () => {
+        expect(isEarlybirdAutomaticFulfillmentEnabled({})).toBe(false);
+        expect(isEarlybirdAutomaticFulfillmentEnabled({
+            EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED: 'TRUE',
+        })).toBe(false);
+        expect(isEarlybirdAutomaticFulfillmentEnabled({
+            EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED: 'true',
+        })).toBe(true);
+    });
+
+    it('admits only opaque identities selected by the bounded automatic RPC', async () => {
+        const rpc = vi.fn((name: string, params: Record<string, unknown>) => {
+            expect(name).toBe('auto_admit_eligible_earlybird_fulfillments');
+            expect(params).toEqual({ p_limit: 7 });
+            return rpcResult([{
+                order_id: ORDER,
+                fulfillment_status: 'admission_pending',
+                preflight_id: PREFLIGHT,
+                user_id: USER,
+                plan_id: 'basic',
+                request_id: null,
+            }]);
+        });
+        const fulfillmentStore = createEarlybirdFulfillmentStore({
+            rpc,
+            randomUuid: () => CLAIM,
+        });
+
+        await expect(fulfillmentStore.autoAdmitEligible(7)).resolves.toEqual([
+            identity(),
+        ]);
+    });
+
     it('parses strict service-role RPC rows and never accepts extra buyer data', async () => {
         const rpc = vi.fn((name: string) => {
             if (name === 'admit_earlybird_fulfillment') {
@@ -263,6 +298,7 @@ describe('earlybird fulfillment store', () => {
             advance,
             limit: 20,
             concurrency: 2,
+            automaticFulfillmentEnabled: false,
         })).resolves.toEqual({
             reconciled: {
                 scanned: 0,
@@ -276,5 +312,30 @@ describe('earlybird fulfillment store', () => {
         });
         expect(orderStore.listRecoverable).toHaveBeenCalledWith(20);
         expect(orderStore.admit).not.toHaveBeenCalled();
+        expect(orderStore.autoAdmitEligible).not.toHaveBeenCalled();
+    });
+
+    it('recovery admits bounded confirmed paid work only when automatic fulfillment is enabled', async () => {
+        const orderStore = store({
+            autoAdmitEligible: vi.fn(async () => [identity()]),
+            listRecoverable: vi.fn(async () => [identity()]),
+        });
+        const advance = vi.fn(async () => ({
+            orderId: ORDER,
+            status: 'admission_pending' as const,
+            requestId: null,
+            nextAction: 'wait_for_fresh_admission' as const,
+        }));
+
+        await recoverEarlybirdFulfillments({
+            store: orderStore,
+            advance,
+            limit: 7,
+            automaticFulfillmentEnabled: true,
+        });
+
+        expect(orderStore.autoAdmitEligible).toHaveBeenCalledWith(7);
+        expect(orderStore.admit).not.toHaveBeenCalled();
+        expect(advance).toHaveBeenCalledWith(identity());
     });
 });

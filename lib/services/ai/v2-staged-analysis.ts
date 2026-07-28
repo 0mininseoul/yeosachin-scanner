@@ -22,8 +22,9 @@ import {
 import {
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_VERSION,
-    AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
+    AI_STAGE_POLICY_V210_VERSION,
+    aiStagePolicySupports,
     getAiStagePolicy,
     type AiStageName,
     type AiStagePolicyVersion,
@@ -99,7 +100,9 @@ const INSTAGRAM_USERNAME_PATTERN = /^[A-Za-z0-9._]{1,30}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const V28_SELF_REFERENCE_PATTERN =
     /(?:판독관|(?:^|[^\p{L}\p{N}])(?:(?:제가|저는|나는)(?:요)?|제가\s*보기(?:엔|에는)(?:요)?|저라면(?:요)?|내\s*눈(?:엔|에는)(?:요)?)(?=$|[^\p{L}\p{N}]))/u;
-const V28_LAUGH_PATTERN = /ㅋ+/u;
+// Public-copy sanitization normalizes compatibility jamo (ㅋ) to choseong jamo (ᄏ).
+// Accept either representation so the policy cannot be bypassed by normalization order.
+const V28_LAUGH_PATTERN = /(?:ㅋ|ᄏ)+/u;
 const V28_RELATIONSHIP_TERM_PATTERN =
     /(?:사귀|썸|연애|연인|애인|남자친구|여자친구|남친|여친|커플|교제|결혼|혼인|기혼|미혼|약혼|부부|배우자|남편|아내|신랑|신부|돌싱|동거|이혼|재혼|불륜|외도|밀회|데이트|바람(?:을\s*)?(?:피우|피웠|폈|난|났다|기))/u;
 const V28_ENGLISH_RELATIONSHIP_TERM_PATTERN =
@@ -378,10 +381,27 @@ function addV28PublicStyleIssues(
 }
 
 function safeOverviewSchemaFor(policyVersion: AiStagePolicyVersion) {
-    if (policyVersion !== AI_STAGE_POLICY_V28_VERSION) return safeOverviewSchema;
+    if (!usesSafePublicPresentation(policyVersion)) return safeOverviewSchema;
     return safeOverviewSchema.superRefine((value, context) => {
         addV28PublicStyleIssues(value, context);
+        if (
+            policyVersion === AI_STAGE_POLICY_V210_VERSION
+            && publicLaughTokenCount(value) > 1
+        ) {
+            context.addIssue({
+                code: 'custom',
+                message: 'v2.10 public overview permits at most one laughter token.',
+            });
+        }
     });
+}
+
+function usesSafePublicPresentation(policyVersion: AiStagePolicyVersion): boolean {
+    return aiStagePolicySupports(policyVersion, 'safePublicPresentationV28');
+}
+
+function publicLaughTokenCount(value: string): number {
+    return value.normalize('NFKC').match(/(?:ㅋ|ᄏ)+/gu)?.length ?? 0;
 }
 
 const featureEvidenceIdsSchema = z.object({
@@ -1262,7 +1282,7 @@ function featureOverviewFallback(input: {
     for (const character of seed) {
         hash = ((hash * 31) + (character.codePointAt(0) ?? 0)) >>> 0;
     }
-    if (input.policyVersion === AI_STAGE_POLICY_V28_VERSION) {
+    if (usesSafePublicPresentation(input.policyVersion)) {
         return FEATURE_OVERVIEW_FALLBACKS_V28[input.accountContext];
     }
     return FEATURE_OVERVIEW_FALLBACKS_LEGACY[
@@ -1356,8 +1376,8 @@ function genderTriagePrompt(
     policyVersion: AiStagePolicyVersion,
     accountProfile?: z.output<typeof accountProfileEvidenceSchema>,
 ): string {
-    return policyVersion === AI_STAGE_POLICY_V28_VERSION
-        || policyVersion === 'ai-stage-policy-v2.9'
+    return usesSafePublicPresentation(policyVersion)
+        || policyVersion === AI_STAGE_POLICY_V29_VERSION
         ? genderTriagePromptV28(media, accountProfile)
         : genderTriagePromptLegacy(media);
 }
@@ -1490,7 +1510,7 @@ function featureAnalysisPrompt(
     media: readonly NormalizedAiMediaSelection[],
     policyVersion: AiStagePolicyVersion,
 ): string {
-    return policyVersion === AI_STAGE_POLICY_V28_VERSION
+    return usesSafePublicPresentation(policyVersion)
         ? featureAnalysisPromptV28(input, media)
         : featureAnalysisPromptLegacy(input, media);
 }
@@ -1647,7 +1667,7 @@ export function createGenderTriageMicrobatchResultIdentity(
     rawAccounts: readonly GenderTriageMicrobatchAccountInput[],
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_V29_VERSION,
 ): AnalysisV2AiResultIdentity {
-    if (policyVersion !== AI_STAGE_POLICY_V29_VERSION) {
+    if (!aiStagePolicySupports(policyVersion, 'genderTriageMicrobatchV29')) {
         throw new Error('ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_POLICY_MISMATCH');
     }
     const accounts = parseGenderTriageMicrobatchAccounts(rawAccounts);
@@ -1668,8 +1688,9 @@ export function createGenderTriageMicrobatchResultIdentity(
 /** Stable, PII-free per-account ID used inside a potentially different batch on every retry. */
 export function createGenderTriageMicrobatchAccountId(
     rawInput: GenderTriageInput,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_V29_VERSION,
 ): string {
-    const identity = createGenderTriageResultIdentity(rawInput, AI_STAGE_POLICY_V29_VERSION);
+    const identity = createGenderTriageResultIdentity(rawInput, policyVersion);
     return `account:${identity.operationKey.slice('gender-triage:'.length)}`;
 }
 
@@ -1722,14 +1743,21 @@ function microbatchTriageResult(
 export async function genderTriageMicrobatch(
     rawAccounts: readonly GenderTriageMicrobatchAccountInput[],
     rawAuditContext: StagedAiAuditContext,
-    options: { replayCapability?: ReplayStatelessCapability } = {},
+    options: {
+        replayCapability?: ReplayStatelessCapability;
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+    } = {},
 ): Promise<readonly GenderTriageMicrobatchResult[]> {
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_V29_VERSION;
+    if (!aiStagePolicySupports(policyVersion, 'genderTriageMicrobatchV29')) {
+        throw new Error('ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_POLICY_MISMATCH');
+    }
     const accounts = parseGenderTriageMicrobatchAccounts(rawAccounts);
     const projected = projectGenderTriageMicrobatch(accounts);
     const prompt = genderTriageMicrobatchPrompt(projected);
     const media = projected.flatMap(account => account.projectedMedia);
     const identity = stagedResultIdentity(
-        'genderTriage', prompt, media, 'request', AI_STAGE_POLICY_V29_VERSION,
+        'genderTriage', prompt, media, 'request', policyVersion,
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderTriageMicrobatchResponseSchemaFor(
@@ -1745,7 +1773,7 @@ export async function genderTriageMicrobatch(
                 schema: responseSchema,
                 analysisType: 'v2_gender_triage_microbatch',
                 stage: 'genderTriage',
-                aiStagePolicyVersion: AI_STAGE_POLICY_V29_VERSION,
+                aiStagePolicyVersion: policyVersion,
                 requestId: audit.requestId,
                 startingAttempt: prepared.startingAttempt,
                 maxImages: GENDER_TRIAGE_V29_MAX_MEDIA_PER_BATCH,
@@ -2297,7 +2325,7 @@ function narrativePrompt(
     policyVersion: AiStagePolicyVersion,
 ): string {
     const legacy = narrativePromptLegacy(input, media, sanitized);
-    if (policyVersion !== AI_STAGE_POLICY_V28_VERSION) return legacy;
+    if (!usesSafePublicPresentation(policyVersion)) return legacy;
     return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요.`;
 }
 
@@ -2355,7 +2383,7 @@ function narrativeResponseSchemaFor(
             });
         }
         value.lines.forEach((line, lineIndex) => {
-            if (policyVersion === AI_STAGE_POLICY_V28_VERSION) {
+            if (usesSafePublicPresentation(policyVersion)) {
                 addV28PublicStyleIssues(line.text, context);
                 if (V28_LAUGH_PATTERN.test(line.text)) {
                     context.addIssue({

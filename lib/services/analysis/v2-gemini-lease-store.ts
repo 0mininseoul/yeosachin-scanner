@@ -7,6 +7,7 @@ import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
+    AI_STAGE_POLICY_V210_VERSION,
     aiStagePolicySupports,
     type AiStageName,
     type AiStagePolicyVersion,
@@ -87,6 +88,7 @@ const acquireInputSchema = z.object({
         'ai-stage-policy-v2.7',
         AI_STAGE_POLICY_V28_VERSION,
         AI_STAGE_POLICY_V29_VERSION,
+        AI_STAGE_POLICY_V210_VERSION,
     ]).optional(),
 }).strict().superRefine((input, context) => {
     const v2 = input.aiStagePolicyVersion !== undefined
@@ -257,10 +259,8 @@ export function createAnalysisV2GeminiLeaseStore(
             const usesV2 = input.data.aiStagePolicyVersion !== undefined
                 && aiStagePolicySupports(input.data.aiStagePolicyVersion, 'durableGeminiLease');
             const usesSchedulerV1Admission =
-                (
-                    input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V28_VERSION
-                    || input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V29_VERSION
-                )
+                input.data.aiStagePolicyVersion !== undefined
+                && aiStagePolicySupports(input.data.aiStagePolicyVersion, 'inputQualityV28')
                 && (
                     input.data.stage === 'genderTriage'
                     || input.data.stage === 'featureAnalysis'

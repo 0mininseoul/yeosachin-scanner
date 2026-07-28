@@ -263,7 +263,10 @@ const AI_RESULT_HASH_PATTERN = /^[0-9a-f]{64}$/;
 function exactSchedulerEnabled(fence: AnalysisV2AiJobFence): boolean {
     return (
         fence.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
-        || fence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        || aiStagePolicySupports(
+            assertAiStagePolicyVersion(fence),
+            'genderTriageMicrobatchV29',
+        )
     )
         && fence.schedulerCapability === 'scheduler-v1';
 }
@@ -482,7 +485,9 @@ export function createDurableAnalysisV2AiStageRuntime(
                         identity,
                         responseSchema,
                     );
-                    const results = await runGenderMicrobatch(accounts, audit);
+                    const results = await runGenderMicrobatch(accounts, audit, {
+                        aiStagePolicyVersion: assertAiStagePolicyVersion(activeFence),
+                    });
                     return {
                         results,
                         operationKey: identity.operationKey,
@@ -532,7 +537,10 @@ export function createDurableAnalysisV2AiStageRuntime(
         if (!exactSchedulerEnabled(fence)) {
             return Promise.reject(new Error('ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_SCHEDULER_REQUIRED'));
         }
-        const accountId = createGenderTriageMicrobatchAccountId(input);
+        const accountId = createGenderTriageMicrobatchAccountId(
+            input,
+            assertAiStagePolicyVersion(fence),
+        );
         const groupKey = schedulerBatchKey(fence);
         let group = pendingGenderMicrobatches.get(groupKey);
         if (!group) {
@@ -564,7 +572,7 @@ export function createDurableAnalysisV2AiStageRuntime(
     return {
         async gender(input, fence) {
             const policyVersion = assertAiStagePolicyVersion(fence);
-            if (policyVersion === 'ai-stage-policy-v2.9') {
+            if (aiStagePolicySupports(policyVersion, 'genderTriageMicrobatchV29')) {
                 return queueGenderMicrobatch(input, fence);
             }
             const identity = createGenderTriageResultIdentity(input, policyVersion);

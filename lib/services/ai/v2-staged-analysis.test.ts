@@ -29,6 +29,7 @@ import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
+    AI_STAGE_POLICY_V210_VERSION,
     type AiStagePolicyVersion,
 } from './stage-policy';
 import {
@@ -981,6 +982,83 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('실제 보이는 단서를 한 가지 이상 콕 집어');
         expect(prompt).toContain('official_group_or_brand면 로고·팀명·발매');
         expect(prompt).toContain('물음표나 ㅋㅋ은');
+    });
+
+    it('keeps v2.9 legacy presentation byte-distinct while v2.10 restores v2.8 concrete copy rules', async () => {
+        const input = featureInput();
+        expect(createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_V210_VERSION).operationKey)
+            .not.toBe(createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_V29_VERSION).operationKey);
+
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            oneLineOverview: '판독관은 남자친구가 있다고 적힌 소개를 보고 결론을 냈습니다 ㅋㅋㅋㅋ.',
+        })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V210_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION },
+        );
+
+        expect(result.features.oneLineOverview)
+            .toBe('개인 계정 맥락으로 분류됐지만, 더 구체적인 총평을 뒷받침할 공개 단서는 부족합니다.');
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('실제 보이는 단서를 한 가지 이상 콕 집어');
+        expect(prompt).toContain('official_group_or_brand면 로고·팀명·발매');
+        expect(prompt).toContain('물음표나 ㅋㅋ은');
+    });
+
+    it('keeps shipped v2.9 overview acceptance and legacy prompt bytes immutable', async () => {
+        const input = featureInput();
+        const shippedV29Copy = '판독관은 여행 사진이 정돈된 흐름을 보며 일정표까지 궁금해집니다.';
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: shippedV29Copy })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V29_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V29_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toBe(shippedV29Copy);
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('한마디를 던지는 판독관');
+        expect(prompt).not.toContain('실제 보이는 단서를 한 가지 이상 콕 집어');
+    });
+
+    it('permits one grounded laugh in a v2.10 overview but rejects a second laugh token', async () => {
+        const input = featureInput();
+        const oneLaugh = '캡션에 콜드브루와 공연 기록이 반복되네요 ㅋㅋ 일정표가 더 바쁠 것 같은 피드입니다.';
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: oneLaugh })));
+        expect((await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V210_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION },
+        )).features.oneLineOverview).toBe(oneLaugh.normalize('NFKC'));
+
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            oneLineOverview: '캡션에 콜드브루와 공연 기록이 반복되네요 ㅋㅋ 일정표가 더 바쁠 것 같네요 ㅋㅋ.',
+        })));
+        expect((await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V210_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION },
+        )).features.oneLineOverview)
+            .toBe('개인 계정 맥락으로 분류됐지만, 더 구체적인 총평을 뒷받침할 공개 단서는 부족합니다.');
     });
 
     it('keeps v2.7 input identity byte-stable while v2.8 admits profile evidence', () => {

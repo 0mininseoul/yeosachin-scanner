@@ -118,10 +118,7 @@ export function analysisV2ProfilePipelineConcurrency(
     configured?: number,
 ): number {
     return configured ?? (
-        (
-            aiStagePolicyVersion === 'ai-stage-policy-v2.8'
-            || aiStagePolicyVersion === 'ai-stage-policy-v2.9'
-        )
+        policySupports(aiStagePolicyVersion, 'inputQualityV28')
         && schedulerCapability === 'scheduler-v1'
             ? SCHEDULER_V1_PROFILE_PIPELINE_CONCURRENCY
             : LEGACY_MAX_PROFILE_AI_CONCURRENCY
@@ -855,8 +852,7 @@ function screenedAccountContext(
     if (!exactV28Policy) return modelContext;
     const hasCompleteV28Provenance =
         (
-            outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
-            || outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+            policySupports(outcome.aiStagePolicyVersion ?? '', 'inputQualityV28')
         )
         && outcome.inputQualityPolicy === 'input-quality-v2.8'
         && outcome.mediaSelectionProvenance !== undefined
@@ -1310,9 +1306,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 aiFence.aiStagePolicyVersion,
                 'inputQualityV28',
             );
-            const inputQualityPolicyVersion = aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
-                ? 'ai-stage-policy-v2.9' as const
-                : 'ai-stage-policy-v2.8' as const;
+            const inputQualityPolicyVersion = assertSupportedAiStagePolicyVersion(
+                aiFence.aiStagePolicyVersion,
+            );
             const defaultGenderResolutionStatus = genderResolutionEnabled
                 ? 'not_eligible' as const
                 : 'disabled' as const;
@@ -1363,7 +1359,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         ? {
                             fullName: profile.fullName ?? null,
                             hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
-                            ...(aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                            ...(policySupports(
+                                aiFence.aiStagePolicyVersion,
+                                'genderTriageMicrobatchV29',
+                            )
                                 ? { bio: profile.bio ?? null }
                                 : {}),
                         }
@@ -1509,11 +1508,17 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     ));
                     const triageAssessment = gender.result.assessment;
                     const resolverMedia =
-                        aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                        policySupports(
+                            aiFence.aiStagePolicyVersion,
+                            'genderTriageMicrobatchV29',
+                        )
                             ? selectAnalysisV2GenderResolverMedia(normalized.media)
                             : normalized.media;
                     const resolverEligible = genderResolutionEnabled && (
-                        aiFence.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+                        policySupports(
+                            aiFence.aiStagePolicyVersion,
+                            'genderTriageMicrobatchV29',
+                        )
                             ? v29GenderResolverAdmission(
                                 gender.result,
                                 resolverMedia.length,
@@ -1557,7 +1562,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 genderResolutionOperationKey: null,
                                 genderResolutionResultHash: null,
                                 mediaBundlePersisted: false,
-                                aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+                                aiStagePolicyVersion: inputQualityPolicyVersion,
                                 v29FeatureAdmission: v29Admission,
                             };
                         }
@@ -1636,7 +1641,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                     genderResolutionResultHash:
                                         readyResolver?.resultHash ?? null,
                                     mediaBundlePersisted,
-                                    aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+                                    aiStagePolicyVersion: inputQualityPolicyVersion,
                                     v29FeatureAdmission: v29Admission,
                                     ...(selectionProvenance
                                         ? {

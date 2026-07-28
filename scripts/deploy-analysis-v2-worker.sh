@@ -96,6 +96,8 @@ Optional deployment environment variables:
   ANALYSIS_V2_WORKER_TIMEOUT_SECONDS         Fixed launch value: 300.
   ANALYSIS_V2_WORKER_ENABLED                 Enables authenticated worker drain; defaults false.
   ANALYSIS_V2_RECOVERY_ENABLED               Enables scheduled recovery; defaults false.
+  EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED    Enables recovery-only admission of validated paid
+                                             earlybird orders on canonical analysis-worker; defaults false.
   ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS
                                                Optional comma-separated slot:version refs for
                                                explicitly reviewed non-selected slots.
@@ -557,6 +559,7 @@ service_runtime_config_matches() {
     --arg identity_hmac_secret "$PREFLIGHT_IDENTITY_HMAC_SECRET_ID" \
     --arg identity_hmac_version "$preflight_identity_hmac_secret_version" \
     --arg result_images_enabled "$result_images_enabled" \
+    --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
     --arg result_image_r2_endpoint "$result_image_r2_endpoint" \
     --arg result_image_r2_bucket "$result_image_r2_bucket" \
     --arg r2_access_key_id_secret "$R2_ACCESS_KEY_ID_SECRET_ID" \
@@ -650,6 +653,7 @@ service_runtime_config_matches() {
         and value("SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED") == [$selfhosted_global_gate]
         and value("SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS") == [$selfhosted_global_interval]
         and value("SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS") == [$selfhosted_response_guard]
+        and value("EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED") == [$automatic_fulfillment_enabled]
         and secret_ref("SUPABASE_SERVICE_ROLE_KEY"; $supabase_secret; $supabase_version)
         and secret_ref($apify_env_key; $apify_secret; $apify_version)
         and secret_ref("IMAGE_PROXY_SIGNING_SECRET"; $image_secret; $image_version)
@@ -1493,6 +1497,7 @@ bootstrap_revision_is_execution_disabled() {
     disabled("ANALYSIS_V2_TASKS_ENABLED")
       and disabled("ANALYSIS_V2_WORKER_ENABLED")
       and disabled("ANALYSIS_V2_RECOVERY_ENABLED")
+      and disabled("EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED")
       and disabled("PREFLIGHT_TASKS_ENABLED")
       and disabled("PREFLIGHT_LOCAL_AFTER_ENABLED")
   ' <<<"$config" >/dev/null
@@ -1541,6 +1546,7 @@ worker_endpoint_env_matches() {
     --arg slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
     --arg worker_enabled "$worker_enabled" \
     --arg recovery_enabled "$recovery_enabled" \
+    --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
     --arg result_images_enabled "$result_images_enabled" \
     --arg result_image_r2_endpoint "$result_image_r2_endpoint" \
     --arg result_image_r2_bucket "$result_image_r2_bucket" '
@@ -1567,6 +1573,7 @@ worker_endpoint_env_matches() {
         and value("ANALYSIS_V2_TASKS_ENABLED") == ["true"]
         and value("ANALYSIS_V2_WORKER_ENABLED") == [$worker_enabled]
         and value("ANALYSIS_V2_RECOVERY_ENABLED") == [$recovery_enabled]
+        and value("EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED") == [$automatic_fulfillment_enabled]
         and value("ANALYSIS_V2_ADMISSION_ENABLED") == []
         and value("ANALYSIS_V2_WORKER_EXECUTION_ENABLED") == []
         and value("ANALYSIS_V2_TASKS_PROJECT") == [$project]
@@ -1632,7 +1639,7 @@ ensure_worker_endpoint_env() {
     "${staging_args[@]}" \
     "--revision-suffix=$final_revision_suffix" \
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha" \
-    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
+    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
     "--remove-env-vars=$remove_env_vars" \
     --quiet
 
@@ -1714,7 +1721,7 @@ validate_runtime_env_keys() {
   local key
   while IFS= read -r key; do
     case "$key" in
-      VERCEL|VERCEL_ENV|GCP_VERCEL_WIF_PROVIDER_RESOURCE|VERCEL_OIDC_TEAM_SLUG|VERCEL_OIDC_TEAM_ID|VERCEL_OIDC_PROJECT_ID|*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL|ANALYSIS_V2_ADMISSION_ENABLED|ANALYSIS_V2_WORKER_EXECUTION_ENABLED|ANALYSIS_V2_TASKS_ENABLED|ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED|PREFLIGHT_TASKS_ENABLED|PREFLIGHT_LOCAL_AFTER_ENABLED)
+      VERCEL|VERCEL_ENV|GCP_VERCEL_WIF_PROVIDER_RESOURCE|VERCEL_OIDC_TEAM_SLUG|VERCEL_OIDC_TEAM_ID|VERCEL_OIDC_PROJECT_ID|*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL|ANALYSIS_V2_ADMISSION_ENABLED|ANALYSIS_V2_WORKER_EXECUTION_ENABLED|ANALYSIS_V2_TASKS_ENABLED|ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED|EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED|PREFLIGHT_TASKS_ENABLED|PREFLIGHT_LOCAL_AFTER_ENABLED)
         die "runtime env file contains a forbidden placement, gate, or WIF bootstrap key: $key"
         ;;
       SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID|ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY|APIFY_API_TOKEN|APIFY_*_API_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_SERVICE_ACCOUNT_KEY_BASE64|*_API_KEY|*_SECRET|*_PASSWORD|*_CREDENTIAL|*_CREDENTIALS|*_PRIVATE_KEY|*_KEY_BASE64|*_ACCESS_TOKEN|*_REFRESH_TOKEN|*_OIDC_TOKEN|*_TOKEN)
@@ -1839,7 +1846,7 @@ build_deploy_args() {
   if [[ -n "$worker_env_deploy_file" ]]; then
     deploy_args+=("--env-vars-file=$worker_env_deploy_file")
   else
-    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,$result_image_env_assignments")
+    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,$result_image_env_assignments")
   fi
   if [[ "$initial_deployment" != "true" ]]; then
     deploy_args+=('--no-traffic')
@@ -2486,6 +2493,7 @@ readonly worker_max_instances="${ANALYSIS_V2_WORKER_MAX_INSTANCES:-$DEFAULT_MAX_
 readonly worker_timeout_seconds="${ANALYSIS_V2_WORKER_TIMEOUT_SECONDS:-$DEFAULT_TIMEOUT_SECONDS}"
 readonly worker_enabled="${ANALYSIS_V2_WORKER_ENABLED:-false}"
 readonly recovery_enabled="${ANALYSIS_V2_RECOVERY_ENABLED:-false}"
+readonly automatic_fulfillment_enabled="${EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED:-false}"
 readonly result_images_enabled="${ANALYSIS_V2_RESULT_IMAGES_ENABLED:-false}"
 readonly result_image_r2_endpoint="${ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT:-}"
 readonly result_image_r2_bucket="${ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET:-}"
@@ -2584,6 +2592,15 @@ fi
   || die "ANALYSIS_V2_WORKER_ENABLED must be true or false"
 [[ "$recovery_enabled" == "true" || "$recovery_enabled" == "false" ]] \
   || die "ANALYSIS_V2_RECOVERY_ENABLED must be true or false"
+[[ "$automatic_fulfillment_enabled" == "true" || "$automatic_fulfillment_enabled" == "false" ]] \
+  || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be true or false"
+if [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker-secondary-e2e" ]]; then
+  [[ "$automatic_fulfillment_enabled" == "false" ]] \
+    || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be false on analysis-worker-secondary-e2e"
+elif [[ "$automatic_fulfillment_enabled" == "true" ]]; then
+  [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker" ]] \
+    || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED may be true only on canonical analysis-worker"
+fi
 [[ "$result_images_enabled" == "true" || "$result_images_enabled" == "false" ]] \
   || die "ANALYSIS_V2_RESULT_IMAGES_ENABLED must be true or false"
 if [[ "$result_images_enabled" == "true" ]]; then
@@ -2654,9 +2671,13 @@ if [[ -n "$worker_env_file" ]]; then
     || die "runtime env file must set SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100"
   runtime_env_json="$(jq -c \
     --arg enabled "$result_images_enabled" \
+    --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
     --arg endpoint "$result_image_r2_endpoint" \
     --arg bucket "$result_image_r2_bucket" '
-      . + {ANALYSIS_V2_RESULT_IMAGES_ENABLED: $enabled}
+      . + {
+        ANALYSIS_V2_RESULT_IMAGES_ENABLED: $enabled,
+        EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED: $automatic_fulfillment_enabled
+      }
       | if $enabled == "true" then
           . + {
             ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT: $endpoint,

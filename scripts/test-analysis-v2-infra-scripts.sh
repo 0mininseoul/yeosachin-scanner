@@ -913,7 +913,9 @@ case "$command_line" in
         worker_gate="${ANALYSIS_V2_WORKER_ENABLED:-false}"
         recovery_gate="${ANALYSIS_V2_RECOVERY_ENABLED:-false}"
       fi
+      automatic_fulfillment_gate="${EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED:-false}"
       jq -nc \
+        --arg service "${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}" \
         --arg latest_created "$latest_created" \
         --arg latest_ready "$latest_ready" \
         --arg traffic_revision "$traffic_revision" \
@@ -925,6 +927,7 @@ case "$command_line" in
         --arg runtime_slot "$runtime_slot" \
         --arg worker_gate "$worker_gate" \
         --arg recovery_gate "$recovery_gate" \
+        --arg automatic_fulfillment_gate "$automatic_fulfillment_gate" \
         --arg selfhosted_global_gate "$selfhosted_global_gate" \
         --arg selfhosted_global_interval "$selfhosted_global_interval" \
         --arg selfhosted_response_guard "$selfhosted_response_guard" \
@@ -945,7 +948,7 @@ case "$command_line" in
       --argjson traffic_tagged "${FAKE_GCLOUD_TRAFFIC_TAGGED:-false}" '
         {
           metadata: {
-            name: "analysis-worker",
+            name: $service,
             generation: $service_generation,
             labels: {"analysis-v2-source-commit": $source_commit},
             annotations: {
@@ -982,6 +985,7 @@ case "$command_line" in
                   {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
                   {name: "ANALYSIS_V2_WORKER_ENABLED", value: $worker_gate},
                   {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $recovery_gate},
+                  {name: "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED", value: $automatic_fulfillment_gate},
                   {name: "ANALYSIS_V2_TASKS_PROJECT", value: "test-project"},
                   {name: "ANALYSIS_V2_TASKS_LOCATION", value: "asia-northeast3"},
                   {name: "ANALYSIS_V2_TASKS_QUEUE", value: $runtime_queue},
@@ -1154,6 +1158,7 @@ case "$command_line" in
         containers: [{image: $revision_image, env: ((
           if $bootstrap_revision then [
             {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: "false"},
+            {name: "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED", value: "false"},
             {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot},
             {name: "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED", value: $active_authorized_test_sharding},
             {name: "NEXT_PUBLIC_SUPABASE_URL", value: $active_supabase_public_url}
@@ -1161,6 +1166,7 @@ case "$command_line" in
             {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
             {name: "ANALYSIS_V2_WORKER_ENABLED", value: "false"},
             {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $known_good_recovery},
+            {name: "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED", value: "false"},
             {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot},
             {name: "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED", value: $active_authorized_test_sharding},
             {name: "NEXT_PUBLIC_SUPABASE_URL", value: $active_supabase_public_url},
@@ -1613,6 +1619,25 @@ common_env=(
   "FAKE_GCLOUD_SOURCE_COMMIT=$repo_source_commit"
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml"
 )
+
+if env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=ready' \
+  'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE=analysis-worker-secondary-e2e' \
+  'EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-secondary-e2e-automatic-fulfillment.out" 2>&1; then
+  fail "secondary E2E worker accepted automatic paid fulfillment"
+fi
+assert_contains "$temp_dir/worker-secondary-e2e-automatic-fulfillment.out" \
+  "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be false on analysis-worker-secondary-e2e"
+
+env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=ready' \
+  'EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-canonical-automatic-fulfillment-check.out"
+assert_contains "$temp_dir/worker-canonical-automatic-fulfillment-check.out" \
+  "verified: V2 and preflight tasks target the canonical private worker URL"
 
 missing_deploy_lock_env=()
 for item in "${common_env[@]}"; do

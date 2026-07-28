@@ -27,7 +27,7 @@ describe('server signout compatibility route', () => {
         }));
 
         expect(response.status).toBe(302);
-        expect(response.headers.get('location')).toBe('https://yeosachin.vercel.app/');
+        expect(response.headers.get('location')).toBe('https://yeosachin.com/');
     });
 
     it('returns only a bounded failure when Supabase rejects sign out', async () => {
