@@ -19,6 +19,9 @@ interface ClaimedOutboxItem {
     project_slug: string | null;
     occurred_at: string;
     issue_url: string | null;
+    issue_short_id: string | null;
+    error_type: string | null;
+    release: string | null;
     attempts: number;
 }
 
@@ -29,6 +32,9 @@ export interface SentryAlertForOutbox {
     projectSlug: string | null;
     occurredAt: Date;
     issueUrl: string | null;
+    issueShortId: string | null;
+    errorType: string | null;
+    release: string | null;
 }
 
 function configuredDiscord(): DiscordConfig | null {
@@ -142,6 +148,44 @@ function safeIssueUrl(value: string | null): string | null {
     }
 }
 
+function safeShortId(value: string | null): string | null {
+    return value && /^[A-Z][A-Z0-9_-]{0,49}-[0-9]{1,12}$/.test(value) ? value : null;
+}
+
+function safeErrorType(value: string | null): string | null {
+    return value && value.length <= 120
+        && /^[A-Za-z_$][A-Za-z0-9_$.]*(?:::[A-Za-z_$][A-Za-z0-9_$.]*)*$/.test(value)
+        ? value : null;
+}
+
+function safeRelease(value: string | null): string | null {
+    return value && value.length <= 80
+        && /^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(value)
+        && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+        ? value : null;
+}
+
+function tagValue(value: unknown, key: string): string | null {
+    const event = asRecord(value)?.event;
+    const direct = asRecord(event)?.[key];
+    if (typeof direct === 'string') return direct;
+    const tags = asRecord(event)?.tags;
+    if (!Array.isArray(tags)) return null;
+    for (const tag of tags) {
+        const record = asRecord(tag);
+        if (record?.key === key && typeof record.value === 'string') return record.value;
+    }
+    return null;
+}
+
+function serviceHookErrorType(value: unknown): string | null {
+    const event = asRecord(value)?.event;
+    const exception = asRecord(event)?.exception;
+    const values = exception?.values;
+    if (!Array.isArray(values)) return null;
+    return typeof asRecord(values[0])?.type === 'string' ? asRecord(values[0])?.type as string : null;
+}
+
 function occurredAt(value: unknown): Date | null {
     const candidate = stringAt(value, ['event', 'dateCreated']);
     if (!candidate) return null;
@@ -209,6 +253,9 @@ export function parseProductionSentryIssueAlert(rawBody: string): SentryAlertFor
         projectSlug,
         occurredAt: when,
         issueUrl,
+        issueShortId: safeShortId(stringAt(payload, ['group', 'shortId'])),
+        errorType: safeErrorType(serviceHookErrorType(payload)),
+        release: safeRelease(tagValue(payload, 'release')),
     };
 }
 
@@ -247,6 +294,9 @@ export function parseProductionSentryInternalIntegrationIssue(rawBody: string): 
         projectSlug,
         occurredAt: when,
         issueUrl: safeIssueUrl(typeof issue.permalink === 'string' ? issue.permalink : null),
+        issueShortId: safeShortId(typeof issue.shortId === 'string' ? issue.shortId : null),
+        errorType: safeErrorType(stringAt(issue, ['metadata', 'type']) ?? (typeof issue.type === 'string' ? issue.type : null)),
+        release: safeRelease(typeof issue.release === 'string' ? issue.release : stringAt(issue, ['metadata', 'release'])),
     };
 }
 
@@ -261,8 +311,13 @@ export function formatSentryAlertKst(value: Date): string {
 }
 
 /** This deliberately has no Sentry text, exception title, request data, tags, or user data. */
-export function buildSentryDiscordPayload(item: Pick<ClaimedOutboxItem, 'project_slug' | 'occurred_at' | 'issue_url'>) {
-    const fields = [{ name: '발생 일시', value: formatSentryAlertKst(new Date(item.occurred_at)), inline: false }];
+export function buildSentryDiscordPayload(item: Pick<ClaimedOutboxItem, 'project_slug' | 'occurred_at' | 'issue_url' | 'issue_short_id' | 'error_type' | 'release'>) {
+    const fields = [
+        { name: 'Sentry ID', value: item.issue_short_id ?? '미제공', inline: true },
+        { name: '오류 유형', value: item.error_type ?? '미제공', inline: true },
+        { name: '발생 일시', value: formatSentryAlertKst(new Date(item.occurred_at)), inline: false },
+    ];
+    if (item.release) fields.splice(2, 0, { name: '릴리스', value: item.release, inline: true });
     if (item.project_slug) fields.unshift({ name: '프로젝트', value: item.project_slug, inline: true });
     return {
         embeds: [{
@@ -397,6 +452,9 @@ export async function enqueueSentryDiscordAlert(alert: SentryAlertForOutbox): Pr
         p_project_slug: alert.projectSlug,
         p_occurred_at: alert.occurredAt.toISOString(),
         p_issue_url: alert.issueUrl,
+        p_issue_short_id: alert.issueShortId,
+        p_error_type: alert.errorType,
+        p_release: alert.release,
     });
     if (error) throw new Error('SENTRY_DISCORD_OUTBOX_ENQUEUE_FAILED');
     return data === true;

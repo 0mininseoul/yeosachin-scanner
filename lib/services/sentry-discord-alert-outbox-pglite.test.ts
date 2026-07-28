@@ -5,6 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 const migration = readFileSync(new URL(
     '../../supabase/migrations/20260728140000_add_sentry_discord_alert_outbox.sql', import.meta.url,
 ), 'utf8');
+const summaryMigration = readFileSync(new URL(
+    '../../supabase/migrations/20260728190000_add_sentry_discord_safe_issue_summary.sql', import.meta.url,
+), 'utf8');
 let db: PGlite;
 const DEDUPE_KEY = 'a'.repeat(64);
 
@@ -19,6 +22,7 @@ beforeAll(async () => {
         $$;
     `);
     await db.exec(migration);
+    await db.exec(summaryMigration);
 }, 30_000);
 
 afterAll(async () => db.close());
@@ -28,12 +32,12 @@ describe('Sentry Discord durable outbox', () => {
         await db.exec('SET ROLE service_role');
         const [first, duplicate] = await Promise.all([
             db.query<{ enqueue_sentry_discord_alert_outbox: boolean }>(
-                'SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3)',
-                [DEDUPE_KEY, 'web-app', 'https://sentry.io/organizations/acme/issues/1234/'],
+                'SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3, $4, $5, $6)',
+                [DEDUPE_KEY, 'web-app', 'https://sentry.io/organizations/acme/issues/1234/', 'WEB-1234', 'TypeError', 'v1.2.3'],
             ),
             db.query<{ enqueue_sentry_discord_alert_outbox: boolean }>(
-                'SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3)',
-                [DEDUPE_KEY, 'web-app', 'https://sentry.io/organizations/acme/issues/1234/'],
+                'SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3, $4, $5, $6)',
+                [DEDUPE_KEY, 'web-app', 'https://sentry.io/organizations/acme/issues/1234/', 'WEB-1234', 'TypeError', 'v1.2.3'],
             ),
         ]);
         const [claimOne, claimTwo] = await Promise.all([
@@ -101,7 +105,7 @@ describe('Sentry Discord durable outbox', () => {
         const older = 'b'.repeat(64);
         const fresh = 'c'.repeat(64);
         await db.exec('SET ROLE service_role');
-        await db.query('SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3)', [older, 'old-project', null]);
+        await db.query('SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3, $4, $5, $6)', [older, 'old-project', null, null, null, null]);
         await db.exec('RESET ROLE');
         await db.exec(`
             UPDATE public.sentry_discord_alert_outbox
@@ -109,7 +113,7 @@ describe('Sentry Discord durable outbox', () => {
             WHERE dedupe_key = '${older}';
             SET ROLE service_role;
         `);
-        await db.query('SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3)', [fresh, 'fresh-project', null]);
+        await db.query('SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3, $4, $5, $6)', [fresh, 'fresh-project', null, null, null, null]);
         const targeted = await db.query<{ id: string }>(
             'SELECT id FROM public.claim_sentry_discord_alert_outbox(1, $1)', [fresh],
         );
