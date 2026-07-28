@@ -52,7 +52,7 @@ function parseRow(value: unknown): DemoAnalysisRun | null {
 
 /** New fixture versions cannot replay a persisted run from an earlier fixture namespace. */
 export function demoFixtureIdempotencyKey(idempotencyKey: string): string {
-    return `fixture-v3-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
+    return `fixture-v4-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
 }
 
 export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({

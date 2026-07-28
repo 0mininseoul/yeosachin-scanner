@@ -18,6 +18,10 @@ const v3Migration = readFileSync(
     new URL('../../../supabase/migrations/20260727141000_upgrade_demo_fixture_v3_redacted.sql', import.meta.url),
     'utf8',
 );
+const v4Migration = readFileSync(
+    new URL('../../../supabase/migrations/20260729120000_upgrade_demo_fixture_v4_bijective.sql', import.meta.url),
+    'utf8',
+);
 
 const userId = '123e4567-e89b-42d3-a456-426614174000';
 const idempotencyKey = 'demo-preflight-key-000000000000';
@@ -44,6 +48,7 @@ beforeAll(async () => {
     `);
     await db.exec(v2Migration);
     await db.exec(v3Migration);
+    await db.exec(v4Migration);
 });
 
 afterAll(async () => db.close());
@@ -76,7 +81,7 @@ describe('create_demo_analysis_preflight forward fix', () => {
         expect(first.rows[0]).toMatchObject({
             user_id: userId,
             target_instagram_id: 'junho_dem',
-            fixture_version: 'authorized-redacted-fixture-v3',
+            fixture_version: 'authorized-redacted-fixture-v4',
             idempotency_key: idempotencyKey,
             duration_seconds: 38,
             started_at: null,
@@ -85,7 +90,7 @@ describe('create_demo_analysis_preflight forward fix', () => {
         expect(replay.rows).toEqual([{ id: first.rows[0]!.id, created: false }]);
     });
 
-    it('retains v1/v2 rows while v3 admits only its shorter server-owned bound', async () => {
+    it('retains v1/v2/v3 rows while v4 admits only its shorter server-owned bound', async () => {
         const legacy = await db.query<{ fixture_version: string; duration_seconds: number }>(`
             SELECT fixture_version, duration_seconds
             FROM public.demo_analysis_runs
@@ -115,11 +120,20 @@ describe('create_demo_analysis_preflight forward fix', () => {
         `);
         expect(persistedV2.rows).toEqual([{ fixture_version: 'authorized-text-fixture-v2', duration_seconds: 38 }]);
 
+        const persistedV3 = await db.query<{ fixture_version: string; duration_seconds: number }>(`
+            INSERT INTO public.demo_analysis_runs (
+                user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds
+            ) VALUES (
+                '${userId}', 'junho_dem', 'authorized-redacted-fixture-v3', 'standard', 'persisted-v3-demo-preflight-key-000000', 38
+            ) RETURNING fixture_version, duration_seconds
+        `);
+        expect(persistedV3.rows).toEqual([{ fixture_version: 'authorized-redacted-fixture-v3', duration_seconds: 38 }]);
+
         await expect(db.query(`
             SELECT * FROM public.create_demo_analysis_preflight(
                 '${userId}', 'junho_dem', 'invalid-v2-duration-key-0000000', 75
             )
-        `)).rejects.toThrow(/invalid demo v3 run input/i);
+        `)).rejects.toThrow(/invalid demo v4 run input/i);
     });
 
     it('keeps the exact RPC executable only by service_role', async () => {

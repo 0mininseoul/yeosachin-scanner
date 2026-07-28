@@ -5,6 +5,7 @@ import {
     DEMO_FIXTURE_VARIANTS,
     DEMO_FIXTURE_VERSION,
     LEGACY_DEMO_FIXTURE_VERSION,
+    REDACTED_DEMO_FIXTURE_VERSION,
     DEMO_TARGET_USERNAME,
     createDemoFixture,
     demoReadyPreflight,
@@ -41,7 +42,7 @@ describe('synthetic demo analysis policy', () => {
         expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(30);
         expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '999' })).toBe(45);
         expect(demoDurationSeconds({})).toBe(38);
-        expect(DEMO_FIXTURE_VERSION).toBe('authorized-redacted-fixture-v3');
+        expect(DEMO_FIXTURE_VERSION).toBe('authorized-redacted-fixture-v4');
     });
 
     it('expires an unstarted preflight exactly at its boundary but preserves a started replay', () => {
@@ -55,7 +56,7 @@ describe('synthetic demo analysis policy', () => {
 });
 
 describe('isolated demo fixtures', () => {
-    it('dispatches legacy and v3 runs to distinct static fixtures', () => {
+    it('dispatches legacy and current runs to distinct static fixtures', () => {
         const requestId = '123e4567-e89b-42d3-a456-426614174000';
         const legacy = createDemoFixture(requestId, LEGACY_DEMO_FIXTURE_VERSION);
         const current = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
@@ -79,10 +80,18 @@ describe('isolated demo fixtures', () => {
 
     it('keeps persisted v2 rows on their original fixture namespace', () => {
         const v2 = createDemoFixture(requestId, AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION);
-        const v3 = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
+        const v4 = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
         expect(v2.version).toBe(AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION);
         expect(v2.publicAccounts[0]?.profileImage).toMatch(/^\/demo-avatars\/synthetic-blurred-avatar-/u);
-        expect(v3.publicAccounts[0]?.profileImage).toMatch(/^\/demo-avatars\/demo-v3-female-/u);
+        expect(v4.publicAccounts[0]?.profileImage).toMatch(/^\/demo-avatars\/demo-v3-female-/u);
+    });
+
+    it('keeps persisted v3 rows on their original repeated-card fixture', () => {
+        const v3 = createDemoFixture(requestId, REDACTED_DEMO_FIXTURE_VERSION);
+
+        expect(v3.version).toBe(REDACTED_DEMO_FIXTURE_VERSION);
+        expect(v3.publicAccounts).toHaveLength(242);
+        expect(v3.privateAccounts).toHaveLength(142);
     });
 
     it('dispatches unstarted legacy preflights to their canonical v1 presentation', () => {
@@ -101,13 +110,13 @@ describe('isolated demo fixtures', () => {
         expect(assets.filter(asset => asset.endsWith('.webp'))).toHaveLength(230);
     });
 
-    it('is deterministic and has exact fixture relationship totals', () => {
+    it('is deterministic and has exact source-backed relationship totals', () => {
         const first = createDemoFixture(requestId);
         expect(first).toEqual(createDemoFixture(requestId));
-        expect(first.publicAccounts).toHaveLength(242);
-        expect(first.privateAccounts).toHaveLength(142);
-        expect(new Set(first.publicAccounts.map(row => row.instagramId)).size).toBe(242);
-        expect(new Set(first.publicAccounts.map(row => `${row.fullName}|${row.bio}|${row.oneLineOverview}`)).size).toBe(242);
+        expect(first.publicAccounts).toHaveLength(84);
+        expect(first.privateAccounts).toHaveLength(145);
+        expect(new Set(first.publicAccounts.map(row => row.instagramId)).size).toBe(84);
+        expect(new Set(first.privateAccounts.map(row => row.instagramId)).size).toBe(145);
         expect(first.publicAccounts.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
         expect(first.publicAccounts.filter(row => row.riskBand === 'caution').length).toBeGreaterThanOrEqual(2);
         expect(first.publicAccounts.every(row => Number.isInteger(row.displayScore))).toBe(true);
@@ -123,9 +132,12 @@ describe('isolated demo fixtures', () => {
         expect(first.publicAccounts.every(row => !/가상 프로필|비공개 프로필/u.test(row.fullName ?? ''))).toBe(true);
         expect(first.summary.genderStats.male + first.summary.genderStats.female + first.summary.genderStats.unknown)
             .toBe(first.summary.screenedMutuals);
+        expect(first.summary.publicMutuals).toBe(first.publicAccounts.length);
+        expect(first.summary.privateMutuals).toBe(first.privateAccounts.length);
+        expect(first.summary.screenedMutuals).toBe(first.publicAccounts.length);
     });
 
-    it('uses static redacted v3 text and only local baked blurred avatars', () => {
+    it('uses static redacted v4 text and only local baked blurred avatars', () => {
         const fixture = createDemoFixture(requestId);
         const publicRows = fixture.publicAccounts;
         const preflight = demoReadyPreflight({ id: requestId, created_at: '2026-07-01T00:00:00.000Z' });
@@ -168,7 +180,7 @@ describe('isolated demo fixtures', () => {
         )).toBe(true);
     });
 
-    it('keeps the requested v3 account normal and moves the third featured caution rank to a distinct row', () => {
+    it('keeps the requested current account normal and moves the third featured caution rank to a distinct row', () => {
         const fixture = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
         const requested = fixture.publicAccounts.find(row => row.instagramId === 'bl1ckcherdk_cuu6');
         const featuredCaution = fixture.publicAccounts.find(row => row.riskBand === 'caution' && row.featuredRank === 3);
@@ -251,8 +263,8 @@ describe('isolated demo fixtures', () => {
             publicCursor = page.femaleNextCursor;
             privateCursor = page.privateNextCursor;
         } while (publicCursor || privateCursor);
-        expect(publicIds).toHaveLength(242);
-        expect(privateIds).toHaveLength(142);
+        expect(publicIds).toHaveLength(84);
+        expect(privateIds).toHaveLength(145);
     });
 
     it('continues to emit the production result-page DTO for the demo UI', () => {
@@ -268,7 +280,7 @@ describe('isolated demo fixtures', () => {
         expect(source).not.toMatch(/supabase|createClient|analysis_results|fetch\(/iu);
     });
 
-    it('pins the v3 source importers to one fully-ready sealed registry selector and deterministic 30 percent mutation', () => {
+    it('pins the v4 builder to one fully-ready sealed source and a bijective local derivation', () => {
         const avatarBuilder = readFileSync(new URL('../../../scripts/build-demo-v3-avatars.ts', import.meta.url), 'utf8');
         const fixtureBuilder = readFileSync(new URL('../../../scripts/build-demo-v3-fixture.ts', import.meta.url), 'utf8');
         [avatarBuilder, fixtureBuilder].forEach(source => {
@@ -281,9 +293,13 @@ describe('isolated demo fixtures', () => {
             expect(source).toMatch(/ready_female\s*=\s*84/u);
             expect(source).toMatch(/ready_private\s*=\s*145/u);
         });
-        expect(fixtureBuilder).toMatch(/DEMO_V3_CURATED_OVERRIDES/u);
+        expect(fixtureBuilder).toMatch(/DEMO_V4_CURATED_OVERRIDES/u);
         expect(fixtureBuilder).toContain('Math.round(indexes.length * 0.3)');
-        expect(fixtureBuilder).toContain('Array.from({ length: 242 }');
+        expect(fixtureBuilder).toContain('sourceCandidateId');
+        expect(fixtureBuilder).toContain('selectedRunIds.size !== 1');
+        expect(fixtureBuilder).toContain('uniqueByImageOrdinal');
+        expect(fixtureBuilder).toContain('new Set(publicFixture.map(row => row.imageSortOrdinal))');
+        expect(fixtureBuilder).not.toContain('index % orderedPublicRows.length');
         expect(fixtureBuilder).toContain('parseSafePublicRiskNarrative(highRiskNarrative)');
         expect(fixtureBuilder).toContain('narrativeSource.narrative_line_one');
         expect(fixtureBuilder).toContain('const orderedPublicRows = [narrativeSource');

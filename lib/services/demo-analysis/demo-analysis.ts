@@ -13,6 +13,7 @@ import type {
 import { paginateAnalysisResults } from '@/lib/domain/analysis/result-pagination';
 import { ANALYSIS_PLAN_CATALOG, PLAN_PRICING_VERSION, buildPlanSelectionCards } from '@/lib/domain/analysis/plan-catalog';
 import { DEMO_V3_SOURCE_FIXTURE } from './demo-v3-source-fixture';
+import { DEMO_V4_SOURCE_FIXTURE } from './demo-v4-source-fixture';
 
 /** The only canonical demo target. Do not duplicate this value in route or SQL code. */
 export const DEMO_TARGET_USERNAME = 'junho_dem' as const;
@@ -20,11 +21,14 @@ export const DEMO_TARGET_USERNAME = 'junho_dem' as const;
 export const LEGACY_DEMO_FIXTURE_VERSION = 'synthetic-fixture-v1' as const;
 /** Existing v2 rows remain replayable after v3 becomes the default. */
 export const AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION = 'authorized-text-fixture-v2' as const;
-/** New runs use redacted text and locally baked source-derived avatar assets. */
-export const DEMO_FIXTURE_VERSION = 'authorized-redacted-fixture-v3' as const;
+/** Persisted v3 rows remain replayable after the bijective v4 fixture becomes current. */
+export const REDACTED_DEMO_FIXTURE_VERSION = 'authorized-redacted-fixture-v3' as const;
+/** New runs use the bijective redacted fixture and locally baked source-derived avatar assets. */
+export const DEMO_FIXTURE_VERSION = 'authorized-redacted-fixture-v4' as const;
 export type DemoFixtureVersion =
     | typeof LEGACY_DEMO_FIXTURE_VERSION
     | typeof AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION
+    | typeof REDACTED_DEMO_FIXTURE_VERSION
     | typeof DEMO_FIXTURE_VERSION;
 export const DEMO_ASSET_PREFIX = '/demo-avatars/synthetic-blurred-avatar-' as const;
 export const DEMO_V3_ASSET_PREFIX = '/demo-avatars/demo-v3-' as const;
@@ -128,8 +132,13 @@ function v3Avatar(kind: 'target' | 'female' | 'private', sortOrdinal: number): s
     return `${DEMO_V3_ASSET_PREFIX}${kind}-${String(sortOrdinal).padStart(3, '0')}.webp`;
 }
 
-function isV3Fixture(fixtureVersion: DemoFixtureVersion | undefined): boolean {
-    return (fixtureVersion ?? DEMO_FIXTURE_VERSION) === DEMO_FIXTURE_VERSION;
+function isRedactedFixture(fixtureVersion: DemoFixtureVersion | undefined): boolean {
+    const version = fixtureVersion ?? DEMO_FIXTURE_VERSION;
+    return version === REDACTED_DEMO_FIXTURE_VERSION || version === DEMO_FIXTURE_VERSION;
+}
+
+function isV3Fixture(fixtureVersion: DemoFixtureVersion): boolean {
+    return fixtureVersion === REDACTED_DEMO_FIXTURE_VERSION;
 }
 
 export type DemoSourceProfileFixture = Readonly<{
@@ -754,6 +763,25 @@ function v3PublicAccount(index: number): FemaleResultRowV1 {
     };
 }
 
+function v4PublicAccount(index: number): FemaleResultRowV1 {
+    const source = DEMO_V4_SOURCE_FIXTURE.public[index]!;
+    return {
+        instagramId: source.instagramId,
+        fullName: source.fullName,
+        profileImage: v3Avatar('female', source.imageSortOrdinal),
+        bio: source.bio,
+        displayScore: source.displayScore,
+        riskBand: source.riskBand,
+        featuredRank: source.featuredRank,
+        recentMutualRank: source.recentMutualRank,
+        analysisDepth: source.analysisDepth,
+        oneLineOverview: source.oneLineOverview,
+        highRiskNarrative: source.highRiskNarrative
+            ? [source.highRiskNarrative[0], source.highRiskNarrative[1]]
+            : null,
+    };
+}
+
 /**
  * Canonical first-release v1 generator, retained for every persisted v1 row.
  * A later development-only rewrite mistakenly reused the same v1 version
@@ -810,6 +838,11 @@ function v3ProgressProfileId(progressBp: number): string {
     return `${DEMO_V3_SOURCE_FIXTURE.public[index]!.instagramId}*`;
 }
 
+function v4ProgressProfileId(progressBp: number): string {
+    const index = Math.floor(progressBp / 1_000) % DEMO_V4_SOURCE_FIXTURE.public.length;
+    return `${DEMO_V4_SOURCE_FIXTURE.public[index]!.instagramId}*`;
+}
+
 function privateAccount(index: number): PrivateResultRowV1 {
     return {
         instagramId: fixtureIdentifier(DEMO_PRIVATE_HANDLES, index),
@@ -820,6 +853,15 @@ function privateAccount(index: number): PrivateResultRowV1 {
 
 function v3PrivateAccount(index: number): PrivateResultRowV1 {
     const source = DEMO_V3_SOURCE_FIXTURE.private[index % DEMO_V3_SOURCE_FIXTURE.private.length]!;
+    return {
+        instagramId: source.instagramId,
+        fullName: source.fullName,
+        profileImage: v3Avatar('private', source.imageSortOrdinal),
+    };
+}
+
+function v4PrivateAccount(index: number): PrivateResultRowV1 {
+    const source = DEMO_V4_SOURCE_FIXTURE.private[index]!;
     return {
         instagramId: source.instagramId,
         fullName: source.fullName,
@@ -858,7 +900,7 @@ export function demoReadyPreflight(
             bio: fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                 ? '사진과 일상을 기록하는 공개 프로필입니다.'
                 : '산책과 사진을 기록하는 데모 프로필입니다.',
-            profileImage: isV3Fixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
+            profileImage: isRedactedFixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             followersCount: counts.followers,
             followingCount: counts.following,
             isPrivate: false,
@@ -887,30 +929,35 @@ export function createDemoFixture(
     fixtureVersion: DemoFixtureVersion = DEMO_FIXTURE_VERSION,
 ): DemoFixture {
     if (!requestId) throw new TypeError('A demo run id is required.');
-    const publicAccounts = Array.from({ length: 242 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
-        ? legacyPublicAccount(index)
-        : isV3Fixture(fixtureVersion)
-            ? v3PublicAccount(index)
-            : publicAccount(index));
-    const privateAccounts = Array.from({ length: 142 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
-        ? legacyPrivateAccount(index)
-        : isV3Fixture(fixtureVersion)
-            ? v3PrivateAccount(index)
-            : privateAccount(index));
+    const publicAccounts = fixtureVersion === DEMO_FIXTURE_VERSION
+        ? DEMO_V4_SOURCE_FIXTURE.public.map((_, index) => v4PublicAccount(index))
+        : Array.from({ length: 242 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+            ? legacyPublicAccount(index)
+            : isV3Fixture(fixtureVersion)
+                ? v3PublicAccount(index)
+                : publicAccount(index));
+    const privateAccounts = fixtureVersion === DEMO_FIXTURE_VERSION
+        ? DEMO_V4_SOURCE_FIXTURE.private.map((_, index) => v4PrivateAccount(index))
+        : Array.from({ length: 142 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+            ? legacyPrivateAccount(index)
+            : isV3Fixture(fixtureVersion)
+                ? v3PrivateAccount(index)
+                : privateAccount(index));
+    const isV4Fixture = fixtureVersion === DEMO_FIXTURE_VERSION;
     return {
         version: fixtureVersion,
         summary: {
             targetInstagramId: DEMO_TARGET_USERNAME,
             targetFullName: '김준호',
-            targetProfileImage: isV3Fixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
+            targetProfileImage: isRedactedFixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             planId: 'standard',
             followers: { declared: 600, collected: 600, coverageRatio: 1, meetsCoverageGate: true, exactCountMatch: true },
             following: { declared: 580, collected: 580, coverageRatio: 1, meetsCoverageGate: true, exactCountMatch: true },
-            detectedMutuals: 384,
-            publicMutuals: 242,
-            privateMutuals: 142,
-            screenedMutuals: 242,
-            genderStats: { male: 112, female: 96, unknown: 34 },
+            detectedMutuals: isV4Fixture ? 229 : 384,
+            publicMutuals: publicAccounts.length,
+            privateMutuals: privateAccounts.length,
+            screenedMutuals: publicAccounts.length,
+            genderStats: isV4Fixture ? { male: 0, female: 84, unknown: 0 } : { male: 112, female: 96, unknown: 34 },
             notScreenedMutuals: 0,
             exclusionApplied: false,
             scorePolicyVersion: 'risk-policy-v2.3',
@@ -1029,10 +1076,12 @@ export function projectDemoProgress(input: {
             activeProfile: completed ? null : {
                 maskedUsername: input.fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                     ? 'profile.***'
-                    : isV3Fixture(input.fixtureVersion)
-                        ? v3ProgressProfileId(progressBp)
+                    : isRedactedFixture(input.fixtureVersion)
+                        ? isV3Fixture(input.fixtureVersion ?? DEMO_FIXTURE_VERSION)
+                            ? v3ProgressProfileId(progressBp)
+                            : v4ProgressProfileId(progressBp)
                         : demoProgressProfileId(progressBp),
-                imageUrl: isV3Fixture(input.fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
+                imageUrl: isRedactedFixture(input.fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
             lastEventSeq: allEvents.length,
