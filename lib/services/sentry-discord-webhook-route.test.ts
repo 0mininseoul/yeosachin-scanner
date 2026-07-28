@@ -4,14 +4,16 @@ const mocks = vi.hoisted(() => ({
     authentic: vi.fn(),
     parse: vi.fn(),
     enqueue: vi.fn(),
-    deliver: vi.fn(),
+    dispatchImmediately: vi.fn(),
+    enabled: vi.fn(),
 }));
 
 vi.mock('@/lib/services/sentry-discord-alert', () => ({
     isAuthenticSentryServiceHook: mocks.authentic,
     parseProductionSentryIssueAlert: mocks.parse,
     enqueueSentryDiscordAlert: mocks.enqueue,
-    deliverSentryDiscordAlerts: mocks.deliver,
+    dispatchSentryDiscordAlertImmediately: mocks.dispatchImmediately,
+    sentryDiscordAlertsEnabled: mocks.enabled,
 }));
 
 import { POST } from '@/app/api/webhooks/sentry/[pathSecret]/route';
@@ -21,7 +23,10 @@ const context = (pathSecret = 'path') => ({
 });
 
 describe('Sentry Service Hook route', () => {
-    beforeEach(() => vi.resetAllMocks());
+    beforeEach(() => {
+        vi.resetAllMocks();
+        mocks.enabled.mockReturnValue(true);
+    });
     afterEach(() => vi.unstubAllEnvs());
 
     it('rejects an invalid raw-body signature before parsing or enqueueing', async () => {
@@ -42,7 +47,7 @@ describe('Sentry Service Hook route', () => {
         expect(response.status).toBe(202);
         expect(await response.json()).toEqual({ accepted: false });
         expect(mocks.enqueue).not.toHaveBeenCalled();
-        expect(mocks.deliver).not.toHaveBeenCalled();
+        expect(mocks.dispatchImmediately).not.toHaveBeenCalled();
     });
 
     it('returns 202 after durable enqueue even when immediate dispatch fails, and keeps pre-durable outage retryable', async () => {
@@ -50,13 +55,13 @@ describe('Sentry Service Hook route', () => {
         mocks.authentic.mockReturnValue(true);
         mocks.parse.mockReturnValue(alert);
         mocks.enqueue.mockResolvedValue(true);
-        mocks.deliver.mockResolvedValue(1);
+        mocks.dispatchImmediately.mockResolvedValue(1);
         const accepted = await POST(new Request('https://example.test', { method: 'POST', body: '{"private":"value"}' }), context());
         expect(accepted.status).toBe(202);
         expect(mocks.enqueue).toHaveBeenCalledWith(alert);
-        expect(mocks.deliver).toHaveBeenCalledWith({ limit: 1 });
+        expect(mocks.dispatchImmediately).toHaveBeenCalledWith(alert.dedupeKey);
 
-        mocks.deliver.mockRejectedValueOnce(new Error('Discord unreachable private=value'));
+        mocks.dispatchImmediately.mockRejectedValueOnce(new Error('Discord unreachable private=value'));
         const dispatchFailure = await POST(new Request('https://example.test', { method: 'POST', body: '{"private":"value"}' }), context());
         expect(dispatchFailure.status).toBe(202);
 
@@ -64,5 +69,17 @@ describe('Sentry Service Hook route', () => {
         const retry = await POST(new Request('https://example.test', { method: 'POST', body: '{"private":"value"}' }), context());
         expect(retry.status).toBe(503);
         expect(await retry.text()).not.toContain('private');
+    });
+
+    it('drops an authenticated production alert while disabled instead of accumulating a later replay', async () => {
+        const alert = { dedupeKey: 'b'.repeat(64), projectSlug: null, occurredAt: new Date(), issueUrl: null };
+        mocks.authentic.mockReturnValue(true);
+        mocks.parse.mockReturnValue(alert);
+        mocks.enabled.mockReturnValue(false);
+        const response = await POST(new Request('https://example.test', { method: 'POST', body: '{"private":"value"}' }), context());
+        expect(response.status).toBe(202);
+        expect(await response.json()).toEqual({ accepted: false, disabled: true });
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.dispatchImmediately).not.toHaveBeenCalled();
     });
 });

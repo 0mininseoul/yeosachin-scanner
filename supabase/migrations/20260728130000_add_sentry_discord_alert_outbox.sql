@@ -51,7 +51,8 @@ END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.claim_sentry_discord_alert_outbox(
-    p_limit integer DEFAULT 10
+    p_limit integer DEFAULT 10,
+    p_dedupe_key text DEFAULT NULL
 )
 RETURNS TABLE (
     id uuid,
@@ -72,6 +73,7 @@ BEGIN
         FROM public.sentry_discord_alert_outbox AS outbox
         WHERE outbox.status = 'pending'
           AND outbox.next_attempt_at <= clock_timestamp()
+          AND (p_dedupe_key IS NULL OR outbox.dedupe_key = p_dedupe_key)
         ORDER BY outbox.created_at
         FOR UPDATE SKIP LOCKED
         LIMIT LEAST(GREATEST(COALESCE(p_limit, 10), 1), 10)
@@ -172,10 +174,10 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.enqueue_sentry_discord_alert_outbox(char, text, timestamptz, text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.claim_sentry_discord_alert_outbox(integer) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.claim_sentry_discord_alert_outbox(integer, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.complete_sentry_discord_alert_outbox(uuid, uuid, text, text, integer) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.reconcile_stale_sentry_discord_alert_claims(integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.enqueue_sentry_discord_alert_outbox(char, text, timestamptz, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.claim_sentry_discord_alert_outbox(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_sentry_discord_alert_outbox(integer, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_sentry_discord_alert_outbox(uuid, uuid, text, text, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.reconcile_stale_sentry_discord_alert_claims(integer) TO service_role;

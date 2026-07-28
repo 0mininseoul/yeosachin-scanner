@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import {
-    deliverSentryDiscordAlerts,
+    dispatchSentryDiscordAlertImmediately,
     enqueueSentryDiscordAlert,
     isAuthenticSentryServiceHook,
     parseProductionSentryIssueAlert,
+    sentryDiscordAlertsEnabled,
 } from '@/lib/services/sentry-discord-alert';
 
 export const runtime = 'nodejs';
@@ -25,6 +26,9 @@ export async function POST(
 
     const alert = parseProductionSentryIssueAlert(rawBody);
     if (!alert) return NextResponse.json({ accepted: false }, { status: 202 });
+    if (!sentryDiscordAlertsEnabled()) {
+        return NextResponse.json({ accepted: false, disabled: true }, { status: 202 });
+    }
 
     try {
         await enqueueSentryDiscordAlert(alert);
@@ -36,7 +40,7 @@ export async function POST(
     // A Vercel Free cron can be daily. Try one bounded delivery while this
     // authenticated request is alive; failures are recorded and still return 202.
     try {
-        await deliverSentryDiscordAlerts({ limit: 1 });
+        await dispatchSentryDiscordAlertImmediately(alert.dedupeKey);
     } catch {
         // Durable enqueue already succeeded. Never turn a Discord dispatcher
         // defect into a non-2xx Service Hook response.

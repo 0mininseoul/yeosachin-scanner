@@ -118,6 +118,17 @@ describe('Sentry Service Hook Discord bridge', () => {
         }));
     });
 
+    it('claims a specific freshly-enqueued fingerprint for immediate dispatch instead of queue head', async () => {
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ error: null });
+        await deliverSentryDiscordAlerts({ dedupeKey: 'f'.repeat(64), fetcher: vi.fn().mockResolvedValue(new Response(null, { status: 204 })) });
+        expect(mocks.rpc).toHaveBeenCalledWith('claim_sentry_discord_alert_outbox', {
+            p_limit: 10,
+            p_dedupe_key: 'f'.repeat(64),
+        });
+    });
+
     it.each([
         ['429', () => Promise.resolve(new Response(JSON.stringify({ retry_after: 2 }), { status: 429 })), 'DISCORD_RATE_LIMITED'],
         ['5xx', () => Promise.resolve(new Response(null, { status: 503 })), 'DISCORD_5XX'],
@@ -130,6 +141,24 @@ describe('Sentry Service Hook Discord bridge', () => {
         await expect(deliverSentryDiscordAlerts({ fetcher })).resolves.toBe(1);
         expect(mocks.rpc).toHaveBeenCalledWith('complete_sentry_discord_alert_outbox', expect.objectContaining({
             p_outcome: 'retry', p_failure_code: code,
+        }));
+    });
+
+    it.each([
+        ['429', () => Promise.resolve(new Response(JSON.stringify({ retry_after: 1 }), { status: 429 }))],
+        ['5xx', () => Promise.resolve(new Response(null, { status: 503 }))],
+        ['timeout', () => Promise.reject(new Error('timeout'))],
+    ])('performs one bounded immediate %s retry before preserving later durable retry state', async (_kind, firstAttempt) => {
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ error: null });
+        const fetcher = vi.fn()
+            .mockImplementationOnce(firstAttempt)
+            .mockResolvedValueOnce(new Response(null, { status: 204 }));
+        await expect(deliverSentryDiscordAlerts({ fetcher, immediateRetry: true })).resolves.toBe(1);
+        expect(fetcher).toHaveBeenCalledTimes(2);
+        expect(mocks.rpc).toHaveBeenCalledWith('complete_sentry_discord_alert_outbox', expect.objectContaining({
+            p_outcome: 'sent', p_failure_code: null,
         }));
     });
 

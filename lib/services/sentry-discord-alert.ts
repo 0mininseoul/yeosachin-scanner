@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 4_000;
+const IMMEDIATE_RETRY_MAX_DELAY_MS = 2_000;
 const MIN_HOOK_SECRET_LENGTH = 32;
 
 interface DiscordConfig {
@@ -31,11 +32,16 @@ export interface SentryAlertForOutbox {
 }
 
 function configuredDiscord(): DiscordConfig | null {
-    if (process.env.SENTRY_DISCORD_ALERTS_ENABLED !== 'true') return null;
+    if (!sentryDiscordAlertsEnabled()) return null;
     const botToken = process.env.SENTRY_DISCORD_BOT_TOKEN?.trim();
     const channelId = process.env.SENTRY_DISCORD_CHANNEL_ID?.trim();
     if (!botToken || !channelId || !/^[0-9]{16,22}$/.test(channelId)) return null;
     return { botToken, channelId };
+}
+
+/** Separate intake gate so disabled alerts are never persisted for later replay. */
+export function sentryDiscordAlertsEnabled(): boolean {
+    return process.env.SENTRY_DISCORD_ALERTS_ENABLED === 'true';
 }
 
 function configuredHookSecrets(): { serviceHookSecret: string; pathSecret: string } | null {
@@ -239,40 +245,65 @@ async function finish(item: ClaimedOutboxItem, outcome: FinishOutcome, failureCo
     }
 }
 
-async function sendClaimedItem(item: ClaimedOutboxItem, config: DiscordConfig, fetcher: typeof fetch): Promise<void> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), DISCORD_TIMEOUT_MS);
-    try {
-        const response = await fetcher(`https://discord.com/api/v10/channels/${encodeURIComponent(config.channelId)}/messages`, {
-            method: 'POST',
-            headers: { Authorization: `Bot ${config.botToken}`, 'content-type': 'application/json' },
-            // Discord's documented enforced nonce returns the original message
-            // rather than creating a second one after an ambiguous timeout/5xx.
-            body: JSON.stringify({
-                ...buildSentryDiscordPayload(item),
-                nonce: item.id.replace(/-/g, '').slice(0, 25),
-                enforce_nonce: true,
-            }),
-            signal: controller.signal,
-        });
-        if (response.ok) return await finish(item, 'sent', null);
+function boundedWait(milliseconds: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
 
-        const transient = response.status === 429 || response.status >= 500;
-        if (transient && item.attempts < MAX_DELIVERY_ATTEMPTS) {
+async function sendClaimedItem(
+    item: ClaimedOutboxItem,
+    config: DiscordConfig,
+    fetcher: typeof fetch,
+    immediateRetry: boolean,
+): Promise<void> {
+    let oneImmediateRetryRemaining = immediateRetry;
+    while (true) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), DISCORD_TIMEOUT_MS);
+        try {
+            const response = await fetcher(`https://discord.com/api/v10/channels/${encodeURIComponent(config.channelId)}/messages`, {
+                method: 'POST',
+                headers: { Authorization: `Bot ${config.botToken}`, 'content-type': 'application/json' },
+                // Discord's documented enforced nonce returns the original message
+                // rather than creating a second one after an ambiguous timeout/5xx.
+                body: JSON.stringify({
+                    ...buildSentryDiscordPayload(item),
+                    nonce: item.id.replace(/-/g, '').slice(0, 25),
+                    enforce_nonce: true,
+                }),
+                signal: controller.signal,
+            });
+            if (response.ok) return await finish(item, 'sent', null);
+
+            const transient = response.status === 429 || response.status >= 500;
             const retryAfter = response.status === 429 ? await discordRetryAfter(response) : null;
-            return await finish(item, 'retry', response.status === 429 ? 'DISCORD_RATE_LIMITED' : 'DISCORD_5XX', retryDelay(item.attempts, retryAfter));
+            const immediateDelay = retryAfter === null ? 1_000 : Math.max(1_000, Math.ceil(retryAfter * 1_000));
+            if (transient && oneImmediateRetryRemaining && immediateDelay <= IMMEDIATE_RETRY_MAX_DELAY_MS) {
+                oneImmediateRetryRemaining = false;
+                await boundedWait(immediateDelay);
+                continue;
+            }
+            if (transient && item.attempts < MAX_DELIVERY_ATTEMPTS) {
+                return await finish(item, 'retry', response.status === 429 ? 'DISCORD_RATE_LIMITED' : 'DISCORD_5XX', retryDelay(item.attempts, retryAfter));
+            }
+            await finish(item, 'failed', transient ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
+            operationalFailure(transient ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
+            return;
+        } catch {
+            if (oneImmediateRetryRemaining) {
+                oneImmediateRetryRemaining = false;
+                await boundedWait(1_000);
+                continue;
+            }
+            if (item.attempts < MAX_DELIVERY_ATTEMPTS) {
+                await finish(item, 'retry', 'DISCORD_TIMEOUT_OR_NETWORK', retryDelay(item.attempts, null));
+            } else {
+                await finish(item, 'failed', 'DISCORD_RETRY_EXHAUSTED');
+                operationalFailure('DISCORD_RETRY_EXHAUSTED');
+            }
+            return;
+        } finally {
+            clearTimeout(timeout);
         }
-        await finish(item, 'failed', transient ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
-        operationalFailure(transient ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
-    } catch {
-        if (item.attempts < MAX_DELIVERY_ATTEMPTS) {
-            await finish(item, 'retry', 'DISCORD_TIMEOUT_OR_NETWORK', retryDelay(item.attempts, null));
-        } else {
-            await finish(item, 'failed', 'DISCORD_RETRY_EXHAUSTED');
-            operationalFailure('DISCORD_RETRY_EXHAUSTED');
-        }
-    } finally {
-        clearTimeout(timeout);
     }
 }
 
@@ -287,13 +318,19 @@ export async function enqueueSentryDiscordAlert(alert: SentryAlertForOutbox): Pr
     return data === true;
 }
 
-export async function deliverSentryDiscordAlerts(options: { limit?: number; fetcher?: typeof fetch } = {}): Promise<number> {
+export async function deliverSentryDiscordAlerts(options: {
+    limit?: number;
+    dedupeKey?: string;
+    fetcher?: typeof fetch;
+    immediateRetry?: boolean;
+} = {}): Promise<number> {
     const config = configuredDiscord();
     if (!config) return 0;
     let data: unknown;
     try {
         const result = await supabaseAdmin.rpc('claim_sentry_discord_alert_outbox', {
             p_limit: Math.max(1, Math.min(options.limit ?? 10, 10)),
+            p_dedupe_key: options.dedupeKey ?? null,
         });
         if (result.error) {
             operationalFailure('OUTBOX_CLAIM_FAILED');
@@ -305,8 +342,15 @@ export async function deliverSentryDiscordAlerts(options: { limit?: number; fetc
         return 0;
     }
     const claimed = (data ?? []) as ClaimedOutboxItem[];
-    await Promise.all(claimed.map(item => sendClaimedItem(item, config, options.fetcher ?? fetch)));
+    await Promise.all(claimed.map(item => sendClaimedItem(
+        item, config, options.fetcher ?? fetch, options.immediateRetry === true,
+    )));
     return claimed.length;
+}
+
+/** One bounded 1-2 second retry fits a Free-plan request; longer backoff stays durable. */
+export async function dispatchSentryDiscordAlertImmediately(dedupeKey: string): Promise<number> {
+    return deliverSentryDiscordAlerts({ limit: 1, dedupeKey, immediateRetry: true });
 }
 
 /** Requeue a worker/deploy/complete-RPC interrupted lease before the next claim. */

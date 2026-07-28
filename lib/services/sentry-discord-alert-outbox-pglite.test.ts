@@ -66,4 +66,27 @@ describe('Sentry Discord durable outbox', () => {
         expect(recovered.rows[0]?.reconcile_stale_sentry_discord_alert_claims).toBe(1);
         expect(claimedAgain.rows).toHaveLength(1);
     });
+
+    it('can claim the just-enqueued fingerprint even when an older row is pending', async () => {
+        const older = 'b'.repeat(64);
+        const fresh = 'c'.repeat(64);
+        await db.exec('SET ROLE service_role');
+        await db.query('SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3)', [older, 'old-project', null]);
+        await db.exec('RESET ROLE');
+        await db.exec(`
+            UPDATE public.sentry_discord_alert_outbox
+            SET created_at = clock_timestamp() - interval '1 minute'
+            WHERE dedupe_key = '${older}';
+            SET ROLE service_role;
+        `);
+        await db.query('SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3)', [fresh, 'fresh-project', null]);
+        const targeted = await db.query<{ id: string }>(
+            'SELECT id FROM public.claim_sentry_discord_alert_outbox(1, $1)', [fresh],
+        );
+        await db.exec('RESET ROLE');
+        const claimedRow = await db.query<{ dedupe_key: string }>(
+            'SELECT dedupe_key FROM public.sentry_discord_alert_outbox WHERE id = $1', [targeted.rows[0]?.id],
+        );
+        expect(claimedRow.rows).toEqual([{ dedupe_key: fresh }]);
+    });
 });
