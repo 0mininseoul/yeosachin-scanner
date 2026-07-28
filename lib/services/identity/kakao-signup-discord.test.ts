@@ -80,6 +80,15 @@ describe('Kakao signup Discord notification', () => {
         }).masked_name).toMatch(/^P\*+e$/);
     });
 
+    it('renders only the safe referrer origin, never the attribution label', () => {
+        const payload = buildKakaoSignupDiscordPayload({
+            masked_name: null, birthyear: null, gender: null, signed_up_at: '2026-01-01T00:01:00.000Z',
+            attribution_origin: 'https://everytime.kr/',
+        });
+        expect(payload.embeds[0].fields).toContainEqual({ name: '🔗 유입 출처', value: 'https://everytime.kr/', inline: false });
+        expect(payload.embeds[0].fields.map(field => field.name)).not.toContain('🌐 유입 경로');
+    });
+
     it('sends an initially claimed row exactly once and never puts recipient data in observability', async () => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
