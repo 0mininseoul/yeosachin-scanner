@@ -19,7 +19,7 @@ const v3Migration = readFileSync(
     'utf8',
 );
 const v4Migration = readFileSync(
-    new URL('../../../supabase/migrations/20260729120000_upgrade_demo_fixture_v4_bijective.sql', import.meta.url),
+    new URL('../../../supabase/migrations/20260730020000_upgrade_demo_fixture_v4_bijective_forward.sql', import.meta.url),
     'utf8',
 );
 
