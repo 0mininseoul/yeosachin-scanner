@@ -4,6 +4,7 @@ import {
     applyEarlybirdPricingRefreshBoundary,
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
+    earlybirdCheckoutLineageStatusAction,
     emitCurrentEarlybirdPricingEvent,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
@@ -507,11 +508,16 @@ describe('earlybird analyze UI state', () => {
         expect(guard.inFlight).toBe(false);
     });
 
-    it('routes only the exact unresolved-payment conflict to owner status for the selected plan', () => {
+    it('maps only classified active lineages to a resumable owner status CTA', () => {
         expect(pendingEarlybirdCheckoutStatusPath(409, {
-            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+            code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+            subreason: 'STALE_PRICING_LINEAGE',
         }, 'standard')).toBe('/earlybird?plan=standard');
 
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE',
+            subreason: 'SUPERSEDED_LINEAGE',
+        }, 'standard')).toBeNull();
         expect(pendingEarlybirdCheckoutStatusPath(409, {
             code: 'EARLYBIRD_PRICING_REFRESH_REQUIRED',
         }, 'standard')).toBeNull();
@@ -519,12 +525,34 @@ describe('earlybird analyze UI state', () => {
             code: 'EARLYBIRD_ORDER_CONFLICT',
         }, 'standard')).toBeNull();
         expect(pendingEarlybirdCheckoutStatusPath(503, {
-            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+            code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+            subreason: 'STALE_PRICING_LINEAGE',
         }, 'standard')).toBeNull();
         expect(pendingEarlybirdCheckoutStatusPath(409, null, 'standard')).toBeNull();
         expect(pendingEarlybirdCheckoutStatusPath(409, {
-            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+            code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+            subreason: 'STALE_PRICING_LINEAGE',
         }, 'plus')).toBeNull();
+    });
+
+    it('maps both classified lineages to status, but never offers cancelled lineage recovery', () => {
+        expect(earlybirdCheckoutLineageStatusAction(409, {
+            code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+            subreason: 'SUPERSEDED_LINEAGE',
+        }, 'basic')).toEqual({
+            path: '/earlybird?plan=basic',
+            kind: 'active_pending',
+        });
+        expect(earlybirdCheckoutLineageStatusAction(409, {
+            code: 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE',
+            subreason: 'STALE_PRICING_LINEAGE',
+        }, 'basic')).toEqual({
+            path: '/earlybird?plan=basic',
+            kind: 'cancelled_unresolved',
+        });
+        expect(earlybirdCheckoutLineageStatusAction(409, {
+            code: 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE',
+        }, 'basic')).toBeNull();
     });
 
     it('hides a late Standard pending-checkout CTA and its bound message after selection changes', () => {
@@ -637,15 +665,16 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('결제 계속하기');
     });
 
-    it('wires only the exact checkout conflict on analyze to owner status without replaying checkout', () => {
+    it('wires classified checkout lineages to owner status without replaying checkout', () => {
         const source = readFileSync(
             new URL('../../../app/analyze/page.tsx', import.meta.url),
             'utf8'
         );
-        expect(source).toContain('pendingEarlybirdCheckoutStatusPath(');
+        expect(source).toContain('earlybirdCheckoutLineageStatusAction(');
         expect(source).toContain('router.push(activeCheckoutStatusCta.path)');
         expect(source).toContain('기존 결제창 확인하기');
-        expect(source).toContain("message: '기존 결제 처리 상태를 먼저 확인해주세요.'");
+        expect(source).toContain('결제 상태 확인하기');
+        expect(source).toContain('kind: lineageStatusAction.kind');
         expect(source).toContain('const visibleError = activeCheckoutStatusCta?.message ?? error;');
         expect(source).not.toContain("setError('기존 결제 처리 상태를 먼저 확인해주세요.')");
         expect(source).not.toContain('recoverPendingEarlybirdCheckout(');

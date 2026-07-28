@@ -18,11 +18,11 @@ import {
     buildEarlybirdPlanPresentation,
     canSubmitEarlybirdSelection,
     emitCurrentEarlybirdPricingEvent,
+    earlybirdCheckoutLineageStatusAction,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
     isCurrentEarlybirdCheckoutStatusCta,
     isSafeGrobleCheckoutUrl,
-    pendingEarlybirdCheckoutStatusPath,
     recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
@@ -64,6 +64,7 @@ interface CheckoutStatusCta {
     preflightId: string;
     targetInstagramId: string | null;
     planId: PlanId;
+    kind: 'active_pending' | 'cancelled_unresolved';
     navigating: boolean;
 }
 
@@ -379,18 +380,24 @@ export default function AnalyzePage() {
             );
             const payload: unknown = await response.json().catch(() => null);
             if (!response.ok) {
-                const pendingStatusPath = pendingEarlybirdCheckoutStatusPath(
+                const lineageStatusAction = earlybirdCheckoutLineageStatusAction(
                     response.status,
                     payload,
                     effectiveSelectedPlan
                 );
-                if (pendingStatusPath) {
+                if (lineageStatusAction) {
+                    const lineageMessage = payload && typeof payload === 'object'
+                        && 'error' in payload && typeof payload.error === 'string'
+                        && payload.error.length <= 200
+                        ? payload.error
+                        : '기존 결제 처리 상태를 먼저 확인해주세요.';
                     setCheckoutStatusCta({
-                        path: pendingStatusPath,
-                        message: '기존 결제 처리 상태를 먼저 확인해주세요.',
+                        path: lineageStatusAction.path,
+                        message: lineageMessage,
                         preflightId: readyPreflight.preflightId,
                         targetInstagramId,
                         planId: effectiveSelectedPlan,
+                        kind: lineageStatusAction.kind,
                         navigating: false,
                     });
                     return;
@@ -888,7 +895,9 @@ export default function AnalyzePage() {
                                             >
                                                 {activeCheckoutStatusCta.navigating
                                                     ? '결제 상태 불러오는 중…'
-                                                    : '기존 결제창 확인하기'}
+                                                    : activeCheckoutStatusCta.kind === 'active_pending'
+                                                        ? '기존 결제창 확인하기'
+                                                        : '결제 상태 확인하기'}
                                             </PrimaryButton>
                                         </div>
                                     )}

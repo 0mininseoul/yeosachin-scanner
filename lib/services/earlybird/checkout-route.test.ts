@@ -663,10 +663,12 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
-    it('returns a conflict when a same-plan checkout is already pending', async () => {
+    it('returns a stable active-pending lineage classification with its stored subreason', async () => {
         mocks.rpc.mockResolvedValue({
             data: null,
-            error: { message: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING' },
+            error: {
+                message: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:STALE_PRICING_LINEAGE',
+            },
         });
         const response = await checkout(request('/api/earlybird/checkout', {
             preflightId: PREFLIGHT_ID,
@@ -676,8 +678,30 @@ describe('earlybird checkout and waitlist routes', () => {
 
         expect(response.status).toBe(409);
         await expect(response.json()).resolves.toEqual({
-            code: 'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
+            code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
             error: '기존 결제창의 처리 상태를 먼저 확인해주세요.',
+            subreason: 'STALE_PRICING_LINEAGE',
+        });
+    });
+
+    it('returns a status-only cancelled unresolved-lineage classification', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: null,
+            error: {
+                message: 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE:SUPERSEDED_LINEAGE',
+            },
+        });
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+            code: 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE',
+            error: '이전 결제 요청의 처리 상태를 먼저 확인해주세요. 새 결제를 만들 수 없습니다.',
+            subreason: 'SUPERSEDED_LINEAGE',
         });
     });
 
