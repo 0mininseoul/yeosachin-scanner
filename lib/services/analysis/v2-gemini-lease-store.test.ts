@@ -226,6 +226,71 @@ describe('deployment-wide Gemini lease store', () => {
         })).rejects.toBeInstanceOf(AnalysisV2AiResolverCapacitySkippedError);
     });
 
+    it('retries a v2.11 resolver pending lease within one bounded admission deadline', async () => {
+        let now = 1_000;
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: [{
+                outcome: 'resolver_capacity_pending', slot: null,
+                lease_claim_token: null, fence: null, expires_at: null,
+            }], error: null })
+            .mockResolvedValueOnce({ data: [{
+                outcome: 'acquired', slot: 2, lease_claim_token: claimToken,
+                fence: 9, expires_at: expiresAt,
+            }], error: null });
+        const store = createAnalysisV2GeminiLeaseStore({
+            rpc,
+            nowMs: () => now,
+            randomUuid: () => claimToken,
+            sleep: async () => { now += 10; },
+        });
+        await expect(store.acquire({
+            ...input(),
+            operationKey: `gender-resolution:${'a'.repeat(64)}`,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            handlerDeadlineAtMs: 250_000,
+            admissionDeadlineAtMs: 1_020,
+            abortSignal: new AbortController().signal,
+        })).resolves.toMatchObject({ slot: 2, stage: 'genderResolution' });
+        expect(rpc).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not reserve a v2.11 resolver lease after abort or handler-clamped deadline', async () => {
+        const controller = new AbortController();
+        controller.abort();
+        const aborted = setup([]);
+        await expect(aborted.store.acquire({
+            ...input(),
+            operationKey: `gender-resolution:${'a'.repeat(64)}`,
+            stage: 'genderResolution', aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            admissionDeadlineAtMs: 9_000, abortSignal: controller.signal,
+        })).rejects.toBeInstanceOf(AnalysisV2AiResolverCapacitySkippedError);
+        expect(aborted.rpc).not.toHaveBeenCalled();
+
+        const clamped = setup([]);
+        await expect(clamped.store.acquire({
+            ...input(),
+            operationKey: `gender-resolution:${'b'.repeat(64)}`,
+            stage: 'genderResolution', aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            handlerDeadlineAtMs: 226_000,
+            admissionDeadlineAtMs: 9_000,
+            abortSignal: new AbortController().signal,
+        })).rejects.toBeInstanceOf(AnalysisV2AiResolverCapacitySkippedError);
+        expect(clamped.rpc).not.toHaveBeenCalled();
+    });
+
+    it('keeps v2.10 resolver capacity admission immediate and single-RPC', async () => {
+        const { rpc, store } = setup([{
+            outcome: 'resolver_capacity_pending', slot: null,
+            lease_claim_token: null, fence: null, expires_at: null,
+        }]);
+        await expect(store.acquire({
+            ...input(), operationKey: `gender-resolution:${'c'.repeat(64)}`,
+            stage: 'genderResolution', aiStagePolicyVersion: 'ai-stage-policy-v2.10',
+        })).rejects.toBeInstanceOf(AnalysisV2AiResolverCapacitySkippedError);
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
     it('quarantines a cutoff v2 resolver lease instead of making it immediately available', async () => {
         const operationKey = `gender-resolution:${'a'.repeat(64)}`;
         const { rpc, store } = setup([{

@@ -178,6 +178,7 @@ async function analyzePrivateNameChunk(
     chunkIndex = 0,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
     replayCapability?: ReplayStatelessCapability,
+    runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>,
 ): Promise<PrivateNameAnalysisResult[]> {
     const expectedIds = accounts.map(account => account.id);
     const schema = createPrivateNameBatchResponseSchema(expectedIds);
@@ -216,6 +217,7 @@ async function analyzePrivateNameChunk(
                             // Preserve the legacy batch allowance when no durable V2 policy applies.
                             maxOutputTokens: 8_192,
                         }),
+                    ...(runProviderAttempt ? { runProviderAttempt } : {}),
                 }
             );
         // Preserve the strict boundary when analyzeWithGemini is replaced in tests or adapters.
@@ -314,6 +316,8 @@ export async function analyzePrivateAccountNames(
     options: {
         aiStagePolicyVersion?: AiStagePolicyVersion;
         replayCapability?: ReplayStatelessCapability;
+        /** Replay-only provider fence; applied to every chunk attempt and retry. */
+        runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>;
     } = {},
 ): Promise<PrivateNameAnalysisResult[]> {
     const accounts = privateNameAccountsInputSchema.parse(rawAccounts);
@@ -347,6 +351,7 @@ export async function analyzePrivateAccountNames(
                     chunkIndex,
                     policyVersion,
                     options.replayCapability,
+                    options.runProviderAttempt,
                 );
             })
         );

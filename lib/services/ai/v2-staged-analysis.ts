@@ -1765,6 +1765,8 @@ export async function genderTriageMicrobatch(
     options: {
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
+        /** Replay-only provider fence, evaluated once for every SDK attempt/retry. */
+        runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>;
     } = {},
 ): Promise<readonly GenderTriageMicrobatchResult[]> {
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_V29_VERSION;
@@ -1798,6 +1800,9 @@ export async function genderTriageMicrobatch(
                 maxImages: GENDER_TRIAGE_V29_MAX_MEDIA_PER_BATCH,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...(options.runProviderAttempt
+                    ? { runProviderAttempt: options.runProviderAttempt }
+                    : {}),
                 ...(options.replayCapability
                     ? { skipTokenLog: true, replayCapability: options.replayCapability }
                     : {}),
@@ -1870,6 +1875,8 @@ export async function genderTriage(
     options: {
         aiStagePolicyVersion?: AiStagePolicyVersion;
         replayCapability?: ReplayStatelessCapability;
+        /** Replay-only provider fence, evaluated once for every SDK attempt/retry. */
+        runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>;
     } = {},
 ): Promise<GenderTriageResult> {
     const input = genderTriageInputSchema.parse(rawInput);
@@ -1898,6 +1905,9 @@ export async function genderTriage(
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...(options.runProviderAttempt
+                    ? { runProviderAttempt: options.runProviderAttempt }
+                    : {}),
                 ...(options.replayCapability
                     ? { skipTokenLog: true, replayCapability: options.replayCapability }
                     : {}),
@@ -1919,6 +1929,7 @@ export async function genderResolution(
     rawAuditContext: StagedAiAuditContext,
     options: {
         abortSignal?: AbortSignal;
+        admissionDeadlineAtMs?: number;
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
     } = {},
@@ -1938,6 +1949,7 @@ async function prepareGenderResolutionGeneration(
     rawAuditContext: StagedAiAuditContext,
     options: {
         abortSignal?: AbortSignal;
+        admissionDeadlineAtMs?: number;
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
     },
@@ -1987,6 +1999,7 @@ async function prepareGenderResolutionGeneration(
             audit,
             startingAttempt: prepared.startingAttempt,
             abortSignal: options.abortSignal,
+            admissionDeadlineAtMs: options.admissionDeadlineAtMs,
             replayCapability: options.replayCapability,
         } satisfies PreparedGenderResolutionGeneration<
             z.infer<typeof genderResolutionModelResponseSchema>
@@ -2002,6 +2015,8 @@ export async function featureAnalysis(
     options: {
         aiStagePolicyVersion?: AiStagePolicyVersion;
         replayCapability?: ReplayStatelessCapability;
+        /** Replay-only provider fence, evaluated once for every SDK attempt/retry. */
+        runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>;
     } = {},
 ): Promise<FeatureAnalysisResult> {
     const input = featureAnalysisInputSchema.parse(rawInput);
@@ -2030,6 +2045,9 @@ export async function featureAnalysis(
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...(options.runProviderAttempt
+                    ? { runProviderAttempt: options.runProviderAttempt }
+                    : {}),
                 ...(options.replayCapability
                     ? { skipTokenLog: true, replayCapability: options.replayCapability }
                     : {}),

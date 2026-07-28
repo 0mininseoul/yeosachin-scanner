@@ -1276,6 +1276,16 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: unexpected attempt reservation.'
                 );
             }
+            const resolverAdmissionExpired = () => (
+                telemetry.abortSignal?.aborted === true
+                || (
+                    telemetry.admissionDeadlineAtMs !== undefined
+                    && performance.now() >= telemetry.admissionDeadlineAtMs
+                )
+            );
+            if (resolverAdmissionExpired()) {
+                throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            }
             const setup = (async () => {
                 const lease = await leaseStore.acquire({
                     requestId: request.data.requestId,
@@ -1292,6 +1302,9 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 });
                 let reservation: AnalysisV2AiAttemptReservation;
                 try {
+                    if (resolverAdmissionExpired()) {
+                        throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                    }
                     reservation = await attemptStore.reserve({
                         requestId: request.data.requestId,
                         jobKey: request.data.jobKey,

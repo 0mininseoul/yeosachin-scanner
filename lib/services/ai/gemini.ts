@@ -337,6 +337,10 @@ export interface AnalyzeWithGeminiOptions<T> {
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: T
     ) => void | Promise<void>;
+    /** Fence the SDK request itself, once for every provider attempt/retry. */
+    runProviderAttempt?: <R>(task: () => Promise<R>) => Promise<R>;
+    /** Absolute v2.11 resolver admission budget; retries must not reset it. */
+    admissionDeadlineAtMs?: number;
 }
 
 interface TokenLogMetadata {
@@ -766,6 +770,8 @@ export async function analyzeWithGemini<T>(
         onTelemetry,
         onBeforeAttempt,
         onAttemptTelemetry,
+        runProviderAttempt,
+        admissionDeadlineAtMs: requestedAdmissionDeadlineAtMs,
         schema,
     } = options;
     if (stage !== undefined && !isAiStageName(stage)) {
@@ -845,6 +851,11 @@ export async function analyzeWithGemini<T>(
     const selectedImages = images?.slice(0, maxImages ?? policyMaxImages) ?? [];
     const responseJsonSchema = zodToGeminiResponseJsonSchema(schema);
     const analysisStartedAt = performance.now();
+    const resolverAdmissionDeadlineAtMs = stage === 'genderResolution'
+        && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+        ? requestedAdmissionDeadlineAtMs
+            ?? performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS
+        : undefined;
 
     console.log('Gemini analysis started:', {
         stage: stage ?? null,
@@ -859,12 +870,24 @@ export async function analyzeWithGemini<T>(
         attemptNumber++
     ) {
         try {
+            if (abortSignal?.aborted || (
+                resolverAdmissionDeadlineAtMs !== undefined
+                && performance.now() >= resolverAdmissionDeadlineAtMs
+            )) {
+                throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            }
             if (attemptNumber > startingAttempt) {
                 const delay = getRetryDelay(attemptNumber - 2);
                 console.log(
                     `Retry attempt ${attemptNumber - 1}/${RETRY_CONFIG.maxRetries} after ${delay}ms`
                 );
                 await sleep(delay);
+                if (abortSignal?.aborted || (
+                    resolverAdmissionDeadlineAtMs !== undefined
+                    && performance.now() >= resolverAdmissionDeadlineAtMs
+                )) {
+                    throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                }
             }
 
             const client = getGenAIClient();
@@ -885,10 +908,6 @@ export async function analyzeWithGemini<T>(
             }
 
             let response;
-            const resolverAdmissionDeadlineAtMs = stage === 'genderResolution'
-                && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
-                ? performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS
-                : undefined;
             try {
                 const config: GenerateContentConfig = {
                     responseMimeType: 'application/json',
@@ -916,6 +935,12 @@ export async function analyzeWithGemini<T>(
                     resolvedPolicyVersion,
                     async () => {
                         attemptStartedAt = performance.now();
+                        if (abortSignal?.aborted || (
+                            resolverAdmissionDeadlineAtMs !== undefined
+                            && performance.now() >= resolverAdmissionDeadlineAtMs
+                        )) {
+                            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                        }
                         if (stage && requestId && stagePolicy && onBeforeAttempt) {
                             try {
                                 await onBeforeAttempt({
@@ -952,12 +977,20 @@ export async function analyzeWithGemini<T>(
                                 );
                             }
                         }
-
-                        return client.models.generateContent({
+                        if (abortSignal?.aborted || (
+                            resolverAdmissionDeadlineAtMs !== undefined
+                            && performance.now() >= resolverAdmissionDeadlineAtMs
+                        )) {
+                            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                        }
+                        const generate = () => client.models.generateContent({
                             model: modelName,
                             contents: [{ role: 'user', parts }],
                             config,
                         });
+                        return runProviderAttempt
+                            ? runProviderAttempt(generate)
+                            : generate();
                     },
                     abortSignal,
                     resolverAdmissionDeadlineAtMs,

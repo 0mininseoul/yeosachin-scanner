@@ -78,7 +78,10 @@ function outcome(error: unknown, telemetry: InvocationTelemetry): ReplayOutcome 
     if (telemetry.rateLimited > 0) return 'rate_limited';
     if (
         error instanceof Error
-        && error.message === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
+        && (
+            error.message === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
+            || error.message === 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+        )
     ) return 'capacity_skipped';
     const disposition = classifyGeminiGenerationError(error);
     return disposition === 'rate_limited' ? 'rate_limited'
@@ -162,20 +165,31 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
     }
 }
 
-function createSemaphore(limit: number) {
+export function createReplayProviderAttemptSemaphore(limit: number) {
     let active = 0;
     const waiters: Array<() => void> = [];
     return async function run<T>(task: () => Promise<T>): Promise<T> {
-        if (active >= limit) {
-            await new Promise<void>(resolve => waiters.push(resolve));
+        const execute = async () => {
+            try {
+                return await task();
+            } finally {
+                active--;
+                waiters.shift()?.();
+            }
+        };
+        // Preserve immediate provider dispatch for a free slot. Apart from
+        // avoiding an unnecessary microtask, resolver cutoff accounting relies
+        // on the admitted task beginning before the caller moves to its cutoff
+        // phase.
+        if (active < limit && waiters.length === 0) {
+            active++;
+            return execute();
         }
-        active++;
-        try {
-            return await task();
-        } finally {
-            active--;
-            waiters.shift()?.();
-        }
+        await new Promise<void>(resolve => waiters.push(() => {
+            active++;
+            resolve();
+        }));
+        return execute();
     };
 }
 
@@ -185,37 +199,60 @@ export function createReplayAbortableBoundedSemaphore(limit: number) {
     return async function run<T>(
         task: () => Promise<T>,
         signal: AbortSignal,
-        timeoutMs: number,
+        deadlineAtMs: number,
     ): Promise<T> {
-        if (signal.aborted) throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
-        if (active >= limit) {
-            await new Promise<void>((resolve, reject) => {
-                const waiter = () => {
-                    cleanup();
-                    resolve();
-                };
-                const onAbort = () => {
-                    const index = waiters.indexOf(waiter);
-                    if (index >= 0) waiters.splice(index, 1);
-                    cleanup();
-                    reject(new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'));
-                };
-                const timer = setTimeout(onAbort, timeoutMs);
-                const cleanup = () => {
-                    clearTimeout(timer);
-                    signal.removeEventListener('abort', onAbort);
-                };
-                signal.addEventListener('abort', onAbort, { once: true });
-                waiters.push(waiter);
-            });
+        if (signal.aborted || performance.now() >= deadlineAtMs) {
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
         }
-        active++;
-        try {
-            return await task();
-        } finally {
+        let acquired = false;
+        const release = () => {
+            if (!acquired) return;
+            acquired = false;
             active--;
             waiters.shift()?.();
+        };
+        const execute = async () => {
+            if (signal.aborted || performance.now() >= deadlineAtMs) {
+                release();
+                throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            }
+            try {
+                return await task();
+            } finally {
+                release();
+            }
+        };
+        if (active < limit && waiters.length === 0) {
+            active++;
+            acquired = true;
+            return execute();
         }
+        await new Promise<void>((resolve, reject) => {
+            const waiter = () => {
+                cleanup();
+                active++;
+                acquired = true;
+                resolve();
+            };
+            const onAbort = () => {
+                const index = waiters.indexOf(waiter);
+                if (index >= 0) waiters.splice(index, 1);
+                cleanup();
+                reject(new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'));
+            };
+            const onDeadline = () => onAbort();
+            const timer = setTimeout(
+                onDeadline,
+                Math.max(0, deadlineAtMs - performance.now()),
+            );
+            const cleanup = () => {
+                clearTimeout(timer);
+                signal.removeEventListener('abort', onAbort);
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+            waiters.push(waiter);
+        });
+        return execute();
     };
 }
 
@@ -236,21 +273,40 @@ export function createReplayStagedAiAdapter(
     // Replay remains stateless, but v2.11 uses the same bounded call shape as scheduler-v1.
     // Waiting is local admission only: no provider attempt exists before the semaphore opens.
     const runTriage = genderQualityV211
-        ? createSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.genderTriageConcurrency)
+        ? createReplayProviderAttemptSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.genderTriageConcurrency)
         : async <T>(task: () => Promise<T>) => task();
     // v2.11 replay uses one deployment-wide provider fence in addition to per-stage fences.
     // It wraps provider invocations, so queued work has not made a paid attempt yet.
     const runShared = genderQualityV211
-        ? createSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.sharedConcurrency)
+        ? createReplayProviderAttemptSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.sharedConcurrency)
         : async <T>(task: () => Promise<T>) => task();
     const runResolver = genderQualityV211
         ? createReplayAbortableBoundedSemaphore(2)
         : null;
+    const runResolverShared = genderQualityV211
+        ? createReplayAbortableBoundedSemaphore(
+            ANALYSIS_V2_SCHEDULER_V1_POLICY.sharedConcurrency,
+        )
+        : null;
     const runFeature = supportsGenderTriageMicrobatch
-        ? createSemaphore(
+        ? createReplayProviderAttemptSemaphore(
             ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
         )
         : async <T>(task: () => Promise<T>) => task();
+    const runPrivate = genderQualityV211
+        ? createReplayProviderAttemptSemaphore(
+            ANALYSIS_V2_SCHEDULER_V1_POLICY.privateAccountNameConcurrency,
+        )
+        : async <T>(task: () => Promise<T>) => task();
+    const runTriageProviderAttempt = genderQualityV211
+        ? <T>(task: () => Promise<T>) => runTriage(() => runShared(task))
+        : undefined;
+    const runFeatureProviderAttempt = genderQualityV211
+        ? <T>(task: () => Promise<T>) => runFeature(() => runShared(task))
+        : undefined;
+    const runPrivateProviderAttempt = genderQualityV211
+        ? <T>(task: () => Promise<T>) => runPrivate(() => runShared(task))
+        : undefined;
     type PendingTriage = {
         accountId: string;
         aiInput: {
@@ -277,15 +333,21 @@ export function createReplayStagedAiAdapter(
                 accountId: member.accountId,
                 input: member.value.aiInput,
             }));
-            const invocation = await runTriage(() => runShared(() => invoke(async state => {
+            const invocation = await invoke(async state => {
                 const identity =
                     createGenderTriageMicrobatchResultIdentity(accounts);
                 return genderTriageMicrobatch(
                     accounts,
                     statelessAudit(requestId, identity, state),
-                    { aiStagePolicyVersion, replayCapability },
+                    {
+                        aiStagePolicyVersion,
+                        replayCapability,
+                        ...(runTriageProviderAttempt
+                            ? { runProviderAttempt: runTriageProviderAttempt }
+                            : {}),
+                    },
                 );
-            })));
+            });
             const byAccount = new Map(invocation.value?.map(result => [
                 result.accountId,
                 result.result,
@@ -358,7 +420,7 @@ export function createReplayStagedAiAdapter(
                 );
             }),
         }),
-        feature: input => runFeature(() => runShared(() => invoke(async state => {
+        feature: input => (genderQualityV211 ? invoke(async state => {
             const aiInput = {
                 triage: input.triage,
                 bio: input.bio,
@@ -369,10 +431,33 @@ export function createReplayStagedAiAdapter(
                 captions: [...input.captions],
             };
             const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
-            return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
+            return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), {
+                aiStagePolicyVersion,
+                replayCapability,
+                ...(runFeatureProviderAttempt
+                    ? { runProviderAttempt: runFeatureProviderAttempt }
+                    : {}),
+            });
+        }) : runFeature(() => invoke(async state => {
+            const aiInput = {
+                triage: input.triage,
+                bio: input.bio,
+                ...(input.accountProfile
+                    ? { accountProfile: input.accountProfile }
+                    : {}),
+                media: normalized(input.media),
+                captions: [...input.captions],
+            };
+            const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
+            return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), {
+                aiStagePolicyVersion,
+                replayCapability,
+            });
         }))),
-        resolveGender: input => (runResolver
-            ? runResolver(() => runShared(() => invoke(async state => {
+        resolveGender: input => (runResolver && runResolverShared
+            ? (() => {
+                const deadlineAtMs = performance.now() + 5_000;
+                return runResolver(() => runResolverShared(() => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderResolutionResultIdentity(
                 aiInput,
@@ -391,10 +476,12 @@ export function createReplayStagedAiAdapter(
                 }),
             }), {
                 abortSignal: input.signal,
+                admissionDeadlineAtMs: deadlineAtMs,
                 aiStagePolicyVersion,
                 replayCapability,
             });
-            })), input.signal, 5_000).catch(() => ({
+            }), input.signal, deadlineAtMs), input.signal, deadlineAtMs);
+            })().catch(() => ({
                 outcome: 'capacity_skipped' as const,
                 attempts: 0, retries: 0, elapsedMs: 0,
             }))
@@ -406,7 +493,7 @@ export function createReplayStagedAiAdapter(
                     onAttemptTelemetry: value => input.onAttemptTelemetry?.({ attempt: value.attempt, retryCount: value.retryCount, disposition: value.disposition, latencyMs: value.latencyMs }),
                 }), { abortSignal: input.signal, aiStagePolicyVersion, replayCapability });
             })),
-        privateNames: accounts => runShared(() => invoke(async state => {
+        privateNames: accounts => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {
                 forChunk(identity) {
                     return {
@@ -419,8 +506,14 @@ export function createReplayStagedAiAdapter(
                     };
                 },
             };
-            return analyzePrivateAccountNames([...accounts], requestId, audit, { aiStagePolicyVersion, replayCapability });
-        })),
+            return analyzePrivateAccountNames([...accounts], requestId, audit, {
+                aiStagePolicyVersion,
+                replayCapability,
+                ...(runPrivateProviderAttempt
+                    ? { runProviderAttempt: runPrivateProviderAttempt }
+                    : {}),
+            });
+        }),
     };
     Object.freeze(runner);
     issuedReplayRunners.set(runner, {

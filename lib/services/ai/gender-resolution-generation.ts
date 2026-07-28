@@ -12,6 +12,7 @@ export interface PreparedGenderResolutionGeneration<T> {
     audit: StagedAiAuditContext;
     startingAttempt: number;
     abortSignal?: AbortSignal;
+    admissionDeadlineAtMs?: number;
     replayCapability?: ReplayStatelessCapability;
 }
 
@@ -29,6 +30,9 @@ async function run<T>(
             requestId: input.audit.requestId,
             startingAttempt: input.startingAttempt,
             abortSignal: input.abortSignal,
+            ...(input.admissionDeadlineAtMs !== undefined
+                ? { admissionDeadlineAtMs: input.admissionDeadlineAtMs }
+                : {}),
             onBeforeAttempt: input.audit.onBeforeAttempt,
             onAttemptTelemetry: input.audit.onAttemptTelemetry,
             ...(input.replayCapability

@@ -879,6 +879,11 @@ export async function runAnalysisV2AiReplay(input: {
         }
 
         await Promise.all(prepared.map(async outcome => {
+            // Let an already-admitted resolver complete its synchronous local
+            // path before deciding it missed the opportunistic window. This is
+            // one event-loop turn, not a provider wait: unresolved work is
+            // still aborted immediately below.
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
             let resolved: ReplayInvocation<GenderResolutionResult> | undefined;
             if (outcome.resolver?.settled) {
                 resolved = outcome.resolver.value;
@@ -886,6 +891,10 @@ export async function runAnalysisV2AiReplay(input: {
                 outcome.resolver.abort.abort();
                 resolver.cutoff++;
                 resolver.outcomes.cutoff++;
+                if (genderQuality) {
+                    genderQuality.resolver.outcome.cutoff =
+                        (genderQuality.resolver.outcome.cutoff ?? 0) + 1;
+                }
                 collectCutoffResolver(
                     stages.genderResolution,
                     durations.genderResolution,
@@ -967,6 +976,24 @@ export async function runAnalysisV2AiReplay(input: {
         }));
     }
     const total = gender.male + gender.female + gender.unknown;
+    if (genderQuality) {
+        const sum = (values: Readonly<Record<string, number>>) => Object.values(values)
+            .reduce((total, value) => total + value, 0);
+        const observedPublic = input.bundle.profiles.filter(profile => !profile.isPrivate).length;
+        const triageOutcomes = sum(genderQuality.triage.outcome);
+        const finalSources = sum(genderQuality.finalClassificationSource);
+        const resolverAdmissions = genderQuality.resolver.earlyAdmission
+            + genderQuality.resolver.lateAdmission;
+        const resolverOutcomes = sum(genderQuality.resolver.outcome);
+        if (
+            total !== observedPublic
+            || triageOutcomes !== observedPublic
+            || finalSources !== observedPublic
+            || resolverAdmissions !== resolverOutcomes
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_GENDER_QUALITY_CONSERVATION_FAILED');
+        }
+    }
     gender.unknownRate = total ? Number((gender.unknown / total).toFixed(4)) : 0;
     for (const name of names) finalize(stages[name], durations[name]);
     const report = {

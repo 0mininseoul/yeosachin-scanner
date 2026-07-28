@@ -203,6 +203,27 @@ describe('analyzeWithGemini generation retry policy', () => {
             .toEqual(['rate_limited', 'success']);
     });
 
+    it('runs a replay provider fence once for each SDK attempt, including a retry', async () => {
+        vi.useFakeTimers();
+        vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        mocks.generateContent
+            .mockRejectedValueOnce(Object.assign(new Error('rate limited'), { status: 429 }))
+            .mockResolvedValueOnce(successfulResponse());
+        const fence = vi.fn(
+            <T,>(task: () => Promise<T>): Promise<T> => task(),
+        ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
+        const result = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            skipTokenLog: true,
+            runProviderAttempt: fence,
+        });
+        await vi.runAllTimersAsync();
+        await expect(result).resolves.toEqual({ value: 'ok' });
+        expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+        expect(fence).toHaveBeenCalledTimes(2);
+    });
+
     it('logs known usage and attempt telemetry before rejecting an empty response', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
         vi.spyOn(console, 'log').mockImplementation(() => undefined);

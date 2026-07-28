@@ -277,14 +277,20 @@ export function createAnalysisV2GeminiLeaseStore(
                 );
             const isV211Resolver = input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION
                 && input.data.stage === 'genderResolution';
-            const deadlineAtMs = Math.min(
-                input.data.admissionDeadlineAtMs ?? (dependencies.nowMs() + V211_RESOLVER_LEASE_GRACE_MS),
-                input.data.handlerDeadlineAtMs - AI_GEMINI_MIN_REMAINING_MS,
-            );
+            const deadlineAtMs = isV211Resolver
+                ? Math.min(
+                    input.data.admissionDeadlineAtMs
+                        ?? (dependencies.nowMs() + V211_RESOLVER_LEASE_GRACE_MS),
+                    input.data.handlerDeadlineAtMs - AI_GEMINI_MIN_REMAINING_MS,
+                )
+                : null;
             let data: unknown;
             let error: unknown;
             while (true) {
-            if (input.data.abortSignal?.aborted || dependencies.nowMs() >= deadlineAtMs) {
+            if (isV211Resolver && (
+                input.data.abortSignal?.aborted
+                || dependencies.nowMs() >= deadlineAtMs!
+            )) {
                 throw new AnalysisV2AiResolverCapacitySkippedError();
             }
             ({ data, error } = await dependencies.rpc(
@@ -322,10 +328,10 @@ export function createAnalysisV2GeminiLeaseStore(
                 if (
                     isV211Resolver
                     && !input.data.abortSignal?.aborted
-                    && dependencies.nowMs() < deadlineAtMs
+                    && dependencies.nowMs() < deadlineAtMs!
                 ) {
                     await (dependencies.sleep?.(10) ?? Promise.resolve());
-                    if (input.data.abortSignal?.aborted || dependencies.nowMs() >= deadlineAtMs) {
+                    if (input.data.abortSignal?.aborted || dependencies.nowMs() >= deadlineAtMs!) {
                         throw new AnalysisV2AiResolverCapacitySkippedError();
                     }
                     continue;
@@ -338,7 +344,18 @@ export function createAnalysisV2GeminiLeaseStore(
             if (row.lease_claim_token !== proposedToken) {
                 throw new AnalysisV2GeminiLeasePersistenceError();
             }
-            return parseLease(row, input.data);
+            const lease = parseLease(row, input.data);
+            // An acquire RPC may finish after the caller cancelled.  Release the
+            // fenced lease before surfacing the skip so it can never reserve or
+            // reach the provider after the v2.11 admission budget expires.
+            if (isV211Resolver && (
+                input.data.abortSignal?.aborted
+                || dependencies.nowMs() >= deadlineAtMs!
+            )) {
+                await this.release(lease);
+                throw new AnalysisV2AiResolverCapacitySkippedError();
+            }
+            return lease;
             }
         },
 

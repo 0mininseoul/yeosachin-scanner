@@ -307,6 +307,24 @@ describe('replay staged AI runner policy capability', () => {
         });
     });
 
+    it('preserves a v2.11 triage capacity outcome in PII-free counters and conserves public totals', async () => {
+        ai.genderTriageMicrobatch.mockRejectedValueOnce(
+            new Error('ANALYSIS_V2_AI_CAPACITY_PENDING'),
+        );
+        const report = await runAnalysisV2AiReplay({
+            bundle: historicalV211Bundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV211Evaluation,
+        });
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+        expect(report.genderQuality).toMatchObject({
+            triage: { nonOk: 1, capacity: 1, outcome: { capacity_skipped: 1 } },
+            finalClassificationSource: { triage_non_ok: 1 },
+        });
+    });
+
     it('blocks unsupported v2.9 unknown context before feature and resolver', async () => {
         const report = await runV29Triage(highFemale('uncertain'));
 

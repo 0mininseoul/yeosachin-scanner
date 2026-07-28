@@ -129,6 +129,22 @@ describe('analyzePrivateAccountNames', () => {
         }
     });
 
+    it('threads the replay fence to each private-name chunk provider attempt', async () => {
+        const fence = vi.fn(
+            <T,>(task: () => Promise<T>): Promise<T> => task(),
+        ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
+        await analyzePrivateAccountNames(accounts(205), requestId, undefined, {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            // The Gemini unit owns retry execution; this contract keeps every
+            // internally parallel chunk on the per-attempt shared fence.
+            runProviderAttempt: fence,
+        });
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(3);
+        for (const call of mocks.analyzeWithGemini.mock.calls) {
+            expect(call[2]).toMatchObject({ runProviderAttempt: fence });
+        }
+    });
+
     it('uses the staged policy only with both durable V2 audit callbacks', async () => {
         let sink: PrivateNameAnalysisAuditSink | undefined;
         const audit = {

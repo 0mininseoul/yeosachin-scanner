@@ -654,6 +654,54 @@ describe('analysis V2 Gemini audit adapter', () => {
         );
     });
 
+    it('does not acquire or reserve a v2.11 resolver after its admission signal aborts', async () => {
+        const resolverIdentity = identity({
+            stage: 'genderResolution',
+            modelName: 'gemini-3-flash-preview',
+            thinkingLevel: 'HIGH',
+            mediaResolution: 'HIGH',
+            promptVersion: 'gender-resolution-v2',
+            schemaVersion: 1,
+            maxOutputTokens: 1_024,
+            cacheScope: 'request',
+        });
+        const reserve = vi.fn().mockResolvedValue(reservation());
+        const controller = new AbortController();
+        controller.abort();
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            resultIdentity: resolverIdentity,
+            resultSchema,
+            attemptStore: {
+                reserve,
+                terminalize: vi.fn(),
+                loadOperation: vi.fn().mockResolvedValue([]),
+            } as unknown as AnalysisV2AiAttemptStore,
+            resultStore: {
+                terminalizeSuccess: vi.fn(),
+                checkpointGlobalHit: vi.fn().mockResolvedValue(null),
+                loadRequest: vi.fn().mockResolvedValue(null),
+            } as unknown as AnalysisV2AiResultStore,
+        });
+        await adapter.prepare();
+        await expect(adapter.onBeforeAttempt(startTelemetry({
+            modelName: 'gemini-3-flash-preview',
+            stage: 'genderResolution',
+            thinkingLevel: 'HIGH',
+            mediaResolution: 'HIGH',
+            promptVersion: 'gender-resolution-v2',
+            schemaVersion: 1,
+            maxOutputTokens: 1_024,
+            abortSignal: controller.signal,
+            admissionDeadlineAtMs: performance.now() + 5_000,
+        }))).rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        expect(leaseMocks.acquire).not.toHaveBeenCalled();
+        expect(reserve).not.toHaveBeenCalled();
+    });
+
     it('terminalizes a 429 and resumes only the next contiguous attempt after restart', async () => {
         const reserve = vi.fn()
             .mockResolvedValueOnce(reservation())
