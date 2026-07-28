@@ -226,7 +226,7 @@ export function createReplayStagedAiAdapter(
                 return genderTriageMicrobatch(
                     accounts,
                     statelessAudit(requestId, identity, state),
-                    { replayCapability },
+                    { aiStagePolicyVersion, replayCapability },
                 );
             });
             const byAccount = new Map(invocation.value?.map(result => [

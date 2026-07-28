@@ -170,7 +170,13 @@ describe('replay staged AI adapter telemetry', () => {
         await adapter.triage?.({ ordinal: 1, media: [] });
 
         expect(mocks.genderTriage).not.toHaveBeenCalled();
-        expect(mocks.genderTriageMicrobatch).toHaveBeenCalledOnce();
+        expect(mocks.genderTriageMicrobatch).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.any(Object),
+            expect.objectContaining({
+                aiStagePolicyVersion: 'ai-stage-policy-v2.10',
+            }),
+        );
     });
 
     it('plans stable paired v2.9 calls with an odd tail and maps reversed responses by opaque ID', async () => {
