@@ -1,7 +1,7 @@
 -- The dashboard-editable fixture is deliberately isolated from analysis data.
 -- A row is a complete presentation payload, never a partial runtime override.
 CREATE TABLE public.demo_analysis_fixtures (
-    version TEXT PRIMARY KEY CHECK (version ~ '^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$'),
+    version TEXT PRIMARY KEY CHECK (version ~ '^operator-editable-fixture-[a-z0-9][a-z0-9._-]{1,99}$'),
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'retired')),
     payload JSONB NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp(),
@@ -35,6 +35,11 @@ BEGIN
         RAISE EXCEPTION 'invalid demo fixture payload shape';
     END IF;
 
+    IF (SELECT count(*) FROM jsonb_object_keys(NEW.payload)) <> 4
+       OR (SELECT count(*) FROM jsonb_object_keys(NEW.payload->'target')) <> 7 THEN
+        RAISE EXCEPTION 'demo fixture strict object contract failed';
+    END IF;
+
     IF NOT (NEW.payload->'target' ?& ARRAY['username', 'fullName', 'bio', 'profileImage', 'followersCount', 'followingCount', 'isPrivate'])
        OR NOT (NEW.payload->'summary' ?& ARRAY['targetInstagramId', 'targetFullName', 'targetProfileImage', 'planId', 'followers', 'following', 'detectedMutuals', 'publicMutuals', 'privateMutuals', 'screenedMutuals', 'genderStats', 'notScreenedMutuals', 'exclusionApplied', 'scorePolicyVersion'])
        OR NEW.payload->'target'->>'username' <> 'junho_dem'
@@ -43,7 +48,7 @@ BEGIN
         RAISE EXCEPTION 'demo fixture target contract failed';
     END IF;
 
-    IF NEW.payload::TEXT ~ 'https?://' OR NEW.payload::TEXT ~ 'www\\.'
+    IF NEW.payload::TEXT ~ 'https?://' OR NEW.payload::TEXT ~ 'www[.]'
        OR (NEW.payload->'target'->>'profileImage') !~ '^/demo-avatars/demo-v3-target-[0-9]{3}[.]webp$'
        OR (NEW.payload->'summary'->>'targetProfileImage') !~ '^/demo-avatars/demo-v3-target-[0-9]{3}[.]webp$' THEN
         RAISE EXCEPTION 'demo fixture must use only local blurred avatars';
@@ -53,16 +58,144 @@ BEGIN
         SELECT 1
         FROM jsonb_array_elements(NEW.payload->'public') AS account(value)
         WHERE jsonb_typeof(account.value) <> 'object'
+           OR (SELECT count(*) FROM jsonb_object_keys(account.value)) <> 11
            OR NOT (account.value ?& ARRAY['instagramId', 'fullName', 'profileImage', 'bio', 'displayScore', 'riskBand', 'featuredRank', 'recentMutualRank', 'analysisDepth', 'oneLineOverview', 'highRiskNarrative'])
            OR account.value->>'profileImage' !~ '^/demo-avatars/demo-v3-female-[0-9]{3}[.]webp$'
     ) OR EXISTS (
         SELECT 1
         FROM jsonb_array_elements(NEW.payload->'private') AS account(value)
         WHERE jsonb_typeof(account.value) <> 'object'
+           OR (SELECT count(*) FROM jsonb_object_keys(account.value)) <> 3
            OR NOT (account.value ?& ARRAY['instagramId', 'fullName', 'profileImage'])
            OR account.value->>'profileImage' !~ '^/demo-avatars/demo-v3-private-[0-9]{3}[.]webp$'
     ) THEN
         RAISE EXCEPTION 'demo fixture account contract failed';
+    END IF;
+
+    -- The database contract is intentionally at least as narrow as the DTO
+    -- loader: dashboard edits must never create a run that runtime rejects.
+    IF jsonb_typeof(NEW.payload->'target'->'fullName') NOT IN ('string', 'null')
+       OR jsonb_typeof(NEW.payload->'target'->'bio') NOT IN ('string', 'null')
+       OR jsonb_typeof(NEW.payload->'target'->'profileImage') <> 'string'
+       OR jsonb_typeof(NEW.payload->'target'->'followersCount') <> 'number'
+       OR jsonb_typeof(NEW.payload->'target'->'followingCount') <> 'number'
+       OR jsonb_typeof(NEW.payload->'target'->'isPrivate') <> 'boolean'
+       OR NEW.payload->'target'->>'followersCount' !~ '^[0-9]+$'
+       OR NEW.payload->'target'->>'followingCount' !~ '^[0-9]+$'
+       OR length(COALESCE(NEW.payload->'target'->>'fullName', '')) > 200
+       OR length(COALESCE(NEW.payload->'target'->>'bio', '')) > 2200 THEN
+        RAISE EXCEPTION 'demo fixture target DTO contract failed';
+    END IF;
+
+    IF jsonb_typeof(NEW.payload->'summary'->'targetFullName') NOT IN ('string', 'null')
+       OR jsonb_typeof(NEW.payload->'summary'->'targetProfileImage') NOT IN ('string', 'null')
+       OR NEW.payload->'summary'->>'planId' NOT IN ('basic', 'standard', 'plus')
+       OR NEW.payload->'summary'->>'scorePolicyVersion' NOT IN ('risk-policy-v2.2', 'risk-policy-v2.3', 'risk-policy-v2.4', 'risk-policy-v2.5')
+       OR jsonb_typeof(NEW.payload->'summary'->'exclusionApplied') <> 'boolean'
+       OR jsonb_typeof(NEW.payload->'summary'->'followers') <> 'object'
+       OR jsonb_typeof(NEW.payload->'summary'->'following') <> 'object'
+       OR jsonb_typeof(NEW.payload->'summary'->'genderStats') <> 'object'
+       OR EXISTS (
+           SELECT 1 FROM unnest(ARRAY['detectedMutuals', 'publicMutuals', 'privateMutuals', 'screenedMutuals', 'notScreenedMutuals']) AS field(name)
+           WHERE jsonb_typeof(NEW.payload->'summary'->field.name) <> 'number'
+              OR NEW.payload->'summary'->>field.name !~ '^[0-9]+$'
+       ) THEN
+        RAISE EXCEPTION 'demo fixture summary DTO contract failed';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY['followers', 'following']) AS side(name)
+        WHERE NOT (NEW.payload->'summary'->side.name ?& ARRAY['declared', 'collected', 'coverageRatio', 'meetsCoverageGate', 'exactCountMatch'])
+           OR (SELECT count(*) FROM jsonb_object_keys(NEW.payload->'summary'->side.name)) <> 5
+           OR jsonb_typeof(NEW.payload->'summary'->side.name->'declared') <> 'number'
+           OR jsonb_typeof(NEW.payload->'summary'->side.name->'collected') <> 'number'
+           OR jsonb_typeof(NEW.payload->'summary'->side.name->'coverageRatio') <> 'number'
+           OR jsonb_typeof(NEW.payload->'summary'->side.name->'meetsCoverageGate') <> 'boolean'
+           OR jsonb_typeof(NEW.payload->'summary'->side.name->'exactCountMatch') <> 'boolean'
+           OR NEW.payload->'summary'->side.name->>'declared' !~ '^[0-9]+$'
+           OR NEW.payload->'summary'->side.name->>'collected' !~ '^[0-9]+$'
+           OR NEW.payload->'summary'->side.name->>'coverageRatio' !~ '^(0|1|0[.][0-9]+)$'
+           OR (NEW.payload->'summary'->side.name->>'meetsCoverageGate') <> 'true'
+           OR (NEW.payload->'summary'->side.name->>'coverageRatio')::NUMERIC
+              <> CASE WHEN (NEW.payload->'summary'->side.name->>'declared')::NUMERIC = 0 THEN 1
+                      ELSE LEAST((NEW.payload->'summary'->side.name->>'collected')::NUMERIC / (NEW.payload->'summary'->side.name->>'declared')::NUMERIC, 1) END
+           OR (NEW.payload->'summary'->side.name->>'exactCountMatch')::BOOLEAN
+              <> ((NEW.payload->'summary'->side.name->>'collected')::NUMERIC = (NEW.payload->'summary'->side.name->>'declared')::NUMERIC)
+    ) OR NOT (NEW.payload->'summary'->'genderStats' ?& ARRAY['male', 'female', 'unknown'])
+      OR (SELECT count(*) FROM jsonb_object_keys(NEW.payload->'summary'->'genderStats')) <> 3
+      OR EXISTS (
+          SELECT 1 FROM unnest(ARRAY['male', 'female', 'unknown']) AS field(name)
+          WHERE jsonb_typeof(NEW.payload->'summary'->'genderStats'->field.name) <> 'number'
+             OR NEW.payload->'summary'->'genderStats'->>field.name !~ '^[0-9]+$'
+      ) THEN
+        RAISE EXCEPTION 'demo fixture summary coverage DTO contract failed';
+    END IF;
+
+    IF (NEW.payload->'summary'->>'publicMutuals')::INTEGER
+           + (NEW.payload->'summary'->>'privateMutuals')::INTEGER
+           <> (NEW.payload->'summary'->>'detectedMutuals')::INTEGER
+       OR (NEW.payload->'summary'->>'screenedMutuals')::INTEGER
+           + (NEW.payload->'summary'->>'notScreenedMutuals')::INTEGER
+           <> (NEW.payload->'summary'->>'publicMutuals')::INTEGER
+       OR (NEW.payload->'summary'->'genderStats'->>'male')::INTEGER
+           + (NEW.payload->'summary'->'genderStats'->>'female')::INTEGER
+           + (NEW.payload->'summary'->'genderStats'->>'unknown')::INTEGER
+           <> (NEW.payload->'summary'->>'screenedMutuals')::INTEGER
+       OR (NEW.payload->'summary'->>'detectedMutuals')::INTEGER > (NEW.payload->'summary'->'followers'->>'collected')::INTEGER
+       OR (NEW.payload->'summary'->>'detectedMutuals')::INTEGER > (NEW.payload->'summary'->'following'->>'collected')::INTEGER THEN
+        RAISE EXCEPTION 'demo fixture summary consistency contract failed';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(NEW.payload->'public') AS account(value)
+        WHERE jsonb_typeof(account.value->'instagramId') <> 'string'
+           OR account.value->>'instagramId' !~ '^[A-Za-z0-9._]{1,30}$'
+           OR jsonb_typeof(account.value->'fullName') NOT IN ('string', 'null')
+           OR jsonb_typeof(account.value->'bio') NOT IN ('string', 'null')
+           OR jsonb_typeof(account.value->'displayScore') <> 'number'
+           OR account.value->>'displayScore' !~ '^(10|[1-9]([.][0-9])?)$'
+           OR account.value->>'riskBand' NOT IN ('normal', 'caution', 'high_risk')
+           OR jsonb_typeof(account.value->'featuredRank') NOT IN ('number', 'null')
+           OR jsonb_typeof(account.value->'recentMutualRank') NOT IN ('number', 'null')
+           OR account.value->>'analysisDepth' NOT IN ('features', 'narrative')
+           OR jsonb_typeof(account.value->'oneLineOverview') <> 'string'
+           OR length(account.value->>'oneLineOverview') NOT BETWEEN 1 AND 180
+           OR account.value->>'oneLineOverview' !~ '[가-힣]'
+           OR account.value->>'oneLineOverview' ~ '[\r\n@]'
+           OR length(COALESCE(account.value->>'fullName', '')) > 200
+           OR length(COALESCE(account.value->>'bio', '')) > 2200
+           OR (jsonb_typeof(account.value->'featuredRank') = 'number' AND account.value->>'featuredRank' !~ '^(10|[1-9])$')
+           OR (jsonb_typeof(account.value->'recentMutualRank') = 'number' AND account.value->>'recentMutualRank' !~ '^(10|[1-9])$')
+           OR jsonb_typeof(account.value->'highRiskNarrative') NOT IN ('array', 'null')
+           OR (jsonb_typeof(account.value->'highRiskNarrative') = 'array' AND (
+               jsonb_array_length(account.value->'highRiskNarrative') <> 2
+               OR EXISTS (SELECT 1 FROM jsonb_array_elements(account.value->'highRiskNarrative') AS line(value)
+                          WHERE jsonb_typeof(line.value) <> 'string'
+                             OR length(line.value #>> '{}') NOT BETWEEN 1 AND 180
+                             OR (line.value #>> '{}') !~ '[가-힣]'
+                             OR (line.value #>> '{}') ~ '[\r\n@]')
+           ))
+           OR ((account.value->>'riskBand' = 'normal') AND jsonb_typeof(account.value->'featuredRank') <> 'null')
+           OR ((account.value->>'riskBand' = 'high_risk') AND jsonb_typeof(account.value->'featuredRank') = 'number' AND (account.value->>'featuredRank')::INTEGER > 3)
+           OR ((account.value->>'riskBand' = 'normal' AND (account.value->>'displayScore')::NUMERIC >= 4.2)
+               OR (account.value->>'riskBand' = 'caution' AND ((account.value->>'displayScore')::NUMERIC < 4.2 OR (account.value->>'displayScore')::NUMERIC > 6.8))
+               OR (account.value->>'riskBand' = 'high_risk' AND (account.value->>'displayScore')::NUMERIC < 6.8))
+    ) THEN
+        RAISE EXCEPTION 'demo fixture public DTO contract failed';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(NEW.payload->'private') AS account(value)
+        WHERE jsonb_typeof(account.value->'instagramId') <> 'string'
+           OR account.value->>'instagramId' !~ '^[A-Za-z0-9._]{1,30}$'
+           OR jsonb_typeof(account.value->'fullName') NOT IN ('string', 'null')
+           OR length(COALESCE(account.value->>'fullName', '')) > 200
+           OR jsonb_typeof(account.value->'profileImage') <> 'string'
+    ) THEN
+        RAISE EXCEPTION 'demo fixture private DTO contract failed';
     END IF;
 
     SELECT COUNT(*) INTO duplicate_count
@@ -119,7 +252,7 @@ ALTER TABLE public.demo_analysis_runs
     ADD CONSTRAINT demo_analysis_runs_fixture_version_duration_check CHECK (
         (fixture_version = 'synthetic-fixture-v1' AND duration_seconds BETWEEN 60 AND 90)
         OR (fixture_version IN ('authorized-text-fixture-v2', 'authorized-redacted-fixture-v3', 'authorized-redacted-fixture-v4') AND duration_seconds BETWEEN 30 AND 45)
-        OR (fixture_version ~ '^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$' AND duration_seconds BETWEEN 30 AND 45)
+        OR (fixture_version ~ '^operator-editable-fixture-[a-z0-9][a-z0-9._-]{1,99}$' AND duration_seconds BETWEEN 30 AND 45)
     );
 
 CREATE OR REPLACE FUNCTION public.create_demo_analysis_preflight(

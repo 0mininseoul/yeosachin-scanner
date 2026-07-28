@@ -49,6 +49,7 @@ const mocks = vi.hoisted(() => ({
         createOrReplay: vi.fn(),
         findForOwner: vi.fn(),
     },
+    loadFixture: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
@@ -89,6 +90,7 @@ vi.mock('@/lib/services/leads/store', () => ({
     insertLandingLead: mocks.insertLandingLead,
 }));
 vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: mocks.demoStore }));
+vi.mock('@/lib/services/demo-analysis/fixture-store', () => ({ loadDemoFixtureForVersion: mocks.loadFixture }));
 
 import { POST as createPreflight } from '@/app/api/analysis/preflight/route';
 import {
@@ -105,7 +107,7 @@ import {
 import { PreflightTaskEnqueueError } from './preflight-tasks';
 import { createAnalysisTestAdmission } from './test-entitlement';
 import type { InstagramProfile } from '@/lib/types/instagram';
-import { demoReadyPreflight, LEGACY_DEMO_FIXTURE_VERSION } from '@/lib/services/demo-analysis/demo-analysis';
+import { createDemoFixture, demoReadyPreflight, LEGACY_DEMO_FIXTURE_VERSION } from '@/lib/services/demo-analysis/demo-analysis';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -155,6 +157,20 @@ function postRequest(
 
 function context(id = preflightId) {
     return { params: Promise.resolve({ preflightId: id }) };
+}
+
+function loadedFixture(version: string) {
+    return {
+        version,
+        target: {
+            username: 'junho_dem',
+            fullName: version === LEGACY_DEMO_FIXTURE_VERSION ? '준호의 공개 프로필' : '모의 분석용 공개 계정',
+            bio: version === LEGACY_DEMO_FIXTURE_VERSION ? '사진과 일상을 기록하는 공개 프로필입니다.' : '산책과 사진을 기록하는 데모 프로필입니다.',
+            profileImage: version === LEGACY_DEMO_FIXTURE_VERSION ? '/demo-avatars/synthetic-blurred-avatar-1-v1.png' : '/demo-avatars/demo-v3-target-000.webp',
+            followersCount: 600, followingCount: 580, isPrivate: false as const,
+        },
+        fixture: { ...createDemoFixture('route-fixture', version as never), version },
+    };
 }
 
 describe('preflight owner routes', () => {
@@ -214,6 +230,7 @@ describe('preflight owner routes', () => {
             },
             error: null,
         });
+        mocks.loadFixture.mockImplementation(async (version: string) => loadedFixture(version));
     });
 
     afterEach(() => {
@@ -999,6 +1016,34 @@ describe('preflight owner routes', () => {
         const hidden = await getPreflight(new Request('https://example.com'), context());
         expect(hidden.status).toBe(404);
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(hidden);
+    });
+
+    it('reads the exact non-static DB fixture target and fails closed when it is unavailable', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        const fixtureVersion = 'operator-editable-fixture-route-v1';
+        const demo = {
+            id: preflightId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: fixtureVersion,
+            idempotency_key: 'preflight-db-fixture-key', duration_seconds: 38, created_at: expiresAt, started_at: null,
+        };
+        mocks.demoStore.findForOwner.mockResolvedValue(demo);
+        mocks.loadFixture.mockResolvedValue({
+            version: fixtureVersion,
+            target: { username: 'junho_dem', fullName: 'DB Fixture Target', bio: 'DB fixture bio', profileImage: '/demo-avatars/demo-v3-target-000.webp', followersCount: 600, followingCount: 580, isPrivate: false },
+            fixture: { ...createDemoFixture('database-preflight-fixture'), version: fixtureVersion },
+        });
+        const ready = await getPreflight(new Request('https://example.com'), context());
+        expect(ready.status).toBe(200);
+        await expect(ready.json()).resolves.toMatchObject({ target: { fullName: 'DB Fixture Target', bio: 'DB fixture bio' } });
+        expect(mocks.loadFixture).toHaveBeenCalledWith(fixtureVersion);
+        expect(mocks.store.findForOwner).not.toHaveBeenCalled();
+
+        mocks.loadFixture.mockResolvedValue(null);
+        const unavailable = await getPreflight(new Request('https://example.com'), context());
+        expect(unavailable.status).toBe(503);
+        expect(mocks.store.findForOwner).not.toHaveBeenCalled();
+        expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
     });
 
     it('presents expired and started demo preflights as terminal lifecycle states', async () => {

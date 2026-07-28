@@ -52,4 +52,11 @@ describe('database demo fixture loader', () => {
         selectFixture({ version, status: 'published', payload: invalid });
         await expect(loadDemoFixtureForVersion(version)).resolves.toBeNull();
     });
+
+    it('rejects external URLs anywhere in editable fixture text', async () => {
+        const invalid = payload();
+        invalid.target.bio = 'www.example.test';
+        selectFixture({ version, status: 'published', payload: invalid });
+        await expect(loadDemoFixtureForVersion(version)).resolves.toBeNull();
+    });
 });

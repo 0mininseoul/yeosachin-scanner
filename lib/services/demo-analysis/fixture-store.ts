@@ -48,6 +48,11 @@ export const demoFixturePayloadSchema = z.object({
     if (value.summary.publicMutuals !== 84 || value.summary.privateMutuals !== 145 || value.summary.screenedMutuals !== 84) {
         context.addIssue({ code: 'custom', message: 'fixture summary counts do not match its lists' });
     }
+}).superRefine((value, context) => {
+    // Dashboard text is presentation data; do not let it turn into an external link.
+    if (/(?:https?:\/\/|www\.)/iu.test(JSON.stringify(value))) {
+        context.addIssue({ code: 'custom', message: 'fixture payload contains an external URL' });
+    }
 });
 
 export type DatabaseDemoFixture = Readonly<{
