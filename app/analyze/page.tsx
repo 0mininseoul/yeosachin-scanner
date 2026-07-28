@@ -47,10 +47,6 @@ import {
 } from '@/lib/services/earlybird/analytics-state';
 import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
-import {
-    analysisDurationRangeLabel,
-    estimatePreflightAnalysisDuration,
-} from '@/lib/domain/analysis/duration-estimate';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     basic: 'Basic',
@@ -145,15 +141,6 @@ export default function AnalyzePage() {
     })
         ? checkoutStatusCta
         : null;
-    const preflightDurationEstimate = (
-        readyPreflight && effectiveSelectedCard
-            ? estimatePreflightAnalysisDuration({
-                followersCount: readyPreflight.target.followersCount,
-                followingCount: readyPreflight.target.followingCount,
-                planCapacity: effectiveSelectedCard.relationshipCapacity,
-            })
-            : null
-    );
     // The pending-checkout copy belongs to the same submission binding as its
     // CTA. A late 409 must not leave this message behind after the user has
     // selected another plan or started a new preflight.
@@ -844,14 +831,14 @@ export default function AnalyzePage() {
                                         })}
                                     </fieldset>
 
-                                    {preflightDurationEstimate && (
+                                    {readyPreflight && effectiveSelectedCard && (
                                         <div className="mt-4 border border-line bg-ink-2 px-4 py-3" aria-live="polite">
                                             <p className="eyebrow">예상 소요 시간</p>
                                             <p className="mt-1 text-[15px] font-bold text-fg">
-                                                {analysisDurationRangeLabel(preflightDurationEstimate.range)}
+                                                완료 시간 측정 중
                                             </p>
                                             <p className="mt-1 text-[11px] leading-relaxed text-fg-mute">
-                                                계정 규모와 선택한 플랜을 기준으로 한 범위예요. 실제 처리 상황에 따라 달라질 수 있어요.
+                                                계정 규모와 수집 상황에 따라 달라집니다. 정확한 완료 시간은 현재 측정 중이에요.
                                             </p>
                                         </div>
                                     )}
