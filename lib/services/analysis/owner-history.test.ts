@@ -23,6 +23,21 @@ describe('owner analysis history contract', () => {
         expect(ownerHistoryTargetLabel(parsed.items[0])).toBe('@0_min._.00');
     });
 
+    it('accepts the additive completed V2 public female aggregate', () => {
+        const parsed = ownerAnalysisHistoryV1Schema.safeParse({
+            ...completedV2History,
+            items: [{
+                ...completedV2History.items[0],
+                publicFemaleCount: 7,
+            }],
+        });
+
+        expect(parsed.success).toBe(true);
+        if (parsed.success) {
+            expect(parsed.data.items[0]?.publicFemaleCount).toBe(7);
+        }
+    });
+
     it('rejects failed requests so they cannot reach owner history rendering', () => {
         const parsed = ownerAnalysisHistoryV1Schema.safeParse({
             ...completedV2History,
