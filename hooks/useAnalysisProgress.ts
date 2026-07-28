@@ -31,6 +31,7 @@ interface AnalysisProgress {
     progressStep: string | null;
     errorMessage: string | null;
     backgroundProcessing: boolean;
+    demo: boolean;
     tracks: ProgressSnapshotV1['tracks'] | null;
     activeProfile: ProgressSnapshotV1['activeProfile'];
     etaRange: ProgressSnapshotV1['etaRange'];
@@ -148,6 +149,7 @@ export function useAnalysisProgress(requestId: string) {
                                 ? '판독 처리 중 오류가 발생했습니다.'
                                 : null,
                         backgroundProcessing: progress.snapshot.backgroundProcessing,
+                        demo: response.headers.get('x-analytics-eligible') === '0',
                         tracks: progress.snapshot.tracks,
                         activeProfile: progress.snapshot.activeProfile,
                         etaRange: progress.snapshot.etaRange,
@@ -176,6 +178,7 @@ export function useAnalysisProgress(requestId: string) {
                     progressStep: analysisRequest.progressStep,
                     errorMessage: analysisRequest.errorMessage,
                     backgroundProcessing: analysisRequest.backgroundProcessing === true,
+                    demo: false,
                     tracks: null,
                     activeProfile: null,
                     etaRange: null,
