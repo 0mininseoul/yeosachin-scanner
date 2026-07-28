@@ -119,6 +119,9 @@ function isolateExpectedV212ResolverFailure(
     if (isV212ResolverCapacitySkip(error)) return true;
     const disposition = expectedV212ResolverTerminalDisposition(error);
     if (disposition === null) return false;
+    if (disposition === 'rate_limited') {
+        telemetry.rateLimited = Math.max(1, telemetry.rateLimited);
+    }
     telemetry.failureDisposition[disposition] = Math.max(
         1,
         telemetry.failureDisposition[disposition] ?? 0,

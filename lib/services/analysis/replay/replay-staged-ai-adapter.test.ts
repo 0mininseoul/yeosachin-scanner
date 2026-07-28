@@ -502,6 +502,53 @@ describe('replay staged AI adapter telemetry', () => {
         },
     );
 
+    it('does not double-count v2.12 resolver rate-limit telemetry and its terminal marker', async () => {
+        mocks.createGenderResolutionResultIdentity.mockReturnValue({
+            operationKey: 'resolver:identity',
+        });
+        mocks.genderResolution.mockImplementationOnce(async (
+            _input: unknown,
+            audit: {
+                onBeforeAttempt?: (value: {
+                    attempt: number;
+                    retryCount: number;
+                }) => void;
+                onAttemptTelemetry?: (value: {
+                    attempt: number;
+                    retryCount: number;
+                    disposition: 'rate_limited';
+                    latencyMs: number;
+                }) => void;
+            },
+        ) => {
+            audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            audit.onAttemptTelemetry?.({
+                attempt: 1,
+                retryCount: 0,
+                disposition: 'rate_limited',
+                latencyMs: 1,
+            });
+            throw new Error(
+                'AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.',
+            );
+        });
+
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.12')
+            .resolveGender?.({
+                ordinal: 1,
+                media: [],
+                signal: new AbortController().signal,
+            });
+
+        expect(result).toMatchObject({
+            outcome: 'rate_limited',
+            calls: 1,
+            attempts: 1,
+            rateLimited: 1,
+            failureDisposition: { rate_limited: 1 },
+        });
+    });
+
     it('rethrows an unexpected v2.12 resolver fault through the outer admission boundary', async () => {
         mocks.createGenderResolutionResultIdentity.mockReturnValue({
             operationKey: 'resolver:identity',
