@@ -90,7 +90,7 @@ export function formatKst(value: Date): string {
 }
 
 export function buildKakaoSignupDiscordPayload(item: Pick<ClaimedOutboxItem,
-    'masked_name' | 'birthyear' | 'gender' | 'signed_up_at' | 'attribution_label' | 'attribution_origin'
+    'masked_name' | 'birthyear' | 'gender' | 'signed_up_at' | 'attribution_origin'
 >) {
     return {
         embeds: [{
@@ -101,7 +101,6 @@ export function buildKakaoSignupDiscordPayload(item: Pick<ClaimedOutboxItem,
                 { name: '🎂 출생연도', value: item.birthyear ?? '미제공', inline: true },
                 { name: '⚧ 성별', value: item.gender ?? '미제공', inline: true },
                 { name: '📅 가입일시', value: formatKst(new Date(item.signed_up_at)), inline: false },
-                ...(item.attribution_label ? [{ name: '🌐 유입 경로', value: item.attribution_label, inline: false }] : []),
                 ...(item.attribution_origin ? [{ name: '🔗 유입 출처', value: item.attribution_origin, inline: false }] : []),
             ],
         }],
