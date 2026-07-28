@@ -583,7 +583,7 @@ describe('earlybird pricing v2 database behavior', () => {
             /EARLYBIRD_ORDER_CONFLICT/
         );
         await expect(checkout(db, cancelledSeed, 'standard', V2)).rejects.toThrow(
-            /EARLYBIRD_ORDER_CONFLICT/
+            /EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE:STALE_PRICING_LINEAGE/
         );
     }, 30_000);
 
