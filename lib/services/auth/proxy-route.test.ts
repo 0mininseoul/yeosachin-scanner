@@ -58,6 +58,27 @@ describe('authentication proxy redirects', () => {
         );
     });
 
+    it('permanently redirects browser requests from legacy public domains', async () => {
+        const response = await proxy(new NextRequest(
+            'https://www.yeosachin.com/analyze?autostart=1'
+        ));
+
+        expect(response.status).toBe(308);
+        expect(response.headers.get('location'))
+            .toBe('https://yeosachin.com/analyze?autostart=1');
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
+    });
+
+    it('keeps old non-GET API endpoints available during external cutover', async () => {
+        const response = await proxy(new NextRequest(
+            'https://yeosachin.vercel.app/api/webhooks/groble',
+            { method: 'POST' }
+        ));
+
+        expect(response.status).toBe(200);
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
+    });
+
     it('sends an authenticated user to the validated destination with refreshed cookies', async () => {
         mockAuthenticatedUser('123e4567-e89b-42d3-a456-426614174000', true);
 
