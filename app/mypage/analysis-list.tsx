@@ -55,7 +55,7 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                         type="button"
                         data-amp-block
                         onClick={() => handleCardClick(item)}
-                        className="group flex w-full gap-3.5 border-b border-line py-3.5 pr-1 text-left transition-colors hover:bg-panel/60"
+                        className="group flex w-full gap-3.5 border-b border-line py-5 pr-1 text-left transition-colors hover:bg-panel/60"
                     >
                         <span
                             aria-hidden="true"
@@ -85,11 +85,8 @@ export default function AnalysisList({ initialAnalyses }: Props) {
                                     {done ? '완료' : item.status === 'processing' ? '판독중' : '대기중'}
                                 </span>
                             </span>
-                            <span className="num mt-1 block text-[11.5px] text-fg-dim">
+                            <span className="num mt-1.5 block text-[11.5px] text-fg-dim">
                                 {item.createdAt ? formatKstDateTime(item.createdAt) : '날짜 미상'}
-                                {done && typeof item.publicFemaleCount === 'number' && (
-                                    <> · 맞팔 여성 (공개 계정) {item.publicFemaleCount.toLocaleString()}명</>
-                                )}
                             </span>
                         </span>
                     </button>

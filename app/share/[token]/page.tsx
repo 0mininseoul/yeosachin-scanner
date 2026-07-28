@@ -10,12 +10,13 @@ import {
     TopBar,
     Eyebrow,
     CaseCard,
-    InstaButton,
     ProfileFallback,
     ghostCls,
     primaryCls,
 } from '@/components/case-ui';
 import { SuspectRow } from '@/components/suspect-row';
+import { mapV2Result } from '@/app/result/[requestId]/page';
+import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 
 interface PageProps {
     params: Promise<{ token: string }>;
@@ -104,12 +105,48 @@ export default function ShareResultPage({ params }: PageProps) {
                     throw new Error(result.error || '결과를 불러올 수 없습니다.');
                 }
 
-                setData(result);
+                // V2 shares return the owner result page shape plus isShared, so
+                // the same mapper the result page uses turns it into this view's
+                // DTO. Legacy v1 shares already arrive in that shape.
+                const isV2 = result?.schemaVersion === 1
+                    && result.summary
+                    && 'detectedMutuals' in result.summary;
+                const display: ResultData = isV2
+                    ? (() => {
+                        const mapped = mapV2Result(result as AnalysisResultPageV1, false);
+                        return {
+                            requestId: mapped.requestId,
+                            status: mapped.status,
+                            isShared: true,
+                            summary: {
+                                targetInstagramId: mapped.summary.targetInstagramId,
+                                targetProfileImage: mapped.summary.targetProfileImage,
+                                mutualFollows: mapped.summary.mutualFollows,
+                                genderRatio: mapped.summary.genderRatio ?? {
+                                    male: { count: 0, percentage: 0 },
+                                    female: { count: 0, percentage: 0 },
+                                    unknown: { count: 0, percentage: 0 },
+                                },
+                            },
+                            femaleAccounts: mapped.femaleAccounts.map(account => ({
+                                ...account,
+                                instagramUrl: account.instagramUrl ?? '',
+                                bio: account.bio,
+                            })),
+                            privateAccounts: mapped.privateAccounts.map(account => ({
+                                ...account,
+                                instagramUrl: account.instagramUrl ?? '',
+                            })),
+                        };
+                    })()
+                    : result;
+
+                setData(display);
                 if (!resultViewTrackedRef.current) {
                     resultViewTrackedRef.current = true;
                     trackEvent(EVENTS.RESULT_VIEWED, {
-                        request_id: result.requestId,
-                        result_count: result.femaleAccounts.length + result.privateAccounts.length,
+                        request_id: display.requestId,
+                        result_count: display.femaleAccounts.length + display.privateAccounts.length,
                         is_shared: true,
                     });
                 }
@@ -261,7 +298,7 @@ export default function ShareResultPage({ params }: PageProps) {
                 {/* public / private tabs */}
                 <div className="mt-9 grid grid-cols-2 border border-line bg-ink-2">
                     {([
-                        { key: 'public', label: '공개 계정', count: femaleAccounts.length },
+                        { key: 'public', label: '공개 계정(여성)', count: femaleAccounts.length },
                         { key: 'private', label: '비공개 계정', count: privateAccounts.length },
                     ] as const).map((t) => (
                         <button
@@ -288,12 +325,16 @@ export default function ShareResultPage({ params }: PageProps) {
                     ) : (
                         <div className="mt-5">
                             {femaleAccounts.map((account, i) => (
+                                /* Anyone holding the link can open this page, and the
+                                   accounts listed here never agreed to appear on it,
+                                   so their handles are masked. */
                                 <SuspectRow
                                     key={account.instagramId}
                                     account={account}
                                     rank={i + 1}
                                     avatar={<ProfileImage src={account.profileImage} variant="person" />}
-                                    externalProfileLinks
+                                    externalProfileLinks={false}
+                                    maskHandle
                                 />
                             ))}
                         </div>
@@ -316,14 +357,13 @@ export default function ShareResultPage({ params }: PageProps) {
                                         <ProfileImage src={account.profileImage} variant="private" />
                                     </div>
                                     <div className="min-w-0 flex-1">
-                                        <a
-                                            href={account.instagramUrl}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="block truncate text-[14px] font-bold text-fg transition-colors hover:text-blood"
+                                        {/* Masked for the same reason as the public list. */}
+                                        <span
+                                            aria-hidden="true"
+                                            className="block select-none truncate text-[14px] font-bold text-fg/90 blur-[5px]"
                                         >
                                             @{account.instagramId}
-                                        </a>
+                                        </span>
                                         {(account.fullName || account.bio) && (
                                             <p className="mt-0.5 truncate text-[12px] text-fg-dim">
                                                 {account.fullName && <span>{account.fullName}</span>}
@@ -332,7 +372,6 @@ export default function ShareResultPage({ params }: PageProps) {
                                             </p>
                                         )}
                                     </div>
-                                    <InstaButton url={account.instagramUrl} />
                                 </div>
                             ))}
                         </div>
