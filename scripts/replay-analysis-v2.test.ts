@@ -282,6 +282,38 @@ describe('analysis V2 replay CLI', () => {
         }
     });
 
+    it('double-confirms the diagnostic partial-coverage override only for paid partial runs', () => {
+        const base = [
+            '--run', '--paid-ai', '--confirm-paid-ai', '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.10',
+            '--bundle=a.enc', '--key=a.key',
+        ];
+        expect(parseReplayCliArgs([
+            ...base,
+            '--allow-low-partial-coverage',
+            '--confirm-low-partial-coverage',
+        ])).toMatchObject({
+            command: 'run',
+            mode: 'paid-ai',
+            historicalPartialAvailable: true,
+            allowLowPartialCoverage: true,
+        });
+        expect(() => parseReplayCliArgs([
+            ...base,
+            '--allow-low-partial-coverage',
+        ])).toThrow('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_DOUBLE_CONFIRM_REQUIRED');
+        expect(() => parseReplayCliArgs([
+            ...base.filter(arg => arg !== '--paid-ai' && arg !== '--confirm-paid-ai'),
+            '--allow-low-partial-coverage',
+            '--confirm-low-partial-coverage',
+        ])).toThrow('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_SCOPE_REQUIRED');
+        expect(() => parseReplayCliArgs([
+            ...base.filter(arg => arg !== '--historical-partial-available'),
+            '--allow-low-partial-coverage',
+            '--confirm-low-partial-coverage',
+        ])).toThrow('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_SCOPE_REQUIRED');
+    });
+
     it('rejects partial artifacts from exact runs and exact artifacts from partial dry-runs', async () => {
         const partial = await partialArtifacts(Date.now());
         await expect(runReplayCli(['--run', `--bundle=${partial.bundlePath}`, `--key=${partial.keyPath}`]))

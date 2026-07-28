@@ -122,6 +122,24 @@ describe('analysis V2 replay bundle', () => {
                     capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
                     aiStage: 'ai-stage-policy-v2.10',
                 },
+                partial: (() => {
+                    const sourceIdentities = [
+                        { ordinal: 1, username: 'example', partition: 'public' as const },
+                        { ordinal: 2, username: 'unavailable', partition: 'public' as const },
+                    ];
+                    return {
+                        sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+                        sourceIdentities,
+                        mediaUnavailable: [{
+                            ordinal: 2,
+                            terminal: 'media_unavailable' as const,
+                            selectedMediaCount: 3,
+                            triageFailures: 1,
+                            featureFailures: 1,
+                            reasons: ['source_missing'],
+                        }],
+                    };
+                })(),
             },
         } as AnalysisV2ReplayBundle;
 
@@ -146,6 +164,9 @@ describe('analysis V2 replay bundle', () => {
                     evaluationPolicy: {
                         capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
                         aiStage: 'ai-stage-policy-v2.10',
+                    },
+                    partial: {
+                        mediaUnavailable: [{ selectedMediaCount: 3 }],
                     },
                 },
             },

@@ -95,6 +95,15 @@ export interface AnalysisV2AiReplayReport {
     fullE2eEvidence: false;
     notExact?: true;
     noMediaSubstitution?: true;
+    diagnosticCoverageOverride?: {
+        used: true;
+        retainedProfiles: number;
+        sourceProfiles: number;
+        retainedMedia: number;
+        exactSelectedMedia: number;
+        profileRetentionBps: number;
+        mediaRetentionBps: number;
+    };
     stages: Record<'genderTriage' | 'featureAnalysis' | 'privateAccountName' | 'genderResolution', ReplayStageMetrics>;
     gender: { male: number; female: number; unknown: number; unknownRate: number };
     resolver: {
@@ -402,6 +411,17 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         replay_ai_policy: report.replayAiPolicy,
         full_e2e_evidence: report.fullE2eEvidence,
         ...(report.notExact ? { not_exact: true, no_media_substitution: true } : {}),
+        ...(report.diagnosticCoverageOverride ? {
+            diagnostic_partial_coverage_override: {
+                used: true,
+                retained_profiles: report.diagnosticCoverageOverride.retainedProfiles,
+                source_profiles: report.diagnosticCoverageOverride.sourceProfiles,
+                retained_media: report.diagnosticCoverageOverride.retainedMedia,
+                exact_selected_media: report.diagnosticCoverageOverride.exactSelectedMedia,
+                profile_retention_bps: report.diagnosticCoverageOverride.profileRetentionBps,
+                media_retention_bps: report.diagnosticCoverageOverride.mediaRetentionBps,
+            },
+        } : {}),
         total_elapsed_ms: report.totalElapsedMs,
         stages: Object.fromEntries(Object.entries(report.stages).map(([stage, values]) => [
             stage,
@@ -425,6 +445,7 @@ export async function runAnalysisV2AiReplay(input: {
     runner?: ReplayAiRunner;
     mode: ReplayMode;
     paidAiOptIn?: boolean;
+    allowLowPartialCoverage?: boolean;
     evaluationPolicy?: ReplayEvaluationPolicy;
     write?: (line: string) => void;
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
@@ -432,14 +453,28 @@ export async function runAnalysisV2AiReplay(input: {
 }): Promise<AnalysisV2AiReplayReport> {
     assertArtifactCapability(input.bundle);
     if (
-        input.bundle.schemaVersion === 2
+        input.allowLowPartialCoverage === true
+        && (
+            input.bundle.schemaVersion !== 2
+            || input.mode !== 'paid-ai'
+        )
+    ) {
+        throw new Error('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_SCOPE_REQUIRED');
+    }
+    const paidPartialCoverage = input.bundle.schemaVersion === 2
         && input.mode === 'paid-ai'
-        && !historicalPartialPaidCoverage({
+        ? historicalPartialPaidCoverage({
             sourceUniverseDigest: input.bundle.capture.partial.sourceUniverseDigest,
             sourceIdentities: input.bundle.capture.partial.sourceIdentities,
             mediaUnavailable: input.bundle.capture.partial.mediaUnavailable,
             profiles: input.bundle.profiles,
-        }).eligible
+        }, input.allowLowPartialCoverage === true
+            ? { mode: 'diagnostic-low-partial-coverage' }
+            : undefined)
+        : undefined;
+    if (
+        paidPartialCoverage
+        && !paidPartialCoverage.eligible
     ) {
         throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
     }
@@ -809,6 +844,17 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         fullE2eEvidence: false as const,
         ...(input.bundle.schemaVersion === 2 ? { notExact: true as const, noMediaSubstitution: true as const } : {}),
+        ...(input.allowLowPartialCoverage === true && paidPartialCoverage ? {
+            diagnosticCoverageOverride: {
+                used: true as const,
+                retainedProfiles: paidPartialCoverage.retainedProfiles,
+                sourceProfiles: paidPartialCoverage.sourceProfiles,
+                retainedMedia: paidPartialCoverage.retainedMedia,
+                exactSelectedMedia: paidPartialCoverage.conservativeSourceMedia,
+                profileRetentionBps: paidPartialCoverage.profileRetentionBps,
+                mediaRetentionBps: paidPartialCoverage.mediaRetentionBps,
+            },
+        } : {}),
         stages,
         gender,
         resolver,

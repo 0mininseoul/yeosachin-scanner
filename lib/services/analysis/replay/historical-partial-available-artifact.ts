@@ -9,7 +9,11 @@ export type HistoricalPartialSourceIdentity = {
 type PartialInvariantInput = {
     sourceUniverseDigest: string;
     sourceIdentities: readonly HistoricalPartialSourceIdentity[];
-    mediaUnavailable: readonly { ordinal: number }[];
+    mediaUnavailable: readonly {
+        ordinal: number;
+        /** Exact feature-media selections for new captures; absent on legacy artifacts. */
+        selectedMediaCount?: number;
+    }[];
     profiles: readonly {
         ordinal: number;
         username: string;
@@ -22,32 +26,67 @@ type PartialInvariantInput = {
 export const HISTORICAL_PARTIAL_PAID_MIN_PROFILE_RETENTION_BPS = 9_850;
 export const HISTORICAL_PARTIAL_PAID_MIN_MEDIA_RETENTION_BPS = 9_900;
 export const HISTORICAL_PARTIAL_PAID_MIN_RETAINED_MEDIA = 1_904;
+export const HISTORICAL_PARTIAL_DIAGNOSTIC_MIN_RETENTION_BPS = 9_800;
 const MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE = 12;
 
-export function historicalPartialPaidCoverage(input: PartialInvariantInput): {
+export function historicalPartialPaidCoverage(
+    input: PartialInvariantInput,
+    options: { mode?: 'default' | 'diagnostic-low-partial-coverage' } = {},
+): {
     eligible: boolean;
+    exactSelectedCountsAvailable: boolean;
     retainedProfiles: number;
     sourceProfiles: number;
     retainedMedia: number;
     conservativeSourceMedia: number;
+    profileRetentionBps: number;
+    mediaRetentionBps: number;
 } {
     const sourceProfiles = input.sourceIdentities.length;
     const retainedProfiles = input.profiles.length;
     const retainedMedia = input.profiles.reduce((sum, profile) => sum + profile.media.length, 0);
+    const exactSelectedCountsAvailable = input.mediaUnavailable.every(item => (
+        Number.isInteger(item.selectedMediaCount)
+        && item.selectedMediaCount! >= 0
+        && item.selectedMediaCount! <= MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE
+    ));
     const conservativeSourceMedia = input.profiles.reduce(
         (sum, profile) => sum + (profile.coverage?.selectedCount ?? profile.media.length),
-        input.mediaUnavailable.length * MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE,
+        input.mediaUnavailable.reduce((sum, item) => (
+            sum + (
+                item.selectedMediaCount
+                ?? MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE
+            )
+        ), 0),
     );
+    const profileRetentionBps = sourceProfiles > 0
+        ? Math.floor(retainedProfiles * 10_000 / sourceProfiles)
+        : 0;
+    const mediaRetentionBps = conservativeSourceMedia > 0
+        ? Math.floor(retainedMedia * 10_000 / conservativeSourceMedia)
+        : 0;
+    const diagnostic = options.mode === 'diagnostic-low-partial-coverage';
     return {
-        eligible: sourceProfiles > 0
-            && conservativeSourceMedia > 0
-            && retainedProfiles * 10_000 >= sourceProfiles * HISTORICAL_PARTIAL_PAID_MIN_PROFILE_RETENTION_BPS
-            && retainedMedia >= HISTORICAL_PARTIAL_PAID_MIN_RETAINED_MEDIA
-            && retainedMedia * 10_000 >= conservativeSourceMedia * HISTORICAL_PARTIAL_PAID_MIN_MEDIA_RETENTION_BPS,
+        eligible: diagnostic
+            ? sourceProfiles > 0
+                && retainedProfiles > 0
+                && retainedMedia > 0
+                && conservativeSourceMedia > 0
+                && exactSelectedCountsAvailable
+                && retainedProfiles * 10_000 >= sourceProfiles * HISTORICAL_PARTIAL_DIAGNOSTIC_MIN_RETENTION_BPS
+                && retainedMedia * 10_000 >= conservativeSourceMedia * HISTORICAL_PARTIAL_DIAGNOSTIC_MIN_RETENTION_BPS
+            : sourceProfiles > 0
+                && conservativeSourceMedia > 0
+                && retainedProfiles * 10_000 >= sourceProfiles * HISTORICAL_PARTIAL_PAID_MIN_PROFILE_RETENTION_BPS
+                && retainedMedia >= HISTORICAL_PARTIAL_PAID_MIN_RETAINED_MEDIA
+                && retainedMedia * 10_000 >= conservativeSourceMedia * HISTORICAL_PARTIAL_PAID_MIN_MEDIA_RETENTION_BPS,
+        exactSelectedCountsAvailable,
         retainedProfiles,
         sourceProfiles,
         retainedMedia,
         conservativeSourceMedia,
+        profileRetentionBps,
+        mediaRetentionBps,
     };
 }
 
@@ -138,6 +177,14 @@ export function historicalPartialBundleInvariantIssues(
         accounted.add(profile.ordinal);
     }
     for (const terminal of input.mediaUnavailable) {
+        if (
+            terminal.selectedMediaCount !== undefined
+            && (
+                !Number.isInteger(terminal.selectedMediaCount)
+                || terminal.selectedMediaCount < 0
+                || terminal.selectedMediaCount > MAX_SELECTED_MEDIA_PER_UNAVAILABLE_PUBLIC_PROFILE
+            )
+        ) issues.push('terminal_selected_media_count_invalid');
         if (
             identities.get(terminal.ordinal)?.partition !== 'public'
             || accounted.has(terminal.ordinal)

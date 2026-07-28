@@ -98,7 +98,7 @@ export async function captureHistoricalPartialAvailableReplayBundle(input: {
         if (!candidate.profile) {
             if (candidate.partition !== 'public') throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
             report.partitions.public_media_unavailable++;
-            mediaUnavailable.push({ ordinal: candidate.ordinal, terminal: 'media_unavailable', triageFailures: 0, featureFailures: 0, reasons: ['profile_unavailable'] });
+            mediaUnavailable.push({ ordinal: candidate.ordinal, terminal: 'media_unavailable', selectedMediaCount: 0, triageFailures: 0, featureFailures: 0, reasons: ['profile_unavailable'] });
             continue;
         }
         const profile = candidate.profile;
@@ -123,7 +123,7 @@ export async function captureHistoricalPartialAvailableReplayBundle(input: {
         const featurePass = !reason && featureJpeg && isAnalysisV2PartialMediaCoverageAllowed(feature.coverage);
         if (!triagePass || !featurePass) {
             report.partitions.public_media_unavailable++;
-            mediaUnavailable.push({ ordinal: candidate.ordinal, terminal: 'media_unavailable', triageFailures: triage.coverage.failures.length, featureFailures: feature.coverage.failures.length, reasons: [...new Set([...triage.coverage.failures, ...feature.coverage.failures].map(failure => unavailableReason(failure.reason)).concat(reason ? [reason] : []))].sort() });
+            mediaUnavailable.push({ ordinal: candidate.ordinal, terminal: 'media_unavailable', selectedMediaCount: feature.coverage.selectedCount, triageFailures: triage.coverage.failures.length, featureFailures: feature.coverage.failures.length, reasons: [...new Set([...triage.coverage.failures, ...feature.coverage.failures].map(failure => unavailableReason(failure.reason)).concat(reason ? [reason] : []))].sort() });
             continue;
         }
         report.partitions.public_available++; report.aiWorkload.publicTriage++; report.aiWorkload.publicFeature++;

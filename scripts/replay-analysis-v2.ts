@@ -40,7 +40,7 @@ type ReplayCliOptions =
     | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: false }
     | { command: 'capture'; historicalOfficialE2E: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'capture'; historicalPartialAvailable: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
-    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true }
+    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true; allowLowPartialCoverage?: true }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -62,6 +62,8 @@ const VALUELESS_FLAGS = new Set([
     '--confirm-paid-ai',
     '--historical-official-e2e',
     '--historical-partial-available',
+    '--allow-low-partial-coverage',
+    '--confirm-low-partial-coverage',
 ]);
 
 function evaluationPolicy(value: string | undefined, historicalOfficialE2E = false, historicalPartialAvailable = false): ReplayEvaluationPolicy | undefined {
@@ -108,6 +110,21 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     if (dirname(resolve(bundlePath)) !== dirname(resolve(keyPath))) {
         throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_PATH_INVALID');
     }
+    const allowLowPartialCoverage = parsed.has('--allow-low-partial-coverage');
+    const confirmLowPartialCoverage = parsed.has('--confirm-low-partial-coverage');
+    if (allowLowPartialCoverage !== confirmLowPartialCoverage) {
+        throw new Error('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_DOUBLE_CONFIRM_REQUIRED');
+    }
+    if (
+        allowLowPartialCoverage
+        && (
+            !parsed.has('--run')
+            || !parsed.has('--paid-ai')
+            || !parsed.has('--historical-partial-available')
+        )
+    ) {
+        throw new Error('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_SCOPE_REQUIRED');
+    }
     if (parsed.has('--capture')) {
         const historicalOfficialE2E = parsed.has('--historical-official-e2e');
         const historicalPartialAvailable = parsed.has('--historical-partial-available');
@@ -145,12 +162,12 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const historicalOfficialE2E = parsed.has('--historical-official-e2e');
     const historicalPartialAvailable = parsed.has('--historical-partial-available');
     if (historicalOfficialE2E && historicalPartialAvailable) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--bundle', '--key', '--evaluation-ai-policy']);
+    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--allow-low-partial-coverage', '--confirm-low-partial-coverage', '--bundle', '--key', '--evaluation-ai-policy']);
     if ([...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
     const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E, historicalPartialAvailable);
     if (historicalOfficialE2E && (!paid || !evaluation)) throw new Error('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
     if (historicalPartialAvailable && !evaluation) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
-    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
+    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(allowLowPartialCoverage ? { allowLowPartialCoverage: true } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
 }
 
 function requiredEnvironment(name: string): string {
@@ -362,6 +379,9 @@ export async function runReplayCli(
             runner,
             mode: options.mode,
             paidAiOptIn: options.mode === 'paid-ai',
+            ...(options.allowLowPartialCoverage
+                ? { allowLowPartialCoverage: true }
+                : {}),
             ...(options.evaluationPolicy
                 ? { evaluationPolicy: options.evaluationPolicy }
                 : {}),

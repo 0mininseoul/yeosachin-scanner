@@ -147,6 +147,7 @@ const partialCaptureFields = {
         mediaUnavailable: z.array(z.object({
             ordinal: z.number().int().positive(),
             terminal: z.literal('media_unavailable'),
+            selectedMediaCount: z.number().int().min(0).max(12).optional(),
             triageFailures: z.number().int().min(0).max(12),
             featureFailures: z.number().int().min(0).max(12),
             reasons: z.array(z.string().regex(/^[a-z_]{1,64}$/)).max(13),
