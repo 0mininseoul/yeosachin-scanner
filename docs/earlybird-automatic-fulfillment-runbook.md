@@ -1,5 +1,7 @@
 # Earlybird automatic fulfillment
 
+현재 production 상태·queue·rollback의 정본은 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이다. 현재 canonical `analysis-worker`에서 automatic fulfillment가 열려 있으며, 이 문서는 그 기능의 좁은 실행·rollback 경계만 보충한다.
+
 ## Authorized launch behavior
 
 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=true` opens automatic fulfillment only

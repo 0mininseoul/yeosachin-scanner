@@ -11,7 +11,6 @@ const analyticsMocks = vi.hoisted(() => ({
     markAnalyticsIdentityPending: vi.fn(),
     markAnalyticsIdentityReady: vi.fn(),
     teardownAmplitudeSessionReplay: vi.fn(),
-    updateAmplitudeReplayRuntimeContext: vi.fn(),
 }));
 
 const authMarkerMocks = vi.hoisted(() => ({
@@ -47,7 +46,6 @@ describe('AmplitudeProvider auth integration', () => {
         analyticsMocks.enforceAmplitudeReplayRoutePrivacy.mockReset();
         analyticsMocks.installAmplitudeReplayNavigationGuards.mockReset();
         analyticsMocks.teardownAmplitudeSessionReplay.mockReset();
-        analyticsMocks.updateAmplitudeReplayRuntimeContext.mockReset();
         authMarkerMocks.analyticsAuthProvider.mockReset().mockReturnValue(null);
         authMarkerMocks.availableAnalyticsSessionStorage.mockReset();
         authMarkerMocks.completePendingAuthEvent.mockReset();
@@ -261,10 +259,14 @@ describe('AmplitudeProvider auth integration', () => {
         expect(layoutSource).toContain(
             'import { AmplitudeProvider } from "@/components/amplitude-provider";',
         );
-        expect(layoutSource.match(/<AmplitudeProvider\s/g)).toHaveLength(1);
+        expect(layoutSource.match(/<AmplitudeProvider(?:\s|>)/g)).toHaveLength(1);
         expect(layoutSource).toMatch(
-            /<AmplitudeProvider demoAnalysisEnabled=\{demoAnalysisEnabled\}>\s*\{children\}\s*<\/AmplitudeProvider>/,
+            /<AmplitudeProvider>\s*\{children\}\s*<\/AmplitudeProvider>/,
         );
+        expect(layoutSource).not.toContain('DEMO_ANALYSIS_ENABLED');
+        expect(layoutSource).not.toContain('data-amplitude-demo-mode');
+        expect(providerSource).not.toContain('demoAnalysisEnabled');
+        expect(providerSource).not.toContain('updateAmplitudeReplayRuntimeContext');
     });
 
     it('keeps the product subtree mounted once when the route observer suspends during hydration', async () => {
@@ -285,7 +287,6 @@ describe('AmplitudeProvider auth integration', () => {
         // eslint-disable-next-line react/no-children-prop
         const html = renderToString(createElement(AmplitudeProvider, {
             children: createElement(ProductShell),
-            demoAnalysisEnabled: false,
         }));
 
         expect(html).toContain('<main>product</main>');
