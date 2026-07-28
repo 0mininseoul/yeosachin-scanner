@@ -8,6 +8,7 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     aiStagePolicySupports,
     type AiStageName,
     type AiStagePolicyVersion,
@@ -21,6 +22,7 @@ const UUID_PATTERN =
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const OPERATION_KEY_PATTERN =
     /^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
+const V211_RESOLVER_LEASE_GRACE_MS = 5_000;
 
 export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     table: 'analysis_v2_gemini_leases',
@@ -89,7 +91,9 @@ const acquireInputSchema = z.object({
         AI_STAGE_POLICY_V28_VERSION,
         AI_STAGE_POLICY_V29_VERSION,
         AI_STAGE_POLICY_V210_VERSION,
+        AI_STAGE_POLICY_V211_VERSION,
     ]).optional(),
+    abortSignal: z.custom<AbortSignal>(value => value instanceof AbortSignal).optional(),
 }).strict().superRefine((input, context) => {
     const v2 = input.aiStagePolicyVersion !== undefined
         && aiStagePolicySupports(input.aiStagePolicyVersion, 'durableGeminiLease');
@@ -135,6 +139,7 @@ export interface AnalysisV2GeminiLeaseDependencies {
     rpc(name: string, params: Record<string, unknown>): PromiseLike<RpcResult>;
     nowMs(): number;
     randomUuid(): string;
+    sleep?(ms: number): Promise<void>;
 }
 
 export interface AnalysisV2GeminiLeaseStore {
@@ -205,6 +210,7 @@ function defaultDependencies(): AnalysisV2GeminiLeaseDependencies {
         rpc: (name, params) => supabaseAdmin.rpc(name, params),
         nowMs: () => performance.now(),
         randomUuid: randomUUID,
+        sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
     };
 }
 
@@ -266,7 +272,13 @@ export function createAnalysisV2GeminiLeaseStore(
                     || input.data.stage === 'featureAnalysis'
                     || input.data.stage === 'privateAccountName'
                 );
-            const { data, error } = await dependencies.rpc(
+            const isV211Resolver = input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION
+                && input.data.stage === 'genderResolution';
+            const deadlineAtMs = dependencies.nowMs() + V211_RESOLVER_LEASE_GRACE_MS;
+            let data: unknown;
+            let error: unknown;
+            while (true) {
+            ({ data, error } = await dependencies.rpc(
                 usesSchedulerV1Admission
                     ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc
                     : usesV2
@@ -287,7 +299,7 @@ export function createAnalysisV2GeminiLeaseStore(
                     p_claim_token: proposedToken,
                     p_lease_seconds: AI_GEMINI_LEASE_SECONDS,
                 }
-            );
+            ));
             if (error) throw new AnalysisV2GeminiLeasePersistenceError();
             const parsed = acquireResultSchema.safeParse(data);
             if (!parsed.success) {
@@ -298,6 +310,14 @@ export function createAnalysisV2GeminiLeaseStore(
                 throw new AnalysisV2AiCapacityPendingError();
             }
             if (row.outcome === 'resolver_capacity_pending') {
+                if (
+                    isV211Resolver
+                    && !input.data.abortSignal?.aborted
+                    && dependencies.nowMs() < deadlineAtMs
+                ) {
+                    await (dependencies.sleep?.(10) ?? Promise.resolve());
+                    continue;
+                }
                 throw new AnalysisV2AiResolverCapacitySkippedError();
             }
             if (row.outcome === 'quarantine_active') {
@@ -307,6 +327,7 @@ export function createAnalysisV2GeminiLeaseStore(
                 throw new AnalysisV2GeminiLeasePersistenceError();
             }
             return parseLease(row, input.data);
+            }
         },
 
         async renew(lease) {
