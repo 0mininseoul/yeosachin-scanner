@@ -1,3 +1,7 @@
+'use client';
+
+import { useEffect, useRef } from 'react';
+
 interface Review {
   body: string;
   when: string;
@@ -40,18 +44,112 @@ const REVIEWS: Review[] = [
   },
 ];
 
+// Slow enough to read past, fast enough to notice.
+const DRIFT_PX_PER_SECOND = 22;
+
+// How long a user-driven scroll has to be quiet before the drift rejoins.
+// Writing scrollLeft into a running fling cancels it, so the drift waits the
+// momentum out instead of cutting it short.
+const SETTLE_MS = 260;
+
+const PRESS_START = ['pointerdown', 'touchstart'] as const;
+const PRESS_END = ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const;
+
+/* Drifts the strip sideways so the row reads as having more in it, and yields
+ * whenever the reader is handling it — while a finger is held down, and while a
+ * scroll they started is still moving. It always rejoins afterwards.
+ *
+ * Scroll snapping is deliberately absent: the browser re-snaps after every
+ * programmatic nudge, which turns a slow drift into a stutter.
+ */
+function useReviewDrift() {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+
+    let frame = 0;
+    let last = 0;
+    let carry = 0;
+    let pressed = false;
+    let lastUserScrollAt = 0;
+    // The scroll position our own last write produced, so the scroll listener can
+    // tell our nudges apart from the reader's.
+    let selfScrollLeft = -1;
+
+    const onPressStart = () => { pressed = true; };
+    const onPressEnd = () => { pressed = false; };
+    const onScroll = () => {
+      if (Math.abs(el.scrollLeft - selfScrollLeft) <= 1) return;
+      lastUserScrollAt = performance.now();
+    };
+    const onVisibility = () => {
+      // Drifting while hidden would dump the accumulated distance on return.
+      last = 0;
+    };
+
+    const tick = (now: number) => {
+      frame = requestAnimationFrame(tick);
+
+      const idle = document.visibilityState !== 'visible'
+        || pressed
+        || now - lastUserScrollAt < SETTLE_MS;
+      if (idle) {
+        last = now;
+        carry = 0;
+        return;
+      }
+
+      if (last === 0) last = now;
+      carry += ((now - last) / 1000) * DRIFT_PX_PER_SECOND;
+      last = now;
+
+      const whole = Math.floor(carry);
+      if (whole <= 0) return;
+      carry -= whole;
+
+      const limit = el.scrollWidth - el.clientWidth;
+      // At the end there is nowhere to go, but the loop stays alive so scrolling
+      // back left picks the drift up again.
+      if (limit <= 0 || el.scrollLeft >= limit - 1) return;
+
+      el.scrollLeft += whole;
+      selfScrollLeft = el.scrollLeft;
+    };
+
+    for (const event of PRESS_START) el.addEventListener(event, onPressStart, { passive: true });
+    for (const event of PRESS_END) window.addEventListener(event, onPressEnd, { passive: true });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    document.addEventListener('visibilitychange', onVisibility);
+    frame = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      for (const event of PRESS_START) el.removeEventListener(event, onPressStart);
+      for (const event of PRESS_END) window.removeEventListener(event, onPressEnd);
+      el.removeEventListener('scroll', onScroll);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
+
+  return ref;
+}
+
 export function LandingReviews() {
+  const ref = useReviewDrift();
   return (
     <div
-      className="scroll-thin -mx-5 flex snap-x snap-mandatory items-start gap-6 overflow-x-auto px-5 pb-2"
-      style={{ scrollPaddingLeft: '20px' }}
+      ref={ref}
+      className="scroll-thin -mx-5 flex items-start gap-6 overflow-x-auto px-5 pb-2"
     >
       {REVIEWS.map((r) => (
         /* A top rule rather than a box or a left rail: review lengths vary a
            lot, so vertical rails would all end at different heights. */
         <article
           key={r.body}
-          className="flex w-[256px] shrink-0 snap-start flex-col border-t border-line pt-3.5"
+          className="flex w-[256px] shrink-0 flex-col border-t border-line pt-3.5"
         >
           <span className="block text-[12px] font-semibold text-fg-dim">익명</span>
           <p className="mt-3 whitespace-pre-line text-[13px] leading-relaxed text-fg">{r.body}</p>
