@@ -10,9 +10,13 @@ import {
     type AppearanceGrade,
     type ReverseLikeStatus,
     type RiskBand,
+    type RiskPolicyVersion,
     type RiskPolicyResult,
 } from '@/lib/domain/analysis/risk-policy';
-import { assignRelativeRiskTiers } from '@/lib/domain/analysis/relative-risk-policy';
+import {
+    assignRelativeRiskTiers,
+    assignRelativeRiskTiersV25,
+} from '@/lib/domain/analysis/relative-risk-policy';
 
 export interface V2FemaleCandidateEvidence {
     candidateId: string;
@@ -92,6 +96,7 @@ export function calculateV2PreliminaryScores(input: {
     candidates: readonly V2FemaleCandidateEvidence[];
     orderedMutualUsernames: readonly string[];
     excludedUsername: string | null;
+    riskPolicyVersion?: RiskPolicyVersion;
 }): V2PreliminaryCandidateScore[] {
     validateCandidateIdentities(input.candidates);
     const recentByUsername = recentAssignmentIndex(
@@ -118,7 +123,7 @@ export function calculateV2PreliminaryScores(input: {
             // the dedicated partner-safety stage has produced its checkpoint.
             hasWeakPartnerEvidence: false,
             hasStrongPartnerEvidence: false,
-        });
+        }, input.riskPolicyVersion);
         return {
             ...candidate,
             username: normalizedUsername(candidate.username),
@@ -158,6 +163,7 @@ export function calculateV2FinalScores(input: {
     preliminary: readonly V2PreliminaryCandidateScore[];
     observedReverseLikeCandidateIds: ReadonlySet<string>;
     notCollectedCandidateIds?: ReadonlySet<string>;
+    riskPolicyVersion?: RiskPolicyVersion;
 }): V2FinalCandidateScore[] {
     const shortlistIds = new Set(
         input.preliminary
@@ -201,10 +207,10 @@ export function calculateV2FinalScores(input: {
             accountContext: candidate.accountContext,
             hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
             hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
-        });
+        }, input.riskPolicyVersion);
         return { ...candidate, reverseLikeStatus, risk };
     });
-    const relativeById = new Map(assignRelativeRiskTiers(scored.map(candidate => ({
+    const relativeCandidates = scored.map(candidate => ({
         candidateId: candidate.candidateId,
         naturalPublicScore: candidate.risk.publicScore,
         naturalDisplayScore: candidate.risk.displayScore,
@@ -214,7 +220,13 @@ export function calculateV2FinalScores(input: {
             || candidate.boundedCandidateCommentsOnTarget >= 1
             || candidate.hasCandidateToTargetTagOrCaptionMention,
         personalRiskEligible: candidate.accountContext !== 'official_group_or_brand',
-    }))).map(assignment => [assignment.candidateId, assignment]));
+    }));
+    const relativeAssignments = input.riskPolicyVersion === 'risk-policy-v2.4'
+        ? assignRelativeRiskTiers(relativeCandidates)
+        : assignRelativeRiskTiersV25(relativeCandidates);
+    const relativeById = new Map(
+        relativeAssignments.map(assignment => [assignment.candidateId, assignment])
+    );
     const calibrated = scored.map(candidate => {
         const assignment = relativeById.get(candidate.candidateId);
         if (!assignment) {

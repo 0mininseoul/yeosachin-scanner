@@ -661,7 +661,12 @@ export const analysisResultSummaryV1Schema = z.object({
     }).strict(),
     notScreenedMutuals: z.number().int().nonnegative(),
     exclusionApplied: z.boolean(),
-    scorePolicyVersion: z.enum(['risk-policy-v2.2', 'risk-policy-v2.3', RISK_POLICY_VERSION]),
+    scorePolicyVersion: z.enum([
+        'risk-policy-v2.2',
+        'risk-policy-v2.3',
+        'risk-policy-v2.4',
+        RISK_POLICY_VERSION,
+    ]),
 }).strip().superRefine((value, context) => {
     for (const side of ['followers', 'following'] as const) {
         if (!value[side].meetsCoverageGate) {

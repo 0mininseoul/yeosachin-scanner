@@ -11,6 +11,7 @@ import {
     type AccountContext,
     type AppearanceGrade,
     type RiskBand,
+    type RiskPolicyVersion,
 } from '@/lib/domain/analysis/risk-policy';
 import { createPartnerSafetyContactSheet } from '@/lib/services/ai/partner-contact-sheet';
 import {
@@ -286,7 +287,7 @@ export interface AnalysisV2ScreeningSnapshot {
     resultHash: string;
     shortlistHash: string;
     /** The persisted scoring contract; absent only on pre-policy in-memory test doubles. */
-    riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+    riskPolicyVersion?: 'risk-policy-v2.3' | RiskPolicyVersion;
     candidates: readonly V2PreliminaryCandidateScore[];
 }
 
@@ -327,7 +328,7 @@ export interface AnalysisV2FinalScoreSnapshot {
     revision: number;
     resultHash: string;
     /** The persisted scoring contract; absent only on pre-policy in-memory test doubles. */
-    riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+    riskPolicyVersion?: 'risk-policy-v2.3' | RiskPolicyVersion;
     candidates: readonly V2FinalCandidateScore[];
     narrativeCandidateIds: readonly string[];
     narrativeBatchHash: string;
@@ -382,7 +383,7 @@ export interface AnalysisV2AiScoringStageStore {
         jobInputHash: string;
         candidates: readonly V2PreliminaryCandidateScore[];
         shortlistHash: string;
-        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+        riskPolicyVersion?: 'risk-policy-v2.3' | RiskPolicyVersion;
     }): Promise<AnalysisV2ScreeningSnapshot>;
     loadScreening(input: AnalysisV2StageReadClaim): Promise<AnalysisV2ScreeningSnapshot | null>;
     checkpointReverseLikes(input: {
@@ -411,7 +412,7 @@ export interface AnalysisV2AiScoringStageStore {
         candidates: readonly V2FinalCandidateScore[];
         narrativeCandidateIds: readonly string[];
         narrativeBatchHash: string;
-        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+        riskPolicyVersion?: 'risk-policy-v2.3' | RiskPolicyVersion;
     }): Promise<AnalysisV2FinalScoreSnapshot>;
     loadFinalScores(input: AnalysisV2StageReadClaim):
         Promise<AnalysisV2FinalScoreSnapshot | null>;
@@ -1227,7 +1228,8 @@ function partnerEvidenceSelectionIds(
 }
 
 function preliminaryStoreRow(
-    candidate: V2PreliminaryCandidateScore
+    candidate: V2PreliminaryCandidateScore,
+    riskPolicyVersion: RiskPolicyVersion
 ): AnalysisV2PreliminaryScoreRow {
     const risk = calculateRiskPolicy({
         uniqueTargetPostsLikedByCandidate: candidate.uniqueTargetPostsLikedByCandidate,
@@ -1245,7 +1247,7 @@ function preliminaryStoreRow(
         // therefore stores no weak adjustment or strong-evidence cap.
         hasWeakPartnerEvidence: false,
         hasStrongPartnerEvidence: false,
-    });
+    }, riskPolicyVersion);
     return {
         candidateId: candidate.candidateId,
         components: risk.components,
@@ -2093,6 +2095,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal)
                 .map(row => row.username);
             const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
+            const liveRiskPolicyVersion = context.riskPolicyVersion as RiskPolicyVersion;
             const preliminary = legacyRecovery
                 ? calculateLegacyV23PreliminaryScores({
                     candidates: candidateEvidence.map(row => ({
@@ -2108,6 +2111,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     candidates: candidateEvidence,
                     orderedMutualUsernames,
                     excludedUsername: relationship.excludedUsername,
+                    riskPolicyVersion: liveRiskPolicyVersion,
                 });
             const shortlistIds = preliminary
                 .filter(row => row.verificationShortlistRank !== null)
@@ -2131,15 +2135,18 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         };
                     })
                     : (preliminary as readonly V2PreliminaryCandidateScore[])
-                        .map(preliminaryStoreRow),
-                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
+                        .map(candidate => preliminaryStoreRow(
+                            candidate,
+                            liveRiskPolicyVersion
+                        )),
+                riskPolicyVersion: context.riskPolicyVersion!,
             });
             assertCheckpointCount(publicCheckpoint, preliminary.length, 'SCREENING');
             const stored = await dependencies.stageStore.checkpointScreening({
                 ...checkpointClaim(context),
                 candidates: preliminary as readonly V2PreliminaryCandidateScore[],
                 shortlistHash,
-                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
+                riskPolicyVersion: context.riskPolicyVersion!,
             });
             if (stored.shortlistHash !== shortlistHash) {
                 throw new Error('ANALYSIS_V2_SHORTLIST_HASH_DRIFT');
@@ -2410,6 +2417,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 throw new Error('ANALYSIS_V2_LEGACY_POLICY_INVALID');
             }
             const legacyRecovery = context.riskPolicyVersion === 'risk-policy-v2.3';
+            const liveRiskPolicyVersion = context.riskPolicyVersion as RiskPolicyVersion;
             const partnerById = new Map(partner.rows.map(row => [row.candidateId, row]));
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const preliminary = screening.candidates.map(candidate => {
@@ -2442,6 +2450,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     preliminary,
                     observedReverseLikeCandidateIds: observed,
                     notCollectedCandidateIds: notCollected,
+                    riskPolicyVersion: liveRiskPolicyVersion,
                 });
             const narrativeCandidateIds = candidates
                 .filter(row => row.riskBand === 'high_risk' && row.featuredRank !== null)
@@ -2487,7 +2496,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const publicCheckpoint = await dependencies.resultStore.checkpointScores({
                 ...checkpointClaim(context),
                 rows: scoreRows,
-                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
+                riskPolicyVersion: context.riskPolicyVersion!,
             });
             assertCheckpointCount(publicCheckpoint, candidates.length, 'FINAL_SCORE');
             const stored = await dependencies.stageStore.checkpointFinalScores({
@@ -2495,7 +2504,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 candidates: candidates as unknown as readonly V2FinalCandidateScore[],
                 narrativeCandidateIds,
                 narrativeBatchHash,
-                ...(legacyRecovery ? { riskPolicyVersion: 'risk-policy-v2.3' as const } : {}),
+                riskPolicyVersion: context.riskPolicyVersion!,
             });
             return {
                 checkpoint: {

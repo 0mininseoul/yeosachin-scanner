@@ -9,6 +9,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const riskPolicyV25Migration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260728180000_add_risk_policy_v25.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const baseFinalizationMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260713185711_add_analysis_v2_result_finalization.sql',
@@ -864,6 +871,88 @@ describe('risk-policy v2.4 database replay', () => {
             );
             expect(patchedDefinition.rows[0]!.definition).toContain('expected_rank <= 3');
             expect(patchedDefinition.rows[0]!.definition).not.toContain('expected_rank <= 15');
+
+            await migrationDb.exec(functionDefinitionFrom(
+                riskPolicyV25Migration,
+                'analysis_v2_expected_relative_risk_rows_v25'
+            ));
+            await migrationDb.exec(functionDefinitionFrom(
+                riskPolicyV25Migration,
+                'analysis_v2_expected_relative_risk_rows'
+            ));
+            await migrationDb.exec(migrationBlockFrom(
+                riskPolicyV25Migration,
+                '-- The preliminary checkpoint shape and component math'
+            ));
+            await migrationDb.exec(migrationBlockFrom(
+                riskPolicyV25Migration,
+                '-- Patch only the version gates in the audited candidate checkpoint.'
+            ));
+            await migrationDb.exec(`
+                UPDATE public.analysis_requests
+                SET policy_versions_snapshot = '{"risk":"risk-policy-v2.5"}'::JSONB
+                WHERE id = '10000000-0000-4000-8000-000000000001'::UUID
+            `);
+            await expect(migrationDb.query(
+                `SELECT public.checkpoint_analysis_v2_preliminary_scores_v24(
+                    '10000000-0000-4000-8000-000000000001'::UUID,
+                    'coordinator:candidate-screening',
+                    '20000000-0000-4000-8000-000000000001'::UUID,
+                    'input',
+                    $1::JSONB,
+                    'risk-policy-v2.5'
+                )`,
+                [JSON.stringify([{
+                    candidateId: 'v24-preliminary',
+                    components: {
+                        candidateToTargetLikes: 24,
+                        candidateToTargetComments: 30,
+                        candidateToTargetTagOrCaptionMention: 12,
+                        targetToCandidateTagOrCaptionMention: 8,
+                        targetToCandidateLike: 0,
+                        recentMutual: 5,
+                        appearanceExposure: 16,
+                    },
+                    preScore: 95,
+                    possibleUpperBound: 100,
+                    recentMutualRank: null,
+                    verificationShortlistRank: 1,
+                }])]
+            )).resolves.toBeDefined();
+            const v25Rows = [
+                {
+                    candidateId: 'relative:v25-a', publicScore: 4.1,
+                    displayScore: 6.8, riskBand: 'high_risk', featuredRank: 1,
+                    accountContext: 'personal', components: {},
+                },
+                {
+                    candidateId: 'relative:v25-b', publicScore: 3.1,
+                    displayScore: 6.8, riskBand: 'high_risk', featuredRank: 2,
+                    accountContext: 'personal', components: {},
+                },
+                {
+                    candidateId: 'relative:v25-c', publicScore: 2.1,
+                    displayScore: 4.2, riskBand: 'caution', featuredRank: 1,
+                    accountContext: 'personal', components: {},
+                },
+                {
+                    candidateId: 'relative:v25-d', publicScore: 1.1,
+                    displayScore: 4.2, riskBand: 'caution', featuredRank: 2,
+                    accountContext: 'personal', components: {},
+                },
+            ];
+            await expect(checkpointScoreRows(
+                v25Rows, 'risk-policy-v2.5'
+            )).resolves.toBeDefined();
+            const v25Definition = await migrationDb.query<{ definition: string }>(
+                `SELECT pg_catalog.pg_get_functiondef(
+                    'public.checkpoint_analysis_v2_candidate_scores(uuid,text,uuid,text,jsonb,text)'
+                        ::pg_catalog.regprocedure
+                ) AS definition`
+            );
+            expect(v25Definition.rows[0]?.definition).toContain(
+                "'risk-policy-v2.4', 'risk-policy-v2.5'"
+            );
         } finally {
             await migrationDb.close();
         }

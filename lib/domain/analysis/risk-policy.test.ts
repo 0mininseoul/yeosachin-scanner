@@ -38,7 +38,7 @@ const maximumInput = {
 
 describe('risk policy components', () => {
     it('keeps the final component weights at exactly 100 points', () => {
-        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.4');
+        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.5');
         expect(RISK_BANDS).toEqual(['normal', 'caution', 'high_risk']);
         expect(RISK_COMPONENT_WEIGHTS).toEqual({
             candidateToTargetLikes: 24,
