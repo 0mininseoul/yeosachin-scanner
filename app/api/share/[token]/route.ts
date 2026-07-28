@@ -8,10 +8,59 @@ import {
     toResultInteractionSummary,
 } from '@/lib/services/analysis/result-interactions';
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
+import {
+    RESULT_PAGE_SIZE_DEFAULT,
+    RESULT_PAGE_SIZE_MAX,
+    ResultPaginationError,
+} from '@/lib/domain/analysis/result-pagination';
+import { v2ShareResultService } from '@/lib/services/share/v2-result-share';
 import { NextResponse } from 'next/server';
+
+const SHARE_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const NO_STORE_HEADERS = {
+    'Cache-Control': 'private, no-store, max-age=0',
+} as const;
 
 function isLegacySharePipeline(pipelineVersion: unknown): pipelineVersion is 'v1' | null {
     return pipelineVersion === null || pipelineVersion === 'v1';
+}
+
+function json(body: unknown, status: number) {
+    return NextResponse.json(body, {
+        status,
+        headers: NO_STORE_HEADERS,
+    });
+}
+
+function parseV2Pagination(url: URL) {
+    const allowed = new Set(['femaleCursor', 'privateCursor', 'pageSize']);
+    const keys = [...url.searchParams.keys()];
+    if (
+        keys.some(key => !allowed.has(key))
+        || [...new Set(keys)].some(
+            key => url.searchParams.getAll(key).length !== 1
+        )
+    ) {
+        throw new Error('INVALID_SHARE_PAGINATION');
+    }
+    const rawPageSize = url.searchParams.get('pageSize');
+    const pageSize = rawPageSize === null
+        ? RESULT_PAGE_SIZE_DEFAULT
+        : /^\d{1,2}$/.test(rawPageSize)
+            ? Number(rawPageSize)
+            : Number.NaN;
+    if (
+        !Number.isSafeInteger(pageSize)
+        || pageSize < 1
+        || pageSize > RESULT_PAGE_SIZE_MAX
+    ) {
+        throw new Error('INVALID_SHARE_PAGINATION');
+    }
+    return {
+        femaleCursor: url.searchParams.get('femaleCursor'),
+        privateCursor: url.searchParams.get('privateCursor'),
+        pageSize,
+    };
 }
 
 export async function GET(
@@ -21,10 +70,10 @@ export async function GET(
     try {
         const { token } = await params;
 
-        if (!token || token.length !== 64) {
-            return NextResponse.json(
+        if (!SHARE_TOKEN_PATTERN.test(token)) {
+            return json(
                 { error: '유효하지 않은 공유 링크입니다.' },
-                { status: 400 }
+                400
             );
         }
 
@@ -37,30 +86,62 @@ export async function GET(
             .single();
 
         if (requestError || !analysisRequest) {
-            return NextResponse.json(
+            return json(
                 { error: '공유 링크를 찾을 수 없거나 비활성화되었습니다.' },
-                { status: 404 }
+                404
             );
         }
 
-        // A V2 owner result is intentionally not represented by the legacy
-        // share DTO or legacy result tables. Fail closed for any stale token.
-        if (!isLegacySharePipeline(analysisRequest.pipeline_version)) {
-            return NextResponse.json(
+        if (
+            !isLegacySharePipeline(analysisRequest.pipeline_version)
+            && analysisRequest.pipeline_version !== 'v2'
+        ) {
+            return json(
                 { error: '공유 링크를 찾을 수 없거나 비활성화되었습니다.' },
-                { status: 404 }
+                404
             );
         }
 
         // 2. 분석이 완료되지 않은 경우
         if (analysisRequest.status !== 'completed') {
-            return NextResponse.json(
+            return json(
                 { error: '분석이 아직 완료되지 않았습니다.' },
-                { status: 400 }
+                400
             );
         }
 
         const requestId = analysisRequest.id;
+        if (analysisRequest.pipeline_version === 'v2') {
+            let pagination: ReturnType<typeof parseV2Pagination>;
+            try {
+                pagination = parseV2Pagination(new URL(request.url));
+            } catch {
+                return json({ error: '유효하지 않은 공유 요청입니다.' }, 400);
+            }
+            try {
+                const result = await v2ShareResultService.loadPage({
+                    requestId,
+                    ownerUserId: analysisRequest.user_id,
+                    shareToken: token,
+                    ...pagination,
+                });
+                return result
+                    ? json(result, 200)
+                    : json(
+                        { error: '공유 링크를 찾을 수 없거나 비활성화되었습니다.' },
+                        404
+                    );
+            } catch (error) {
+                if (error instanceof ResultPaginationError) {
+                    return json(
+                        { error: '유효하지 않은 공유 요청입니다.' },
+                        400
+                    );
+                }
+                console.error('[v2-share] result read failed');
+                return json({ error: '결과 조회에 실패했습니다.' }, 500);
+            }
+        }
 
         // 3. 분석 결과 조회 (여성 계정들)
         const { data: results, error: resultsError } = await supabaseAdmin
@@ -78,10 +159,10 @@ export async function GET(
             .order('rank', { ascending: true });
 
         if (resultsError) {
-            console.error('Results fetch error:', resultsError);
-            return NextResponse.json(
+            console.error('Results fetch error');
+            return json(
                 { error: '결과 조회에 실패했습니다.' },
-                { status: 500 }
+                500
             );
         }
 
@@ -94,8 +175,8 @@ export async function GET(
             .order('name_confidence', { ascending: false, nullsFirst: false })
             .order('instagram_id', { ascending: true });
         if (privateAccountsError) {
-            console.error('Shared private account results fetch failed', { requestId });
-            return NextResponse.json({ error: '결과 조회에 실패했습니다.' }, { status: 500 });
+            console.error('Shared private account results fetch failed');
+            return json({ error: '결과 조회에 실패했습니다.' }, 500);
         }
 
         // 5. 성별 비율 계산
@@ -144,7 +225,7 @@ export async function GET(
         })) || [];
 
         // 8. 응답 구성 (공유 페이지용)
-        return NextResponse.json({
+        return json({
             requestId,
             status: analysisRequest.status,
             isShared: true, // 공유 링크로 접근했음을 표시
@@ -158,12 +239,12 @@ export async function GET(
             },
             femaleAccounts,
             privateAccounts: privateAccountsList,
-        });
-    } catch (error) {
-        console.error('Share result fetch error:', error);
-        return NextResponse.json(
+        }, 200);
+    } catch {
+        console.error('Share result fetch error');
+        return json(
             { error: '서버 오류가 발생했습니다.' },
-            { status: 500 }
+            500
         );
     }
 }

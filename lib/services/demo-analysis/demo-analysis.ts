@@ -901,6 +901,7 @@ export function createDemoFixture(
         version: fixtureVersion,
         summary: {
             targetInstagramId: DEMO_TARGET_USERNAME,
+            targetFullName: '김준호',
             targetProfileImage: isV3Fixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             planId: 'standard',
             followers: { declared: 600, collected: 600, coverageRatio: 1, meetsCoverageGate: true, exactCountMatch: true },

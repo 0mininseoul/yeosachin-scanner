@@ -485,6 +485,7 @@ function dependencies(
                 requestStatus: 'completed' as const,
                 summary: {
                     targetInstagramId: 'target.account',
+                    targetFullName: null,
                     targetProfileImage: null,
                     planId: 'basic' as const,
                     followers: {
