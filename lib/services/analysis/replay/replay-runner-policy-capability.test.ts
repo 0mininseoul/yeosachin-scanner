@@ -505,7 +505,7 @@ describe('replay staged AI runner policy capability', () => {
                     coverage: { selectedCount: 9, normalizedCount: 9, failures: [] },
                 }],
             },
-            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12'),
             mode: 'paid-ai',
             paidAiOptIn: true,
             evaluationPolicy: historicalV212Evaluation,
