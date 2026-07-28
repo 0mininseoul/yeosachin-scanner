@@ -8,13 +8,16 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.rpc } }));
 import {
     buildSentryDiscordPayload,
     deliverSentryDiscordAlerts,
+    isAuthenticSentryInternalIntegration,
     isAuthenticSentryServiceHook,
+    parseProductionSentryInternalIntegrationIssue,
     parseProductionSentryIssueAlert,
     reconcileStaleSentryDiscordAlertClaims,
 } from './sentry-discord-alert';
 
 const SERVICE_SECRET = 'a'.repeat(48);
 const PATH_SECRET = 'b'.repeat(48);
+const INTERNAL_INTEGRATION_SECRET = 'c'.repeat(48);
 const ITEM = {
     id: '123e4567-e89b-42d3-a456-426614174000',
     claim_token: '223e4567-e89b-42d3-a456-426614174000',
@@ -30,6 +33,7 @@ function configured() {
     vi.stubEnv('SENTRY_DISCORD_CHANNEL_ID', '1525023310675710092');
     vi.stubEnv('SENTRY_DISCORD_SERVICE_HOOK_SECRET', SERVICE_SECRET);
     vi.stubEnv('SENTRY_DISCORD_SERVICE_HOOK_PATH_SECRET', PATH_SECRET);
+    vi.stubEnv('SENTRY_DISCORD_ALERTS_INTERNAL_INTEGRATION_CLIENT_SECRET', INTERNAL_INTEGRATION_SECRET);
 }
 
 function productionAlert(overrides: Record<string, unknown> = {}) {
@@ -62,6 +66,38 @@ function signedRequest(body: string, signature = createHmac('sha256', SERVICE_SE
     });
 }
 
+function internalIntegrationIssue(overrides: Record<string, unknown> = {}) {
+    return JSON.stringify({
+        action: 'created',
+        installation: { uuid: '123e4567-e89b-42d3-a456-426614174000' },
+        data: {
+            issue: {
+                id: '987654321',
+                title: 'private exception title',
+                permalink: 'https://sentry.io/organizations/acme/issues/987654321/',
+                project: { slug: 'ai-baram-detector' },
+                firstSeen: '2026-07-28T00:00:00.000Z',
+                environment: 'production',
+                user: { email: 'person@example.test' },
+                request: { headers: { authorization: 'private bearer token' } },
+            },
+        },
+        actor: { id: 'sentry' },
+        ...overrides,
+    });
+}
+
+function signedInternalIntegrationRequest(body: string, signature?: string, resource = 'issue') {
+    const normalized = JSON.stringify(JSON.parse(body));
+    return new Request('https://example.test/api/webhooks/sentry/internal-integration', {
+        headers: {
+            'sentry-hook-resource': resource,
+            'sentry-hook-signature': signature ?? createHmac('sha256', INTERNAL_INTEGRATION_SECRET)
+                .update(normalized, 'utf8').digest('hex'),
+        },
+    });
+}
+
 describe('Sentry Service Hook Discord bridge', () => {
     beforeEach(() => {
         vi.resetAllMocks();
@@ -76,6 +112,43 @@ describe('Sentry Service Hook Discord bridge', () => {
         expect(isAuthenticSentryServiceHook(signedRequest(body), body, 'wrong')).toBe(false);
         vi.stubEnv('SENTRY_DISCORD_SERVICE_HOOK_PATH_SECRET', 'short');
         expect(isAuthenticSentryServiceHook(signedRequest(body), body, 'short')).toBe(false);
+    });
+
+    it('verifies the Internal Integration normalized-body HMAC and issue resource in constant time', () => {
+        const body = internalIntegrationIssue();
+        expect(isAuthenticSentryInternalIntegration(signedInternalIntegrationRequest(body), body)).toBe(true);
+        expect(isAuthenticSentryInternalIntegration(
+            signedInternalIntegrationRequest(body, '0'.repeat(64)), body,
+        )).toBe(false);
+        expect(isAuthenticSentryInternalIntegration(
+            signedInternalIntegrationRequest(body, undefined, 'event_alert'), body,
+        )).toBe(false);
+        expect(isAuthenticSentryInternalIntegration(new Request('https://example.test', {
+            headers: { 'sentry-hook-resource': 'issue', 'sentry-hook-signature': '0'.repeat(64) },
+        }), '{not-json')).toBe(false);
+    });
+
+    it('accepts only a created production ai-baram-detector issue and uses a stable privacy-safe dedupe key', () => {
+        const accepted = parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue());
+        const duplicate = parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: {
+                id: '987654321', project: { slug: 'ai-baram-detector' },
+                firstSeen: '2026-07-28T00:00:00.000Z', environment: 'production',
+                title: 'different private exception title',
+            } },
+        }));
+        expect(accepted).toMatchObject({ projectSlug: 'ai-baram-detector' });
+        expect(duplicate?.dedupeKey).toBe(accepted?.dedupeKey);
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({ action: 'resolved' }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: 'other-project' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
+        }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'staging' } },
+        }))).toBeNull();
+        expect(JSON.stringify(accepted)).not.toContain('person@example.test');
+        expect(JSON.stringify(accepted)).not.toContain('private exception title');
+        expect(JSON.stringify(accepted)).not.toContain('private bearer token');
     });
 
     it('accepts the actual v0 production payload contract and rejects non-production or non-v0 payloads', () => {

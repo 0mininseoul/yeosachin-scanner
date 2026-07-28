@@ -56,6 +56,11 @@ function configuredHookSecrets(): { serviceHookSecret: string; pathSecret: strin
         : null;
 }
 
+function configuredInternalIntegrationSecret(): string | null {
+    const secret = process.env.SENTRY_DISCORD_ALERTS_INTERNAL_INTEGRATION_CLIENT_SECRET?.trim();
+    return secret && secret.length >= MIN_HOOK_SECRET_LENGTH ? secret : null;
+}
+
 function constantTimeEqual(actual: string | null, expected: string): boolean {
     if (!actual) return false;
     const actualBytes = Buffer.from(actual);
@@ -87,6 +92,24 @@ export function isAuthenticSentryServiceHook(
     if (!timestamp || !/^[0-9]{10,13}$/.test(timestamp) || !guid || !signature) return false;
     const expected = createHmac('sha256', configured.serviceHookSecret).update(rawBody, 'utf8').digest('hex');
     return constantTimeEqual(signature, expected);
+}
+
+/**
+ * Internal Integrations sign the parsed request body, rather than its wire
+ * representation. This exactly follows Sentry's official sample verifier.
+ */
+export function isAuthenticSentryInternalIntegration(request: Request, rawBody: string): boolean {
+    const secret = configuredInternalIntegrationSecret();
+    const signature = request.headers.get('sentry-hook-signature');
+    if (!secret || request.headers.get('sentry-hook-resource') !== 'issue' || !signature) return false;
+
+    try {
+        const normalizedBody = JSON.stringify(JSON.parse(rawBody));
+        const expected = createHmac('sha256', secret).update(normalizedBody, 'utf8').digest('hex');
+        return constantTimeEqual(signature, expected);
+    } catch {
+        return false;
+    }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -146,6 +169,21 @@ function eventEnvironment(value: unknown): string | null {
     return null;
 }
 
+function internalIssueEnvironment(issue: Record<string, unknown>): string | null {
+    const direct = issue.environment;
+    if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    const metadata = asRecord(issue.metadata);
+    const metadataEnvironment = metadata?.environment;
+    if (typeof metadataEnvironment === 'string' && metadataEnvironment.trim())
+        return metadataEnvironment.trim();
+    const environments = issue.environments;
+    if (!Array.isArray(environments) || environments.length !== 1) return null;
+    const environment = environments[0];
+    if (typeof environment === 'string' && environment.trim()) return environment.trim();
+    const name = asRecord(environment)?.name;
+    return typeof name === 'string' && name.trim() ? name.trim() : null;
+}
+
 /** Parse the official v0 Service Hook shape: top-level project, group, event. */
 export function parseProductionSentryIssueAlert(rawBody: string): SentryAlertForOutbox | null {
     let payload: unknown;
@@ -179,6 +217,44 @@ export function parseProductionSentryIssueAlert(rawBody: string): SentryAlertFor
         projectSlug,
         occurredAt: when,
         issueUrl,
+    };
+}
+
+/**
+ * Accept only a new production issue from this application. The issue ID is a
+ * stable Sentry identity, so it is sufficient for idempotency without keeping
+ * the received webhook body or any event/user/request fields it may contain.
+ */
+export function parseProductionSentryInternalIntegrationIssue(rawBody: string): SentryAlertForOutbox | null {
+    let payload: unknown;
+    try {
+        payload = JSON.parse(rawBody);
+    } catch {
+        return null;
+    }
+
+    const root = asRecord(payload);
+    const data = root ? asRecord(root.data) : null;
+    const issue = data ? asRecord(data.issue) : null;
+    if (!root || root.action !== 'created' || !issue) return null;
+
+    const projectSlug = safeProjectSlug(stringAt(issue, ['project', 'slug']));
+    if (projectSlug !== 'ai-baram-detector' || !isProduction(internalIssueEnvironment(issue))) return null;
+
+    const issueId = typeof issue.id === 'string' && issue.id.trim() ? issue.id.trim() : null;
+    const timestamp = typeof issue.firstSeen === 'string'
+        ? issue.firstSeen
+        : typeof issue.lastSeen === 'string' ? issue.lastSeen : null;
+    const when = timestamp ? new Date(timestamp) : null;
+    if (!issueId || !when || Number.isNaN(when.getTime())) return null;
+
+    return {
+        dedupeKey: createHash('sha256')
+            .update(`sentry-internal-integration:issue:created:${projectSlug}:${issueId}`, 'utf8')
+            .digest('hex'),
+        projectSlug,
+        occurredAt: when,
+        issueUrl: safeIssueUrl(typeof issue.permalink === 'string' ? issue.permalink : null),
     };
 }
 
