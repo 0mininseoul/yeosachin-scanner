@@ -38,6 +38,10 @@ describe('Amplitude replay privacy contract', () => {
         expect(analytics).toContain('captureEnabled: false, sampleRate: 0');
         expect(analytics).toContain('hasExpectedReplaySampling');
         expect(analytics).toContain('isTrustedReplayConfigUrl');
+        expect(analytics).toContain(
+            'Revalidate route, DNT, GPC, environment, and sticky shutdown after the config fetch.'
+        );
+        expect(analytics).not.toContain('Route, demo mode, DNT');
         expect(analytics).toContain('sampleRate: 0');
         expect(analytics).toContain('interactionConfig: { enabled: false, batch: false }');
         expect(analytics).not.toContain('ugcFilterRules');

@@ -188,6 +188,12 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(
             /DOM\/resource\/link URL[^\n]*존재[^\n]*(실패|위반)[^\n]*(아니|않)/
         );
+        expect(operations).toMatch(
+            /(고객|사용자 입력)[^\n]*(이메일|email)[^\n]*(연락처|contact)[^\n]*(replay|event)[^\n]*(보내지 않|전송하지 않)/i
+        );
+        expect(operations).toMatch(
+            /(공개 사업자 연락처|public business contact)[^\n]*contact@ascentum\.co\.kr[^\n]*mailto:[^\n]*(serialized DOM|직렬화)[^\n]*(허용|포함될 수)/i
+        );
         expect(operations).not.toMatch(
             /Replay payload에는[^\n]*`\/terms` URL만 포함될 수/
         );

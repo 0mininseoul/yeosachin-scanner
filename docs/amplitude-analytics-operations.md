@@ -24,7 +24,7 @@ DNT 또는 GPC(Global Privacy Control) opt-out이면 fail-closed로 `sampleRate:
 
 Replay 화면 구조에는 `form`, `input`, `select`, `textarea`, `option`, `[contenteditable]`를 마스킹한다. `img`, `video`, `audio`, `canvas`, `svg`와 `.amp-block`, `[data-amp-block]`, `[data-amp-sensitive]`, `[data-amp-private]`는 차단한다. 이는 안전 경로에만 적용되는 추가 방어선이며, 민감 경로를 Replay로 분석할 근거가 아니다.
 
-명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay의 serialized DOM에는 공개 페이지의 `href`, `src`, `inline-style`, `resource`, `link URL`과 공개 외부 링크가 포함될 수 있다. 민감 콘텐츠는 page allowlist와 mask/block selector로 보호하며, 이는 blanket URL sanitizer가 아니다. 민감·비허용 페이지 또는 query/hash가 붙은 top-level current page URL은 gate가 캡처를 차단한다. 생 인스타그램 식별자, 이름, bio/소개글, 댓글/comment, caption/캡션, 이미지·미디어, 결제 연락처, 이메일·전화번호, raw 오류·응답은 replay 또는 event에 보내지 않는다. Replay는 허용 경로의 표본 세션 문제를 분석할 때만 사용하며 민감 화면을 분석하려 하지 않는다.
+명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay의 serialized DOM에는 공개 페이지의 `href`, `src`, `inline-style`, `resource`, `link URL`과 공개 외부 링크가 포함될 수 있다. 공개 사업자 연락처 `contact@ascentum.co.kr`와 `mailto:` 링크 attribute도 serialized DOM에 포함될 수 있는 허용 공개 DOM 값이다. 민감 콘텐츠는 page allowlist와 mask/block selector로 보호하며, 이는 blanket URL sanitizer가 아니다. 민감·비허용 페이지 또는 query/hash가 붙은 top-level current page URL은 gate가 캡처를 차단한다. 생 인스타그램 식별자, 이름, bio/소개글, 댓글/comment, caption/캡션, 이미지·미디어와 고객 또는 사용자 입력 이메일·전화번호·연락처, 결제 연락처, raw 오류·응답 같은 민감 개인정보는 replay 또는 event에 보내지 않는다. Replay는 허용 경로의 표본 세션 문제를 분석할 때만 사용하며 민감 화면을 분석하려 하지 않는다.
 
 ## 3. 이벤트와 허용 속성
 
@@ -62,7 +62,7 @@ Replay 화면 구조에는 `form`, `input`, `select`, `textarea`, `option`, `[co
 - 결제 완료 fixture 또는 실제 검증 결제는 고객 화면이 `paid`를 읽은 뒤 `payment_confirmed_viewed`를 한 번만 보내는지 확인한다. 중복 새로고침은 dedupe 계약과 비교한다.
 - 각 이벤트 상세의 properties 탭에서 schema에 없는 값이 제거되는지 확인한다.
 - 민감 경로(로그인, analyze, progress, result, share, account, profile)와 query/hash가 붙은 안전 경로에서 Replay가 수신되지 않는지 확인한다. DNT/GPC opt-out 브라우저도 수신되지 않아야 한다.
-- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 검사한다. Replay의 top-level current page URL만 허용 경로와 query/hash 조건을 확인한다. 공개 페이지의 DOM/resource/link URL과 공개 외부 링크는 존재 자체가 실패나 위반이 아니며, 실제 민감 값이 없고 mask/block selector가 적용됐는지를 검사한다.
+- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 검사한다. Replay의 top-level current page URL만 허용 경로와 query/hash 조건을 확인한다. 공개 페이지의 DOM/resource/link URL, 공개 외부 링크, 공개 사업자 이메일과 `mailto:` attribute는 존재 자체가 실패나 위반이 아니다. 고객 또는 사용자 입력 이메일·연락처와 민감 개인정보가 없고 mask/block selector가 적용됐는지를 검사한다.
 
 검증 중 민감 속성이 발견되면 대시보드 작성과 Production rollout을 중단한다. allowlist 또는 caller를 수정하고 잘못 수집된 데이터의 삭제 절차를 Amplitude 프로젝트 관리자와 확인한 뒤 다시 검증한다.
 

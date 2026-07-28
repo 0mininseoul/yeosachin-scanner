@@ -509,7 +509,7 @@ function createSafeSessionReplayRemoteConfig(apiKey: string) {
             ) {
                 return replayConfigResponse({ captureEnabled: false, sampleRate: 0 });
             }
-            // Route, demo mode, DNT, or GPC may change while config is in flight.
+            // Revalidate route, DNT, GPC, environment, and sticky shutdown after the config fetch.
             return configuredReplaySampling().captureEnabled
                 ? replayConfigResponse(expectedSampling)
                 : replayConfigResponse({ captureEnabled: false, sampleRate: 0 });
