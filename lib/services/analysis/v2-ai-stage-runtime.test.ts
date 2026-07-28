@@ -506,8 +506,6 @@ describe('durable V2 AI stage runtime', () => {
     it('keeps v2.10 on the v2.9 microbatch scheduler path while binding its own immutable policy', async () => {
         const runGenderMicrobatch = vi.fn(async (
             accounts: readonly { accountId: string; input: GenderTriageInput }[],
-            _audit: unknown,
-            _options?: { aiStagePolicyVersion?: string },
         ) => accounts.map(account => ({
             accountId: account.accountId,
             result: {
@@ -570,7 +568,12 @@ describe('durable V2 AI stage runtime', () => {
 
         expect(runScheduler).toHaveBeenCalledOnce();
         expect(runGenderMicrobatch).toHaveBeenCalledOnce();
-        expect(runGenderMicrobatch.mock.calls[0]![2]).toEqual({
+        const call = runGenderMicrobatch.mock.calls[0] as unknown as [
+            unknown,
+            unknown,
+            { aiStagePolicyVersion?: string },
+        ];
+        expect(call[2]).toEqual({
             aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
         });
     });
