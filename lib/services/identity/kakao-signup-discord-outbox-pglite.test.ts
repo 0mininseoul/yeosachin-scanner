@@ -26,6 +26,10 @@ const hardenedAttributionOrigin = readFileSync(new URL(
     '../../../supabase/migrations/20260729120000_harden_kakao_signup_discord_attribution_origin.sql',
     import.meta.url,
 ), 'utf8');
+const corpOrigin = readFileSync(new URL(
+    '../../../supabase/migrations/20260729130000_reject_corp_kakao_signup_attribution_origin.sql',
+    import.meta.url,
+), 'utf8');
 const KAKAO_ID = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite;
 
@@ -51,6 +55,7 @@ beforeAll(async () => {
     await db.exec(attribution);
     await db.exec(attributionOrigin);
     await db.exec(hardenedAttributionOrigin);
+    await db.exec(corpOrigin);
 }, 30_000);
 
 afterAll(async () => db.close());
@@ -190,4 +195,5 @@ describe('Kakao signup Discord durable outbox', () => {
         await db.exec('RESET ROLE');
         expect((await db.query<{ attribution_origin: string | null }>('SELECT attribution_origin FROM public.kakao_signup_discord_outbox WHERE user_id=$1', [userId])).rows).toEqual([{ attribution_origin: null }]);
         await expect(db.query("UPDATE public.kakao_signup_discord_outbox SET attribution_origin='https://intranet/' WHERE user_id=$1", [userId])).rejects.toThrow();
+        await expect(db.query("UPDATE public.kakao_signup_discord_outbox SET attribution_origin='https://portal.corp/' WHERE user_id=$1", [userId])).rejects.toThrow();
     });

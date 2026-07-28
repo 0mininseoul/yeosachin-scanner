@@ -32,7 +32,7 @@ export function normalizeKakaoReferrerOrigin(value: string): string | null {
         const host = url.hostname.toLowerCase();
         if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.port
             || !/^[a-z0-9][a-z0-9.-]{0,251}$/.test(host) || !host.includes('.')
-            || /\.(?:localhost|local|internal|test|example|invalid|home|lan|localdomain)$/.test(host)
+            || /\.(?:localhost|local|internal|test|example|invalid|home|lan|localdomain|corp)$/.test(host)
             || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) || /^10\.|^127\.|^192\.168\.|^172\.(?:1[6-9]|2\d|3[01])\./.test(host)) return null;
         return `${url.protocol}//${host}/`;
     } catch { return null; }
