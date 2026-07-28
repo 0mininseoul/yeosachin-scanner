@@ -45,7 +45,7 @@ import {
     planSelectedEventKey,
     planViewEventKey,
 } from '@/lib/services/earlybird/analytics-state';
-import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
+import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 import {
     analysisDurationRangeLabel,
@@ -531,7 +531,7 @@ export default function AnalyzePage() {
                             남자친구의 인스타그램 아이디를 입력해주세요.
                         </p>
 
-                        <CaseCard className="mt-8 p-5">
+                        <Panel className="mt-8 p-5">
                             <label htmlFor="target-instagram" className="eyebrow mb-3 block">
                                 대상 인스타그램 아이디
                             </label>
@@ -556,15 +556,15 @@ export default function AnalyzePage() {
                                 />
                             </div>
                             <InstagramLookupLink />
-                            <div className="mt-4 border border-amber/30 bg-amber/[0.06] px-3 py-2.5">
-                                <p className="text-[12px] leading-relaxed text-fg-dim">
-                                    <span className="font-semibold text-amber">공개 계정</span>만 판독 가능합니다.
-                                </p>
-                            </div>
+                            {/* Rails rather than nested boxes: a notice inside a panel
+                                is an annotation, not another surface. */}
+                            <p className="mt-4 border-l-2 border-amber pl-3 text-[12px] leading-relaxed text-fg-dim">
+                                <span className="font-semibold text-amber">공개 계정</span>만 판독 가능합니다.
+                            </p>
                             {error && (
-                                <div className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood" role="alert">
+                                <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] leading-relaxed text-blood-2" role="alert">
                                     {error}
-                                </div>
+                                </p>
                             )}
                             <div className="mt-5">
                                 <PrimaryButton
@@ -574,7 +574,7 @@ export default function AnalyzePage() {
                                     {creating ? '계정 확인 중…' : '대상 계정 확인하기'}
                                 </PrimaryButton>
                             </div>
-                        </CaseCard>
+                        </Panel>
                     </>
                 ) : preflight.status === 'blocked' ? (
                     <CaseCard bracket="var(--color-blood)" className="p-7 text-center">
@@ -610,7 +610,7 @@ export default function AnalyzePage() {
                         </div>
 
                         {!exclusionDecided && (
-                            <CaseCard className="mt-6 p-5">
+                            <Panel className="mt-6 p-5">
                                 <p className="text-[13px] leading-relaxed text-fg-dim">
                                     본인 계정은 위장여사친 후보에서 처음부터 제외합니다.
                                 </p>
@@ -638,9 +638,9 @@ export default function AnalyzePage() {
                                     />
                                 </div>
                                 {error && (
-                                    <div className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood" role="alert">
+                                    <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] leading-relaxed text-blood-2" role="alert">
                                         {error}
-                                    </div>
+                                    </p>
                                 )}
                                 <div className="mt-5 space-y-2.5">
                                     <PrimaryButton
@@ -658,11 +658,11 @@ export default function AnalyzePage() {
                                         본인 계정 제외 안 함
                                     </button>
                                 </div>
-                            </CaseCard>
+                            </Panel>
                         )}
 
                         {exclusionDecided && !readyPreflight && (
-                            <CaseCard className="mt-7 p-7 text-center">
+                            <div className="mt-7 py-4 text-center">
                                 <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
                                     <BrandMark size={26} className="anim-blink text-blood" />
                                 </div>
@@ -678,7 +678,7 @@ export default function AnalyzePage() {
                                 <p className="mt-5 text-[12px] text-fg-mute">
                                     보통 몇 초 이내에 끝나요. 화면을 벗어나도 진행됩니다.
                                 </p>
-                            </CaseCard>
+                            </div>
                         )}
 
                         {exclusionDecided && readyPreflight && (

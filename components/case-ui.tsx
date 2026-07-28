@@ -84,7 +84,28 @@ function Corners({ color }: { color: string }) {
   );
 }
 
-/* --- bordered dossier card with corner brackets --- */
+/* Container tiers
+ *
+ *   Tier 0  plain      no container; whitespace and a single hairline
+ *   Tier 1  Panel      hairline border, no brackets — an operable surface
+ *   Tier 2  CaseCard   border + corner brackets — the screen's verdict, used once
+ *
+ * The brackets are the brand's loudest device. They only read as a signal while
+ * they stay rare, so Tier 2 is reserved rather than reached for by default.
+ */
+
+/* --- Tier 1: operable surface --- */
+export function Panel({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return <div className={`border border-line bg-ink-2 ${className}`}>{children}</div>;
+}
+
+/* --- Tier 2: bordered dossier card with corner brackets --- */
 export function CaseCard({
   children,
   className = "",
@@ -102,25 +123,44 @@ export function CaseCard({
   );
 }
 
-/* --- classification tag --- */
-const GRADE_MAP: Record<Grade, { label: string; text: string; border: string; bg: string; dot: string }> = {
-  high_risk: { label: "고위험", text: "text-blood", border: "border-blood/45", bg: "bg-blood/10", dot: "bg-blood" },
-  caution: { label: "주의", text: "text-amber", border: "border-amber/45", bg: "bg-amber/10", dot: "bg-amber" },
-  normal: { label: "정상", text: "text-jade", border: "border-jade/45", bg: "bg-jade/10", dot: "bg-jade" },
+/* --- classification scale --- */
+const GRADE_MAP: Record<Grade, { label: string; text: string; mark: string; color: string }> = {
+  high_risk: { label: "고위험", text: "text-blood-2", mark: "bg-blood", color: "var(--color-blood)" },
+  caution: { label: "주의", text: "text-amber", mark: "bg-amber", color: "var(--color-amber)" },
+  normal: { label: "정상", text: "text-jade", mark: "bg-jade", color: "var(--color-jade)" },
 };
 
+/* Grade reads as a rotated registration mark plus a word — no box. A border in a
+   result row means "this is pressable", and the grade is not. */
 export function RiskTag({ grade, className = "" }: { grade: Grade; className?: string }) {
   const g = GRADE_MAP[grade];
   return (
     <span
-      className={`inline-flex items-center gap-1.5 border ${g.border} ${g.bg} px-2 py-[3px] text-[10px] font-bold tracking-[0.14em] ${g.text} ${className}`}
+      className={`inline-flex items-center gap-1.5 text-[10.5px] font-extrabold tracking-[0.14em] ${g.text} ${className}`}
     >
-      <span className={`h-1.5 w-1.5 ${g.dot}`} />
+      <span className={`h-[5px] w-[5px] rotate-45 ${g.mark}`} aria-hidden="true" />
       {g.label}
     </span>
   );
 }
 
+/* Full-height rail carrying the row's grade. Rows scanned at speed are read by
+   this colour band alone. */
+export function GradeRail({ grade, className = "" }: { grade: Grade; className?: string }) {
+  return (
+    <span
+      className={`w-0.5 shrink-0 self-stretch ${GRADE_MAP[grade].mark} ${className}`}
+      aria-hidden="true"
+    />
+  );
+}
+
+/* An annotation, not a control.
+ *
+ * A left rail would read as a second grade: the row's left vertical axis is
+ * owned by GradeRail, and on a caution row both would be amber, leaving no way
+ * to tell classification from annotation. So this borrows the diamond from
+ * RiskTag instead — same mark vocabulary, different axis. */
 export function RecentMutualBadge({
   rank,
   className = "",
@@ -128,15 +168,12 @@ export function RecentMutualBadge({
   rank: 1 | 2 | 3 | 4 | 5;
   className?: string;
 }) {
-  const label = `가장 최근 맞팔한 여자 ${rank}번째`;
   return (
     <span
-      className={`inline-flex max-w-full items-center gap-1.5 border border-amber/45 bg-amber/10 px-2 py-1 text-[10px] font-bold text-amber ${className}`}
-      title={label}
-      aria-label={label}
+      className={`inline-flex items-center gap-2 text-[11.5px] font-semibold leading-snug text-amber ${className}`}
     >
-      <span className="h-1.5 w-1.5 shrink-0 bg-amber" aria-hidden="true" />
-      <span className="truncate">{label}</span>
+      <span className="h-[5px] w-[5px] shrink-0 rotate-45 bg-amber" aria-hidden="true" />
+      가장 최근 맞팔한 여자 {rank}번째
     </span>
   );
 }
@@ -152,22 +189,22 @@ export function DeepRiskAnalysis({
 
   return (
     <div className={`border-t border-line pt-3 ${className}`}>
-      <span className="eyebrow text-blood">고위험 계정 총평</span>
-      <ol className="mt-2 space-y-2">
-        {lines.slice(0, 2).map((line, index) => (
-          <li key={line} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2">
-            <span className="num pt-0.5 text-[10px] font-bold text-blood" aria-hidden="true">
-              {String(index + 1).padStart(2, "0")}
-            </span>
-            <p className="text-[12px] leading-[1.65] text-fg-dim">{line}</p>
-          </li>
+      <span className="eyebrow text-blood-2">고위험 계정 총평</span>
+      <div className="mt-2.5 space-y-2">
+        {lines.slice(0, 2).map((line) => (
+          <p key={line} className="text-[12.5px] leading-[1.65] text-fg-dim">
+            {line}
+          </p>
         ))}
-      </ol>
+      </div>
     </div>
   );
 }
 
-/* --- segmented threat meter --- */
+/* --- threat meter --- */
+/* Rendered as one continuous track rather than ten blocks, but the fill is still
+   driven by threatMeterFillCount so the bar and the printed score stay locked to
+   the same rounded value. */
 export function ThreatBar({
   grade,
   score,
@@ -179,25 +216,14 @@ export function ThreatBar({
   segments?: number;
   className?: string;
 }) {
-  const colorMap: Record<Grade, string> = {
-    high_risk: "var(--color-blood)",
-    caution: "var(--color-amber)",
-    normal: "var(--color-jade)",
-  };
   const filled = threatMeterFillCount({ grade, displayScore: score, segments });
-  const color = colorMap[grade];
+  const ratio = segments > 0 ? filled / segments : 0;
   return (
-    <div className={`flex items-center gap-[3px] ${className}`} aria-hidden="true">
-      {Array.from({ length: segments }).map((_, i) => (
-        <span
-          key={i}
-          className="h-2.5 flex-1"
-          style={{
-            background: i < filled ? color : "var(--color-line)",
-            boxShadow: i < filled ? `0 0 6px color-mix(in srgb, ${color} 40%, transparent)` : "none",
-          }}
-        />
-      ))}
+    <div className={`relative h-0.5 w-full bg-line ${className}`} aria-hidden="true">
+      <span
+        className="absolute inset-y-0 left-0"
+        style={{ width: `${ratio * 100}%`, background: GRADE_MAP[grade].color }}
+      />
     </div>
   );
 }
@@ -230,6 +256,34 @@ export function Redaction({ className = "", style }: { className?: string; style
       style={style}
       aria-hidden="true"
     />
+  );
+}
+
+/* --- placeholder for a profile picture we could not load ---
+ *
+ * Instagram hands back its own anonymous-avatar URL for accounts that never set
+ * a photo, and that host is proxy-allowed, so a genuinely photo-less account
+ * already renders Instagram's real default. This only stands in when no URL
+ * reached us at all — so it mirrors that default's solid silhouette rather than
+ * an outline icon, which read as "failed to load" instead of "no photo".
+ *
+ * The tone is our own: Instagram's #DBDBDB would be the brightest thing on the
+ * page, louder than the crimson accent.
+ */
+export function ProfileFallback({ variant = "person" }: { variant?: "person" | "private" }) {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-line">
+      {variant === "private" ? (
+        <svg viewBox="0 0 24 24" className="h-1/2 w-1/2 text-fg-mute" fill="currentColor" aria-hidden="true">
+          <path d="M12 2.75A4.25 4.25 0 0 0 7.75 7v2.25H7A1.75 1.75 0 0 0 5.25 11v7A1.75 1.75 0 0 0 7 19.75h10A1.75 1.75 0 0 0 18.75 18v-7A1.75 1.75 0 0 0 17 9.25h-.75V7A4.25 4.25 0 0 0 12 2.75zm2.75 6.5h-5.5V7a2.75 2.75 0 0 1 5.5 0v2.25z" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" className="h-3/5 w-3/5 text-fg-mute" fill="currentColor" aria-hidden="true">
+          <circle cx="12" cy="8.6" r="3.9" />
+          <path d="M12 14.4c-4.06 0-7.35 2.64-7.35 5.9 0 .6.49 1.09 1.09 1.09h12.52c.6 0 1.09-.49 1.09-1.09 0-3.26-3.29-5.9-7.35-5.9z" />
+        </svg>
+      )}
+    </div>
   );
 }
 
@@ -275,6 +329,42 @@ export function PrimaryButton({
     <button className={`${primaryBase} ${primarySizes[size]} ${className}`} {...props}>
       {children}
     </button>
+  );
+}
+
+/* --- instagram profile action --- */
+function InstagramGlyph({ className = "" }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
+    </svg>
+  );
+}
+
+/* Opening the suspect's profile is the row's real destination, so it gets a
+   label and the row's only border. High-risk rows carry the crimson from rest. */
+export function InstaButton({
+  url,
+  emphasis = "default",
+  className = "",
+}: {
+  url: string;
+  emphasis?: "default" | "high";
+  className?: string;
+}) {
+  const tone = emphasis === "high"
+    ? "border-blood/50 text-blood-2"
+    : "border-line-2 text-fg";
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`inline-flex shrink-0 items-center gap-1.5 border ${tone} px-2.5 py-[7px] text-[11.5px] font-bold whitespace-nowrap transition-colors duration-150 hover:border-blood hover:bg-blood/[0.08] hover:text-blood-2 ${className}`}
+    >
+      <InstagramGlyph className="h-3.5 w-3.5 shrink-0" />
+      프로필 열기
+    </a>
   );
 }
 

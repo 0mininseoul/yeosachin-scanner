@@ -412,7 +412,7 @@ export default function ProgressPage({ params }: PageProps) {
 
                 {/* step log */}
                 {data.pipelineVersion === 'v2' && data.tracks ? (
-                    <div className="mt-7 w-full border border-line bg-ink-2">
+                    <div className="mt-7 w-full border-t border-line">
                         {V2_TRACK_PRESENTATION.map(({ key, label }) => {
                             const track = data.tracks![key];
                             const trackProgress = Math.round(track.progressBp / 10) / 10;
@@ -421,7 +421,7 @@ export default function ProgressPage({ params }: PageProps) {
                             return (
                                 <div
                                     key={key}
-                                    className="border-b border-line px-4 py-3 last:border-b-0"
+                                    className="border-b border-line px-1 py-3"
                                 >
                                     <div className="flex items-center gap-3">
                                         <span className={`flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
@@ -457,7 +457,7 @@ export default function ProgressPage({ params }: PageProps) {
                         })}
                     </div>
                 ) : (
-                    <div className="mt-7 w-full border border-line bg-ink-2">
+                    <div className="mt-7 w-full border-t border-line">
                         {ANALYSIS_PROGRESS_STEPS.map((step, index) => {
                             const isComplete = data.progress >= step.threshold;
                             const isCurrent =
@@ -467,7 +467,7 @@ export default function ProgressPage({ params }: PageProps) {
                             return (
                                 <div
                                     key={step.label}
-                                    className="flex items-center gap-3 border-b border-line px-4 py-3 last:border-b-0"
+                                    className="flex items-center gap-3 border-b border-line px-1 py-3"
                                 >
                                     <span
                                         className={`num flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
@@ -502,7 +502,7 @@ export default function ProgressPage({ params }: PageProps) {
                 )}
 
                 {data.pipelineVersion === 'v2' && data.events.length > 0 && (
-                    <div className="mt-4 w-full border border-line bg-ink-2 px-4 py-3" aria-live="polite">
+                    <div className="mt-5 w-full border-l-2 border-blood pl-3.5" aria-live="polite">
                         <span className="eyebrow">실시간 판독 로그</span>
                         <ul className="mt-2.5 space-y-2">
                             {data.events.slice(-3).reverse().map((event) => (
@@ -517,7 +517,7 @@ export default function ProgressPage({ params }: PageProps) {
 
                 {/* background continuity or legacy browser fallback */}
                 {data.backgroundProcessing ? (
-                    <div className="mt-7 w-full border border-line-2 bg-panel px-4 py-3.5">
+                    <div className="mt-7 w-full border-l-2 border-line-2 pl-3.5">
                         <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-fg">
                             <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-fg-dim" />
                             <span>

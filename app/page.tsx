@@ -264,9 +264,11 @@ export default function LandingPage() {
           <Eyebrow>판독 절차</Eyebrow>
           <h2 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">3단계로 끝나는 판독</h2>
 
-          <div className="mt-8 space-y-3">
+          {/* A numbered sequence is already a strong enough structure; wrapping
+              each step in its own card only flattens the page. */}
+          <div className="mt-8">
             {STEPS.map((s) => (
-              <CaseCard key={s.n} className="flex items-start gap-4 p-4">
+              <div key={s.n} className="flex items-start gap-4 border-t border-line py-5">
                 <span className="num text-[26px] font-black leading-none text-blood/85">{s.n}</span>
                 <div className="pt-0.5">
                   <h3 className="text-[16px] font-bold text-fg">{s.title}</h3>
@@ -278,7 +280,7 @@ export default function LandingPage() {
                     ))}
                   </p>
                 </div>
-              </CaseCard>
+              </div>
             ))}
           </div>
         </section>
@@ -293,13 +295,16 @@ export default function LandingPage() {
             밤새 프로필을 눌러봐도 못 찾는 걸, AI는 5분이면 끝냅니다.
           </p>
 
-          <div className="mt-8 grid grid-cols-2 gap-3">
+          {/* Parallel items in a grid are already separated by their columns.
+              A top hairline gives the block a regular spine — vertical rails
+              would end at four different heights and fight the grid. */}
+          <div className="mt-8 grid grid-cols-2 gap-x-5 gap-y-7">
             {TRUST.map((t, i) => (
-              <CaseCard key={i} className="p-4">
+              <div key={i} className="border-t border-line pt-3.5">
                 <BrandMark size={16} className="text-blood" />
-                <h3 className="mt-3 text-[14px] font-bold text-fg">{t.title}</h3>
+                <h3 className="mt-2.5 text-[14px] font-bold text-fg">{t.title}</h3>
                 <p className="mt-1.5 text-[12px] leading-relaxed text-fg-dim">{t.body}</p>
-              </CaseCard>
+              </div>
             ))}
           </div>
         </section>

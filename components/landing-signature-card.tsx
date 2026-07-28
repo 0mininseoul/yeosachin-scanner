@@ -252,7 +252,7 @@ export function LandingSignatureCard() {
 
         <div className="flex items-center justify-between border-t border-line px-4 py-3">
           <span className="text-[12px] text-fg-mute">3명 판독 완료</span>
-          <Stamp className="-rotate-3">고위험 감지</Stamp>
+          <Stamp className="-rotate-3">위장여사친 감지</Stamp>
         </div>
       </CaseCard>
     </div>

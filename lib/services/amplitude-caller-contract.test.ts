@@ -47,10 +47,23 @@ describe('Amplitude caller privacy contract', () => {
             source('app/result/[requestId]/page.tsx'),
             source('app/share/[token]/page.tsx'),
         ]) {
-            expect(page).toMatch(/const shareChannel = await shareResult/);
+            expect(page).toMatch(/const shareChannel = await shareResult\(/);
             expect(page).toMatch(/if \(shareChannel\)[\s\S]*?trackEvent\(EVENTS\.RESULT_SHARED/);
-            expect(page).not.toMatch(/trackEvent\(EVENTS\.RESULT_SHARED[\s\S]*?await shareResult/);
+            // The trailing `(` matters: without it this also matches the Kakao
+            // helper `shareResultToKakao(`, which is a different call site.
+            expect(page).not.toMatch(/trackEvent\(EVENTS\.RESULT_SHARED[\s\S]*?await shareResult\(/);
         }
+    });
+
+    it('tracks a Kakao share only once a channel came back', () => {
+        const result = source('app/result/[requestId]/page.tsx');
+        expect(result).toMatch(/const channel = await shareResultToKakao\(/);
+        // The null-channel path bails out before anything is tracked. A negative
+        // "never tracks before the call" regex cannot be used here: the file holds
+        // two share handlers, and a plain text scan cannot tell their bodies apart.
+        expect(result).toMatch(
+            /if \(!channel\)[\s\S]{0,200}?return;[\s\S]{0,200}?trackEvent\(EVENTS\.RESULT_SHARED/,
+        );
     });
 
     it('uses the shared result request UUID without exposing the share token', () => {
