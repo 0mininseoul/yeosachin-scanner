@@ -238,6 +238,11 @@ export function createReplayStagedAiAdapter(
     const runTriage = genderQualityV211
         ? createSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.genderTriageConcurrency)
         : async <T>(task: () => Promise<T>) => task();
+    // v2.11 replay uses one deployment-wide provider fence in addition to per-stage fences.
+    // It wraps provider invocations, so queued work has not made a paid attempt yet.
+    const runShared = genderQualityV211
+        ? createSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.sharedConcurrency)
+        : async <T>(task: () => Promise<T>) => task();
     const runResolver = genderQualityV211
         ? createReplayAbortableBoundedSemaphore(2)
         : null;
@@ -272,7 +277,7 @@ export function createReplayStagedAiAdapter(
                 accountId: member.accountId,
                 input: member.value.aiInput,
             }));
-            const invocation = await runTriage(() => invoke(async state => {
+            const invocation = await runTriage(() => runShared(() => invoke(async state => {
                 const identity =
                     createGenderTriageMicrobatchResultIdentity(accounts);
                 return genderTriageMicrobatch(
@@ -280,7 +285,7 @@ export function createReplayStagedAiAdapter(
                     statelessAudit(requestId, identity, state),
                     { aiStagePolicyVersion, replayCapability },
                 );
-            }));
+            })));
             const byAccount = new Map(invocation.value?.map(result => [
                 result.accountId,
                 result.result,
@@ -353,7 +358,7 @@ export function createReplayStagedAiAdapter(
                 );
             }),
         }),
-        feature: input => runFeature(() => invoke(async state => {
+        feature: input => runFeature(() => runShared(() => invoke(async state => {
             const aiInput = {
                 triage: input.triage,
                 bio: input.bio,
@@ -365,9 +370,9 @@ export function createReplayStagedAiAdapter(
             };
             const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
             return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
-        })),
+        }))),
         resolveGender: input => (runResolver
-            ? runResolver(() => invoke(async state => {
+            ? runResolver(() => runShared(() => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderResolutionResultIdentity(
                 aiInput,
@@ -389,7 +394,7 @@ export function createReplayStagedAiAdapter(
                 aiStagePolicyVersion,
                 replayCapability,
             });
-            }), input.signal, 5_000).catch(() => ({
+            })), input.signal, 5_000).catch(() => ({
                 outcome: 'capacity_skipped' as const,
                 attempts: 0, retries: 0, elapsedMs: 0,
             }))
@@ -401,7 +406,7 @@ export function createReplayStagedAiAdapter(
                     onAttemptTelemetry: value => input.onAttemptTelemetry?.({ attempt: value.attempt, retryCount: value.retryCount, disposition: value.disposition, latencyMs: value.latencyMs }),
                 }), { abortSignal: input.signal, aiStagePolicyVersion, replayCapability });
             })),
-        privateNames: accounts => invoke(async state => {
+        privateNames: accounts => runShared(() => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {
                 forChunk(identity) {
                     return {
@@ -415,7 +420,7 @@ export function createReplayStagedAiAdapter(
                 },
             };
             return analyzePrivateAccountNames([...accounts], requestId, audit, { aiStagePolicyVersion, replayCapability });
-        }),
+        })),
     };
     Object.freeze(runner);
     issuedReplayRunners.set(runner, {

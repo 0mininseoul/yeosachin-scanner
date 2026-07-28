@@ -687,12 +687,6 @@ export async function runAnalysisV2AiReplay(input: {
             } else if (v29ResolverAdmission === 'insufficient_media') {
                 resolver.admission.insufficientMedia++;
             }
-            if (triage.routingDecision === 'exclude_high_confidence_male') {
-                if (genderQuality) genderQuality.finalClassificationSource.triage =
-                    (genderQuality.finalClassificationSource.triage ?? 0) + 1;
-                gender.male++;
-                return;
-            }
             if (genderQuality) {
                 const context = triage.v29AccountContext ?? 'absent';
                 const genderConfidence = `${triage.assessment.inferredGender}:${triage.assessment.confidence}`;
@@ -701,6 +695,12 @@ export async function runAnalysisV2AiReplay(input: {
                     (genderQuality.triage.genderConfidence[genderConfidence] ?? 0) + 1;
                 genderQuality.triage.accountContext[context] =
                     (genderQuality.triage.accountContext[context] ?? 0) + 1;
+            }
+            if (triage.routingDecision === 'exclude_high_confidence_male') {
+                if (genderQuality) genderQuality.finalClassificationSource.triage =
+                    (genderQuality.finalClassificationSource.triage ?? 0) + 1;
+                gender.male++;
+                return;
             }
             const featureAdmitted = !supportsGenderTriageMicrobatch
                 || (genderQualityV211
