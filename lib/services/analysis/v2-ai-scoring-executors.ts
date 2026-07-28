@@ -91,6 +91,7 @@ import {
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
 import { v211FeatureAdmission } from './v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
+import { v211LateGenderResolverEligible } from './v2-v211-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
 import {
     AnalysisV2TransientMediaPreparationError,
@@ -1753,13 +1754,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const lateResolverEligible = genderQualityV211
                         && resolverHandle === null
                         && genderResolutionEnabled
-                        && (modelAccountContext === 'personal'
-                            || modelAccountContext === 'individual_creator')
-                        && (
-                            baselineClassification === 'unresolved'
-                            || baselineClassification === 'unresolved_stage_conflict'
-                        )
-                        && resolverMedia.length >= 2;
+                        && v211LateGenderResolverEligible(
+                            gender.result,
+                            modelAccountContext,
+                            baselineClassification,
+                            resolverMedia.length,
+                        );
                     if (lateResolverEligible) {
                         resolverHandle = dependencies.ai.startGenderResolution({
                             media: resolverMedia,

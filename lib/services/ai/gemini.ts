@@ -46,6 +46,7 @@ import {
 } from './replay-stateless-capability';
 
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
+const V211_RESOLVER_ADMISSION_GRACE_MS = 5_000;
 
 let genAI: GoogleGenAI | null = null;
 let extendedTelemetrySupported: boolean | null = null;
@@ -74,6 +75,16 @@ class AsyncSemaphore {
             released = true;
             this.release();
         };
+    }
+
+    async tryAcquireWithin(deadlineAtMs: number, signal?: AbortSignal): Promise<(() => void) | null> {
+        while (performance.now() < deadlineAtMs) {
+            if (signal?.aborted) return null;
+            const release = this.tryAcquire();
+            if (release) return release;
+            await new Promise<void>(resolve => setTimeout(resolve, 10));
+        }
+        return null;
     }
 
     private acquire(): Promise<void> {
@@ -126,7 +137,8 @@ function getStageGenerationSemaphore(
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
     policyVersion: AiStagePolicyVersion,
-    task: () => Promise<T>
+    task: () => Promise<T>,
+    abortSignal?: AbortSignal,
 ): Promise<T> {
     if (!stage) {
         return generationLimiterState.shared.run(task);
@@ -134,6 +146,25 @@ async function runWithGenerationSlot<T>(
 
     const stageSemaphore = getStageGenerationSemaphore(policyVersion, stage);
     if (stage === 'genderResolution') {
+        if (aiStagePolicySupports(policyVersion, 'genderQualityV211')) {
+            const deadlineAtMs = performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS;
+            while (performance.now() < deadlineAtMs && !abortSignal?.aborted) {
+                const releaseStage = await stageSemaphore.tryAcquireWithin(deadlineAtMs, abortSignal);
+                if (!releaseStage) break;
+                const releaseShared = generationLimiterState.shared.tryAcquire();
+                if (releaseShared) {
+                    try {
+                        return await task();
+                    } finally {
+                        releaseShared();
+                        releaseStage();
+                    }
+                }
+                releaseStage();
+                await new Promise<void>(resolve => setTimeout(resolve, 10));
+            }
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        }
         const releaseStage = stageSemaphore.tryAcquire();
         if (!releaseStage) {
             throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
@@ -912,7 +943,8 @@ export async function analyzeWithGemini<T>(
                             contents: [{ role: 'user', parts }],
                             config,
                         });
-                    }
+                    },
+                    abortSignal,
                 );
             } catch (generationError) {
                 if (

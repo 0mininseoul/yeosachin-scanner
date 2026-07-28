@@ -15,4 +15,13 @@ describe('replay AI-only gender quality gate', () => {
             worstCasePass: false,
         });
     });
+
+    it('uses unrounded integer arithmetic at the twenty-percent boundary', () => {
+        expect(evaluateReplayGenderQualityGate({
+            male: 4, female: 0, unknown: 1, missingPublic: 0,
+        }).observedPass).toBe(true);
+        expect(evaluateReplayGenderQualityGate({
+            male: 79, female: 0, unknown: 21, missingPublic: 0,
+        }).observedPass).toBe(false);
+    });
 });

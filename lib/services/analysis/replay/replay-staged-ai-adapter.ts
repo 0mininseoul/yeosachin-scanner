@@ -179,6 +179,46 @@ function createSemaphore(limit: number) {
     };
 }
 
+export function createReplayAbortableBoundedSemaphore(limit: number) {
+    let active = 0;
+    const waiters: Array<() => void> = [];
+    return async function run<T>(
+        task: () => Promise<T>,
+        signal: AbortSignal,
+        timeoutMs: number,
+    ): Promise<T> {
+        if (signal.aborted) throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        if (active >= limit) {
+            await new Promise<void>((resolve, reject) => {
+                const waiter = () => {
+                    cleanup();
+                    resolve();
+                };
+                const onAbort = () => {
+                    const index = waiters.indexOf(waiter);
+                    if (index >= 0) waiters.splice(index, 1);
+                    cleanup();
+                    reject(new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'));
+                };
+                const timer = setTimeout(onAbort, timeoutMs);
+                const cleanup = () => {
+                    clearTimeout(timer);
+                    signal.removeEventListener('abort', onAbort);
+                };
+                signal.addEventListener('abort', onAbort, { once: true });
+                waiters.push(waiter);
+            });
+        }
+        active++;
+        try {
+            return await task();
+        } finally {
+            active--;
+            waiters.shift()?.();
+        }
+    };
+}
+
 /** Stateless paid-AI adapter. It imports no Supabase, provider, R2, job, result, or archive module. */
 export function createReplayStagedAiAdapter(
     aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
@@ -199,9 +239,8 @@ export function createReplayStagedAiAdapter(
         ? createSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.genderTriageConcurrency)
         : async <T>(task: () => Promise<T>) => task();
     const runResolver = genderQualityV211
-        // Resolver has the immutable v2.7+ two-operation ceiling; do not raise it for replay.
-        ? createSemaphore(2)
-        : async <T>(task: () => Promise<T>) => task();
+        ? createReplayAbortableBoundedSemaphore(2)
+        : null;
     const runFeature = supportsGenderTriageMicrobatch
         ? createSemaphore(
             ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
@@ -327,7 +366,8 @@ export function createReplayStagedAiAdapter(
             const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
             return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
         })),
-        resolveGender: input => runResolver(() => invoke(async state => {
+        resolveGender: input => (runResolver
+            ? runResolver(() => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderResolutionResultIdentity(
                 aiInput,
@@ -349,7 +389,18 @@ export function createReplayStagedAiAdapter(
                 aiStagePolicyVersion,
                 replayCapability,
             });
-        })),
+            }), input.signal, 5_000).catch(() => ({
+                outcome: 'capacity_skipped' as const,
+                attempts: 0, retries: 0, elapsedMs: 0,
+            }))
+            : invoke(async state => {
+                const aiInput = { media: normalized(input.media) };
+                const identity = createGenderResolutionResultIdentity(aiInput, aiStagePolicyVersion);
+                return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
+                    onAttemptStart: value => input.onAttemptStart?.({ attempt: value.attempt, retryCount: value.retryCount }),
+                    onAttemptTelemetry: value => input.onAttemptTelemetry?.({ attempt: value.attempt, retryCount: value.retryCount, disposition: value.disposition, latencyMs: value.latencyMs }),
+                }), { abortSignal: input.signal, aiStagePolicyVersion, replayCapability });
+            })),
         privateNames: accounts => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {
                 forChunk(identity) {

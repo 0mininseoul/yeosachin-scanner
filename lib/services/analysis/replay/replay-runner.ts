@@ -13,6 +13,7 @@ import {
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
 import { v211FeatureAdmission } from '../v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
+import { v211LateGenderResolverEligible } from '../v2-v211-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from '../v2-gender-resolver-media-policy';
 import { historicalPartialBundleInvariantIssues, historicalPartialPaidCoverage } from './historical-partial-available-artifact';
 import {
@@ -139,7 +140,13 @@ export interface AnalysisV2AiReplayReport {
     };
     /** v2.11-only, aggregate and deliberately PII-free quality observability. */
     genderQuality?: {
-        triage: { nonOk: number; accountContext: Record<string, number> };
+        triage: {
+            nonOk: number;
+            capacity: number;
+            outcome: Record<string, number>;
+            genderConfidence: Record<string, number>;
+            accountContext: Record<string, number>;
+        };
         feature: { admission: Record<string, number>; finalDecision: Record<string, number>; accountContext: Record<string, number> };
         resolver: { earlyAdmission: number; lateAdmission: number; outcome: Record<string, number> };
         finalClassificationSource: Record<string, number>;
@@ -564,7 +571,13 @@ export async function runAnalysisV2AiReplay(input: {
     const durations = Object.fromEntries(names.map(name => [name, [] as number[]])) as Record<typeof names[number], number[]>;
     const gender = { male: 0, female: 0, unknown: 0, unknownRate: 0 };
     const genderQuality = genderQualityV211 ? {
-        triage: { nonOk: 0, accountContext: {} as Record<string, number> },
+        triage: {
+            nonOk: 0,
+            capacity: 0,
+            outcome: {} as Record<string, number>,
+            genderConfidence: {} as Record<string, number>,
+            accountContext: {} as Record<string, number>,
+        },
         feature: {
             admission: {} as Record<string, number>,
             finalDecision: {} as Record<string, number>,
@@ -682,6 +695,10 @@ export async function runAnalysisV2AiReplay(input: {
             }
             if (genderQuality) {
                 const context = triage.v29AccountContext ?? 'absent';
+                const genderConfidence = `${triage.assessment.inferredGender}:${triage.assessment.confidence}`;
+                genderQuality.triage.outcome.ok = (genderQuality.triage.outcome.ok ?? 0) + 1;
+                genderQuality.triage.genderConfidence[genderConfidence] =
+                    (genderQuality.triage.genderConfidence[genderConfidence] ?? 0) + 1;
                 genderQuality.triage.accountContext[context] =
                     (genderQuality.triage.accountContext[context] ?? 0) + 1;
             }
@@ -803,12 +820,16 @@ export async function runAnalysisV2AiReplay(input: {
                 && !trackedResolver
                 && feature?.outcome === 'ok'
                 && feature.value
-                && (
-                    feature.value.features.accountContext === 'personal'
-                    || feature.value.features.accountContext === 'individual_creator'
+                && v211LateGenderResolverEligible(
+                    triage,
+                    feature.value.features.accountContext,
+                    baseline === 'unresolved_stage_conflict'
+                        ? 'unresolved_stage_conflict'
+                        : baseline === 'unresolved'
+                            ? 'unresolved'
+                            : 'verified_non_female',
+                    resolverMedia.length,
                 )
-                && (baseline === 'unresolved' || baseline === 'unresolved_stage_conflict')
-                && resolverMedia.length >= 2
             ) {
                 if (genderQuality) genderQuality.resolver.lateAdmission++;
                 startResolver();
@@ -836,7 +857,14 @@ export async function runAnalysisV2AiReplay(input: {
                 if (replayWorkFailed) return;
                 collect(stages.genderTriage, durations.genderTriage, triage);
                 if (triage.outcome !== 'ok' || !triage.value) {
-                    if (genderQuality) genderQuality.triage.nonOk++;
+                    if (genderQuality) {
+                        genderQuality.triage.nonOk++;
+                        genderQuality.triage.outcome[triage.outcome] =
+                            (genderQuality.triage.outcome[triage.outcome] ?? 0) + 1;
+                        if (triage.outcome === 'capacity_skipped') genderQuality.triage.capacity++;
+                        genderQuality.finalClassificationSource.triage_non_ok =
+                            (genderQuality.finalClassificationSource.triage_non_ok ?? 0) + 1;
+                    }
                     gender.unknown++;
                     return;
                 }
@@ -973,7 +1001,12 @@ export async function runAnalysisV2AiReplay(input: {
                 qualityGate: evaluateReplayGenderQualityGate({
                     ...gender,
                     missingPublic: input.bundle.schemaVersion === 2
-                        ? input.bundle.capture.partial.mediaUnavailable.length
+                        ? Math.max(0, input.bundle.capture.partial.sourceIdentities.filter(
+                            identity => identity.partition === 'public'
+                                || identity.partition === 'fetch_terminal',
+                        ).length - input.bundle.profiles.filter(
+                            profile => !profile.isPrivate,
+                        ).length)
                         : 0,
                 }),
             },

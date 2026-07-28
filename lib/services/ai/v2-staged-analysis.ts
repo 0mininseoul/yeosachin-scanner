@@ -317,7 +317,7 @@ export const genderResolutionModelResponseSchema = z.object({
 
 export const genderResolutionResultSchema = z.object({
     assessment: genderResolutionModelResponseSchema,
-    analyzedSelectionIds: z.array(selectionIdSchema).max(MAX_FEATURE_MEDIA),
+    analyzedSelectionIds: z.array(selectionIdSchema).max(MAX_TRIAGE_FEED_MEDIA + 1),
 }).strict();
 
 export type GenderResolutionInput = z.input<typeof genderResolutionInputSchema>;
@@ -325,6 +325,15 @@ export type GenderResolutionResult = z.infer<typeof genderResolutionResultSchema
 
 function genderResolutionFeedLimit(policyVersion: AiStagePolicyVersion): number {
     return getAiStagePolicy(policyVersion, 'genderResolution').feedImageLimit;
+}
+
+function genderResolutionResultSchemaFor(policyVersion: AiStagePolicyVersion) {
+    return aiStagePolicySupports(policyVersion, 'genderQualityV211')
+        ? z.object({
+            assessment: genderResolutionModelResponseSchema,
+            analyzedSelectionIds: z.array(selectionIdSchema).max(MAX_FEATURE_MEDIA),
+        }).strict()
+        : genderResolutionResultSchema;
 }
 
 const safeOverviewSchema = z.string()
@@ -1397,6 +1406,7 @@ export function genderResolutionCheckpointAssessment(
     const projection = projectGenderResolutionMedia(
         media,
         genderResolutionFeedLimit(policyVersion),
+        aiStagePolicySupports(policyVersion, 'genderQualityV211'),
     );
     const assessment = genderResolutionModelResponseSchema.parse(rawAssessment);
     const evidenceSelectionIds = assessment.evidenceSelectionIds.map(selectionId => {
@@ -1825,7 +1835,11 @@ export function createGenderResolutionResultIdentity(
 ): AnalysisV2AiResultIdentity {
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
-    const projection = projectGenderResolutionMedia(media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(
+        media,
+        genderResolutionFeedLimit(policyVersion),
+        aiStagePolicySupports(policyVersion, 'genderQualityV211'),
+    );
     return stagedResultIdentity(
         'genderResolution',
         projection.prompt,
@@ -1931,7 +1945,11 @@ async function prepareGenderResolutionGeneration(
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_LATEST_VERSION;
     const input = genderResolutionInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
-    const projection = projectGenderResolutionMedia(media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(
+        media,
+        genderResolutionFeedLimit(policyVersion),
+        aiStagePolicySupports(policyVersion, 'genderQualityV211'),
+    );
     const prompt = projection.prompt;
     const identity = stagedResultIdentity(
         'genderResolution', prompt, media, 'request', policyVersion,
@@ -1954,7 +1972,7 @@ async function prepareGenderResolutionGeneration(
             }
         ),
     });
-      return genderResolutionResultSchema.parse({
+      return genderResolutionResultSchemaFor(policyVersion).parse({
         assessment,
         analyzedSelectionIds: media.map(item => item.selectionId),
       });

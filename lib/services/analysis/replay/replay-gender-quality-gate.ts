@@ -27,10 +27,16 @@ export function evaluateReplayGenderQualityGate(
         input.unknown + input.missingPublic,
         observedTotal + input.missingPublic,
     );
+    // The displayed rates are rounded for reports only. Gate decisions compare raw integer
+    // counts so 1/5 passes exactly and the next representable fraction above 20% fails.
+    const observedPass = input.unknown * 5 <= observedTotal;
+    const worstTotal = observedTotal + input.missingPublic;
+    const worstUnknown = input.unknown + input.missingPublic;
+    const worstCasePass = worstUnknown * 5 <= worstTotal;
     return {
         observedUnknownRate,
-        worstCaseUnknownRate,
-        observedPass: observedUnknownRate <= 0.2,
-        worstCasePass: worstCaseUnknownRate <= 0.2,
+        worstCaseUnknownRate: rate(worstUnknown, worstTotal),
+        observedPass,
+        worstCasePass,
     };
 }

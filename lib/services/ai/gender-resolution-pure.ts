@@ -19,6 +19,7 @@ export interface PureGenderResolutionMedia {
 export function projectGenderResolutionMedia(
     rawMedia: readonly PureGenderResolutionMedia[],
     feedLimit = MAX_TRIAGE_FEED_MEDIA,
+    v211QualityPrompt = false,
 ) {
     const profile = rawMedia.find(item => item.kind === 'profile');
     const media = [
@@ -37,7 +38,9 @@ export function projectGenderResolutionMedia(
         '아래 이미지만 보고 계정 소유자의 성별을 독립적으로 재판정하세요.',
         '추측을 강요하지 말고 보이는 시각 근거만 사용하세요.',
         '여러 사람이 섞이면 ownerConsistency=mixed_people로 반환하세요.',
-        '반복해서 보이는 계정 소유자를 찾되, 여러 사람이 섞였으면 한 사람으로 강제하지 마세요.',
+        ...(v211QualityPrompt
+            ? ['반복해서 보이는 계정 소유자를 찾되, 여러 사람이 섞였으면 한 사람으로 강제하지 마세요.']
+            : []),
         '근거가 없으면 inferredGender=unknown, confidence=low, ownerConsistency=not_visible로 반환하세요.',
         'high confidence 이진 판정에는 서로 다른 이미지 근거가 최소 2개 필요합니다.',
         `사용 가능한 selectionId: ${projectedMedia.map(item => item.selectionId).join(', ')}`,

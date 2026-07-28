@@ -352,7 +352,8 @@ const profileOutcomeSchema = z.object({
         || value.officialExclusionReason !== undefined;
     const inputQualityPolicyFamily = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
         || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
-        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10';
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.11';
     const requiresInputQualityProvenance = inputQualityPolicyFamily && !v29FeatureSkipped;
     if (!inputQualityPolicyFamily && hasV28Contamination) {
         context.addIssue({
@@ -587,12 +588,14 @@ const profilePayloadSchema = z.object({
         'ai-stage-policy-v2.8',
         'ai-stage-policy-v2.9',
         'ai-stage-policy-v2.10',
+        'ai-stage-policy-v2.11',
     ]).optional(),
     outcomes: z.array(profileOutcomeSchema).min(1).max(30),
 }).strict().superRefine((value, context) => {
     const exactV28Family = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
         || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
-        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10';
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.11';
     for (const [index, outcome] of value.outcomes.entries()) {
         const hasFeature = outcome.feature !== null;
         if (exactV28Family && hasFeature && outcome.aiStagePolicyVersion !== value.aiStagePolicyVersion) {
@@ -622,6 +625,13 @@ const profilePayloadSchema = z.object({
                 code: 'custom',
                 path: ['outcomes', index, 'aiStagePolicyVersion'],
                 message: 'v2.10 outcome requires a v2.10 batch policy.',
+            });
+        }
+        if (!exactV28Family && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.11') {
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.11 outcome cannot contaminate a legacy profile batch.',
             });
         }
     }
@@ -861,6 +871,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                     input.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
                     || input.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
                     || input.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+                    || input.aiStagePolicyVersion === 'ai-stage-policy-v2.11'
                     ? { aiStagePolicyVersion: input.aiStagePolicyVersion }
                     : {}),
                 outcomes,
