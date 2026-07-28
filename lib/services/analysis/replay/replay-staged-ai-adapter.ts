@@ -17,6 +17,7 @@ import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generati
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
+import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import type {
     ReplayAiRunner,
@@ -184,7 +185,11 @@ export function createReplayStagedAiAdapter(
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
-    const runFeature = aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+    const supportsGenderTriageMicrobatch = aiStagePolicySupports(
+        aiStagePolicyVersion,
+        'genderTriageMicrobatchV29',
+    );
+    const runFeature = supportsGenderTriageMicrobatch
         ? createSemaphore(
             ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
         )
@@ -221,7 +226,7 @@ export function createReplayStagedAiAdapter(
                 return genderTriageMicrobatch(
                     accounts,
                     statelessAudit(requestId, identity, state),
-                    { replayCapability },
+                    { aiStagePolicyVersion, replayCapability },
                 );
             });
             const byAccount = new Map(invocation.value?.map(result => [
@@ -280,7 +285,7 @@ export function createReplayStagedAiAdapter(
         });
     };
     const runner: ReplayAiRunner = {
-        ...(aiStagePolicyVersion === 'ai-stage-policy-v2.9' ? {
+        ...(supportsGenderTriageMicrobatch ? {
             triage: queueTriage,
         } : {
             triage: (input: ReplayTriageInput) => invoke(async state => {

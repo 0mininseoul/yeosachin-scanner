@@ -37,6 +37,36 @@ function publicProfile(username: string, posts = 1) {
 }
 
 describe('historical partial-available replay capture', () => {
+    it('seals a v2.10 evaluation into the same non-exact no-substitution scope', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '0'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+                aiStage: 'ai-stage-policy-v2.10',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle).toMatchObject({
+            schemaVersion: 2,
+            capture: {
+                scope: 'ai-only-historical-partial-available',
+                notExact: true,
+                fullE2eEvidence: false,
+                noMediaSubstitution: true,
+                evaluationPolicy: {
+                    capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+                    aiStage: 'ai-stage-policy-v2.10',
+                },
+            },
+        });
+    });
+
     it('records unavailable public media terminally while retaining passing public and private work at original ordinals', async () => {
         const result = await captureHistoricalPartialAvailableReplayBundle({
             requestFingerprint: 'a'.repeat(64),
@@ -112,6 +142,9 @@ describe('historical partial-available replay capture', () => {
         expect(result.report.stages.triage).toMatchObject({ selected: 5, normalized: 5, failed: 0 });
         expect(result.report.stages.feature).toMatchObject({ selected: 9, normalized: 7, failed: 2 });
         expect(result.report.partitions.public_media_unavailable).toBe(1);
+        expect(result.bundle.capture.partial?.mediaUnavailable).toEqual([
+            expect.objectContaining({ ordinal: 99, selectedMediaCount: 9 }),
+        ]);
         const visible = JSON.stringify(partialAvailableSafeReport(result.report));
         expect(visible).not.toContain('sensitive_name');
         expect(visible).not.toContain('cdn.example');
@@ -127,7 +160,7 @@ describe('historical partial-available replay capture', () => {
         });
         expect(result.report.partitions).toMatchObject({ public_media_unavailable: 1, total: 1 });
         expect(result.bundle.capture.partial?.mediaUnavailable).toEqual([
-            expect.objectContaining({ ordinal: 44, terminal: 'media_unavailable', reasons: ['profile_unavailable'] }),
+            expect.objectContaining({ ordinal: 44, terminal: 'media_unavailable', selectedMediaCount: 0, reasons: ['profile_unavailable'] }),
         ]);
     });
 

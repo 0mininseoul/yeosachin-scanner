@@ -156,6 +156,29 @@ describe('replay staged AI adapter telemetry', () => {
         );
     });
 
+    it('uses the v2.9 microbatch behavior for the immutable v2.10 successor', async () => {
+        const identity = { operationKey: 'gender-triage:batch-identity' };
+        mocks.createGenderTriageMicrobatchAccountId.mockReturnValue(`account:${'a'.repeat(64)}`);
+        mocks.createGenderTriageMicrobatchResultIdentity.mockReturnValue(identity);
+        mocks.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'a'.repeat(64)}`,
+            source: 'checkpoint',
+            result: { assessment: {}, routingDecision: 'route_to_feature_analysis' },
+        }]);
+
+        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.10');
+        await adapter.triage?.({ ordinal: 1, media: [] });
+
+        expect(mocks.genderTriage).not.toHaveBeenCalled();
+        expect(mocks.genderTriageMicrobatch).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.any(Object),
+            expect.objectContaining({
+                aiStagePolicyVersion: 'ai-stage-policy-v2.10',
+            }),
+        );
+    });
+
     it('plans stable paired v2.9 calls with an odd tail and maps reversed responses by opaque ID', async () => {
         const ids = new Map([
             ['profile:1', `account:${'e'.repeat(64)}`],

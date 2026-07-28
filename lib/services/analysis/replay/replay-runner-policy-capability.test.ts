@@ -39,6 +39,7 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => {
 import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
 import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
 import {
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -101,6 +102,27 @@ const v28ToV29Bundle = {
     capture: {
         ...v28Bundle.capture,
         evaluationPolicy: v29EvaluationPolicy,
+    },
+};
+
+const historicalV210Evaluation = {
+    capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.10',
+} as const satisfies ReplayEvaluationPolicy;
+
+const historicalV210Bundle = {
+    ...v28Bundle,
+    capture: {
+        ...v28Bundle.capture,
+        sourceLineage: {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        },
+        evaluationPolicy: historicalV210Evaluation,
     },
 };
 
@@ -169,6 +191,30 @@ describe('replay staged AI runner policy capability', () => {
             evaluationPolicy: v29EvaluationPolicy,
         });
     }
+
+    it('reports the authenticated v2.10 policy while preserving v2.9 capability behavior', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: highFemale('official_group_or_brand'),
+            source: 'checkpoint',
+        }]);
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: historicalV210Bundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.10'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV210Evaluation,
+        });
+
+        expect(report).toMatchObject({
+            evaluationAiPolicy: 'ai-stage-policy-v2.10',
+            replayAiPolicy: 'ai-stage-policy-v2.10',
+        });
+        expect(ai.genderTriage).not.toHaveBeenCalled();
+        expect(ai.genderTriageMicrobatch).toHaveBeenCalledOnce();
+        expect(ai.featureAnalysis).not.toHaveBeenCalled();
+    });
 
     it('blocks an official high-female v2.9 account before feature and resolver', async () => {
         const report = await runV29Triage(

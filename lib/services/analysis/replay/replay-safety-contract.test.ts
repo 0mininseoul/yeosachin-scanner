@@ -9,6 +9,10 @@ const runner = new URL('./replay-runner.ts', import.meta.url);
 const cli = new URL('../../../../scripts/replay-analysis-v2.ts', import.meta.url);
 const libRoot = new URL('../../../', import.meta.url);
 const replayCapability = new URL('../../ai/replay-stateless-capability.ts', import.meta.url);
+const diagnosticPartialCoverageCapability = new URL(
+    './diagnostic-partial-coverage-capability.ts',
+    import.meta.url,
+);
 const sourceLineage = new URL('./replay-source-lineage.ts', import.meta.url);
 
 async function productionTypescriptFiles(directory: URL): Promise<URL[]> {
@@ -61,6 +65,22 @@ describe('analysis V2 replay safety contract', () => {
         expect(sourceLineagePolicy).not.toContain('AI_STAGE_POLICY_LATEST_VERSION');
         expect(adapterSource).not.toContain('sourceLineage');
         expect(imports).not.toMatch(/supabase|provider-run|result-store|archive|cloudflare|R2/i);
+    });
+
+    it('issues diagnostic partial coverage approval only from CLI flag parsing', async () => {
+        const parserName =
+            'parseDiagnosticPartialCoverageCliCapability';
+        const capabilityUsers: string[] = [];
+        for (const file of await productionTypescriptFiles(libRoot)) {
+            if ((await readFile(file, 'utf8')).includes(parserName)) {
+                capabilityUsers.push(file.pathname);
+            }
+        }
+        expect(capabilityUsers).toEqual([
+            diagnosticPartialCoverageCapability.pathname,
+        ]);
+        expect(await readFile(cli, 'utf8')).toContain(parserName);
+        expect(await readFile(runner, 'utf8')).not.toContain(parserName);
     });
 
     it('labels capture as AI-only source evidence without Standard relabeling', async () => {

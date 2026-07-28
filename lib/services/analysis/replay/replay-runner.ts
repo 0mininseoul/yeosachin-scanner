@@ -1,9 +1,11 @@
 import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
 import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-reconciliation';
+import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -11,6 +13,10 @@ import { v29FeatureAdmission } from '../v2-v29-feature-admission';
 import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from '../v2-gender-resolver-media-policy';
 import { historicalPartialBundleInvariantIssues, historicalPartialPaidCoverage } from './historical-partial-available-artifact';
+import {
+    isDiagnosticPartialCoverageCliCapability,
+    type DiagnosticPartialCoverageCliCapability,
+} from './diagnostic-partial-coverage-capability';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -93,6 +99,15 @@ export interface AnalysisV2AiReplayReport {
     fullE2eEvidence: false;
     notExact?: true;
     noMediaSubstitution?: true;
+    diagnosticCoverageOverride?: {
+        used: true;
+        retainedProfiles: number;
+        sourceProfiles: number;
+        retainedMedia: number;
+        exactSelectedMedia: number;
+        profileRetentionBps: number;
+        mediaRetentionBps: number;
+    };
     stages: Record<'genderTriage' | 'featureAnalysis' | 'privateAccountName' | 'genderResolution', ReplayStageMetrics>;
     gender: { male: number; female: number; unknown: number; unknownRate: number };
     resolver: {
@@ -218,9 +233,12 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         };
     };
     const capability = capture.evaluationPolicy?.capability;
+    const partialCapability =
+        capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY;
     if (
-        (bundle.schemaVersion === 1 && capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY)
-        || (bundle.schemaVersion === 2 && capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY)
+        (bundle.schemaVersion === 1 && partialCapability)
+        || (bundle.schemaVersion === 2 && !partialCapability)
     ) throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
     if (bundle.schemaVersion !== 2) return;
     if (
@@ -397,6 +415,17 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         replay_ai_policy: report.replayAiPolicy,
         full_e2e_evidence: report.fullE2eEvidence,
         ...(report.notExact ? { not_exact: true, no_media_substitution: true } : {}),
+        ...(report.diagnosticCoverageOverride ? {
+            diagnostic_partial_coverage_override: {
+                used: true,
+                retained_profiles: report.diagnosticCoverageOverride.retainedProfiles,
+                source_profiles: report.diagnosticCoverageOverride.sourceProfiles,
+                retained_media: report.diagnosticCoverageOverride.retainedMedia,
+                exact_selected_media: report.diagnosticCoverageOverride.exactSelectedMedia,
+                profile_retention_bps: report.diagnosticCoverageOverride.profileRetentionBps,
+                media_retention_bps: report.diagnosticCoverageOverride.mediaRetentionBps,
+            },
+        } : {}),
         total_elapsed_ms: report.totalElapsedMs,
         stages: Object.fromEntries(Object.entries(report.stages).map(([stage, values]) => [
             stage,
@@ -420,21 +449,58 @@ export async function runAnalysisV2AiReplay(input: {
     runner?: ReplayAiRunner;
     mode: ReplayMode;
     paidAiOptIn?: boolean;
+    diagnosticPartialCoverageCapability?:
+        DiagnosticPartialCoverageCliCapability;
     evaluationPolicy?: ReplayEvaluationPolicy;
     write?: (line: string) => void;
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
+    const legacyBooleanSupplied = Object.prototype.hasOwnProperty.call(
+        input,
+        'allowLowPartialCoverage',
+    );
+    const diagnosticCapabilitySupplied =
+        input.diagnosticPartialCoverageCapability !== undefined;
+    if (
+        legacyBooleanSupplied
+        || (
+            diagnosticCapabilitySupplied
+            && !isDiagnosticPartialCoverageCliCapability(
+                input.diagnosticPartialCoverageCapability,
+            )
+        )
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+    }
+    const diagnosticPartialCoverageAuthorized =
+        diagnosticCapabilitySupplied;
     assertArtifactCapability(input.bundle);
     if (
-        input.bundle.schemaVersion === 2
+        diagnosticPartialCoverageAuthorized
+        && (
+            input.bundle.schemaVersion !== 2
+            || input.mode !== 'paid-ai'
+        )
+    ) {
+        throw new Error('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_SCOPE_REQUIRED');
+    }
+    const paidPartialCoverage = input.bundle.schemaVersion === 2
         && input.mode === 'paid-ai'
-        && !historicalPartialPaidCoverage({
+        ? historicalPartialPaidCoverage({
             sourceUniverseDigest: input.bundle.capture.partial.sourceUniverseDigest,
             sourceIdentities: input.bundle.capture.partial.sourceIdentities,
             mediaUnavailable: input.bundle.capture.partial.mediaUnavailable,
             profiles: input.bundle.profiles,
-        }).eligible
+        }, diagnosticPartialCoverageAuthorized
+            ? { mode: 'diagnostic-low-partial-coverage' }
+            : undefined)
+        : undefined;
+    if (
+        paidPartialCoverage
+        && !paidPartialCoverage.eligible
     ) {
         throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
     }
@@ -456,6 +522,10 @@ export async function runAnalysisV2AiReplay(input: {
     const replayAiPolicy = resolveReplayAiStagePolicyVersion(
         input.bundle.capture.sourceLineage,
         input.evaluationPolicy,
+    );
+    const supportsGenderTriageMicrobatch = aiStagePolicySupports(
+        replayAiPolicy,
+        'genderTriageMicrobatchV29',
     );
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
@@ -506,7 +576,7 @@ export async function runAnalysisV2AiReplay(input: {
             profile => !profile.isPrivate,
         );
         if (
-            replayAiPolicy === 'ai-stage-policy-v2.9'
+            supportsGenderTriageMicrobatch
             && publicProfiles.some(profile => (
                 typeof profile.hasProfileImage !== 'boolean'
             ))
@@ -558,10 +628,10 @@ export async function runAnalysisV2AiReplay(input: {
                 profile,
                 profile.resolverSelectionIds,
             );
-            const resolverMedia = replayAiPolicy === 'ai-stage-policy-v2.9'
+            const resolverMedia = supportsGenderTriageMicrobatch
                 ? selectAnalysisV2GenderResolverMedia(canonicalResolverMedia)
                 : canonicalResolverMedia;
-            const v29ResolverAdmission = replayAiPolicy === 'ai-stage-policy-v2.9'
+            const v29ResolverAdmission = supportsGenderTriageMicrobatch
                 ? v29GenderResolverAdmission(triage, resolverMedia.length)
                 : null;
             if (v29ResolverAdmission === 'eligible') resolver.admission.eligible++;
@@ -578,12 +648,12 @@ export async function runAnalysisV2AiReplay(input: {
                 gender.male++;
                 return;
             }
-            const featureAdmitted = replayAiPolicy !== 'ai-stage-policy-v2.9'
+            const featureAdmitted = !supportsGenderTriageMicrobatch
                 || v29FeatureAdmission(triage, profile) === 'eligible';
             const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
-                ...(replayAiPolicy === 'ai-stage-policy-v2.9' ? {
+                ...(supportsGenderTriageMicrobatch ? {
                     accountProfile: v29AccountProfile(profile),
                 } : {}),
                 media: mediaFor(profile, profile.featureSelectionIds),
@@ -591,7 +661,7 @@ export async function runAnalysisV2AiReplay(input: {
                 triage,
             }) : undefined;
             const assessment = triage.assessment;
-            const eligible = replayAiPolicy === 'ai-stage-policy-v2.9'
+            const eligible = supportsGenderTriageMicrobatch
                 ? v29ResolverAdmission === 'eligible'
                 : !(
                     assessment.inferredGender === 'female'
@@ -679,14 +749,14 @@ export async function runAnalysisV2AiReplay(input: {
         };
         const publicTask = observeRequiredTask(runBounded(
             publicProfiles,
-            replayAiPolicy === 'ai-stage-policy-v2.9' ? 6 : 4,
+            supportsGenderTriageMicrobatch ? 6 : 4,
             async profile => {
                 if (replayWorkFailed) return;
                 if (!runner.triage) return;
                 const triage = await runner.triage({
                     ordinal: profile.ordinal,
                     media: mediaFor(profile, profile.triageSelectionIds),
-                    ...(replayAiPolicy === 'ai-stage-policy-v2.9'
+                    ...(supportsGenderTriageMicrobatch
                         ? { accountProfile: v29AccountProfile(profile) }
                         : {}),
                 });
@@ -800,6 +870,17 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         fullE2eEvidence: false as const,
         ...(input.bundle.schemaVersion === 2 ? { notExact: true as const, noMediaSubstitution: true as const } : {}),
+        ...(diagnosticPartialCoverageAuthorized && paidPartialCoverage ? {
+            diagnosticCoverageOverride: {
+                used: true as const,
+                retainedProfiles: paidPartialCoverage.retainedProfiles,
+                sourceProfiles: paidPartialCoverage.sourceProfiles,
+                retainedMedia: paidPartialCoverage.retainedMedia,
+                exactSelectedMedia: paidPartialCoverage.conservativeSourceMedia,
+                profileRetentionBps: paidPartialCoverage.profileRetentionBps,
+                mediaRetentionBps: paidPartialCoverage.mediaRetentionBps,
+            },
+        } : {}),
         stages,
         gender,
         resolver,

@@ -15,6 +15,7 @@ import {
 } from './replay-runner';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
+import { parseReplayCliArgs } from '../../../../scripts/replay-analysis-v2';
 
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
@@ -26,6 +27,37 @@ function v29Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
     testRunnerPolicies.set(runner, 'ai-stage-policy-v2.9');
     return runner;
+}
+
+function v210Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.10');
+    return runner;
+}
+
+function diagnosticPartialCoverageCapability(
+    aiStagePolicy: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' =
+        'ai-stage-policy-v2.9',
+) {
+    const parsed = parseReplayCliArgs([
+        '--run',
+        '--paid-ai',
+        '--confirm-paid-ai',
+        '--historical-partial-available',
+        '--allow-low-partial-coverage',
+        '--confirm-low-partial-coverage',
+        `--evaluation-ai-policy=${aiStagePolicy}`,
+        '--bundle=a.enc',
+        '--key=a.key',
+    ]);
+    if (
+        parsed.command !== 'run'
+        || !('diagnosticPartialCoverageCapability' in parsed)
+        || !parsed.diagnosticPartialCoverageCapability
+    ) {
+        throw new Error('TEST_DIAGNOSTIC_PARTIAL_COVERAGE_CAPABILITY_MISSING');
+    }
+    return parsed.diagnosticPartialCoverageCapability;
 }
 
 const bundle = {
@@ -163,6 +195,56 @@ describe('AI-only replay runner', () => {
         };
     }
 
+    function diagnosticPaidPartialBundle(): ReturnType<typeof validPartialBundle> {
+        const retainedProfiles = Array.from({ length: 49 }, (_, index) => {
+            const selectionId = `diagnostic-media-${index + 1}`;
+            return {
+                ...bundle.profiles[0]!,
+                ordinal: index + 1,
+                username: `diagnostic_${index + 1}`,
+                media: [{
+                    selectionId,
+                    kind: 'feed' as const,
+                    postId: `diagnostic-post-${index + 1}`,
+                    caption: null,
+                    jpegBase64: '/9j/2Q==',
+                }],
+                triageSelectionIds: [selectionId],
+                featureSelectionIds: [selectionId],
+                resolverSelectionIds: [selectionId],
+                coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            };
+        });
+        const sourceIdentities = [
+            ...retainedProfiles.map(profile => ({
+                ordinal: profile.ordinal,
+                username: profile.username,
+                partition: 'public' as const,
+            })),
+            { ordinal: 50, username: 'diagnostic_unavailable', partition: 'public' as const },
+        ];
+        const value = validPartialBundle();
+        return {
+            ...value,
+            profiles: retainedProfiles,
+            capture: {
+                ...value.capture,
+                partial: {
+                    sourceIdentities,
+                    sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+                    mediaUnavailable: [{
+                        ordinal: 50,
+                        terminal: 'media_unavailable',
+                        selectedMediaCount: 1,
+                        triageFailures: 1,
+                        featureFailures: 1,
+                        reasons: ['source_missing'],
+                    }],
+                },
+            },
+        } as ReturnType<typeof validPartialBundle>;
+    }
+
     const withIdentities = (
         value: ReturnType<typeof validPartialBundle>,
         sourceIdentities: ReturnType<typeof validPartialBundle>['capture']['partial']['sourceIdentities'],
@@ -215,6 +297,32 @@ describe('AI-only replay runner', () => {
         });
     });
 
+    it('reports authenticated partial v2.10 without weakening non-exact scope labels', async () => {
+        const partial = validPartialBundle();
+        const evaluationPolicy = {
+            capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+            aiStage: 'ai-stage-policy-v2.10',
+        } as const;
+        const partialV210 = {
+            ...partial,
+            capture: { ...partial.capture, evaluationPolicy },
+        } satisfies AnalysisV2ReplayBundle;
+        const report = await runAnalysisV2AiReplay({
+            bundle: partialV210,
+            mode: 'dry-run',
+            evaluationPolicy,
+        });
+
+        expect(report).toMatchObject({
+            benchmarkScope: 'ai-only-historical-partial-available',
+            evaluationAiPolicy: 'ai-stage-policy-v2.10',
+            replayAiPolicy: 'ai-stage-policy-v2.10',
+            fullE2eEvidence: false,
+            notExact: true,
+            noMediaSubstitution: true,
+        });
+    });
+
     it('runs eligible partial paid replay through the authenticated v2.9 stages and preserves aggregate-only scope labels', async () => {
         const triage = vi.fn(async () => ({
             outcome: 'ok' as const,
@@ -249,6 +357,161 @@ describe('AI-only replay runner', () => {
             no_media_substitution: true,
             replay_ai_policy: 'ai-stage-policy-v2.9',
         });
+    });
+
+    it('admits v2.10 exact-count diagnostic coverage only through double-confirmed CLI capability', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            value: {
+                assessment: { inferredGender: 'male' as const, confidence: 'high' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['diagnostic-media-1'] },
+                routingDecision: 'exclude_high_confidence_male' as const,
+                routingReason: 'high_confidence_same_owner_male' as const,
+                analyzedSelectionIds: ['diagnostic-media-1'],
+                v29AccountContext: 'personal' as const,
+            },
+            attempts: 1, retries: 0, elapsedMs: 1,
+        }));
+        const basePartial = diagnosticPaidPartialBundle();
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+            aiStage: 'ai-stage-policy-v2.10',
+        } as const;
+        const partial = {
+            ...basePartial,
+            capture: {
+                ...basePartial.capture,
+                evaluationPolicy,
+            },
+        } satisfies AnalysisV2ReplayBundle;
+        const lines: string[] = [];
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner: v210Runner({ triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
+        expect(triage).not.toHaveBeenCalled();
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: partial,
+            runner: v210Runner({ triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(
+                    'ai-stage-policy-v2.10',
+                ),
+            evaluationPolicy,
+            write: line => lines.push(line),
+        });
+
+        expect(triage).toHaveBeenCalledTimes(49);
+        expect(report).toMatchObject({
+            fullE2eEvidence: false,
+            notExact: true,
+            noMediaSubstitution: true,
+            evaluationAiPolicy: 'ai-stage-policy-v2.10',
+            replayAiPolicy: 'ai-stage-policy-v2.10',
+            diagnosticCoverageOverride: {
+                used: true,
+                retainedProfiles: 49,
+                sourceProfiles: 50,
+                retainedMedia: 49,
+                exactSelectedMedia: 50,
+                profileRetentionBps: 9_800,
+                mediaRetentionBps: 9_800,
+            },
+        });
+        const safe = JSON.parse(lines[0]!);
+        expect(safe).toMatchObject({
+            full_e2e_evidence: false,
+            not_exact: true,
+            no_media_substitution: true,
+            diagnostic_partial_coverage_override: {
+                used: true,
+                retained_profiles: 49,
+                source_profiles: 50,
+                retained_media: 49,
+                exact_selected_media: 50,
+                profile_retention_bps: 9_800,
+                media_retention_bps: 9_800,
+            },
+        });
+        expect(lines.join('')).not.toContain('diagnostic_1');
+        expect(lines.join('')).not.toContain('diagnostic-media');
+    });
+
+    it('rejects direct boolean and forged diagnostic approval before any AI call', async () => {
+        const triage = vi.fn();
+        const feature = vi.fn();
+        const privateNames = vi.fn();
+        const resolveGender = vi.fn();
+        const partial = diagnosticPaidPartialBundle();
+        const runner = v29Runner({
+            triage,
+            feature,
+            privateNames,
+            resolveGender,
+        });
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            allowLowPartialCoverage: true,
+            evaluationPolicy: partial.capture.evaluationPolicy,
+        } as Parameters<typeof runAnalysisV2AiReplay>[0])).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            diagnosticPartialCoverageCapability: Object.freeze({}),
+            evaluationPolicy: partial.capture.evaluationPolicy,
+        } as Parameters<typeof runAnalysisV2AiReplay>[0])).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+
+        expect(triage).not.toHaveBeenCalled();
+        expect(feature).not.toHaveBeenCalled();
+        expect(privateNames).not.toHaveBeenCalled();
+        expect(resolveGender).not.toHaveBeenCalled();
+    });
+
+    it('rejects diagnostic coverage for legacy countless partial artifacts before AI', async () => {
+        const triage = vi.fn();
+        const partial = diagnosticPaidPartialBundle();
+        const legacy = {
+            ...partial,
+            capture: {
+                ...partial.capture,
+                partial: {
+                    ...partial.capture.partial,
+                    mediaUnavailable: partial.capture.partial.mediaUnavailable.map(item => {
+                        const rest = { ...item };
+                        delete rest.selectedMediaCount;
+                        return rest;
+                    }),
+                },
+            },
+        } as ReturnType<typeof validPartialBundle>;
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: legacy,
+            runner: v29Runner({ triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(),
+            evaluationPolicy: legacy.capture.evaluationPolicy,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
+        expect(triage).not.toHaveBeenCalled();
     });
 
     it('requires the authenticated historical capability on every run', async () => {
