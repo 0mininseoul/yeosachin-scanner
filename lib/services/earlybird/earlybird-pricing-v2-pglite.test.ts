@@ -21,6 +21,9 @@ const prePricingMigrations = [
 const pricingV2Migration = migration(
     '20260724230000_update_earlybird_pricing_v2.sql'
 );
+const checkoutLineageMigration = migration(
+    '20260728130000_classify_earlybird_checkout_lineage.sql'
+);
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -149,7 +152,9 @@ async function createDatabase(includePricingV2: boolean): Promise<PGlite> {
     databases.push(db);
     await db.exec(bootstrap);
     for (const source of prePricingMigrations) await db.exec(source);
-    if (includePricingV2) await db.exec(pricingV2Migration);
+    if (includePricingV2) {
+        await db.exec(pricingV2Migration);
+    }
     return db;
 }
 
@@ -411,6 +416,7 @@ describe('earlybird pricing v2 database behavior', () => {
         )).rows[0];
 
         await db.exec(pricingV2Migration);
+        await db.exec(checkoutLineageMigration);
         await expect(checkout(db, seed, 'basic', V2)).resolves.toEqual({
             order_id: original.order_id,
             created: false,
@@ -423,7 +429,7 @@ describe('earlybird pricing v2 database behavior', () => {
         expect(after).toEqual(before);
     }, 30_000);
 
-    it('replays the exact pending P1 order even after a newer P2 is ready and blocks a new same-product checkout', async () => {
+    it('replays the exact pending P1 order and classifies a new same-product lineage without mutation', async () => {
         const db = await createDatabase(false);
         const p1 = await seedPreflight(db, 11, 'basic', V1);
         const original = await checkout(db, p1, 'basic', V1);
@@ -440,6 +446,7 @@ describe('earlybird pricing v2 database behavior', () => {
         )).rows[0];
 
         await db.exec(pricingV2Migration);
+        await db.exec(checkoutLineageMigration);
         const p2 = await seedNewerPreflightForUser(db, p1, 12, 'basic', V2);
 
         await expect(checkout(db, p1, 'basic', V2)).resolves.toEqual({
@@ -452,8 +459,89 @@ describe('earlybird pricing v2 database behavior', () => {
             [original.order_id]
         )).rows[0]).toEqual(before);
         await expect(checkout(db, p2, 'basic', V2)).rejects.toThrow(
-            /EARLYBIRD_CHECKOUT_ALREADY_PENDING/
+            /EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:STALE_PRICING_LINEAGE/
         );
+        expect((await db.query<typeof before>(
+            `SELECT id, pricing_version, expected_amount_krw, status, updated_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0]).toEqual(before);
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_orders'
+        )).rows[0].count).toBe(1);
+    }, 30_000);
+
+    it('classifies a cancelled unresolved same-product lineage without replacing its snapshot', async () => {
+        const db = await createDatabase(false);
+        const p1 = await seedPreflight(db, 13, 'basic', V1);
+        const original = await checkout(db, p1, 'basic', V1);
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'cancelled', updated_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [original.order_id]
+        );
+        const before = (await db.query<{
+            id: string;
+            pricing_version: string;
+            expected_amount_krw: number;
+            status: string;
+            payment_id: string | null;
+            updated_at: string;
+        }>(
+            `SELECT id, pricing_version, expected_amount_krw, status, payment_id, updated_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0];
+
+        await db.exec(pricingV2Migration);
+        await db.exec(checkoutLineageMigration);
+        const p2 = await seedNewerPreflightForUser(db, p1, 14, 'basic', V2);
+
+        await expect(checkout(db, p2, 'basic', V2)).rejects.toThrow(
+            /EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE:STALE_PRICING_LINEAGE/
+        );
+        expect((await db.query<typeof before>(
+            `SELECT id, pricing_version, expected_amount_krw, status, payment_id, updated_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0]).toEqual(before);
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_orders'
+        )).rows[0].count).toBe(1);
+    }, 30_000);
+
+    it('does not cancel or replace a live different-product checkout lineage', async () => {
+        const db = await createDatabase(false);
+        const p1 = await seedPreflight(db, 15, 'basic', V1);
+        const original = await checkout(db, p1, 'basic', V1);
+        const before = (await db.query<{
+            id: string;
+            plan_id: string;
+            status: string;
+            payment_id: string | null;
+            updated_at: string;
+        }>(
+            `SELECT id, plan_id, status, payment_id, updated_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0];
+
+        await db.exec(pricingV2Migration);
+        await db.exec(checkoutLineageMigration);
+        const p2 = await seedNewerPreflightForUser(db, p1, 16, 'standard', V2);
+
+        await expect(checkout(db, p2, 'standard', V2)).rejects.toThrow(
+            /EARLYBIRD_ORDER_CONFLICT/
+        );
+        expect((await db.query<typeof before>(
+            `SELECT id, plan_id, status, payment_id, updated_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0]).toEqual(before);
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_orders'
+        )).rows[0].count).toBe(1);
     }, 30_000);
 
     it('preserves paid/cancelled orders and webhook audit rows across the migration', async () => {
@@ -480,6 +568,7 @@ describe('earlybird pricing v2 database behavior', () => {
         )).rows;
 
         await db.exec(pricingV2Migration);
+        await db.exec(checkoutLineageMigration);
 
         expect((await db.query(
             `SELECT id, preflight_id, plan_id, pricing_version,
@@ -494,7 +583,7 @@ describe('earlybird pricing v2 database behavior', () => {
             /EARLYBIRD_ORDER_CONFLICT/
         );
         await expect(checkout(db, cancelledSeed, 'standard', V2)).rejects.toThrow(
-            /EARLYBIRD_ORDER_CONFLICT/
+            /EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE:STALE_PRICING_LINEAGE/
         );
     }, 30_000);
 

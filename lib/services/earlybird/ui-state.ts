@@ -82,22 +82,51 @@ interface PendingEarlybirdRecoveryDependencies {
     showError: (message: string) => void;
 }
 
-export function pendingEarlybirdCheckoutStatusPath(
+export interface EarlybirdCheckoutLineageStatusAction {
+    path: string;
+    kind: 'active_pending' | 'cancelled_unresolved';
+}
+
+function isEarlybirdCheckoutLineageSubreason(value: unknown): boolean {
+    return value === 'STALE_PRICING_LINEAGE' || value === 'SUPERSEDED_LINEAGE';
+}
+
+/**
+ * Only database-classified blocked lineages get a status CTA. In particular,
+ * a cancelled unresolved lineage deliberately has no checkout-recovery action.
+ */
+export function earlybirdCheckoutLineageStatusAction(
     status: number,
     payload: unknown,
     planId: PlanId
-): string | null {
+): EarlybirdCheckoutLineageStatusAction | null {
     if (
         status !== 409
         || !isPaidEarlybirdPlanId(planId)
         || !payload
         || typeof payload !== 'object'
         || !('code' in payload)
-        || payload.code !== 'EARLYBIRD_CHECKOUT_ALREADY_PENDING'
+        || !('subreason' in payload)
+        || !isEarlybirdCheckoutLineageSubreason(payload.subreason)
     ) {
         return null;
     }
-    return `/earlybird?plan=${planId}`;
+    if (payload.code === 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE') {
+        return { path: `/earlybird?plan=${planId}`, kind: 'active_pending' };
+    }
+    if (payload.code === 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE') {
+        return { path: `/earlybird?plan=${planId}`, kind: 'cancelled_unresolved' };
+    }
+    return null;
+}
+
+export function pendingEarlybirdCheckoutStatusPath(
+    status: number,
+    payload: unknown,
+    planId: PlanId
+): string | null {
+    const action = earlybirdCheckoutLineageStatusAction(status, payload, planId);
+    return action?.kind === 'active_pending' ? action.path : null;
 }
 
 interface PlanCardAvailability {

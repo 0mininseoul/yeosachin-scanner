@@ -56,19 +56,45 @@ const waitlistResultSchema = z.array(z.object({
 
 export class EarlybirdPersistenceError extends Error {
     readonly code: string;
+    readonly subreason?: EarlybirdCheckoutLineageSubreason;
 
-    constructor(code: string) {
+    constructor(code: string, subreason?: EarlybirdCheckoutLineageSubreason) {
         super(code);
         this.name = 'EarlybirdPersistenceError';
         this.code = code;
+        this.subreason = subreason;
     }
 }
 
-function boundedDatabaseCode(error: unknown): string {
+export type EarlybirdCheckoutLineageSubreason =
+    | 'STALE_PRICING_LINEAGE'
+    | 'SUPERSEDED_LINEAGE';
+
+function boundedDatabaseFailure(error: unknown): {
+    code: string;
+    subreason?: EarlybirdCheckoutLineageSubreason;
+} {
     if (!error || typeof error !== 'object' || !('message' in error)) {
-        return 'EARLYBIRD_PERSISTENCE_FAILED';
+        return { code: 'EARLYBIRD_PERSISTENCE_FAILED' };
     }
     const message = String(error.message);
+    const lineageCode = [
+        'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+        'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE',
+    ].find(code => message.includes(code));
+    if (lineageCode) {
+        const subreason: EarlybirdCheckoutLineageSubreason | undefined =
+            message.includes('STALE_PRICING_LINEAGE')
+                ? 'STALE_PRICING_LINEAGE'
+                : message.includes('SUPERSEDED_LINEAGE')
+                    ? 'SUPERSEDED_LINEAGE'
+                    : undefined;
+        // A lineage rejection without its fixed database-generated subreason
+        // is deliberately opaque; callers must not infer it from mutable data.
+        return subreason
+            ? { code: lineageCode, subreason }
+            : { code: 'EARLYBIRD_PERSISTENCE_FAILED' };
+    }
     const knownCode = [
         'PLAN_UPGRADE_REQUIRED',
         'PLAN_SELECTION_UNAVAILABLE',
@@ -77,12 +103,11 @@ function boundedDatabaseCode(error: unknown): string {
         'EARLYBIRD_WAITLIST_REQUIRED',
         'EARLYBIRD_WAITLIST_NOT_ELIGIBLE',
         'EARLYBIRD_ORDER_CONFLICT',
-        'EARLYBIRD_CHECKOUT_ALREADY_PENDING',
         'CHECKOUT_PHONE_REQUIRED',
         'EARLYBIRD_PRICE_SNAPSHOT_INVALID',
         'EARLYBIRD_PRICING_REFRESH_REQUIRED',
     ].find(code => message.includes(code));
-    return knownCode ?? 'EARLYBIRD_PERSISTENCE_FAILED';
+    return { code: knownCode ?? 'EARLYBIRD_PERSISTENCE_FAILED' };
 }
 
 export interface CreateCheckoutRecordInput {
@@ -110,7 +135,10 @@ export const earlybirdStore = {
             p_disclosure_text: input.disclosureText,
             p_disclosure_accepted_at: input.disclosureAcceptedAt,
         });
-        if (error) throw new EarlybirdPersistenceError(boundedDatabaseCode(error));
+        if (error) {
+            const failure = boundedDatabaseFailure(error);
+            throw new EarlybirdPersistenceError(failure.code, failure.subreason);
+        }
         const parsed = checkoutResultSchema.safeParse(data);
         if (!parsed.success) {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
@@ -121,9 +149,8 @@ export const earlybirdStore = {
                 { p_order_id: parsed.data[0].order_id }
             );
         if (referenceError) {
-            throw new EarlybirdPersistenceError(
-                boundedDatabaseCode(referenceError)
-            );
+            const failure = boundedDatabaseFailure(referenceError);
+            throw new EarlybirdPersistenceError(failure.code, failure.subreason);
         }
         const sellerReference = sellerReferenceResultSchema.safeParse(
             referenceData
@@ -220,7 +247,10 @@ export const earlybirdStore = {
             p_user_id: userId,
             p_preflight_id: preflightId,
         });
-        if (error) throw new EarlybirdPersistenceError(boundedDatabaseCode(error));
+        if (error) {
+            const failure = boundedDatabaseFailure(error);
+            throw new EarlybirdPersistenceError(failure.code, failure.subreason);
+        }
         const parsed = waitlistResultSchema.safeParse(data);
         if (!parsed.success) {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');

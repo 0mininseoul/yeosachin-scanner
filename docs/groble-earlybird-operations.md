@@ -159,8 +159,8 @@ ORDER BY query_start;
 - `verified_kakao_phone` 주문의 결제 완료는 checkout 시점의 불변 정규화 전화번호 snapshot으로만 매칭한다. 사용자 프로필 전화번호가 이후 바뀌어도 주문 snapshot은 바뀌지 않으며 이메일로 fallback하지 않는다. 이메일 매칭은 migration 전에 생성된 `legacy_email` 주문에만 허용한다.
 - 같은 사용자·상품·금액에 해당하는 미결제 `legacy_email` 취소 주문이 여러 건이면 최신 주문을 임의로 고르지 않고 `ambiguous_buyer`로 격리한다.
 - Groble 구매자의 정규화 전화번호와 소문자 이메일은 signed webhook transaction의 전화번호 우선·이메일 fallback 매칭 RPC 입력으로만 일시 처리한다. raw 전화번호·표시 이름은 RPC에 전달하지 않고, 이메일·전화번호·표시 이름을 주문·웹훅 이벤트에 영속 저장하지 않으며 브라우저 응답·Amplitude·Axiom에 전송하지 않는다. 카드 정보와 원본 payload도 저장하지 않는다.
-- 다른 플랜의 최신 사전 점검으로 다시 시도하면 이전 미처리 주문은 snapshot을 변경하지 않고 `cancelled`로 남기며, 새 snapshot으로 별도 주문을 만든다. 이전 결제창에서 뒤늦게 결제된 건은 새 주문에 붙이지 않고 환불 검토 대상으로 격리한다.
-- Groble 완료 이벤트에는 앱의 주문 식별자가 없으므로, 같은 구매자가 같은 플랜을 새 snapshot으로 다시 열면 이전 주문과 구분할 수 없다. 현재 `payment_pending` 주문이나 같은 상품의 미해결 `cancelled` 주문이 있으면 새 주문을 만들지 않고 `EARLYBIRD_CHECKOUT_ALREADY_PENDING`으로 차단하여 기존 snapshot을 보존한다. 이미 종료 상태인 동일 주문은 결제창 재진입 대상으로 반환하지 않는다.
+- 다른 플랜의 최신 사전 점검으로 재시도해도 이전 `payment_pending` 주문을 취소·만료·교체하지 않으며 새 checkout을 만들지 않는다. 기존 주문의 불변 snapshot과 provider 귀속 가능성을 보존한다.
+- Groble 완료 이벤트에는 앱의 주문 식별자가 없으므로, 같은 구매자가 같은 플랜을 새 snapshot으로 다시 열면 이전 주문과 구분할 수 없다. 같은 상품의 `payment_pending` 주문은 `EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE`, 같은 상품의 `payment_id IS NULL`인 `cancelled` 주문은 `EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE` 409으로 차단한다. 두 응답의 `subreason`은 저장된 불변 snapshot만으로 `STALE_PRICING_LINEAGE`(v1) 또는 `SUPERSEDED_LINEAGE`(그 외)로 정해진다. 전자는 상태 페이지에서 기존 결제창을 이어갈 수 있지만 후자는 상태만 확인하며 재시도·재개하지 않는다.
 - Basic과 Standard는 각각 독립된 서버 한도 10건과 순번 1~10을 사용한다. 한 플랜의 남은 수량을 다른 플랜으로 옮기지 않는다.
 - 채널 표시 수량과 가격의 정본은 [운영 원가 문서의 Groble 얼리버드 가격](./operations-cost-model.md#groble-얼리버드-가격)과 함께 확인한다.
 - Groble 상품 재고와 서버 inventory를 동시에 유지한다.

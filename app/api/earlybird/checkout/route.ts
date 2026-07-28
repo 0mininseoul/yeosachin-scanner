@@ -35,8 +35,17 @@ import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function errorResponse(status: number, code: string, error: string): NextResponse {
-    return NextResponse.json({ code, error }, { status });
+function errorResponse(
+    status: number,
+    code: string,
+    error: string,
+    subreason?: 'STALE_PRICING_LINEAGE' | 'SUPERSEDED_LINEAGE',
+): NextResponse {
+    return NextResponse.json({
+        code,
+        error,
+        ...(subreason ? { subreason } : {}),
+    }, { status });
 }
 
 /** Demo rejections intentionally bypass operational and commercial instrumentation. */
@@ -55,11 +64,20 @@ function persistenceErrorResponse(error: EarlybirdPersistenceError): NextRespons
             '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.'
         );
     }
-    if (error.code === 'EARLYBIRD_CHECKOUT_ALREADY_PENDING') {
+    if (error.code === 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE') {
         return errorResponse(
             409,
             error.code,
-            '기존 결제창의 처리 상태를 먼저 확인해주세요.'
+            '기존 결제창의 처리 상태를 먼저 확인해주세요.',
+            error.subreason,
+        );
+    }
+    if (error.code === 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE') {
+        return errorResponse(
+            409,
+            error.code,
+            '이전 결제 요청의 처리 상태를 먼저 확인해주세요. 새 결제를 만들 수 없습니다.',
+            error.subreason,
         );
     }
     if (error.code === 'EARLYBIRD_PRICING_REFRESH_REQUIRED') {
