@@ -17,6 +17,7 @@ import {
 } from './replay-bundle';
 import { installReplayArtifactSignalCleanup } from './replay-artifact-lifecycle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
+import { HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY } from './replay-source-lineage';
 
 const temporaryPaths: string[] = [];
 
@@ -167,6 +168,46 @@ describe('analysis V2 replay bundle', () => {
                     },
                     partial: {
                         mediaUnavailable: [{ selectedMediaCount: 3 }],
+                    },
+                },
+            },
+        });
+    });
+
+    it('authenticates the exact v2.11 gender-quality capability in a sealed schema-v2 bundle', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        const bundlePath = join(directory, 'partial-v211.enc');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.11',
+                },
+            },
+        } as AnalysisV2ReplayBundle;
+
+        await writeReplayBundle({
+            bundle: value,
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+        await expect(readAuthenticatedReplayBundle({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:20:00.000Z'),
+        })).resolves.toMatchObject({
+            bundle: {
+                schemaVersion: 2,
+                capture: {
+                    evaluationPolicy: {
+                        capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.11',
                     },
                 },
             },

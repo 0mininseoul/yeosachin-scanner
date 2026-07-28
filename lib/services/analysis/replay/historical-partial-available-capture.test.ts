@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import { captureHistoricalPartialAvailableReplayBundle, partialAvailableSafeReport } from './historical-partial-available-capture';
+import {
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+} from './replay-source-lineage';
 
 const lineage = {
     selectedPlanId: 'standard' as const,
@@ -37,6 +41,43 @@ function publicProfile(username: string, posts = 1) {
 }
 
 describe('historical partial-available replay capture', () => {
+    it('seals the exact v2.11 gender-quality evaluation capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '2'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11',
+        });
+    });
+
+    it('rejects the v2.11 official E2E capability from non-exact capture', async () => {
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '3'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
     it('seals a v2.10 evaluation into the same non-exact no-substitution scope', async () => {
         const result = await captureHistoricalPartialAvailableReplayBundle({
             requestFingerprint: '0'.repeat(64),
