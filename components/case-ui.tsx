@@ -1,6 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
 import {
   DEFAULT_THREAT_METER_SEGMENTS,
   threatMeterFillCount,
@@ -210,19 +210,40 @@ export function ThreatBar({
   score,
   segments = DEFAULT_THREAT_METER_SEGMENTS,
   className = "",
+  fill = "static",
+  fillDelayMs = 0,
 }: {
   grade: Grade;
   score?: number;
   segments?: number;
   className?: string;
+  /**
+   * static  — render at the final width (default).
+   * pending — hold at zero, waiting for its cue.
+   * run     — animate from zero up to the final width.
+   */
+  fill?: "static" | "pending" | "run";
+  fillDelayMs?: number;
 }) {
   const filled = threatMeterFillCount({ grade, displayScore: score, segments });
   const ratio = segments > 0 ? filled / segments : 0;
+  const width = `${ratio * 100}%`;
   return (
     <div className={`relative h-0.5 w-full bg-line ${className}`} aria-hidden="true">
       <span
-        className="absolute inset-y-0 left-0"
-        style={{ width: `${ratio * 100}%`, background: GRADE_MAP[grade].color }}
+        // The meter fills on cue so it reads as a reading being taken rather than
+        // a value that was always there. It has to sit at zero until then, or the
+        // final width flashes before the animation starts.
+        className={`absolute inset-y-0 left-0 ${fill === "run" ? "meter-fill" : ""}`}
+        style={{
+          background: GRADE_MAP[grade].color,
+          ...(fill === "run"
+            ? ({
+                "--meter-width": width,
+                animationDelay: fillDelayMs ? `${fillDelayMs}ms` : undefined,
+              } as CSSProperties)
+            : { width: fill === "pending" ? 0 : width }),
+        }}
       />
     </div>
   );

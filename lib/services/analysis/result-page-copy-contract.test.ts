@@ -78,10 +78,17 @@ describe('result page pagination copy contract', () => {
     it('omits the screened-count header while retaining the gender breakdown and account tabs', () => {
         expect(resultPage).not.toContain('판독 {counts.screened.toLocaleString()}명');
         expect(resultPage).toContain('<GenderRatioBreakdown gr={gr} />');
-        expect(resultPage).toContain("label: '공개 계정'");
-        expect(resultPage).toContain('summary.v2.publicMutuals.toLocaleString()');
+        expect(resultPage).toContain("label: '공개 계정(여성)'");
         expect(resultPage).toContain("label: '비공개 계정'");
         expect(resultPage).toContain('summary.v2.privateMutuals.toLocaleString()');
+    });
+
+    it('counts the public tab by the rows it actually lists', () => {
+        // The public tab lists female-classified accounts only. Counting every
+        // public mutual overstated it roughly threefold, so the number has to
+        // come from the same female slice the distribution bar shows.
+        expect(resultPage).toContain('gr ? gr.female.count : femaleAccounts.length');
+        expect(resultPage).not.toContain('summary.v2.publicMutuals.toLocaleString()');
     });
 
     it('keeps the signed image proxy boundary for profile images', () => {
@@ -112,11 +119,10 @@ describe('result page pagination copy contract', () => {
         expect(topBar).not.toContain('handleKakaoShare');
     });
 
-    it('states the public/private split once, on the tabs', () => {
-        // Both numbers already label the tabs below the summary, so a separate
+    it('states the account split once, on the tabs', () => {
+        // The counts already label the tabs below the summary, so a separate
         // metric strip repeating them would be dead weight.
         expect(resultPage).not.toContain('MetricStrip');
-        expect(resultPage).toContain('summary.v2.publicMutuals.toLocaleString()');
         expect(resultPage).toContain('summary.v2.privateMutuals.toLocaleString()');
     });
 

@@ -269,21 +269,24 @@ export interface AnalysisPlanBadgePresentation {
     className: string;
 }
 
+// Every plan reads in the brand crimson. The tiers are already named in the
+// label, so spending a second accent colour on them only competed with the
+// status rail, which is the archive's actual scanning signal.
 const PLAN_BADGES = {
     basic: {
         planId: 'basic',
         label: 'BASIC',
-        className: 'border-line-2 text-fg-mute',
+        className: 'text-blood-2',
     },
     standard: {
         planId: 'standard',
         label: 'STANDARD',
-        className: 'border-blood/40 bg-blood/10 text-blood',
+        className: 'text-blood-2',
     },
     plus: {
         planId: 'plus',
         label: 'PLUS',
-        className: 'border-amber/50 bg-amber/10 text-amber',
+        className: 'text-blood-2',
     },
 } as const satisfies Readonly<Record<PlanId, AnalysisPlanBadgePresentation>>;
 

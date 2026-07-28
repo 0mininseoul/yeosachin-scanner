@@ -826,10 +826,12 @@ export default function ResultPage({ params }: PageProps) {
                     {([
                         {
                             key: 'public',
-                            label: '공개 계정',
-                            count: summary.v2
-                                ? summary.v2.publicMutuals.toLocaleString()
-                                : String(femaleAccounts.length),
+                            // The list below holds female-classified accounts only, so the
+                            // tab must not count every public mutual — that overstated it
+                            // by roughly 3x. This number now matches the female slice of
+                            // the distribution bar above.
+                            label: '공개 계정(여성)',
+                            count: (gr ? gr.female.count : femaleAccounts.length).toLocaleString(),
                         },
                         {
                             key: 'private',

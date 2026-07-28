@@ -13,7 +13,9 @@ export function InstagramLookupLink() {
         <button
             type="button"
             onClick={openInstagramApp}
-            className="group flex min-h-10 items-center justify-end gap-1.5 px-1 text-[12px] text-fg-mute transition-colors hover:text-fg-dim focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blood"
+            // min-h-10 keeps the tap target while the negative top margin pulls the
+            // text back against the field it belongs to.
+            className="group -mt-0.5 flex min-h-10 items-center justify-end gap-1.5 px-1 text-[12px] text-fg-mute transition-colors hover:text-fg-dim focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blood"
         >
             <span>아이디가 기억 안 나나요?</span>
             <span className="font-semibold text-fg-dim transition-colors group-hover:text-blood">
