@@ -36,16 +36,24 @@ export const AI_STAGE_POLICY_LATEST_VERSION = 'ai-stage-policy-v2.7';
  */
 export const AI_STAGE_POLICY_V28_VERSION = 'ai-stage-policy-v2.8';
 /**
- * v2.9 is an explicit launch-performance fence.  It retains every v2.8 input
- * and presentation rule, but changes only how small, independently-audited
- * gender triage requests are packed for Gemini.
+ * v2.9 is an explicit launch-performance fence. It changed only how small,
+ * independently-audited gender-triage requests are packed for Gemini; its
+ * historical presentation bytes remain immutable even though v2.10 restores
+ * the intended v2.8 public-copy inheritance for new requests.
  */
 export const AI_STAGE_POLICY_V29_VERSION = 'ai-stage-policy-v2.9';
+/**
+ * v2.10 is the immutable successor to the shipped v2.9 microbatch policy. It restores the
+ * v2.8 public-presentation guard family without changing v2.9 model, threshold, or scheduler
+ * semantics. Historical v2.9 requests deliberately remain on their original bytes.
+ */
+export const AI_STAGE_POLICY_V210_VERSION = 'ai-stage-policy-v2.10';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
+    AI_STAGE_POLICY_V210_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -184,11 +192,16 @@ const AI_STAGE_POLICIES_V29 = Object.freeze({
     }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V210 = Object.freeze({
+    ...AI_STAGE_POLICIES_V29,
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
     [AI_STAGE_POLICY_V28_VERSION]: AI_STAGE_POLICIES_V28,
     [AI_STAGE_POLICY_V29_VERSION]: AI_STAGE_POLICIES_V29,
+    [AI_STAGE_POLICY_V210_VERSION]: AI_STAGE_POLICIES_V210,
 });
 
 export type AiStagePolicyCapability =
@@ -196,7 +209,9 @@ export type AiStagePolicyCapability =
     | 'genderResolution'
     | 'partialMediaCoverage'
     | 'inputQualityV28'
-    | 'genderTriageMicrobatchV29';
+    | 'genderTriageMicrobatchV29'
+    /** Safe v2.8 public-copy contracts, restored for the v2.10 successor only. */
+    | 'safePublicPresentationV28';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -213,6 +228,7 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'genderResolution',
         'partialMediaCoverage',
         'inputQualityV28',
+        'safePublicPresentationV28',
     ]),
     [AI_STAGE_POLICY_V29_VERSION]: new Set<AiStagePolicyCapability>([
         'durableGeminiLease',
@@ -220,6 +236,14 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'partialMediaCoverage',
         'inputQualityV28',
         'genderTriageMicrobatchV29',
+    ]),
+    [AI_STAGE_POLICY_V210_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
     ]),
 });
 
@@ -293,7 +317,7 @@ export function selectAiStagePolicyVersion({
             && accessMode === 'test_entitlement'
         );
     if (v27Eligible && v28Eligible && v29Eligible) {
-        return AI_STAGE_POLICY_V29_VERSION;
+        return AI_STAGE_POLICY_V210_VERSION;
     }
     if (v27Eligible && v28Eligible) {
         return AI_STAGE_POLICY_V28_VERSION;

@@ -11,6 +11,10 @@ const v29ClaimPolicyMigrationPath = path.join(
     process.cwd(),
     'supabase/migrations/20260728100000_allow_scheduler_claim_ai_stage_v29.sql'
 );
+const v210ClaimPolicyMigrationPath = path.join(
+    process.cwd(),
+    'supabase/migrations/20260728110000_add_ai_stage_policy_v210.sql'
+);
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const jobClaim = '223e4567-e89b-42d3-a456-426614174000';
 const operationClaim = '323e4567-e89b-42d3-a456-426614174000';
@@ -96,6 +100,17 @@ beforeAll(async () => {
             operation_key TEXT NOT NULL,
             stage TEXT NOT NULL
         );
+        CREATE TABLE public.analysis_v2_female_results (
+            request_id UUID NOT NULL,
+            candidate_id TEXT NOT NULL,
+            sort_ordinal SMALLINT NOT NULL,
+            one_line_overview TEXT NOT NULL,
+            narrative_line_one TEXT,
+            narrative_line_two TEXT
+        );
+        CREATE FUNCTION public.analysis_v2_v28_safe_overview_fallback(p_sort_ordinal INTEGER)
+        RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = ''
+        AS $$ SELECT '안전한 공개 단서만 남긴 총평입니다.'::TEXT $$;
         CREATE FUNCTION public.analysis_v2_valid_ai_operation_key(value TEXT)
         RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = ''
         AS $$ SELECT value ~
@@ -157,6 +172,7 @@ beforeAll(async () => {
     `);
     await db.exec(await readFile(migrationPath, 'utf8'));
     await db.exec(await readFile(v29ClaimPolicyMigrationPath, 'utf8'));
+    await db.exec(await readFile(v210ClaimPolicyMigrationPath, 'utf8'));
     await db.query(`
         INSERT INTO public.analysis_requests (
             id, pipeline_version, status, policy_versions_snapshot
@@ -183,10 +199,13 @@ afterAll(async () => {
 });
 
 describe('analysis V2 live scheduler migration', () => {
-    it('admits only canonical v2.8/v2.9 snapshots for scheduler claims', async () => {
+    it('admits v2.10 only after its forward migration while preserving exact scheduler snapshots', async () => {
         const v29RequestId = '133e4567-e89b-42d3-a456-426614174000';
         const v29JobClaim = '143e4567-e89b-42d3-a456-426614174000';
         const v29OperationClaim = '153e4567-e89b-42d3-a456-426614174000';
+        const v210RequestId = '113e4567-e89b-42d3-a456-426614174000';
+        const v210JobClaim = '123e4567-e89b-42d3-a456-426614174000';
+        const v210OperationClaim = '133e4567-e89b-42d3-a456-426614174000';
         const rejectedRequests = [
             {
                 id: '163e4567-e89b-42d3-a456-426614174000',
@@ -261,6 +280,19 @@ describe('analysis V2 live scheduler migration', () => {
                 not_before_at: null,
             }]);
 
+            await insertClaimableRequest(
+                v210RequestId,
+                policy('ai-stage-policy-v2.10'),
+                v210JobClaim,
+            );
+            expect((await claim(v210RequestId, v210JobClaim, v210OperationClaim)).rows).toEqual([{
+                decision: 'execute',
+                operation_claim_token: v210OperationClaim,
+                recovery_only: false,
+                result_json: null,
+                not_before_at: null,
+            }]);
+
             for (const rejected of rejectedRequests) {
                 await insertClaimableRequest(
                     rejected.id,
@@ -271,7 +303,7 @@ describe('analysis V2 live scheduler migration', () => {
                     .rejects.toThrow('ANALYSIS_V2_SCHEDULER_OPERATION_POLICY_MISMATCH');
             }
         } finally {
-            for (const id of [v29RequestId, ...rejectedRequests.map(({ id }) => id)]) {
+            for (const id of [v29RequestId, v210RequestId, ...rejectedRequests.map(({ id }) => id)]) {
                 await db.query(
                     'DELETE FROM public.analysis_v2_scheduler_operations WHERE request_id = $1',
                     [id]
@@ -282,6 +314,48 @@ describe('analysis V2 live scheduler migration', () => {
                 );
                 await db.query('DELETE FROM public.analysis_requests WHERE id = $1', [id]);
             }
+        }
+    });
+
+    it('applies the atomic v2.8 presentation guard to v2.10 only', async () => {
+        const presentationRequestId = '153e4567-e89b-42d3-a456-426614174000';
+        try {
+            await db.query(`
+                INSERT INTO public.analysis_requests (
+                    id, pipeline_version, status, policy_versions_snapshot
+                ) VALUES (
+                    $1, 'v2', 'processing',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.10","scheduler":"ai-scheduler-v1"}'::jsonb
+                )
+            `, [presentationRequestId]);
+            await db.query(`
+                INSERT INTO public.analysis_v2_female_results (
+                    request_id, candidate_id, sort_ordinal, one_line_overview,
+                    narrative_line_one, narrative_line_two
+                ) VALUES (
+                    $1, 'candidate:one', 1,
+                    '판독관은 남자친구가 있다고 적힌 소개를 보고 결론을 냈습니다 ㅋㅋ.',
+                    '첫 줄 ㅋㅋ.', '둘째 줄 ㅋㅋ.'
+                )
+            `, [presentationRequestId]);
+            await db.query('SELECT public.analysis_v2_apply_v28_summary_tone($1)', [presentationRequestId]);
+            const guarded = await db.query<{
+                overview: string;
+                line_one: string | null;
+                line_two: string | null;
+            }>(`
+                SELECT one_line_overview AS overview,
+                    narrative_line_one AS line_one, narrative_line_two AS line_two
+                FROM public.analysis_v2_female_results WHERE request_id = $1
+            `, [presentationRequestId]);
+            expect(guarded.rows).toEqual([{
+                overview: '안전한 공개 단서만 남긴 총평입니다.',
+                line_one: '첫 줄 .',
+                line_two: '둘째 줄 .',
+            }]);
+        } finally {
+            await db.query('DELETE FROM public.analysis_v2_female_results WHERE request_id = $1', [presentationRequestId]);
+            await db.query('DELETE FROM public.analysis_requests WHERE id = $1', [presentationRequestId]);
         }
     });
 

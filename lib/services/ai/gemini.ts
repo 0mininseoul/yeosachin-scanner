@@ -31,6 +31,7 @@ import {
     AI_STAGE_POLICY_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
     AI_GEMINI_SDK_TIMEOUT_MS,
+    aiStagePolicySupports,
     assertSupportedAiStagePolicyVersion,
     getAiStagePolicy,
     isAiStageName,
@@ -151,10 +152,7 @@ async function runWithGenerationSlot<T>(
     }
 
     if (
-        (
-            policyVersion === 'ai-stage-policy-v2.8'
-            || policyVersion === 'ai-stage-policy-v2.9'
-        )
+        aiStagePolicySupports(policyVersion, 'inputQualityV28')
         && (
             stage === 'genderTriage'
             || stage === 'featureAnalysis'
@@ -787,7 +785,7 @@ export async function analyzeWithGemini<T>(
         || maxImages < 0
         || maxImages > 10
         || stage !== 'genderTriage'
-        || resolvedPolicyVersion !== 'ai-stage-policy-v2.9'
+        || !aiStagePolicySupports(resolvedPolicyVersion, 'genderTriageMicrobatchV29')
     )) {
         throw new Error('Gemini maxImages override is restricted to bounded v2.9 gender batches');
     }

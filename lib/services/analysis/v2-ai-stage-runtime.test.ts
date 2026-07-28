@@ -3,6 +3,7 @@ import {
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
+    AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
 import type { GenderTriageInput } from '@/lib/services/ai/v2-staged-analysis';
@@ -500,6 +501,78 @@ describe('durable V2 AI stage runtime', () => {
         ))).toBe(true);
         expect(runGender).toHaveBeenCalledTimes(2);
         expect(first.operationKey).not.toBe(second.operationKey);
+    });
+
+    it('keeps v2.10 on the v2.9 microbatch scheduler path while binding its own immutable policy', async () => {
+        const runGenderMicrobatch = vi.fn(async (
+            accounts: readonly { accountId: string; input: GenderTriageInput }[],
+            _audit: unknown,
+            _options?: { aiStagePolicyVersion?: string },
+        ) => accounts.map(account => ({
+            accountId: account.accountId,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: account.input.media.map(item => item.selectionId),
+                v29AccountContext: 'uncertain' as const,
+            },
+            source: 'checkpoint' as const,
+        })));
+        const runScheduler = vi.fn(async (options: AnalysisV2SchedulerRuntimeOptions<unknown>) => ({
+            status: 'completed' as const,
+            completed: await Promise.all(options.tasks.map(async task => ({
+                key: task.key,
+                stage: task.stage,
+                value: await task.run(),
+            }))),
+            remainingKeys: [],
+            recoveryPendingKeys: [],
+            continuationDelayMs: 1_000,
+        }));
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            runGenderMicrobatch,
+            runScheduler: runScheduler as typeof import('./v2-ai-scheduler-runtime')
+                .runAnalysisV2FairAiScheduler,
+            createSchedulerOperationStore: vi.fn(() => ({
+                claim: vi.fn(), commitReady: vi.fn(),
+            })) as typeof import('./v2-ai-scheduler-operation-store')
+                .createAnalysisV2SchedulerOperationStore,
+            createAudit: vi.fn(options => ({
+                requestId: options.requestId,
+                operationKey: options.resultIdentity.operationKey,
+                resultIdentity: options.resultIdentity,
+                resultSchema: options.resultSchema,
+                prepare: vi.fn(), onBeforeAttempt: vi.fn(), onAttemptTelemetry: vi.fn(),
+            })),
+        });
+        const scheduledFence = {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
+            schedulerCapability: 'scheduler-v1' as const,
+            handlerDeadlineAtMs: performance.now() + 300_000,
+        };
+        const input = (suffix: string) => ({ media: [{
+            selectionId: `profile:${suffix}`,
+            kind: 'profile' as const,
+            normalizedJpegBase64: '/9j/2Q==',
+        }] });
+
+        await Promise.all([
+            runtime.gender(input('first'), scheduledFence),
+            runtime.gender(input('second'), scheduledFence),
+        ]);
+
+        expect(runScheduler).toHaveBeenCalledOnce();
+        expect(runGenderMicrobatch).toHaveBeenCalledOnce();
+        expect(runGenderMicrobatch.mock.calls[0]![2]).toEqual({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
+        });
     });
 
     it('uses one audited v2.9 Gemini batch for two concurrent accounts and no individual calls', async () => {
