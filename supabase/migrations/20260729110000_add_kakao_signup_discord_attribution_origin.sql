@@ -1,0 +1,16 @@
+-- A public normalized origin only; never a complete landing/referrer URL.
+ALTER TABLE public.kakao_signup_discord_outbox ADD COLUMN attribution_origin text
+    CHECK (attribution_origin IS NULL OR (attribution_origin ~ '^https?://[a-z0-9][a-z0-9.-]{0,251}/$' AND attribution_origin !~ '^https?://(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})/'));
+DROP FUNCTION public.set_kakao_signup_discord_outbox_profile(uuid, text, char, text, timestamptz, text);
+CREATE FUNCTION public.set_kakao_signup_discord_outbox_profile(p_user_id uuid, p_masked_name text, p_birthyear char, p_gender text, p_signed_up_at timestamptz, p_attribution_label text DEFAULT NULL, p_attribution_origin text DEFAULT NULL)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN UPDATE public.kakao_signup_discord_outbox SET masked_name=p_masked_name,birthyear=p_birthyear,gender=CASE WHEN p_gender IN ('여성','남성') THEN p_gender ELSE NULL END,signed_up_at=p_signed_up_at,
+ attribution_label=CASE WHEN p_attribution_label IN ('직접 방문','UTM: 카카오','UTM: 구글','UTM: 인스타그램','UTM: 기타','외부 참조: 카카오','외부 참조: 구글','외부 참조: 인스타그램','외부 참조: 기타') THEN p_attribution_label ELSE NULL END,
+ attribution_origin=CASE WHEN p_attribution_origin ~ '^https?://[a-z0-9][a-z0-9.-]{0,251}/$' AND p_attribution_origin !~ '^https?://(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})/' THEN p_attribution_origin ELSE NULL END,
+ updated_at=clock_timestamp(),profile_staged_at=clock_timestamp() WHERE user_id=p_user_id AND status='pending' AND profile_staged_at IS NULL; RETURN FOUND; END; $$;
+DROP FUNCTION public.claim_kakao_signup_discord_outbox(uuid, integer);
+CREATE FUNCTION public.claim_kakao_signup_discord_outbox(p_user_id uuid DEFAULT NULL,p_limit integer DEFAULT 1) RETURNS TABLE(id uuid,claim_token uuid,masked_name text,birthyear char(4),gender text,signed_up_at timestamptz,attribution_label text,attribution_origin text,attempts integer) LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$ BEGIN RETURN QUERY WITH candidates AS (SELECT o.id FROM public.kakao_signup_discord_outbox o WHERE o.status='pending' AND o.profile_staged_at IS NOT NULL AND o.next_attempt_at<=clock_timestamp() AND (p_user_id IS NULL OR o.user_id=p_user_id) ORDER BY o.created_at FOR UPDATE SKIP LOCKED LIMIT LEAST(GREATEST(COALESCE(p_limit,1),1),10)),claimed AS (UPDATE public.kakao_signup_discord_outbox o SET status='sending',attempts=o.attempts+1,claim_token=uuid_generate_v4(),claimed_at=clock_timestamp(),updated_at=clock_timestamp() FROM candidates WHERE o.id=candidates.id RETURNING o.*) SELECT claimed.id,claimed.claim_token,claimed.masked_name,claimed.birthyear,claimed.gender,claimed.signed_up_at,claimed.attribution_label,claimed.attribution_origin,claimed.attempts FROM claimed; END; $$;
+REVOKE ALL ON FUNCTION public.set_kakao_signup_discord_outbox_profile(uuid,text,char,text,timestamptz,text,text) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.claim_kakao_signup_discord_outbox(uuid,integer) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.set_kakao_signup_discord_outbox_profile(uuid,text,char,text,timestamptz,text,text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_kakao_signup_discord_outbox(uuid,integer) TO service_role;

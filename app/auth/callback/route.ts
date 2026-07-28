@@ -11,7 +11,7 @@ import {
     deliverKakaoSignupDiscordNotifications,
     stageKakaoSignupDiscordProfile,
 } from '@/lib/services/identity/kakao-signup-discord';
-import { KAKAO_ATTRIBUTION_COOKIE, validKakaoSignupAttribution } from '@/lib/services/identity/kakao-signup-attribution';
+import { KAKAO_ATTRIBUTION_COOKIE, readKakaoSignupAttribution } from '@/lib/services/identity/kakao-signup-attribution';
 import {
     observeRoute,
     type OperationalRequestContext,
@@ -27,14 +27,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 async function stageUnavailableKakaoSignupProfile(
     userId: string,
     signedUpAt: Date,
-    attributionLabel: string | null,
+    attribution: { label: string | null; origin: string | null },
 ): Promise<void> {
     await stageKakaoSignupDiscordProfile(userId, {
         name: null,
         birthyear: null,
         gender: null,
         signedUpAt,
-        attributionLabel,
+        attributionLabel: attribution.label, attributionOrigin: attribution.origin,
     });
 }
 
@@ -62,7 +62,7 @@ async function syncKakaoProfile(
     email: string | undefined,
     providerToken: string,
     signedUpAt: Date,
-    attributionLabel: string | null,
+    attribution: { label: string | null; origin: string | null },
 ): Promise<'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null> {
     const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${providerToken}` },
@@ -70,7 +70,7 @@ async function syncKakaoProfile(
     });
     if (!res.ok) {
         console.error('Kakao /v2/user/me failed:', res.status);
-        await stageUnavailableKakaoSignupProfile(userId, signedUpAt, attributionLabel);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt, attribution);
         return 'PROVIDER_ERROR';
     }
     const data: unknown = await res.json();
@@ -108,7 +108,7 @@ async function syncKakaoProfile(
         }, { onConflict: 'id' });
     if (error) {
         console.error('users upsert (kakao profile) failed:', error.code);
-        await stageUnavailableKakaoSignupProfile(userId, signedUpAt, attributionLabel);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt, attribution);
         return 'INTERNAL_ERROR';
     }
     await stageKakaoSignupDiscordProfile(userId, {
@@ -116,7 +116,7 @@ async function syncKakaoProfile(
         birthyear: account.birthyear,
         gender: account.gender,
         signedUpAt,
-        attributionLabel,
+        attributionLabel: attribution.label, attributionOrigin: attribution.origin,
     });
     return null;
 }
@@ -201,12 +201,12 @@ async function handleGET(
         // Some supported test/runtime cookie adapters expose only the Supabase
         // getAll/setAll surface; absence simply means no attribution label.
         const getAttributionCookie = (cookieStore as { get?: (name: string) => { value?: string } | undefined }).get;
-        const attributionLabel = validKakaoSignupAttribution(
+        const attribution = readKakaoSignupAttribution(
             typeof getAttributionCookie === 'function' ? getAttributionCookie(KAKAO_ATTRIBUTION_COOKIE)?.value : undefined,
         );
         let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
         if (!session?.provider_token) {
-            await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attributionLabel);
+            await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attribution);
             errorCode = 'PROVIDER_ERROR';
         } else {
             try {
@@ -215,11 +215,11 @@ async function handleGET(
                     authedUser.email ?? undefined,
                     session.provider_token,
                     signedUpAt,
-                    attributionLabel,
+                    attribution,
                 );
             } catch {
                 console.error('Kakao profile sync failed');
-                await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attributionLabel);
+                await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attribution);
                 errorCode = 'INTERNAL_ERROR';
             }
         }

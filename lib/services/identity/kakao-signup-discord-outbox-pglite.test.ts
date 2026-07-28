@@ -18,6 +18,18 @@ const attribution = readFileSync(new URL(
     '../../../supabase/migrations/20260729100000_add_kakao_signup_discord_attribution.sql',
     import.meta.url,
 ), 'utf8');
+const attributionOrigin = readFileSync(new URL(
+    '../../../supabase/migrations/20260729110000_add_kakao_signup_discord_attribution_origin.sql',
+    import.meta.url,
+), 'utf8');
+const hardenedAttributionOrigin = readFileSync(new URL(
+    '../../../supabase/migrations/20260729120000_harden_kakao_signup_discord_attribution_origin.sql',
+    import.meta.url,
+), 'utf8');
+const corpOrigin = readFileSync(new URL(
+    '../../../supabase/migrations/20260729130000_reject_corp_kakao_signup_attribution_origin.sql',
+    import.meta.url,
+), 'utf8');
 const KAKAO_ID = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite;
 
@@ -41,6 +53,9 @@ beforeAll(async () => {
     await db.exec(hardening);
     await db.exec(recovery);
     await db.exec(attribution);
+    await db.exec(attributionOrigin);
+    await db.exec(hardenedAttributionOrigin);
+    await db.exec(corpOrigin);
 }, 30_000);
 
 afterAll(async () => db.close());
@@ -136,14 +151,14 @@ describe('Kakao signup Discord durable outbox', () => {
         const userId = '523e4567-e89b-42d3-a456-426614174000';
         await db.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('${userId}', '{"provider":"kakao"}'); SET ROLE service_role;`);
         await db.query(
-            'SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp(), $2)',
-            [userId, '외부 참조: 구글'],
+            'SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp(), $2, $3)',
+            [userId, '외부 참조: 구글', 'https://everytime.kr/'],
         );
-        const claimed = await db.query<{ attribution_label: string }>(
-            'SELECT attribution_label FROM public.claim_kakao_signup_discord_outbox($1, 1)', [userId],
+        const claimed = await db.query<{ attribution_label: string; attribution_origin: string }>(
+            'SELECT attribution_label, attribution_origin FROM public.claim_kakao_signup_discord_outbox($1, 1)', [userId],
         );
         await db.exec('RESET ROLE');
-        expect(claimed.rows).toEqual([{ attribution_label: '외부 참조: 구글' }]);
+        expect(claimed.rows).toEqual([{ attribution_label: '외부 참조: 구글', attribution_origin: 'https://everytime.kr/' }]);
     });
 
     it('keeps five-argument staging compatible and rejects invalid attribution at both boundaries', async () => {
@@ -172,3 +187,28 @@ describe('Kakao signup Discord durable outbox', () => {
             [legacyUserId],
         )).rejects.toThrow();
     });
+
+    it('rejects internal-looking origins at the RPC and database constraint', async () => {
+        const userId = '823e4567-e89b-42d3-a456-426614174000';
+        await db.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('${userId}', '{"provider":"kakao"}'); SET ROLE service_role;`);
+        await db.query('SELECT public.set_kakao_signup_discord_outbox_profile($1,NULL,NULL,NULL,clock_timestamp(),$2,$3)', [userId, 'UTM: 기타', 'https://corp.internal/']);
+        await db.exec('RESET ROLE');
+        expect((await db.query<{ attribution_origin: string | null }>('SELECT attribution_origin FROM public.kakao_signup_discord_outbox WHERE user_id=$1', [userId])).rows).toEqual([{ attribution_origin: null }]);
+        await expect(db.query("UPDATE public.kakao_signup_discord_outbox SET attribution_origin='https://intranet/' WHERE user_id=$1", [userId])).rejects.toThrow();
+        await expect(db.query("UPDATE public.kakao_signup_discord_outbox SET attribution_origin='https://portal.corp/' WHERE user_id=$1", [userId])).rejects.toThrow();
+    });
+
+    it('nulls historic legal internal/corp origins before each hardening CHECK', async () => {
+        const transitionDb = await PGlite.create();
+        try {
+            await transitionDb.exec(`CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN; CREATE SCHEMA auth; CREATE FUNCTION public.uuid_generate_v4() RETURNS uuid LANGUAGE sql VOLATILE AS $$ SELECT pg_catalog.gen_random_uuid() $$; CREATE TABLE auth.users (id uuid PRIMARY KEY, raw_app_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT clock_timestamp());`);
+            await transitionDb.exec(foundation); await transitionDb.exec(hardening); await transitionDb.exec(recovery); await transitionDb.exec(attribution); await transitionDb.exec(attributionOrigin);
+            await transitionDb.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('923e4567-e89b-42d3-a456-426614174000', '{"provider":"kakao"}'), ('a23e4567-e89b-42d3-a456-426614174000', '{"provider":"kakao"}'); UPDATE public.kakao_signup_discord_outbox SET attribution_origin = CASE WHEN user_id='923e4567-e89b-42d3-a456-426614174000' THEN 'https://intranet/' ELSE 'https://portal.corp/' END;`);
+            await transitionDb.exec(hardenedAttributionOrigin);
+            const afterInternal = await transitionDb.query<{ attribution_origin: string | null }>("SELECT attribution_origin FROM public.kakao_signup_discord_outbox WHERE user_id='923e4567-e89b-42d3-a456-426614174000'");
+            await transitionDb.exec(corpOrigin);
+            const afterCorp = await transitionDb.query<{ attribution_origin: string | null }>("SELECT attribution_origin FROM public.kakao_signup_discord_outbox WHERE user_id='a23e4567-e89b-42d3-a456-426614174000'");
+            expect(afterInternal.rows).toEqual([{ attribution_origin: null }]);
+            expect(afterCorp.rows).toEqual([{ attribution_origin: null }]);
+        } finally { await transitionDb.close(); }
+    }, 30_000);

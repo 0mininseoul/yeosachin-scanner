@@ -24,3 +24,25 @@ export function classifyKakaoSignupAttribution(search: string, referrer: string)
 export function validKakaoSignupAttribution(value: string | undefined): string | null {
     return value && LABELS.has(value) ? value : null;
 }
+
+/** Only a public HTTP(S) origin survives; paths, query, fragments and credentials never do. */
+export function normalizeKakaoReferrerOrigin(value: string): string | null {
+    try {
+        const url = new URL(value);
+        const host = url.hostname.toLowerCase();
+        if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.port
+            || !/^[a-z0-9][a-z0-9.-]{0,251}$/.test(host) || !host.includes('.')
+            || /\.(?:localhost|local|internal|test|example|invalid|home|lan|localdomain|corp)$/.test(host)
+            || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) || /^10\.|^127\.|^192\.168\.|^172\.(?:1[6-9]|2\d|3[01])\./.test(host)) return null;
+        return `${url.protocol}//${host}/`;
+    } catch { return null; }
+}
+
+export function encodeKakaoSignupAttribution(label: string, origin: string | null): string {
+    return origin ? `${label}|${origin}` : label;
+}
+
+export function readKakaoSignupAttribution(value: string | undefined): { label: string | null; origin: string | null } {
+    const [label, origin, extra] = value?.split('|') ?? [];
+    return { label: extra ? null : validKakaoSignupAttribution(label), origin: extra ? null : normalizeKakaoReferrerOrigin(origin ?? '') };
+}
