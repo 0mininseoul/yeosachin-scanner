@@ -168,6 +168,22 @@ describe('isolated demo fixtures', () => {
         )).toBe(true);
     });
 
+    it('keeps the requested v3 account normal and moves the third featured caution rank to a distinct row', () => {
+        const fixture = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
+        const requested = fixture.publicAccounts.find(row => row.instagramId === 'bl1ckcherdk_cuu6');
+        const featuredCaution = fixture.publicAccounts.find(row => row.riskBand === 'caution' && row.featuredRank === 3);
+
+        expect(requested).toMatchObject({
+            fullName: '이유진',
+            riskBand: 'normal',
+            displayScore: 3,
+            featuredRank: null,
+        });
+        expect(featuredCaution).toBeDefined();
+        expect(featuredCaution?.instagramId).not.toBe(requested?.instagramId);
+        expect(fixture.publicAccounts.flatMap(row => row.featuredRank ?? [])).toEqual([1, 2, 3]);
+    });
+
     it('keeps every named fixture selector within its template range', () => {
         expect(DEMO_FIXTURE_VARIANTS).toHaveLength(86);
         DEMO_FIXTURE_VARIANTS.forEach(variant => {
@@ -265,6 +281,7 @@ describe('isolated demo fixtures', () => {
             expect(source).toMatch(/ready_female\s*=\s*84/u);
             expect(source).toMatch(/ready_private\s*=\s*145/u);
         });
+        expect(fixtureBuilder).toMatch(/DEMO_V3_CURATED_OVERRIDES/u);
         expect(fixtureBuilder).toContain('Math.round(indexes.length * 0.3)');
         expect(fixtureBuilder).toContain('Array.from({ length: 242 }');
         expect(fixtureBuilder).toContain('parseSafePublicRiskNarrative(highRiskNarrative)');

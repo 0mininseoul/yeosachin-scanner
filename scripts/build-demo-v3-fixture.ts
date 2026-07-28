@@ -113,6 +113,13 @@ const KOREAN_WORD_ALTERNATIVES = [
 const LATIN_WORD_ALTERNATIVES = ['daily', 'photo', 'walk', 'weekend', 'mood', 'record'] as const;
 const NAME_SYLLABLES = ['민', '서', '지', '윤', '하', '아', '연', '수', '진', '현'] as const;
 
+// Curated demo-only presentation adjustments are applied after deterministic
+// mutation, so rebuilding the fixture preserves the reviewed v3 cards.
+const DEMO_V3_CURATED_OVERRIDES = {
+    normalInstagramId: 'bl1ckcherdk_cuu6',
+    normalFullName: '이유진',
+} as const;
+
 function mutateName(value: string | null, seed: string): string | null {
     if (value === null) return null;
     const characters = [...value];
@@ -202,6 +209,32 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
                 : null,
         };
     });
+    const curatedNormalIndex = publicFixture.findIndex(
+        row => row.instagramId === DEMO_V3_CURATED_OVERRIDES.normalInstagramId,
+    );
+    if (curatedNormalIndex < 0) {
+        throw new Error('The reviewed v3 account was not present in the selected fixture.');
+    }
+    publicFixture[curatedNormalIndex] = {
+        ...publicFixture[curatedNormalIndex]!,
+        fullName: DEMO_V3_CURATED_OVERRIDES.normalFullName,
+        displayScore: 3,
+        riskBand: 'normal',
+        featuredRank: null,
+    };
+    const promotedCautionIndex = publicFixture.findIndex(
+        (row, index) => index !== curatedNormalIndex && row.riskBand === 'normal',
+    );
+    if (promotedCautionIndex < 0) {
+        throw new Error('No distinct normal v3 account was available to promote to caution.');
+    }
+    publicFixture[promotedCautionIndex] = {
+        ...publicFixture[promotedCautionIndex]!,
+        displayScore: 5,
+        riskBand: 'caution',
+        featuredRank: 3,
+    };
+
     const privateFixture = privateRows.map(row => ({
             imageSortOrdinal: row.sort_ordinal,
             instagramId: mutateIdentifier(row.instagram_id, `private-handle:${row.sort_ordinal}`),
