@@ -154,6 +154,27 @@ const historicalV212Bundle = {
     },
 };
 
+function v212TwoMediaBundle() {
+    return {
+        ...historicalV212Bundle,
+        profiles: [{
+            ...historicalV212Bundle.profiles[0]!,
+            media: [
+                historicalV212Bundle.profiles[0]!.media[0]!,
+                {
+                    ...historicalV212Bundle.profiles[0]!.media[0]!,
+                    selectionId: 'm2',
+                    postId: 'p2',
+                },
+            ],
+            triageSelectionIds: ['m1', 'm2'],
+            featureSelectionIds: ['m1', 'm2'],
+            resolverSelectionIds: ['m1', 'm2'],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        }],
+    };
+}
+
 describe('replay staged AI runner policy capability', () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -440,6 +461,133 @@ describe('replay staged AI runner policy capability', () => {
             paidAiOptIn: true,
             evaluationPolicy: historicalV212Evaluation,
         })).rejects.toThrow('unexpected resolver logic fault');
+    });
+
+    it('fails a v2.12 ordinary cutoff when an abort-ignoring raw resolver fault outlives settlement', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'personal' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockImplementation((
+            _input: unknown,
+            _audit: unknown,
+            options: { abortSignal?: AbortSignal },
+        ) => new Promise((_, reject) => {
+            options.abortSignal?.addEventListener('abort', () => {
+                setTimeout(() => reject(new Error('delayed raw resolver fault')), 40);
+            }, { once: true });
+        }));
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v212TwoMediaBundle(),
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+            resolverCutoffMs: 25,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_RESOLVER_SETTLEMENT_TIMEOUT');
+
+        // The late raw rejection remains observed after the bounded timeout.
+        await new Promise(resolve => setTimeout(resolve, 50));
+    });
+
+    it('propagates a v2.12 raw resolver fault that settles after official exclusion', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'personal',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'official_group_or_brand' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockImplementation((
+            _input: unknown,
+            _audit: unknown,
+            options: { abortSignal?: AbortSignal },
+        ) => new Promise((_, reject) => {
+            options.abortSignal?.addEventListener('abort', () => {
+                setTimeout(() => reject(new Error('delayed raw resolver fault')), 35);
+            }, { once: true });
+        }));
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v212TwoMediaBundle(),
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+        })).rejects.toThrow('delayed raw resolver fault');
+    });
+
+    it('keeps a v2.12 promptly settled capacity cutoff as one unknown report', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'personal' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockImplementation((
+            _input: unknown,
+            _audit: unknown,
+            options: { abortSignal?: AbortSignal },
+        ) => new Promise((_, reject) => {
+            options.abortSignal?.addEventListener('abort', () => {
+                reject(new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'));
+            }, { once: true });
+        }));
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: v212TwoMediaBundle(),
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+            resolverCutoffMs: 25,
+        });
+
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+        expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
+        expect(report.stages.genderResolution.failureDisposition)
+            .toMatchObject({ backoff_cutoff: 1 });
     });
 
     it('keeps a triage-personal but deterministically collective account out of feature and resolver', async () => {

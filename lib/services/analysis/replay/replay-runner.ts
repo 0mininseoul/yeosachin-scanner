@@ -1,6 +1,9 @@
 import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
 import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-reconciliation';
-import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
+import {
+    AI_STAGE_POLICY_V212_VERSION,
+    aiStagePolicySupports,
+} from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
@@ -174,6 +177,7 @@ type ReplayBaselineClassification =
 interface TrackedResolver {
     abort: AbortController;
     promise?: Promise<ReplayInvocation<GenderResolutionResult>>;
+    settlement?: Promise<ResolverSettlement>;
     settled: boolean;
     value?: ReplayInvocation<GenderResolutionResult>;
     telemetry: {
@@ -185,6 +189,14 @@ interface TrackedResolver {
         pendingAttemptStartedAt?: number;
     };
 }
+
+type ResolverSettlement =
+    | { status: 'fulfilled' }
+    | { status: 'rejected'; error: unknown };
+
+const V212_RESOLVER_SETTLEMENT_DEFAULT_MS = 50;
+const V212_RESOLVER_SETTLEMENT_TIMEOUT_CODE =
+    'ANALYSIS_V2_REPLAY_RESOLVER_SETTLEMENT_TIMEOUT';
 
 interface PreparedPublicReplay {
     baseline: ReplayBaselineClassification;
@@ -215,6 +227,58 @@ async function abortAndObserveResolvers(
             if (timer) clearTimeout(timer);
         }
     }));
+}
+
+/**
+ * v2.12 waits briefly after cutoff solely to distinguish a normal abort
+ * settlement from a raw fault. The timeout remains bounded and never turns
+ * the opportunistic resolver into required provider work.
+ */
+async function awaitV212ResolverSettlement(
+    resolver: TrackedResolver,
+    timeoutMs: number,
+): Promise<void> {
+    if (!resolver.settlement) {
+        throw new Error(V212_RESOLVER_SETTLEMENT_TIMEOUT_CODE);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        const settlement = await Promise.race([
+            resolver.settlement,
+            new Promise<{ status: 'timeout' }>(resolve => {
+                timer = setTimeout(() => resolve({ status: 'timeout' }), timeoutMs);
+            }),
+        ]);
+        if (settlement.status === 'timeout') {
+            throw new Error(V212_RESOLVER_SETTLEMENT_TIMEOUT_CODE);
+        }
+        if (settlement.status === 'rejected') throw settlement.error;
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+async function awaitResolverCutoffBookkeeping(
+    resolver: TrackedResolver,
+    timeoutMs: number,
+    strictV212ResolverSettlement: boolean,
+): Promise<void> {
+    if (strictV212ResolverSettlement) {
+        await awaitV212ResolverSettlement(resolver, timeoutMs);
+        return;
+    }
+    if (!resolver.promise) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await Promise.race([
+            resolver.promise,
+            new Promise<undefined>(resolve => {
+                timer = setTimeout(() => resolve(undefined), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 function metrics(): ReplayStageMetrics {
@@ -484,7 +548,11 @@ export async function runAnalysisV2AiReplay(input: {
         DiagnosticPartialCoverageCliCapability;
     evaluationPolicy?: ReplayEvaluationPolicy;
     write?: (line: string) => void;
-    /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
+    /**
+     * Bounded post-abort telemetry bookkeeping only; it never grants resolver
+     * provider time. Exact v2.12 uses the same override for its abort-settlement
+     * window (50ms by default) so delayed raw faults cannot outlive success.
+     */
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
     const legacyBooleanSupplied = Object.prototype.hasOwnProperty.call(
@@ -562,6 +630,8 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         'genderQualityV211',
     );
+    const strictV212ResolverSettlement =
+        replayAiPolicy === AI_STAGE_POLICY_V212_VERSION;
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
@@ -576,6 +646,9 @@ export async function runAnalysisV2AiReplay(input: {
     ) {
         throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
     }
+    const resolverSettlementMs = strictV212ResolverSettlement
+        ? input.resolverCutoffMs ?? V212_RESOLVER_SETTLEMENT_DEFAULT_MS
+        : cutoffBookkeepingMs;
     const replayStarted = performance.now();
     const names = ['genderTriage', 'featureAnalysis', 'privateAccountName', 'genderResolution'] as const;
     const stages = Object.fromEntries(names.map(name => [name, metrics()])) as AnalysisV2AiReplayReport['stages'];
@@ -811,6 +884,12 @@ export async function runAnalysisV2AiReplay(input: {
                     tracked.value = value;
                     return value;
                 });
+                if (strictV212ResolverSettlement) {
+                    tracked.settlement = tracked.promise.then(
+                        () => ({ status: 'fulfilled' as const }),
+                        error => ({ status: 'rejected' as const, error }),
+                    );
+                }
                 void tracked.promise.catch(() => undefined);
             };
             if (eligible) {
@@ -951,20 +1030,11 @@ export async function runAnalysisV2AiReplay(input: {
                         durations.genderResolution,
                         outcome.resolver,
                     );
-                    let bookkeepingTimer: ReturnType<typeof setTimeout> | undefined;
-                    try {
-                        await Promise.race([
-                            outcome.resolver.promise!,
-                            new Promise<undefined>(resolve => {
-                                bookkeepingTimer = setTimeout(
-                                    () => resolve(undefined),
-                                    cutoffBookkeepingMs,
-                                );
-                            }),
-                        ]);
-                    } finally {
-                        if (bookkeepingTimer) clearTimeout(bookkeepingTimer);
-                    }
+                    await awaitResolverCutoffBookkeeping(
+                        outcome.resolver,
+                        resolverSettlementMs,
+                        strictV212ResolverSettlement,
+                    );
                 }
                 if (genderQuality) {
                     genderQuality.resolver.outcome.official_excluded =
@@ -985,20 +1055,11 @@ export async function runAnalysisV2AiReplay(input: {
                     durations.genderResolution,
                     outcome.resolver,
                 );
-                let bookkeepingTimer: ReturnType<typeof setTimeout> | undefined;
-                try {
-                    await Promise.race([
-                        outcome.resolver.promise!,
-                        new Promise<undefined>(resolve => {
-                            bookkeepingTimer = setTimeout(
-                                () => resolve(undefined),
-                                cutoffBookkeepingMs,
-                            );
-                        }),
-                    ]);
-                } finally {
-                    if (bookkeepingTimer) clearTimeout(bookkeepingTimer);
-                }
+                await awaitResolverCutoffBookkeeping(
+                    outcome.resolver,
+                    resolverSettlementMs,
+                    strictV212ResolverSettlement,
+                );
             }
 
             if (resolved) {
