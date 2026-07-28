@@ -490,49 +490,6 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
-    // V2 results have no public URL: /result is auth-gated and /api/share/enable
-    // rejects v2, so there is no share token to hand out. The button therefore
-    // shares the service itself with a teaser rather than a link that would land
-    // a recipient on a login screen.
-    const handleKakaoShare = async () => {
-        if (kakaoShareLoading) return;
-        setKakaoShareLoading(true);
-        try {
-            // Both the link and the thumbnail must sit on the domain registered in
-            // Kakao Developers, so they are pinned to the canonical origin even when
-            // this page is served from localhost.
-            const detected = data?.summary.v2?.highRiskCount
-                ?? data?.femaleAccounts.filter(account => account.riskGrade === 'high_risk').length
-                ?? 0;
-            const channel = await shareResultToKakao(
-                {
-                    url: CANONICAL_APP_ORIGIN,
-                    title: '위장여사친 판독기',
-                    description: detected > 0
-                        ? `방금 판독했더니 고위험 계정 ${detected}건이 나왔어요.`
-                        : '남자친구가 맞팔 중인 여자들, AI가 5분이면 판독해줍니다.',
-                    imageUrl: `${CANONICAL_APP_ORIGIN}/og.png`,
-                },
-                {
-                    ...(navigator.share
-                        ? { share: (payload: { title: string; text: string; url: string }) => navigator.share(payload) }
-                        : {}),
-                    ...(navigator.clipboard?.writeText
-                        ? { writeText: (text: string) => navigator.clipboard.writeText(text) }
-                        : {}),
-                },
-            );
-            if (!channel) {
-                alert('공유하기에 실패했습니다.');
-                return;
-            }
-            trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: channel });
-            if (channel === 'clipboard') alert('링크가 클립보드에 복사되었습니다!');
-        } finally {
-            setKakaoShareLoading(false);
-        }
-    };
-
     const handleShare = async () => {
         setShareLoading(true);
 
@@ -580,6 +537,49 @@ export default function ResultPage({ params }: PageProps) {
             alert('공유하기에 실패했습니다.');
         } finally {
             setShareLoading(false);
+        }
+    };
+
+    // V2 results have no public URL: /result is auth-gated and /api/share/enable
+    // rejects v2, so there is no share token to hand out. The button therefore
+    // shares the service itself with a teaser rather than a link that would land
+    // a recipient on a login screen.
+    const handleKakaoShare = async () => {
+        if (kakaoShareLoading) return;
+        setKakaoShareLoading(true);
+        try {
+            // Both the link and the thumbnail must sit on the domain registered in
+            // Kakao Developers, so they are pinned to the canonical origin even when
+            // this page is served from localhost.
+            const detected = data?.summary.v2?.highRiskCount
+                ?? data?.femaleAccounts.filter(account => account.riskGrade === 'high_risk').length
+                ?? 0;
+            const channel = await shareResultToKakao(
+                {
+                    url: CANONICAL_APP_ORIGIN,
+                    title: '위장여사친 판독기',
+                    description: detected > 0
+                        ? `방금 판독했더니 고위험 계정 ${detected}건이 나왔어요.`
+                        : '남자친구가 맞팔 중인 여자들, AI가 5분이면 판독해줍니다.',
+                    imageUrl: `${CANONICAL_APP_ORIGIN}/og.png`,
+                },
+                {
+                    ...(navigator.share
+                        ? { share: (payload: { title: string; text: string; url: string }) => navigator.share(payload) }
+                        : {}),
+                    ...(navigator.clipboard?.writeText
+                        ? { writeText: (text: string) => navigator.clipboard.writeText(text) }
+                        : {}),
+                },
+            );
+            if (!channel) {
+                alert('공유하기에 실패했습니다.');
+                return;
+            }
+            trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: channel });
+            if (channel === 'clipboard') alert('링크가 클립보드에 복사되었습니다!');
+        } finally {
+            setKakaoShareLoading(false);
         }
     };
 
