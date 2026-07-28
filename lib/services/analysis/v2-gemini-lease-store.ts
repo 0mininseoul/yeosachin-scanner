@@ -274,10 +274,16 @@ export function createAnalysisV2GeminiLeaseStore(
                 );
             const isV211Resolver = input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION
                 && input.data.stage === 'genderResolution';
-            const deadlineAtMs = dependencies.nowMs() + V211_RESOLVER_LEASE_GRACE_MS;
+            const deadlineAtMs = Math.min(
+                dependencies.nowMs() + V211_RESOLVER_LEASE_GRACE_MS,
+                input.data.handlerDeadlineAtMs - AI_GEMINI_MIN_REMAINING_MS,
+            );
             let data: unknown;
             let error: unknown;
             while (true) {
+            if (input.data.abortSignal?.aborted || dependencies.nowMs() >= deadlineAtMs) {
+                throw new AnalysisV2AiResolverCapacitySkippedError();
+            }
             ({ data, error } = await dependencies.rpc(
                 usesSchedulerV1Admission
                     ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc
@@ -316,6 +322,9 @@ export function createAnalysisV2GeminiLeaseStore(
                     && dependencies.nowMs() < deadlineAtMs
                 ) {
                     await (dependencies.sleep?.(10) ?? Promise.resolve());
+                    if (input.data.abortSignal?.aborted || dependencies.nowMs() >= deadlineAtMs) {
+                        throw new AnalysisV2AiResolverCapacitySkippedError();
+                    }
                     continue;
                 }
                 throw new AnalysisV2AiResolverCapacitySkippedError();
