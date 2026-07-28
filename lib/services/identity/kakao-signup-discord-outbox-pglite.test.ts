@@ -14,6 +14,10 @@ const recovery = readFileSync(new URL(
     '../../../supabase/migrations/20260727160000_recover_unstaged_kakao_signup_discord_outbox.sql',
     import.meta.url,
 ), 'utf8');
+const attribution = readFileSync(new URL(
+    '../../../supabase/migrations/20260729100000_add_kakao_signup_discord_attribution.sql',
+    import.meta.url,
+), 'utf8');
 const KAKAO_ID = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite;
 
@@ -36,6 +40,7 @@ beforeAll(async () => {
     await db.exec(foundation);
     await db.exec(hardening);
     await db.exec(recovery);
+    await db.exec(attribution);
 }, 30_000);
 
 afterAll(async () => db.close());
@@ -56,8 +61,8 @@ describe('Kakao signup Discord durable outbox', () => {
         const beforeStage = await db.query('SELECT * FROM public.claim_kakao_signup_discord_outbox($1, 1)', [KAKAO_ID]);
         expect(beforeStage.rows).toHaveLength(0);
         await db.query(
-            "SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp())",
-            [KAKAO_ID],
+            "SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp(), $2)",
+            [KAKAO_ID, 'UTM: 카카오'],
         );
         const afterStage = await db.query<{ id: string }>(
             'SELECT id FROM public.claim_kakao_signup_discord_outbox($1, 1)', [KAKAO_ID],
@@ -72,7 +77,7 @@ describe('Kakao signup Discord durable outbox', () => {
                 ('323e4567-e89b-42d3-a456-426614174000', '{"provider":"kakao"}');
             SET ROLE service_role;
             SELECT public.set_kakao_signup_discord_outbox_profile(
-                '323e4567-e89b-42d3-a456-426614174000', NULL, NULL, NULL, clock_timestamp()
+                '323e4567-e89b-42d3-a456-426614174000', NULL, NULL, NULL, clock_timestamp(), '직접 방문'
             );
             RESET ROLE;
         `);
@@ -125,4 +130,45 @@ describe('Kakao signup Discord durable outbox', () => {
         expect(recovered.rows[0]?.recover_unstaged_kakao_signup_discord_outbox).toBe(1);
         expect(claimed.rows).toHaveLength(1);
     }, 30_000);
-});
+    });
+
+    it('persists only allowlisted attribution through a staged row and its claim', async () => {
+        const userId = '523e4567-e89b-42d3-a456-426614174000';
+        await db.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('${userId}', '{"provider":"kakao"}'); SET ROLE service_role;`);
+        await db.query(
+            'SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp(), $2)',
+            [userId, '외부 참조: 구글'],
+        );
+        const claimed = await db.query<{ attribution_label: string }>(
+            'SELECT attribution_label FROM public.claim_kakao_signup_discord_outbox($1, 1)', [userId],
+        );
+        await db.exec('RESET ROLE');
+        expect(claimed.rows).toEqual([{ attribution_label: '외부 참조: 구글' }]);
+    });
+
+    it('keeps five-argument staging compatible and rejects invalid attribution at both boundaries', async () => {
+        const legacyUserId = '623e4567-e89b-42d3-a456-426614174000';
+        const invalidUserId = '723e4567-e89b-42d3-a456-426614174000';
+        await db.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('${legacyUserId}', '{"provider":"kakao"}'), ('${invalidUserId}', '{"provider":"kakao"}'); SET ROLE service_role;`);
+        await db.query(
+            'SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp())',
+            [legacyUserId],
+        );
+        await db.query(
+            'SELECT public.set_kakao_signup_discord_outbox_profile($1, NULL, NULL, NULL, clock_timestamp(), $2)',
+            [invalidUserId, 'https://evil.test/?token=secret'],
+        );
+        await db.exec('RESET ROLE');
+        const values = await db.query<{ user_id: string; attribution_label: string | null }>(
+            'SELECT user_id, attribution_label FROM public.kakao_signup_discord_outbox WHERE user_id IN ($1, $2) ORDER BY user_id',
+            [legacyUserId, invalidUserId],
+        );
+        expect(values.rows).toEqual([
+            { user_id: legacyUserId, attribution_label: null },
+            { user_id: invalidUserId, attribution_label: null },
+        ]);
+        await expect(db.query(
+            "UPDATE public.kakao_signup_discord_outbox SET attribution_label = 'https://evil.test/?token=secret' WHERE user_id = $1",
+            [legacyUserId],
+        )).rejects.toThrow();
+    });

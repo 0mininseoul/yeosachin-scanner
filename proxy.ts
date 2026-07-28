@@ -4,6 +4,7 @@ import {
     appRedirectUrlForRequest,
     CANONICAL_APP_ORIGIN,
 } from '@/lib/constants/app-url';
+import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution } from '@/lib/services/identity/kakao-signup-attribution';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
     'www.yeosachin.com',
@@ -37,6 +38,15 @@ export async function proxy(request: NextRequest) {
         return supabaseResponse;
     }
 
+    // Capture first touch once on a real page navigation only. The server never
+    // stores a URL, query string, referrer, click ID, or other identifier.
+    if (request.method === 'GET' && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
+        supabaseResponse.cookies.set(KAKAO_ATTRIBUTION_COOKIE,
+            classifyKakaoSignupAttribution(request.nextUrl.search, request.headers.get('referer') ?? ''), {
+                maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax', secure: true,
+            });
+    }
+
     const supabase = createServerClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL!,
         process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -52,6 +62,13 @@ export async function proxy(request: NextRequest) {
                     supabaseResponse = NextResponse.next({
                         request,
                     });
+                    const attribution = request.cookies.get(KAKAO_ATTRIBUTION_COOKIE)
+                        ?? { name: KAKAO_ATTRIBUTION_COOKIE, value: classifyKakaoSignupAttribution(
+                            request.nextUrl.search, request.headers.get('referer') ?? '',
+                        ), maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true };
+                    if (!request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
+                        supabaseResponse.cookies.set(attribution);
+                    }
                     cookiesToSet.forEach(({ name, value, options }) =>
                         supabaseResponse.cookies.set(name, value, options)
                     );
@@ -70,6 +87,8 @@ export async function proxy(request: NextRequest) {
         supabaseResponse.cookies.getAll().forEach(cookie => {
             redirectResponse.cookies.set(cookie);
         });
+        const attribution = supabaseResponse.cookies.get(KAKAO_ATTRIBUTION_COOKIE);
+        if (attribution) redirectResponse.cookies.set(attribution);
         return redirectResponse;
     };
 
