@@ -5,7 +5,7 @@
 ## 현재 의사결정 및 측정 상태
 
 - 얼리버드 최초 가격은 Basic **6,900원**, Standard **9,900원**을 유지한다. 가격 snapshot은 `earlybird-2026-07-v2`이며, 가격 유지가 complete cost의 증거는 아니다.
-- 최신 Standard 표본은 기능·latency·quality 관측이지 complete cost 표본이 아니다. `0_min._.00` 완료 표본은 mutual 385명(공개 240, 비공개 145), gender M/F/U 72/84/84(unknown 35%), 전체 94.6분, 결과 이미지 healthy, completed card 및 failed card 없음이다.
+- 승인된 최신 Standard 표본은 기능·latency·quality 관측이지 complete cost 표본이 아니다. mutual 385명(공개 240, 비공개 145), gender M/F/U 72/84/84(unknown 35%), 전체 94.6분, 결과 이미지 healthy, completed card 및 failed card 없음이다. 원본 Instagram handle은 비용 판단에 필요하지 않아 운영 문서에 남기지 않는다.
 - 비교 baseline은 공개 240명, M/F/U 62/69/109(unknown 45.4%), 121.9분이다. unknown 목표 `<=20%`는 아직 충족하지 못했다.
 - UI의 4–6/5–8/8–12/10–15분 workload band는 계획 band일 뿐 검증된 SLA가 아니다. 94.6분 최신 표본은 이 band 안에 들지 않는다.
 - Basic/Standard의 complete cost는 아직 없다. provider·Gemini 일부 관측과 실제 기능 표본을 전체 원가, p50/p95, 마진 증명으로 쓰지 않는다. 새 유료 E2E는 실행하지 않았다.
@@ -152,11 +152,11 @@ owner 전용 함수로만 가능하다. process-local 8개 semaphore는 방어�
 | V2 전체 wall time p50/p95 | 미측정 | 미측정 | 미측정 |
 | E2E 기반 최종 판매가 | 보류 | 보류 | 보류 |
 
-2026-07-13의 `0_min._.00` 완료 canary와 그 이전 비용표는 V1 순차 실행, 과거 plan 상한, 과거 batch fallback, 다른 Gemini fanout을 사용했다. 관계/Actor 기능 진단 자료로는 남기되 V2 가격이나 5분 SLA 근거로 사용하지 않는다.
+2026-07-13의 과거 완료 canary와 그 이전 비용표는 V1 순차 실행, 과거 plan 상한, 과거 batch fallback, 다른 Gemini fanout을 사용했다. 관계/Actor 기능 진단 자료로는 남기되 V2 가격이나 5분 SLA 근거로 사용하지 않는다.
 
 ### 2026-07-17 Standard 실패 E2E 비용 하한 (역사적)
 
-`0_min._.00`의 Standard 요청은 완료되지 않았으므로 이 기록은 성공 표본, p50/p95, 5분 SLA 또는 최종 판매가의 근거가 아니다. 식별자는 운영 문서에 남기지 않는다.
+과거 승인된 Standard 요청은 완료되지 않았으므로 이 기록은 성공 표본, p50/p95, 5분 SLA 또는 최종 판매가의 근거가 아니다. 원본 계정 식별자는 운영 문서에 남기지 않는다.
 
 - 전체 wall time은 `1,308,289ms`(`21m48.289s`), queue는 `978ms`, processing은 `1,307,311ms`였다. 21개 job 중 11개가 완료되고 1개가 실패했으며 9개가 취소됐다. `private-names` batch 1이 7회 시도를 소진했고 sibling AI checkpoint job들이 취소됐다.
 - 첫 번째 원인은 private-name topology content hash를 독립된 scope의 consumer job hash와 잘못 비교한 것이었다. 두 번째 원인은 executor가 `verified_female`에만 media bundle을 저장하는데도 candidate feature 완료 조건이 non-`verified_female` 분류에도 media bundle을 요구한 것이었다. Forward migration `20260717120000_fix_analysis_v2_checkpoint_contracts.sql`과 PGlite tests는 이 계약을 교정하지만, 아직 배포됐거나 성공 E2E로 검증됐다고 기록하지 않는다.
@@ -236,6 +236,6 @@ input/run id, lease/fence 값은 telemetry 테이블과 RPC 응답에 포함하�
 ## 출시 판단 (현재 비용 판단)
 
 - 무료 Apify 계정 여러 개를 production quota 우회용으로 자동 회전하지 않는다. 테스트 credential slot은 명시적 canary와 장애 복구에만 사용한다.
-- Actor plan 결제는 V2 canary가 무료 credit을 초과하거나 production 예상 월 사용량이 확인된 뒤 결정한다.
+- Secondary는 이미 Starter다. 추가 Actor plan 구독·상향·변경은 production 월 사용량과 complete cost를 확인한 뒤 별도로 결정한다.
 - 할인 판매가의 지속 여부는 `p95(C_total)`에 기간 내 만료·이탈 preflight 획득원가의 유료 전환 건당 배부액, VAT, Groble 수수료 8.69%, 환불, 지원, 모니터링, 실패 재시도 여유를 더해 판단한다.
 - 자동 분석 공개 입장은 이미 열려 있다. 다만 complete Basic/Standard cost, 비용 재현성, p50/p95, UI workload band SLA는 여전히 미측정이다. 가격을 유지·변경하거나 원가를 확정하는 판단에는 이 미측정 항목을 별도로 대사해야 한다.

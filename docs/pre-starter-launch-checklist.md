@@ -8,7 +8,7 @@
 
 ### 1. 실제 유료 수요와 책임
 
-UTC 반개구간에서 다음 report를 실행했다.
+당시 gate는 UTC 반개구간에서 다음 report를 실행하도록 요구했다.
 
 ```bash
 npm run report:earlybird-demand -- \
@@ -16,13 +16,13 @@ npm run report:earlybird-demand -- \
   --end <YYYY-MM-DD>
 ```
 
-- seller reference와 결제 증거가 함께 확인된 reference-confirmed 실결제 1건 이상
-- 미확인 paid 주문 0건
-- 기한 초과 이행 0건
-- 환불 책임 주문 0건
-- report 종료 코드 `0`
+- seller reference와 결제 증거가 함께 확인된 reference-confirmed 실결제 1건 이상이어야 했다.
+- 미확인 paid 주문은 0건이어야 했다.
+- 기한 초과 이행은 0건이어야 했다.
+- 환불 책임 주문은 0건이어야 했다.
+- report 종료 코드는 `0`이어야 했다.
 
-checkout 이동, 프론트 이벤트, 수동 연결, test-send, waitlist는 실결제로 세지 않았다. 이 수요 신호는 충분한 단위경제 증명이 아니었다.
+checkout 이동, 프론트 이벤트, 수동 연결, test-send, waitlist는 실결제로 세지 않는 조건이었다. 이 문서는 실제 유료 gate가 충족됐거나 특정 결제 증거가 확인됐다고 주장하지 않는다. 특히 독립된 provider 증거가 없는 `payment_pending` 상태는 변경 근거로 삼지 않는다.
 
 ### 2. 전환 시점의 정지 확인
 
@@ -35,9 +35,9 @@ credential cutover 직전 같은 read-only snapshot에서 active analysis reques
 ### 4. 배포·판매 snapshot
 
 - production migration history와 reviewed branch를 비교하고, dry-run에 예상하지 않은 migration이 없었어야 했다.
-- server catalog와 DB checkout RPC의 가격 버전은 `earlybird-2026-07-v2`였다.
+- server catalog와 DB checkout RPC의 가격 버전은 `earlybird-2026-07-v2`여야 했다.
 - Groble 가격과 재고가 server catalog와 같아야 했다. Basic/Standard는 6,900원/9,900원, 각각 재고 10건, 기준가 13,900원/19,900원, 표시 할인율 50%였고 Plus는 checkout 없이 대기 신청만 유지했다.
-- read-only checkout 회귀에서 Basic/Standard 링크와 seller reference를 확인했다.
+- read-only checkout 회귀에서 Basic/Standard 링크와 seller reference를 확인해야 했다.
 
 ### 5. 당시 비용 판단
 
