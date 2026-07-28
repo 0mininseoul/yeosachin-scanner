@@ -9,6 +9,8 @@ import {
 describe('Sentry privacy scrubber', () => {
     it('removes request/user PII and recursively redacts secrets from events and breadcrumbs', () => {
         const webhook = 'https://discord.com/api/webhooks/123/very-secret';
+        const discordChannelUrl = 'https://discord.com/api/v10/channels/1525023310675710092/messages';
+        const sentryHookUrl = 'https://example.test/api/webhooks/sentry/service-hook-secret-12345678901234567890/path-secret-12345678901234567890';
         const result = scrubSentryEvent({
             type: undefined,
             message: 'login user@example.com Basic dXNlcjpwYXNz token=top-secret id_token=eyJhbGciOiJIUzI1Ni.abcde.zyxwv code=oauth-code state=oauth-state code_verifier=oauth-verifier-secret DOB=19940102 birthyear 1994; harmless error code 42',
@@ -24,7 +26,7 @@ describe('Sentry privacy scrubber', () => {
             contexts: { custom: { birthyear: '1994' } },
             breadcrumbs: [{
                 category: 'fetch',
-                message: `sent ${webhook} Cookie: sb-access-token=session-secret for user@example.com state=breadcrumb-state DOB=19940102`,
+                message: `sent ${webhook} ${discordChannelUrl} ${sentryHookUrl} Cookie: sb-access-token=session-secret for user@example.com state=breadcrumb-state DOB=19940102`,
                 data: {
                     cookie: 'session=secret',
                     profile_image: 'https://scontent-icn1-1.cdninstagram.com/private/image.jpg',
@@ -47,6 +49,8 @@ describe('Sentry privacy scrubber', () => {
         expect(serialised).not.toContain('010-1234-5678');
         expect(serialised).not.toContain('1994-01-02');
         expect(serialised).not.toContain(webhook);
+        expect(serialised).not.toContain(discordChannelUrl);
+        expect(serialised).not.toContain(sentryHookUrl);
         expect(serialised).not.toContain('cdninstagram.com');
         expect(serialised).not.toContain('423e4567-e89b-42d3-a456-426614174000');
         expect(serialised).not.toContain('analysis-run-raw');
