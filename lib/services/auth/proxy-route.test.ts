@@ -58,6 +58,18 @@ describe('authentication proxy redirects', () => {
         );
     });
 
+    it('captures the first landing as an HttpOnly bounded label and preserves it', async () => {
+        mockAuthenticatedUser(null);
+        const first = await proxy(new NextRequest('https://yeosachin.com/?utm_source=instagram&token=secret'));
+        const cookie = first.headers.get('set-cookie') ?? '';
+        expect(cookie).toContain('kakao_signup_attribution=UTM%3A%20%EC%9D%B8%EC%8A%A4%ED%83%80%EA%B7%B8%EB%9E%A8');
+        expect(cookie).toContain('HttpOnly');
+        expect(cookie).toContain('Secure');
+        expect(cookie).not.toContain('token=secret');
+        const later = await proxy(new NextRequest('https://yeosachin.com/?utm_source=google', { headers: { cookie: 'kakao_signup_attribution=UTM%3A%20%EC%9D%B8%EC%8A%A4%ED%83%80%EA%B7%B8%EB%9E%A8' } }));
+        expect(later.headers.get('set-cookie') ?? '').not.toContain('kakao_signup_attribution=');
+    });
+
     it('permanently redirects browser requests from legacy public domains', async () => {
         const response = await proxy(new NextRequest(
             'https://www.yeosachin.com/analyze?autostart=1'

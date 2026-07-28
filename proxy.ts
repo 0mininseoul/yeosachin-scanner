@@ -4,6 +4,7 @@ import {
     appRedirectUrlForRequest,
     CANONICAL_APP_ORIGIN,
 } from '@/lib/constants/app-url';
+import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution } from '@/lib/services/identity/kakao-signup-attribution';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
     'www.yeosachin.com',
@@ -26,6 +27,15 @@ export async function proxy(request: NextRequest) {
     let supabaseResponse = NextResponse.next({
         request,
     });
+
+    // Capture first touch once as a bounded label only. The server never stores
+    // a URL, query string, referrer, click ID, or other acquisition identifier.
+    if ((request.method === 'GET' || request.method === 'HEAD') && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
+        supabaseResponse.cookies.set(KAKAO_ATTRIBUTION_COOKIE,
+            classifyKakaoSignupAttribution(request.nextUrl.search, request.headers.get('referer') ?? ''), {
+                maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax', secure: true,
+            });
+    }
 
     // Auth Callback, API, Static, Share 파일은 proxy 로직 건너뛰기
     // /share는 비로그인 상태에서도 접근 가능해야 함 (결과 공유 기능)
@@ -70,6 +80,8 @@ export async function proxy(request: NextRequest) {
         supabaseResponse.cookies.getAll().forEach(cookie => {
             redirectResponse.cookies.set(cookie);
         });
+        const attribution = supabaseResponse.cookies.get(KAKAO_ATTRIBUTION_COOKIE);
+        if (attribution) redirectResponse.cookies.set(attribution);
         return redirectResponse;
     };
 
