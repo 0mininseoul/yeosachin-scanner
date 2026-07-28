@@ -21,7 +21,7 @@ CREATE FUNCTION public.claim_kakao_signup_discord_outbox(p_user_id uuid DEFAULT 
 RETURNS TABLE (id uuid, claim_token uuid, masked_name text, birthyear char(4), gender text, signed_up_at timestamptz, attribution_label text, attempts integer)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 BEGIN RETURN QUERY WITH candidates AS (
-    SELECT outbox.id FROM public.kakao_signup_discord_outbox outbox WHERE outbox.status='pending' AND outbox.next_attempt_at <= clock_timestamp() AND (p_user_id IS NULL OR outbox.user_id=p_user_id) ORDER BY outbox.created_at FOR UPDATE SKIP LOCKED LIMIT LEAST(GREATEST(COALESCE(p_limit,1),1),10)
+    SELECT outbox.id FROM public.kakao_signup_discord_outbox outbox WHERE outbox.status='pending' AND outbox.profile_staged_at IS NOT NULL AND outbox.next_attempt_at <= clock_timestamp() AND (p_user_id IS NULL OR outbox.user_id=p_user_id) ORDER BY outbox.created_at FOR UPDATE SKIP LOCKED LIMIT LEAST(GREATEST(COALESCE(p_limit,1),1),10)
 ), claimed AS (
     UPDATE public.kakao_signup_discord_outbox outbox SET status='sending', attempts=outbox.attempts+1, claim_token=uuid_generate_v4(), claimed_at=clock_timestamp(), updated_at=clock_timestamp() FROM candidates WHERE outbox.id=candidates.id RETURNING outbox.*
 ) SELECT claimed.id,claimed.claim_token,claimed.masked_name,claimed.birthyear,claimed.gender,claimed.signed_up_at,claimed.attribution_label,claimed.attempts FROM claimed; END; $$;

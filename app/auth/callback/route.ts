@@ -198,7 +198,12 @@ async function handleGET(
     const provider = authProvider(authedUser?.app_metadata?.provider);
     if (authedUser && provider === 'kakao') {
         const signedUpAt = new Date(authedUser.created_at ?? Date.now());
-        const attributionLabel = validKakaoSignupAttribution(cookieStore.get(KAKAO_ATTRIBUTION_COOKIE)?.value);
+        // Some supported test/runtime cookie adapters expose only the Supabase
+        // getAll/setAll surface; absence simply means no attribution label.
+        const getAttributionCookie = (cookieStore as { get?: (name: string) => { value?: string } | undefined }).get;
+        const attributionLabel = validKakaoSignupAttribution(
+            typeof getAttributionCookie === 'function' ? getAttributionCookie(KAKAO_ATTRIBUTION_COOKIE)?.value : undefined,
+        );
         let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
         if (!session?.provider_token) {
             await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attributionLabel);
@@ -235,7 +240,8 @@ async function handleGET(
         // The first-signup DB trigger is the only enqueue authority. Delivery runs
         // asynchronously so Discord cannot delay or fail a completed login.
         scheduleKakaoSignupDiscordDelivery(authedUser.id);
-        cookieStore.delete(KAKAO_ATTRIBUTION_COOKIE);
+        const deleteAttributionCookie = (cookieStore as { delete?: (name: string) => void }).delete;
+        if (typeof deleteAttributionCookie === 'function') deleteAttributionCookie(KAKAO_ATTRIBUTION_COOKIE);
     }
 
     const redirectUrl = appRedirectUrlForRequest(request.url, searchParams.get('next'));
