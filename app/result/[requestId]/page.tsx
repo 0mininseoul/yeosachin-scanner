@@ -45,17 +45,11 @@ import { ResultActions } from '@/components/result-actions';
 import { ResultFeedback } from '@/components/result-feedback';
 import { ResultPagination } from '@/components/result-pagination';
 import { useCountUp } from '@/hooks/useCountUp';
+import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
 }
-
-const getProxyImageUrl = (url: string | undefined): string | undefined => {
-    if (!url) return undefined;
-    return url.startsWith('/api/image-proxy?') || /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(url)
-        ? url
-        : undefined;
-};
 
 // 프로필 이미지 컴포넌트 (로드 실패 시 fallback)
 function ProfileImage({
@@ -68,7 +62,7 @@ function ProfileImage({
     className?: string;
 }) {
     const [error, setError] = useState(false);
-    const proxiedSrc = getProxyImageUrl(src);
+    const proxiedSrc = safeResultImageUrl(src);
 
     if (!proxiedSrc || error) {
         return <ProfileFallback variant={variant} />;
@@ -540,10 +534,14 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
-    // V2 results have no public URL: /result is auth-gated and /api/share/enable
-    // rejects v2, so there is no share token to hand out. The button therefore
-    // shares the service itself with a teaser rather than a link that would land
-    // a recipient on a login screen.
+    // Shares the service with a teaser rather than this result. /result is
+    // auth-gated, so a recipient would land on a login screen.
+    //
+    // TODO: /api/share/enable now issues v2 share tokens and there is an
+    // opengraph-image route for them, so this can point at /share/{token}
+    // instead. That needs the enable call, its failure path, and the redaction
+    // decision on what a tokenless visitor may see, so it is left to its own
+    // change rather than folded into the motion work.
     const handleKakaoShare = async () => {
         if (kakaoShareLoading) return;
         setKakaoShareLoading(true);

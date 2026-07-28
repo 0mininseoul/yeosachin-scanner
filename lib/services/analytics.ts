@@ -220,10 +220,6 @@ let hasInspectedSdkIdentity = false;
 let pendingIdentityReset = false;
 let replayShutdown = false;
 let replayShutdownRequested = false;
-let replayRuntimeContext = {
-    configured: false,
-    demoAnalysisEnabled: true,
-};
 let navigationGuardConsumers = 0;
 let removeNavigationGuards: (() => void) | null = null;
 const queuedEvents: QueuedEvent[] = [];
@@ -289,8 +285,6 @@ function configuredReplaySampling(): ReplaySamplingConfig {
         typeof window === 'undefined'
         || !isReplayProductionEnvironment()
         || process.env.NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED !== 'true'
-        || !replayRuntimeContext.configured
-        || replayRuntimeContext.demoAnalysisEnabled
         || replayShutdownRequested
         || hasReplayPrivacyOptOut()
         || !isReplaySafeLocation()
@@ -515,7 +509,7 @@ function createSafeSessionReplayRemoteConfig(apiKey: string) {
             ) {
                 return replayConfigResponse({ captureEnabled: false, sampleRate: 0 });
             }
-            // Route, demo mode, DNT, or GPC may change while config is in flight.
+            // Revalidate route, DNT, GPC, environment, and sticky shutdown after the config fetch.
             return configuredReplaySampling().captureEnabled
                 ? replayConfigResponse(expectedSampling)
                 : replayConfigResponse({ captureEnabled: false, sampleRate: 0 });
@@ -735,22 +729,9 @@ export function enforceAmplitudeReplayRoutePrivacy(): void {
     if (
         !isReplaySafeLocation()
         || hasReplayPrivacyOptOut()
-        || replayRuntimeContext.demoAnalysisEnabled
     ) {
         shutdownSessionReplay();
     }
-}
-
-export function updateAmplitudeReplayRuntimeContext({
-    demoAnalysisEnabled,
-}: {
-    demoAnalysisEnabled: boolean;
-}): void {
-    replayRuntimeContext = {
-        configured: true,
-        demoAnalysisEnabled,
-    };
-    if (demoAnalysisEnabled) shutdownSessionReplay();
 }
 
 function isSafeNavigationTarget(value: string | URL | null | undefined): boolean {

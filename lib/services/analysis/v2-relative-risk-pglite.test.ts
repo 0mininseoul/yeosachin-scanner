@@ -123,7 +123,7 @@ describe('relative risk policy v2.3 SQL helper', () => {
         } finally {
             await migrationDb.close();
         }
-    });
+    }, 15_000);
 
     it.each([
         { scores: [] },

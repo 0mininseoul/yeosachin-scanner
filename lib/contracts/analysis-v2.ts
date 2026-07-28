@@ -43,6 +43,7 @@ const boundedImageUrlSchema = z.string()
     .min(1)
     .max(2_048)
     .refine(value => value.startsWith('/api/image-proxy?')
+        || /^\/api\/share\/[0-9a-f]{64}\/image\?(?:kind=target|kind=(?:female|private)&candidateId=(?:[A-Za-z0-9._-]|%3A){1,384})$/u.test(value)
         || /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(value)
         || /^\/demo-avatars\/demo-v3-(?:target|female|private)-\d{3}\.webp$/u.test(value), {
         message: 'Public image URLs must use the signed proxy or a fixed local synthetic asset.',
@@ -646,6 +647,7 @@ const relationshipCoverageSchema = z.object({
 
 export const analysisResultSummaryV1Schema = z.object({
     targetInstagramId: usernameSchema,
+    targetFullName: z.string().max(200).nullable().default(null),
     targetProfileImage: boundedImageUrlSchema,
     planId: planIdSchema,
     followers: relationshipCoverageSchema,
@@ -661,7 +663,12 @@ export const analysisResultSummaryV1Schema = z.object({
     }).strict(),
     notScreenedMutuals: z.number().int().nonnegative(),
     exclusionApplied: z.boolean(),
-    scorePolicyVersion: z.enum(['risk-policy-v2.2', 'risk-policy-v2.3', RISK_POLICY_VERSION]),
+    scorePolicyVersion: z.enum([
+        'risk-policy-v2.2',
+        'risk-policy-v2.3',
+        'risk-policy-v2.4',
+        RISK_POLICY_VERSION,
+    ]),
 }).strip().superRefine((value, context) => {
     for (const side of ['followers', 'following'] as const) {
         if (!value[side].meetsCoverageGate) {

@@ -376,6 +376,7 @@ describe('analysis V2 AI/scoring stage store', () => {
             ...claim(),
             shortlistHash,
             candidates,
+            riskPolicyVersion: 'risk-policy-v2.4',
         });
 
         expect(stored).toEqual({
@@ -400,8 +401,30 @@ describe('analysis V2 AI/scoring stage store', () => {
 
     it('persists calibrated v2.4 fields and rejects v2.2 final-score replay', async () => {
         const candidates = calculateV2FinalScores({
-            preliminary: preliminary(),
+            preliminary: calculateV2PreliminaryScores({
+                candidates: preliminary().map(row => ({
+                    candidateId: row.candidateId,
+                    username: row.username,
+                    appearanceGrade: row.appearanceGrade,
+                    exposureScore: row.exposureScore,
+                    accountContext: row.accountContext,
+                    hasWeakPartnerEvidence: row.hasWeakPartnerEvidence,
+                    hasStrongPartnerEvidence: row.hasStrongPartnerEvidence,
+                    uniqueTargetPostsLikedByCandidate:
+                        row.uniqueTargetPostsLikedByCandidate,
+                    boundedCandidateCommentsOnTarget:
+                        row.boundedCandidateCommentsOnTarget,
+                    hasCandidateToTargetTagOrCaptionMention:
+                        row.hasCandidateToTargetTagOrCaptionMention,
+                    hasTargetToCandidateTagOrCaptionMention:
+                        row.hasTargetToCandidateTagOrCaptionMention,
+                })),
+                orderedMutualUsernames: ['woman.one'],
+                excludedUsername: null,
+                riskPolicyVersion: 'risk-policy-v2.4',
+            }),
             observedReverseLikeCandidateIds: new Set(),
+            riskPolicyVersion: 'risk-policy-v2.4',
         });
         const narrativeBatchHash = digest('narrative-batch');
         const resultHash = digest('final-score');
@@ -453,6 +476,35 @@ describe('analysis V2 AI/scoring stage store', () => {
             error: null,
         });
         await expect(createSupabaseAnalysisV2AiScoringStageStore(rejected.client)
+            .loadFinalScores(claim('track:final-score')))
+            .rejects.toThrow('invalid payload');
+    });
+
+    it('rejects a hybrid v2.5 payload carrying v2.4 candidate results', async () => {
+        const candidates = calculateV2FinalScores({
+            preliminary: preliminary(),
+            observedReverseLikeCandidateIds: new Set(),
+            riskPolicyVersion: 'risk-policy-v2.4',
+        });
+        const payload = {
+            riskPolicyVersion: 'risk-policy-v2.5',
+            candidates,
+            narrativeCandidateIds: [],
+            narrativeBatchHash: digest('v25-hybrid'),
+        };
+        const fake = clientWith({
+            data: {
+                stageKind: 'final_score',
+                batch: null,
+                revision: 1,
+                resultHash: digest('v25-hybrid-result'),
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+
+        await expect(createSupabaseAnalysisV2AiScoringStageStore(fake.client)
             .loadFinalScores(claim('track:final-score')))
             .rejects.toThrow('invalid payload');
     });

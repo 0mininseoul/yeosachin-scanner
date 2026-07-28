@@ -24,6 +24,7 @@ const ITEM = {
     project_slug: 'web-app',
     occurred_at: '2026-07-28T00:00:00.000Z',
     issue_url: 'https://sentry.io/organizations/acme/issues/1234/',
+    issue_short_id: 'WEB-1234', error_type: 'TypeError', release: 'v1.2.3',
     attempts: 1,
 };
 
@@ -41,13 +42,14 @@ function productionAlert(overrides: Record<string, unknown> = {}) {
         // Official Service Hook v0 shape from sentry_apps/tasks/service_hooks.py:
         // top-level project, group, event; the event environment is an event tag.
         project: { slug: 'web-app', name: 'Private project name' },
-        group: { id: '1234', url: 'https://sentry.io/organizations/acme/issues/1234/' },
+        group: { id: '1234', shortId: 'WEB-1234', url: 'https://sentry.io/organizations/acme/issues/1234/' },
         event: {
             id: 'a'.repeat(32),
             eventID: 'a'.repeat(32),
             groupID: '1234',
             dateCreated: '2026-07-28T00:00:00.000Z',
             tags: [{ key: 'environment', value: 'production' }],
+            exception: { values: [{ type: 'TypeError' }] }, release: 'v1.2.3',
             message: 'private exception message',
             entries: [{ data: { values: [{ stacktrace: 'private stacktrace' }] } }],
             user: { email: 'person@example.test', ip_address: '203.0.113.10' },
@@ -78,6 +80,7 @@ function internalIntegrationIssue(overrides: Record<string, unknown> = {}) {
                 project: { slug: 'ai-baram-detector' },
                 firstSeen: '2026-07-28T00:00:00.000Z',
                 environment: 'production',
+                shortId: 'AI-1234', metadata: { type: 'TypeError', release: 'v1.2.3' },
                 user: { email: 'person@example.test' },
                 request: { headers: { authorization: 'private bearer token' } },
             },
@@ -146,7 +149,10 @@ describe('Sentry Service Hook Discord bridge', () => {
                 title: 'different private exception title',
             } },
         }));
-        expect(accepted).toMatchObject({ projectSlug: 'ai-baram-detector' });
+        expect(accepted).toMatchObject({
+            projectSlug: 'ai-baram-detector', issueShortId: 'AI-1234',
+            errorType: 'TypeError', release: 'v1.2.3',
+        });
         expect(duplicate?.dedupeKey).toBe(accepted?.dedupeKey);
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({ action: 'resolved' }))).toBeNull();
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
@@ -169,11 +175,12 @@ describe('Sentry Service Hook Discord bridge', () => {
 
     it('builds a PII-safe minimal Discord embed', () => {
         const parsed = parseProductionSentryIssueAlert(productionAlert());
-        expect(parsed).not.toBeNull();
+        expect(parsed).toMatchObject({ issueShortId: 'WEB-1234', errorType: 'TypeError', release: 'v1.2.3' });
         const embed = buildSentryDiscordPayload({
             project_slug: parsed!.projectSlug,
             occurred_at: parsed!.occurredAt.toISOString(),
             issue_url: parsed!.issueUrl,
+            issue_short_id: parsed!.issueShortId, error_type: parsed!.errorType, release: parsed!.release,
         });
         const rendered = JSON.stringify(embed);
         expect(embed.embeds[0].title).toBe('🚨 Sentry 오류 알림');
@@ -182,6 +189,20 @@ describe('Sentry Service Hook Discord bridge', () => {
         expect(rendered).not.toContain('person@example.test');
         expect(rendered).not.toContain('203.0.113.10');
         expect(rendered).not.toContain('request');
+        expect(rendered).toContain('WEB-1234');
+        expect(rendered).toContain('TypeError');
+        expect(rendered).toContain('v1.2.3');
+    });
+
+    it('drops malicious issue summary values and renders only safe defaults', () => {
+        const parsed = parseProductionSentryIssueAlert(productionAlert({
+            group: { shortId: 'WEB-1234?token=secret' },
+            event: { dateCreated: '2026-07-28T00:00:00.000Z', tags: [{ key: 'environment', value: 'production' }, { key: 'release', value: 'person@example.test' }], exception: { values: [{ type: 'TypeError: person@example.test' }] } },
+        }));
+        expect(parsed).toMatchObject({ issueShortId: null, errorType: null, release: null });
+        const rendered = JSON.stringify(buildSentryDiscordPayload({ project_slug: null, occurred_at: '2026-07-28T00:00:00Z', issue_url: null, issue_short_id: null, error_type: null, release: null }));
+        expect(rendered).toContain('미제공');
+        expect(rendered).not.toContain('person@example.test');
     });
 
     it('claims once across concurrent dispatchers and records a successful send', async () => {

@@ -144,7 +144,7 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     aiStagePolicyVersion: string | null;
     /** Parsed once from this request's immutable policy snapshot. */
     schedulerCapability?: AiSchedulerCapability;
-    riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null;
+    riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | 'risk-policy-v2.5' | null;
     handlerDeadlineAtMs?: number;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
     reportActiveProfile?: (username: string) => Promise<void>;
@@ -579,10 +579,15 @@ export async function executeAnalysisV2DagJob(
             }
         }
     }
-    let riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | null = null;
+    let riskPolicyVersion:
+        'risk-policy-v2.3' | 'risk-policy-v2.4' | 'risk-policy-v2.5' | null = null;
     if (RISK_POLICY_STAGES.has(current.stage)) {
         const loaded = await aiPolicyStore.loadRiskPolicyVersion(claim.requestId);
-        if (loaded !== 'risk-policy-v2.3' && loaded !== 'risk-policy-v2.4') {
+        if (
+            loaded !== 'risk-policy-v2.3'
+            && loaded !== 'risk-policy-v2.4'
+            && loaded !== 'risk-policy-v2.5'
+        ) {
             executionError('ANALYSIS_V2_LEGACY_POLICY_INVALID', 'permanent');
         }
         riskPolicyVersion = loaded;

@@ -1,10 +1,18 @@
 # Final Automatic Analysis Launch Readiness Implementation Plan
 
+> **현재 상태 스냅샷 (2026-07-28):** 이 파일의 나머지는 당시 launch readiness checklist라는 역사적 계획이다. checkbox를 현재 상태로 다시 해석하거나 미충족 gate를 체크하지 않는다. 현재 운영 정본은 [Analysis V2 프로덕션 운영 정본](../../analysis-v2-production-operations.md)이다.
+
+**구현됨:** v2.10 tone, aggregate gender experiment, risk v2.5, checkout safe failure와 automatic open, microbatch v2.9, owner-controlled sharing/revocation이 구현·배포되었다.
+
+**소유자 waived/deferred:** repeat stability와 실제 결제 경로의 재검증은 launch 이후로 deferred되었다.
+
+**검증 공백(미해결):** unknown `<=20%`는 아직 미달이다. 최신 full E2E는 v2.9/v2.10 이전의 표본이며, 최신 94.6분은 표시 workload band 안에 들지 않는다. complete Basic/Standard cost도 없다. 이 공백은 이력 checklist의 해당 gate를 충족한 것으로 표시하지 않는다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remove the remaining presentation, gender-quality, checkout, and measured-latency launch blockers, then perform one non-duplicated Standard production E2E before enabling public automatic analysis and privacy-bounded Amplitude Session Replay.
+**Historical goal:** Remove the then-remaining presentation, gender-quality, checkout, and measured-latency launch blockers, then perform one non-duplicated Standard production E2E before enabling public automatic analysis and privacy-bounded Amplitude Session Replay.
 
-**Architecture:** Every semantic AI change receives a new immutable AI policy version and is evaluated against the sealed historical Standard source before any new Apify collection. Payment state remains fail-closed until an opaque provider reference makes late completion unambiguous. Public admission remains closed until the same reviewed source is deployed and one full production E2E passes the quality, UI, cost, routing, and duration gates.
+**Historical architecture:** Every semantic AI change receives a new immutable AI policy version and is evaluated against the sealed historical Standard source before any new Apify collection. Payment state remains fail-closed until an opaque provider reference makes late completion unambiguous. This plan assumed public admission would remain closed until the reviewed source and E2E gates passed; owner policy has since opened automatic admission, without turning unmet measurement gates into passes.
 
 **Tech Stack:** Next.js 16, TypeScript, Vitest, Supabase/PostgreSQL/PGlite, Gemini staged analysis, Cloud Run/Cloud Tasks, Apify, Vercel, Amplitude.
 

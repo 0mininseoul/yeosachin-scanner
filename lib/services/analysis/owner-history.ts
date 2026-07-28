@@ -12,9 +12,8 @@ const ownerAnalysisHistoryItemV1Schema = z.object({
     createdAt: z.string().datetime({ offset: true }).nullable(),
     planType: z.string().min(1).max(20).regex(/^[a-z0-9_-]+$/).nullable(),
     pipelineVersion: z.enum(['v1', 'v2']),
-    // Additive: the archive shows "맞팔 여성 (공개 계정) N명" once the owner-history
-    // RPC carries it. Optional so today's payload — which omits the field — still
-    // parses against this .strict() object.
+    // Drives "맞팔 여성 (공개 계정) N명" in the archive. Optional so rows written
+    // before the RPC carried it still parse against this .strict() object.
     publicFemaleCount: z.number().int().nonnegative().nullable().optional(),
 }).strict().superRefine((item, context) => {
     if (

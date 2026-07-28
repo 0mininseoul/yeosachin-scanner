@@ -234,6 +234,7 @@ describe('analysis V2 durable DAG worker', () => {
         );
         const executor = vi.fn(async context => {
             expect(context.aiStagePolicyVersion).toBe(AI_STAGE_POLICY_LATEST_VERSION);
+            expect(context.riskPolicyVersion).toBe('risk-policy-v2.5');
             throw new Error('SCREENING_EXECUTOR_REACHED');
         });
 
@@ -242,7 +243,7 @@ describe('analysis V2 durable DAG worker', () => {
             executors: { screening: executor },
             aiPolicyStore: {
                 loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
-                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.5'),
             },
         })).rejects.toThrow('SCREENING_EXECUTOR_REACHED');
 

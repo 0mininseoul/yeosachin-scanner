@@ -10,6 +10,10 @@ const presentation = readFileSync(
     join(root, 'lib', 'services', 'analysis', 'owner-view-presentation.ts'),
     'utf8',
 );
+const resultImageBoundary = readFileSync(
+    join(root, 'lib', 'services', 'result-local-image.ts'),
+    'utf8',
+);
 const globals = readFileSync(join(root, 'app', 'globals.css'), 'utf8');
 
 function relativeLuminance(hex: string): number {
@@ -91,8 +95,12 @@ describe('result page pagination copy contract', () => {
         expect(resultPage).not.toContain('summary.v2.publicMutuals.toLocaleString()');
     });
 
-    it('keeps the signed image proxy boundary for profile images', () => {
-        expect(resultPage).toContain("url.startsWith('/api/image-proxy?')");
+    it('keeps profile images behind the exact local/proxy boundary', () => {
+        expect(resultPage).toContain("import { safeResultImageUrl } from '@/lib/services/result-local-image'");
+        expect(resultPage).toContain('const proxiedSrc = safeResultImageUrl(src)');
+        expect(resultImageBoundary).toContain("url.startsWith('/api/image-proxy?')");
+        expect(resultImageBoundary).toContain('demo-v3-(?:target|female|private)');
+        expect(resultImageBoundary).toContain("? url\n        : undefined");
     });
 
     it('keeps V2 owner results out of the legacy share action', () => {
