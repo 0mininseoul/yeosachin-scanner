@@ -12,7 +12,7 @@ ALTER TABLE public.demo_analysis_fixtures ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.demo_analysis_fixtures FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.demo_analysis_fixtures FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON TABLE public.demo_analysis_fixtures FROM service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.demo_analysis_fixtures TO service_role;
+GRANT SELECT ON TABLE public.demo_analysis_fixtures TO service_role;
 
 CREATE UNIQUE INDEX demo_analysis_fixtures_one_published
     ON public.demo_analysis_fixtures ((status)) WHERE status = 'published';
@@ -157,6 +157,17 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.create_demo_analysis_fixture_draft(
+    p_version TEXT,
+    p_payload JSONB
+) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+BEGIN
+    INSERT INTO public.demo_analysis_fixtures (version, status, payload)
+    VALUES (p_version, 'draft', p_payload);
+END;
+$$;
+
 CREATE TRIGGER validate_demo_analysis_fixture_payload
     BEFORE INSERT OR UPDATE ON public.demo_analysis_fixtures
     FOR EACH ROW EXECUTE FUNCTION public.assert_demo_analysis_fixture_payload();
@@ -173,6 +184,7 @@ ALTER TABLE public.demo_analysis_runs
         OR (fixture_version ~ '^operator-editable-fixture-[a-z0-9][a-z0-9._-]{1,99}$' AND duration_seconds BETWEEN 30 AND 45)
     );
 
+DROP FUNCTION IF EXISTS public.create_demo_analysis_preflight(UUID, TEXT, TEXT, INTEGER);
 CREATE OR REPLACE FUNCTION public.create_demo_analysis_preflight(
     p_user_id UUID,
     p_target_instagram_id TEXT,
@@ -226,3 +238,5 @@ REVOKE ALL ON FUNCTION public.create_demo_analysis_preflight(UUID, TEXT, TEXT, I
 GRANT EXECUTE ON FUNCTION public.create_demo_analysis_preflight(UUID, TEXT, TEXT, INTEGER, TEXT, JSONB) TO service_role;
 REVOKE ALL ON FUNCTION public.publish_demo_analysis_fixture(TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.publish_demo_analysis_fixture(TEXT, JSONB) TO service_role;
+REVOKE ALL ON FUNCTION public.create_demo_analysis_fixture_draft(TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_demo_analysis_fixture_draft(TEXT, JSONB) TO service_role;

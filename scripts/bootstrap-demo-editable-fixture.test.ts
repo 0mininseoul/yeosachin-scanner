@@ -11,10 +11,10 @@ describe('operator editable demo fixture bootstrap', () => {
     });
 
     it('refuses to overwrite an existing operator fixture row', async () => {
-        const insert = vi.fn();
+        const rpc = vi.fn();
         const maybeSingle = vi.fn().mockResolvedValue({ data: { version: 'operator-editable-fixture-v1' }, error: null });
-        const client = { from: vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle }) }), insert }) };
+        const client = { from: vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle }) }) }), rpc };
         await expect(bootstrapDemoEditableFixture(client as never)).rejects.toThrow(/already exists/i);
-        expect(insert).not.toHaveBeenCalled();
+        expect(rpc).not.toHaveBeenCalled();
     });
 });

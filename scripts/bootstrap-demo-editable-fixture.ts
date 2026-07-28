@@ -28,8 +28,8 @@ export function createBootstrapDemoFixturePayload() {
 type BootstrapClient = {
     from(table: string): {
         select(columns: string): { eq(column: string, value: string): { maybeSingle(): Promise<{ data: unknown; error: unknown }> } };
-        insert(value: unknown): Promise<{ error: unknown }>;
     };
+    rpc(name: string, input: Record<string, unknown>): Promise<{ error: unknown }>;
 };
 
 export async function bootstrapDemoEditableFixture(client: BootstrapClient = supabaseAdmin as unknown as BootstrapClient): Promise<void> {
@@ -37,10 +37,9 @@ export async function bootstrapDemoEditableFixture(client: BootstrapClient = sup
     const existing = await table.select('version').eq('version', OPERATOR_EDITABLE_DEMO_FIXTURE_VERSION).maybeSingle();
     if (existing.error) throw new Error('Could not check the demo fixture bootstrap state.');
     if (existing.data) throw new Error('The operator editable demo fixture already exists; refusing to overwrite it.');
-    const { error } = await table.insert({
-        version: OPERATOR_EDITABLE_DEMO_FIXTURE_VERSION,
-        status: 'draft',
-        payload: createBootstrapDemoFixturePayload(),
+    const { error } = await client.rpc('create_demo_analysis_fixture_draft', {
+        p_version: OPERATOR_EDITABLE_DEMO_FIXTURE_VERSION,
+        p_payload: createBootstrapDemoFixturePayload(),
     });
     if (error) throw new Error('Could not create the demo fixture draft.');
 }
