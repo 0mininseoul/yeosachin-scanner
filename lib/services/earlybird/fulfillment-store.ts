@@ -112,6 +112,7 @@ export type EarlybirdFulfillmentReconciliation = Readonly<{
 
 export interface EarlybirdFulfillmentStore {
     admit(orderId: string): Promise<EarlybirdFulfillmentIdentity>;
+    autoAdmitEligible(limit: number): Promise<readonly EarlybirdFulfillmentIdentity[]>;
     listRecoverable(limit: number): Promise<readonly EarlybirdFulfillmentIdentity[]>;
     claim(orderId: string): Promise<EarlybirdFulfillmentClaim>;
     createOrReplayRequest(
@@ -132,6 +133,12 @@ export class EarlybirdFulfillmentError extends Error {
         this.name = 'EarlybirdFulfillmentError';
         this.code = code;
     }
+}
+
+export function isEarlybirdAutomaticFulfillmentEnabled(
+    environment: Record<string, string | undefined> = process.env
+): boolean {
+    return environment.EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED === 'true';
 }
 
 function persistenceError(): never {
@@ -204,6 +211,26 @@ export function createEarlybirdFulfillmentStore(
             );
             if (error) persistenceError();
             return identityFromRow(oneRow(data, identityRowSchema));
+        },
+
+        async autoAdmitEligible(limit) {
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+                throw new EarlybirdFulfillmentError(
+                    'EARLYBIRD_FULFILLMENT_INPUT_INVALID'
+                );
+            }
+            const { data, error } = await dependencies.rpc(
+                'auto_admit_eligible_earlybird_fulfillments',
+                { p_limit: limit }
+            );
+            if (error) persistenceError();
+            const parsed = identityRowsSchema.safeParse(data);
+            if (!parsed.success || parsed.data.some(
+                row => row.fulfillment_status !== 'admission_pending'
+            )) {
+                persistenceError();
+            }
+            return Object.freeze(parsed.data.map(identityFromRow));
         },
 
         async listRecoverable(limit) {
@@ -618,6 +645,7 @@ export type EarlybirdFulfillmentRecoverySummary = Readonly<{
 export async function recoverEarlybirdFulfillments(
     dependencies: {
         store?: EarlybirdFulfillmentStore;
+        automaticFulfillmentEnabled?: boolean;
         advance?: (
             identity: EarlybirdFulfillmentIdentity
         ) => Promise<EarlybirdFulfillmentAdvanceResult>;
@@ -641,6 +669,18 @@ export async function recoverEarlybirdFulfillments(
             'EARLYBIRD_FULFILLMENT_INPUT_INVALID'
         );
     }
+    let failed = 0;
+    if (
+        dependencies.automaticFulfillmentEnabled
+        ?? isEarlybirdAutomaticFulfillmentEnabled()
+    ) {
+        try {
+            await fulfillmentStore.autoAdmitEligible(limit);
+        } catch {
+            // A temporary admission sweep failure must not stop already-admitted work draining.
+            failed += 1;
+        }
+    }
     const reconciled = await fulfillmentStore.reconcile(100);
     const rows = await fulfillmentStore.listRecoverable(limit);
     const advance = dependencies.advance
@@ -650,7 +690,6 @@ export async function recoverEarlybirdFulfillments(
         }));
     let cursor = 0;
     let advanced = 0;
-    let failed = 0;
     const worker = async () => {
         while (cursor < rows.length) {
             const row = rows[cursor++];
