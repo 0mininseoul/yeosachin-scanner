@@ -75,6 +75,9 @@ export const HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY =
 /** Explicitly sealed non-exact historical media-availability audit capability. */
 export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY =
     'historical-partial-available-standard-v27-risk-v23-to-ai-v29' as const;
+/** Distinct non-exact historical evaluation fence for the v2.10 successor. */
+export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY =
+    'historical-partial-available-standard-v27-risk-v23-to-ai-v210' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -91,11 +94,16 @@ const historicalPartialAvailableEvaluationPolicySchema = z.object({
     capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
 }).strict();
+const historicalPartialAvailableV210EvaluationPolicySchema = z.object({
+    capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
+}).strict();
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
     historicalOfficialE2EV210EvaluationPolicySchema,
     historicalPartialAvailableEvaluationPolicySchema,
+    historicalPartialAvailableV210EvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -142,6 +150,7 @@ export function resolveReplayAiStagePolicyVersion(
         parsed.data.capability === HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY
         || parsed.data.capability === HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY
         || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+        || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
     ) {
         if (
             lineage.selectedPlanId !== 'standard'

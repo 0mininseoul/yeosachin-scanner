@@ -4,7 +4,12 @@ import type { AnalysisV2CheckpointProfile } from '@/lib/services/analysis/v2-pro
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import { isAnalysisV2PartialMediaCoverageAllowed, normalizeAnalysisV2MediaSelections } from '@/lib/services/analysis/v2-media-normalization';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
-import { HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY, type ReplayEvaluationPolicy, type ReplaySourceLineage } from './replay-source-lineage';
+import {
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
+    type ReplayEvaluationPolicy,
+    type ReplaySourceLineage,
+} from './replay-source-lineage';
 import {
     canonicalHistoricalPartialSourceIdentities,
     historicalPartialBundleInvariantIssues,
@@ -65,7 +70,10 @@ export async function captureHistoricalPartialAvailableReplayBundle(input: {
     source: { profiles: readonly HistoricalPartialSourceProfile[]; evidence: AnalysisV2ReplayBundle['evidence'] };
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>; now?: number;
 }): Promise<{ bundle: PartialBundle; report: HistoricalPartialAvailableReport }> {
-    if (input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    if (
+        input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+        && input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
+    ) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
     if (input.sourceLineage.selectedPlanId !== 'standard' || input.sourceLineage.policyVersions.aiStage !== 'ai-stage-policy-v2.7' || input.sourceLineage.policyVersions.risk !== 'risk-policy-v2.3' || 'scheduler' in input.sourceLineage.policyVersions) throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
     let identities;
     try { identities = sourceIdentities(input.source.profiles); } catch {

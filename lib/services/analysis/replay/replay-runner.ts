@@ -5,6 +5,7 @@ import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-ana
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -219,9 +220,12 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         };
     };
     const capability = capture.evaluationPolicy?.capability;
+    const partialCapability =
+        capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY;
     if (
-        (bundle.schemaVersion === 1 && capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY)
-        || (bundle.schemaVersion === 2 && capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY)
+        (bundle.schemaVersion === 1 && partialCapability)
+        || (bundle.schemaVersion === 2 && !partialCapability)
     ) throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
     if (bundle.schemaVersion !== 2) return;
     if (

@@ -258,6 +258,30 @@ describe('analysis V2 replay CLI', () => {
         ])).toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
     });
 
+    it('seals partial v2.10 capture and run behind a distinct capability', () => {
+        const capture = parseReplayCliArgs([
+            '--capture', '--historical-partial-available',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--evaluation-ai-policy=ai-stage-policy-v2.10',
+            '--bundle=a.enc', '--key=a.key',
+        ]);
+        const run = parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.10',
+            '--bundle=a.enc', '--key=a.key',
+        ]);
+
+        for (const parsed of [capture, run]) {
+            expect(parsed).toMatchObject({
+                historicalPartialAvailable: true,
+                evaluationPolicy: {
+                    capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+                    aiStage: 'ai-stage-policy-v2.10',
+                },
+            });
+        }
+    });
+
     it('rejects partial artifacts from exact runs and exact artifacts from partial dry-runs', async () => {
         const partial = await partialArtifacts(Date.now());
         await expect(runReplayCli(['--run', `--bundle=${partial.bundlePath}`, `--key=${partial.keyPath}`]))

@@ -21,6 +21,10 @@ const historicalV210Evaluation = {
     capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.10' as const,
 } satisfies ReplayEvaluationPolicy;
+const historicalPartialV210Evaluation = {
+    capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+    aiStage: 'ai-stage-policy-v2.10' as const,
+} satisfies ReplayEvaluationPolicy;
 const standard = (aiStage: 'ai-stage-policy-v2.7' | 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9') => ({
     selectedPlanId: 'standard' as const,
     policyVersions: {
@@ -61,6 +65,26 @@ describe('replay cross-policy evaluation capability', () => {
             .toBe('ai-stage-policy-v2.10');
         expect(replayEvaluationPolicySchema.safeParse({
             capability: HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.10',
+        }).success).toBe(false);
+    });
+
+    it('authenticates partial v2.10 with a distinct non-exact capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV210Evaluation,
+        )).toBe('ai-stage-policy-v2.10');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29',
             aiStage: 'ai-stage-policy-v2.10',
         }).success).toBe(false);
     });

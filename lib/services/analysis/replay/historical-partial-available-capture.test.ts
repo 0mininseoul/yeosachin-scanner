@@ -37,6 +37,36 @@ function publicProfile(username: string, posts = 1) {
 }
 
 describe('historical partial-available replay capture', () => {
+    it('seals a v2.10 evaluation into the same non-exact no-substitution scope', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '0'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+                aiStage: 'ai-stage-policy-v2.10',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle).toMatchObject({
+            schemaVersion: 2,
+            capture: {
+                scope: 'ai-only-historical-partial-available',
+                notExact: true,
+                fullE2eEvidence: false,
+                noMediaSubstitution: true,
+                evaluationPolicy: {
+                    capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+                    aiStage: 'ai-stage-policy-v2.10',
+                },
+            },
+        });
+    });
+
     it('records unavailable public media terminally while retaining passing public and private work at original ordinals', async () => {
         const result = await captureHistoricalPartialAvailableReplayBundle({
             requestFingerprint: 'a'.repeat(64),

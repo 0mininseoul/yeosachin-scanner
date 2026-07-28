@@ -215,6 +215,32 @@ describe('AI-only replay runner', () => {
         });
     });
 
+    it('reports authenticated partial v2.10 without weakening non-exact scope labels', async () => {
+        const partial = validPartialBundle();
+        const evaluationPolicy = {
+            capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+            aiStage: 'ai-stage-policy-v2.10',
+        } as const;
+        const partialV210 = {
+            ...partial,
+            capture: { ...partial.capture, evaluationPolicy },
+        } satisfies AnalysisV2ReplayBundle;
+        const report = await runAnalysisV2AiReplay({
+            bundle: partialV210,
+            mode: 'dry-run',
+            evaluationPolicy,
+        });
+
+        expect(report).toMatchObject({
+            benchmarkScope: 'ai-only-historical-partial-available',
+            evaluationAiPolicy: 'ai-stage-policy-v2.10',
+            replayAiPolicy: 'ai-stage-policy-v2.10',
+            fullE2eEvidence: false,
+            notExact: true,
+            noMediaSubstitution: true,
+        });
+    });
+
     it('runs eligible partial paid replay through the authenticated v2.9 stages and preserves aggregate-only scope labels', async () => {
         const triage = vi.fn(async () => ({
             outcome: 'ok' as const,

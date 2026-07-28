@@ -99,12 +99,57 @@ describe('analysis V2 replay bundle', () => {
         const keyPath = join(directory, 'key.key'); await createReplayKeyFile(keyPath);
         const invalid = [
             { ...bundle(), capture: { ...bundle().capture, evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' } } },
+            { ...bundle(), capture: { ...bundle().capture, evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210', aiStage: 'ai-stage-policy-v2.10' } } },
             { ...partialBundle(), capture: { ...partialBundle().capture, evaluationPolicy: undefined } },
             { ...partialBundle(), capture: { ...partialBundle().capture, evaluationPolicy: { capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' } } },
         ];
         for (const [index, value] of invalid.entries()) {
             await expect(writeReplayBundle({ bundle: value as AnalysisV2ReplayBundle, bundlePath: join(directory, `${index}.enc`), keyPath, now: Date.parse('2026-07-27T00:10:00.000Z') })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
         }
+    });
+
+    it('authenticates a distinct v2.10 evaluation in a sealed schema-v2 bundle', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        const bundlePath = join(directory, 'partial-v210.enc');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+                    aiStage: 'ai-stage-policy-v2.10',
+                },
+            },
+        } as AnalysisV2ReplayBundle;
+
+        await writeReplayBundle({
+            bundle: value,
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+        await expect(readAuthenticatedReplayBundle({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:20:00.000Z'),
+        })).resolves.toMatchObject({
+            bundle: {
+                schemaVersion: 2,
+                capture: {
+                    scope: 'ai-only-historical-partial-available',
+                    notExact: true,
+                    fullE2eEvidence: false,
+                    noMediaSubstitution: true,
+                    evaluationPolicy: {
+                        capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+                        aiStage: 'ai-stage-policy-v2.10',
+                    },
+                },
+            },
+        });
     });
 
     it('rejects cross-version capabilities again while reading authenticated plaintext', async () => {
