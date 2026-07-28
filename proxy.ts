@@ -28,15 +28,6 @@ export async function proxy(request: NextRequest) {
         request,
     });
 
-    // Capture first touch once as a bounded label only. The server never stores
-    // a URL, query string, referrer, click ID, or other acquisition identifier.
-    if ((request.method === 'GET' || request.method === 'HEAD') && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
-        supabaseResponse.cookies.set(KAKAO_ATTRIBUTION_COOKIE,
-            classifyKakaoSignupAttribution(request.nextUrl.search, request.headers.get('referer') ?? ''), {
-                maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax', secure: true,
-            });
-    }
-
     // Auth Callback, API, Static, Share 파일은 proxy 로직 건너뛰기
     // /share는 비로그인 상태에서도 접근 가능해야 함 (결과 공유 기능)
     if (request.nextUrl.pathname.startsWith('/auth') ||
@@ -45,6 +36,15 @@ export async function proxy(request: NextRequest) {
         request.nextUrl.pathname.startsWith('/_next') ||
         request.nextUrl.pathname.startsWith('/static')) {
         return supabaseResponse;
+    }
+
+    // Capture first touch once on a real page navigation only. The server never
+    // stores a URL, query string, referrer, click ID, or other identifier.
+    if (request.method === 'GET' && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
+        supabaseResponse.cookies.set(KAKAO_ATTRIBUTION_COOKIE,
+            classifyKakaoSignupAttribution(request.nextUrl.search, request.headers.get('referer') ?? ''), {
+                maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax', secure: true,
+            });
     }
 
     const supabase = createServerClient(
@@ -62,6 +62,13 @@ export async function proxy(request: NextRequest) {
                     supabaseResponse = NextResponse.next({
                         request,
                     });
+                    const attribution = request.cookies.get(KAKAO_ATTRIBUTION_COOKIE)
+                        ?? { name: KAKAO_ATTRIBUTION_COOKIE, value: classifyKakaoSignupAttribution(
+                            request.nextUrl.search, request.headers.get('referer') ?? '',
+                        ), maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true };
+                    if (!request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
+                        supabaseResponse.cookies.set(attribution);
+                    }
                     cookiesToSet.forEach(({ name, value, options }) =>
                         supabaseResponse.cookies.set(name, value, options)
                     );

@@ -103,6 +103,18 @@ describe('authentication proxy redirects', () => {
         expect(response.headers.get('set-cookie')).toContain('sb-test-auth=refreshed');
     });
 
+    it('retains first-touch attribution when Supabase refreshes response cookies', async () => {
+        mockAuthenticatedUser(null, true);
+        const response = await proxy(new NextRequest('https://yeosachin.com/?utm_source=kakao'));
+        expect(response.headers.get('set-cookie')).toContain('kakao_signup_attribution=UTM%3A%20%EC%B9%B4%EC%B9%B4%EC%98%A4');
+        expect(response.headers.get('set-cookie')).toContain('sb-test-auth=refreshed');
+    });
+
+    it.each(['/auth/callback?utm_source=kakao', '/api/user/me?utm_source=kakao', '/share/token?utm_source=kakao', '/_next/static/app.js?utm_source=kakao', '/static/file?utm_source=kakao'])('does not capture attribution on bypass path %s', async path => {
+        const response = await proxy(new NextRequest(`https://yeosachin.com${path}`));
+        expect(response.headers.get('set-cookie') ?? '').not.toContain('kakao_signup_attribution=');
+    });
+
     it('rejects an external authenticated redirect destination', async () => {
         mockAuthenticatedUser('123e4567-e89b-42d3-a456-426614174000');
 
