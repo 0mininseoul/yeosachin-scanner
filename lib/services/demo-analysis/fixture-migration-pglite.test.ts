@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDemoFixture } from './demo-analysis';
 
 const migration = readFileSync(
-    new URL('../../../supabase/migrations/20260730000000_demo_analysis_editable_fixture.sql', import.meta.url),
+    new URL('../../../supabase/migrations/20260730010000_demo_analysis_editable_fixture_authority.sql', import.meta.url),
     'utf8',
 );
 let db: PGlite;
