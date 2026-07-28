@@ -200,6 +200,7 @@ const profileOutcomeSchema = z.object({
         'ai-stage-policy-v2.8',
         'ai-stage-policy-v2.9',
         'ai-stage-policy-v2.10',
+        'ai-stage-policy-v2.11',
     ]).optional(),
     mediaSelectionProvenance: mediaSelectionProvenanceSchema.optional(),
     inputQualityPolicy: z.literal('input-quality-v2.8').optional(),
@@ -321,6 +322,7 @@ const profileOutcomeSchema = z.object({
     const v29FeatureSkipped = (
         value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
         || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.11'
     )
         && value.v29FeatureAdmission !== undefined
         && value.v29FeatureAdmission !== 'eligible';

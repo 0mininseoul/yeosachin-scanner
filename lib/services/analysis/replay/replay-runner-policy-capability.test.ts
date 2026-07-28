@@ -40,6 +40,7 @@ import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
 import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -123,6 +124,19 @@ const historicalV210Bundle = {
             },
         },
         evaluationPolicy: historicalV210Evaluation,
+    },
+};
+
+const historicalV211Evaluation = {
+    capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.11',
+} as const satisfies ReplayEvaluationPolicy;
+
+const historicalV211Bundle = {
+    ...historicalV210Bundle,
+    capture: {
+        ...historicalV210Bundle.capture,
+        evaluationPolicy: historicalV211Evaluation,
     },
 };
 
@@ -214,6 +228,67 @@ describe('replay staged AI runner policy capability', () => {
         expect(ai.genderTriage).not.toHaveBeenCalled();
         expect(ai.genderTriageMicrobatch).toHaveBeenCalledOnce();
         expect(ai.featureAnalysis).not.toHaveBeenCalled();
+    });
+
+    it('admits uncertain triage to feature then launches one late resolver for strict personal unresolved output', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'personal' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockResolvedValue({
+            assessment: {
+                inferredGender: 'female', confidence: 'high',
+                ownerConsistency: 'same_person', evidenceSelectionIds: ['m1', 'm2'],
+            },
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        let serialized = '';
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...historicalV211Bundle,
+                profiles: [{
+                    ...historicalV211Bundle.profiles[0]!,
+                    media: [
+                        historicalV211Bundle.profiles[0]!.media[0]!,
+                        { ...historicalV211Bundle.profiles[0]!.media[0]!, selectionId: 'm2', postId: 'p2' },
+                    ],
+                    triageSelectionIds: ['m1', 'm2'],
+                    featureSelectionIds: ['m1', 'm2'],
+                    resolverSelectionIds: ['m1', 'm2'],
+                    coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+                }],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV211Evaluation,
+            write: line => { serialized = line; },
+        });
+        expect(ai.featureAnalysis).toHaveBeenCalledOnce();
+        expect(ai.genderResolution).toHaveBeenCalledOnce();
+        expect(report.gender.female).toBe(1);
+        expect(report.genderQuality).toMatchObject({
+            resolver: { earlyAdmission: 0, lateAdmission: 1 },
+            qualityGate: { observedPass: true, worstCasePass: true },
+        });
+        expect(serialized).toContain('gender_quality');
+        expect(serialized).not.toContain('"public"');
+        expect(serialized).not.toContain('"m1"');
     });
 
     it('blocks an official high-female v2.9 account before feature and resolver', async () => {

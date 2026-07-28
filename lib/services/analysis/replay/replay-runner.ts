@@ -6,10 +6,12 @@ import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
+import { v211FeatureAdmission } from '../v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from '../v2-gender-resolver-media-policy';
 import { historicalPartialBundleInvariantIssues, historicalPartialPaidCoverage } from './historical-partial-available-artifact';
@@ -17,6 +19,7 @@ import {
     isDiagnosticPartialCoverageCliCapability,
     type DiagnosticPartialCoverageCliCapability,
 } from './diagnostic-partial-coverage-capability';
+import { evaluateReplayGenderQualityGate } from './replay-gender-quality-gate';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -134,6 +137,14 @@ export interface AnalysisV2AiReplayReport {
             capacitySkipped: number;
         };
     };
+    /** v2.11-only, aggregate and deliberately PII-free quality observability. */
+    genderQuality?: {
+        triage: { nonOk: number; accountContext: Record<string, number> };
+        feature: { admission: Record<string, number>; finalDecision: Record<string, number>; accountContext: Record<string, number> };
+        resolver: { earlyAdmission: number; lateAdmission: number; outcome: Record<string, number> };
+        finalClassificationSource: Record<string, number>;
+        qualityGate: ReturnType<typeof evaluateReplayGenderQualityGate>;
+    };
     totalElapsedMs: number;
 }
 
@@ -235,7 +246,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
     const capability = capture.evaluationPolicy?.capability;
     const partialCapability =
         capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
@@ -441,6 +453,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         ])),
         gender: report.gender,
         resolver: report.resolver,
+        ...(report.genderQuality ? { gender_quality: report.genderQuality } : {}),
     });
 }
 
@@ -527,6 +540,10 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         'genderTriageMicrobatchV29',
     );
+    const genderQualityV211 = aiStagePolicySupports(
+        replayAiPolicy,
+        'genderQualityV211',
+    );
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
@@ -546,6 +563,16 @@ export async function runAnalysisV2AiReplay(input: {
     const stages = Object.fromEntries(names.map(name => [name, metrics()])) as AnalysisV2AiReplayReport['stages'];
     const durations = Object.fromEntries(names.map(name => [name, [] as number[]])) as Record<typeof names[number], number[]>;
     const gender = { male: 0, female: 0, unknown: 0, unknownRate: 0 };
+    const genderQuality = genderQualityV211 ? {
+        triage: { nonOk: 0, accountContext: {} as Record<string, number> },
+        feature: {
+            admission: {} as Record<string, number>,
+            finalDecision: {} as Record<string, number>,
+            accountContext: {} as Record<string, number>,
+        },
+        resolver: { earlyAdmission: 0, lateAdmission: 0, outcome: {} as Record<string, number> },
+        finalClassificationSource: {} as Record<string, number>,
+    } : null;
     const resolver: AnalysisV2AiReplayReport['resolver'] = {
         ready: 0,
         applied: 0,
@@ -629,7 +656,10 @@ export async function runAnalysisV2AiReplay(input: {
                 profile.resolverSelectionIds,
             );
             const resolverMedia = supportsGenderTriageMicrobatch
-                ? selectAnalysisV2GenderResolverMedia(canonicalResolverMedia)
+                ? selectAnalysisV2GenderResolverMedia(
+                    canonicalResolverMedia,
+                    replayAiPolicy,
+                )
                 : canonicalResolverMedia;
             const v29ResolverAdmission = supportsGenderTriageMicrobatch
                 ? v29GenderResolverAdmission(triage, resolverMedia.length)
@@ -645,11 +675,25 @@ export async function runAnalysisV2AiReplay(input: {
                 resolver.admission.insufficientMedia++;
             }
             if (triage.routingDecision === 'exclude_high_confidence_male') {
+                if (genderQuality) genderQuality.finalClassificationSource.triage =
+                    (genderQuality.finalClassificationSource.triage ?? 0) + 1;
                 gender.male++;
                 return;
             }
+            if (genderQuality) {
+                const context = triage.v29AccountContext ?? 'absent';
+                genderQuality.triage.accountContext[context] =
+                    (genderQuality.triage.accountContext[context] ?? 0) + 1;
+            }
             const featureAdmitted = !supportsGenderTriageMicrobatch
-                || v29FeatureAdmission(triage, profile) === 'eligible';
+                || (genderQualityV211
+                    ? v211FeatureAdmission(triage, profile)
+                    : v29FeatureAdmission(triage, profile)) === 'eligible';
+            if (genderQuality) {
+                const admission = featureAdmitted ? 'eligible' : 'excluded';
+                genderQuality.feature.admission[admission] =
+                    (genderQuality.feature.admission[admission] ?? 0) + 1;
+            }
             const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
@@ -669,13 +713,16 @@ export async function runAnalysisV2AiReplay(input: {
                     && assessment.ownerConsistency === 'same_person'
                 );
             if (!featureAdmitted && !eligible) {
+                if (genderQuality) genderQuality.finalClassificationSource.unknown =
+                    (genderQuality.finalClassificationSource.unknown ?? 0) + 1;
                 gender.unknown++;
                 return;
             }
             const abort = new AbortController();
             let trackedResolver: TrackedResolver | undefined;
-            if (eligible && runner.resolveGender) {
-                trackedResolver = {
+            const startResolver = () => {
+                if (trackedResolver || !runner.resolveGender) return;
+                const tracked: TrackedResolver = {
                     abort,
                     settled: false,
                     telemetry: {
@@ -687,44 +734,47 @@ export async function runAnalysisV2AiReplay(input: {
                         pendingAttemptStartedAt: undefined,
                     },
                 };
-                launchedResolvers.push(trackedResolver);
+                trackedResolver = tracked;
+                launchedResolvers.push(tracked);
                 const resolverPromise = runner.resolveGender({
                     ordinal: profile.ordinal,
                     media: resolverMedia,
                     signal: abort.signal,
                     onAttemptStart: value => {
-                        if (!trackedResolver) return;
-                        trackedResolver.telemetry.calls++;
-                        trackedResolver.telemetry.pendingAttemptStartedAt =
+                        tracked.telemetry.calls++;
+                        tracked.telemetry.pendingAttemptStartedAt =
                             performance.now();
                         if (value.retryCount > 0) {
-                            trackedResolver.telemetry.retries++;
+                            tracked.telemetry.retries++;
                         }
                     },
                     onAttemptTelemetry: value => {
-                        if (!trackedResolver) return;
-                        trackedResolver.telemetry.attemptLatenciesMs.push(
+                        tracked.telemetry.attemptLatenciesMs.push(
                             Math.max(0, value.latencyMs),
                         );
-                        trackedResolver.telemetry.pendingAttemptStartedAt =
+                        tracked.telemetry.pendingAttemptStartedAt =
                             undefined;
                         if (value.disposition === 'rate_limited') {
-                            trackedResolver.telemetry.rateLimited++;
+                            tracked.telemetry.rateLimited++;
                         }
                         if (value.disposition !== 'success') {
                             const failures =
-                                trackedResolver.telemetry.failureDisposition;
+                                tracked.telemetry.failureDisposition;
                             failures[value.disposition] =
                                 (failures[value.disposition] ?? 0) + 1;
                         }
                     },
                 });
-                trackedResolver.promise = resolverPromise.then(value => {
-                    trackedResolver!.settled = true;
-                    trackedResolver!.value = value;
+                tracked.promise = resolverPromise.then(value => {
+                    tracked.settled = true;
+                    tracked.value = value;
                     return value;
                 });
-                void trackedResolver.promise.catch(() => undefined);
+                void tracked.promise.catch(() => undefined);
+            };
+            if (eligible) {
+                if (genderQuality) genderQuality.resolver.earlyAdmission++;
+                startResolver();
             }
             const feature = featurePromise ? await featurePromise : undefined;
             if (feature) collect(stages.featureAnalysis, durations.featureAnalysis, feature);
@@ -739,6 +789,29 @@ export async function runAnalysisV2AiReplay(input: {
                         : feature.value.finalGenderDecision === 'unresolved_stage_conflict'
                             ? 'unresolved_stage_conflict'
                             : 'unresolved';
+                if (genderQuality) {
+                    const decision = feature.value.finalGenderDecision;
+                    const context = feature.value.features.accountContext;
+                    genderQuality.feature.finalDecision[decision] =
+                        (genderQuality.feature.finalDecision[decision] ?? 0) + 1;
+                    genderQuality.feature.accountContext[context] =
+                        (genderQuality.feature.accountContext[context] ?? 0) + 1;
+                }
+            }
+            if (
+                genderQualityV211
+                && !trackedResolver
+                && feature?.outcome === 'ok'
+                && feature.value
+                && (
+                    feature.value.features.accountContext === 'personal'
+                    || feature.value.features.accountContext === 'individual_creator'
+                )
+                && (baseline === 'unresolved' || baseline === 'unresolved_stage_conflict')
+                && resolverMedia.length >= 2
+            ) {
+                if (genderQuality) genderQuality.resolver.lateAdmission++;
+                startResolver();
             }
             prepared.push({
                 baseline,
@@ -763,6 +836,7 @@ export async function runAnalysisV2AiReplay(input: {
                 if (replayWorkFailed) return;
                 collect(stages.genderTriage, durations.genderTriage, triage);
                 if (triage.outcome !== 'ok' || !triage.value) {
+                    if (genderQuality) genderQuality.triage.nonOk++;
                     gender.unknown++;
                     return;
                 }
@@ -853,6 +927,15 @@ export async function runAnalysisV2AiReplay(input: {
             if (reconciliation.finalClassification === 'verified_female') gender.female++;
             else if (reconciliation.finalClassification === 'verified_non_female') gender.male++;
             else gender.unknown++;
+            if (genderQuality) {
+                const source = reconciliation.classificationSource;
+                genderQuality.finalClassificationSource[source] =
+                    (genderQuality.finalClassificationSource[source] ?? 0) + 1;
+                if (resolved?.outcome) {
+                    genderQuality.resolver.outcome[resolved.outcome] =
+                        (genderQuality.resolver.outcome[resolved.outcome] ?? 0) + 1;
+                }
+            }
         }));
     }
     const total = gender.male + gender.female + gender.unknown;
@@ -884,6 +967,17 @@ export async function runAnalysisV2AiReplay(input: {
         stages,
         gender,
         resolver,
+        ...(genderQuality ? {
+            genderQuality: {
+                ...genderQuality,
+                qualityGate: evaluateReplayGenderQualityGate({
+                    ...gender,
+                    missingPublic: input.bundle.schemaVersion === 2
+                        ? input.bundle.capture.partial.mediaUnavailable.length
+                        : 0,
+                }),
+            },
+        } : {}),
         totalElapsedMs: Math.round(performance.now() - replayStarted),
     };
     input.write?.(safeLine(report));

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     replayEvaluationPolicySchema,
     resolveReplayAiStagePolicyVersion,
@@ -24,6 +25,10 @@ const historicalV210Evaluation = {
 const historicalPartialV210Evaluation = {
     capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
     aiStage: 'ai-stage-policy-v2.10' as const,
+} satisfies ReplayEvaluationPolicy;
+const historicalPartialV211Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.11' as const,
 } satisfies ReplayEvaluationPolicy;
 const standard = (aiStage: 'ai-stage-policy-v2.7' | 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9') => ({
     selectedPlanId: 'standard' as const,
@@ -85,6 +90,23 @@ describe('replay cross-policy evaluation capability', () => {
         )).toBe('ai-stage-policy-v2.10');
         expect(replayEvaluationPolicySchema.safeParse({
             capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29',
+            aiStage: 'ai-stage-policy-v2.10',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.11 only behind its distinct gender-quality capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+        expect(resolveReplayAiStagePolicyVersion(historical, historicalPartialV211Evaluation))
+            .toBe('ai-stage-policy-v2.11');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
             aiStage: 'ai-stage-policy-v2.10',
         }).success).toBe(false);
     });

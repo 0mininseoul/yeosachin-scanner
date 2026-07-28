@@ -647,7 +647,8 @@ export function createDurableAnalysisV2AiStageRuntime(
                             resultHash: analysisV2CanonicalAiResultHash(
                                 genderResolutionCheckpointAssessment(
                                     input,
-                                    result.assessment
+                                    result.assessment,
+                                    policyVersion,
                                 )
                             ),
                             source: 'checkpoint',

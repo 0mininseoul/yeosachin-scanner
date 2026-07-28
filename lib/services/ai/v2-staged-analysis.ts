@@ -24,6 +24,7 @@ import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     aiStagePolicySupports,
     getAiStagePolicy,
     type AiStageName,
@@ -316,11 +317,15 @@ export const genderResolutionModelResponseSchema = z.object({
 
 export const genderResolutionResultSchema = z.object({
     assessment: genderResolutionModelResponseSchema,
-    analyzedSelectionIds: z.array(selectionIdSchema).max(MAX_TRIAGE_FEED_MEDIA + 1),
+    analyzedSelectionIds: z.array(selectionIdSchema).max(MAX_FEATURE_MEDIA),
 }).strict();
 
 export type GenderResolutionInput = z.input<typeof genderResolutionInputSchema>;
 export type GenderResolutionResult = z.infer<typeof genderResolutionResultSchema>;
+
+function genderResolutionFeedLimit(policyVersion: AiStagePolicyVersion): number {
+    return getAiStagePolicy(policyVersion, 'genderResolution').feedImageLimit;
+}
 
 const safeOverviewSchema = z.string()
     .transform(value => sanitizePublicRiskNarrativeLine(value) ?? '')
@@ -1384,11 +1389,15 @@ function genderTriagePrompt(
 
 export function genderResolutionCheckpointAssessment(
     rawInput: GenderResolutionInput,
-    rawAssessment: GenderResolutionResult['assessment']
+    rawAssessment: GenderResolutionResult['assessment'],
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_LATEST_VERSION,
 ): z.infer<typeof genderResolutionModelResponseSchema> {
     const input = genderResolutionInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = projectGenderResolutionMedia(media);
+    const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(
+        media,
+        genderResolutionFeedLimit(policyVersion),
+    );
     const assessment = genderResolutionModelResponseSchema.parse(rawAssessment);
     const evidenceSelectionIds = assessment.evidenceSelectionIds.map(selectionId => {
         const opaqueId = projection.opaqueByOriginalId.get(selectionId);
@@ -1815,8 +1824,8 @@ export function createGenderResolutionResultIdentity(
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_LATEST_VERSION,
 ): AnalysisV2AiResultIdentity {
     const input = genderResolutionInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = projectGenderResolutionMedia(media);
+    const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(media, genderResolutionFeedLimit(policyVersion));
     return stagedResultIdentity(
         'genderResolution',
         projection.prompt,
@@ -1919,10 +1928,10 @@ async function prepareGenderResolutionGeneration(
         aiStagePolicyVersion?: AiStagePolicyVersion;
     },
 ) {
-    const input = genderResolutionInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = projectGenderResolutionMedia(media);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_LATEST_VERSION;
+    const input = genderResolutionInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(media, genderResolutionFeedLimit(policyVersion));
     const prompt = projection.prompt;
     const identity = stagedResultIdentity(
         'genderResolution', prompt, media, 'request', policyVersion,

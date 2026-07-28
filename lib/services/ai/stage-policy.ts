@@ -48,12 +48,18 @@ export const AI_STAGE_POLICY_V29_VERSION = 'ai-stage-policy-v2.9';
  * semantics. Historical v2.9 requests deliberately remain on their original bytes.
  */
 export const AI_STAGE_POLICY_V210_VERSION = 'ai-stage-policy-v2.10';
+/**
+ * v2.11 is an evaluation-only gender-quality policy. It is intentionally not selectable by
+ * production rollout; its bytes exist solely for authenticated replay evaluation.
+ */
+export const AI_STAGE_POLICY_V211_VERSION = 'ai-stage-policy-v2.11';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -196,12 +202,25 @@ const AI_STAGE_POLICIES_V210 = Object.freeze({
     ...AI_STAGE_POLICIES_V29,
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V211 = Object.freeze({
+    ...AI_STAGE_POLICIES_V210,
+    genderResolution: Object.freeze({
+        ...AI_STAGE_POLICIES_V210.genderResolution,
+        thinkingLevel: 'HIGH',
+        mediaResolution: 'HIGH',
+        feedImageLimit: 8,
+        maxOutputTokens: 1_024,
+        promptVersion: 'gender-resolution-v2',
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
     [AI_STAGE_POLICY_V28_VERSION]: AI_STAGE_POLICIES_V28,
     [AI_STAGE_POLICY_V29_VERSION]: AI_STAGE_POLICIES_V29,
     [AI_STAGE_POLICY_V210_VERSION]: AI_STAGE_POLICIES_V210,
+    [AI_STAGE_POLICY_V211_VERSION]: AI_STAGE_POLICIES_V211,
 });
 
 export type AiStagePolicyCapability =
@@ -211,7 +230,8 @@ export type AiStagePolicyCapability =
     | 'inputQualityV28'
     | 'genderTriageMicrobatchV29'
     /** Safe v2.8 public-copy contracts, restored for the v2.10 successor only. */
-    | 'safePublicPresentationV28';
+    | 'safePublicPresentationV28'
+    | 'genderQualityV211';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -244,6 +264,15 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'inputQualityV28',
         'genderTriageMicrobatchV29',
         'safePublicPresentationV28',
+    ]),
+    [AI_STAGE_POLICY_V211_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
     ]),
 });
 

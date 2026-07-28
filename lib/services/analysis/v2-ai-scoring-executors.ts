@@ -89,6 +89,7 @@ import {
     type AnalysisV2OfficialExclusionReason,
 } from './v2-official-account-screening';
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
+import { v211FeatureAdmission } from './v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
 import {
@@ -1448,11 +1449,17 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
+                    const genderQualityV211 = policySupports(
+                        aiFence.aiStagePolicyVersion,
+                        'genderQualityV211',
+                    );
                     const v29Admission = policySupports(
                         aiFence.aiStagePolicyVersion,
                         'genderTriageMicrobatchV29',
                     )
-                        ? v29FeatureAdmission(gender.result, profile)
+                        ? genderQualityV211
+                            ? v211FeatureAdmission(gender.result, profile)
+                            : v29FeatureAdmission(gender.result, profile)
                         : null;
                     const triageAttempted = new Set(policy.triage.selectionIds);
                     const featureRemainder = policy.feature.media.filter(media => (
@@ -1514,7 +1521,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             aiFence.aiStagePolicyVersion,
                             'genderTriageMicrobatchV29',
                         )
-                            ? selectAnalysisV2GenderResolverMedia(normalized.media)
+                            ? selectAnalysisV2GenderResolverMedia(
+                                normalized.media,
+                                assertSupportedAiStagePolicyVersion(
+                                    aiFence.aiStagePolicyVersion,
+                                ),
+                            )
                             : normalized.media;
                     const resolverEligible = genderResolutionEnabled && (
                         policySupports(
@@ -1531,7 +1543,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 && triageAssessment.ownerConsistency === 'same_person'
                             )
                     );
-                    const resolverHandle = resolverEligible
+                    let resolverHandle = resolverEligible
                         ? dependencies.ai.startGenderResolution({
                             media: resolverMedia,
                         }, aiFence)
@@ -1738,6 +1750,22 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 ? 'corroborated_official' as const
                                 : 'uncorroborated_official' as const
                         : undefined;
+                    const lateResolverEligible = genderQualityV211
+                        && resolverHandle === null
+                        && genderResolutionEnabled
+                        && (modelAccountContext === 'personal'
+                            || modelAccountContext === 'individual_creator')
+                        && (
+                            baselineClassification === 'unresolved'
+                            || baselineClassification === 'unresolved_stage_conflict'
+                        )
+                        && resolverMedia.length >= 2;
+                    if (lateResolverEligible) {
+                        resolverHandle = dependencies.ai.startGenderResolution({
+                            media: resolverMedia,
+                        }, aiFence);
+                        startedResolverHandles.push(resolverHandle);
+                    }
                     const couldResolveFemale = resolverHandle !== null
                         && (
                             baselineClassification === 'unresolved'

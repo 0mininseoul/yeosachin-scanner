@@ -189,6 +189,19 @@ export function createReplayStagedAiAdapter(
         aiStagePolicyVersion,
         'genderTriageMicrobatchV29',
     );
+    const genderQualityV211 = aiStagePolicySupports(
+        aiStagePolicyVersion,
+        'genderQualityV211',
+    );
+    // Replay remains stateless, but v2.11 uses the same bounded call shape as scheduler-v1.
+    // Waiting is local admission only: no provider attempt exists before the semaphore opens.
+    const runTriage = genderQualityV211
+        ? createSemaphore(ANALYSIS_V2_SCHEDULER_V1_POLICY.genderTriageConcurrency)
+        : async <T>(task: () => Promise<T>) => task();
+    const runResolver = genderQualityV211
+        // Resolver has the immutable v2.7+ two-operation ceiling; do not raise it for replay.
+        ? createSemaphore(2)
+        : async <T>(task: () => Promise<T>) => task();
     const runFeature = supportsGenderTriageMicrobatch
         ? createSemaphore(
             ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
@@ -220,7 +233,7 @@ export function createReplayStagedAiAdapter(
                 accountId: member.accountId,
                 input: member.value.aiInput,
             }));
-            const invocation = await invoke(async state => {
+            const invocation = await runTriage(() => invoke(async state => {
                 const identity =
                     createGenderTriageMicrobatchResultIdentity(accounts);
                 return genderTriageMicrobatch(
@@ -228,7 +241,7 @@ export function createReplayStagedAiAdapter(
                     statelessAudit(requestId, identity, state),
                     { aiStagePolicyVersion, replayCapability },
                 );
-            });
+            }));
             const byAccount = new Map(invocation.value?.map(result => [
                 result.accountId,
                 result.result,
@@ -314,7 +327,7 @@ export function createReplayStagedAiAdapter(
             const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
             return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
         })),
-        resolveGender: input => invoke(async state => {
+        resolveGender: input => runResolver(() => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
             const identity = createGenderResolutionResultIdentity(
                 aiInput,
@@ -336,7 +349,7 @@ export function createReplayStagedAiAdapter(
                 aiStagePolicyVersion,
                 replayCapability,
             });
-        }),
+        })),
         privateNames: accounts => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {
                 forChunk(identity) {
