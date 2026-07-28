@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
@@ -59,15 +59,28 @@ function constantTimeEqual(actual: string | null, expected: string): boolean {
 }
 
 /**
- * Sentry's Service Hook registration response has a generated secret, but its
- * delivery signature is not documented for this hook type. The configured URL
- * therefore has two independent high-entropy path segments and is fail-closed.
+ * Service Hook v0 sends X-ServiceHook-Signature as an HMAC-SHA256 hex digest of
+ * the raw JSON body, keyed with the generated Service Hook secret. A separate
+ * URL path capability remains a defense in depth boundary; the HMAC key is
+ * never placed in the URL.
  */
-export function isAuthenticSentryServiceHookPath(serviceHookSecret: string, pathSecret: string): boolean {
+export function isAuthenticSentryServiceHook(
+    request: Request,
+    rawBody: string,
+    pathSecret: string,
+): boolean {
     const configured = configuredHookSecrets();
-    return Boolean(configured
-        && constantTimeEqual(serviceHookSecret, configured.serviceHookSecret)
-        && constantTimeEqual(pathSecret, configured.pathSecret));
+    if (!configured
+        || !constantTimeEqual(pathSecret, configured.pathSecret)) return false;
+
+    // These are the documented v0 Service Hook headers. There is no event-kind
+    // header in v0; subscribe this hook to event.alert only (see .env.example).
+    const timestamp = request.headers.get('x-servicehook-timestamp');
+    const guid = request.headers.get('x-servicehook-guid');
+    const signature = request.headers.get('x-servicehook-signature');
+    if (!timestamp || !/^[0-9]{10,13}$/.test(timestamp) || !guid || !signature) return false;
+    const expected = createHmac('sha256', configured.serviceHookSecret).update(rawBody, 'utf8').digest('hex');
+    return constantTimeEqual(signature, expected);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -109,17 +122,26 @@ function safeIssueUrl(value: string | null): string | null {
 }
 
 function occurredAt(value: unknown): Date | null {
-    const candidate = stringAt(value, ['data', 'event', 'dateCreated'])
-        ?? stringAt(value, ['data', 'event', 'date_created'])
-        ?? stringAt(value, ['data', 'event', 'datetime'])
-        ?? stringAt(value, ['dateCreated']);
+    const candidate = stringAt(value, ['event', 'dateCreated']);
     if (!candidate) return null;
     const parsed = new Date(candidate);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-/** Parse only a minimal, non-PII subset after authentication. */
-export function parseProductionSentryIssueAlert(rawBody: string, request: Request): SentryAlertForOutbox | null {
+function eventEnvironment(value: unknown): string | null {
+    const event = asRecord(value)?.event;
+    const tags = asRecord(event)?.tags;
+    if (!Array.isArray(tags)) return null;
+    for (const tag of tags) {
+        const record = asRecord(tag);
+        if (record?.key === 'environment' && typeof record.value === 'string' && record.value.trim())
+            return record.value.trim();
+    }
+    return null;
+}
+
+/** Parse the official v0 Service Hook shape: top-level project, group, event. */
+export function parseProductionSentryIssueAlert(rawBody: string): SentryAlertForOutbox | null {
     let payload: unknown;
     try {
         payload = JSON.parse(rawBody);
@@ -127,28 +149,21 @@ export function parseProductionSentryIssueAlert(rawBody: string, request: Reques
         return null;
     }
 
-    // Service Hooks document event.alert and event.created. We accept an alert
-    // only when the body explicitly identifies it; headers alone are not enough.
-    const eventName = stringAt(payload, ['event']) ?? stringAt(payload, ['event_type']);
-    const resource = request.headers.get('sentry-hook-resource')?.trim().toLowerCase();
-    if (eventName !== 'event.alert' || (resource && resource !== 'event_alert' && resource !== 'event.alert'))
-        return null;
-
-    const environment = stringAt(payload, ['data', 'event', 'environment'])
-        ?? stringAt(payload, ['environment']);
-    if (!isProduction(environment)) return null;
+    // v0 has no event-kind field/header. Authentication plus a hook configured
+    // to subscribe only to event.alert is the event-kind boundary. Require the
+    // actual top-level project/group/event delivery contract before proceeding.
+    const root = asRecord(payload);
+    if (!root || !asRecord(root.project) || !asRecord(root.group) || !asRecord(root.event)) return null;
+    if (!isProduction(eventEnvironment(payload))) return null;
 
     const when = occurredAt(payload);
     if (!when) return null;
 
     const projectSlug = safeProjectSlug(
-        stringAt(payload, ['data', 'event', 'project', 'slug'])
-        ?? stringAt(payload, ['data', 'project', 'slug']),
+        stringAt(payload, ['project', 'slug']),
     );
     const issueUrl = safeIssueUrl(
-        stringAt(payload, ['data', 'event', 'web_url'])
-        ?? stringAt(payload, ['data', 'event', 'issue_url'])
-        ?? stringAt(payload, ['data', 'issue_url']),
+        stringAt(payload, ['group', 'url']),
     );
 
     // Do not retain the received body: a one-way body fingerprint is sufficient
@@ -292,4 +307,19 @@ export async function deliverSentryDiscordAlerts(options: { limit?: number; fetc
     const claimed = (data ?? []) as ClaimedOutboxItem[];
     await Promise.all(claimed.map(item => sendClaimedItem(item, config, options.fetcher ?? fetch)));
     return claimed.length;
+}
+
+/** Requeue a worker/deploy/complete-RPC interrupted lease before the next claim. */
+export async function reconcileStaleSentryDiscordAlertClaims(): Promise<number> {
+    try {
+        const { data, error } = await supabaseAdmin.rpc('reconcile_stale_sentry_discord_alert_claims');
+        if (error) {
+            operationalFailure('OUTBOX_STALE_CLAIM_RECONCILE_FAILED');
+            return 0;
+        }
+        return typeof data === 'number' ? data : 0;
+    } catch {
+        operationalFailure('OUTBOX_STALE_CLAIM_RECONCILE_FAILED');
+        return 0;
+    }
 }

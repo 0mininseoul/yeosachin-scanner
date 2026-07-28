@@ -50,4 +50,20 @@ describe('Sentry Discord durable outbox', () => {
         expect(migration).toContain("attempts <= 3");
         expect(migration).not.toMatch(/raw_payload|request_body|stacktrace/i);
     });
+
+    it('requeues a stale sending lease for a bounded retry instead of stranding it', async () => {
+        await db.exec(`
+            UPDATE public.sentry_discord_alert_outbox
+            SET claimed_at = clock_timestamp() - interval '10 minutes'
+            WHERE dedupe_key = '${DEDUPE_KEY}';
+            SET ROLE service_role;
+        `);
+        const recovered = await db.query<{ reconcile_stale_sentry_discord_alert_claims: number }>(
+            'SELECT public.reconcile_stale_sentry_discord_alert_claims(60)',
+        );
+        const claimedAgain = await db.query<{ id: string }>('SELECT id FROM public.claim_sentry_discord_alert_outbox(1)');
+        await db.exec('RESET ROLE');
+        expect(recovered.rows[0]?.reconcile_stale_sentry_discord_alert_claims).toBe(1);
+        expect(claimedAgain.rows).toHaveLength(1);
+    });
 });

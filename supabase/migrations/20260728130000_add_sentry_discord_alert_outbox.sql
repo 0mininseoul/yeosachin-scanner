@@ -139,9 +139,43 @@ BEGIN
 END;
 $$;
 
+-- A process can die after claiming but before recording the Discord outcome.
+-- Requeue the bounded attempt; the Discord enforced nonce prevents a second
+-- message when the prior request actually reached Discord.
+CREATE OR REPLACE FUNCTION public.reconcile_stale_sentry_discord_alert_claims(
+    p_lease_seconds integer DEFAULT 300
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    v_count integer;
+BEGIN
+    UPDATE public.sentry_discord_alert_outbox
+    SET status = CASE WHEN attempts < 3 THEN 'pending' ELSE 'failed' END,
+        next_attempt_at = CASE WHEN attempts < 3 THEN clock_timestamp() ELSE next_attempt_at END,
+        failure_code = CASE
+            WHEN attempts < 3 THEN 'DISCORD_CLAIM_LEASE_RECOVERED'
+            ELSE 'DISCORD_CLAIM_LEASE_EXPIRED_RETRY_EXHAUSTED'
+        END,
+        claim_token = NULL,
+        claimed_at = NULL,
+        updated_at = clock_timestamp()
+    WHERE status = 'sending'
+      AND claimed_at < clock_timestamp()
+            - make_interval(secs => LEAST(GREATEST(COALESCE(p_lease_seconds, 300), 60), 900));
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.enqueue_sentry_discord_alert_outbox(char, text, timestamptz, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.claim_sentry_discord_alert_outbox(integer) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.complete_sentry_discord_alert_outbox(uuid, uuid, text, text, integer) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.reconcile_stale_sentry_discord_alert_claims(integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.enqueue_sentry_discord_alert_outbox(char, text, timestamptz, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_sentry_discord_alert_outbox(integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_sentry_discord_alert_outbox(uuid, uuid, text, text, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.reconcile_stale_sentry_discord_alert_claims(integer) TO service_role;

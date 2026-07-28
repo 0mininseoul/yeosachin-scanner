@@ -10,7 +10,7 @@ describe('Sentry privacy scrubber', () => {
     it('removes request/user PII and recursively redacts secrets from events and breadcrumbs', () => {
         const webhook = 'https://discord.com/api/webhooks/123/very-secret';
         const discordChannelUrl = 'https://discord.com/api/v10/channels/1525023310675710092/messages';
-        const sentryHookUrl = 'https://example.test/api/webhooks/sentry/service-hook-secret-12345678901234567890/path-secret-12345678901234567890';
+        const sentryHookUrl = 'https://example.test/api/webhooks/sentry/path-secret-12345678901234567890';
         const result = scrubSentryEvent({
             type: undefined,
             message: 'login user@example.com Basic dXNlcjpwYXNz token=top-secret id_token=eyJhbGciOiJIUzI1Ni.abcde.zyxwv code=oauth-code state=oauth-state code_verifier=oauth-verifier-secret DOB=19940102 birthyear 1994; harmless error code 42',
