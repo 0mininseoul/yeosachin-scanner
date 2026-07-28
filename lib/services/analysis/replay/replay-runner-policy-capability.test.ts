@@ -291,6 +291,111 @@ describe('replay staged AI runner policy capability', () => {
         expect(serialized).not.toContain('"m1"');
     });
 
+    it('keeps a triage-personal but deterministically collective account out of feature and resolver', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'personal',
+            },
+            source: 'checkpoint',
+        }]);
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...historicalV211Bundle,
+                profiles: [{
+                    ...historicalV211Bundle.profiles[0]!,
+                    fullName: 'Black Cherry Club',
+                    bio: 'Single [콜드브루] Out now',
+                    media: [
+                        historicalV211Bundle.profiles[0]!.media[0]!,
+                        { ...historicalV211Bundle.profiles[0]!.media[0]!, selectionId: 'm2', postId: 'p2' },
+                    ],
+                    triageSelectionIds: ['m1', 'm2'],
+                    featureSelectionIds: ['m1', 'm2'],
+                    resolverSelectionIds: ['m1', 'm2'],
+                    coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+                }],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV211Evaluation,
+        });
+        expect(ai.featureAnalysis).not.toHaveBeenCalled();
+        expect(ai.genderResolution).not.toHaveBeenCalled();
+        expect(report.genderQuality).toMatchObject({
+            feature: {
+                admission: { nonpersonal_or_official: 1 },
+                routeTerminal: { excluded_official: 1 },
+            },
+        });
+    });
+
+    it('cuts off an early resolver and never applies it when feature identifies an official group', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'personal',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'official_group_or_brand' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockImplementation((
+            _input: unknown,
+            _audit: unknown,
+            options: { abortSignal?: AbortSignal },
+        ) => new Promise((_, reject) => {
+            options.abortSignal?.addEventListener('abort', () => {
+                reject(new Error('resolver aborted after official context'));
+            }, { once: true });
+        }));
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...historicalV211Bundle,
+                profiles: [{
+                    ...historicalV211Bundle.profiles[0]!,
+                    media: [
+                        historicalV211Bundle.profiles[0]!.media[0]!,
+                        { ...historicalV211Bundle.profiles[0]!.media[0]!, selectionId: 'm2', postId: 'p2' },
+                    ],
+                    triageSelectionIds: ['m1', 'm2'],
+                    featureSelectionIds: ['m1', 'm2'],
+                    resolverSelectionIds: ['m1', 'm2'],
+                    coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+                }],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV211Evaluation,
+        });
+        expect(ai.featureAnalysis).toHaveBeenCalledOnce();
+        expect(ai.genderResolution).toHaveBeenCalledOnce();
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+        expect(report.genderQuality).toMatchObject({
+            feature: { routeTerminal: { completed: 1 } },
+            resolver: { earlyAdmission: 1, outcome: { official_excluded: 1 } },
+        });
+    });
+
     it('blocks an official high-female v2.9 account before feature and resolver', async () => {
         const report = await runV29Triage(
             highFemale('official_group_or_brand'),
@@ -321,7 +426,67 @@ describe('replay staged AI runner policy capability', () => {
         expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
         expect(report.genderQuality).toMatchObject({
             triage: { nonOk: 1, capacity: 1, outcome: { capacity_skipped: 1 } },
+            feature: { routeTerminal: { triage_non_ok: 1 } },
             finalClassificationSource: { triage_non_ok: 1 },
+        });
+    });
+
+    it('records the non-routed high-male feature cohort without invoking feature', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'male', confidence: 'high',
+                    ownerConsistency: 'same_person', evidenceSelectionIds: ['m1'],
+                },
+                routingDecision: 'exclude_high_confidence_male',
+                routingReason: 'high_confidence_same_owner_male',
+                analyzedSelectionIds: ['m1'],
+                v29AccountContext: 'personal',
+            },
+            source: 'checkpoint',
+        }]);
+        const report = await runAnalysisV2AiReplay({
+            bundle: historicalV211Bundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV211Evaluation,
+        });
+        expect(ai.featureAnalysis).not.toHaveBeenCalled();
+        expect(report.genderQuality).toMatchObject({
+            feature: { routeTerminal: { not_routed_high_male: 1 } },
+        });
+    });
+
+    it('counts a non-ok admitted feature provider result in the complete cohort', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1'],
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockRejectedValueOnce(new Error('feature provider unavailable'));
+        const report = await runAnalysisV2AiReplay({
+            bundle: historicalV211Bundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV211Evaluation,
+        });
+        expect(report.genderQuality).toMatchObject({
+            feature: {
+                admission: { eligible: 1 },
+                routeTerminal: { provider_non_ok: 1 },
+            },
         });
     });
 

@@ -16,6 +16,26 @@ export interface AnalysisV2OfficialAccountScreening {
     profileSignalCount: number;
 }
 
+/**
+ * V2.11's pre-feature guard is intentionally narrower than the scored-account
+ * override above: it only uses independently corroborated profile text and
+ * never changes the stored account context.  It exists solely to avoid paying
+ * for an opportunistic resolver on a plainly collective account when triage
+ * happened to call it personal.
+ */
+export function hasAnalysisV2PreFeatureOfficialSignals(input: {
+    fullName: string | null;
+    bio: string | null;
+}): boolean {
+    return profileSignalCount({
+        // This enables the deliberately guarded `Club + real release` pair,
+        // while ordinary personal-club language still produces zero signals.
+        modelAccountContext: 'official_group_or_brand',
+        fullName: input.fullName,
+        bio: input.bio,
+    }) >= 2;
+}
+
 const ORGANIZATION_PATTERNS: readonly RegExp[] = [
     /(?:(?<![\p{L}\p{N}_])(?:official|company|corporation|inc\.?|ltd\.?|agency|studio|label|records?)(?![\p{L}\p{N}_])|공식)/iu,
     /(?:(?<![\p{L}\p{N}_])(?:band|team|crew|collective|community)(?![\p{L}\p{N}_])|밴드|팀|크루|커뮤니티|프로젝트)/iu,

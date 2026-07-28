@@ -89,7 +89,10 @@ import {
     type AnalysisV2OfficialExclusionReason,
 } from './v2-official-account-screening';
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
-import { v211FeatureAdmission } from './v2-v211-feature-admission';
+import {
+    v211FeatureAdmission,
+    v211FeatureResolverExcluded,
+} from './v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
 import { v211LateGenderResolverEligible } from './v2-v211-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
@@ -1529,7 +1532,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 ),
                             )
                             : normalized.media;
-                    const resolverEligible = genderResolutionEnabled && (
+                    const resolverEligible = genderResolutionEnabled
+                        && !(
+                            genderQualityV211
+                            && v29Admission === 'nonpersonal_or_official'
+                        ) && (
                         policySupports(
                             aiFence.aiStagePolicyVersion,
                             'genderTriageMicrobatchV29',
@@ -1751,8 +1758,18 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 ? 'corroborated_official' as const
                                 : 'uncorroborated_official' as const
                         : undefined;
+                    const resolverExcludedByFeatureOfficial = genderQualityV211
+                        && v211FeatureResolverExcluded(modelAccountContext);
+                    if (resolverExcludedByFeatureOfficial && resolverHandle) {
+                        // The resolver is opportunistic. Feature's explicit collective
+                        // context wins immediately: cutoff aborts the SDK call and fences
+                        // its durable intent before any result can be reconciled.
+                        await settleOptionalGenderResolution(resolverHandle);
+                        resolverHandle = null;
+                    }
                     const lateResolverEligible = genderQualityV211
                         && resolverHandle === null
+                        && !resolverExcludedByFeatureOfficial
                         && genderResolutionEnabled
                         && v211LateGenderResolverEligible(
                             gender.result,

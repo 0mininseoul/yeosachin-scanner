@@ -28,4 +28,11 @@ describe('v2.11 feature admission', () => {
             fullName: 'Club', bio: null,
         })).toBe('eligible');
     });
+
+    it('blocks an independently corroborated collective profile even when triage calls it personal', () => {
+        expect(v211FeatureAdmission(triage('personal'), {
+            fullName: 'Black Cherry Club',
+            bio: 'Single [콜드브루] Out now',
+        })).toBe('nonpersonal_or_official');
+    });
 });

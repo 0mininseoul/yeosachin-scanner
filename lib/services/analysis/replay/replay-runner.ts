@@ -11,7 +11,10 @@ import {
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
-import { v211FeatureAdmission } from '../v2-v211-feature-admission';
+import {
+    v211FeatureAdmission,
+    v211FeatureResolverExcluded,
+} from '../v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
 import { v211LateGenderResolverEligible } from '../v2-v211-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from '../v2-gender-resolver-media-policy';
@@ -147,7 +150,12 @@ export interface AnalysisV2AiReplayReport {
             genderConfidence: Record<string, number>;
             accountContext: Record<string, number>;
         };
-        feature: { admission: Record<string, number>; finalDecision: Record<string, number>; accountContext: Record<string, number> };
+        feature: {
+            admission: Record<string, number>;
+            finalDecision: Record<string, number>;
+            accountContext: Record<string, number>;
+            routeTerminal: Record<string, number>;
+        };
         resolver: { earlyAdmission: number; lateAdmission: number; outcome: Record<string, number> };
         finalClassificationSource: Record<string, number>;
         qualityGate: ReturnType<typeof evaluateReplayGenderQualityGate>;
@@ -182,6 +190,7 @@ interface PreparedPublicReplay {
     triage: GenderTriageResult;
     feature?: ReplayInvocation<FeatureAnalysisResult>;
     resolver?: TrackedResolver;
+    resolverExcludedByFeatureOfficial?: boolean;
 }
 
 async function abortAndObserveResolvers(
@@ -582,6 +591,7 @@ export async function runAnalysisV2AiReplay(input: {
             admission: {} as Record<string, number>,
             finalDecision: {} as Record<string, number>,
             accountContext: {} as Record<string, number>,
+            routeTerminal: {} as Record<string, number>,
         },
         resolver: { earlyAdmission: 0, lateAdmission: 0, outcome: {} as Record<string, number> },
         finalClassificationSource: {} as Record<string, number>,
@@ -697,19 +707,24 @@ export async function runAnalysisV2AiReplay(input: {
                     (genderQuality.triage.accountContext[context] ?? 0) + 1;
             }
             if (triage.routingDecision === 'exclude_high_confidence_male') {
-                if (genderQuality) genderQuality.finalClassificationSource.triage =
-                    (genderQuality.finalClassificationSource.triage ?? 0) + 1;
+                if (genderQuality) {
+                    genderQuality.finalClassificationSource.triage =
+                        (genderQuality.finalClassificationSource.triage ?? 0) + 1;
+                    genderQuality.feature.routeTerminal.not_routed_high_male =
+                        (genderQuality.feature.routeTerminal.not_routed_high_male ?? 0) + 1;
+                }
                 gender.male++;
                 return;
             }
-            const featureAdmitted = !supportsGenderTriageMicrobatch
-                || (genderQualityV211
+            const featureAdmission = !supportsGenderTriageMicrobatch
+                ? 'eligible'
+                : (genderQualityV211
                     ? v211FeatureAdmission(triage, profile)
-                    : v29FeatureAdmission(triage, profile)) === 'eligible';
+                    : v29FeatureAdmission(triage, profile));
+            const featureAdmitted = featureAdmission === 'eligible';
             if (genderQuality) {
-                const admission = featureAdmitted ? 'eligible' : 'excluded';
-                genderQuality.feature.admission[admission] =
-                    (genderQuality.feature.admission[admission] ?? 0) + 1;
+                genderQuality.feature.admission[featureAdmission] =
+                    (genderQuality.feature.admission[featureAdmission] ?? 0) + 1;
             }
             const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
@@ -722,16 +737,23 @@ export async function runAnalysisV2AiReplay(input: {
                 triage,
             }) : undefined;
             const assessment = triage.assessment;
-            const eligible = supportsGenderTriageMicrobatch
+            const eligible = !(
+                genderQualityV211
+                && featureAdmission === 'nonpersonal_or_official'
+            ) && (supportsGenderTriageMicrobatch
                 ? v29ResolverAdmission === 'eligible'
                 : !(
                     assessment.inferredGender === 'female'
                     && assessment.confidence === 'high'
                     && assessment.ownerConsistency === 'same_person'
-                );
+                ));
             if (!featureAdmitted && !eligible) {
-                if (genderQuality) genderQuality.finalClassificationSource.unknown =
-                    (genderQuality.finalClassificationSource.unknown ?? 0) + 1;
+                if (genderQuality) {
+                    genderQuality.finalClassificationSource.unknown =
+                        (genderQuality.finalClassificationSource.unknown ?? 0) + 1;
+                    genderQuality.feature.routeTerminal.excluded_official =
+                        (genderQuality.feature.routeTerminal.excluded_official ?? 0) + 1;
+                }
                 gender.unknown++;
                 return;
             }
@@ -795,6 +817,13 @@ export async function runAnalysisV2AiReplay(input: {
             }
             const feature = featurePromise ? await featurePromise : undefined;
             if (feature) collect(stages.featureAnalysis, durations.featureAnalysis, feature);
+            if (genderQuality && featureAdmitted) {
+                const terminal = feature?.outcome === 'ok' && feature.value
+                    ? 'completed'
+                    : 'provider_non_ok';
+                genderQuality.feature.routeTerminal[terminal] =
+                    (genderQuality.feature.routeTerminal[terminal] ?? 0) + 1;
+            }
             let baseline: ReplayBaselineClassification = featureAdmitted
                 ? 'analysis_unavailable'
                 : 'unresolved';
@@ -815,9 +844,20 @@ export async function runAnalysisV2AiReplay(input: {
                         (genderQuality.feature.accountContext[context] ?? 0) + 1;
                 }
             }
+            const resolverExcludedByFeatureOfficial = genderQualityV211
+                && feature?.outcome === 'ok'
+                && feature.value !== undefined
+                && v211FeatureResolverExcluded(feature.value.features.accountContext);
+            if (resolverExcludedByFeatureOfficial && trackedResolver) {
+                // Abort immediately after feature's collective context arrives.
+                // The finalizer records this as an excluded resolver outcome and
+                // deliberately ignores even a racing ready result.
+                trackedResolver.abort.abort();
+            }
             if (
                 genderQualityV211
                 && !trackedResolver
+                && !resolverExcludedByFeatureOfficial
                 && feature?.outcome === 'ok'
                 && feature.value
                 && v211LateGenderResolverEligible(
@@ -839,6 +879,9 @@ export async function runAnalysisV2AiReplay(input: {
                 triage,
                 feature,
                 resolver: trackedResolver,
+                ...(resolverExcludedByFeatureOfficial
+                    ? { resolverExcludedByFeatureOfficial: true }
+                    : {}),
             });
         };
         const publicTask = observeRequiredTask(runBounded(
@@ -864,6 +907,8 @@ export async function runAnalysisV2AiReplay(input: {
                         if (triage.outcome === 'capacity_skipped') genderQuality.triage.capacity++;
                         genderQuality.finalClassificationSource.triage_non_ok =
                             (genderQuality.finalClassificationSource.triage_non_ok ?? 0) + 1;
+                        genderQuality.feature.routeTerminal.triage_non_ok =
+                            (genderQuality.feature.routeTerminal.triage_non_ok ?? 0) + 1;
                     }
                     gender.unknown++;
                     return;
@@ -885,7 +930,45 @@ export async function runAnalysisV2AiReplay(input: {
             // still aborted immediately below.
             await new Promise<void>(resolve => setTimeout(resolve, 0));
             let resolved: ReplayInvocation<GenderResolutionResult> | undefined;
-            if (outcome.resolver?.settled) {
+            if (outcome.resolverExcludedByFeatureOfficial && outcome.resolver) {
+                if (outcome.resolver.settled && outcome.resolver.value) {
+                    // The call may have won the race just before feature
+                    // completed. Keep its PII-free cost/latency telemetry but
+                    // never pass the result to reconciliation.
+                    collect(
+                        stages.genderResolution,
+                        durations.genderResolution,
+                        outcome.resolver.value,
+                    );
+                } else {
+                    outcome.resolver.abort.abort();
+                    resolver.cutoff++;
+                    resolver.outcomes.cutoff++;
+                    collectCutoffResolver(
+                        stages.genderResolution,
+                        durations.genderResolution,
+                        outcome.resolver,
+                    );
+                    let bookkeepingTimer: ReturnType<typeof setTimeout> | undefined;
+                    try {
+                        await Promise.race([
+                            outcome.resolver.promise!,
+                            new Promise<undefined>(resolve => {
+                                bookkeepingTimer = setTimeout(
+                                    () => resolve(undefined),
+                                    cutoffBookkeepingMs,
+                                );
+                            }),
+                        ]);
+                    } finally {
+                        if (bookkeepingTimer) clearTimeout(bookkeepingTimer);
+                    }
+                }
+                if (genderQuality) {
+                    genderQuality.resolver.outcome.official_excluded =
+                        (genderQuality.resolver.outcome.official_excluded ?? 0) + 1;
+                }
+            } else if (outcome.resolver?.settled) {
                 resolved = outcome.resolver.value;
             } else if (outcome.resolver) {
                 outcome.resolver.abort.abort();
@@ -985,11 +1068,18 @@ export async function runAnalysisV2AiReplay(input: {
         const resolverAdmissions = genderQuality.resolver.earlyAdmission
             + genderQuality.resolver.lateAdmission;
         const resolverOutcomes = sum(genderQuality.resolver.outcome);
+        const featureRouteTerminals = sum(genderQuality.feature.routeTerminal);
+        const featureAdmitted = genderQuality.feature.admission.eligible ?? 0;
+        const featureCompleted = genderQuality.feature.routeTerminal.completed ?? 0;
+        const featureProviderNonOk =
+            genderQuality.feature.routeTerminal.provider_non_ok ?? 0;
         if (
             total !== observedPublic
             || triageOutcomes !== observedPublic
             || finalSources !== observedPublic
             || resolverAdmissions !== resolverOutcomes
+            || featureRouteTerminals !== observedPublic
+            || featureAdmitted !== featureCompleted + featureProviderNonOk
         ) {
             throw new Error('ANALYSIS_V2_REPLAY_GENDER_QUALITY_CONSERVATION_FAILED');
         }
