@@ -66,15 +66,10 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const demoAnalysisEnabled = process.env.DEMO_ANALYSIS_ENABLED === "true";
-
   return (
     <html lang="ko" className={paperlogy.variable}>
-      <body
-        className="antialiased"
-        data-amplitude-demo-mode={demoAnalysisEnabled ? "true" : "false"}
-      >
-        <AmplitudeProvider demoAnalysisEnabled={demoAnalysisEnabled}>
+      <body className="antialiased">
+        <AmplitudeProvider>
           {children}
         </AmplitudeProvider>
         <Analytics />

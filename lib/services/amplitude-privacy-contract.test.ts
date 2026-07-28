@@ -82,15 +82,19 @@ describe('Amplitude replay privacy contract', () => {
         expect(provider).toContain('installAmplitudeReplayNavigationGuards()');
     });
 
-    it('derives demo replay shutdown from the server-only deployment flag', () => {
+    it('keeps server-only demo eligibility independent from the replay client', () => {
         const layout = source('app/layout.tsx');
         const provider = source('components/amplitude-provider.tsx');
         const analytics = source('lib/services/analytics.ts');
+        const demoPolicy = source('lib/services/demo-analysis/demo-analysis.ts');
 
-        expect(layout).toContain('process.env.DEMO_ANALYSIS_ENABLED === "true"');
-        expect(layout).toContain('data-amplitude-demo-mode');
-        expect(layout).toContain('demoAnalysisEnabled={demoAnalysisEnabled}');
-        expect(provider).toContain('updateAmplitudeReplayRuntimeContext({ demoAnalysisEnabled })');
+        expect(demoPolicy).toContain("import 'server-only'");
+        expect(demoPolicy).toContain("env.DEMO_ANALYSIS_ENABLED !== 'true'");
+        expect(layout).not.toContain('DEMO_ANALYSIS_ENABLED');
+        expect(layout).not.toContain('data-amplitude-demo-mode');
+        expect(provider).not.toContain('demoAnalysisEnabled');
+        expect(provider).not.toContain('updateAmplitudeReplayRuntimeContext');
+        expect(analytics).not.toContain('DEMO_ANALYSIS_ENABLED');
         expect(analytics).not.toContain('NEXT_PUBLIC_DEMO_ANALYSIS_ENABLED');
     });
 

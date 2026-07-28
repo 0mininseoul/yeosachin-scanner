@@ -68,7 +68,7 @@ Replay 화면 구조에는 `form`, `input`, `select`, `textarea`, `option`, `[co
 
 ## 6. Rollout과 롤백
 
-Session Replay rollout 전제 조건으로 서버 전용 `DEMO_ANALYSIS_ENABLED`가 정확히 `true`가 아니어야 한다. `DEMO_ANALYSIS_ENABLED`가 `true`이면 런타임은 데모 모드로 판단하여 Replay를 fail-closed `sampleRate: 0`으로 차단하고, 이미 시작된 캡처도 종료한다.
+`DEMO_ANALYSIS_ENABLED`는 server-only 데모 자격(demo eligibility)만 제어하며 브라우저로 직렬화하거나 Replay gate에 사용하지 않는다. 따라서 `DEMO_ANALYSIS_ENABLED`가 `true`여도 안전 공개 페이지는 다른 Replay 조건을 모두 충족하면 수집 후보가 될 수 있다. 데모 분석 콘텐츠가 표시되는 analyze, progress, result, share 및 admin 경로는 route allowlist 밖이라 차단되고, 세션이 이 경로로 전환되면 현재 Replay는 영구 종료된다.
 
 Rollout은 로컬 테스트, Vercel Preview 실이벤트, 금지 속성 검사, Production에 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true` 및 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0.05` 설정, Production live 검증 순서로 진행한다. 배포 직후 핵심 funnel 이벤트 수신과 제품 흐름을 함께 확인한다.
 

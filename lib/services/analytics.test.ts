@@ -29,10 +29,8 @@ async function loadAnalytics() {
     return import('./analytics');
 }
 
-async function loadReplayAnalytics(demoAnalysisEnabled = false) {
-    const analytics = await loadAnalytics();
-    analytics.updateAmplitudeReplayRuntimeContext({ demoAnalysisEnabled });
-    return analytics;
+async function loadReplayAnalytics() {
+    return loadAnalytics();
 }
 
 function enableBrowser(apiKey = API_KEY) {
@@ -521,6 +519,47 @@ describe('Amplitude analytics adapter', () => {
         });
     });
 
+    it.each(['/', '/privacy', '/terms'])(
+        'keeps safe public replay eligible at %s when server demo analysis is enabled',
+        async (pathname) => {
+            enableReplayBrowser({ pathname });
+            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+            const { initAmplitude } = await loadReplayAnalytics();
+
+            await expect(initAmplitude(null)).resolves.toBe(true);
+
+            const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+                sessionReplay: {
+                    privacyConfig: { maskSelector: string[] };
+                    sampleRate: number;
+                };
+            };
+            expect(options.sessionReplay.sampleRate).toBe(0.1);
+            expect(options.sessionReplay.privacyConfig.maskSelector).toEqual(
+                expect.arrayContaining(['form', 'input', 'textarea', 'select', 'option', '[contenteditable]']),
+            );
+        },
+    );
+
+    it.each([
+        '/analyze',
+        '/progress/demo-request-id',
+        '/result/demo-request-id',
+        '/share/demo-token',
+        '/admin/analysis-audit',
+    ])('never enables initial replay on analysis or sensitive route %s', async (pathname) => {
+        enableReplayBrowser({ pathname });
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await expect(initAmplitude(null)).resolves.toBe(true);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { sampleRate: number };
+        };
+        expect(options.sessionReplay.sampleRate).toBe(0);
+    });
+
     it('normalizes the canonical 0.10 production sample to numeric 0.1', async () => {
         enableReplayBrowser();
         vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', '0.10');
@@ -606,9 +645,9 @@ describe('Amplitude analytics adapter', () => {
         expect(options.sessionReplay.sampleRate).toBe(0);
     });
 
-    it('fails replay closed for demo, query, fragment, and sensitive routes without changing funnel delivery', async () => {
+    it('fails replay closed for a sensitive result route without changing funnel delivery', async () => {
         enableReplayBrowser({ pathname: '/result/request-id' });
-        const analytics = await loadReplayAnalytics(true);
+        const analytics = await loadReplayAnalytics();
 
         await expect(analytics.initAmplitude(null)).resolves.toBe(true);
         analytics.markAnalyticsIdentityReady();

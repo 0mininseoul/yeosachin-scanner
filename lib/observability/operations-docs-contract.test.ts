@@ -160,10 +160,13 @@ describe('analytics and observability disclosure contract', () => {
             /NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE[^\n]*0\.05/
         );
         expect(operations).toMatch(
-            /DEMO_ANALYSIS_ENABLED[^\n]*정확히[^\n]*`true`[^\n]*(아니어야|아닌지)/
+            /DEMO_ANALYSIS_ENABLED[^\n]*(server-only|서버 전용)[^\n]*(데모 자격|demo eligibility)/i
         );
         expect(operations).toMatch(
-            /DEMO_ANALYSIS_ENABLED[^\n]*`true`[^\n]*(fail-closed|sampleRate:[^\n]*0)/
+            /DEMO_ANALYSIS_ENABLED[^\n]*`true`[^\n]*(안전 공개 페이지|safe public page)[^\n]*Replay[^\n]*(후보|수집 가능)/i
+        );
+        expect(operations).toMatch(
+            /데모 분석[^\n]*analyze[^\n]*progress[^\n]*result[^\n]*(route|경로)[^\n]*(allowlist 밖|차단)/
         );
         expect(operations).toMatch(/현재 승인된[^\n]*0\.05/);
         expect(operations).toMatch(/0\.01[^\n]*0\.10/);
@@ -211,6 +214,7 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/(replay|event)[^\n]*(보내지 않|전송하지 않)|(보내지 않|전송하지 않)[^\n]*(replay|event)/i);
         expect(env).toContain('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=false');
         expect(env).toContain('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0');
+        expect(env).not.toContain('NEXT_PUBLIC_DEMO_ANALYSIS_ENABLED');
         expect(operations).toContain('닫힌 allowlist');
         expect(operations).toContain('얼리버드 전환 대시보드');
         expect(dashboardSection.match(/^\d+\. /gm)).toHaveLength(8);

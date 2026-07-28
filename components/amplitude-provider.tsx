@@ -11,7 +11,6 @@ import {
     markAnalyticsIdentityPending,
     markAnalyticsIdentityReady,
     teardownAmplitudeSessionReplay,
-    updateAmplitudeReplayRuntimeContext,
 } from '@/lib/services/analytics';
 import {
     analyticsAuthProvider,
@@ -71,18 +70,16 @@ export async function syncAnalyticsAuth(
 
 interface AmplitudeProviderProps {
     children: ReactNode;
-    demoAnalysisEnabled: boolean;
 }
 
-function AmplitudeProviderClient({ children, demoAnalysisEnabled }: AmplitudeProviderProps) {
+function AmplitudeProviderClient({ children }: AmplitudeProviderProps) {
     const { loading, user } = useAuth();
     const authState = useRef(createAuthAnalyticsState());
     const transitionGeneration = useRef(0);
 
     useLayoutEffect(() => {
-        updateAmplitudeReplayRuntimeContext({ demoAnalysisEnabled });
         enforceAmplitudeReplayRoutePrivacy();
-    }, [demoAnalysisEnabled]);
+    }, []);
 
     useLayoutEffect(() => installAmplitudeReplayNavigationGuards(), []);
 
@@ -141,8 +138,8 @@ function AmplitudeReplayRouteObserver() {
     return null;
 }
 
-export function AmplitudeProvider({ children, demoAnalysisEnabled }: AmplitudeProviderProps) {
+export function AmplitudeProvider({ children }: AmplitudeProviderProps) {
     // useSearchParams makes query-bearing URLs fail closed before they can be replayed.
     // Only the zero-DOM route observer suspends; the product subtree is mounted exactly once.
-    return <AmplitudeProviderClient demoAnalysisEnabled={demoAnalysisEnabled}>{children}</AmplitudeProviderClient>;
+    return <AmplitudeProviderClient>{children}</AmplitudeProviderClient>;
 }
