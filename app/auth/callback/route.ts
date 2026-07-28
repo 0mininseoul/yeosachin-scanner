@@ -11,6 +11,7 @@ import {
     deliverKakaoSignupDiscordNotifications,
     stageKakaoSignupDiscordProfile,
 } from '@/lib/services/identity/kakao-signup-discord';
+import { KAKAO_ATTRIBUTION_COOKIE, validKakaoSignupAttribution } from '@/lib/services/identity/kakao-signup-attribution';
 import {
     observeRoute,
     type OperationalRequestContext,
@@ -26,12 +27,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 async function stageUnavailableKakaoSignupProfile(
     userId: string,
     signedUpAt: Date,
+    attributionLabel: string | null,
 ): Promise<void> {
     await stageKakaoSignupDiscordProfile(userId, {
         name: null,
         birthyear: null,
         gender: null,
         signedUpAt,
+        attributionLabel,
     });
 }
 
@@ -59,6 +62,7 @@ async function syncKakaoProfile(
     email: string | undefined,
     providerToken: string,
     signedUpAt: Date,
+    attributionLabel: string | null,
 ): Promise<'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null> {
     const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${providerToken}` },
@@ -66,7 +70,7 @@ async function syncKakaoProfile(
     });
     if (!res.ok) {
         console.error('Kakao /v2/user/me failed:', res.status);
-        await stageUnavailableKakaoSignupProfile(userId, signedUpAt);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt, attributionLabel);
         return 'PROVIDER_ERROR';
     }
     const data: unknown = await res.json();
@@ -104,7 +108,7 @@ async function syncKakaoProfile(
         }, { onConflict: 'id' });
     if (error) {
         console.error('users upsert (kakao profile) failed:', error.code);
-        await stageUnavailableKakaoSignupProfile(userId, signedUpAt);
+        await stageUnavailableKakaoSignupProfile(userId, signedUpAt, attributionLabel);
         return 'INTERNAL_ERROR';
     }
     await stageKakaoSignupDiscordProfile(userId, {
@@ -112,6 +116,7 @@ async function syncKakaoProfile(
         birthyear: account.birthyear,
         gender: account.gender,
         signedUpAt,
+        attributionLabel,
     });
     return null;
 }
@@ -193,9 +198,10 @@ async function handleGET(
     const provider = authProvider(authedUser?.app_metadata?.provider);
     if (authedUser && provider === 'kakao') {
         const signedUpAt = new Date(authedUser.created_at ?? Date.now());
+        const attributionLabel = validKakaoSignupAttribution(cookieStore.get(KAKAO_ATTRIBUTION_COOKIE)?.value);
         let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
         if (!session?.provider_token) {
-            await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt);
+            await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attributionLabel);
             errorCode = 'PROVIDER_ERROR';
         } else {
             try {
@@ -204,10 +210,11 @@ async function handleGET(
                     authedUser.email ?? undefined,
                     session.provider_token,
                     signedUpAt,
+                    attributionLabel,
                 );
             } catch {
                 console.error('Kakao profile sync failed');
-                await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt);
+                await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attributionLabel);
                 errorCode = 'INTERNAL_ERROR';
             }
         }
@@ -228,6 +235,7 @@ async function handleGET(
         // The first-signup DB trigger is the only enqueue authority. Delivery runs
         // asynchronously so Discord cannot delay or fail a completed login.
         scheduleKakaoSignupDiscordDelivery(authedUser.id);
+        cookieStore.delete(KAKAO_ATTRIBUTION_COOKIE);
     }
 
     const redirectUrl = appRedirectUrlForRequest(request.url, searchParams.get('next'));

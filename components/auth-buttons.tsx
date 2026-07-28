@@ -12,6 +12,7 @@ import {
     clearPendingAuthEvent,
     type AuthMarkerStorage,
 } from '@/lib/services/analytics-auth';
+import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution } from '@/lib/services/identity/kakao-signup-attribution';
 
 type OAuthProvider = 'kakao' | 'google';
 
@@ -69,6 +70,10 @@ export function AuthButtons({
     const signIn = async (provider: OAuthProvider) => {
         setPending(provider);
         try {
+            if (provider === 'kakao') {
+                const label = classifyKakaoSignupAttribution(window.location.search, document.referrer);
+                document.cookie = `${KAKAO_ATTRIBUTION_COOKIE}=${encodeURIComponent(label)}; Max-Age=1800; Path=/; SameSite=Lax${window.location.protocol === 'https:' ? '; Secure' : ''}`;
+            }
             const supabase = createClient();
             const appOrigin = appOriginForRequest(window.location.href);
             const nextUrl = appRedirectUrlForRequest(window.location.href, redirectTo);

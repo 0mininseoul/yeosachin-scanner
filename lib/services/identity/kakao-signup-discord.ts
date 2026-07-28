@@ -11,6 +11,7 @@ export interface KakaoSignupProfile {
     birthyear: unknown;
     gender: unknown;
     signedUpAt: Date;
+    attributionLabel?: string | null;
 }
 
 interface ClaimedOutboxItem {
@@ -20,6 +21,7 @@ interface ClaimedOutboxItem {
     birthyear: string | null;
     gender: string | null;
     signed_up_at: string;
+    attribution_label?: string | null;
     attempts: number;
 }
 
@@ -86,7 +88,7 @@ export function formatKst(value: Date): string {
 }
 
 export function buildKakaoSignupDiscordPayload(item: Pick<ClaimedOutboxItem,
-    'masked_name' | 'birthyear' | 'gender' | 'signed_up_at'
+    'masked_name' | 'birthyear' | 'gender' | 'signed_up_at' | 'attribution_label'
 >) {
     return {
         embeds: [{
@@ -97,6 +99,7 @@ export function buildKakaoSignupDiscordPayload(item: Pick<ClaimedOutboxItem,
                 { name: '🎂 출생연도', value: item.birthyear ?? '미제공', inline: true },
                 { name: '⚧ 성별', value: item.gender ?? '미제공', inline: true },
                 { name: '📅 가입일시', value: formatKst(new Date(item.signed_up_at)), inline: false },
+                ...(item.attribution_label ? [{ name: '🌐 유입 경로', value: item.attribution_label, inline: false }] : []),
             ],
         }],
         allowed_mentions: { parse: [] },
@@ -234,6 +237,7 @@ export function kakaoSignupProfileForOutbox(profile: KakaoSignupProfile) {
         birthyear: safeBirthyear(profile.birthyear),
         gender: safeGender(profile.gender),
         signed_up_at: profile.signedUpAt.toISOString(),
+        attribution_label: profile.attributionLabel ?? null,
     };
 }
 
@@ -250,6 +254,7 @@ export async function stageKakaoSignupDiscordProfile(
             p_birthyear: payload.birthyear,
             p_gender: payload.gender,
             p_signed_up_at: payload.signed_up_at,
+            p_attribution_label: payload.attribution_label,
         });
         if (error) operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
     } catch {
