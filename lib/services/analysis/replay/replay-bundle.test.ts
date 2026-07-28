@@ -17,7 +17,10 @@ import {
 } from './replay-bundle';
 import { installReplayArtifactSignalCleanup } from './replay-artifact-lifecycle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
-import { HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY } from './replay-source-lineage';
+import {
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+} from './replay-source-lineage';
 
 const temporaryPaths: string[] = [];
 
@@ -212,6 +215,60 @@ describe('analysis V2 replay bundle', () => {
                 },
             },
         });
+    });
+
+    it('authenticates v2.12 only with its own sealed partial capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        const bundlePath = join(directory, 'partial-v212.enc');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.12',
+                },
+            },
+        } as AnalysisV2ReplayBundle;
+
+        await writeReplayBundle({
+            bundle: value,
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+        await expect(readAuthenticatedReplayBundle({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:20:00.000Z'),
+        })).resolves.toMatchObject({
+            bundle: {
+                capture: {
+                    evaluationPolicy: {
+                        capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.12',
+                    },
+                },
+            },
+        });
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.12',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-policy.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
     });
 
     it('rejects cross-version capabilities again while reading authenticated plaintext', async () => {

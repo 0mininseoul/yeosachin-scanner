@@ -6,6 +6,7 @@ import { createAnalysisV2SelectedMediaNormalizer } from '../lib/services/ai/imag
 import {
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
 } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
@@ -25,9 +26,11 @@ import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
@@ -97,6 +100,18 @@ function evaluationPolicy(value: string | undefined, historicalOfficialE2E = fal
         return {
             capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
             aiStage: AI_STAGE_POLICY_V211_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V212_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V212_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V212_VERSION && historicalOfficialE2E) {
+        return {
+            capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V212_VERSION,
         };
     }
     if (value !== AI_STAGE_POLICY_V29_VERSION) {

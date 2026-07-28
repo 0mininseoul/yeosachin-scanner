@@ -53,6 +53,11 @@ export const AI_STAGE_POLICY_V210_VERSION = 'ai-stage-policy-v2.10';
  * production rollout; its bytes exist solely for authenticated replay evaluation.
  */
 export const AI_STAGE_POLICY_V211_VERSION = 'ai-stage-policy-v2.11';
+/**
+ * v2.12 is an evaluation-only v2.11 successor. It preserves v2.11 exactly
+ * except for additional resolver output headroom during authenticated replay.
+ */
+export const AI_STAGE_POLICY_V212_VERSION = 'ai-stage-policy-v2.12';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
@@ -60,6 +65,7 @@ export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -214,6 +220,14 @@ const AI_STAGE_POLICIES_V211 = Object.freeze({
     }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V212 = Object.freeze({
+    ...AI_STAGE_POLICIES_V211,
+    genderResolution: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.genderResolution,
+        maxOutputTokens: 2_048,
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
@@ -221,6 +235,7 @@ export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_V29_VERSION]: AI_STAGE_POLICIES_V29,
     [AI_STAGE_POLICY_V210_VERSION]: AI_STAGE_POLICIES_V210,
     [AI_STAGE_POLICY_V211_VERSION]: AI_STAGE_POLICIES_V211,
+    [AI_STAGE_POLICY_V212_VERSION]: AI_STAGE_POLICIES_V212,
 });
 
 export type AiStagePolicyCapability =
@@ -266,6 +281,15 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'safePublicPresentationV28',
     ]),
     [AI_STAGE_POLICY_V211_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V212_VERSION]: new Set<AiStagePolicyCapability>([
         'durableGeminiLease',
         'genderResolution',
         'partialMediaCoverage',

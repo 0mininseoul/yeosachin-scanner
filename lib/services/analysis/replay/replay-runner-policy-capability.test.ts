@@ -41,6 +41,7 @@ import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -137,6 +138,19 @@ const historicalV211Bundle = {
     capture: {
         ...historicalV210Bundle.capture,
         evaluationPolicy: historicalV211Evaluation,
+    },
+};
+
+const historicalV212Evaluation = {
+    capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.12',
+} as const satisfies ReplayEvaluationPolicy;
+
+const historicalV212Bundle = {
+    ...historicalV210Bundle,
+    capture: {
+        ...historicalV210Bundle.capture,
+        evaluationPolicy: historicalV212Evaluation,
     },
 };
 
@@ -289,6 +303,93 @@ describe('replay staged AI runner policy capability', () => {
         expect(serialized).toContain('gender_quality');
         expect(serialized).not.toContain('"public"');
         expect(serialized).not.toContain('"m1"');
+    });
+
+    it('serializes a v2.12 MAX_TOKENS resolver rejection as one unknown account', async () => {
+        await expect(runAnalysisV2AiReplay({
+            bundle: historicalV212Bundle,
+            mode: 'dry-run',
+            evaluationPolicy: historicalV211Evaluation,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_MISMATCH');
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'personal' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockImplementationOnce(async (
+            _input: unknown,
+            audit: {
+                onBeforeAttempt?: (value: { attempt: number; retryCount: number }) => void;
+                onAttemptTelemetry?: (value: {
+                    attempt: number; retryCount: number;
+                    disposition: string; latencyMs: number;
+                }) => void;
+            },
+        ) => {
+            audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            audit.onAttemptTelemetry?.({
+                attempt: 1,
+                retryCount: 0,
+                disposition: 'response_rejected',
+                latencyMs: 1,
+            });
+            throw new Error(
+                'AI_GENERATION_RESPONSE_REJECTED_ERROR: finishReason=MAX_TOKENS',
+            );
+        });
+        let serialized = '';
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...historicalV212Bundle,
+                profiles: [{
+                    ...historicalV212Bundle.profiles[0]!,
+                    media: [
+                        historicalV212Bundle.profiles[0]!.media[0]!,
+                        {
+                            ...historicalV212Bundle.profiles[0]!.media[0]!,
+                            selectionId: 'm2',
+                            postId: 'p2',
+                        },
+                    ],
+                    triageSelectionIds: ['m1', 'm2'],
+                    featureSelectionIds: ['m1', 'm2'],
+                    resolverSelectionIds: ['m1', 'm2'],
+                    coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+                }],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+            write: line => { serialized = line; },
+        });
+
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+        expect(report.stages.genderResolution.failureDisposition)
+            .toEqual({ response_rejected: 1 });
+        expect(report.genderQuality).toMatchObject({
+            resolver: { outcome: { failed: 1 } },
+        });
+        expect(JSON.parse(serialized)).toMatchObject({
+            status: 'ok',
+            gender: { unknown: 1, unknownRate: 1 },
+        });
+        expect(serialized).not.toContain('MAX_TOKENS');
     });
 
     it('keeps a triage-personal but deterministically collective account out of feature and resolver', async () => {

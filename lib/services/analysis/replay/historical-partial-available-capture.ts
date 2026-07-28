@@ -8,6 +8,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     type ReplayEvaluationPolicy,
     type ReplaySourceLineage,
 } from './replay-source-lineage';
@@ -36,6 +37,17 @@ export type HistoricalPartialAvailableReport = {
     aiWorkload: { publicTriage: number; publicFeature: number; privateNames: number };
 };
 
+type HistoricalPartialAvailableEvaluationPolicy = Extract<
+    ReplayEvaluationPolicy,
+    {
+        capability:
+            | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+            | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
+            | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY
+            | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY;
+    }
+>;
+
 type PartialBundle = Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }>;
 
 function jpeg(bytes: Buffer): boolean {
@@ -62,6 +74,24 @@ function sourceIdentities(profiles: readonly HistoricalPartialSourceProfile[]) {
 }
 function unavailableReason(reason: string) { return /^[a-z_]{1,64}$/.test(reason) ? reason : 'media_gate_failed'; }
 
+function isHistoricalPartialAvailableEvaluationPolicy(
+    policy: ReplayEvaluationPolicy,
+): policy is HistoricalPartialAvailableEvaluationPolicy {
+    return (
+        policy.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
+        && policy.aiStage === 'ai-stage-policy-v2.9'
+    ) || (
+        policy.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
+        && policy.aiStage === 'ai-stage-policy-v2.10'
+    ) || (
+        policy.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY
+        && policy.aiStage === 'ai-stage-policy-v2.11'
+    ) || (
+        policy.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY
+        && policy.aiStage === 'ai-stage-policy-v2.12'
+    );
+}
+
 /**
  * Read-only non-exact capture: it deliberately keeps exact capture fail-closed and
  * contains only profiles that independently pass both production media gates.
@@ -71,11 +101,9 @@ export async function captureHistoricalPartialAvailableReplayBundle(input: {
     source: { profiles: readonly HistoricalPartialSourceProfile[]; evidence: AnalysisV2ReplayBundle['evidence'] };
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>; now?: number;
 }): Promise<{ bundle: PartialBundle; report: HistoricalPartialAvailableReport }> {
-    if (
-        input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
-        && input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
-        && input.evaluationPolicy.capability !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY
-    ) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    if (!isHistoricalPartialAvailableEvaluationPolicy(input.evaluationPolicy)) {
+        throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    }
     if (input.sourceLineage.selectedPlanId !== 'standard' || input.sourceLineage.policyVersions.aiStage !== 'ai-stage-policy-v2.7' || input.sourceLineage.policyVersions.risk !== 'risk-policy-v2.3' || 'scheduler' in input.sourceLineage.policyVersions) throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
     let identities;
     try { identities = sourceIdentities(input.source.profiles); } catch {

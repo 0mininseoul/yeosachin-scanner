@@ -3,7 +3,9 @@ import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preproces
 import { captureHistoricalPartialAvailableReplayBundle, partialAvailableSafeReport } from './historical-partial-available-capture';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
 } from './replay-source-lineage';
 
 const lineage = {
@@ -69,6 +71,52 @@ describe('historical partial-available replay capture', () => {
             evaluationPolicy: {
                 capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
                 aiStage: 'ai-stage-policy-v2.11',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('seals only the exact v2.12 partial capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '4'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.12',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.12',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '6'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.12',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '5'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.12',
             },
             source: {
                 profiles: [],

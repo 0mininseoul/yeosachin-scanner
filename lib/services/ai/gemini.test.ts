@@ -204,7 +204,9 @@ describe('analyzeWithGemini generation retry policy', () => {
             .toEqual(['rate_limited', 'success']);
     });
 
-    it('runs a replay provider fence once for each SDK attempt, including a retry', async () => {
+    it.each(['ai-stage-policy-v2.11', 'ai-stage-policy-v2.12'] as const)(
+        'runs a replay provider fence once for each SDK attempt under %s, including a retry',
+        async aiStagePolicyVersion => {
         vi.useFakeTimers();
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
         vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -217,7 +219,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         const result = analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
             stage: 'genderTriage',
-            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            aiStagePolicyVersion: aiStagePolicyVersion as never,
             skipTokenLog: true,
             replayCapability: issueReplayStatelessCapability(),
             runProviderAttempt: fence,
@@ -227,7 +229,8 @@ describe('analyzeWithGemini generation retry policy', () => {
         await expect(result).resolves.toEqual({ value: 'ok' });
         expect(mocks.generateContent).toHaveBeenCalledTimes(2);
         expect(fence).toHaveBeenCalledTimes(2);
-    });
+        },
+    );
 
     it('logs known usage and attempt telemetry before rejecting an empty response', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => undefined);

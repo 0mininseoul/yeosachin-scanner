@@ -7,6 +7,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -263,7 +264,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
     const partialCapability =
         capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
