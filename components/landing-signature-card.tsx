@@ -66,11 +66,6 @@ const SUSPECTS: Suspect[] = [
 
 const CHAR_INTERVAL_MS = 26;
 
-// Held at the start of every row so its meter can fill before the verdict types.
-// The reading is taken first, then it is explained — typing first and filling the
-// meter partway through read as two unrelated things happening at once.
-const METER_LEAD_MS = 1100;
-
 function rowStartOffsets(): number[] {
   const offsets: number[] = [];
   let consumed = 0;
@@ -97,27 +92,18 @@ function useSequentialVerdicts(active: boolean): {
     // reduced-motion shows the finished text directly in render (below), so the
     // effect only drives the animated case.
     if (!active || reduce) return;
-    const starts = rowStartOffsets();
     let count = 0;
-    let timer = 0;
-
-    // A self-scheduling timeout rather than a fixed interval, so each row can
-    // pause at its own boundary while the meter fills.
-    const step = () => {
-      const wait = starts.includes(count) ? METER_LEAD_MS : CHAR_INTERVAL_MS;
-      timer = window.setTimeout(() => {
-        count += 1;
-        setRevealed(count);
-        if (count < total) step();
-      }, wait);
-    };
-    step();
-
-    return () => window.clearTimeout(timer);
+    const id = window.setInterval(() => {
+      count += 1;
+      setRevealed(count);
+      if (count >= total) window.clearInterval(id);
+    }, CHAR_INTERVAL_MS);
+    return () => window.clearInterval(id);
   }, [active, reduce, total]);
 
-  const starts = rowStartOffsets();
-  const started = starts.map((offset) => active && (reduce || revealed >= offset));
+  // A row's meter starts filling the moment its turn begins — the same instant
+  // its first character types, so the reading and its explanation arrive together.
+  const started = rowStartOffsets().map((offset) => active && (reduce || revealed >= offset));
 
   const reveals = revealVerdicts(
     SUSPECTS.map((s) => ({ lines: s.verdict })),

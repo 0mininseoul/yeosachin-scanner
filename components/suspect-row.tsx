@@ -37,14 +37,26 @@ export function SuspectRow({
   rank,
   avatar,
   externalProfileLinks,
+  maskHandle = false,
 }: {
   account: SuspectRowAccount;
   rank: number;
   avatar: ReactNode;
   externalProfileLinks: boolean;
+  /**
+   * Blurs the account's handle. Used on the shared view, where the reader never
+   * consented to being listed.
+   *
+   * This is a visual mask only — the handle is still in the payload and readable
+   * from devtools. Real redaction has to happen where the share response is
+   * built, not here.
+   */
+  maskHandle?: boolean;
 }) {
   const isHighRisk = account.riskGrade === "high_risk";
-  const showProfileLink = Boolean(account.instagramUrl) && externalProfileLinks;
+  // A masked handle plus a link whose href *is* that handle would cancel out, so
+  // the profile action goes away with it.
+  const showProfileLink = Boolean(account.instagramUrl) && externalProfileLinks && !maskHandle;
 
   const body = (
     <div className="flex min-w-0 flex-1 flex-col gap-2.5">
@@ -61,7 +73,14 @@ export function SuspectRow({
             <span className="num shrink-0 text-[11px] font-bold tracking-[0.1em] text-fg-mute">
               {String(rank).padStart(2, "0")}
             </span>
-            {account.instagramUrl ? (
+            {maskHandle ? (
+              <span
+                aria-hidden="true"
+                className="min-w-0 flex-1 select-none truncate text-[15px] font-bold tracking-tight text-fg/90 blur-[5px]"
+              >
+                @{account.instagramId}
+              </span>
+            ) : account.instagramUrl ? (
               <a
                 href={account.instagramUrl}
                 target="_blank"

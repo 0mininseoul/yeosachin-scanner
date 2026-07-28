@@ -68,8 +68,10 @@ describe('Amplitude caller privacy contract', () => {
 
     it('uses the shared result request UUID without exposing the share token', () => {
         const shared = source('app/share/[token]/page.tsx');
+        // `display` is the payload after the v2 shape is mapped onto this view's
+        // DTO; either way the id comes from the result, never from the token.
         expect(shared).toMatch(
-            /trackEvent\(EVENTS\.RESULT_VIEWED, \{[\s\S]*?request_id:\s*result\.requestId/,
+            /trackEvent\(EVENTS\.RESULT_VIEWED, \{[\s\S]*?request_id:\s*display\.requestId/,
         );
         expect(shared).toMatch(
             /if \(shareChannel\)[\s\S]*?trackEvent\(EVENTS\.RESULT_SHARED, \{[\s\S]*?request_id:\s*data\.requestId/,

@@ -534,28 +534,41 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
-    // Shares the service with a teaser rather than this result. /result is
-    // auth-gated, so a recipient would land on a login screen.
-    //
-    // TODO: /api/share/enable now issues v2 share tokens and there is an
-    // opengraph-image route for them, so this can point at /share/{token}
-    // instead. That needs the enable call, its failure path, and the redaction
-    // decision on what a tokenless visitor may see, so it is left to its own
-    // change rather than folded into the motion work.
+    // Shares the result itself. /result is auth-gated, so a share token is minted
+    // first and the recipient is sent to /share/{token}. If minting fails the
+    // share still goes out, pointing at the service rather than dropping the
+    // user's action on the floor.
     const handleKakaoShare = async () => {
         if (kakaoShareLoading) return;
         setKakaoShareLoading(true);
         try {
-            // Both the link and the thumbnail must sit on the domain registered in
-            // Kakao Developers, so they are pinned to the canonical origin even when
-            // this page is served from localhost.
+            let shareUrl = CANONICAL_APP_ORIGIN;
+            let sharedResult = false;
+            try {
+                const enabled = await fetch('/api/share/enable', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ requestId }),
+                });
+                const payload = await enabled.json();
+                if (enabled.ok && payload?.success && typeof payload.shareUrl === 'string') {
+                    shareUrl = payload.shareUrl;
+                    sharedResult = true;
+                }
+            } catch {
+                // fall through to the service link
+            }
+
+            // Kakao only accepts links and thumbnails on a domain registered in
+            // its console, so the fallback is pinned to the canonical origin even
+            // when this page is served from localhost.
             const detected = data?.summary.v2?.highRiskCount
                 ?? data?.femaleAccounts.filter(account => account.riskGrade === 'high_risk').length
                 ?? 0;
             const channel = await shareResultToKakao(
                 {
-                    url: CANONICAL_APP_ORIGIN,
-                    title: '위장여사친 판독기',
+                    url: shareUrl,
+                    title: sharedResult ? '위장여사친 판독 결과' : '위장여사친 판독기',
                     description: detected > 0
                         ? `방금 판독했더니 고위험 계정 ${detected}건이 나왔어요.`
                         : '남자친구가 맞팔 중인 여자들, AI가 5분이면 판독해줍니다.',
