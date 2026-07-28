@@ -1,5 +1,8 @@
 import { z } from 'zod';
-import { MAX_TRIAGE_MEDIA } from '@/lib/domain/analysis/media-policy';
+import {
+    getAiStagePolicy,
+    type AiStagePolicyVersion,
+} from './stage-policy';
 import type {
     FeatureAnalysisResult,
     GenderResolutionResult,
@@ -19,6 +22,7 @@ export type GenderClassificationSource =
     | 'unavailable';
 
 export interface GenderResolutionReconciliationInput {
+    aiStagePolicyVersion: AiStagePolicyVersion;
     baselineClassification: GenderBaselineClassification;
     baselineSource: Exclude<GenderClassificationSource, 'gender_resolution'>;
     triage: GenderTriageResult['assessment'] | null;
@@ -33,15 +37,24 @@ export interface GenderResolutionReconciliationResult {
     resolverApplied: boolean;
 }
 
-const genderResolutionResultSchema = z.object({
-    assessment: z.object({
-        inferredGender: z.enum(['female', 'male', 'unknown']),
-        confidence: z.enum(['low', 'medium', 'high']),
-        ownerConsistency: z.enum(['same_person', 'mixed_people', 'not_visible']),
-        evidenceSelectionIds: z.array(z.string().trim().min(1).max(240)).max(5),
-    }).strict(),
-    analyzedSelectionIds: z.array(z.string().trim().min(1).max(240)).max(MAX_TRIAGE_MEDIA),
+const genderResolutionAssessmentSchema = z.object({
+    inferredGender: z.enum(['female', 'male', 'unknown']),
+    confidence: z.enum(['low', 'medium', 'high']),
+    ownerConsistency: z.enum(['same_person', 'mixed_people', 'not_visible']),
+    evidenceSelectionIds: z.array(z.string().trim().min(1).max(240)).max(5),
 }).strict();
+
+function genderResolutionResultSchemaFor(
+    aiStagePolicyVersion: AiStagePolicyVersion,
+) {
+    const policy = getAiStagePolicy(aiStagePolicyVersion, 'genderResolution');
+    return z.object({
+        assessment: genderResolutionAssessmentSchema,
+        analyzedSelectionIds: z.array(z.string().trim().min(1).max(240)).max(
+            policy.profileImageLimit + policy.feedImageLimit,
+        ),
+    }).strict();
+}
 
 function verifiedClassificationFor(
     gender: 'female' | 'male',
@@ -76,7 +89,9 @@ export function applyGenderResolution(
         return unchanged();
     }
 
-    const resolver = genderResolutionResultSchema.parse(input.resolver).assessment;
+    const resolver = genderResolutionResultSchemaFor(
+        input.aiStagePolicyVersion,
+    ).parse(input.resolver).assessment;
     const resolverGender = resolver.inferredGender;
     const resolverEvidenceCount = new Set(resolver.evidenceSelectionIds).size;
     const isHighSameOwnerResolver = isBinaryGender(resolverGender)

@@ -30,6 +30,7 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
     type AiStagePolicyVersion,
 } from './stage-policy';
 import {
@@ -429,6 +430,7 @@ describe('V2 staged AI services', () => {
             inferredGender: 'male',
         });
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'verified_female',
             baselineSource: 'feature',
             triage: routedTriage().assessment,
@@ -440,6 +442,7 @@ describe('V2 staged AI services', () => {
             resolverApplied: false,
         });
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'verified_non_female',
             baselineSource: 'triage',
             triage: routedTriage().assessment,
@@ -464,6 +467,7 @@ describe('V2 staged AI services', () => {
             finalGenderDecision: 'unresolved' as const,
         };
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'unresolved',
             baselineSource: 'unknown',
             triage: routedTriage().assessment,
@@ -480,6 +484,7 @@ describe('V2 staged AI services', () => {
             evidenceSelectionIds: ['post:2:thumbnail'],
         });
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'unresolved',
             baselineSource: 'unknown',
             triage: routedTriage().assessment,
@@ -487,6 +492,7 @@ describe('V2 staged AI services', () => {
             resolver: mediumResolver,
         }).finalClassification).toBe('verified_female');
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'unresolved',
             baselineSource: 'unknown',
             triage: routedTriage().assessment,
@@ -510,6 +516,7 @@ describe('V2 staged AI services', () => {
             finalGenderDecision: 'unresolved_stage_conflict' as const,
         };
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'unresolved_stage_conflict',
             baselineSource: 'unknown',
             triage,
@@ -517,6 +524,7 @@ describe('V2 staged AI services', () => {
             resolver: genderResolutionResult({ inferredGender: 'male' }),
         }).finalClassification).toBe('verified_non_female');
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'unresolved_stage_conflict',
             baselineSource: 'unknown',
             triage,
@@ -535,6 +543,7 @@ describe('V2 staged AI services', () => {
             'analysis_unavailable',
         ] as const) {
             expect(applyGenderResolution({
+                aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
                 baselineClassification,
                 baselineSource: 'unavailable',
                 triage: null,
@@ -547,6 +556,7 @@ describe('V2 staged AI services', () => {
             });
         }
         expect(applyGenderResolution({
+            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
             baselineClassification: 'unresolved',
             baselineSource: 'unknown',
             triage: routedTriage().assessment,
@@ -557,6 +567,31 @@ describe('V2 staged AI services', () => {
             resolver: null,
         }).finalClassification).toBe('unresolved');
     });
+
+    it.each([
+        [AI_STAGE_POLICY_V210_VERSION, 6, 5],
+        [AI_STAGE_POLICY_V212_VERSION, 10, 9],
+    ] as const)(
+        'rejects %s resolver results above its exact media limit',
+        (aiStagePolicyVersion, analyzedCount, maximum) => {
+            expect(() => applyGenderResolution({
+                aiStagePolicyVersion,
+                baselineClassification: 'unresolved',
+                baselineSource: 'unknown',
+                triage: routedTriage().assessment,
+                feature: {
+                    ...verifiedFeatureResult(),
+                    finalGenderDecision: 'unresolved',
+                },
+                resolver: {
+                    ...genderResolutionResult(),
+                    analyzedSelectionIds: media()
+                        .slice(0, analyzedCount)
+                        .map(item => item.selectionId),
+                },
+            })).toThrow(`Too big: expected array to have <=${maximum} items`);
+        },
+    );
 
     it('accepts only bounded normalized JPEG artifacts with stable IDs', () => {
         expect(normalizedAiMediaSelectionSchema.parse(media()[0])).toEqual(media()[0]);

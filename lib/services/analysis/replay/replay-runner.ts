@@ -1085,6 +1085,7 @@ export async function runAnalysisV2AiReplay(input: {
                 }
             }
             const reconciliation = applyGenderResolution({
+                aiStagePolicyVersion: replayAiPolicy,
                 baselineClassification: outcome.baseline,
                 baselineSource: outcome.baseline === 'verified_female'
                     || outcome.baseline === 'verified_non_female'

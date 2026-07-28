@@ -459,6 +459,75 @@ describe('replay staged AI runner policy capability', () => {
         expect(serialized).not.toContain('Gemini generation status');
     });
 
+    it('reconciles a paid v2.12 resolver result that analyzed nine selected images', async () => {
+        const media = Array.from({ length: 9 }, (_, index) => ({
+            ...historicalV212Bundle.profiles[0]!.media[0]!,
+            selectionId: `m${index + 1}`,
+            postId: `p${index + 1}`,
+        }));
+        const selectionIds = media.map(item => item.selectionId);
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: selectionIds.slice(0, 5),
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'personal' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: selectionIds,
+        });
+        ai.genderResolution.mockResolvedValue({
+            assessment: {
+                inferredGender: 'female', confidence: 'high',
+                ownerConsistency: 'same_person', evidenceSelectionIds: ['m1', 'm2'],
+            },
+            analyzedSelectionIds: selectionIds,
+        });
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...historicalV212Bundle,
+                profiles: [{
+                    ...historicalV212Bundle.profiles[0]!,
+                    media,
+                    triageSelectionIds: selectionIds.slice(0, 5),
+                    featureSelectionIds: selectionIds,
+                    resolverSelectionIds: selectionIds,
+                    coverage: { selectedCount: 9, normalizedCount: 9, failures: [] },
+                }],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+        });
+
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+        expect(report.resolver).toMatchObject({
+            ready: 1,
+            applied: 1,
+            inconclusive: 0,
+            outcomes: {
+                readyHighConfirmed: 1,
+                reconciliationApplied: 1,
+            },
+        });
+        expect(report.genderQuality).toMatchObject({
+            feature: { routeTerminal: { completed: 1 } },
+            resolver: { lateAdmission: 1, outcome: { ok: 1 } },
+            finalClassificationSource: { gender_resolution: 1 },
+        });
+    });
+
     it('counts a telemetry-free v2.12 rate-limited resolver provider error consistently', async () => {
         ai.genderTriageMicrobatch.mockResolvedValue([{
             accountId: `account:${'b'.repeat(64)}`,

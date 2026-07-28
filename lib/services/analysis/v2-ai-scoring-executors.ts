@@ -1597,6 +1597,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                         ? settledResolverState.value
                                         : null;
                                 const reconciliation = applyGenderResolution({
+                                    aiStagePolicyVersion: inputQualityPolicyVersion,
                                     baselineClassification: 'unresolved',
                                     baselineSource: 'unknown',
                                     triage: gender.result.assessment,
@@ -1826,6 +1827,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                     ? settledResolverState.value
                                     : null;
                             const reconciliation = applyGenderResolution({
+                                aiStagePolicyVersion: inputQualityPolicyVersion,
                                 baselineClassification,
                                 baselineSource: baselineClassification === 'verified_female'
                                     || baselineClassification === 'verified_non_female'
