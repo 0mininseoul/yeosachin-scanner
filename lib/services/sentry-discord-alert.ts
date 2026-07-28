@@ -34,7 +34,7 @@ function configuredDiscord(): DiscordConfig | null {
     if (process.env.SENTRY_DISCORD_ALERTS_ENABLED !== 'true') return null;
     const botToken = process.env.SENTRY_DISCORD_BOT_TOKEN?.trim();
     const channelId = process.env.SENTRY_DISCORD_CHANNEL_ID?.trim();
-    if (!botToken || !/^[0-9]{16,22}$/.test(channelId ?? '')) return null;
+    if (!botToken || !channelId || !/^[0-9]{16,22}$/.test(channelId)) return null;
     return { botToken, channelId };
 }
 
