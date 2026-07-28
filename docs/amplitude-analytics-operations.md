@@ -14,12 +14,17 @@ Amplitude는 클라이언트 제품 퍼널을 보는 보조 분석 도구다. �
 - 인증 전에는 익명 상태를 사용하고, 인증 후 Amplitude user ID는 Supabase UUID만 사용한다. 이메일, 전화번호, 인스타그램 아이디를 ID나 user property로 설정하지 않는다.
 - Analytics는 클라이언트에서만 전송한다. Groble webhook 등 서버 요청에서 Amplitude 이벤트를 보내지 않는다.
 - Analytics 자동 수집은 세션 경계를 포함해 전부 끈다. page URL·view, form·element·frustration interaction, file download, network, web vitals·performance, attribution은 수집하지 않고 닫힌 allowlist의 명시 이벤트만 전송한다.
+- Session Replay는 Production(`NEXT_PUBLIC_VERCEL_ENV=production`)에서 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true`이고 경로·개인정보 조건도 통과할 때만 후보가 된다. 현재 승인된 Production 운영값은 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0.05`(5%)다. 런타임은 형식이 맞는 `0.01`(1%)부터 `0.10`(10%)까지를 지원하며, 형식 오류 또는 범위 밖 값은 fail-closed `sampleRate: 0`으로 비활성화한다. 현재 `0.05` 변경은 별도 검토가 필요하다.
 
 ## 2. 개인정보 경계
 
-Session Replay는 현재 비활성화 상태다. 구현은 `sampleRate: 0`, `capture_enabled: false`를 강제하며 interaction, network, document title, URL change 수집도 끈다. 원격 설정도 0으로 고정해 fail-closed로 동작하므로 replay 영상은 수집·보관되지 않는다.
+Session Replay 허용 경로는 `/`, `/privacy`, `/terms` 세 곳뿐이다. query 또는 hash가 하나라도 있으면 차단한다. 로그인, analyze, progress, result, share, account, profile 및 그 밖의 모든 경로는 allowlist 밖이므로 차단한다. 안전 경로에서 시작한 세션도 민감 경로로 이동하면 Replay를 중지하며, 다시 허용하려면 새 페이지/세션이 필요하다.
 
-명시 이벤트와 속성은 닫힌 allowlist를 통과한다. 생 인스타그램 아이디, 이메일, 전화번호, 이름, profile/bio/comment/caption 등 소셜 콘텐츠, 이미지·미디어·페이지 URL, 결제 연락처, raw 오류·응답은 보내지 않는다. 민감 화면의 block/mask 표시는 Replay가 실수로 활성화되는 변경에 대비한 추가 방어선이며 현재 수집을 의미하지 않는다.
+DNT 또는 GPC(Global Privacy Control) opt-out이면 fail-closed로 `sampleRate: 0`, `capture_enabled: false`로 Replay를 차단한다. SDK 또는 remote config의 sampling 값이 기대값과 불일치하거나 응답 오류·실패가 발생해도 같은 fail-closed 응답을 반환한다. interaction, network, document title, URL change, performance 수집도 끈다.
+
+Replay 화면 구조에는 `form`, `input`, `select`, `textarea`, `option`, `[contenteditable]`를 마스킹한다. `img`, `video`, `audio`, `canvas`, `svg`와 `.amp-block`, `[data-amp-block]`, `[data-amp-sensitive]`, `[data-amp-private]`는 차단한다. 이는 안전 경로에만 적용되는 추가 방어선이며, 민감 경로를 Replay로 분석할 근거가 아니다.
+
+명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay payload에는 query와 hash가 없는 `/`, `/privacy`, `/terms` URL만 포함될 수 있다. 민감·비허용 경로 URL 및 query/hash가 붙은 허용 경로 URL은 gate가 캡처를 차단하므로 Replay payload에 포함되지 않는다. 생 인스타그램 식별자, 이름, bio/소개글, 댓글/comment, caption/캡션, 이미지·미디어, 결제 연락처, 이메일·전화번호, raw 오류·응답은 replay 또는 event에 보내지 않는다. Replay는 허용 경로의 표본 세션 문제를 분석할 때만 사용하며 민감 화면을 분석하려 하지 않는다.
 
 ## 3. 이벤트와 허용 속성
 
@@ -48,21 +53,23 @@ Session Replay는 현재 비활성화 상태다. 구현은 `sampleRate: 0`, `cap
 7. 결과 사용: `result_viewed`, `result_shared` 추이와 `share_channel`, `is_shared` breakdown
 8. 이벤트 기반 핵심 이탈 세그먼트: 같은 세션에서 `target_submitted` 후 `preflight_succeeded`가 없거나 `plan_selected` 후 `checkout_redirected`가 없는 사용자. Replay 링크 없이 후속 이벤트 유무로만 구성
 
-Session Replay가 비활성화되어 있으므로 Replay 세그먼트나 영상 패널을 만들지 않는다. Plus 대기 신청 전용 차트도 만들지 않고 대시보드에서 제외한다.
+기존 8개 이벤트 대시보드 패널은 유지한다. Replay는 이 대시보드의 대체 지표나 별도 민감 화면 패널이 아니며, 안전 경로에서 수신된 표본 세션의 문제를 조사할 때만 보조적으로 확인한다. Plus 대기 신청 전용 차트도 만들지 않고 대시보드에서 제외한다.
 
 ## 5. Live 검증
 
-- Preview 또는 Production에서 동의된 테스트 사용자로 landing → 대상 입력 → 인증 → preflight → 플랜 조회·선택 → checkout 이동까지 한 번 수행한다.
+- Production 검증에서는 5% sampling 때문에 한 세션에서 Replay 영상이 반드시 생긴다고 가정하지 않는다. query·hash 없는 `/`, `/privacy`, `/terms` 표본 세션을 충분히 만들어 안전 경로 Replay 수신 여부를 확인한다.
 - Amplitude User Lookup 또는 Debugger에서 이벤트 순서와 Supabase UUID identity를 확인한다. 익명 이벤트가 인증 후 잘못된 이메일·전화번호 identity에 연결되지 않았는지 확인한다.
 - 결제 완료 fixture 또는 실제 검증 결제는 고객 화면이 `paid`를 읽은 뒤 `payment_confirmed_viewed`를 한 번만 보내는지 확인한다. 중복 새로고침은 dedupe 계약과 비교한다.
 - 각 이벤트 상세의 properties 탭에서 schema에 없는 값이 제거되는지 확인한다.
-- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 표본 검사한다.
-- `[Amplitude] Replay Captured` 이벤트와 Replay 영상이 새로 생성되지 않는지 확인한다.
+- 민감 경로(로그인, analyze, progress, result, share, account, profile)와 query/hash가 붙은 안전 경로에서 Replay가 수신되지 않는지 확인한다. DNT/GPC opt-out 브라우저도 수신되지 않아야 한다.
+- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 검사한다. Replay 표본에는 허용 경로 URL 외의 URL과 위 민감 값이 없어야 한다.
 
 검증 중 민감 속성이 발견되면 대시보드 작성과 Production rollout을 중단한다. allowlist 또는 caller를 수정하고 잘못 수집된 데이터의 삭제 절차를 Amplitude 프로젝트 관리자와 확인한 뒤 다시 검증한다.
 
 ## 6. Rollout과 롤백
 
-Rollout은 로컬 테스트, Vercel Preview 실이벤트, 금지 속성 검사, Production 환경 변수 추가, Production live event 확인 순서로 진행한다. 배포 직후 핵심 funnel 이벤트 수신과 제품 흐름을 함께 확인한다.
+Session Replay rollout 전제 조건으로 서버 전용 `DEMO_ANALYSIS_ENABLED`가 정확히 `true`가 아니어야 한다. `DEMO_ANALYSIS_ENABLED`가 `true`이면 런타임은 데모 모드로 판단하여 Replay를 fail-closed `sampleRate: 0`으로 차단하고, 이미 시작된 캡처도 종료한다.
 
-롤백은 `NEXT_PUBLIC_AMPLITUDE_API_KEY`를 Production 환경에서 제거하고 재배포하여 새 전송을 중단하는 방식으로 수행한다. SDK 실패나 key 제거 후에도 로그인·preflight·checkout·결과 화면이 정상 동작해야 한다. Session Replay는 문제 해결 중에도 `sampleRate: 0`과 capture 비활성 상태를 유지한다.
+Rollout은 로컬 테스트, Vercel Preview 실이벤트, 금지 속성 검사, Production에 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true` 및 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0.05` 설정, Production live 검증 순서로 진행한다. 배포 직후 핵심 funnel 이벤트 수신과 제품 흐름을 함께 확인한다.
+
+Replay만 롤백하려면 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=false`와 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0`을 함께 설정하고 재배포한다. 이 조치는 명시 이벤트 analytics는 유지한다. 반대로 `NEXT_PUBLIC_AMPLITUDE_API_KEY`를 제거하는 것은 전체 analytics kill switch로서 명시 이벤트 전송까지 모두 중단한다. SDK 실패나 key 제거 후에도 로그인·preflight·checkout·결과 화면이 정상 동작해야 한다.

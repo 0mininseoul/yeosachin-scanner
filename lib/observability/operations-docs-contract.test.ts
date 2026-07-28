@@ -146,20 +146,71 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/internal checkout body[^\n]*post-drain/);
     });
 
-    it('documents the closed Amplitude schema with replay disabled and eight event panels', () => {
+    it('documents fail-closed 5% Amplitude Session Replay with eight event panels', () => {
         const operations = source('docs/amplitude-analytics-operations.md');
+        const env = source('.env.example');
+        const dashboardSection = operations.match(/## 4\. 대시보드 생성[\s\S]*?(?=## 5\. Live 검증)/)?.[0] ?? '';
 
         expect(operations).toContain('NEXT_PUBLIC_AMPLITUDE_API_KEY');
         expect(operations).toContain('Supabase UUID');
-        expect(operations).toMatch(/Session Replay[^\n]*비활성화/);
-        expect(operations).toMatch(/sampleRate[^\n]*0/);
+        expect(operations).toMatch(
+            /NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED[^\n]*true/
+        );
+        expect(operations).toMatch(
+            /NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE[^\n]*0\.05/
+        );
+        expect(operations).toMatch(
+            /DEMO_ANALYSIS_ENABLED[^\n]*정확히[^\n]*`true`[^\n]*(아니어야|아닌지)/
+        );
+        expect(operations).toMatch(
+            /DEMO_ANALYSIS_ENABLED[^\n]*`true`[^\n]*(fail-closed|sampleRate:[^\n]*0)/
+        );
+        expect(operations).toMatch(/현재 승인된[^\n]*0\.05/);
+        expect(operations).toMatch(/0\.01[^\n]*0\.10/);
+        expect(operations).toMatch(/(범위 밖|형식 오류)[^\n]*(fail-closed|sampleRate:[^\n]*0)/);
+        expect(operations).toMatch(/(0\.05|sample rate)[^\n]*(변경|변경은)[^\n]*(별도 검토|검토 필요)/i);
+        expect(operations).toMatch(
+            /허용 경로[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`/
+        );
+        expect(operations).toMatch(/query[^\n]*hash|hash[^\n]*query/i);
+        expect(operations).toMatch(
+            /Replay payload[^\n]*query[^\n]*hash[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`[^\n]*URL[^\n]*(포함될 수|포함 가능)/i
+        );
+        expect(operations).toMatch(
+            /민감[^\n]*비허용[^\n]*query[^\n]*hash[^\n]*gate[^\n]*차단[^\n]*Replay payload[^\n]*포함되지/i
+        );
+        expect(operations).toMatch(
+            /명시 이벤트[^\n]*페이지 URL[^\n]*(보내지 않|전송하지 않)/
+        );
+        expect(operations).toMatch(
+            /로그인[^\n]*analyze[^\n]*progress[^\n]*result[^\n]*share[^\n]*account[^\n]*profile[^\n]*(allowlist 밖|차단)/
+        );
+        expect(operations).toMatch(/DNT[^\n]*(GPC|Global Privacy Control)|(GPC|Global Privacy Control)[^\n]*DNT/);
+        expect(operations).toMatch(/DNT[^\n]*GPC[^\n]*fail-closed[^\n]*sampleRate:[^\n]*0/i);
+        expect(operations).toMatch(/(SDK|remote config)[^\n]*(불일치|오류|실패)[^\n]*(fail-closed|sample[^\n]*0)|(fail-closed|sample[^\n]*0)[^\n]*(SDK|remote config)/i);
+        for (const selector of ['form', 'input', 'select', 'textarea', 'option', 'contenteditable']) {
+            expect(operations).toContain(selector);
+        }
+        expect(operations).toMatch(/(마스킹|mask)/i);
+        for (const selector of ['img', 'video', 'audio', 'canvas', 'svg']) {
+            expect(operations).toContain(selector);
+        }
+        expect(operations).toMatch(/(차단|block)/i);
+        for (const excludedValue of ['인스타그램', '이름', 'bio', '댓글', 'caption', '이미지', '미디어', '결제 연락처']) {
+            expect(operations).toContain(excludedValue);
+        }
+        expect(operations).toMatch(/(replay|event)[^\n]*(보내지 않|전송하지 않)|(보내지 않|전송하지 않)[^\n]*(replay|event)/i);
+        expect(env).toContain('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=false');
+        expect(env).toContain('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0');
+        expect(operations).toContain('닫힌 allowlist');
         expect(operations).toContain('얼리버드 전환 대시보드');
-        expect(operations.match(/^\d+\. /gm)).toHaveLength(8);
+        expect(dashboardSection.match(/^\d+\. /gm)).toHaveLength(8);
         expect(operations).toMatch(/이벤트 기반[^\n]*이탈/);
         expect(operations).toMatch(/Plus[^\n]*대기 신청[^\n]*(만들지|제외)/);
         expect(operations).toMatch(/Comet[^\n]*UI/);
         expect(operations).toMatch(/금지 (속성|프로퍼티)[^\n]*검사/);
-        expect(operations).toMatch(/롤백/);
+        expect(operations).toMatch(/롤백[^\n]*NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=false[^\n]*NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0/);
+        expect(operations).toMatch(/NEXT_PUBLIC_AMPLITUDE_API_KEY[^\n]*(전체|all)[^\n]*(analytics|분석)[^\n]*(kill switch|중단)/i);
     });
 
     it('keeps Axiom runtime variables server-only and excludes provisioning credentials', () => {
