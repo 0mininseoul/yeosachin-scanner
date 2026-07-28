@@ -25,6 +25,40 @@ export const STRONG_UNCERTAIN_RESOLVER_CONFIG = Object.freeze({
     concurrency: 2,
 } as const);
 
+type DiagnosticOutcomeHistogram = {
+    ok: number;
+    rateLimited: number;
+    retryExhausted: number;
+    rejected: number;
+    failed: number;
+    capacitySkipped: number;
+};
+
+type ResolverCohortDiagnostics = {
+    selected: number;
+    outcomes: DiagnosticOutcomeHistogram;
+    highConfidence: { applied: number; inconclusive: number };
+};
+
+/**
+ * Deliberately fixed-key, aggregate-only cohort diagnostics. It cannot carry
+ * candidate content, model content, or media references.
+ */
+export interface ResolverExperimentDiagnostics {
+    triageOutcomes: DiagnosticOutcomeHistogram;
+    accountContextAdmission: {
+        alreadyVerified: number;
+        officialOrGroup: number;
+        uncertainOrAbsent: number;
+        insufficientMedia: number;
+        eligible: number;
+    };
+    resolverCohorts: {
+        existing: ResolverCohortDiagnostics;
+        uncertain: ResolverCohortDiagnostics;
+    };
+}
+
 export interface ResolverExperimentReport {
     experimentId: 'strong-uncertain-v1';
     evaluationAiStage: 'ai-stage-policy-v2.9';
@@ -56,6 +90,7 @@ export interface ResolverExperimentReport {
         capacitySkipped: number;
         ambiguous: number;
     };
+    diagnostics: ResolverExperimentDiagnostics;
     limits: {
         existingEligible: 40;
         uncertainPilot: 24;
@@ -65,6 +100,39 @@ export interface ResolverExperimentReport {
         maxBudgetedOutputTokens: 524288;
     };
     preflightPassed: true;
+}
+
+function diagnosticOutcomes(): DiagnosticOutcomeHistogram {
+    return {
+        ok: 0,
+        rateLimited: 0,
+        retryExhausted: 0,
+        rejected: 0,
+        failed: 0,
+        capacitySkipped: 0,
+    };
+}
+
+function recordDiagnosticOutcome(
+    histogram: DiagnosticOutcomeHistogram,
+    outcome: ReplayInvocation<unknown>['outcome'],
+): void {
+    switch (outcome) {
+    case 'ok': histogram.ok++; break;
+    case 'rate_limited': histogram.rateLimited++; break;
+    case 'retry_exhausted': histogram.retryExhausted++; break;
+    case 'rejected': histogram.rejected++; break;
+    case 'failed': histogram.failed++; break;
+    case 'capacity_skipped': histogram.capacitySkipped++; break;
+    }
+}
+
+function resolverCohortDiagnostics(): ResolverCohortDiagnostics {
+    return {
+        selected: 0,
+        outcomes: diagnosticOutcomes(),
+        highConfidence: { applied: 0, inconclusive: 0 },
+    };
 }
 
 function mediaFor(
@@ -164,6 +232,20 @@ export async function runStrongUncertainResolverExperiment(input: {
         ordinal: number;
         media: ReplayMedia[];
     }> = [];
+    const diagnostics: ResolverExperimentDiagnostics = {
+        triageOutcomes: diagnosticOutcomes(),
+        accountContextAdmission: {
+            alreadyVerified: 0,
+            officialOrGroup: 0,
+            uncertainOrAbsent: 0,
+            insufficientMedia: 0,
+            eligible: 0,
+        },
+        resolverCohorts: {
+            existing: resolverCohortDiagnostics(),
+            uncertain: resolverCohortDiagnostics(),
+        },
+    };
     let triaged = 0;
     const triageInputs = profiles.map(profile => {
         const triageMedia = mediaFor(profile, profile.triageSelectionIds);
@@ -185,6 +267,7 @@ export async function runStrongUncertainResolverExperiment(input: {
     );
     for (const { profile, triage } of triageResults) {
         if (input.signal?.aborted) throw input.signal.reason;
+        recordDiagnosticOutcome(diagnostics.triageOutcomes, triage.outcome);
         if (triage.outcome !== 'ok' || !triage.value) {
             throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_TRIAGE_FAILED');
         }
@@ -197,7 +280,13 @@ export async function runStrongUncertainResolverExperiment(input: {
             resolverMedia.length,
         );
         if (admission === 'eligible') {
+            diagnostics.accountContextAdmission.eligible++;
+            diagnostics.resolverCohorts.existing.selected++;
             admitted.push({ cohort: 'existing', ordinal: profile.ordinal, media: resolverMedia });
+        } else if (admission === 'already_verified') {
+            diagnostics.accountContextAdmission.alreadyVerified++;
+        } else if (admission === 'official_or_group') {
+            diagnostics.accountContextAdmission.officialOrGroup++;
         } else if (
             admission === 'uncertain_or_absent'
             && triage.value.v29AccountContext === 'uncertain'
@@ -205,7 +294,13 @@ export async function runStrongUncertainResolverExperiment(input: {
             && admitted.filter(item => item.cohort === 'uncertain').length
                 < input.bundle.capture.experiment.uncertainPilotLimit
         ) {
+            diagnostics.accountContextAdmission.uncertainOrAbsent++;
+            diagnostics.resolverCohorts.uncertain.selected++;
             admitted.push({ cohort: 'uncertain', ordinal: profile.ordinal, media: resolverMedia });
+        } else if (admission === 'uncertain_or_absent') {
+            diagnostics.accountContextAdmission.uncertainOrAbsent++;
+        } else {
+            diagnostics.accountContextAdmission.insufficientMedia++;
         }
     }
     const existingEligible = admitted.filter(item => item.cohort === 'existing').length;
@@ -269,11 +364,20 @@ export async function runStrongUncertainResolverExperiment(input: {
                 cohortDurations[candidate.cohort],
                 result,
             );
+            recordDiagnosticOutcome(
+                diagnostics.resolverCohorts[candidate.cohort].outcomes,
+                result.outcome,
+            );
             if (abort.signal.aborted) break;
             if (result.outcome === 'ok' && result.value) {
                 succeeded++;
                 cohorts[candidate.cohort].succeeded++;
-                if (highConfidence(result.value)) resolvedHighConfidence++;
+                if (highConfidence(result.value)) {
+                    resolvedHighConfidence++;
+                    diagnostics.resolverCohorts[candidate.cohort].highConfidence.applied++;
+                } else {
+                    diagnostics.resolverCohorts[candidate.cohort].highConfidence.inconclusive++;
+                }
             } else {
                 failed++;
                 cohorts[candidate.cohort].failed++;
@@ -319,6 +423,7 @@ export async function runStrongUncertainResolverExperiment(input: {
         cohorts,
         resolverTelemetry,
         failureOutcomes,
+        diagnostics,
         limits: {
             existingEligible: 40,
             uncertainPilot: 24,

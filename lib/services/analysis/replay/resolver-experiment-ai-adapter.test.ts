@@ -314,6 +314,94 @@ describe('dedicated resolver experiment AI adapter', () => {
         expect(mocks.analyze).toHaveBeenCalledTimes(64);
     });
 
+    it('reports only bounded aggregate cohort diagnostics', async () => {
+        mocks.batch.mockImplementation(async accounts => accounts.map((account: { accountId: string }) => {
+            const ordinal = Number(/m(\d+)-/.exec(account.accountId)?.[1]);
+            const assessment = ordinal === 1
+                ? {
+                    inferredGender: 'female' as const, confidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    evidenceSelectionIds: ['m1-1', 'm1-2'],
+                }
+                : {
+                    inferredGender: 'unknown' as const, confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                };
+            return {
+                accountId: account.accountId,
+                result: {
+                    assessment,
+                    routingDecision: 'route_to_feature_analysis',
+                    routingReason: 'conserve_female_recall',
+                    analyzedSelectionIds: [],
+                    v29AccountContext: ordinal === 2
+                        ? 'official_group_or_brand'
+                        : ordinal === 3 ? 'uncertain' : 'personal',
+                },
+            };
+        }));
+        const bundle = sealedBundle(5);
+        bundle.profiles[4]!.resolverSelectionIds = ['m5-1'];
+        bundle.profiles[0]!.fullName = 'name-do-not-report';
+        bundle.profiles[0]!.bio = 'bio-do-not-report';
+        bundle.profiles[0]!.captions = [{
+            evidenceRefId: 'caption-evidence', selectionId: 'm1-1',
+            text: 'caption-do-not-report',
+        }];
+        bundle.profiles[0]!.media[0]!.postId = 'https://example.invalid/post';
+        bundle.profiles[2]!.media[0]!.jpegBase64 = 'aGVsbG8=';
+        mocks.analyze.mockImplementation(async (_prompt, media) => media.includes('aGVsbG8=')
+            ? {
+                inferredGender: 'female', confidence: 'high',
+                ownerConsistency: 'same_person',
+                evidenceSelectionIds: ['resolver-media:1', 'resolver-media:2'],
+            }
+            : {
+                inferredGender: 'unknown', confidence: 'low',
+                ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+            });
+
+        const report = await runStrongUncertainResolverExperiment({
+            bundle,
+            runner: createStrongUncertainResolverExperimentAdapter(),
+        });
+
+        expect(report.diagnostics).toEqual({
+            triageOutcomes: {
+                ok: 5, rateLimited: 0, retryExhausted: 0,
+                rejected: 0, failed: 0, capacitySkipped: 0,
+            },
+            accountContextAdmission: {
+                alreadyVerified: 1, officialOrGroup: 1, uncertainOrAbsent: 1,
+                insufficientMedia: 1, eligible: 1,
+            },
+            resolverCohorts: {
+                existing: {
+                    selected: 1,
+                    outcomes: {
+                        ok: 1, rateLimited: 0, retryExhausted: 0,
+                        rejected: 0, failed: 0, capacitySkipped: 0,
+                    },
+                    highConfidence: { applied: 0, inconclusive: 1 },
+                },
+                uncertain: {
+                    selected: 1,
+                    outcomes: {
+                        ok: 1, rateLimited: 0, retryExhausted: 0,
+                        rejected: 0, failed: 0, capacitySkipped: 0,
+                    },
+                    highConfidence: { applied: 1, inconclusive: 0 },
+                },
+            },
+        });
+        const serialized = JSON.stringify(report);
+        for (const forbidden of [
+            'sealed1', 'm1-1', 'account:m1-1', 'name-do-not-report',
+            'bio-do-not-report', 'caption-do-not-report', 'https://example.invalid',
+        ]) expect(serialized).not.toContain(forbidden);
+    });
+
     it('isolates concurrent rejected and ambiguous generations and completes the cohort', async () => {
         mocks.batch.mockImplementation(async accounts => accounts.map((account: { accountId: string }) => {
             const ordinal = Number(/m(\d+)-/.exec(account.accountId)?.[1]);
