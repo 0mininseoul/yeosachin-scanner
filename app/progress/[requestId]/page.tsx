@@ -11,7 +11,10 @@ import {
     decideAnalysisStepFailure,
     shouldClientDriveAnalysis,
 } from '@/lib/services/analysis/progress-retry';
-import { analysisV2EventCopy } from '@/lib/services/analysis/owner-view-presentation';
+import {
+    analysisDurationProgressCopy,
+    analysisV2EventCopy,
+} from '@/lib/services/analysis/owner-view-presentation';
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
@@ -345,7 +348,7 @@ export default function ProgressPage({ params }: PageProps) {
                     </div>
                     <div className="mt-2 flex justify-between text-[12px] text-fg-mute">
                         <span className="num font-bold text-blood">{data.progress}%</span>
-                        <span>{data.demo ? '약 60~90초' : '완료 시간 측정 중'}</span>
+                        <span>{analysisDurationProgressCopy(data.demo)}</span>
                     </div>
                 </div>
 

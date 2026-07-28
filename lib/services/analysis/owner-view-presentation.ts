@@ -76,6 +76,10 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
         || '서버에서 판독을 진행하고 있습니다.';
 }
 
+export function analysisDurationProgressCopy(isDemo: boolean): string {
+    return isDemo ? '약 60~90초' : '완료 시간 측정 중';
+}
+
 export const OWNER_RESULT_PAGE_SIZE = 50;
 
 export function boundedOwnerResultPage<T>(items: readonly T[]): T[] {
