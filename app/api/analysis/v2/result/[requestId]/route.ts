@@ -11,6 +11,11 @@ import { analysisV2ResultStore } from '@/lib/services/analysis/v2-result-store';
 import { createClient } from '@/lib/supabase/server';
 import { demoResponseHeaders, demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import {
+    observeRoute,
+    type OperationalRequestContext,
+} from '@/lib/observability/request';
+import { operationalLogger } from '@/lib/observability/server';
 
 const requestIdSchema = z.string().uuid();
 const pageSizeSchema = z.string().regex(/^\d{1,2}$/).transform(Number)
@@ -39,9 +44,10 @@ function parseCursor(value: string | null, list: ResultListKind): string | null 
     return value;
 }
 
-export async function GET(
+async function handleGET(
     request: Request,
-    { params }: { params: Promise<{ requestId: string }> }
+    { params }: { params: Promise<{ requestId: string }> },
+    context: OperationalRequestContext,
 ) {
     const requestId = requestIdSchema.safeParse((await params).requestId);
     if (!requestId.success) {
@@ -103,11 +109,39 @@ export async function GET(
             return json({ error: 'Analysis result not found.' }, 404);
         }
 
-        return json(analysisResultPageV1Schema.parse(result), 200);
+        const response = json(analysisResultPageV1Schema.parse(result), 200);
+        if (
+            !url.searchParams.has('femaleCursor')
+            && !url.searchParams.has('privateCursor')
+        ) {
+            operationalLogger.emit({
+                event: 'analysis_v2.result_viewed',
+                severity: 'info',
+                fields: {
+                    ...context,
+                    user_id: user.id,
+                    analysis_request_id: requestId.data,
+                    operation: 'result',
+                    disposition: 'success',
+                },
+            });
+        }
+        return response;
     } catch {
         console.error('[analysis-v2-result] owner result read failed');
         return demoRecognized
             ? demoJson({ error: 'Result could not be loaded.' }, 500)
             : json({ error: 'Result could not be loaded.' }, 500);
     }
+}
+
+export async function GET(
+    request: Request,
+    routeContext: { params: Promise<{ requestId: string }> },
+) {
+    return observeRoute(
+        request,
+        '/api/analysis/v2/result/[requestId]',
+        context => handleGET(request, routeContext, context),
+    );
 }

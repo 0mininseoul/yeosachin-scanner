@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     loadPage: vi.fn(),
+    operationalEmit: vi.fn(),
+    observeRoute: vi.fn(),
     demoFindForOwner: vi.fn(),
 }));
 
@@ -17,6 +19,12 @@ vi.mock('@/lib/services/analysis/v2-result-store', () => ({
 }));
 vi.mock('@/lib/services/demo-analysis/store', () => ({
     demoAnalysisStore: { findForOwner: mocks.demoFindForOwner },
+}));
+vi.mock('@/lib/observability/request', () => ({
+    observeRoute: mocks.observeRoute,
+}));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.operationalEmit },
 }));
 
 import { GET } from '@/app/api/analysis/v2/result/[requestId]/route';
@@ -87,6 +95,21 @@ describe('analysis V2 owner result route', () => {
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
         mocks.loadPage.mockResolvedValue(page());
         mocks.demoFindForOwner.mockResolvedValue(null);
+        mocks.observeRoute.mockImplementation(async (
+            _request: Request,
+            _route: string,
+            operation: (context: {
+                request_id: string;
+                trace_id: null;
+                route: string;
+                method: string;
+            }) => Promise<Response>,
+        ) => operation({
+            request_id: '323e4567-e89b-42d3-a456-426614174000',
+            trace_id: null,
+            route: '/api/analysis/v2/result/[requestId]',
+            method: 'GET',
+        }));
     });
 
     it('validates route identifiers safely and keeps malformed production pagination generic', async () => {
@@ -250,6 +273,26 @@ describe('analysis V2 owner result route', () => {
         await expect(response.json()).resolves.toMatchObject({
             schemaVersion: 1,
             requestId,
+        });
+    });
+
+    it('records the initial completed-result view with the owner and analysis join keys', async () => {
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.operationalEmit).toHaveBeenCalledWith({
+            event: 'analysis_v2.result_viewed',
+            severity: 'info',
+            fields: expect.objectContaining({
+                request_id: '323e4567-e89b-42d3-a456-426614174000',
+                user_id: userId,
+                analysis_request_id: requestId,
+                operation: 'result',
+                disposition: 'success',
+            }),
         });
     });
 

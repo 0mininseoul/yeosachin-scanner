@@ -39,6 +39,11 @@ import {
     dispatchAnalysisV2Job,
     getAnalysisV2TasksConfig,
 } from '@/lib/services/analysis/v2-tasks';
+import {
+    observeRoute,
+    type OperationalRequestContext,
+} from '@/lib/observability/request';
+import { operationalLogger } from '@/lib/observability/server';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const requestBodySchema = z.object({
@@ -120,12 +125,13 @@ async function dispatchInitialJob(
     requestId: string,
     jobKey: Parameters<AnalysisV2InitialJobDispatcher>[1]
 ) {
-    await dispatcher(requestId, jobKey);
+    return dispatcher(requestId, jobKey);
 }
 
-export async function POST(
+async function handlePOST(
     request: Request,
-    { params }: EntitlementRouteContext
+    { params }: EntitlementRouteContext,
+    context: OperationalRequestContext,
 ) {
     try {
         const supabase = await createClient();
@@ -325,6 +331,19 @@ export async function POST(
                             { status: 503 }
                         );
                     }
+                    operationalLogger.emit({
+                        event: 'analysis_v2.fresh_admission_enqueued',
+                        severity: 'info',
+                        fields: {
+                            ...context,
+                            user_id: user.id,
+                            preflight_id: preflightId,
+                            target_instagram_id: row.target_instagram_id,
+                            plan_id: body.data.planId,
+                            operation: 'fresh_admission',
+                            disposition: 'enqueued',
+                        },
+                    });
                 }
                 return NextResponse.json({
                     schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
@@ -362,9 +381,10 @@ export async function POST(
 
         const terminal = consumed.requestStatus === 'completed'
             || consumed.requestStatus === 'failed';
+        let dispatchOutcome: unknown;
         if (!terminal) {
             try {
-                await dispatchInitialJob(
+                dispatchOutcome = await dispatchInitialJob(
                     dispatchAnalysisV2Job,
                     consumed.requestId,
                     consumed.initialJobKey
@@ -378,6 +398,24 @@ export async function POST(
                     { status: 503 }
                 );
             }
+        }
+
+        if (!terminal) {
+            operationalLogger.emit({
+                event: 'analysis_v2.request_queued',
+                severity: 'info',
+                fields: {
+                    ...context,
+                    user_id: user.id,
+                    preflight_id: preflightId,
+                    analysis_request_id: consumed.requestId,
+                    job_key: consumed.initialJobKey,
+                    target_instagram_id: row.target_instagram_id,
+                    plan_id: body.data.planId,
+                    operation: 'entitlement',
+                    disposition: dispatchOutcome === 'already_dispatched' ? 'exists' : 'enqueued',
+                },
+            });
         }
 
         const responseStatus = consumed.requestStatus === 'pending'
@@ -407,4 +445,15 @@ export async function POST(
             { status: 500 }
         );
     }
+}
+
+export async function POST(
+    request: Request,
+    routeContext: EntitlementRouteContext,
+) {
+    return observeRoute(
+        request,
+        '/api/analysis/preflight/[preflightId]/entitle',
+        context => handlePOST(request, routeContext, context),
+    );
 }

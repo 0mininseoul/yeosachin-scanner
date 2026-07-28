@@ -130,6 +130,48 @@ interface AxiomRuntimeConfig {
     orgId: string;
 }
 
+function vercelRuntimeTransport(): OperationalTransport | undefined {
+    if (process.env.VERCEL !== '1') return undefined;
+
+    return {
+        log(level, message, fields) {
+            if (level === 'error') {
+                console.error(message, fields);
+                return;
+            }
+            if (level === 'warn') {
+                console.warn(message, fields);
+                return;
+            }
+            console.info(message, fields);
+        },
+        async flush() {
+            // Vercel captures console output synchronously; no buffered transport to drain.
+        },
+    };
+}
+
+function combineRuntimeTransports(
+    transports: readonly OperationalTransport[],
+): OperationalTransport | undefined {
+    if (transports.length === 0) return undefined;
+    if (transports.length === 1) return transports[0];
+    return {
+        log(level, message, fields) {
+            for (const transport of transports) {
+                try {
+                    transport.log(level, message, fields);
+                } catch {
+                    // One log sink must not prevent delivery to the others.
+                }
+            }
+        },
+        async flush() {
+            await Promise.allSettled(transports.map(transport => transport.flush()));
+        },
+    };
+}
+
 async function createAxiomRuntimeTransport(
     config: AxiomRuntimeConfig,
 ): Promise<OperationalTransport | undefined> {
@@ -162,30 +204,36 @@ function runtimeTransport(): OperationalTransport | undefined {
     const token = process.env.AXIOM_TOKEN?.trim();
     const dataset = process.env.AXIOM_DATASET?.trim();
     const orgId = process.env.AXIOM_ORG_ID?.trim();
-    if (!token || !dataset || !orgId) return undefined;
+    const transports: OperationalTransport[] = [];
+    const vercel = vercelRuntimeTransport();
+    if (vercel) transports.push(vercel);
 
-    let loadedTransport: Promise<OperationalTransport | undefined> | undefined;
-    const pendingLogs = new Set<Promise<void>>();
-    const load = () => {
-        loadedTransport ??= createAxiomRuntimeTransport({ token, dataset, orgId });
-        return loadedTransport;
-    };
+    if (token && dataset && orgId) {
+        let loadedTransport: Promise<OperationalTransport | undefined> | undefined;
+        const pendingLogs = new Set<Promise<void>>();
+        const load = () => {
+            loadedTransport ??= createAxiomRuntimeTransport({ token, dataset, orgId });
+            return loadedTransport;
+        };
 
-    return {
-        log(level, message, fields) {
-            const pending = load()
-                .then(transport => transport?.log(level, message, fields))
-                .then(() => undefined)
-                .catch(() => undefined);
-            pendingLogs.add(pending);
-            void pending.then(() => pendingLogs.delete(pending));
-        },
-        async flush() {
-            await Promise.allSettled([...pendingLogs]);
-            const transport = await load();
-            await transport?.flush();
-        },
-    };
+        transports.push({
+            log(level, message, fields) {
+                const pending = load()
+                    .then(transport => transport?.log(level, message, fields))
+                    .then(() => undefined)
+                    .catch(() => undefined);
+                pendingLogs.add(pending);
+                void pending.then(() => pendingLogs.delete(pending));
+            },
+            async flush() {
+                await Promise.allSettled([...pendingLogs]);
+                const transport = await load();
+                await transport?.flush();
+            },
+        });
+    }
+
+    return combineRuntimeTransports(transports);
 }
 
 let singletonLogger: OperationalLogger | undefined;

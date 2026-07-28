@@ -42,9 +42,9 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 
 - HTTP·Next: `http.route_completed`, `http.route_failed`, `next.request_error`
 - 인증·사전 검사: `auth.*`, `preflight.*`
-- 결제: `earlybird.checkout_*`, `groble.webhook_*`
+- 결제: `earlybird.checkout_*`, `earlybird.waitlist_*`, `groble.webhook_*`
 - 수집: `scraper.batch_*`, `scraper.fallback_selected`, `scraper.candidate_failed`
-- 작업 큐·분석: `cloud_task.enqueue_*`, `analysis_v2.worker_*`
+- 작업 큐·분석: `cloud_task.enqueue_*`, `analysis_v2.fresh_admission_enqueued`, `analysis_v2.request_queued`, `analysis_v2.worker_*`, `analysis_v2.result_viewed`
 - AI: `gemini.stage_*`
 
 허용 차원은 환경, 이벤트, severity, request/trace ID, 정적 route·method·status·duration, 내부 user/preflight/order/analysis UUID, job key, 대상·후보·제외 인스타그램 아이디, provider·operation·phase·attempt·disposition, 집계 건수, 오류 코드, retry/fallback, 모델·thinking level·토큰 수·추정 비용, plan·금액으로 제한한다. 성공은 배치·단계 단위로 집계하고, 후보 인스타그램 아이디는 실패·재시도·fallback 진단에서만 사용한다.
@@ -56,6 +56,8 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 - 프로필·이미지·미디어 URL 및 페이지 URL
 - OAuth/provider/API 토큰, 쿠키, 세션, 서명, 서비스 계정 자격증명
 - 원문 request/response body, Groble webhook body, 외부 API body
+
+Vercel 런타임에서는 같은 allowlist로 정제된 이벤트를 구조화 console 로그에도 남긴다. 따라서 Vercel은 즉시 장애 확인·특정 `request_id` 검색에, Axiom은 30일 범위의 상태 전환·집계·상관관계 조회에 사용한다. 두 곳 모두 원문 예외, 요청 본문, 토큰, 연락처를 기록하지 않는다.
 
 ## 4. Preview 대표 검증
 
@@ -98,10 +100,44 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `env
 - Cloud Tasks / V2 worker: enqueue 결과, retry·failure·timeout, job key·phase별 상태
 - Groble: `accepted`, `duplicate_event`, `duplicate_payment`, `unmatched`, `ambiguous_buyer`, `mismatch`, `overflow_refund_required`, `cancel_requested`, `cancel_duplicate_event`, `cancel_unmatched`, `cancel_mismatch`, `cancel_before_payment`, `late_cancelled_payment` disposition과 webhook route 5xx
 - Analysis: 완료·실패 수, 총 지연, phase별 p50·p90 단계 지연
+- User lifecycle: `preflight.requested` → `preflight.completed` → `preflight.exclusion_decided` → `earlybird.checkout_created` 또는 `earlybird.waitlist_created` → `groble.webhook_finalized` → `analysis_v2.fresh_admission_enqueued` → `analysis_v2.request_queued` → `analysis_v2.worker_*` → `analysis_v2.result_viewed` 수와 이탈 지점
 
 성공 로그 수를 계정·이미지 수로 해석하지 않는다. 대시보드의 결제 금액은 운영 신호이며 매출 장부는 Supabase를 기준으로 한다.
 
-## 6. 출시 모니터
+## 6. 사용자 여정 조사
+
+한 사용자의 여정은 브라우저 클릭 전체를 복제하는 방식이 아니라, 서버가 실제로 수락·완료한 상태 전환으로 재구성한다. 아래 키를 순서대로 연결한다.
+
+1. `preflight_id`: 사전 점검 요청, 완료/차단, 제외 결정, 결제·대기 신청의 기본 키
+2. `order_id`: checkout 생성과 Groble webhook 최종화의 연결 키
+3. `analysis_request_id`: 분석 접수, 워커 실행, 결과 최초 열람의 기본 키
+4. `job_key`: 한 분석 요청 안의 큐·워커 단계 키
+5. `request_id`: 하나의 HTTP 요청과 Vercel 런타임 로그를 연결하는 단기 진단 키
+
+`preflight_id`와 `analysis_request_id`는 `analysis_v2.request_queued`에 함께 기록된다. 결제 webhook은 `order_id`로 checkout 생성 이벤트와 연결한다. 따라서 결제 webhook만으로 user 또는 preflight를 역조회하려 하지 않는다.
+
+사전 점검부터 결과 최초 열람까지의 전환을 확인하는 기본 조회 예시는 다음과 같다. 실제 UUID 값은 운영 티켓·로그 출력에 복사하지 않고 Axiom UI의 안전한 필터 입력으로만 사용한다.
+
+```apl
+['yeosachin-logs']
+| where environment == "production"
+| where event in (
+    "preflight.requested", "preflight.completed", "preflight.exclusion_decided",
+    "earlybird.checkout_created", "earlybird.waitlist_created",
+    "groble.webhook_finalized", "analysis_v2.fresh_admission_enqueued",
+    "analysis_v2.request_queued", "analysis_v2.worker_completed",
+    "analysis_v2.worker_retry", "analysis_v2.worker_failed", "analysis_v2.result_viewed"
+)
+| project _time, event, severity, disposition, error_code, request_id,
+    preflight_id, order_id, analysis_request_id, job_key, plan_id, status, duration_ms
+| order by _time asc
+```
+
+결과 페이지의 다음 페이지·새로고침과 진행 화면의 폴링은 lifecycle 이벤트로 기록하지 않는다. `analysis_v2.result_viewed`는 커서 없는 최초 결과 응답만 기록한다. 이는 실제 결과 도달을 확인하면서 폴링량이 여정을 왜곡하지 않도록 하기 위함이다.
+
+Vercel에서 같은 시점의 상세 요청을 볼 때는 Axiom 이벤트의 `request_id`와 route를 사용한다. Axiom은 상태 전환의 권위 있는 보관소이고, Vercel은 짧은 실시간 조사 창이다. 어느 쪽도 Amplitude의 브라우저 UX 퍼널을 대체하지 않는다.
+
+## 7. 출시 모니터
 
 Personal 요금제의 3개 모니터 제한 안에서 다음 세 개의 결합 모니터만 먼저 만든다. 모든 쿼리는 `environment == "production"`을 강제하고 테스트·Preview 이벤트를 제외한다.
 
@@ -113,15 +149,15 @@ Personal 요금제의 3개 모니터 제한 안에서 다음 세 개의 결합 �
 
 결제 5xx와 구매자 불일치, 분석 실패와 worker timeout 등을 별도 모니터로 나누는 것은 요금제 용량을 늘린 뒤에만 수행한다.
 
-## 7. 장애 대응
+## 8. 장애 대응
 
 - 결제: `request_id`·`order_id`로 route 실패와 `groble.webhook_*` disposition을 연결한다. 구매자 연락처나 raw webhook을 Axiom에서 찾지 않는다.
-- 분석: `analysis_request_id`·`job_key`·phase로 enqueue, worker retry, terminal 결과를 연결한다.
+- 분석: `preflight_id` → `analysis_request_id` → `job_key` 순으로 `analysis_v2.request_queued`, worker, `analysis_v2.result_viewed`를 연결한다.
 - Provider: provider·operation·error code·fallback을 확인하고 quota/auth 문제인지 일시 장애인지 구분한다.
 - Gemini: operation·model·attempt·rate limit·토큰·비용 집계를 확인한다. 프롬프트나 모델 응답은 Axiom에서 찾지 않는다.
 - 영향 범위와 시작 시각을 기록한 뒤 admission 또는 worker gate 등 기존 운영 스위치로 신규 작업을 제한한다. 데이터 수정·재실행은 해당 runbook의 멱등성과 fence 조건을 확인한 뒤 수행한다.
 
-## 8. 토큰 회전
+## 9. 토큰 회전
 
 토큰 회전은 기존 토큰을 먼저 폐기하지 않는 순서로 진행한다.
 
