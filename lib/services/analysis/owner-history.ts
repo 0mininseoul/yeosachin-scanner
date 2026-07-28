@@ -12,6 +12,7 @@ const ownerAnalysisHistoryItemV1Schema = z.object({
     createdAt: z.string().datetime({ offset: true }).nullable(),
     planType: z.string().min(1).max(20).regex(/^[a-z0-9_-]+$/).nullable(),
     pipelineVersion: z.enum(['v1', 'v2']),
+    publicFemaleCount: z.number().int().nonnegative().nullable().optional(),
 }).strict().superRefine((item, context) => {
     if (
         item.pipelineVersion === 'v2'
