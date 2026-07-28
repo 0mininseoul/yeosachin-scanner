@@ -3,7 +3,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const migration = readFileSync(new URL(
-    '../../supabase/migrations/20260728130000_add_sentry_discord_alert_outbox.sql', import.meta.url,
+    '../../supabase/migrations/20260728140000_add_sentry_discord_alert_outbox.sql', import.meta.url,
 ), 'utf8');
 let db: PGlite;
 const DEDUPE_KEY = 'a'.repeat(64);
