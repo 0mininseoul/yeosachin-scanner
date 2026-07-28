@@ -66,12 +66,28 @@ const SUSPECTS: Suspect[] = [
 
 const CHAR_INTERVAL_MS = 26;
 
+// Held at the start of every row so its meter can fill before the verdict types.
+// The reading is taken first, then it is explained — typing first and filling the
+// meter partway through read as two unrelated things happening at once.
+const METER_LEAD_MS = 1100;
+
+function rowStartOffsets(): number[] {
+  const offsets: number[] = [];
+  let consumed = 0;
+  for (const suspect of SUSPECTS) {
+    offsets.push(consumed);
+    consumed += suspect.verdict.reduce((sum, line) => sum + line.length, 0);
+  }
+  return offsets;
+}
+
 // Advances a single "revealed characters" budget once the card scrolls into view,
 // then maps it onto per-row visible substrings. Honors reduced-motion by showing
 // the finished state immediately.
 function useSequentialVerdicts(active: boolean): {
   reveals: VerdictRowReveal[];
   caret: { row: number; line: number } | null;
+  started: boolean[];
 } {
   const reduce = useReducedMotion();
   const total = totalVerdictChars(SUSPECTS.map((s) => ({ lines: s.verdict })));
@@ -81,14 +97,27 @@ function useSequentialVerdicts(active: boolean): {
     // reduced-motion shows the finished text directly in render (below), so the
     // effect only drives the animated case.
     if (!active || reduce) return;
+    const starts = rowStartOffsets();
     let count = 0;
-    const id = window.setInterval(() => {
-      count += 1;
-      setRevealed(count);
-      if (count >= total) window.clearInterval(id);
-    }, CHAR_INTERVAL_MS);
-    return () => window.clearInterval(id);
+    let timer = 0;
+
+    // A self-scheduling timeout rather than a fixed interval, so each row can
+    // pause at its own boundary while the meter fills.
+    const step = () => {
+      const wait = starts.includes(count) ? METER_LEAD_MS : CHAR_INTERVAL_MS;
+      timer = window.setTimeout(() => {
+        count += 1;
+        setRevealed(count);
+        if (count < total) step();
+      }, wait);
+    };
+    step();
+
+    return () => window.clearTimeout(timer);
   }, [active, reduce, total]);
+
+  const starts = rowStartOffsets();
+  const started = starts.map((offset) => active && (reduce || revealed >= offset));
 
   const reveals = revealVerdicts(
     SUSPECTS.map((s) => ({ lines: s.verdict })),
@@ -107,7 +136,7 @@ function useSequentialVerdicts(active: boolean): {
     }
   }
 
-  return { reveals, caret };
+  return { reveals, caret, started };
 }
 
 const listV: Variants = {
@@ -123,7 +152,7 @@ export function LandingSignatureCard() {
   const reduce = useReducedMotion();
   const ref = useRef<HTMLDivElement>(null);
   const [inView, setInView] = useState(false);
-  const { reveals, caret } = useSequentialVerdicts(inView);
+  const { reveals, caret, started } = useSequentialVerdicts(inView);
 
   useEffect(() => {
     const el = ref.current;
@@ -139,7 +168,11 @@ export function LandingSignatureCard() {
           io.disconnect();
         }
       },
-      { threshold: 0.35 },
+      // The negative bottom margin keeps the observation band in the upper part
+      // of the viewport. Without it the card counts as "seen" at page load on a
+      // tall screen — it already sits ~54% inside the fold — so the whole
+      // sequence played out while the reader was still on the hero.
+      { threshold: 0.35, rootMargin: '0px 0px -35% 0px' },
     );
     io.observe(el);
     return () => io.disconnect();
@@ -202,7 +235,17 @@ export function LandingSignatureCard() {
 
                 {/* threat meter + score */}
                 <div className="mt-3 flex items-center gap-3">
-                  <ThreatBar grade={s.grade} score={s.score} className="flex-1" />
+                  {/* Cued off this row's verdict finishing rather than the card
+                      merely entering view: the card is tall enough that a
+                      viewport-triggered fill was over before the reader reached
+                      the meter. Now each meter fills right after its own text
+                      lands, which is also the truer narrative. */}
+                  <ThreatBar
+                    grade={s.grade}
+                    score={s.score}
+                    className="flex-1"
+                    fill={reduce ? 'static' : started[i] ? 'run' : 'pending'}
+                  />
                   <span className="num shrink-0 text-[12px] font-bold text-fg">{s.score}/10</span>
                 </div>
 

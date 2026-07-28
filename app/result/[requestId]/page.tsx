@@ -534,10 +534,14 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
-    // V2 results have no public URL: /result is auth-gated and /api/share/enable
-    // rejects v2, so there is no share token to hand out. The button therefore
-    // shares the service itself with a teaser rather than a link that would land
-    // a recipient on a login screen.
+    // Shares the service with a teaser rather than this result. /result is
+    // auth-gated, so a recipient would land on a login screen.
+    //
+    // TODO: /api/share/enable now issues v2 share tokens and there is an
+    // opengraph-image route for them, so this can point at /share/{token}
+    // instead. That needs the enable call, its failure path, and the redaction
+    // decision on what a tokenless visitor may see, so it is left to its own
+    // change rather than folded into the motion work.
     const handleKakaoShare = async () => {
         if (kakaoShareLoading) return;
         setKakaoShareLoading(true);
@@ -820,10 +824,12 @@ export default function ResultPage({ params }: PageProps) {
                     {([
                         {
                             key: 'public',
-                            label: '공개 계정',
-                            count: summary.v2
-                                ? summary.v2.publicMutuals.toLocaleString()
-                                : String(femaleAccounts.length),
+                            // The list below holds female-classified accounts only, so the
+                            // tab must not count every public mutual — that overstated it
+                            // by roughly 3x. This number now matches the female slice of
+                            // the distribution bar above.
+                            label: '공개 계정(여성)',
+                            count: (gr ? gr.female.count : femaleAccounts.length).toLocaleString(),
                         },
                         {
                             key: 'private',

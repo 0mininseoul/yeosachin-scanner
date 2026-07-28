@@ -30,8 +30,9 @@ export default function AnalysisList({ initialAnalyses }: Props) {
     };
 
     if (visibleAnalyses.length === 0) {
+        // Tier 0: an empty state is not a surface to operate, so it needs no box.
         return (
-            <div className="border border-line bg-ink-2 px-6 py-16 text-center">
+            <div className="border-t border-line px-2 py-14 text-center">
                 <p className="mb-6 text-[13px] text-fg-mute">아직 판독 기록이 없습니다.</p>
                 <div className="mx-auto max-w-[220px]">
                     <PrimaryButton onClick={() => router.push('/analyze')}>판독 시작하기</PrimaryButton>
@@ -40,49 +41,58 @@ export default function AnalysisList({ initialAnalyses }: Props) {
         );
     }
 
+    /* Rows, not cards. Status rides the left rail so the archive can be scanned
+       by colour alone, and the row keeps exactly one bordered element — none —
+       because the whole row is the target. */
     return (
-        <div className="space-y-2.5">
+        <div className="border-t border-line">
             {visibleAnalyses.map((item) => {
                 const planBadge = analysisPlanBadgePresentation(item.planType);
+                const done = item.status === 'completed';
                 return (
-                    <div
+                    <button
                         key={item.id}
+                        type="button"
                         data-amp-block
                         onClick={() => handleCardClick(item)}
-                        className="group relative cursor-pointer border border-line bg-ink-2 p-4 transition-colors hover:border-blood/50 active:scale-[0.99]"
+                        className="group flex w-full gap-3.5 border-b border-line py-3.5 pr-1 text-left transition-colors hover:bg-panel/60"
                     >
-                        <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                    <h3 className="truncate text-[15px] font-bold text-fg">
-                                        {ownerHistoryTargetLabel(item)}
-                                    </h3>
+                        <span
+                            aria-hidden="true"
+                            className={`w-0.5 shrink-0 self-stretch ${done ? 'bg-jade' : 'bg-amber'}`}
+                        />
+                        <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-2">
+                                <span className="truncate text-[15px] font-bold text-fg">
+                                    {ownerHistoryTargetLabel(item)}
+                                </span>
+                                <span
+                                    className={`num shrink-0 text-[10px] font-bold tracking-[0.12em] ${planBadge.className}`}
+                                >
+                                    {planBadge.label}
+                                </span>
+                                <span
+                                    className={`ml-auto inline-flex shrink-0 items-center gap-1.5 text-[10.5px] font-extrabold tracking-[0.14em] ${
+                                        done ? 'text-jade' : 'text-amber'
+                                    }`}
+                                >
                                     <span
-                                        className={`shrink-0 border px-1.5 py-0.5 text-[10px] font-bold tracking-[0.1em] ${planBadge.className}`}
-                                    >
-                                        {planBadge.label}
-                                    </span>
-                                </div>
-                                <div className="num mt-1.5 text-[12px] text-fg-mute">
-                                    {item.createdAt
-                                        ? formatKstDateTime(item.createdAt)
-                                        : '날짜 미상'}
-                                </div>
-                            </div>
-
-                            {item.status === 'completed' ? (
-                                <span className="flex shrink-0 items-center gap-1.5 border border-jade/45 bg-jade/10 px-2 py-1 text-[11px] font-bold text-jade">
-                                    <span className="h-1.5 w-1.5 bg-jade" />
-                                    판독완료
+                                        aria-hidden="true"
+                                        className={`h-[5px] w-[5px] rotate-45 ${
+                                            done ? 'bg-jade' : 'anim-blink bg-amber'
+                                        }`}
+                                    />
+                                    {done ? '완료' : item.status === 'processing' ? '판독중' : '대기중'}
                                 </span>
-                            ) : (
-                                <span className="flex shrink-0 items-center gap-1.5 border border-amber/45 bg-amber/10 px-2 py-1 text-[11px] font-bold text-amber">
-                                    <span className="anim-blink h-1.5 w-1.5 bg-amber" />
-                                    {item.status === 'processing' ? '판독중' : '대기중'}
-                                </span>
-                            )}
-                        </div>
-                    </div>
+                            </span>
+                            <span className="num mt-1 block text-[11.5px] text-fg-dim">
+                                {item.createdAt ? formatKstDateTime(item.createdAt) : '날짜 미상'}
+                                {done && typeof item.publicFemaleCount === 'number' && (
+                                    <> · 맞팔 여성 (공개 계정) {item.publicFemaleCount.toLocaleString()}명</>
+                                )}
+                            </span>
+                        </span>
+                    </button>
                 );
             })}
         </div>

@@ -35,6 +35,7 @@ import {
   PrimaryButton,
 } from '@/components/case-ui';
 import { LandingSignatureCard } from '@/components/landing-signature-card';
+import { LandingOverture, useOverture } from '@/components/landing-overture';
 import { LandingReviews } from '@/components/landing-reviews';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 
@@ -134,9 +135,16 @@ export default function LandingPage() {
   };
 
   const EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
+  const overturePlaying = useOverture();
 
   return (
-    <div className="min-h-dvh">
+    /* The overture is a sibling of the animated root, never a child: the page-in
+       animation applies a transform, and a transformed ancestor becomes the
+       containing block for position: fixed, which pinned the overture to the
+       full document height and centred its text ~1500px below the fold. */
+    <>
+    {overturePlaying && <LandingOverture />}
+    <div className={`min-h-dvh ${overturePlaying ? 'overture-page-in' : ''}`}>
       <TopBar
         right={
           user ? (
@@ -189,7 +197,11 @@ export default function LandingPage() {
           </motion.div>
 
           {/* input + submit — 서브카피 바로 아래(액션 우선). 도감 카드는 그 아래에서 결과 미리보기 */}
-          <div className="mt-7 space-y-2.5">
+          {/* The helper is a footnote of the field, not a step between the field
+              and the CTA — it answers a question the visitor has while filling the
+              input. Uniform space-y plus the link's 40px tap target made all three
+              read as equal rows, so the spacing is set per element instead. */}
+          <div className="mt-7">
             <div className="relative" data-amp-mask>
               <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
               <input
@@ -211,7 +223,8 @@ export default function LandingPage() {
               />
             </div>
             <InstagramLookupLink />
-            {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
+            {heroError && <p className="mt-1 px-1 text-[12px] text-blood">{heroError}</p>}
+            <div className="mt-3">
             <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
               {starting ? (
                 <>
@@ -227,7 +240,8 @@ export default function LandingPage() {
                 </>
               )}
             </PrimaryButton>
-            <p className="text-center text-[12px] text-fg-mute">
+            </div>
+            <p className="mt-2.5 text-center text-[12px] text-fg-mute">
               판독 결과는 상대방에게 절대 통보되지 않습니다.
             </p>
           </div>
@@ -372,5 +386,6 @@ export default function LandingPage() {
         redirectTo="/analyze?autostart=1"
       />
     </div>
+    </>
   );
 }

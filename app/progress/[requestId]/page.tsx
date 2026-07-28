@@ -521,7 +521,7 @@ export default function ProgressPage({ params }: PageProps) {
                         <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-fg">
                             <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-fg-dim" />
                             <span>
-                                다른 앱으로 이동하거나 화면을 잠가도 판독은 계속됩니다.
+                                이 화면을 나가셔도 판독은 계속됩니다.
                                 <br />
                                 <span className="text-fg-dim">언제든 돌아와 진행 상태를 확인할 수 있습니다.</span>
                             </span>
