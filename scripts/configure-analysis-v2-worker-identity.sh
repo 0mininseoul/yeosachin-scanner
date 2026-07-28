@@ -238,11 +238,13 @@ build_service_account_is_enabled() {
     <<<"$config" >/dev/null
 }
 
+build_identity_available="false"
 ensure_build_service_account() {
   local config
   if config="$(build_service_account_json)"; then
     build_service_account_is_enabled "$config" \
       || die "worker build service account is disabled or invalid"
+    build_identity_available="true"
     log "verified: keyless dedicated worker build service account exists and is enabled"
     return 0
   fi
@@ -260,13 +262,14 @@ ensure_build_service_account() {
       || die "worker build service account creation was not observable"
     build_service_account_is_enabled "$config" \
       || die "new worker build service account is disabled or invalid"
+    build_identity_available="true"
   else
     log "[dry-run] the new build identity will be created without credential keys"
   fi
 }
 
 verify_no_build_user_managed_keys() {
-  if ! build_service_account_json >/dev/null; then
+  if [[ "$build_identity_available" != "true" ]]; then
     [[ "$mode" == "dry-run" ]] \
       || die "worker build service account is unavailable for key verification"
     return 0
