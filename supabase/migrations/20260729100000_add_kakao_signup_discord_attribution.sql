@@ -3,7 +3,7 @@ ALTER TABLE public.kakao_signup_discord_outbox
     ADD COLUMN attribution_label text CHECK (attribution_label IN ('직접 방문', 'UTM: 카카오', 'UTM: 구글', 'UTM: 인스타그램', 'UTM: 기타', '외부 참조: 카카오', '외부 참조: 구글', '외부 참조: 인스타그램', '외부 참조: 기타') OR attribution_label IS NULL);
 
 DROP FUNCTION public.set_kakao_signup_discord_outbox_profile(uuid, text, char, text, timestamptz);
-CREATE FUNCTION public.set_kakao_signup_discord_outbox_profile(p_user_id uuid, p_masked_name text, p_birthyear char, p_gender text, p_signed_up_at timestamptz, p_attribution_label text)
+CREATE FUNCTION public.set_kakao_signup_discord_outbox_profile(p_user_id uuid, p_masked_name text, p_birthyear char, p_gender text, p_signed_up_at timestamptz, p_attribution_label text DEFAULT NULL)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 BEGIN
     UPDATE public.kakao_signup_discord_outbox
