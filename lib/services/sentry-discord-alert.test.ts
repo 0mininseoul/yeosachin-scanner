@@ -106,6 +106,7 @@ describe('Sentry Service Hook Discord bridge', () => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
             .mockResolvedValueOnce({ data: [], error: null })
+            .mockResolvedValueOnce({ data: true, error: null })
             .mockResolvedValueOnce({ error: null });
         const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
         await Promise.all([deliverSentryDiscordAlerts({ fetcher }), deliverSentryDiscordAlerts({ fetcher })]);
@@ -121,6 +122,7 @@ describe('Sentry Service Hook Discord bridge', () => {
     it('claims a specific freshly-enqueued fingerprint for immediate dispatch instead of queue head', async () => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ data: true, error: null })
             .mockResolvedValueOnce({ error: null });
         await deliverSentryDiscordAlerts({ dedupeKey: 'f'.repeat(64), fetcher: vi.fn().mockResolvedValue(new Response(null, { status: 204 })) });
         expect(mocks.rpc).toHaveBeenCalledWith('claim_sentry_discord_alert_outbox', {
@@ -136,6 +138,7 @@ describe('Sentry Service Hook Discord bridge', () => {
     ])('records and retries a transient Discord %s without throwing to the hook caller', async (_kind, response, code) => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ data: true, error: null })
             .mockResolvedValueOnce({ error: null });
         const fetcher = vi.fn().mockImplementation(response);
         await expect(deliverSentryDiscordAlerts({ fetcher })).resolves.toBe(1);
@@ -151,6 +154,7 @@ describe('Sentry Service Hook Discord bridge', () => {
     ])('performs one bounded immediate %s retry before preserving later durable retry state', async (_kind, firstAttempt) => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ data: true, error: null })
             .mockResolvedValueOnce({ error: null });
         const fetcher = vi.fn()
             .mockImplementationOnce(firstAttempt)
@@ -165,6 +169,7 @@ describe('Sentry Service Hook Discord bridge', () => {
     it('keeps raw payloads, Discord credentials, and response details out of logs', async () => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ data: true, error: null })
             .mockResolvedValueOnce({ error: null });
         const privatePayload = productionAlert();
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -174,6 +179,15 @@ describe('Sentry Service Hook Discord bridge', () => {
         expect(logged).not.toContain('person@example.test');
         expect(logged).not.toContain('private exception message');
         expect(logged).not.toContain('https://discord.com');
+    });
+
+    it('does not POST when the durable pre-send fence cannot be recorded', async () => {
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ data: false, error: null });
+        const fetcher = vi.fn();
+        await expect(deliverSentryDiscordAlerts({ fetcher })).resolves.toBe(1);
+        expect(fetcher).not.toHaveBeenCalled();
     });
 
     it('reconciles a stale sending lease through the durable RPC without sending', async () => {

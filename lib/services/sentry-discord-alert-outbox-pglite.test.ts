@@ -67,6 +67,36 @@ describe('Sentry Discord durable outbox', () => {
         expect(claimedAgain.rows).toHaveLength(1);
     });
 
+    it('terminalizes a stale claim once the durable pre-send fence was recorded', async () => {
+        const claimed = await db.query<{ id: string; claim_token: string }>(
+            'SELECT id, claim_token FROM public.sentry_discord_alert_outbox WHERE dedupe_key = $1', [DEDUPE_KEY],
+        );
+        await db.exec('SET ROLE service_role');
+        const marked = await db.query<{ mark_sentry_discord_alert_delivery_started: boolean }>(
+            'SELECT public.mark_sentry_discord_alert_delivery_started($1, $2)',
+            [claimed.rows[0]?.id, claimed.rows[0]?.claim_token],
+        );
+        await db.exec('RESET ROLE');
+        await db.exec(`
+            UPDATE public.sentry_discord_alert_outbox
+            SET claimed_at = clock_timestamp() - interval '10 minutes'
+            WHERE dedupe_key = '${DEDUPE_KEY}';
+            SET ROLE service_role;
+        `);
+        const recovered = await db.query<{ reconcile_stale_sentry_discord_alert_claims: number }>(
+            'SELECT public.reconcile_stale_sentry_discord_alert_claims(60)',
+        );
+        await db.exec('RESET ROLE');
+        const state = await db.query<{ status: string; failure_code: string }>(
+            'SELECT status, failure_code FROM public.sentry_discord_alert_outbox WHERE dedupe_key = $1', [DEDUPE_KEY],
+        );
+        expect(marked.rows[0]?.mark_sentry_discord_alert_delivery_started).toBe(true);
+        expect(recovered.rows[0]?.reconcile_stale_sentry_discord_alert_claims).toBe(1);
+        expect(state.rows[0]).toEqual({
+            status: 'ambiguous_failed', failure_code: 'DISCORD_CLAIM_LEASE_EXPIRED_AMBIGUOUS',
+        });
+    });
+
     it('can claim the just-enqueued fingerprint even when an older row is pending', async () => {
         const older = 'b'.repeat(64);
         const fresh = 'c'.repeat(64);

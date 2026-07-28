@@ -245,6 +245,24 @@ async function finish(item: ClaimedOutboxItem, outcome: FinishOutcome, failureCo
     }
 }
 
+/** Never send unless the at-most-once fence is durable. */
+async function markDeliveryStarted(item: ClaimedOutboxItem): Promise<boolean> {
+    try {
+        const { data, error } = await supabaseAdmin.rpc('mark_sentry_discord_alert_delivery_started', {
+            p_outbox_id: item.id,
+            p_claim_token: item.claim_token,
+        });
+        if (error || data !== true) {
+            operationalFailure('OUTBOX_DELIVERY_START_MARK_FAILED');
+            return false;
+        }
+        return true;
+    } catch {
+        operationalFailure('OUTBOX_DELIVERY_START_MARK_FAILED');
+        return false;
+    }
+}
+
 function boundedWait(milliseconds: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
@@ -255,6 +273,7 @@ async function sendClaimedItem(
     fetcher: typeof fetch,
     immediateRetry: boolean,
 ): Promise<void> {
+    if (!await markDeliveryStarted(item)) return;
     let oneImmediateRetryRemaining = immediateRetry;
     while (true) {
         const controller = new AbortController();
