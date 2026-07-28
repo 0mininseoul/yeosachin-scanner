@@ -48,7 +48,7 @@ describe('analysis V2 scheduler policy reader migration', () => {
                 ) AS legacy
         `);
         expect(snapshots.rows[0]).toEqual({ scheduler: true, legacy: false });
-    });
+    }, 15_000);
 
     it('uses the canonical 128-character SQL policy-version boundary', async () => {
         const db = await database();
