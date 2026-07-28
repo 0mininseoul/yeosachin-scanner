@@ -14,6 +14,9 @@ fail() {
   exit 1
 }
 
+bash -n "$script_dir/configure-analysis-v2-worker-identity.sh" \
+  || fail "worker identity script has invalid Bash syntax"
+
 assert_contains() {
   local file="$1"
   local expected="$2"
@@ -174,6 +177,12 @@ state="${FAKE_GCLOUD_STATE:-missing}"
 if [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" \
   && -f "$FAKE_GCLOUD_STATE_FILE" ]]; then
   state="$(<"$FAKE_GCLOUD_STATE_FILE")"
+fi
+
+build_describe_count=0
+if [[ -n "${FAKE_GCLOUD_BUILD_DESCRIBE_COUNT_FILE:-}" ]]; then
+  [[ -f "$FAKE_GCLOUD_BUILD_DESCRIBE_COUNT_FILE" ]] \
+    && build_describe_count="$(<"$FAKE_GCLOUD_BUILD_DESCRIBE_COUNT_FILE")"
 fi
 
 increment_service_generation() {
@@ -359,6 +368,15 @@ case "$command_line" in
     for argument in "$@"; do
       [[ "$argument" == *@*.iam.gserviceaccount.com ]] && email="$argument"
     done
+    if [[ "$email" == "analysis-build@test-project.iam.gserviceaccount.com" \
+      && -n "${FAKE_GCLOUD_BUILD_DESCRIBE_COUNT_FILE:-}" ]]; then
+      build_describe_count="$((10#$build_describe_count + 1))"
+      printf '%s\n' "$build_describe_count" >"$FAKE_GCLOUD_BUILD_DESCRIBE_COUNT_FILE"
+      if [[ -n "${FAKE_GCLOUD_BUILD_DESCRIBE_FAIL_AFTER:-}" \
+        && "$build_describe_count" -gt "$FAKE_GCLOUD_BUILD_DESCRIBE_FAIL_AFTER" ]]; then
+        exit 1
+      fi
+    fi
     if [[ "$email" == "analysis-recovery@test-project.iam.gserviceaccount.com" \
       && "$identity_ready" != "true" ]]; then
       exit 1
@@ -1791,6 +1809,20 @@ assert_contains "$temp_dir/identity-check.out" \
 assert_contains "$temp_dir/identity-check.out" \
   "Analysis V2 keyless worker identity configuration verified"
 
+printf '0\n' >"$temp_dir/build-describe-count"
+env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=identity_ready' \
+  "FAKE_GCLOUD_BUILD_DESCRIBE_COUNT_FILE=$temp_dir/build-describe-count" \
+  'FAKE_GCLOUD_BUILD_DESCRIBE_FAIL_AFTER=1' \
+  bash "$script_dir/configure-analysis-v2-worker-identity.sh" --check \
+  >"$temp_dir/identity-build-key-check-continues.out"
+assert_contains "$temp_dir/identity-build-key-check-continues.out" \
+  "worker build service account has no user-managed credential keys"
+assert_contains "$temp_dir/identity-build-key-check-continues.out" \
+  "worker build identity has no project role beyond roles/run.builder"
+assert_contains "$temp_dir/identity-build-key-check-continues.out" \
+  "Analysis V2 keyless worker identity configuration verified"
+
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=identity_ready' \
   bash "$script_dir/configure-analysis-v2-worker-identity.sh" \
   >"$temp_dir/identity-apply-ready.out"
@@ -1967,6 +1999,20 @@ assert_not_contains "$temp_dir/worker.out" "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PR
 assert_contains "$temp_dir/worker.out" \
   "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
 assert_contains "$temp_dir/worker.out" \
+  "deploy-lock bucket metadata and IAM are audited separately by an admin"
+
+printf '0\n' >"$temp_dir/deploy-build-describe-count"
+env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "FAKE_GCLOUD_BUILD_DESCRIBE_COUNT_FILE=$temp_dir/deploy-build-describe-count" \
+  'FAKE_GCLOUD_BUILD_DESCRIBE_FAIL_AFTER=2' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-build-key-check-continues.out"
+assert_contains "$temp_dir/worker-build-key-check-continues.out" \
+  "worker build service account has no user-managed credential keys"
+assert_contains "$temp_dir/worker-build-key-check-continues.out" \
   "deploy-lock bucket metadata and IAM are audited separately by an admin"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
