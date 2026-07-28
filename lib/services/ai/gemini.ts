@@ -140,7 +140,12 @@ async function runWithGenerationSlot<T>(
     task: () => Promise<T>,
     abortSignal?: AbortSignal,
     admissionDeadlineAtMs?: number,
+    externallyAdmitted: boolean = false,
 ): Promise<T> {
+    if (externallyAdmitted) {
+        return task();
+    }
+
     if (!stage) {
         return generationLimiterState.shared.run(task);
     }
@@ -337,7 +342,7 @@ export interface AnalyzeWithGeminiOptions<T> {
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: T
     ) => void | Promise<void>;
-    /** Fence the SDK request itself, once for every provider attempt/retry. */
+    /** Own admission and fence one SDK attempt, once for every provider attempt/retry. */
     runProviderAttempt?: <R>(task: () => Promise<R>) => Promise<R>;
     /** Absolute v2.11 resolver admission budget; retries must not reset it. */
     admissionDeadlineAtMs?: number;
@@ -930,7 +935,7 @@ export async function analyzeWithGemini<T>(
                         }
                         : {}),
                 };
-                response = await runWithGenerationSlot(
+                const dispatchGeneration = () => runWithGenerationSlot(
                     stage ?? null,
                     resolvedPolicyVersion,
                     async () => {
@@ -983,18 +988,19 @@ export async function analyzeWithGemini<T>(
                         )) {
                             throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
                         }
-                        const generate = () => client.models.generateContent({
+                        return client.models.generateContent({
                             model: modelName,
                             contents: [{ role: 'user', parts }],
                             config,
                         });
-                        return runProviderAttempt
-                            ? runProviderAttempt(generate)
-                            : generate();
                     },
                     abortSignal,
                     resolverAdmissionDeadlineAtMs,
+                    Boolean(runProviderAttempt),
                 );
+                response = runProviderAttempt
+                    ? await runProviderAttempt(dispatchGeneration)
+                    : await dispatchGeneration();
             } catch (generationError) {
                 if (
                     generationError instanceof Error

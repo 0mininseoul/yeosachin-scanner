@@ -48,6 +48,7 @@ import {
 } from './analysis-response-schemas';
 import { deepRiskNarrativeResponseSchema } from './deep-risk-analysis';
 import { createPrivateNameBatchResponseSchema } from './private-name-analysis';
+import { issueReplayStatelessCapability } from './replay-stateless-capability';
 
 const responseSchema = z.object({ value: z.string() }).strict();
 const stageRequestId = '11111111-1111-4111-8111-111111111111';
@@ -904,6 +905,30 @@ describe('analyzeWithGemini process concurrency', () => {
         };
     }
 
+    function replayProviderFence(limit: number) {
+        let active = 0;
+        const waiters: Array<() => void> = [];
+        return async function run<T>(task: () => Promise<T>): Promise<T> {
+            const execute = async () => {
+                try {
+                    return await task();
+                } finally {
+                    active--;
+                    waiters.shift()?.();
+                }
+            };
+            if (active < limit && waiters.length === 0) {
+                active++;
+                return execute();
+            }
+            await new Promise<void>(resolve => waiters.push(() => {
+                active++;
+                resolve();
+            }));
+            return execute();
+        };
+    }
+
     it('caps all process-shared generations at eight', async () => {
         const deferred = deferredGenerations();
         const calls = Array.from({ length: 12 }, () => analyzeWithGemini('prompt', undefined, {
@@ -994,6 +1019,129 @@ describe('analyzeWithGemini process concurrency', () => {
             expect(deferred.maximumActive()).toBe(concurrency);
         },
     );
+
+    it('queues injected v2.11 provider attempts before local stage admission', async () => {
+        const deferred = deferredGenerations();
+        const runShared = replayProviderFence(8);
+        const runTriage = replayProviderFence(6);
+        const replayCapability = issueReplayStatelessCapability();
+        const runProviderAttempt = <T,>(task: () => Promise<T>) => (
+            runTriage(() => runShared(task))
+        );
+        const calls = Array.from({ length: 7 }, () => analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            skipTokenLog: true,
+            replayCapability,
+            runProviderAttempt,
+            ...stageAuditOptions(),
+        }));
+        const settled = Promise.allSettled(calls);
+
+        try {
+            await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(6));
+            deferred.releases.splice(0).forEach(release => release());
+            await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(7));
+        } finally {
+            deferred.releases.splice(0).forEach(release => release());
+            await settled;
+        }
+
+        expect(await settled).toEqual(Array.from({ length: 7 }, () => (
+            expect.objectContaining({ status: 'fulfilled' })
+        )));
+    });
+
+    it('settles mixed v2.11 replay fences without inner capacity rejection or duplicate SDK calls', async () => {
+        type ReplayStage = 'genderTriage' | 'featureAnalysis' | 'privateAccountName';
+        const makeTasks = (stage: ReplayStage, count: number) => Array.from(
+            { length: count },
+            (_, index) => ({ stage, id: `${stage}-${index + 1}` }),
+        );
+        const tasks = [
+            ...makeTasks('genderTriage', 7),
+            ...makeTasks('featureAnalysis', 4),
+            ...makeTasks('privateAccountName', 3),
+        ];
+        const maxByStage: Record<ReplayStage, number> = {
+            genderTriage: 0,
+            featureAnalysis: 0,
+            privateAccountName: 0,
+        };
+        const activeByStage: Record<ReplayStage, number> = {
+            genderTriage: 0,
+            featureAnalysis: 0,
+            privateAccountName: 0,
+        };
+        const terminalCounts = new Map(tasks.map(task => [task.id, 0]));
+        const providerCalls = new Map(tasks.map(task => [task.id, 0]));
+        const releases: Array<() => void> = [];
+        let active = 0;
+        let maximumActive = 0;
+        mocks.generateContent.mockImplementation(request => new Promise(resolve => {
+            const prompt = (request as {
+                contents: Array<{ parts: Array<{ text?: string }> }>;
+            }).contents[0]!.parts[0]!.text!;
+            const [stage, id] = prompt.split('/') as [ReplayStage, string];
+            active++;
+            maximumActive = Math.max(maximumActive, active);
+            activeByStage[stage]++;
+            maxByStage[stage] = Math.max(maxByStage[stage], activeByStage[stage]);
+            providerCalls.set(id, providerCalls.get(id)! + 1);
+            releases.push(() => {
+                active--;
+                activeByStage[stage]--;
+                resolve(successfulResponse());
+            });
+        }));
+
+        const runShared = replayProviderFence(8);
+        const runTriage = replayProviderFence(6);
+        const runFeature = replayProviderFence(3);
+        const runPrivate = replayProviderFence(2);
+        const runProviderAttemptByStage = {
+            genderTriage: <T,>(task: () => Promise<T>) => runTriage(() => runShared(task)),
+            featureAnalysis: <T,>(task: () => Promise<T>) => runFeature(() => runShared(task)),
+            privateAccountName: <T,>(task: () => Promise<T>) => runPrivate(() => runShared(task)),
+        };
+        const replayCapability = issueReplayStatelessCapability();
+        const calls = tasks.map(task => analyzeWithGemini(`${task.stage}/${task.id}`, undefined, {
+            schema: responseSchema,
+            stage: task.stage,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            skipTokenLog: true,
+            replayCapability,
+            runProviderAttempt: runProviderAttemptByStage[task.stage],
+            requestId: stageRequestId,
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(() => {
+                terminalCounts.set(task.id, terminalCounts.get(task.id)! + 1);
+            }),
+        }));
+
+        let released = 0;
+        while (released < tasks.length) {
+            await vi.waitFor(() => expect(releases.length).toBeGreaterThan(0));
+            const batch = releases.splice(0);
+            released += batch.length;
+            batch.forEach(release => release());
+        }
+
+        await expect(Promise.all(calls)).resolves.toEqual(
+            Array.from({ length: tasks.length }, () => ({ value: 'ok' })),
+        );
+        expect(maximumActive).toBe(8);
+        expect(maxByStage.genderTriage).toBe(6);
+        expect(maxByStage.featureAnalysis).toBeLessThanOrEqual(3);
+        expect(maxByStage.privateAccountName).toBeLessThanOrEqual(2);
+        expect([...providerCalls.values()]).toEqual(
+            Array.from({ length: tasks.length }, () => 1),
+        );
+        expect([...terminalCounts.values()]).toEqual(
+            Array.from({ length: tasks.length }, () => 1),
+        );
+    });
 
     it('never queues a resolver when either bounded slot is unavailable', async () => {
         const deferred = deferredGenerations();
