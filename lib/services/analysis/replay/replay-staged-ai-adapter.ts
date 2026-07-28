@@ -107,17 +107,23 @@ function expectedV212ResolverTerminalDisposition(
 }
 
 /**
- * v2.12 isolates only terminal provider/admission outcomes. The explicit
- * error marker and matching terminal telemetry prevent raw adapter/audit
- * faults from being reclassified as a per-account unknown result.
+ * v2.12 isolates only terminal provider/admission outcomes. A known provider
+ * marker is sufficient when the provider fails before its telemetry callback;
+ * the aggregate-safe disposition is then recorded locally. Raw adapter/audit
+ * faults remain outside this allowlist and escape the replay boundary.
  */
-function isExpectedV212ResolverFailure(
+function isolateExpectedV212ResolverFailure(
     error: unknown,
     telemetry: InvocationTelemetry,
 ): boolean {
     if (isV212ResolverCapacitySkip(error)) return true;
     const disposition = expectedV212ResolverTerminalDisposition(error);
-    return disposition !== null && telemetry.failureDisposition[disposition] > 0;
+    if (disposition === null) return false;
+    telemetry.failureDisposition[disposition] = Math.max(
+        1,
+        telemetry.failureDisposition[disposition] ?? 0,
+    );
+    return true;
 }
 
 function normalized(media: readonly ReplayMedia[]) {
@@ -540,7 +546,7 @@ export function createReplayStagedAiAdapter(
                         aiStagePolicyVersion,
                         replayCapability,
                     });
-                }, strictV212Resolver ? isExpectedV212ResolverFailure : undefined), input.signal, deadlineAtMs), input.signal, deadlineAtMs);
+                }, strictV212Resolver ? isolateExpectedV212ResolverFailure : undefined), input.signal, deadlineAtMs), input.signal, deadlineAtMs);
                 return strictV212Resolver
                     ? invocation.catch(error => {
                         if (!isV212ResolverCapacitySkip(error)) throw error;

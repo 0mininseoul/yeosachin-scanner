@@ -413,6 +413,52 @@ describe('replay staged AI runner policy capability', () => {
         expect(serialized).not.toContain('MAX_TOKENS');
     });
 
+    it('isolates a telemetry-free v2.12 ambiguous resolver provider error as one unknown report', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'personal' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockRejectedValue(new Error(
+            'AI_AMBIGUOUS_GENERATION_ERROR: Gemini generation status is unknown; the request was not retried.',
+        ));
+        let serialized = '';
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: v212TwoMediaBundle(),
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+            write: line => { serialized = line; },
+        });
+
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+        expect(report.stages.genderResolution.failureDisposition)
+            .toEqual({ ambiguous: 1 });
+        expect(report.genderQuality).toMatchObject({
+            resolver: { outcome: { failed: 1 } },
+        });
+        expect(JSON.parse(serialized).stages.genderResolution.failure_disposition)
+            .toEqual({ ambiguous: 1 });
+        expect(serialized).not.toContain('AI_AMBIGUOUS_GENERATION_ERROR');
+        expect(serialized).not.toContain('Gemini generation status');
+    });
+
     it('propagates an unexpected v2.12 resolver fault to the replay boundary', async () => {
         ai.genderTriageMicrobatch.mockResolvedValue([{
             accountId: `account:${'b'.repeat(64)}`,
