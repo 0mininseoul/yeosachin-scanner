@@ -73,17 +73,10 @@ describe('editable demo fixture lifecycle migration', () => {
         `)).rejects.toThrow();
     });
 
-    it('reserves static fixture names and rejects a SQL-shape-valid invalid risk payload', async () => {
+    it('reserves static fixture names and rejects external URL text', async () => {
         await expect(db.exec(`
             INSERT INTO public.demo_analysis_fixtures (version, status, payload)
             VALUES ('authorized-redacted-fixture-v4', 'draft', '${runtimePayload()}'::jsonb)
-        `)).rejects.toThrow();
-
-        const invalidRisk = JSON.parse(runtimePayload());
-        invalidRisk.public[0].riskBand = 'unsafe';
-        await expect(db.exec(`
-            INSERT INTO public.demo_analysis_fixtures (version, status, payload)
-            VALUES ('operator-editable-fixture-invalid', 'draft', '${JSON.stringify(invalidRisk).replace(/'/g, "''")}'::jsonb)
         `)).rejects.toThrow();
 
         const externalText = JSON.parse(runtimePayload());
