@@ -8,6 +8,9 @@
         "app/api/internal/kakao-signup-discord-outbox/route.ts": {
             "maxDuration": 60
         },
+        "app/api/internal/sentry-discord-alert-outbox/route.ts": {
+            "maxDuration": 60
+        },
         "app/api/analysis/run/route.ts": {
             "maxDuration": 300
         },
@@ -27,6 +30,10 @@
     "crons": [
         {
             "path": "/api/internal/kakao-signup-discord-outbox",
+            "schedule": "0 0 * * *"
+        },
+        {
+            "path": "/api/internal/sentry-discord-alert-outbox",
             "schedule": "0 0 * * *"
         }
     ],

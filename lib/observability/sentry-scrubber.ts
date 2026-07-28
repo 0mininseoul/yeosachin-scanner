@@ -16,11 +16,15 @@ const JWT = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/gu;
 const COMPACT_BIRTHDATE = /\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\b/g;
 const CONTEXTUAL_BIRTHYEAR = /\b(?:birth[_ ]?year|dob)\s*[:=]?\s*(?:19|20)\d{2}\b/giu;
 const DISCORD_WEBHOOK_URL = /https?:\/\/(?:canary\.)?discord(?:app)?\.com\/api\/webhooks\/[^\s"']+/giu;
+const DISCORD_API_URL = /https?:\/\/(?:canary\.)?discord(?:app)?\.com\/api\/v\d+\/channels\/[^\s"']+/giu;
+const SENTRY_SERVICE_HOOK_URL = /https?:\/\/[^\s"']+\/api\/webhooks\/sentry\/[^\s/?#"']+(?:\?[^\s"']*)?/giu;
 const INSTAGRAM_URL = /https?:\/\/[^\s"']*(?:instagram\.com|cdninstagram\.com|fbcdn\.net)[^\s"']*/giu;
 
 function scrubString(value: string): string {
     return value
         .replace(DISCORD_WEBHOOK_URL, REDACTED)
+        .replace(DISCORD_API_URL, REDACTED)
+        .replace(SENTRY_SERVICE_HOOK_URL, REDACTED)
         .replace(INSTAGRAM_URL, REDACTED)
         .replace(COOKIE_VALUE, REDACTED)
         .replace(AUTHORIZATION_VALUE, REDACTED)
