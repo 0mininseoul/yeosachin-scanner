@@ -15,6 +15,7 @@ import {
 } from './replay-runner';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
+import { parseReplayCliArgs } from '../../../../scripts/replay-analysis-v2';
 
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
@@ -26,6 +27,37 @@ function v29Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
     testRunnerPolicies.set(runner, 'ai-stage-policy-v2.9');
     return runner;
+}
+
+function v210Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.10');
+    return runner;
+}
+
+function diagnosticPartialCoverageCapability(
+    aiStagePolicy: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' =
+        'ai-stage-policy-v2.9',
+) {
+    const parsed = parseReplayCliArgs([
+        '--run',
+        '--paid-ai',
+        '--confirm-paid-ai',
+        '--historical-partial-available',
+        '--allow-low-partial-coverage',
+        '--confirm-low-partial-coverage',
+        `--evaluation-ai-policy=${aiStagePolicy}`,
+        '--bundle=a.enc',
+        '--key=a.key',
+    ]);
+    if (
+        parsed.command !== 'run'
+        || !('diagnosticPartialCoverageCapability' in parsed)
+        || !parsed.diagnosticPartialCoverageCapability
+    ) {
+        throw new Error('TEST_DIAGNOSTIC_PARTIAL_COVERAGE_CAPABILITY_MISSING');
+    }
+    return parsed.diagnosticPartialCoverageCapability;
 }
 
 const bundle = {
@@ -327,7 +359,7 @@ describe('AI-only replay runner', () => {
         });
     });
 
-    it('admits exact-count diagnostic coverage only with an aggregate non-exact marker', async () => {
+    it('admits v2.10 exact-count diagnostic coverage only through double-confirmed CLI capability', async () => {
         const triage = vi.fn(async () => ({
             outcome: 'ok' as const,
             value: {
@@ -339,25 +371,40 @@ describe('AI-only replay runner', () => {
             },
             attempts: 1, retries: 0, elapsedMs: 1,
         }));
-        const partial = diagnosticPaidPartialBundle();
+        const basePartial = diagnosticPaidPartialBundle();
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+            aiStage: 'ai-stage-policy-v2.10',
+        } as const;
+        const partial = {
+            ...basePartial,
+            capture: {
+                ...basePartial.capture,
+                evaluationPolicy,
+            },
+        } satisfies AnalysisV2ReplayBundle;
         const lines: string[] = [];
 
         await expect(runAnalysisV2AiReplay({
             bundle: partial,
-            runner: v29Runner({ triage }),
+            runner: v210Runner({ triage }),
             mode: 'paid-ai',
             paidAiOptIn: true,
-            evaluationPolicy: partial.capture.evaluationPolicy,
+            evaluationPolicy,
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
         expect(triage).not.toHaveBeenCalled();
 
         const report = await runAnalysisV2AiReplay({
             bundle: partial,
-            runner: v29Runner({ triage }),
+            runner: v210Runner({ triage }),
             mode: 'paid-ai',
             paidAiOptIn: true,
-            allowLowPartialCoverage: true,
-            evaluationPolicy: partial.capture.evaluationPolicy,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(
+                    'ai-stage-policy-v2.10',
+                ),
+            evaluationPolicy,
             write: line => lines.push(line),
         });
 
@@ -366,6 +413,8 @@ describe('AI-only replay runner', () => {
             fullE2eEvidence: false,
             notExact: true,
             noMediaSubstitution: true,
+            evaluationAiPolicy: 'ai-stage-policy-v2.10',
+            replayAiPolicy: 'ai-stage-policy-v2.10',
             diagnosticCoverageOverride: {
                 used: true,
                 retainedProfiles: 49,
@@ -395,6 +444,46 @@ describe('AI-only replay runner', () => {
         expect(lines.join('')).not.toContain('diagnostic-media');
     });
 
+    it('rejects direct boolean and forged diagnostic approval before any AI call', async () => {
+        const triage = vi.fn();
+        const feature = vi.fn();
+        const privateNames = vi.fn();
+        const resolveGender = vi.fn();
+        const partial = diagnosticPaidPartialBundle();
+        const runner = v29Runner({
+            triage,
+            feature,
+            privateNames,
+            resolveGender,
+        });
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            allowLowPartialCoverage: true,
+            evaluationPolicy: partial.capture.evaluationPolicy,
+        } as Parameters<typeof runAnalysisV2AiReplay>[0])).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            diagnosticPartialCoverageCapability: Object.freeze({}),
+            evaluationPolicy: partial.capture.evaluationPolicy,
+        } as Parameters<typeof runAnalysisV2AiReplay>[0])).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+
+        expect(triage).not.toHaveBeenCalled();
+        expect(feature).not.toHaveBeenCalled();
+        expect(privateNames).not.toHaveBeenCalled();
+        expect(resolveGender).not.toHaveBeenCalled();
+    });
+
     it('rejects diagnostic coverage for legacy countless partial artifacts before AI', async () => {
         const triage = vi.fn();
         const partial = diagnosticPaidPartialBundle();
@@ -405,7 +494,8 @@ describe('AI-only replay runner', () => {
                 partial: {
                     ...partial.capture.partial,
                     mediaUnavailable: partial.capture.partial.mediaUnavailable.map(item => {
-                        const { selectedMediaCount: _selectedMediaCount, ...rest } = item;
+                        const rest = { ...item };
+                        delete rest.selectedMediaCount;
                         return rest;
                     }),
                 },
@@ -417,7 +507,8 @@ describe('AI-only replay runner', () => {
             runner: v29Runner({ triage }),
             mode: 'paid-ai',
             paidAiOptIn: true,
-            allowLowPartialCoverage: true,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(),
             evaluationPolicy: legacy.capture.evaluationPolicy,
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
         expect(triage).not.toHaveBeenCalled();

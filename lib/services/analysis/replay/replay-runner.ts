@@ -13,6 +13,10 @@ import { v29FeatureAdmission } from '../v2-v29-feature-admission';
 import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from '../v2-gender-resolver-media-policy';
 import { historicalPartialBundleInvariantIssues, historicalPartialPaidCoverage } from './historical-partial-available-artifact';
+import {
+    isDiagnosticPartialCoverageCliCapability,
+    type DiagnosticPartialCoverageCliCapability,
+} from './diagnostic-partial-coverage-capability';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -445,15 +449,37 @@ export async function runAnalysisV2AiReplay(input: {
     runner?: ReplayAiRunner;
     mode: ReplayMode;
     paidAiOptIn?: boolean;
-    allowLowPartialCoverage?: boolean;
+    diagnosticPartialCoverageCapability?:
+        DiagnosticPartialCoverageCliCapability;
     evaluationPolicy?: ReplayEvaluationPolicy;
     write?: (line: string) => void;
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
     resolverCutoffMs?: number;
 }): Promise<AnalysisV2AiReplayReport> {
+    const legacyBooleanSupplied = Object.prototype.hasOwnProperty.call(
+        input,
+        'allowLowPartialCoverage',
+    );
+    const diagnosticCapabilitySupplied =
+        input.diagnosticPartialCoverageCapability !== undefined;
+    if (
+        legacyBooleanSupplied
+        || (
+            diagnosticCapabilitySupplied
+            && !isDiagnosticPartialCoverageCliCapability(
+                input.diagnosticPartialCoverageCapability,
+            )
+        )
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+    }
+    const diagnosticPartialCoverageAuthorized =
+        diagnosticCapabilitySupplied;
     assertArtifactCapability(input.bundle);
     if (
-        input.allowLowPartialCoverage === true
+        diagnosticPartialCoverageAuthorized
         && (
             input.bundle.schemaVersion !== 2
             || input.mode !== 'paid-ai'
@@ -468,7 +494,7 @@ export async function runAnalysisV2AiReplay(input: {
             sourceIdentities: input.bundle.capture.partial.sourceIdentities,
             mediaUnavailable: input.bundle.capture.partial.mediaUnavailable,
             profiles: input.bundle.profiles,
-        }, input.allowLowPartialCoverage === true
+        }, diagnosticPartialCoverageAuthorized
             ? { mode: 'diagnostic-low-partial-coverage' }
             : undefined)
         : undefined;
@@ -844,7 +870,7 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         fullE2eEvidence: false as const,
         ...(input.bundle.schemaVersion === 2 ? { notExact: true as const, noMediaSubstitution: true as const } : {}),
-        ...(input.allowLowPartialCoverage === true && paidPartialCoverage ? {
+        ...(diagnosticPartialCoverageAuthorized && paidPartialCoverage ? {
             diagnosticCoverageOverride: {
                 used: true as const,
                 retainedProfiles: paidPartialCoverage.retainedProfiles,

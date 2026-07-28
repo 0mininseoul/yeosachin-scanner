@@ -288,16 +288,18 @@ describe('analysis V2 replay CLI', () => {
             '--evaluation-ai-policy=ai-stage-policy-v2.10',
             '--bundle=a.enc', '--key=a.key',
         ];
-        expect(parseReplayCliArgs([
+        const approved = parseReplayCliArgs([
             ...base,
             '--allow-low-partial-coverage',
             '--confirm-low-partial-coverage',
-        ])).toMatchObject({
+        ]);
+        expect(approved).toMatchObject({
             command: 'run',
             mode: 'paid-ai',
             historicalPartialAvailable: true,
-            allowLowPartialCoverage: true,
+            diagnosticPartialCoverageCapability: expect.any(Object),
         });
+        expect(approved).not.toHaveProperty('allowLowPartialCoverage');
         expect(() => parseReplayCliArgs([
             ...base,
             '--allow-low-partial-coverage',
