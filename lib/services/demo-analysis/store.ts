@@ -7,6 +7,7 @@ import {
     AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION,
     DEMO_FIXTURE_VERSION,
     LEGACY_DEMO_FIXTURE_VERSION,
+    REDACTED_DEMO_FIXTURE_VERSION,
     DEMO_TARGET_USERNAME,
     demoDurationSeconds,
 } from './demo-analysis';
@@ -30,6 +31,11 @@ const rowSchema = z.union([
     z.object({
         ...rowFields,
         fixture_version: z.literal(AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION),
+        duration_seconds: z.number().int().min(30).max(45),
+    }).passthrough(),
+    z.object({
+        ...rowFields,
+        fixture_version: z.literal(REDACTED_DEMO_FIXTURE_VERSION),
         duration_seconds: z.number().int().min(30).max(45),
     }).passthrough(),
     z.object({

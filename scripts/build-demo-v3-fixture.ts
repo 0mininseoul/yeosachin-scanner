@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { parseSafePublicRiskNarrative } from '../lib/services/analysis/narrative-privacy';
 
@@ -180,6 +181,22 @@ function uniqueByImageOrdinal<T extends { sort_ordinal: number }>(rows: readonly
     return rows.filter(row => !seen.has(row.sort_ordinal) && seen.add(row.sort_ordinal));
 }
 
+type FixtureIdentity = Readonly<{
+    imageSortOrdinal: number;
+    instagramId: string;
+}>;
+
+export function assertUniqueFixture(fixture: Readonly<{
+    public: readonly FixtureIdentity[];
+    private: readonly FixtureIdentity[];
+}>): void {
+    const cards = [...fixture.public, ...fixture.private];
+    if (new Set(cards.map(row => row.imageSortOrdinal)).size !== cards.length
+        || new Set(cards.map(row => row.instagramId)).size !== cards.length) {
+        throw new Error('The demo fixture repeats a source image or synthetic identifier across public and private cards.');
+    }
+}
+
 function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
     const selectedRunIds = new Set(rows.map(row => row.sourceRunId));
     if (selectedRunIds.size !== 1) {
@@ -262,12 +279,7 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
             instagramId: mutateIdentifier(row.instagram_id, `private-handle:${row.sort_ordinal}`),
             fullName: mutateName(row.full_name, `private-name:${row.sort_ordinal}`),
         }));
-    if (new Set(publicFixture.map(row => row.imageSortOrdinal)).size !== publicFixture.length
-        || new Set(privateFixture.map(row => row.imageSortOrdinal)).size !== privateFixture.length
-        || new Set(publicFixture.map(row => row.instagramId)).size !== publicFixture.length
-        || new Set(privateFixture.map(row => row.instagramId)).size !== privateFixture.length) {
-        throw new Error('The demo fixture contains a repeated source image or deterministic identifier collision.');
-    }
+    assertUniqueFixture({ public: publicFixture, private: privateFixture });
     return {
         public: publicFixture,
         private: privateFixture,
@@ -282,4 +294,6 @@ async function main() {
     process.stdout.write(`demo-v4-source-fixture=${fixture.public.length + fixture.private.length}\n`);
 }
 
-void main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    void main();
+}

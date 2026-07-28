@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.rpc, from: mocks.from } }));
 
 import { demoAnalysisStore, isCurrentDemoFixtureRun } from './store';
-import { DEMO_FIXTURE_VERSION } from './demo-analysis';
+import { DEMO_FIXTURE_VERSION, REDACTED_DEMO_FIXTURE_VERSION } from './demo-analysis';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
 const otherOwnerId = '223e4567-e89b-42d3-a456-426614174000';
@@ -56,6 +56,18 @@ describe('demo analysis store idempotency and ownership boundary', () => {
         expect(result?.run.fixture_version).toBe('synthetic-fixture-v1');
         expect(result?.run.duration_seconds).toBe(75);
         expect(result && isCurrentDemoFixtureRun(result.run)).toBe(false);
+    });
+
+    it('reads a persisted v3 run without reinterpreting it as the current fixture', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: [{ ...row(), fixture_version: REDACTED_DEMO_FIXTURE_VERSION, created: false }],
+            error: null,
+        });
+
+        const result = await demoAnalysisStore.startForOwner(runId, ownerId);
+
+        expect(result?.fixture_version).toBe(REDACTED_DEMO_FIXTURE_VERSION);
+        expect(result && isCurrentDemoFixtureRun(result)).toBe(false);
     });
 
     it('fails closed when the database returns a row for another owner', async () => {

@@ -19,6 +19,7 @@ import {
 import { analysisV2ProgressCopy } from '@/lib/services/analysis/owner-view-presentation';
 import { parseSafePublicRiskNarrative } from '@/lib/services/analysis/narrative-privacy';
 import { analysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
+import { DEMO_V4_SOURCE_FIXTURE } from './demo-v4-source-fixture';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
 const requestId = '223e4567-e89b-42d3-a456-426614174000';
@@ -280,6 +281,18 @@ describe('isolated demo fixtures', () => {
         expect(source).not.toMatch(/supabase|createClient|analysis_results|fetch\(/iu);
     });
 
+    it('keeps the v4 source snapshot self-contained with unique source asset ordinals', () => {
+        const source = readFileSync(new URL('./demo-v4-source-fixture.ts', import.meta.url), 'utf8');
+
+        expect(source).not.toContain('demo-v3-source-fixture');
+        expect(DEMO_V4_SOURCE_FIXTURE.public).toHaveLength(84);
+        expect(DEMO_V4_SOURCE_FIXTURE.private).toHaveLength(145);
+        expect(new Set(DEMO_V4_SOURCE_FIXTURE.public.map(row => row.imageSortOrdinal))).toHaveLength(84);
+        expect(new Set(DEMO_V4_SOURCE_FIXTURE.private.map(row => row.imageSortOrdinal))).toHaveLength(145);
+        expect(new Set(DEMO_V4_SOURCE_FIXTURE.public.map(row => row.instagramId))).toHaveLength(84);
+        expect(new Set(DEMO_V4_SOURCE_FIXTURE.private.map(row => row.instagramId))).toHaveLength(145);
+    });
+
     it('pins the v4 builder to one fully-ready sealed source and a bijective local derivation', () => {
         const avatarBuilder = readFileSync(new URL('../../../scripts/build-demo-v3-avatars.ts', import.meta.url), 'utf8');
         const fixtureBuilder = readFileSync(new URL('../../../scripts/build-demo-v3-fixture.ts', import.meta.url), 'utf8');
@@ -298,7 +311,7 @@ describe('isolated demo fixtures', () => {
         expect(fixtureBuilder).toContain('sourceCandidateId');
         expect(fixtureBuilder).toContain('selectedRunIds.size !== 1');
         expect(fixtureBuilder).toContain('uniqueByImageOrdinal');
-        expect(fixtureBuilder).toContain('new Set(publicFixture.map(row => row.imageSortOrdinal))');
+        expect(fixtureBuilder).toContain('assertUniqueFixture({ public: publicFixture, private: privateFixture })');
         expect(fixtureBuilder).not.toContain('index % orderedPublicRows.length');
         expect(fixtureBuilder).toContain('parseSafePublicRiskNarrative(highRiskNarrative)');
         expect(fixtureBuilder).toContain('narrativeSource.narrative_line_one');
