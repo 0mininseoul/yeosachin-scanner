@@ -1,8 +1,28 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { appRedirectUrlForRequest } from '@/lib/constants/app-url';
+import {
+    appRedirectUrlForRequest,
+    CANONICAL_APP_ORIGIN,
+} from '@/lib/constants/app-url';
+
+const LEGACY_PUBLIC_HOSTNAMES = new Set([
+    'www.yeosachin.com',
+    'yeosachin.vercel.app',
+    'ai-yeosachinscanner.vercel.app',
+]);
 
 export async function proxy(request: NextRequest) {
+    // Keep the old webhook/API endpoints reachable while external providers
+    // switch to the canonical domain. Browser navigations are permanently
+    // redirected so one public URL is indexed and shared.
+    if (
+        (request.method === 'GET' || request.method === 'HEAD')
+        && LEGACY_PUBLIC_HOSTNAMES.has(request.nextUrl.hostname)
+    ) {
+        const canonicalUrl = new URL(request.nextUrl.pathname + request.nextUrl.search, CANONICAL_APP_ORIGIN);
+        return NextResponse.redirect(canonicalUrl, 308);
+    }
+
     let supabaseResponse = NextResponse.next({
         request,
     });

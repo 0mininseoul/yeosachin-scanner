@@ -1,4 +1,4 @@
-export const CANONICAL_APP_ORIGIN = 'https://yeosachin.vercel.app';
+export const CANONICAL_APP_ORIGIN = 'https://yeosachin.com';
 export const DEFAULT_APP_REDIRECT_PATH = '/analyze';
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);

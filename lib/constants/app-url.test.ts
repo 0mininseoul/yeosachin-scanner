@@ -9,7 +9,7 @@ import {
 
 describe('canonical app origin', () => {
     it('pins the production origin', () => {
-        expect(CANONICAL_APP_ORIGIN).toBe('https://yeosachin.vercel.app');
+        expect(CANONICAL_APP_ORIGIN).toBe('https://yeosachin.com');
         expect(appOriginForRequest('https://ai-yeosachinscanner.vercel.app/result/1'))
             .toBe(CANONICAL_APP_ORIGIN);
         expect(appOriginForRequest('https://attacker.example/result/1'))

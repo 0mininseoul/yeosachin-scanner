@@ -9,12 +9,12 @@
 | 기준가 | 13,900원 | 19,900원 |
 | 얼리버드 결제액 | 6,900원 | 9,900원 |
 | 표시 할인율 | 50% | 50% |
-| 진입 페이지 | `https://yeosachin.vercel.app/analyze?plan=basic` | `https://yeosachin.vercel.app/analyze?plan=standard` |
-| 이동 페이지 | `https://yeosachin.vercel.app/earlybird?plan=basic` | `https://yeosachin.vercel.app/earlybird?plan=standard` |
+| 진입 페이지 | `https://yeosachin.com/analyze?plan=basic` | `https://yeosachin.com/analyze?plan=standard` |
+| 이동 페이지 | `https://yeosachin.com/earlybird?plan=basic` | `https://yeosachin.com/earlybird?plan=standard` |
 | 이동 버튼 문구 | `사전 구매 현황 확인` | `사전 구매 현황 확인` |
 | Groble 상품 재고 | 10건 유지 | 10건 유지 |
 
-Webhook URL은 `https://yeosachin.vercel.app/api/webhooks/groble`이며 `payment.completed`와 `payment.cancel_requested`를 구독한다.
+Webhook URL은 `https://yeosachin.com/api/webhooks/groble`이며 `payment.completed`와 `payment.cancel_requested`를 구독한다.
 
 Groble의 현재 공식 가이드를 기준으로 결제창 주소는 `https://groble.im/payment/{결제창 주소}` 형식을 사용한다. 진입 페이지는 결제창을 닫거나 뒤로 갈 때 돌아오는 판매 페이지이고, 이동 페이지는 완료 화면 버튼의 목적지일 뿐 결제 증명이 아니다.
 

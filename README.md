@@ -2,7 +2,7 @@
 
 AI가 남자친구의 인스타그램 맞팔 중 위장 여사친을 찾아주는 서비스
 
-[서비스 바로가기](https://yeosachin.vercel.app)
+[서비스 바로가기](https://yeosachin.com)
 
 ## 프로젝트 개요
 
