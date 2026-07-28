@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     assignRelativeRiskTiers,
+    assignRelativeRiskTiersV25,
     type RelativeRiskCandidate,
 } from './relative-risk-policy';
 
@@ -187,5 +188,68 @@ describe('relative risk tier policy', () => {
         expect(() => assignRelativeRiskTiers([
             candidate('candidate:a', 3.4, 'high_risk'),
         ])).toThrow('natural score and band are incompatible');
+    });
+});
+
+describe('relative risk tier policy v2.5', () => {
+    it('assigns two high-risk and two caution tiers from four eligible candidates', () => {
+        const result = assignRelativeRiskTiersV25([
+            candidate('candidate:a', 4.1),
+            candidate('candidate:b', 3.1),
+            candidate('candidate:c', 2.1),
+            candidate('candidate:d', 1.1),
+        ]);
+
+        expect(result.map(row => row.riskBand))
+            .toEqual(['high_risk', 'high_risk', 'caution', 'caution']);
+    });
+
+    it('assigns three high-risk tiers only when the third high-pool score is caution-worthy', () => {
+        const qualified = assignRelativeRiskTiersV25([
+            candidate('candidate:a', 7.1, 'high_risk'),
+            candidate('candidate:b', 6.1, 'caution'),
+            candidate('candidate:c', 4.2, 'caution'),
+            candidate('candidate:d', 3.1),
+            candidate('candidate:e', 2.1),
+        ]);
+        const belowThreshold = assignRelativeRiskTiersV25([
+            candidate('candidate:a', 7.1, 'high_risk'),
+            candidate('candidate:b', 6.1, 'caution'),
+            candidate('candidate:c', 4.1, 'normal'),
+            candidate('candidate:d', 3.1),
+            candidate('candidate:e', 2.1),
+        ]);
+
+        expect(qualified.filter(row => row.riskBand === 'high_risk')).toHaveLength(3);
+        expect(qualified.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+        expect(belowThreshold.filter(row => row.riskBand === 'high_risk')).toHaveLength(2);
+        expect(belowThreshold.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+    });
+
+    it('preserves the inbound-only high pool and uses only feasible floors', () => {
+        const result = assignRelativeRiskTiersV25([
+            candidate('candidate:top-no-inbound', 9, 'high_risk', false, 9),
+            candidate('candidate:only-inbound', 2, 'normal', false, 2, true),
+            candidate('candidate:c', 1.8),
+            candidate('candidate:d', 1.6),
+            candidate('candidate:e', 1.4),
+        ]);
+
+        expect(result.filter(row => row.riskBand === 'high_risk')).toEqual([
+            expect.objectContaining({ candidateId: 'candidate:only-inbound' }),
+        ]);
+        expect(result.filter(row => row.riskBand === 'caution')).toHaveLength(2);
+    });
+
+    it('keeps v2.4 behavior unchanged for the same four-candidate input', () => {
+        const input = [
+            candidate('candidate:a', 4.1),
+            candidate('candidate:b', 3.1),
+            candidate('candidate:c', 2.1),
+            candidate('candidate:d', 1.1),
+        ];
+
+        expect(assignRelativeRiskTiers(input).filter(row => row.riskBand === 'high_risk'))
+            .toHaveLength(1);
     });
 });

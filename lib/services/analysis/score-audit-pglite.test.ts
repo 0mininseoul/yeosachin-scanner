@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { calculateRiskPolicy, type RiskPolicyInput } from '@/lib/domain/analysis/risk-policy';
-import { assignRelativeRiskTiers } from '@/lib/domain/analysis/relative-risk-policy';
+import {
+    assignRelativeRiskTiers,
+    assignRelativeRiskTiersV25,
+} from '@/lib/domain/analysis/relative-risk-policy';
 
 const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260727032000_add_analysis_v2_score_audit.sql',
@@ -10,6 +13,10 @@ const migration = readFileSync(new URL(
 ), 'utf8');
 const riskPolicyV24Migration = readFileSync(new URL(
     '../../../supabase/migrations/20260726090000_add_risk_policy_v24.sql',
+    import.meta.url,
+), 'utf8');
+const riskPolicyV25Migration = readFileSync(new URL(
+    '../../../supabase/migrations/20260728180000_add_risk_policy_v25.sql',
     import.meta.url,
 ), 'utf8');
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
@@ -31,6 +38,15 @@ function functionDefinition(
     const end = source.indexOf('\n$$;', start);
     if (end < 0) throw new Error(`Unbounded function ${name} occurrence ${occurrence}`);
     return source.slice(start, end + 4);
+}
+
+function migrationBlock(source: string, marker: string): string {
+    const start = source.indexOf(marker);
+    if (start < 0) throw new Error(`Missing migration block ${marker}`);
+    const blockStart = source.indexOf('DO $migration$', start);
+    const end = source.indexOf('\n$migration$;', blockStart);
+    if (blockStart < 0 || end < 0) throw new Error(`Unbounded migration block ${marker}`);
+    return source.slice(blockStart, end + '\n$migration$;'.length);
 }
 
 beforeAll(async () => {
@@ -98,6 +114,22 @@ beforeAll(async () => {
         [preMigrationRequestId],
     );
     await db.exec(migration);
+    await db.exec(functionDefinition(
+        riskPolicyV25Migration,
+        'analysis_v2_expected_relative_risk_rows_v25',
+    ));
+    await db.exec(functionDefinition(
+        riskPolicyV25Migration,
+        'analysis_v2_expected_relative_risk_rows',
+    ));
+    await db.exec(functionDefinition(
+        riskPolicyV25Migration,
+        'analysis_v2_score_audit_expected_v25_components',
+    ));
+    await db.exec(migrationBlock(
+        riskPolicyV25Migration,
+        '-- Extend the audit capture/materialization gates',
+    ));
 }, 60_000);
 
 afterAll(async () => { await db.close(); }, 30_000);
@@ -144,9 +176,10 @@ function canonicalFixtureCandidate(
     candidateId: string,
     username: string,
     input: RiskPolicyInput,
+    policyVersion: 'risk-policy-v2.4' | 'risk-policy-v2.5' = 'risk-policy-v2.4',
 ): AuditFixtureCandidate {
-    const risk = calculateRiskPolicy(input);
-    const relative = assignRelativeRiskTiers([{
+    const risk = calculateRiskPolicy(input, policyVersion);
+    const relativeInput = [{
         candidateId,
         naturalPublicScore: risk.publicScore,
         naturalDisplayScore: risk.displayScore,
@@ -156,7 +189,12 @@ function canonicalFixtureCandidate(
             || input.boundedCandidateCommentsOnTarget > 0
             || input.hasCandidateToTargetTagOrCaptionMention,
         personalRiskEligible: input.accountContext !== 'official_group_or_brand',
-    }])[0]!;
+    }];
+    const relative = (
+        policyVersion === 'risk-policy-v2.5'
+            ? assignRelativeRiskTiersV25(relativeInput)
+            : assignRelativeRiskTiers(relativeInput)
+    )[0]!;
     return {
         candidateId,
         username,
@@ -171,11 +209,12 @@ function canonicalFixtureCandidate(
 
 function normalizeFixtureCandidates(
     candidates: readonly AuditFixtureCandidate[],
+    policyVersion: 'risk-policy-v2.4' | 'risk-policy-v2.5' = 'risk-policy-v2.4',
 ): {
     normalizedCandidates: AuditFixtureCandidate[];
     sortedCandidates: AuditFixtureCandidate[];
 } {
-    const relativeById = new Map(assignRelativeRiskTiers(candidates.map(candidate => ({
+    const relativeInput = candidates.map(candidate => ({
         candidateId: candidate.candidateId,
         naturalPublicScore: Number(
             (candidate.risk as { publicScore: number }).publicScore
@@ -194,7 +233,12 @@ function normalizeFixtureCandidates(
             || candidate.hasCandidateToTargetTagOrCaptionMention === true,
         personalRiskEligible:
             candidate.accountContext !== 'official_group_or_brand',
-    }))).map(relative => [relative.candidateId, relative]));
+    }));
+    const relativeById = new Map((
+        policyVersion === 'risk-policy-v2.5'
+            ? assignRelativeRiskTiersV25(relativeInput)
+            : assignRelativeRiskTiers(relativeInput)
+    ).map(relative => [relative.candidateId, relative]));
     const relativeCandidates = candidates.map(candidate => {
         const relative = relativeById.get(candidate.candidateId);
         if (!relative) throw new Error('Missing relative fixture result.');
@@ -234,13 +278,14 @@ async function materializeCapturedFixture(
     fixtureRequestId: string,
     fixtureResultHash: string,
     candidates: readonly AuditFixtureCandidate[],
+    policyVersion: 'risk-policy-v2.4' | 'risk-policy-v2.5' = 'risk-policy-v2.4',
 ): Promise<string> {
     const { normalizedCandidates, sortedCandidates } =
-        normalizeFixtureCandidates(candidates);
+        normalizeFixtureCandidates(candidates, policyVersion);
     await db.query(
         'INSERT INTO public.analysis_requests VALUES ($1, $2, $3, $4::jsonb)',
         [fixtureRequestId, 'completed', 'v2', JSON.stringify({
-            risk: 'risk-policy-v2.4', aiStage: 'ai-stage-policy-v2.7',
+            risk: policyVersion, aiStage: 'ai-stage-policy-v2.7',
         })],
     );
     for (const candidate of normalizedCandidates) {
@@ -252,14 +297,14 @@ async function materializeCapturedFixture(
     await db.query(
         'INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints VALUES ($1, $2, -1, $3, $4::jsonb, DEFAULT)',
         [fixtureRequestId, 'final_score', fixtureResultHash, JSON.stringify({
-            riskPolicyVersion: 'risk-policy-v2.4', candidates: normalizedCandidates,
+            riskPolicyVersion: policyVersion, candidates: normalizedCandidates,
         })],
     );
     await db.query(
         `INSERT INTO public.analysis_v2_result_summaries
             (request_id, score_policy_version, female_count)
-         VALUES ($1, 'risk-policy-v2.4', $2)`,
-        [fixtureRequestId, normalizedCandidates.length],
+         VALUES ($1, $2, $3)`,
+        [fixtureRequestId, policyVersion, normalizedCandidates.length],
     );
     for (const [index, candidate] of sortedCandidates.entries()) {
         await db.query(
@@ -461,7 +506,7 @@ describe('analysis score audit database materializer', () => {
             },
         ];
         for (const input of inputs) {
-            const canonical = calculateRiskPolicy(input);
+            const canonical = calculateRiskPolicy(input, 'risk-policy-v2.4');
             const signals = {
                 candidateLikes: input.uniqueTargetPostsLikedByCandidate,
                 candidateComments: input.boundedCandidateCommentsOnTarget,
@@ -569,6 +614,88 @@ describe('analysis score audit database materializer', () => {
         });
     });
 
+    it('materializes an exact v2.5 two-high/two-caution audit without rewriting v2.4', async () => {
+        const policyInput: RiskPolicyInput = {
+            uniqueTargetPostsLikedByCandidate: 0,
+            boundedCandidateCommentsOnTarget: 0,
+            reverseLikeStatus: 'not_collected',
+            hasCandidateToTargetTagOrCaptionMention: false,
+            hasTargetToCandidateTagOrCaptionMention: false,
+            recentFemaleMutualRank: null,
+            appearanceGrade: 1,
+            exposureScore: 0,
+            accountContext: 'personal',
+            hasWeakPartnerEvidence: false,
+            hasStrongPartnerEvidence: false,
+        };
+        const fixtureRequestId = '25100000-e89b-42d3-a456-426614174000';
+        const fixtureHash = '2'.repeat(64);
+        const candidates = Array.from({ length: 4 }, (_, index) =>
+            canonicalFixtureCandidate(
+                `v25-${index}`,
+                `v25.woman.${index}`,
+                policyInput,
+                'risk-policy-v2.5',
+            ));
+
+        await expect(materializeCapturedFixture(
+            fixtureRequestId,
+            fixtureHash,
+            candidates,
+            'risk-policy-v2.5',
+        )).resolves.toBe('ready');
+        const rows = await db.query<{ risk_band: string }>(
+            `SELECT risk_band FROM public.analysis_v2_score_audit_rows
+             WHERE request_id = $1`,
+            [fixtureRequestId],
+        );
+        expect(rows.rows.filter(row => row.risk_band === 'high_risk')).toHaveLength(2);
+        expect(rows.rows.filter(row => row.risk_band === 'caution')).toHaveLength(2);
+    });
+
+    it('keeps the v2.5 version when hard-TTL terminalizes retained audit evidence', async () => {
+        const ttlRequestId = '25200000-e89b-42d3-a456-426614174000';
+        const ttlHash = '3'.repeat(64);
+        await db.query(
+            'INSERT INTO public.analysis_requests VALUES ($1, $2, $3, $4::jsonb)',
+            [ttlRequestId, 'completed', 'v2', JSON.stringify({
+                risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.10',
+            })],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints
+             VALUES ($1, 'final_score', -1, $2, $3::jsonb, DEFAULT)`,
+            [ttlRequestId, ttlHash, JSON.stringify({
+                riskPolicyVersion: 'risk-policy-v2.5', candidates: [],
+            })],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_result_summaries
+                (request_id, score_policy_version, female_count)
+             VALUES ($1, 'risk-policy-v2.5', 0)`,
+            [ttlRequestId],
+        );
+        await db.query(
+            `UPDATE public.analysis_v2_score_audit_intents
+             SET retain_until = clock_timestamp() - INTERVAL '1 second'
+             WHERE request_id = $1`,
+            [ttlRequestId],
+        );
+
+        await db.query(
+            'SELECT public.purge_expired_analysis_v2_score_audit_evidence(100)',
+        );
+        const run = await db.query<{ risk_policy_version: string; status: string }>(
+            `SELECT risk_policy_version, status
+             FROM public.analysis_v2_score_audit_runs WHERE request_id = $1`,
+            [ttlRequestId],
+        );
+        expect(run.rows[0]).toEqual({
+            risk_policy_version: 'risk-policy-v2.5',
+            status: 'partial',
+        });
+    });
+
     it('certifies clamp, adjustment, transform, partner-cap, band, and official transitions from TS oracles', async () => {
         const definitions: Array<{
             key: string;
@@ -656,7 +783,7 @@ describe('analysis score audit database materializer', () => {
         }>();
 
         for (const definition of definitions) {
-            const risk = calculateRiskPolicy(definition.input);
+            const risk = calculateRiskPolicy(definition.input, 'risk-policy-v2.4');
             const candidateId = `transition-${definition.key}`;
             const username = `transition_${definition.key}`;
             const relative = assignRelativeRiskTiers([{
@@ -870,7 +997,7 @@ describe('analysis score audit database materializer', () => {
         const natural = definitions.map(definition => ({
             definition,
             candidateId: `relative-${definition.key}`,
-            risk: calculateRiskPolicy(definition.input),
+            risk: calculateRiskPolicy(definition.input, 'risk-policy-v2.4'),
         }));
         const relative = new Map(assignRelativeRiskTiers(natural.map(row => ({
             candidateId: row.candidateId,
@@ -2114,7 +2241,7 @@ describe('analysis score audit database materializer', () => {
             hasWeakPartnerEvidence: false,
             hasStrongPartnerEvidence: false,
         };
-        const canonical = calculateRiskPolicy(input);
+        const canonical = calculateRiskPolicy(input, 'risk-policy-v2.4');
         const componentKeys = Object.keys(canonical.components) as Array<
             keyof typeof canonical.components
         >;

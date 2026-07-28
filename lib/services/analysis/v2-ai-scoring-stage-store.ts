@@ -6,6 +6,7 @@ import {
     partnerSafetyResultSchema,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
+import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
 import {
     analysisV2CheckpointProfileSchema,
     type AnalysisV2CheckpointProfile,
@@ -95,6 +96,7 @@ const accountContextSchema = z.enum([
     'uncertain',
 ]);
 const riskBandSchema = z.enum(['normal', 'caution', 'high_risk']);
+const liveRiskPolicyVersionSchema = z.enum(['risk-policy-v2.4', 'risk-policy-v2.5']);
 const nullableRankSchema = z.number().int().min(1).max(900).nullable();
 
 const mediaCoverageSchema = z.object({
@@ -477,7 +479,7 @@ const scoreComponentsSchema = z.object({
 }).strict();
 
 const riskResultSchema = z.object({
-    policyVersion: z.literal('risk-policy-v2.4'),
+    policyVersion: liveRiskPolicyVersionSchema,
     components: scoreComponentsSchema,
     softContextBeforeBusinessAdjustment: z.object({
         recentMutual: z.number().finite().min(0).max(5),
@@ -625,8 +627,8 @@ const profilePayloadSchema = z.object({
 const primaryPayloadSchema = z.object({
     candidates: z.array(primaryCandidateSchema).max(900),
 }).strict();
-const screeningPayloadV24Schema = z.object({
-    riskPolicyVersion: z.literal('risk-policy-v2.4'),
+const screeningPayloadLiveSchema = z.object({
+    riskPolicyVersion: liveRiskPolicyVersionSchema,
     shortlistHash: hashSchema,
     candidates: z.array(preliminaryCandidateSchema).max(900),
 }).strict();
@@ -634,7 +636,7 @@ const screeningPayloadV23Schema = z.object({
     shortlistHash: hashSchema,
     candidates: z.array(legacyPreliminaryCandidateSchema).max(900),
 }).strict();
-const screeningPayloadSchema = z.union([screeningPayloadV24Schema, screeningPayloadV23Schema]);
+const screeningPayloadSchema = z.union([screeningPayloadLiveSchema, screeningPayloadV23Schema]);
 const reverseRowsPayloadSchema = z.object({
     rows: z.array(reverseLikeRowSchema).max(10),
 }).strict();
@@ -644,18 +646,28 @@ const partnerRowsPayloadSchema = z.object({
 const narrativeRowsPayloadSchema = z.object({
     rows: z.array(narrativeRowSchema).max(3),
 }).strict();
-const finalPayloadV24Schema = z.object({
-    riskPolicyVersion: z.literal('risk-policy-v2.4'),
+const finalPayloadLiveSchema = z.object({
+    riskPolicyVersion: liveRiskPolicyVersionSchema,
     candidates: z.array(finalCandidateSchema).max(900),
     narrativeCandidateIds: z.array(candidateIdSchema).max(3),
     narrativeBatchHash: hashSchema,
-}).strict();
+}).strict().superRefine((value, context) => {
+    value.candidates.forEach((candidate, index) => {
+        if (candidate.risk.policyVersion !== value.riskPolicyVersion) {
+            context.addIssue({
+                code: 'custom',
+                path: ['candidates', index, 'risk', 'policyVersion'],
+                message: 'Candidate risk policy must match the payload policy.',
+            });
+        }
+    });
+});
 const finalPayloadV23Schema = z.object({
     candidates: z.array(legacyFinalCandidateSchema).max(900),
     narrativeCandidateIds: z.array(candidateIdSchema).max(3),
     narrativeBatchHash: hashSchema,
 }).strict();
-const finalPayloadSchema = z.union([finalPayloadV24Schema, finalPayloadV23Schema]);
+const finalPayloadSchema = z.union([finalPayloadLiveSchema, finalPayloadV23Schema]);
 
 const rpcEnvelopeSchema = z.object({
     stageKind: stageKindSchema,
@@ -910,7 +922,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'screening', null, input.candidates.length, {
                 ...(input.riskPolicyVersion === 'risk-policy-v2.3'
-                    ? {} : { riskPolicyVersion: 'risk-policy-v2.4' }),
+                    ? {} : { riskPolicyVersion: input.riskPolicyVersion ?? RISK_POLICY_VERSION }),
                 shortlistHash: input.shortlistHash,
                 candidates: input.candidates,
             });
@@ -918,7 +930,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
                 shortlistHash: envelope.payload.shortlistHash,
-                riskPolicyVersion: input.riskPolicyVersion ?? 'risk-policy-v2.4',
+                riskPolicyVersion: input.riskPolicyVersion ?? RISK_POLICY_VERSION,
                 candidates: envelope.payload.candidates,
             }) as AnalysisV2ScreeningSnapshot;
         },
@@ -982,7 +994,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             uniqueCandidates(input.candidates);
             const envelope = await checkpoint(input, 'final_score', null, input.candidates.length, {
                 ...(input.riskPolicyVersion === 'risk-policy-v2.3'
-                    ? {} : { riskPolicyVersion: 'risk-policy-v2.4' }),
+                    ? {} : { riskPolicyVersion: input.riskPolicyVersion ?? RISK_POLICY_VERSION }),
                 candidates: input.candidates,
                 narrativeCandidateIds: input.narrativeCandidateIds,
                 narrativeBatchHash: input.narrativeBatchHash,
@@ -990,7 +1002,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
             return Object.freeze({
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,
-                riskPolicyVersion: input.riskPolicyVersion ?? 'risk-policy-v2.4',
+                riskPolicyVersion: input.riskPolicyVersion ?? RISK_POLICY_VERSION,
                 candidates: envelope.payload.candidates,
                 narrativeCandidateIds: envelope.payload.narrativeCandidateIds,
                 narrativeBatchHash: envelope.payload.narrativeBatchHash,

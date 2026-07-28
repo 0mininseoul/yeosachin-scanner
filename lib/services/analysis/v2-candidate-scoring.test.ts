@@ -86,10 +86,45 @@ describe('V2 candidate scoring orchestration', () => {
         });
 
         expect(final.every(row => row.risk.riskBand === 'normal')).toBe(true);
-        expect(final.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(final.filter(row => row.riskBand === 'high_risk')).toHaveLength(2);
         expect(final.filter(row => row.riskBand === 'caution')).toHaveLength(2);
-        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(3);
+        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(4);
         expect(final.filter(row => row.relativeWatchRank !== null)).toHaveLength(2);
+    });
+
+    it('dispatches immutable v2.4 tiers separately from the v2.5 successor', () => {
+        const candidates = Array.from({ length: 4 }, (_, index) => candidate(index + 1, {
+            appearanceGrade: 1,
+            exposureScore: 0,
+        }));
+        const v24Preliminary = calculateV2PreliminaryScores({
+            candidates,
+            orderedMutualUsernames: [],
+            excludedUsername: null,
+            riskPolicyVersion: 'risk-policy-v2.4',
+        });
+        const v25Preliminary = calculateV2PreliminaryScores({
+            candidates,
+            orderedMutualUsernames: [],
+            excludedUsername: null,
+            riskPolicyVersion: 'risk-policy-v2.5',
+        });
+
+        const v24 = calculateV2FinalScores({
+            preliminary: v24Preliminary,
+            observedReverseLikeCandidateIds: new Set(),
+            riskPolicyVersion: 'risk-policy-v2.4',
+        });
+        const v25 = calculateV2FinalScores({
+            preliminary: v25Preliminary,
+            observedReverseLikeCandidateIds: new Set(),
+            riskPolicyVersion: 'risk-policy-v2.5',
+        });
+
+        expect(v24.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(v24.every(row => row.risk.policyVersion === 'risk-policy-v2.4')).toBe(true);
+        expect(v25.filter(row => row.riskBand === 'high_risk')).toHaveLength(2);
+        expect(v25.every(row => row.risk.policyVersion === 'risk-policy-v2.5')).toBe(true);
     });
 
     it('does not apply minimum tiers when only two rows remain partner-cap eligible', () => {

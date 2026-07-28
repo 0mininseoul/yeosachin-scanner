@@ -1,4 +1,10 @@
-export const RISK_POLICY_VERSION = 'risk-policy-v2.4' as const;
+export const RISK_POLICY_V24_VERSION = 'risk-policy-v2.4' as const;
+export const RISK_POLICY_VERSION = 'risk-policy-v2.5' as const;
+export const RISK_POLICY_VERSIONS = [
+    RISK_POLICY_V24_VERSION,
+    RISK_POLICY_VERSION,
+] as const;
+export type RiskPolicyVersion = typeof RISK_POLICY_VERSIONS[number];
 
 export const RISK_BANDS = ['normal', 'caution', 'high_risk'] as const;
 
@@ -98,7 +104,7 @@ export interface RiskPolicyComponents {
 }
 
 export interface RiskPolicyResult {
-    policyVersion: typeof RISK_POLICY_VERSION;
+    policyVersion: RiskPolicyVersion;
     components: Readonly<RiskPolicyComponents>;
     softContextBeforeBusinessAdjustment: Readonly<{
         recentMutual: number;
@@ -264,7 +270,10 @@ export function isRiskBandCompatibleWithDisplayScore(
     return riskBand === 'high_risk';
 }
 
-export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
+export function calculateRiskPolicy(
+    input: RiskPolicyInput,
+    policyVersion: RiskPolicyVersion = RISK_POLICY_VERSION
+): RiskPolicyResult {
     if (input.hasWeakPartnerEvidence && input.hasStrongPartnerEvidence) {
         throw new Error('RISK_POLICY_ERROR: weak and strong partner evidence are mutually exclusive.');
     }
@@ -318,7 +327,7 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
     );
 
     return Object.freeze({
-        policyVersion: RISK_POLICY_VERSION,
+        policyVersion,
         components: Object.freeze({
             candidateToTargetLikes,
             candidateToTargetComments,

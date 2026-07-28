@@ -78,8 +78,9 @@ function calibratedScore(naturalDisplayScore: number, riskBand: RiskBand): numbe
     return roundToOneDecimal(clamp(naturalDisplayScore, minimum, maximum));
 }
 
-export function assignRelativeRiskTiers(
-    candidates: readonly RelativeRiskCandidate[]
+function assignRelativeRiskTiersForVersion(
+    candidates: readonly RelativeRiskCandidate[],
+    version: 'risk-policy-v2.4' | 'risk-policy-v2.5'
 ): RelativeRiskAssignment[] {
     validateCandidates(candidates);
     const eligible = candidates
@@ -109,12 +110,27 @@ export function assignRelativeRiskTiers(
     const naturalCautionOrHighCount = eligible
         .filter(candidate => candidate.naturalRiskBand !== 'normal')
         .length;
-    const requestedHighCount = Math.max(
+    const naturalRequestedHighCount = Math.max(
         1,
         Math.min(3, eligible.length - 2, naturalHighCount)
     );
     const inboundEligible = eligible.filter(candidate => candidate.isInbound);
     const highPool = inboundEligible.length > 0 ? inboundEligible : eligible;
+    const minimumHighCount = version === 'risk-policy-v2.5' && eligible.length >= 4
+        ? (
+            eligible.length >= 5
+            && highPool.length >= 3
+            && highPool[2]!.naturalPublicScore >= RISK_DISPLAY_THRESHOLDS.caution
+                ? 3
+                : 2
+        )
+        : 1;
+    const requestedHighCount = Math.min(
+        3,
+        eligible.length - 2,
+        highPool.length,
+        Math.max(naturalRequestedHighCount, minimumHighCount)
+    );
     const highCount = Math.min(requestedHighCount, highPool.length);
     const highIds = new Set(highPool.slice(0, highCount).map(candidate => candidate.candidateId));
     const remaining = eligible.filter(candidate => !highIds.has(candidate.candidateId));
@@ -141,4 +157,18 @@ export function assignRelativeRiskTiers(
 
     return candidates.map(candidate =>
         assignments.get(candidate.candidateId) ?? excluded.get(candidate.candidateId) ?? naturalAssignment(candidate));
+}
+
+/** Exact predecessor semantics for immutable risk-policy-v2.4 requests. */
+export function assignRelativeRiskTiers(
+    candidates: readonly RelativeRiskCandidate[]
+): RelativeRiskAssignment[] {
+    return assignRelativeRiskTiersForVersion(candidates, 'risk-policy-v2.4');
+}
+
+/** Forward-only v2.5 successor with evidence-aware two/three high-risk floors. */
+export function assignRelativeRiskTiersV25(
+    candidates: readonly RelativeRiskCandidate[]
+): RelativeRiskAssignment[] {
+    return assignRelativeRiskTiersForVersion(candidates, 'risk-policy-v2.5');
 }

@@ -21,6 +21,7 @@ import {
     RISK_POLICY_VERSION,
     isRiskBandCompatibleWithDisplayScore,
     type AccountContext,
+    type RiskPolicyVersion,
 } from '@/lib/domain/analysis/risk-policy';
 import {
     canonicalizeImageProxyUrl,
@@ -331,18 +332,18 @@ export interface AnalysisV2ResultStore {
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointPreliminaryScores(input: AnalysisV2ResultJobClaim & {
         rows: readonly (AnalysisV2PreliminaryScoreRow | AnalysisV2LegacyPreliminaryScoreRow)[];
-        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+        riskPolicyVersion?: 'risk-policy-v2.3' | RiskPolicyVersion;
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointReverseLikes(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2ReverseLikeRow[];
-        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+        riskPolicyVersion?: 'risk-policy-v2.3' | RiskPolicyVersion;
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointPartnerSafety(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2PartnerSafetyRow[];
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointScores(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2CandidateScoreRow[];
-        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+        riskPolicyVersion?: 'risk-policy-v2.3' | RiskPolicyVersion;
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointPrivateNames(input: AnalysisV2ResultJobClaim & {
         batch: number;
@@ -1292,7 +1293,8 @@ export function createSupabaseAnalysisV2ResultStore(
                     : ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointPreliminaryRpc,
                 input,
                 legacyRecovery ? { p_rows: rows } : {
-                    p_rows: rows, p_risk_policy_version: RISK_POLICY_VERSION,
+                    p_rows: rows,
+                    p_risk_policy_version: input.riskPolicyVersion ?? RISK_POLICY_VERSION,
                 }
             );
         },

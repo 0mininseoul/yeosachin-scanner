@@ -3864,9 +3864,9 @@ describe('V2 final score invariants', () => {
             observedReverseLikeCandidateIds: new Set(),
         });
         expect(final.every(row => row.risk.riskBand === 'normal')).toBe(true);
-        expect(final.filter(row => row.riskBand === 'high_risk')).toHaveLength(1);
+        expect(final.filter(row => row.riskBand === 'high_risk')).toHaveLength(2);
         expect(final.filter(row => row.riskBand === 'caution')).toHaveLength(2);
-        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(3);
+        expect(final.filter(row => row.featuredRank !== null)).toHaveLength(4);
         expect(final.filter(row => row.relativeWatchRank !== null)).toHaveLength(2);
     });
 
