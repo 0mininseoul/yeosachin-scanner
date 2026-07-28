@@ -1,3 +1,7 @@
+'use client';
+
+import { useEffect, useRef } from 'react';
+
 interface Review {
   body: string;
   when: string;
@@ -40,18 +44,96 @@ const REVIEWS: Review[] = [
   },
 ];
 
+// Slow enough to read past, fast enough to notice.
+const DRIFT_PX_PER_SECOND = 22;
+
+/* Drifts the strip sideways so the row reads as having more in it, then gets out
+ * of the way the moment the reader takes over.
+ *
+ * Scroll snapping is deliberately absent: the browser re-snaps after every
+ * programmatic nudge, which turns a slow drift into a stutter.
+ */
+function useReviewDrift() {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+
+    let frame = 0;
+    let last = 0;
+    let carry = 0;
+    let stopped = false;
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      cancelAnimationFrame(frame);
+      for (const event of HANDOVER_EVENTS) el.removeEventListener(event, stop);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+
+    function onVisibility() {
+      // Drifting while hidden would dump the accumulated distance on return.
+      last = 0;
+    }
+
+    const tick = (now: number) => {
+      if (document.visibilityState !== 'visible') {
+        last = now;
+        frame = requestAnimationFrame(tick);
+        return;
+      }
+      if (last === 0) last = now;
+      carry += ((now - last) / 1000) * DRIFT_PX_PER_SECOND;
+      last = now;
+
+      const whole = Math.floor(carry);
+      if (whole > 0) {
+        carry -= whole;
+        const limit = el.scrollWidth - el.clientWidth;
+        if (limit <= 0 || el.scrollLeft >= limit - 1) {
+          stop();
+          return;
+        }
+        el.scrollLeft += whole;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+
+    for (const event of HANDOVER_EVENTS) {
+      el.addEventListener(event, stop, { passive: true });
+    }
+    document.addEventListener('visibilitychange', onVisibility);
+    frame = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      for (const event of HANDOVER_EVENTS) el.removeEventListener(event, stop);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
+
+  return ref;
+}
+
+// Any of these means the reader wants control; the drift never resumes after.
+const HANDOVER_EVENTS = ['pointerdown', 'wheel', 'touchstart', 'keydown'] as const;
+
 export function LandingReviews() {
+  const ref = useReviewDrift();
   return (
     <div
-      className="scroll-thin -mx-5 flex snap-x snap-mandatory items-start gap-6 overflow-x-auto px-5 pb-2"
-      style={{ scrollPaddingLeft: '20px' }}
+      ref={ref}
+      className="scroll-thin -mx-5 flex items-start gap-6 overflow-x-auto px-5 pb-2"
     >
       {REVIEWS.map((r) => (
         /* A top rule rather than a box or a left rail: review lengths vary a
            lot, so vertical rails would all end at different heights. */
         <article
           key={r.body}
-          className="flex w-[256px] shrink-0 snap-start flex-col border-t border-line pt-3.5"
+          className="flex w-[256px] shrink-0 flex-col border-t border-line pt-3.5"
         >
           <span className="block text-[12px] font-semibold text-fg-dim">익명</span>
           <p className="mt-3 whitespace-pre-line text-[13px] leading-relaxed text-fg">{r.body}</p>

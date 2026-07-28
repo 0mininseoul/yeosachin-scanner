@@ -347,7 +347,7 @@ export default function LandingPage() {
             </p>
             <div className="mt-7">
               <PrimaryButton onClick={focusInput} size="lg">
-                지금 바로 위장 여사친 찾아내기
+                지금 바로 위장 여사친 확인하기
               </PrimaryButton>
             </div>
           </CaseCard>
