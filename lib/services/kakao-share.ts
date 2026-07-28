@@ -24,7 +24,6 @@ interface KakaoFeedTemplate {
     objectType: 'feed';
     content: {
         title: string;
-        description: string;
         imageUrl: string;
         link: KakaoShareLink;
     };
@@ -71,6 +70,25 @@ function loadKakaoSdk(): Promise<KakaoSdk | null> {
     });
 }
 
+/**
+ * The initialized SDK if it is already sitting in the page, without awaiting.
+ *
+ * Kakao opens a popup, and Safari only allows that inside the task that handled
+ * the tap. Any `await` that crosses a network boundary loses it, so the click
+ * path has to be able to reach the SDK synchronously — call `readyKakao()`
+ * earlier (on intent) so this returns something by the time it matters.
+ */
+export function kakaoSdkIfReady(): KakaoSdk | null {
+    if (typeof window === 'undefined') return null;
+    const sdk = window.Kakao;
+    if (!sdk?.Share) return null;
+    try {
+        return sdk.isInitialized() ? sdk : null;
+    } catch {
+        return null;
+    }
+}
+
 /** Resolves to the initialized SDK, or null when the key is unset or the CDN is unreachable. */
 export async function readyKakao(): Promise<KakaoSdk | null> {
     const key = kakaoJavascriptKey();
@@ -89,8 +107,36 @@ export interface ResultShareContent {
     /** Publicly reachable destination. Never an auth-gated result URL. */
     url: string;
     title: string;
-    description: string;
     imageUrl: string;
+}
+
+/** The feed card. Kakao ignores the page's own OG tags and uses only this. */
+function feedTemplate(content: ResultShareContent): KakaoFeedTemplate {
+    const link = { mobileWebUrl: content.url, webUrl: content.url };
+    return {
+        objectType: 'feed',
+        content: {
+            title: content.title,
+            imageUrl: content.imageUrl,
+            link,
+        },
+        buttons: [{ title: '결과 보기', link }],
+    };
+}
+
+/**
+ * Sends through Kakao in the same task as the tap. Returns false when the SDK is
+ * not ready, leaving the caller to fall back.
+ */
+export function shareToKakaoNow(content: ResultShareContent): boolean {
+    const sdk = kakaoSdkIfReady();
+    if (!sdk?.Share) return false;
+    try {
+        sdk.Share.sendDefault(feedTemplate(content));
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 export type ShareChannel = 'kakao' | 'web_share' | 'clipboard';
@@ -111,18 +157,8 @@ export async function shareResultToKakao(
 ): Promise<ShareChannel | null> {
     const sdk = await readyKakao();
     if (sdk?.Share) {
-        const link = { mobileWebUrl: content.url, webUrl: content.url };
         try {
-            sdk.Share.sendDefault({
-                objectType: 'feed',
-                content: {
-                    title: content.title,
-                    description: content.description,
-                    imageUrl: content.imageUrl,
-                    link,
-                },
-                buttons: [{ title: '나도 판독해보기', link }],
-            });
+            sdk.Share.sendDefault(feedTemplate(content));
             return 'kakao';
         } catch {
             // fall through to the platform share sheet
@@ -133,7 +169,7 @@ export async function shareResultToKakao(
         try {
             await fallbacks.share({
                 title: content.title,
-                text: content.description,
+                text: content.title,
                 url: content.url,
             });
             return 'web_share';

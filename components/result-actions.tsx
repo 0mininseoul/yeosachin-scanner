@@ -27,6 +27,10 @@ const itemCls =
 const INSTAGRAM_DM_APP_URL = 'instagram://direct-inbox';
 const INSTAGRAM_DM_WEB_URL = 'https://www.instagram.com/direct/inbox/';
 
+function isPhone(): boolean {
+  return /iphone|ipad|ipod|android/i.test(navigator.userAgent);
+}
+
 /* Overflow menu for the report's secondary actions.
  *
  * These sit above the headline, where anything with a border and a label wins the
@@ -38,14 +42,18 @@ export function ResultActions({
   kakaoBusy,
   kakaoAvailable,
   copyUrl,
+  onOpen,
 }: {
   onKakaoShare: () => void;
   kakaoBusy: boolean;
   kakaoAvailable: boolean;
   copyUrl: string;
+  /** Fired when the menu opens, so slow work can finish before the tap. */
+  onOpen?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -69,6 +77,24 @@ export function ResultActions({
     };
   }, [open]);
 
+  // The notice has to survive the trip into Instagram and still be there on the
+  // way back, so its countdown only runs while this tab is actually on screen.
+  useEffect(() => {
+    if (!notice) return;
+    let timer = 0;
+    const arm = () => {
+      window.clearTimeout(timer);
+      if (document.visibilityState !== 'visible') return;
+      timer = window.setTimeout(() => setNotice(null), 5000);
+    };
+    arm();
+    document.addEventListener('visibilitychange', arm);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', arm);
+    };
+  }, [notice]);
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(copyUrl);
@@ -89,45 +115,51 @@ export function ResultActions({
      clipboard first and the user pastes it into whichever chat they pick.
      Nothing blocking may sit between the copy and the scheme navigation: iOS
      Safari drops custom-scheme navigations that have drifted too far from the
-     originating gesture, and an alert() in between is enough to lose it. */
+     originating gesture, and an alert() in between is enough to lose it.
+
+     On a phone only the app scheme runs. The old timer-based web fallback fired
+     even when the app had opened, leaving instagram.com sitting in a tab behind
+     the browser; there is no reliable signal that a scheme handoff succeeded, so
+     the platform decides instead of a guess. */
   const shareToInstagramDm = async () => {
+    let copied = false;
     try {
       await navigator.clipboard.writeText(copyUrl);
+      copied = true;
     } catch {
       // Opening the inbox is still useful without the clipboard.
     }
     setOpen(false);
+    // Shown before the handoff so it is still on screen when the reader comes
+    // back from Instagram — otherwise the copy happens with no sign at all.
+    if (copied) setNotice('링크를 복사했어요. DM 입력창에 붙여넣어 주세요.');
 
-    // The app scheme silently does nothing on desktop, so fall back to the web
-    // inbox if we are still here a moment later.
-    const openedAt = Date.now();
-    let onVisibilityChange: (() => void) | null = null;
-    const fallback = window.setTimeout(() => {
-      if (onVisibilityChange) {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-        onVisibilityChange = null;
-      }
-      if (document.visibilityState === 'visible' && Date.now() - openedAt < 2500) {
-        window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
-      }
-    }, 1200);
-    onVisibilityChange = () => {
-      window.clearTimeout(fallback);
-      if (onVisibilityChange) {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-        onVisibilityChange = null;
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    window.location.href = INSTAGRAM_DM_APP_URL;
+    if (isPhone()) {
+      window.location.href = INSTAGRAM_DM_APP_URL;
+      return;
+    }
+    window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
   };
 
   return (
     <div ref={rootRef} className="relative shrink-0">
+      {notice && (
+        <div
+          role="status"
+          className="fixed inset-x-4 bottom-6 z-50 mx-auto max-w-[420px] border border-line-2 bg-ink-2 px-4 py-3 text-center text-[12.5px] font-semibold text-fg shadow-[0_8px_28px_-8px_rgba(0,0,0,0.85)]"
+        >
+          {notice}
+        </div>
+      )}
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => setOpen(value => !value)}
+        onClick={() => {
+          setOpen(value => {
+            if (!value) onOpen?.();
+            return !value;
+          });
+        }}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="판독 결과 공유하기"
