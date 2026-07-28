@@ -45,7 +45,7 @@ type ResolverCohortDiagnostics = {
  * candidate content, model content, or media references.
  */
 export interface ResolverExperimentDiagnostics {
-    triageOutcomes: DiagnosticOutcomeHistogram;
+    triageOutcomes: { ok: number };
     accountContextAdmission: {
         alreadyVerified: number;
         officialOrGroup: number;
@@ -233,7 +233,7 @@ export async function runStrongUncertainResolverExperiment(input: {
         media: ReplayMedia[];
     }> = [];
     const diagnostics: ResolverExperimentDiagnostics = {
-        triageOutcomes: diagnosticOutcomes(),
+        triageOutcomes: { ok: 0 },
         accountContextAdmission: {
             alreadyVerified: 0,
             officialOrGroup: 0,
@@ -267,10 +267,10 @@ export async function runStrongUncertainResolverExperiment(input: {
     );
     for (const { profile, triage } of triageResults) {
         if (input.signal?.aborted) throw input.signal.reason;
-        recordDiagnosticOutcome(diagnostics.triageOutcomes, triage.outcome);
         if (triage.outcome !== 'ok' || !triage.value) {
             throw new Error('ANALYSIS_V2_RESOLVER_EXPERIMENT_TRIAGE_FAILED');
         }
+        diagnostics.triageOutcomes.ok++;
         triaged++;
         const resolverMedia = selectAnalysisV2GenderResolverMedia(
             mediaFor(profile, profile.resolverSelectionIds),

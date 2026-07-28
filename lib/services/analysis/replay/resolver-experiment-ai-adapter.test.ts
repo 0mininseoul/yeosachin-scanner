@@ -368,10 +368,7 @@ describe('dedicated resolver experiment AI adapter', () => {
         });
 
         expect(report.diagnostics).toEqual({
-            triageOutcomes: {
-                ok: 5, rateLimited: 0, retryExhausted: 0,
-                rejected: 0, failed: 0, capacitySkipped: 0,
-            },
+            triageOutcomes: { ok: 5 },
             accountContextAdmission: {
                 alreadyVerified: 1, officialOrGroup: 1, uncertainOrAbsent: 1,
                 insufficientMedia: 1, eligible: 1,
