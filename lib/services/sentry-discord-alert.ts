@@ -22,7 +22,7 @@ interface ClaimedOutboxItem {
     attempts: number;
 }
 
-type FinishOutcome = 'sent' | 'retry' | 'failed';
+type FinishOutcome = 'sent' | 'retry' | 'failed' | 'ambiguous_failed';
 
 export interface SentryAlertForOutbox {
     dedupeKey: string;
@@ -293,32 +293,29 @@ async function sendClaimedItem(
             });
             if (response.ok) return await finish(item, 'sent', null);
 
-            const transient = response.status === 429 || response.status >= 500;
-            const retryAfter = response.status === 429 ? await discordRetryAfter(response) : null;
+            const retryable = response.status === 429;
+            const ambiguous = response.status >= 500;
+            const retryAfter = retryable ? await discordRetryAfter(response) : null;
             const immediateDelay = retryAfter === null ? 1_000 : Math.max(1_000, Math.ceil(retryAfter * 1_000));
-            if (transient && oneImmediateRetryRemaining && immediateDelay <= IMMEDIATE_RETRY_MAX_DELAY_MS) {
+            if (retryable && oneImmediateRetryRemaining && immediateDelay <= IMMEDIATE_RETRY_MAX_DELAY_MS) {
                 oneImmediateRetryRemaining = false;
                 await boundedWait(immediateDelay);
                 continue;
             }
-            if (transient && item.attempts < MAX_DELIVERY_ATTEMPTS) {
-                return await finish(item, 'retry', response.status === 429 ? 'DISCORD_RATE_LIMITED' : 'DISCORD_5XX', retryDelay(item.attempts, retryAfter));
+            if (retryable && item.attempts < MAX_DELIVERY_ATTEMPTS) {
+                return await finish(item, 'retry', 'DISCORD_RATE_LIMITED', retryDelay(item.attempts, retryAfter));
             }
-            await finish(item, 'failed', transient ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
-            operationalFailure(transient ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
+            if (ambiguous) {
+                await finish(item, 'ambiguous_failed', 'DISCORD_5XX_AMBIGUOUS');
+                operationalFailure('DISCORD_5XX_AMBIGUOUS');
+                return;
+            }
+            await finish(item, 'failed', retryable ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
+            operationalFailure(retryable ? 'DISCORD_RETRY_EXHAUSTED' : 'DISCORD_REJECTED');
             return;
         } catch {
-            if (oneImmediateRetryRemaining) {
-                oneImmediateRetryRemaining = false;
-                await boundedWait(1_000);
-                continue;
-            }
-            if (item.attempts < MAX_DELIVERY_ATTEMPTS) {
-                await finish(item, 'retry', 'DISCORD_TIMEOUT_OR_NETWORK', retryDelay(item.attempts, null));
-            } else {
-                await finish(item, 'failed', 'DISCORD_RETRY_EXHAUSTED');
-                operationalFailure('DISCORD_RETRY_EXHAUSTED');
-            }
+            await finish(item, 'ambiguous_failed', 'DISCORD_TIMEOUT_OR_NETWORK_AMBIGUOUS');
+            operationalFailure('DISCORD_TIMEOUT_OR_NETWORK_AMBIGUOUS');
             return;
         } finally {
             clearTimeout(timeout);
@@ -367,7 +364,7 @@ export async function deliverSentryDiscordAlerts(options: {
     return claimed.length;
 }
 
-/** One bounded 1-2 second retry fits a Free-plan request; longer backoff stays durable. */
+/** One bounded 1-2 second explicit-rate-limit retry fits a Free-plan request. */
 export async function dispatchSentryDiscordAlertImmediately(dedupeKey: string): Promise<number> {
     return deliverSentryDiscordAlerts({ limit: 1, dedupeKey, immediateRetry: true });
 }

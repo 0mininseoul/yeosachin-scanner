@@ -134,7 +134,7 @@ AS $$
 DECLARE
     v_attempts integer;
 BEGIN
-    IF p_outcome NOT IN ('sent', 'retry', 'failed') THEN
+    IF p_outcome NOT IN ('sent', 'retry', 'failed', 'ambiguous_failed') THEN
         RAISE EXCEPTION 'SENTRY_DISCORD_OUTBOX_INVALID_OUTCOME';
     END IF;
 
@@ -151,6 +151,7 @@ BEGIN
     SET status = CASE
             WHEN p_outcome = 'sent' THEN 'sent'
             WHEN p_outcome = 'retry' AND v_attempts < 3 THEN 'pending'
+            WHEN p_outcome = 'ambiguous_failed' THEN 'ambiguous_failed'
             ELSE 'failed'
         END,
         next_attempt_at = CASE

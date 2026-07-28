@@ -131,39 +131,49 @@ describe('Sentry Service Hook Discord bridge', () => {
         });
     });
 
-    it.each([
-        ['429', () => Promise.resolve(new Response(JSON.stringify({ retry_after: 2 }), { status: 429 })), 'DISCORD_RATE_LIMITED'],
-        ['5xx', () => Promise.resolve(new Response(null, { status: 503 })), 'DISCORD_5XX'],
-        ['timeout', () => Promise.reject(new Error('timeout')), 'DISCORD_TIMEOUT_OR_NETWORK'],
-    ])('records and retries a transient Discord %s without throwing to the hook caller', async (_kind, response, code) => {
+    it('records an explicit Discord 429 as the only durable retryable outcome', async () => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
             .mockResolvedValueOnce({ data: true, error: null })
             .mockResolvedValueOnce({ error: null });
-        const fetcher = vi.fn().mockImplementation(response);
+        const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ retry_after: 2 }), { status: 429 }));
         await expect(deliverSentryDiscordAlerts({ fetcher })).resolves.toBe(1);
         expect(mocks.rpc).toHaveBeenCalledWith('complete_sentry_discord_alert_outbox', expect.objectContaining({
-            p_outcome: 'retry', p_failure_code: code,
+            p_outcome: 'retry', p_failure_code: 'DISCORD_RATE_LIMITED',
         }));
     });
 
-    it.each([
-        ['429', () => Promise.resolve(new Response(JSON.stringify({ retry_after: 1 }), { status: 429 }))],
-        ['5xx', () => Promise.resolve(new Response(null, { status: 503 }))],
-        ['timeout', () => Promise.reject(new Error('timeout'))],
-    ])('performs one bounded immediate %s retry before preserving later durable retry state', async (_kind, firstAttempt) => {
+    it('performs one bounded immediate retry only for an explicit Discord 429', async () => {
         mocks.rpc
             .mockResolvedValueOnce({ data: [ITEM], error: null })
             .mockResolvedValueOnce({ data: true, error: null })
             .mockResolvedValueOnce({ error: null });
         const fetcher = vi.fn()
-            .mockImplementationOnce(firstAttempt)
+            .mockResolvedValueOnce(new Response(JSON.stringify({ retry_after: 1 }), { status: 429 }))
             .mockResolvedValueOnce(new Response(null, { status: 204 }));
         await expect(deliverSentryDiscordAlerts({ fetcher, immediateRetry: true })).resolves.toBe(1);
         expect(fetcher).toHaveBeenCalledTimes(2);
         expect(mocks.rpc).toHaveBeenCalledWith('complete_sentry_discord_alert_outbox', expect.objectContaining({
             p_outcome: 'sent', p_failure_code: null,
         }));
+    });
+
+    it.each([
+        ['5xx', () => Promise.resolve(new Response(null, { status: 503 })), 'DISCORD_5XX_AMBIGUOUS'],
+        ['timeout', () => Promise.reject(new Error('timeout')), 'DISCORD_TIMEOUT_OR_NETWORK_AMBIGUOUS'],
+    ])('terminalizes ambiguous Discord %s without a later retry', async (_kind, result, code) => {
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ data: true, error: null })
+            .mockResolvedValueOnce({ error: null });
+        const fetcher = vi.fn().mockImplementation(result);
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        await expect(deliverSentryDiscordAlerts({ fetcher, immediateRetry: true })).resolves.toBe(1);
+        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(mocks.rpc).toHaveBeenCalledWith('complete_sentry_discord_alert_outbox', expect.objectContaining({
+            p_outcome: 'ambiguous_failed', p_failure_code: code,
+        }));
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('timeout');
     });
 
     it('keeps raw payloads, Discord credentials, and response details out of logs', async () => {
