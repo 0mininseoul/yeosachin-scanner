@@ -111,6 +111,66 @@ async function compareAndSetShareEnabled(
     return readEnabledWinner(requestId, userId, pipelineVersion);
 }
 
+async function readDisabledWinner(
+    requestId: string,
+    userId: string,
+    pipelineVersion: 'v1' | 'v2' | null
+) {
+    return supabaseAdmin
+        .from('analysis_requests')
+        .select(SHARE_REQUEST_SELECT)
+        .eq('id', requestId)
+        .eq('user_id', userId)
+        .eq('status', 'completed')
+        .eq('share_enabled', false)
+        .is('share_token', null)
+        .or(pipelineFilter(pipelineVersion))
+        .maybeSingle();
+}
+
+async function compareAndSetShareDisabled(
+    requestId: string,
+    userId: string,
+    expectedToken: string | null,
+    expectedEnabled: boolean | null,
+    pipelineVersion: 'v1' | 'v2' | null
+) {
+    const baseMutation = supabaseAdmin
+        .from('analysis_requests')
+        .update({
+            share_enabled: false,
+            share_token: null,
+        })
+        .eq('id', requestId)
+        .eq('user_id', userId)
+        .eq('status', 'completed')
+        .or(pipelineFilter(pipelineVersion));
+    const enabledMutation = expectedEnabled === null
+        ? baseMutation.is('share_enabled', null)
+        : baseMutation.eq('share_enabled', expectedEnabled);
+    const tokenMutation = expectedToken === null
+        ? enabledMutation.is('share_token', null)
+        : enabledMutation.eq('share_token', expectedToken);
+    const mutation = await tokenMutation
+        .select(SHARE_REQUEST_SELECT)
+        .maybeSingle();
+
+    if (mutation.error) return { data: null, error: mutation.error };
+    if (
+        mutation.data
+        && mutation.data.pipeline_version === pipelineVersion
+        && mutation.data.status === 'completed'
+        && mutation.data.share_enabled === false
+        && mutation.data.share_token === null
+    ) {
+        return { data: mutation.data as ShareRequestRecord, error: null };
+    }
+
+    // Another revoke may have committed first. Treat the already-disabled
+    // owner row as the winner, while keeping the old public token unusable.
+    return readDisabledWinner(requestId, userId, pipelineVersion);
+}
+
 export async function POST(request: Request) {
     let demoRecognized = false;
     try {
@@ -231,16 +291,18 @@ export async function POST(request: Request) {
             `/share/${shareToken}`,
             appOriginForRequest(request.url)
         ).toString();
-        const ogImageUrl = new URL(
-            `/api/share/${shareToken}/opengraph-image`,
-            appOriginForRequest(request.url)
-        ).toString();
-
         return NextResponse.json({
             success: true,
             shareToken,
             shareUrl,
-            ogImageUrl,
+            ...(analysisRequest.pipeline_version === 'v2'
+                ? {
+                    ogImageUrl: new URL(
+                        `/api/share/${shareToken}/opengraph-image`,
+                        appOriginForRequest(request.url)
+                    ).toString(),
+                }
+                : {}),
         }, {
             headers: {
                 'Cache-Control': 'private, no-store, max-age=0',
@@ -249,6 +311,129 @@ export async function POST(request: Request) {
         });
     } catch {
         console.error('Share enable error');
+        return NextResponse.json(
+            { error: '서버 오류가 발생했습니다.' },
+            demoRecognized
+                ? { status: 500, headers: demoResponseHeaders() }
+                : { status: 500 }
+        );
+    }
+}
+
+export async function DELETE(request: Request) {
+    let demoRecognized = false;
+    try {
+        const { requestId } = await request.json();
+        if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) {
+            return NextResponse.json(
+                { error: 'requestId가 필요합니다.' },
+                { status: 400 }
+            );
+        }
+
+        const supabase = await createClient();
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError || !user) {
+            return NextResponse.json(
+                { error: '로그인이 필요합니다.' },
+                { status: 401 }
+            );
+        }
+
+        const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
+        if (demo) {
+            demoRecognized = true;
+            return demo.user_id === user.id && isDemoOperator(user.id)
+                ? NextResponse.json(
+                    { error: '이 판독 결과는 공유할 수 없습니다.' },
+                    { status: 409, headers: demoResponseHeaders() }
+                )
+                : NextResponse.json(
+                    { error: '분석 요청을 찾을 수 없습니다.' },
+                    { status: 404, headers: demoResponseHeaders() }
+                );
+        }
+
+        const { data: analysisRequest, error: requestError } = await supabaseAdmin
+            .from('analysis_requests')
+            .select(SHARE_REQUEST_SELECT)
+            .eq('id', requestId)
+            .eq('user_id', user.id)
+            .single();
+        if (requestError || !analysisRequest) {
+            return NextResponse.json(
+                { error: '분석 요청을 찾을 수 없습니다.' },
+                { status: 404 }
+            );
+        }
+        if (analysisRequest.user_id !== user.id) {
+            return NextResponse.json(
+                { error: '권한이 없습니다.' },
+                { status: 403 }
+            );
+        }
+        if (!isSupportedSharePipeline(analysisRequest.pipeline_version)) {
+            return unsupportedPipelineResponse(analysisRequest.pipeline_version);
+        }
+        if (analysisRequest.status !== 'completed') {
+            return NextResponse.json(
+                { error: '분석이 완료된 후에 공유를 해제할 수 있습니다.' },
+                { status: 400 }
+            );
+        }
+        if (
+            analysisRequest.share_token !== null
+            && typeof analysisRequest.share_token !== 'string'
+        ) {
+            return NextResponse.json(
+                {
+                    code: 'SHARE_STATE_CHANGED',
+                    error: '공유 상태가 변경되었습니다. 다시 시도해 주세요.',
+                },
+                { status: 409 }
+            );
+        }
+
+        const expectedEnabled = analysisRequest.share_enabled === true
+            ? true
+            : analysisRequest.share_enabled === false
+                ? false
+                : null;
+        const mutation = await compareAndSetShareDisabled(
+            requestId,
+            user.id,
+            analysisRequest.share_token,
+            expectedEnabled,
+            analysisRequest.pipeline_version
+        );
+        if (mutation.error) {
+            console.error('Share revoke compare-and-set failed');
+            return NextResponse.json(
+                { error: '공유 해제에 실패했습니다.' },
+                { status: 500 }
+            );
+        }
+        if (!mutation.data) {
+            return NextResponse.json(
+                {
+                    code: 'SHARE_STATE_CHANGED',
+                    error: '공유 상태가 변경되었습니다. 다시 시도해 주세요.',
+                },
+                { status: 409 }
+            );
+        }
+
+        return NextResponse.json(
+            { success: true },
+            {
+                headers: {
+                    'Cache-Control': 'private, no-store, max-age=0',
+                    Vary: 'Cookie',
+                },
+            }
+        );
+    } catch {
+        console.error('Share revoke error');
         return NextResponse.json(
             { error: '서버 오류가 발생했습니다.' },
             demoRecognized

@@ -234,7 +234,11 @@ describe('V2 share isolation', () => {
             }));
 
             expect(response.status).toBe(200);
-            await expect(response.json()).resolves.toMatchObject({ success: true, shareToken: token });
+            await expect(response.json()).resolves.toEqual({
+                success: true,
+                shareToken: token,
+                shareUrl: `https://yeosachin.com/share/${token}`,
+            });
             expect(request.update).not.toHaveBeenCalled();
         }
     );
