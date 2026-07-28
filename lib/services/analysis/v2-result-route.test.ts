@@ -274,6 +274,7 @@ describe('analysis V2 owner result route', () => {
             schemaVersion: 1,
             requestId,
         });
+        expect(mocks.operationalEmit).not.toHaveBeenCalled();
     });
 
     it('records the initial completed-result view with the owner and analysis join keys', async () => {

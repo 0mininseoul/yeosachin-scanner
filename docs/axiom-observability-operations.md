@@ -110,13 +110,13 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `env
 
 1. `preflight_id`: 사전 점검 요청, 완료/차단, 제외 결정, 결제·대기 신청의 기본 키
 2. `order_id`: checkout 생성과 Groble webhook 최종화의 연결 키
-3. `analysis_request_id`: 분석 접수, 워커 실행, 결과 최초 열람의 기본 키
+3. `analysis_request_id`: 분석 접수, 워커 실행, 결과 페이지 열람의 기본 키
 4. `job_key`: 한 분석 요청 안의 큐·워커 단계 키
 5. `request_id`: 하나의 HTTP 요청과 Vercel 런타임 로그를 연결하는 단기 진단 키
 
 `preflight_id`와 `analysis_request_id`는 `analysis_v2.request_queued`에 함께 기록된다. 결제 webhook은 `order_id`로 checkout 생성 이벤트와 연결한다. 따라서 결제 webhook만으로 user 또는 preflight를 역조회하려 하지 않는다.
 
-사전 점검부터 결과 최초 열람까지의 전환을 확인하는 기본 조회 예시는 다음과 같다. 실제 UUID 값은 운영 티켓·로그 출력에 복사하지 않고 Axiom UI의 안전한 필터 입력으로만 사용한다.
+사전 점검부터 결과 페이지 열람까지의 전환을 확인하는 기본 조회 예시는 다음과 같다. 실제 UUID 값은 운영 티켓·로그 출력에 복사하지 않고 Axiom UI의 안전한 필터 입력으로만 사용한다.
 
 ```apl
 ['yeosachin-logs']
@@ -133,7 +133,7 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `env
 | order by _time asc
 ```
 
-결과 페이지의 다음 페이지·새로고침과 진행 화면의 폴링은 lifecycle 이벤트로 기록하지 않는다. `analysis_v2.result_viewed`는 커서 없는 최초 결과 응답만 기록한다. 이는 실제 결과 도달을 확인하면서 폴링량이 여정을 왜곡하지 않도록 하기 위함이다.
+결과 페이지의 다음 페이지와 진행 화면의 폴링은 lifecycle 이벤트로 기록하지 않는다. `analysis_v2.result_viewed`는 커서 없는 결과 페이지 응답을 기록하므로 새로고침·재열람은 별도 실제 열람으로 남을 수 있다. 고유 전환율은 Amplitude의 제품 퍼널을 기준으로 보고, Axiom에서는 결과 도달·재열람의 운영 신호로만 사용한다.
 
 Vercel에서 같은 시점의 상세 요청을 볼 때는 Axiom 이벤트의 `request_id`와 route를 사용한다. Axiom은 상태 전환의 권위 있는 보관소이고, Vercel은 짧은 실시간 조사 창이다. 어느 쪽도 Amplitude의 브라우저 UX 퍼널을 대체하지 않는다.
 
