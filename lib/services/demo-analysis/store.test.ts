@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn() }));
+const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn(), loadPublished: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.rpc, from: mocks.from } }));
+vi.mock('./fixture-store', () => ({ loadPublishedDemoFixture: mocks.loadPublished }));
 
 import { demoAnalysisStore, isCurrentDemoFixtureRun } from './store';
 import { DEMO_FIXTURE_VERSION, REDACTED_DEMO_FIXTURE_VERSION } from './demo-analysis';
@@ -20,7 +21,10 @@ function row(id = runId, userId = ownerId, startedAt: string | null = null, fixt
 }
 
 describe('demo analysis store idempotency and ownership boundary', () => {
-    beforeEach(() => vi.clearAllMocks());
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mocks.loadPublished.mockResolvedValue({ version: 'operator-editable-fixture-v1', payload: { target: {}, summary: {}, public: [], private: [] } });
+    });
 
     it('preserves a replayed run and start timestamp while a fresh key receives a new run', async () => {
         mocks.rpc
@@ -74,5 +78,11 @@ describe('demo analysis store idempotency and ownership boundary', () => {
         mocks.rpc.mockResolvedValue({ data: [{ ...row(runId, otherOwnerId), created: true }], error: null });
         await expect(demoAnalysisStore.createOrReplay({ userId: ownerId, idempotencyKey: 'demo-idempotency-key-000000' })).resolves.toBeNull();
         await expect(demoAnalysisStore.startForOwner(runId, ownerId)).resolves.toBeNull();
+    });
+
+    it('creates no run when no validated published database fixture exists', async () => {
+        mocks.loadPublished.mockResolvedValue(null);
+        await expect(demoAnalysisStore.createOrReplay({ userId: ownerId, idempotencyKey: 'demo-idempotency-key-000000' })).resolves.toBeNull();
+        expect(mocks.rpc).not.toHaveBeenCalled();
     });
 });

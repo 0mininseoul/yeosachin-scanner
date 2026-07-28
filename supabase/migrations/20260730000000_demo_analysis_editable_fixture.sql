@@ -24,6 +24,9 @@ SET search_path = '' AS $$
 DECLARE
     duplicate_count INTEGER;
 BEGIN
+    IF TG_OP = 'INSERT' AND NEW.status = 'published' THEN
+        RAISE EXCEPTION 'draft fixtures require the controlled publish procedure';
+    END IF;
     IF jsonb_typeof(NEW.payload) <> 'object'
        OR NOT (NEW.payload ? 'target' AND NEW.payload ? 'summary' AND NEW.payload ? 'public' AND NEW.payload ? 'private')
        OR jsonb_typeof(NEW.payload->'target') <> 'object'
@@ -72,8 +75,8 @@ BEGIN
         RAISE EXCEPTION 'demo fixture account contract failed';
     END IF;
 
-    -- The database contract is intentionally at least as narrow as the DTO
-    -- loader: dashboard edits must never create a run that runtime rejects.
+    -- These are fundamental structural guards only. The shared server DTO
+    -- schema is the publication and admission authority for nuanced policy.
     IF jsonb_typeof(NEW.payload->'target'->'fullName') NOT IN ('string', 'null')
        OR jsonb_typeof(NEW.payload->'target'->'bio') NOT IN ('string', 'null')
        OR jsonb_typeof(NEW.payload->'target'->'profileImage') <> 'string'
@@ -224,18 +227,57 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 SET search_path = '' AS $$
 BEGIN
-    IF OLD.status = 'published'
+    IF current_setting('app.demo_fixture_publish', TRUE) = '1'
        AND TG_OP = 'UPDATE'
+       AND OLD.status = 'draft'
+       AND NEW.status = 'published'
+       AND NEW.version IS NOT DISTINCT FROM OLD.version
+       AND NEW.payload IS NOT DISTINCT FROM OLD.payload
+       AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
+        RETURN NEW;
+    END IF;
+    IF current_setting('app.demo_fixture_publish', TRUE) = '1'
+       AND TG_OP = 'UPDATE'
+       AND OLD.status = 'published'
        AND NEW.status = 'retired'
        AND NEW.version IS NOT DISTINCT FROM OLD.version
        AND NEW.payload IS NOT DISTINCT FROM OLD.payload
        AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
         RETURN NEW;
     END IF;
+    IF OLD.status = 'draft' AND TG_OP = 'UPDATE' AND NEW.status = 'published' THEN
+        RAISE EXCEPTION 'draft fixtures require the controlled publish procedure';
+    END IF;
     IF OLD.status IN ('published', 'retired') THEN
         RAISE EXCEPTION 'published and retired demo fixtures are immutable';
     END IF;
     RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.publish_demo_analysis_fixture(
+    p_version TEXT,
+    p_expected_payload JSONB
+) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_payload JSONB;
+BEGIN
+    SELECT fixture.payload INTO v_payload
+    FROM public.demo_analysis_fixtures AS fixture
+    WHERE fixture.version = p_version AND fixture.status = 'draft'
+    FOR UPDATE;
+    IF v_payload IS NULL OR v_payload IS DISTINCT FROM p_expected_payload THEN
+        RAISE EXCEPTION 'demo fixture draft changed or is unavailable';
+    END IF;
+    PERFORM set_config('app.demo_fixture_publish', '1', TRUE);
+    UPDATE public.demo_analysis_fixtures AS fixture
+    SET status = 'retired'
+    WHERE fixture.status = 'published';
+    UPDATE public.demo_analysis_fixtures AS fixture
+    SET status = 'published'
+    WHERE fixture.version = p_version AND fixture.status = 'draft' AND fixture.payload = p_expected_payload;
+    IF NOT FOUND THEN RAISE EXCEPTION 'demo fixture draft changed during publish'; END IF;
 END;
 $$;
 
@@ -259,7 +301,9 @@ CREATE OR REPLACE FUNCTION public.create_demo_analysis_preflight(
     p_user_id UUID,
     p_target_instagram_id TEXT,
     p_idempotency_key TEXT,
-    p_duration_seconds INTEGER
+    p_duration_seconds INTEGER,
+    p_fixture_version TEXT,
+    p_fixture_payload JSONB
 ) RETURNS TABLE (
     id UUID, user_id UUID, target_instagram_id TEXT, fixture_version TEXT,
     idempotency_key TEXT, duration_seconds INTEGER, created_at TIMESTAMP WITH TIME ZONE,
@@ -287,6 +331,8 @@ BEGIN
     SELECT fixture.version INTO v_fixture_version
     FROM public.demo_analysis_fixtures AS fixture
     WHERE fixture.status = 'published'
+      AND fixture.version = p_fixture_version
+      AND fixture.payload = p_fixture_payload
     FOR SHARE;
     IF v_fixture_version IS NULL THEN RETURN; END IF;
 
@@ -300,5 +346,7 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.create_demo_analysis_preflight(UUID, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.create_demo_analysis_preflight(UUID, TEXT, TEXT, INTEGER) TO service_role;
+REVOKE ALL ON FUNCTION public.create_demo_analysis_preflight(UUID, TEXT, TEXT, INTEGER, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_demo_analysis_preflight(UUID, TEXT, TEXT, INTEGER, TEXT, JSONB) TO service_role;
+REVOKE ALL ON FUNCTION public.publish_demo_analysis_fixture(TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.publish_demo_analysis_fixture(TEXT, JSONB) TO service_role;

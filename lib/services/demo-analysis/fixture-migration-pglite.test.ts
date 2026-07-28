@@ -42,25 +42,28 @@ afterAll(async () => db.close());
 
 describe('editable demo fixture lifecycle migration', () => {
     it('allows only the published to retired status transition and preserves the payload', async () => {
-        await db.exec(`INSERT INTO public.demo_analysis_fixtures (version, status, payload) VALUES ('operator-editable-fixture-v1', 'published', '${payload()}'::jsonb);`);
-        await db.exec(`UPDATE public.demo_analysis_fixtures SET status = 'retired' WHERE version = 'operator-editable-fixture-v1';`);
+        await db.exec(`INSERT INTO public.demo_analysis_fixtures (version, status, payload) VALUES ('operator-editable-fixture-v1', 'draft', '${payload()}'::jsonb);`);
+        await db.exec(`SELECT public.publish_demo_analysis_fixture('operator-editable-fixture-v1', '${payload()}'::jsonb);`);
         await expect(db.exec(`UPDATE public.demo_analysis_fixtures SET payload = payload WHERE version = 'operator-editable-fixture-v1';`)).rejects.toThrow(/immutable/i);
         await expect(db.exec(`DELETE FROM public.demo_analysis_fixtures WHERE version = 'operator-editable-fixture-v1';`)).rejects.toThrow(/immutable/i);
-        await db.exec(`INSERT INTO public.demo_analysis_fixtures (version, status, payload) VALUES ('operator-editable-fixture-v2', 'published', '${payload()}'::jsonb);`);
+        await db.exec(`INSERT INTO public.demo_analysis_fixtures (version, status, payload) VALUES ('operator-editable-fixture-v2', 'draft', '${payload()}'::jsonb);`);
+        await db.exec(`SELECT public.publish_demo_analysis_fixture('operator-editable-fixture-v2', '${payload()}'::jsonb);`);
         await expect(db.exec(`INSERT INTO public.demo_analysis_fixtures (version, status, payload) VALUES ('operator-editable-fixture-v3', 'published', '${payload()}'::jsonb);`)).rejects.toThrow();
     });
 
-    it('persists the exact published version and fails closed after the fixture is retired', async () => {
+    it('persists the exact published version on idempotent replay', async () => {
         const userId = '123e4567-e89b-42d3-a456-426614174000';
         const run = await db.query<{ fixture_version: string }>(`
             SELECT fixture_version FROM public.create_demo_analysis_preflight(
-                '${userId}', 'junho_dem', 'database-fixture-preflight-key-000000', 38
+                '${userId}', 'junho_dem', 'database-fixture-preflight-key-000000', 38,
+                'operator-editable-fixture-v2', '${payload()}'::jsonb
             )
         `);
         expect(run.rows).toEqual([{ fixture_version: 'operator-editable-fixture-v2' }]);
         const replay = await db.query<{ fixture_version: string }>(`
             SELECT fixture_version FROM public.create_demo_analysis_preflight(
-                '${userId}', 'junho_dem', 'database-fixture-preflight-key-000000', 38
+                '${userId}', 'junho_dem', 'database-fixture-preflight-key-000000', 38,
+                'operator-editable-fixture-v2', '${payload()}'::jsonb
             )
         `);
         expect(replay.rows).toEqual([{ fixture_version: 'operator-editable-fixture-v2' }]);
@@ -68,13 +71,6 @@ describe('editable demo fixture lifecycle migration', () => {
             INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
             VALUES ('${userId}', 'junho_dem', 'synthetic-fixture-v1', 'standard', 'reserved-static-duration-key', 38)
         `)).rejects.toThrow();
-        await db.exec(`UPDATE public.demo_analysis_fixtures SET status = 'retired' WHERE version = 'operator-editable-fixture-v2';`);
-        const unavailable = await db.query(`
-            SELECT * FROM public.create_demo_analysis_preflight(
-                '${userId}', 'junho_dem', 'no-published-fixture-key-0000000000', 38
-            )
-        `);
-        expect(unavailable.rows).toEqual([]);
     });
 
     it('reserves static fixture names and rejects a SQL-shape-valid invalid risk payload', async () => {
@@ -96,5 +92,28 @@ describe('editable demo fixture lifecycle migration', () => {
             INSERT INTO public.demo_analysis_fixtures (version, status, payload)
             VALUES ('operator-editable-fixture-external-text', 'draft', '${JSON.stringify(externalText).replace(/'/g, "''")}'::jsonb)
         `)).rejects.toThrow();
+    });
+
+    it('rejects a normal direct draft-to-published update', async () => {
+        await db.exec(`
+            INSERT INTO public.demo_analysis_fixtures (version, status, payload)
+            VALUES ('operator-editable-fixture-direct', 'draft', '${runtimePayload()}'::jsonb)
+        `);
+        await expect(db.exec(`
+            UPDATE public.demo_analysis_fixtures SET status = 'published'
+            WHERE version = 'operator-editable-fixture-direct'
+        `)).rejects.toThrow(/controlled publish/i);
+    });
+
+    it('fails closed when the controlled publisher receives a stale draft payload', async () => {
+        await db.exec(`
+            INSERT INTO public.demo_analysis_fixtures (version, status, payload)
+            VALUES ('operator-editable-fixture-race', 'draft', '${runtimePayload()}'::jsonb)
+        `);
+        await expect(db.exec(`
+            SELECT public.publish_demo_analysis_fixture(
+                'operator-editable-fixture-race', '{"target":"changed"}'::jsonb
+            )
+        `)).rejects.toThrow(/changed or is unavailable/i);
     });
 });

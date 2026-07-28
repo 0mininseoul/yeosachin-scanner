@@ -25,7 +25,8 @@
     "replay:analysis-v2": "tsx --conditions=react-server --env-file=.env.local scripts/replay-analysis-v2.ts",
     "replay:resolver-experiment": "tsx --conditions=react-server --env-file=.env.local scripts/replay-resolver-experiment.ts",
     "benchmark:analysis-v2-scheduler": "tsx scripts/benchmark-analysis-v2-scheduler.ts",
-    "bootstrap:demo-fixture": "tsx --conditions=react-server --env-file=.env.local scripts/bootstrap-demo-editable-fixture.ts"
+    "bootstrap:demo-fixture": "tsx --conditions=react-server --env-file=.env.local scripts/bootstrap-demo-editable-fixture.ts",
+    "publish:demo-fixture": "tsx --conditions=react-server --env-file=.env.local scripts/publish-demo-editable-fixture.ts"
   },
   "dependencies": {
     "@amplitude/unified": "1.1.25",

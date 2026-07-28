@@ -59,6 +59,7 @@ export type DatabaseDemoFixture = Readonly<{
     version: string;
     target: z.infer<typeof targetSchema>;
     fixture: DemoFixture;
+    payload?: z.infer<typeof demoFixturePayloadSchema>;
 }>;
 
 const staticVersions = new Set<string>([
@@ -102,5 +103,19 @@ export async function loadDemoFixtureForVersion(version: string): Promise<Databa
         version,
         target: parsed.data.target,
         fixture: { version, summary: parsed.data.summary, publicAccounts: parsed.data.public, privateAccounts: parsed.data.private },
+        payload: parsed.data,
     };
+}
+
+export async function loadPublishedDemoFixture(): Promise<DatabaseDemoFixture | null> {
+    const { data, error } = await supabaseAdmin.from('demo_analysis_fixtures')
+        .select('version, status, payload').eq('status', 'published').maybeSingle();
+    if (error || !data || typeof data !== 'object') return null;
+    const row = data as { version?: unknown; status?: unknown; payload?: unknown };
+    if (typeof row.version !== 'string' || row.status !== 'published') return null;
+    const parsed = demoFixturePayloadSchema.safeParse(row.payload);
+    return parsed.success ? {
+        version: row.version, target: parsed.data.target,
+        fixture: { version: row.version, summary: parsed.data.summary, publicAccounts: parsed.data.public, privateAccounts: parsed.data.private }, payload: parsed.data,
+    } : null;
 }

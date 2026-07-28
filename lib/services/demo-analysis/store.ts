@@ -9,6 +9,7 @@ import {
     DEMO_TARGET_USERNAME,
     demoDurationSeconds,
 } from './demo-analysis';
+import { loadPublishedDemoFixture } from './fixture-store';
 
 const uuid = z.string().uuid();
 const rowFields = {
@@ -58,11 +59,15 @@ export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({
 
 export const demoAnalysisStore = {
     async createOrReplay(input: { userId: string; idempotencyKey: string }): Promise<{ run: DemoAnalysisRun; created: boolean } | null> {
+        const fixture = await loadPublishedDemoFixture();
+        if (!fixture?.payload) return null;
         const { data, error } = await supabaseAdmin.rpc(DEMO_ANALYSIS_DATABASE_NAMES.createRpc, {
             p_user_id: input.userId,
             p_target_instagram_id: DEMO_TARGET_USERNAME,
             p_idempotency_key: demoFixtureIdempotencyKey(input.idempotencyKey),
             p_duration_seconds: demoDurationSeconds(),
+            p_fixture_version: fixture.version,
+            p_fixture_payload: fixture.payload,
         });
         if (error || !Array.isArray(data) || data.length !== 1) return null;
         const entry = data[0] as Record<string, unknown>;
