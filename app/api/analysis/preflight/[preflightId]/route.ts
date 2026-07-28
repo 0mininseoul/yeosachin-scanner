@@ -24,6 +24,7 @@ import { operationalLogger } from '@/lib/observability/server';
 import { insertLandingLead } from '@/lib/services/leads/store';
 import { demoPreflightLifecycle, demoReadyPreflight, demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -140,8 +141,12 @@ async function handleGET(
             if (lifecycle === 'expired') {
                 return suppressOperationalObservation(demoErrorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.'));
             }
+            const fixture = await loadDemoFixtureForVersion(demo.fixture_version);
+            if (!fixture) {
+                return suppressOperationalObservation(demoErrorResponse(503, 'DEMO_UNAVAILABLE', '데모 분석을 일시적으로 사용할 수 없습니다.'));
+            }
             return suppressOperationalObservation(NextResponse.json(
-                demoReadyPreflight(demo, demo.fixture_version),
+                demoReadyPreflight(demo, demo.fixture_version, fixture.target),
                 { headers: demoResponseHeaders() }
             ));
         }

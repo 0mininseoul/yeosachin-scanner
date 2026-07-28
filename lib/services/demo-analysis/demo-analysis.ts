@@ -132,12 +132,12 @@ function v3Avatar(kind: 'target' | 'female' | 'private', sortOrdinal: number): s
     return `${DEMO_V3_ASSET_PREFIX}${kind}-${String(sortOrdinal).padStart(3, '0')}.webp`;
 }
 
-function isRedactedFixture(fixtureVersion: DemoFixtureVersion | undefined): boolean {
+function isRedactedFixture(fixtureVersion: string | undefined): boolean {
     const version = fixtureVersion ?? DEMO_FIXTURE_VERSION;
     return version === REDACTED_DEMO_FIXTURE_VERSION || version === DEMO_FIXTURE_VERSION;
 }
 
-function isV3Fixture(fixtureVersion: DemoFixtureVersion): boolean {
+function isV3Fixture(fixtureVersion: string): boolean {
     return fixtureVersion === REDACTED_DEMO_FIXTURE_VERSION;
 }
 
@@ -870,7 +870,8 @@ function v4PrivateAccount(index: number): PrivateResultRowV1 {
 }
 
 export interface DemoFixture {
-    version: DemoFixtureVersion;
+    /** Static versions are historical; database versions are operator-published. */
+    version: string;
     summary: AnalysisResultSummaryV1;
     publicAccounts: FemaleResultRowV1[];
     privateAccounts: PrivateResultRowV1[];
@@ -878,9 +879,12 @@ export interface DemoFixture {
 
 export function demoReadyPreflight(
     run: { id: string; created_at: string },
-    fixtureVersion: DemoFixtureVersion = DEMO_FIXTURE_VERSION,
+    fixtureVersion: string = DEMO_FIXTURE_VERSION,
+    fixtureTarget?: { fullName: string | null; bio: string | null; profileImage: string; followersCount: number; followingCount: number; isPrivate: false },
 ) {
-    const counts = { followers: 600, following: 580 };
+    const counts = fixtureTarget
+        ? { followers: fixtureTarget.followersCount, following: fixtureTarget.followingCount }
+        : { followers: 600, following: 580 };
     const catalog = {
         ...ANALYSIS_PLAN_CATALOG,
         plus: { ...ANALYSIS_PLAN_CATALOG.plus, launchStatus: 'disabled' as const },
@@ -894,16 +898,16 @@ export function demoReadyPreflight(
         exclusionDecision: 'skip' as const,
         target: {
             username: DEMO_TARGET_USERNAME,
-            fullName: fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+            fullName: fixtureTarget?.fullName ?? (fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                 ? '준호의 공개 프로필'
-                : '모의 분석용 공개 계정',
-            bio: fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
+                : '모의 분석용 공개 계정'),
+            bio: fixtureTarget?.bio ?? (fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                 ? '사진과 일상을 기록하는 공개 프로필입니다.'
-                : '산책과 사진을 기록하는 데모 프로필입니다.',
-            profileImage: isRedactedFixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
+                : '산책과 사진을 기록하는 데모 프로필입니다.'),
+            profileImage: fixtureTarget?.profileImage ?? (isRedactedFixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0)),
             followersCount: counts.followers,
             followingCount: counts.following,
-            isPrivate: false,
+            isPrivate: fixtureTarget?.isPrivate ?? false,
         },
         accessMode: 'production' as const,
         capacityRequiredPlan: 'standard' as const,
@@ -974,7 +978,15 @@ export function demoResultPage(input: {
     privateCursor: string | null;
     pageSize: number;
 }) {
-    const fixture = createDemoFixture(input.requestId, input.fixtureVersion);
+    return demoResultPageFromFixture(createDemoFixture(input.requestId, input.fixtureVersion), input);
+}
+
+export function demoResultPageFromFixture(fixture: DemoFixture, input: {
+    requestId: string;
+    femaleCursor: string | null;
+    privateCursor: string | null;
+    pageSize: number;
+}) {
     const publicPage = paginateAnalysisResults(fixture.publicAccounts, {
         list: 'public', direction: 'desc', sortKeyType: 'number', cursor: input.femaleCursor,
         pageSize: input.pageSize, getSortKey: row => row.displayScore, getCandidateId: row => row.instagramId,
@@ -1037,12 +1049,13 @@ export const DEMO_PROGRESS_STAGE_SCHEDULE = [
 
 export function projectDemoProgress(input: {
     requestId: string;
-    fixtureVersion?: DemoFixtureVersion;
+    fixtureVersion?: string;
     startedAt: Date;
     durationSeconds: number;
     now: Date;
     afterSequence?: number;
     eventLimit?: number;
+    fixture?: DemoFixture;
 }): { snapshot: ProgressSnapshotV1; events: ProgressEventV1[] } {
     const elapsed = Math.max(0, input.now.getTime() - input.startedAt.getTime());
     const progressBp = Math.min(10_000, Math.floor(elapsed / (input.durationSeconds * 1_000) * 10_000));
@@ -1076,12 +1089,14 @@ export function projectDemoProgress(input: {
             activeProfile: completed ? null : {
                 maskedUsername: input.fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                     ? 'profile.***'
-                    : isRedactedFixture(input.fixtureVersion)
+                    : input.fixture
+                        ? `${input.fixture.publicAccounts[Math.floor(progressBp / 1_000) % input.fixture.publicAccounts.length]!.instagramId}*`
+                        : isRedactedFixture(input.fixtureVersion)
                         ? isV3Fixture(input.fixtureVersion ?? DEMO_FIXTURE_VERSION)
                             ? v3ProgressProfileId(progressBp)
                             : v4ProgressProfileId(progressBp)
                         : demoProgressProfileId(progressBp),
-                imageUrl: isRedactedFixture(input.fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
+                imageUrl: input.fixture?.summary.targetProfileImage ?? (isRedactedFixture(input.fixtureVersion) ? v3Avatar('target', 0) : avatar(0)),
             },
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
             lastEventSeq: allEvents.length,
