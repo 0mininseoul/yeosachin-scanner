@@ -15,14 +15,14 @@ const mocks = vi.hoisted(() => ({
     emit: vi.fn(),
     suppressOperationalObservation: vi.fn((response: Response) => response),
     observeRoute: vi.fn((
-        _request: Request,
-        _route: string,
+        request: Request,
+        route: string,
         operation: (context: Record<string, unknown>) => Promise<Response>,
     ) => operation({
         request_id: '423e4567-e89b-42d3-a456-426614174002',
         trace_id: null,
-        route: '/api/earlybird/checkout',
-        method: 'POST',
+        route,
+        method: request.method,
     })),
 }));
 
@@ -818,6 +818,18 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.rpc).toHaveBeenCalledWith('join_earlybird_waitlist', {
             p_user_id: USER_ID,
             p_preflight_id: PREFLIGHT_ID,
+        });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'earlybird.waitlist_created',
+            severity: 'info',
+            fields: expect.objectContaining({
+                request_id: '423e4567-e89b-42d3-a456-426614174002',
+                user_id: USER_ID,
+                preflight_id: PREFLIGHT_ID,
+                plan_id: 'plus',
+                operation: 'checkout',
+                disposition: 'accepted',
+            }),
         });
     });
 

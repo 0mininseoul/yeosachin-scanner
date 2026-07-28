@@ -10,6 +10,8 @@ import {
 } from '@/lib/services/analysis/fresh-plan-admission';
 import { enqueueFreshAdmissionTask } from '@/lib/services/analysis/preflight-tasks';
 import { dispatchAnalysisV2Job } from '@/lib/services/analysis/v2-tasks';
+import { operationalLogger } from '@/lib/observability/server';
+import type { OperationalEvent } from '@/lib/observability/schema';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const fulfillmentStatusSchema = z.enum([
@@ -436,6 +438,7 @@ export interface EarlybirdFulfillmentAdvanceDependencies {
         requestId: string,
         jobKey: string
     ): Promise<unknown>;
+    emitOperationalEvent?: (event: OperationalEvent) => void;
 }
 
 function defaultAdvanceDependencies(): EarlybirdFulfillmentAdvanceDependencies {
@@ -464,6 +467,7 @@ function defaultAdvanceDependencies(): EarlybirdFulfillmentAdvanceDependencies {
         dispatchAnalysisJob: (requestId, jobKey) => (
             dispatchAnalysisV2Job(requestId, jobKey)
         ),
+        emitOperationalEvent: event => operationalLogger.emit(event),
     };
 }
 
@@ -481,6 +485,8 @@ export async function advanceAdmittedEarlybirdFulfillment(
     dependencies: EarlybirdFulfillmentAdvanceDependencies =
         defaultAdvanceDependencies()
 ): Promise<EarlybirdFulfillmentAdvanceResult> {
+    const emitOperationalEvent = dependencies.emitOperationalEvent
+        ?? (event => operationalLogger.emit(event));
     if (identity.status === 'completed') {
         return result(
             identity.orderId,
@@ -548,6 +554,18 @@ export async function advanceAdmittedEarlybirdFulfillment(
                     supabaseAdmin,
                     dispatchInput
                 );
+                emitOperationalEvent({
+                    event: 'analysis_v2.fresh_admission_enqueued',
+                    severity: 'info',
+                    fields: {
+                        user_id: identity.userId,
+                        preflight_id: identity.preflightId,
+                        order_id: identity.orderId,
+                        plan_id: identity.planId,
+                        operation: 'fresh_admission',
+                        disposition: 'enqueued',
+                    },
+                });
             } catch (error) {
                 await dependencies.releaseFreshAdmissionDispatch(
                     supabaseAdmin,
@@ -614,10 +632,24 @@ export async function advanceAdmittedEarlybirdFulfillment(
             'completed'
         );
     }
-    await dependencies.dispatchAnalysisJob(
+    const dispatchOutcome = await dependencies.dispatchAnalysisJob(
         request.requestId,
         request.initialJobKey
     );
+    emitOperationalEvent({
+        event: 'analysis_v2.request_queued',
+        severity: 'info',
+        fields: {
+            user_id: identity.userId,
+            preflight_id: identity.preflightId,
+            order_id: identity.orderId,
+            analysis_request_id: request.requestId,
+            job_key: request.initialJobKey,
+            plan_id: identity.planId,
+            operation: 'enqueue',
+            disposition: dispatchOutcome === 'already_dispatched' ? 'exists' : 'enqueued',
+        },
+    });
     return result(
         identity.orderId,
         'analysis_in_progress',

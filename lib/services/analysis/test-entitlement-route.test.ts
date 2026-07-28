@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
     from: vi.fn(),
     getPreflightTasksConfig: vi.fn(),
     getTasksConfig: vi.fn(),
+    operationalEmit: vi.fn(),
+    observeRoute: vi.fn(),
     rpc: vi.fn(),
 }));
 
@@ -23,6 +25,12 @@ vi.mock('@/lib/services/analysis/v2-tasks', () => ({
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     enqueueFreshAdmissionTask: mocks.dispatchAdmission,
     getPreflightTasksConfig: mocks.getPreflightTasksConfig,
+}));
+vi.mock('@/lib/observability/request', () => ({
+    observeRoute: mocks.observeRoute,
+}));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.operationalEmit },
 }));
 
 import { POST } from '@/app/api/analysis/preflight/[preflightId]/entitle/route';
@@ -189,6 +197,21 @@ describe('analysis V2 durable test-entitlement route', () => {
         process.env.ANALYSIS_TEST_ENTITLEMENTS_ENABLED = 'true';
         mocks.dispatchAdmission.mockResolvedValue('enqueued');
         mocks.dispatchJob.mockResolvedValue('enqueued');
+        mocks.observeRoute.mockImplementation(async (
+            _request: Request,
+            _route: string,
+            operation: (context: {
+                request_id: string;
+                trace_id: null;
+                route: string;
+                method: string;
+            }) => Promise<Response>,
+        ) => operation({
+            request_id: '123e4567-e89b-42d3-a456-426614174099',
+            trace_id: null,
+            route: '/api/analysis/preflight/[preflightId]/entitle',
+            method: 'POST',
+        }));
         mocks.getPreflightTasksConfig.mockReturnValue(preflightTaskConfig);
         mocks.getTasksConfig.mockReturnValue(taskConfig);
         mocks.createServerClient.mockResolvedValue({
@@ -276,6 +299,19 @@ describe('analysis V2 durable test-entitlement route', () => {
             'mark_analysis_v2_preflight_admission_dispatched',
         ]);
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
+        expect(mocks.operationalEmit).toHaveBeenCalledWith({
+            event: 'analysis_v2.fresh_admission_enqueued',
+            severity: 'info',
+            fields: expect.objectContaining({
+                request_id: '123e4567-e89b-42d3-a456-426614174099',
+                user_id: USER_ID,
+                preflight_id: PREFLIGHT_ID,
+                target_instagram_id: 'target.account',
+                plan_id: 'standard',
+                operation: 'fresh_admission',
+                disposition: 'enqueued',
+            }),
+        });
     });
 
     it('polls a durable pending dispatch without issuing duplicate Cloud Tasks creates', async () => {
@@ -333,6 +369,21 @@ describe('analysis V2 durable test-entitlement route', () => {
             REQUEST_ID,
             ANALYSIS_V2_BOOTSTRAP_JOB_KEY
         );
+        expect(mocks.operationalEmit).toHaveBeenCalledWith({
+            event: 'analysis_v2.request_queued',
+            severity: 'info',
+            fields: expect.objectContaining({
+                request_id: '123e4567-e89b-42d3-a456-426614174099',
+                user_id: USER_ID,
+                preflight_id: PREFLIGHT_ID,
+                analysis_request_id: REQUEST_ID,
+                job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
+                target_instagram_id: 'target.account',
+                plan_id: 'standard',
+                operation: 'entitlement',
+                disposition: 'enqueued',
+            }),
+        });
     });
 
     it('atomically binds the exact authorized target policy before initial dispatch', async () => {

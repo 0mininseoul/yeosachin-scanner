@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
     recover: vi.fn(),
     recoverCanary: vi.fn(),
     purgeResultImages: vi.fn(),
+    afterTask: vi.fn(),
+    operationalEmit: vi.fn(),
+    flush: vi.fn(),
 }));
 
 vi.mock('@/lib/services/analysis/v2-maintenance-auth', () => ({
@@ -24,6 +27,15 @@ vi.mock('@/lib/services/analysis/profile-provider-canary-recovery', () => ({
 }));
 vi.mock('@/lib/services/media/result-image-purge', () => ({
     purgeConfiguredResultImages: mocks.purgeResultImages,
+}));
+vi.mock('server-only', () => ({}));
+vi.mock('next/server', async importOriginal => {
+    const actual = await importOriginal<typeof import('next/server')>();
+    return { ...actual, after: mocks.afterTask };
+});
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.operationalEmit },
+    flushOperationalLogs: mocks.flush,
 }));
 
 import { POST } from '@/app/api/analysis/v2/recover/route';
@@ -64,6 +76,8 @@ describe('analysis V2 recovery route', () => {
             failed: 0,
             hasMore: false,
         });
+        mocks.afterTask.mockImplementation(() => undefined);
+        mocks.flush.mockResolvedValue(undefined);
     });
 
     it('runs the bounded recovery scan only for the configured OIDC identity', async () => {
@@ -77,6 +91,10 @@ describe('analysis V2 recovery route', () => {
             profileProviderCanary: { scanned: 1, finalized: 1, failed: 0 },
             resultImagePurge: { claimed: 2, deleted: 2, failed: 0 },
         });
+        expect(mocks.afterTask).toHaveBeenCalledOnce();
+        const flushTask = mocks.afterTask.mock.calls[0]?.[0] as () => Promise<void>;
+        await expect(flushTask()).resolves.toBeUndefined();
+        expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
     it('uses only the recovery gate and retries partial failures', async () => {

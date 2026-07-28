@@ -454,6 +454,29 @@ describe('preflight persistence adapter', () => {
         await expect(update).rejects.toMatchObject({ message: 'PREFLIGHT_IMMUTABLE' });
     });
 
+    it('maps a blocked preflight exclusion RPC result to an immutable error', async () => {
+        const store = createSupabasePreflightStore({
+            rpc: vi.fn(async () => ({
+                data: null,
+                error: {
+                    code: 'P0001',
+                    message: 'ANALYSIS_V2_PREFLIGHT_NOT_READY',
+                },
+            })),
+            from: vi.fn() as never,
+        });
+
+        await expect(store.setExclusion({
+            preflightId,
+            userId,
+            decision: 'skip',
+            excludedInstagramId: null,
+        })).rejects.toMatchObject({
+            name: 'PreflightImmutableError',
+            message: 'ANALYSIS_V2_PREFLIGHT_NOT_READY',
+        });
+    });
+
     it('reserves and marks one durable dispatch generation', async () => {
         const reservationToken = '423e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
         const rpc = vi.fn(async (...args: [string, Record<string, unknown>?]) => (

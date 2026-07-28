@@ -11,10 +11,11 @@ import {
 import {
     purgeConfiguredResultImages,
 } from '@/lib/services/media/result-image-purge';
+import { observeRoute } from '@/lib/observability/request';
 
 export const maxDuration = 300;
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
     let config;
     try {
         config = getAnalysisV2MaintenanceAuthConfig();
@@ -57,5 +58,13 @@ export async function POST(request: Request) {
                 ? 200
                 : 500,
         }
+    );
+}
+
+export async function POST(request: Request) {
+    return observeRoute(
+        request,
+        '/api/analysis/v2/recover',
+        () => handlePOST(request),
     );
 }

@@ -12,9 +12,14 @@ const BUSINESS_EVENTS = [
     'preflight.exclusion_decided',
     'earlybird.checkout_created',
     'earlybird.checkout_failed',
+    'earlybird.waitlist_created',
+    'earlybird.waitlist_failed',
     'groble.webhook_received',
     'groble.webhook_finalized',
     'groble.webhook_rejected',
+    'analysis_v2.fresh_admission_enqueued',
+    'analysis_v2.request_queued',
+    'analysis_v2.result_viewed',
 ] as const;
 
 describe('business operational event contract', () => {

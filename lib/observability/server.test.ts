@@ -78,19 +78,29 @@ import {
 } from './server';
 
 const AXIOM_ENV_NAMES = ['AXIOM_TOKEN', 'AXIOM_DATASET', 'AXIOM_ORG_ID'] as const;
+const VERCEL_ENV_NAMES = ['VERCEL', 'VERCEL_ENV'] as const;
 const ORIGINAL_AXIOM_ENV = Object.fromEntries(
     AXIOM_ENV_NAMES.map(name => [name, process.env[name]]),
+);
+const ORIGINAL_VERCEL_ENV = Object.fromEntries(
+    VERCEL_ENV_NAMES.map(name => [name, process.env[name]]),
 );
 
 beforeEach(() => {
     vi.clearAllMocks();
     for (const name of AXIOM_ENV_NAMES) delete process.env[name];
+    for (const name of VERCEL_ENV_NAMES) delete process.env[name];
 });
 
 afterEach(() => {
     vi.useRealTimers();
     for (const name of AXIOM_ENV_NAMES) {
         const original = ORIGINAL_AXIOM_ENV[name];
+        if (original === undefined) delete process.env[name];
+        else process.env[name] = original;
+    }
+    for (const name of VERCEL_ENV_NAMES) {
+        const original = ORIGINAL_VERCEL_ENV[name];
         if (original === undefined) delete process.env[name];
         else process.env[name] = original;
     }
@@ -336,6 +346,38 @@ describe('emitBatchOutcome', () => {
 });
 
 describe('operationalLogger runtime transport', () => {
+    it('writes the same sanitized lifecycle event to Vercel runtime logs without Axiom', async () => {
+        process.env.VERCEL = '1';
+        process.env.VERCEL_ENV = 'production';
+        const consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({
+            event: 'analysis_v2.request_queued',
+            severity: 'info',
+            fields: {
+                user_id: '123e4567-e89b-42d3-a456-426614174000',
+                preflight_id: '123e4567-e89b-42d3-a456-426614174001',
+                analysis_request_id: '123e4567-e89b-42d3-a456-426614174002',
+                target_instagram_id: 'Target.Account',
+                operation: 'entitlement',
+                disposition: 'enqueued',
+                email: 'buyer@example.com',
+            },
+        });
+        await flushOperationalLogs();
+
+        expect(consoleInfo).toHaveBeenCalledWith(
+            'analysis_v2.request_queued',
+            expect.objectContaining({
+                event: 'analysis_v2.request_queued',
+                target_instagram_id: 'target.account',
+            }),
+        );
+        expect(JSON.stringify(consoleInfo.mock.calls)).not.toContain('buyer@example.com');
+    });
+
     it('does not construct Axiom when any trimmed server runtime setting is missing', async () => {
         process.env.AXIOM_TOKEN = '   ';
         process.env.AXIOM_DATASET = 'yeosachin-logs';

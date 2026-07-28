@@ -780,6 +780,40 @@ describe('preflight owner routes', () => {
         await expect(conflict.json()).resolves.toMatchObject({ code: 'PREFLIGHT_IMMUTABLE' });
     });
 
+    it('observes an unexpected exclusion persistence failure without changing its response', async () => {
+        const failure = new Error('PREFLIGHT_PERSISTENCE_ERROR: exclusion failed (PGRST202).');
+        mocks.store.setExclusion.mockRejectedValueOnce(failure);
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        try {
+            const response = await patchPreflight(new Request('https://example.com', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ decision: 'skip' }),
+            }), context());
+
+            expect(response.status).toBe(500);
+            await expect(response.json()).resolves.toMatchObject({ code: 'ANALYSIS_FAILED' });
+            expect(mocks.emit).toHaveBeenCalledWith({
+                event: 'preflight.failed',
+                severity: 'error',
+                fields: expect.objectContaining({
+                    user_id: userId,
+                    preflight_id: preflightId,
+                    operation: 'exclusion',
+                    disposition: 'failed',
+                    error_code: 'PREFLIGHT_PERSISTENCE_ERROR',
+                }),
+                error: failure,
+            });
+            expect(errorSpy).toHaveBeenCalledWith(
+                'Preflight exclusion update failed (PREFLIGHT_PERSISTENCE_ERROR).'
+            );
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
+
     it('captures a normalized excluded lead after the durable decision succeeds', async () => {
         const response = await patchPreflight(new Request('https://example.com', {
             method: 'PATCH',

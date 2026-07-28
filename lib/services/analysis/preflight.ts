@@ -512,6 +512,7 @@ function throwRpcError(error: RpcError, operation: string): never {
         || error.message === 'ANALYSIS_V2_PREFLIGHT_EXPIRED'
         || error.message === 'PREFLIGHT_CONSUMED'
         || error.message === 'ANALYSIS_V2_PREFLIGHT_CONSUMED'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_NOT_READY'
         || error.message === 'PREFLIGHT_IMMUTABLE'
     ) {
         throw new PreflightImmutableError(error.message);

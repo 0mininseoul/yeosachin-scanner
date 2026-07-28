@@ -157,6 +157,7 @@ describe('earlybird fulfillment store', () => {
         const fulfillmentStore = store();
         const enqueueFreshAdmission = vi.fn(async () => 'enqueued' as const);
         const markFreshAdmissionDispatched = vi.fn(async () => 'marked' as const);
+        const emitOperationalEvent = vi.fn();
         const result = await advanceAdmittedEarlybirdFulfillment(identity(), {
             store: fulfillmentStore,
             reserveFreshAdmission: vi.fn(async () => ({
@@ -170,6 +171,7 @@ describe('earlybird fulfillment store', () => {
             markFreshAdmissionDispatched,
             releaseFreshAdmissionDispatch: vi.fn(),
             dispatchAnalysisJob: vi.fn(),
+            emitOperationalEvent,
         });
 
         expect(result).toEqual({
@@ -195,6 +197,18 @@ describe('earlybird fulfillment store', () => {
             }
         );
         expect(fulfillmentStore.claim).not.toHaveBeenCalled();
+        expect(emitOperationalEvent).toHaveBeenCalledWith({
+            event: 'analysis_v2.fresh_admission_enqueued',
+            severity: 'info',
+            fields: {
+                user_id: USER,
+                preflight_id: PREFLIGHT,
+                order_id: ORDER,
+                plan_id: 'basic',
+                operation: 'fresh_admission',
+                disposition: 'enqueued',
+            },
+        });
     });
 
     it('claims only after fresh admission and creates before dispatching one request', async () => {
@@ -224,6 +238,7 @@ describe('earlybird fulfillment store', () => {
             sequence.push('dispatch');
             return 'enqueued' as const;
         });
+        const emitOperationalEvent = vi.fn();
 
         await expect(advanceAdmittedEarlybirdFulfillment(identity(), {
             store: orderStore,
@@ -247,6 +262,7 @@ describe('earlybird fulfillment store', () => {
             markFreshAdmissionDispatched: vi.fn(),
             releaseFreshAdmissionDispatch: vi.fn(),
             dispatchAnalysisJob,
+            emitOperationalEvent,
         })).resolves.toEqual({
             orderId: ORDER,
             status: 'analysis_in_progress',
@@ -258,6 +274,20 @@ describe('earlybird fulfillment store', () => {
             REQUEST,
             'coordinator:bootstrap'
         );
+        expect(emitOperationalEvent).toHaveBeenCalledWith({
+            event: 'analysis_v2.request_queued',
+            severity: 'info',
+            fields: {
+                user_id: USER,
+                preflight_id: PREFLIGHT,
+                order_id: ORDER,
+                analysis_request_id: REQUEST,
+                job_key: 'coordinator:bootstrap',
+                plan_id: 'basic',
+                operation: 'enqueue',
+                disposition: 'enqueued',
+            },
+        });
     });
 
     it('sends blocked or newly ineligible paid work to manual review', async () => {
