@@ -94,22 +94,14 @@ export function isAuthenticSentryServiceHook(
     return constantTimeEqual(signature, expected);
 }
 
-/**
- * Internal Integrations sign the parsed request body, rather than its wire
- * representation. This exactly follows Sentry's official sample verifier.
- */
+/** Internal Integrations sign the exact outbound JSON body bytes. */
 export function isAuthenticSentryInternalIntegration(request: Request, rawBody: string): boolean {
     const secret = configuredInternalIntegrationSecret();
     const signature = request.headers.get('sentry-hook-signature');
     if (!secret || request.headers.get('sentry-hook-resource') !== 'issue' || !signature) return false;
 
-    try {
-        const normalizedBody = JSON.stringify(JSON.parse(rawBody));
-        const expected = createHmac('sha256', secret).update(normalizedBody, 'utf8').digest('hex');
-        return constantTimeEqual(signature, expected);
-    } catch {
-        return false;
-    }
+    const expected = createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');
+    return constantTimeEqual(signature, expected);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

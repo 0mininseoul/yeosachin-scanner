@@ -88,12 +88,11 @@ function internalIntegrationIssue(overrides: Record<string, unknown> = {}) {
 }
 
 function signedInternalIntegrationRequest(body: string, signature?: string, resource = 'issue') {
-    const normalized = JSON.stringify(JSON.parse(body));
     return new Request('https://example.test/api/webhooks/sentry/internal-integration', {
         headers: {
             'sentry-hook-resource': resource,
             'sentry-hook-signature': signature ?? createHmac('sha256', INTERNAL_INTEGRATION_SECRET)
-                .update(normalized, 'utf8').digest('hex'),
+                .update(body, 'utf8').digest('hex'),
         },
     });
 }
@@ -114,7 +113,7 @@ describe('Sentry Service Hook Discord bridge', () => {
         expect(isAuthenticSentryServiceHook(signedRequest(body), body, 'short')).toBe(false);
     });
 
-    it('verifies the Internal Integration normalized-body HMAC and issue resource in constant time', () => {
+    it('verifies the Internal Integration exact-body HMAC and issue resource in constant time', () => {
         const body = internalIntegrationIssue();
         expect(isAuthenticSentryInternalIntegration(signedInternalIntegrationRequest(body), body)).toBe(true);
         expect(isAuthenticSentryInternalIntegration(
@@ -126,6 +125,16 @@ describe('Sentry Service Hook Discord bridge', () => {
         expect(isAuthenticSentryInternalIntegration(new Request('https://example.test', {
             headers: { 'sentry-hook-resource': 'issue', 'sentry-hook-signature': '0'.repeat(64) },
         }), '{not-json')).toBe(false);
+    });
+
+    it('accepts escaped Unicode and noncanonical JSON only when signed as the exact raw body', () => {
+        const body = '{  "data" : { "issue" : { "project" : { "slug" : "ai-baram-detector" }, "id" : "987654321", "firstSeen" : "2026-07-28T00:00:00.000Z", "environment" : "production", "title" : "\\uC548\\uB155" } }, "action" : "created" }';
+        const normalizedSignature = createHmac('sha256', INTERNAL_INTEGRATION_SECRET)
+            .update(JSON.stringify(JSON.parse(body)), 'utf8').digest('hex');
+        expect(isAuthenticSentryInternalIntegration(signedInternalIntegrationRequest(body), body)).toBe(true);
+        expect(isAuthenticSentryInternalIntegration(
+            signedInternalIntegrationRequest(body, normalizedSignature), body,
+        )).toBe(false);
     });
 
     it('accepts only a created production ai-baram-detector issue and uses a stable privacy-safe dedupe key', () => {
