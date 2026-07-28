@@ -45,17 +45,11 @@ import { ResultActions } from '@/components/result-actions';
 import { ResultFeedback } from '@/components/result-feedback';
 import { ResultPagination } from '@/components/result-pagination';
 import { useCountUp } from '@/hooks/useCountUp';
+import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
 }
-
-const getProxyImageUrl = (url: string | undefined): string | undefined => {
-    if (!url) return undefined;
-    return url.startsWith('/api/image-proxy?') || /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/u.test(url)
-        ? url
-        : undefined;
-};
 
 // 프로필 이미지 컴포넌트 (로드 실패 시 fallback)
 function ProfileImage({
@@ -68,7 +62,7 @@ function ProfileImage({
     className?: string;
 }) {
     const [error, setError] = useState(false);
-    const proxiedSrc = getProxyImageUrl(src);
+    const proxiedSrc = safeResultImageUrl(src);
 
     if (!proxiedSrc || error) {
         return <ProfileFallback variant={variant} />;
