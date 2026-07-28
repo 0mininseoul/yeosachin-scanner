@@ -70,6 +70,12 @@ function captureExcludedLandingLead(
     }
 }
 
+function exclusionFailureErrorCode(error: unknown): 'PREFLIGHT_PERSISTENCE_ERROR' | 'INTERNAL_ERROR' {
+    return error instanceof Error && error.message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+        ? 'PREFLIGHT_PERSISTENCE_ERROR'
+        : 'INTERNAL_ERROR';
+}
+
 async function consumedPreflightStatus(
     preflightId: string,
     userId: string,
@@ -191,13 +197,17 @@ async function handlePATCH(
     context: OperationalRequestContext,
 ) {
     let demoRecognized = false;
+    let observedUserId: string | undefined;
+    let observedPreflightId: string | undefined;
     try {
         const user = await authenticatedUser();
         if (!user) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+        observedUserId = user.id;
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
         }
+        observedPreflightId = preflightId;
 
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
@@ -277,7 +287,21 @@ async function handlePATCH(
         if (error instanceof PreflightImmutableError) {
             return errorResponse(409, error.message, '이 사전 점검 요청은 변경할 수 없습니다.');
         }
-        console.error('Preflight exclusion update failed.');
+        const errorCode = exclusionFailureErrorCode(error);
+        operationalLogger.emit({
+            event: 'preflight.failed',
+            severity: 'error',
+            fields: {
+                ...context,
+                ...(observedUserId ? { user_id: observedUserId } : {}),
+                ...(observedPreflightId ? { preflight_id: observedPreflightId } : {}),
+                operation: 'exclusion',
+                disposition: 'failed',
+                error_code: errorCode,
+            },
+            error,
+        });
+        console.error(`Preflight exclusion update failed (${errorCode}).`);
         return errorResponse(500, 'ANALYSIS_FAILED', '제외 계정 저장에 실패했습니다.');
     }
 }

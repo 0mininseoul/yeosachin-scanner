@@ -388,6 +388,28 @@ describe('sanitizeOperationalEvent', () => {
         }
     });
 
+    it('records a bounded preflight persistence category without retaining a database detail', () => {
+        const sanitized = sanitizeOperationalEvent({
+            event: 'preflight.failed',
+            severity: 'error',
+            fields: {
+                operation: 'exclusion',
+                disposition: 'failed',
+                error_code: 'INTERNAL_ERROR',
+            },
+            error: new Error('PREFLIGHT_PERSISTENCE_ERROR: exclusion failed (PGRST202).'),
+        });
+
+        expect(sanitized.fields).toMatchObject({
+            event: 'preflight.failed',
+            operation: 'exclusion',
+            disposition: 'failed',
+            error_name: 'Error',
+            error_code: 'PREFLIGHT_PERSISTENCE_ERROR',
+        });
+        expect(JSON.stringify(sanitized)).not.toContain('PGRST202');
+    });
+
     it('drops unregistered categorical values and broad-prefix error codes', () => {
         const sanitized = sanitizeOperationalEvent({
             event: 'attacker.secret_token',
