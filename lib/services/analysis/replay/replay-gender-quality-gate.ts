@@ -35,7 +35,7 @@ export function evaluateReplayGenderQualityGate(
     const worstCasePass = worstUnknown * 5 <= worstTotal;
     return {
         observedUnknownRate,
-        worstCaseUnknownRate: rate(worstUnknown, worstTotal),
+        worstCaseUnknownRate,
         observedPass,
         worstCasePass,
     };
