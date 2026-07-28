@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const migration = readFileSync(
     new URL(
-        '../../../supabase/migrations/20260728190000_persist_analysis_v2_target_full_name.sql',
+        '../../../supabase/migrations/20260728200000_persist_analysis_v2_target_full_name.sql',
         import.meta.url
     ),
     'utf8'

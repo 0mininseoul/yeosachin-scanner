@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const migrationUrl = new URL(
-    '../../../supabase/migrations/20260728190000_persist_analysis_v2_target_full_name.sql',
+    '../../../supabase/migrations/20260728200000_persist_analysis_v2_target_full_name.sql',
     import.meta.url
 );
 
