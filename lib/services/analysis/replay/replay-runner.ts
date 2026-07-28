@@ -1,5 +1,6 @@
 import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
 import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-reconciliation';
+import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
@@ -457,6 +458,10 @@ export async function runAnalysisV2AiReplay(input: {
         input.bundle.capture.sourceLineage,
         input.evaluationPolicy,
     );
+    const supportsGenderTriageMicrobatch = aiStagePolicySupports(
+        replayAiPolicy,
+        'genderTriageMicrobatchV29',
+    );
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
@@ -506,7 +511,7 @@ export async function runAnalysisV2AiReplay(input: {
             profile => !profile.isPrivate,
         );
         if (
-            replayAiPolicy === 'ai-stage-policy-v2.9'
+            supportsGenderTriageMicrobatch
             && publicProfiles.some(profile => (
                 typeof profile.hasProfileImage !== 'boolean'
             ))
@@ -558,10 +563,10 @@ export async function runAnalysisV2AiReplay(input: {
                 profile,
                 profile.resolverSelectionIds,
             );
-            const resolverMedia = replayAiPolicy === 'ai-stage-policy-v2.9'
+            const resolverMedia = supportsGenderTriageMicrobatch
                 ? selectAnalysisV2GenderResolverMedia(canonicalResolverMedia)
                 : canonicalResolverMedia;
-            const v29ResolverAdmission = replayAiPolicy === 'ai-stage-policy-v2.9'
+            const v29ResolverAdmission = supportsGenderTriageMicrobatch
                 ? v29GenderResolverAdmission(triage, resolverMedia.length)
                 : null;
             if (v29ResolverAdmission === 'eligible') resolver.admission.eligible++;
@@ -578,12 +583,12 @@ export async function runAnalysisV2AiReplay(input: {
                 gender.male++;
                 return;
             }
-            const featureAdmitted = replayAiPolicy !== 'ai-stage-policy-v2.9'
+            const featureAdmitted = !supportsGenderTriageMicrobatch
                 || v29FeatureAdmission(triage, profile) === 'eligible';
             const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
-                ...(replayAiPolicy === 'ai-stage-policy-v2.9' ? {
+                ...(supportsGenderTriageMicrobatch ? {
                     accountProfile: v29AccountProfile(profile),
                 } : {}),
                 media: mediaFor(profile, profile.featureSelectionIds),
@@ -591,7 +596,7 @@ export async function runAnalysisV2AiReplay(input: {
                 triage,
             }) : undefined;
             const assessment = triage.assessment;
-            const eligible = replayAiPolicy === 'ai-stage-policy-v2.9'
+            const eligible = supportsGenderTriageMicrobatch
                 ? v29ResolverAdmission === 'eligible'
                 : !(
                     assessment.inferredGender === 'female'
@@ -679,14 +684,14 @@ export async function runAnalysisV2AiReplay(input: {
         };
         const publicTask = observeRequiredTask(runBounded(
             publicProfiles,
-            replayAiPolicy === 'ai-stage-policy-v2.9' ? 6 : 4,
+            supportsGenderTriageMicrobatch ? 6 : 4,
             async profile => {
                 if (replayWorkFailed) return;
                 if (!runner.triage) return;
                 const triage = await runner.triage({
                     ordinal: profile.ordinal,
                     media: mediaFor(profile, profile.triageSelectionIds),
-                    ...(replayAiPolicy === 'ai-stage-policy-v2.9'
+                    ...(supportsGenderTriageMicrobatch
                         ? { accountProfile: v29AccountProfile(profile) }
                         : {}),
                 });

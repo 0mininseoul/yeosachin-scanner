@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
+    AI_STAGE_POLICY_V210_VERSION,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
 
@@ -68,6 +69,9 @@ export const REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY =
     'standard-v27-v28-risk-v24-scheduler-v1-to-ai-v29' as const;
 export const HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY =
     'historical-official-e2e-standard-v27-risk-v23-to-ai-v29' as const;
+/** v2.10 is a distinct historical evaluation fence, never a v2.9 alias. */
+export const HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY =
+    'historical-official-e2e-standard-v27-risk-v23-to-ai-v210' as const;
 /** Explicitly sealed non-exact historical media-availability audit capability. */
 export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY =
     'historical-partial-available-standard-v27-risk-v23-to-ai-v29' as const;
@@ -79,6 +83,10 @@ const historicalOfficialE2EEvaluationPolicySchema = z.object({
     capability: z.literal(HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
 }).strict();
+const historicalOfficialE2EV210EvaluationPolicySchema = z.object({
+    capability: z.literal(HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
+}).strict();
 const historicalPartialAvailableEvaluationPolicySchema = z.object({
     capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -86,6 +94,7 @@ const historicalPartialAvailableEvaluationPolicySchema = z.object({
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
+    historicalOfficialE2EV210EvaluationPolicySchema,
     historicalPartialAvailableEvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
@@ -95,6 +104,7 @@ export type ReplaySupportedAiStagePolicyVersion = Extract<
     | typeof AI_STAGE_POLICY_V27_VERSION
     | typeof AI_STAGE_POLICY_V28_VERSION
     | typeof AI_STAGE_POLICY_V29_VERSION
+    | typeof AI_STAGE_POLICY_V210_VERSION
 >;
 
 /**
@@ -130,6 +140,7 @@ export function resolveReplayAiStagePolicyVersion(
     // that missing telemetry does not change the replayed AI semantics.
     if (
         parsed.data.capability === HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY
+        || parsed.data.capability === HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY
         || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY
     ) {
         if (

@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     replayEvaluationPolicySchema,
     resolveReplayAiStagePolicyVersion,
+    type ReplayEvaluationPolicy,
     type ReplaySourceLineage,
 } from './replay-source-lineage';
 
@@ -15,6 +17,10 @@ const historicalEvaluation = {
     capability: HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.9' as const,
 };
+const historicalV210Evaluation = {
+    capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.10' as const,
+} satisfies ReplayEvaluationPolicy;
 const standard = (aiStage: 'ai-stage-policy-v2.7' | 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9') => ({
     selectedPlanId: 'standard' as const,
     policyVersions: {
@@ -39,6 +45,24 @@ describe('replay cross-policy evaluation capability', () => {
             .toBe('ai-stage-policy-v2.9');
         expect(() => resolveReplayAiStagePolicyVersion(historical, evaluation))
             .toThrow('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+    });
+
+    it('authenticates the historical official v2.10 target with its own exact capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(historical, historicalV210Evaluation))
+            .toBe('ai-stage-policy-v2.10');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.10',
+        }).success).toBe(false);
     });
 
     it.each(['ai-stage-policy-v2.7', 'ai-stage-policy-v2.8'] as const)(
