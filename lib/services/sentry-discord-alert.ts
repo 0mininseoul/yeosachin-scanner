@@ -180,7 +180,7 @@ function tagValue(value: unknown, key: string): string | null {
 
 function serviceHookErrorType(value: unknown): string | null {
     const event = asRecord(value)?.event;
-    const exception = asRecord(event)?.exception;
+    const exception = asRecord(event) ? asRecord(asRecord(event)?.exception) : null;
     const values = exception?.values;
     if (!Array.isArray(values)) return null;
     return typeof asRecord(values[0])?.type === 'string' ? asRecord(values[0])?.type as string : null;

@@ -1,8 +1,8 @@
 -- Only bounded, allowlisted issue summary fields may accompany an outbox row.
 ALTER TABLE public.sentry_discord_alert_outbox
     ADD COLUMN issue_short_id text CHECK (issue_short_id IS NULL OR issue_short_id ~ '^[A-Z][A-Z0-9_-]{0,49}-[0-9]{1,12}$'),
-    ADD COLUMN error_type text CHECK (error_type IS NULL OR error_type ~ '^[A-Za-z_$][A-Za-z0-9_$.]*(::[A-Za-z_$][A-Za-z0-9_$.]*)*$'),
-    ADD COLUMN release text CHECK (release IS NULL OR release ~ '^[0-9A-Za-z][0-9A-Za-z._+-]*$');
+    ADD COLUMN error_type text CHECK (error_type IS NULL OR (length(error_type) <= 120 AND error_type ~ '^[A-Za-z_$][A-Za-z0-9_$.]*(::[A-Za-z_$][A-Za-z0-9_$.]*)*$')),
+    ADD COLUMN release text CHECK (release IS NULL OR (length(release) <= 80 AND release ~ '^[0-9A-Za-z][0-9A-Za-z._+-]*$' AND release !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'));
 
 DROP FUNCTION public.enqueue_sentry_discord_alert_outbox(char, text, timestamptz, text);
 CREATE FUNCTION public.enqueue_sentry_discord_alert_outbox(

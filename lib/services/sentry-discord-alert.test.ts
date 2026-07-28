@@ -149,7 +149,10 @@ describe('Sentry Service Hook Discord bridge', () => {
                 title: 'different private exception title',
             } },
         }));
-        expect(accepted).toMatchObject({ projectSlug: 'ai-baram-detector' });
+        expect(accepted).toMatchObject({
+            projectSlug: 'ai-baram-detector', issueShortId: 'AI-1234',
+            errorType: 'TypeError', release: 'v1.2.3',
+        });
         expect(duplicate?.dedupeKey).toBe(accepted?.dedupeKey);
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({ action: 'resolved' }))).toBeNull();
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({

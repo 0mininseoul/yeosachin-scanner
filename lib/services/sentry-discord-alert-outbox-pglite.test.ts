@@ -55,6 +55,34 @@ describe('Sentry Discord durable outbox', () => {
         expect(migration).not.toMatch(/raw_payload|request_body|stacktrace/i);
     });
 
+    it('rejects oversized error/release values and UUID-shaped releases at the RPC boundary', async () => {
+        const oversizedType = `TypeError${'A'.repeat(121)}`;
+        const oversizedRelease = `v${'1'.repeat(80)}`;
+        const uuidRelease = '123e4567-e89b-42d3-a456-426614174000';
+        await db.exec('SET ROLE service_role');
+        for (const [key, errorType, release] of [
+            ['d'.repeat(64), oversizedType, 'v1.2.3'],
+            ['e'.repeat(64), 'TypeError', oversizedRelease],
+            ['f'.repeat(64), 'TypeError', uuidRelease],
+        ]) {
+            await db.query(
+                'SELECT public.enqueue_sentry_discord_alert_outbox($1, $2, clock_timestamp(), $3, $4, $5, $6)',
+                [key, 'web-app', null, 'WEB-1234', errorType, release],
+            );
+        }
+        await db.exec('RESET ROLE');
+        const summaries = await db.query<{ dedupe_key: string; error_type: string | null; release: string | null }>(
+            `SELECT dedupe_key, error_type, release FROM public.sentry_discord_alert_outbox
+             WHERE dedupe_key IN ('${'d'.repeat(64)}', '${'e'.repeat(64)}', '${'f'.repeat(64)}')
+             ORDER BY dedupe_key`,
+        );
+        expect(summaries.rows).toEqual([
+            { dedupe_key: 'd'.repeat(64), error_type: null, release: 'v1.2.3' },
+            { dedupe_key: 'e'.repeat(64), error_type: 'TypeError', release: null },
+            { dedupe_key: 'f'.repeat(64), error_type: 'TypeError', release: null },
+        ]);
+    });
+
     it('requeues a stale sending lease for a bounded retry instead of stranding it', async () => {
         await db.exec(`
             UPDATE public.sentry_discord_alert_outbox
