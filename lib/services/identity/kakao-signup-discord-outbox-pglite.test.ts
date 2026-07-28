@@ -22,6 +22,10 @@ const attributionOrigin = readFileSync(new URL(
     '../../../supabase/migrations/20260729110000_add_kakao_signup_discord_attribution_origin.sql',
     import.meta.url,
 ), 'utf8');
+const hardenedAttributionOrigin = readFileSync(new URL(
+    '../../../supabase/migrations/20260729120000_harden_kakao_signup_discord_attribution_origin.sql',
+    import.meta.url,
+), 'utf8');
 const KAKAO_ID = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite;
 
@@ -46,6 +50,7 @@ beforeAll(async () => {
     await db.exec(recovery);
     await db.exec(attribution);
     await db.exec(attributionOrigin);
+    await db.exec(hardenedAttributionOrigin);
 }, 30_000);
 
 afterAll(async () => db.close());
@@ -176,4 +181,13 @@ describe('Kakao signup Discord durable outbox', () => {
             "UPDATE public.kakao_signup_discord_outbox SET attribution_label = 'https://evil.test/?token=secret' WHERE user_id = $1",
             [legacyUserId],
         )).rejects.toThrow();
+    });
+
+    it('rejects internal-looking origins at the RPC and database constraint', async () => {
+        const userId = '823e4567-e89b-42d3-a456-426614174000';
+        await db.exec(`INSERT INTO auth.users (id, raw_app_meta_data) VALUES ('${userId}', '{"provider":"kakao"}'); SET ROLE service_role;`);
+        await db.query('SELECT public.set_kakao_signup_discord_outbox_profile($1,NULL,NULL,NULL,clock_timestamp(),$2,$3)', [userId, 'UTM: 기타', 'https://corp.internal/']);
+        await db.exec('RESET ROLE');
+        expect((await db.query<{ attribution_origin: string | null }>('SELECT attribution_origin FROM public.kakao_signup_discord_outbox WHERE user_id=$1', [userId])).rows).toEqual([{ attribution_origin: null }]);
+        await expect(db.query("UPDATE public.kakao_signup_discord_outbox SET attribution_origin='https://intranet/' WHERE user_id=$1", [userId])).rejects.toThrow();
     });

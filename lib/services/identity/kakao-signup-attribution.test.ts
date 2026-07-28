@@ -10,6 +10,8 @@ describe('Kakao signup attribution', () => {
     it('keeps only a public normalized Everytime origin with no path or query', () => {
         expect(normalizeKakaoReferrerOrigin('https://Everytime.kr/board/free?email=person@example.test#private')).toBe('https://everytime.kr/');
         expect(normalizeKakaoReferrerOrigin('http://127.0.0.1/private')).toBeNull();
+        expect(normalizeKakaoReferrerOrigin('https://intranet/')).toBeNull();
+        expect(normalizeKakaoReferrerOrigin('https://corp.internal/')).toBeNull();
         expect(normalizeKakaoReferrerOrigin('https://user:pass@evil.test/path')).toBeNull();
         expect(readKakaoSignupAttribution('UTM: 카카오|https://everytime.kr/')).toEqual({ label: 'UTM: 카카오', origin: 'https://everytime.kr/' });
     });
