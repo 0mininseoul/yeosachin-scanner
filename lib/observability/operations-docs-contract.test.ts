@@ -169,18 +169,27 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/0\.01[^\n]*0\.10/);
         expect(operations).toMatch(/(범위 밖|형식 오류)[^\n]*(fail-closed|sampleRate:[^\n]*0)/);
         expect(operations).toMatch(/(0\.05|sample rate)[^\n]*(변경|변경은)[^\n]*(별도 검토|검토 필요)/i);
-        expect(operations).toMatch(
-            /허용 경로[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`/
-        );
         expect(operations).toMatch(/query[^\n]*hash|hash[^\n]*query/i);
         expect(operations).toMatch(
-            /Replay payload[^\n]*query[^\n]*hash[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`[^\n]*URL[^\n]*(포함될 수|포함 가능)/i
+            /top-level current page URL[^\n]*query[^\n]*hash[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`/i
         );
         expect(operations).toMatch(
-            /민감[^\n]*비허용[^\n]*query[^\n]*hash[^\n]*gate[^\n]*차단[^\n]*Replay payload[^\n]*포함되지/i
+            /serialized DOM[^\n]*href[^\n]*src[^\n]*inline-style[^\n]*resource[^\n]*link URL[^\n]*공개 외부 링크[^\n]*(포함될 수|포함 가능)/i
+        );
+        expect(operations).toMatch(
+            /민감 콘텐츠[^\n]*(page allowlist|페이지 allowlist)[^\n]*(mask|block)[^\n]*blanket URL sanitizer[^\n]*(아니|없)/i
         );
         expect(operations).toMatch(
             /명시 이벤트[^\n]*페이지 URL[^\n]*(보내지 않|전송하지 않)/
+        );
+        expect(operations).toMatch(
+            /DOM\/resource\/link URL[^\n]*존재[^\n]*(실패|위반)[^\n]*(아니|않)/
+        );
+        expect(operations).not.toMatch(
+            /Replay payload에는[^\n]*`\/terms` URL만 포함될 수/
+        );
+        expect(operations).not.toMatch(
+            /Replay 표본[^\n]*허용 경로 URL 외의 URL[^\n]*없어야/
         );
         expect(operations).toMatch(
             /로그인[^\n]*analyze[^\n]*progress[^\n]*result[^\n]*share[^\n]*account[^\n]*profile[^\n]*(allowlist 밖|차단)/
