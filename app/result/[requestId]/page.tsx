@@ -761,8 +761,11 @@ export default function ResultPage({ params }: PageProps) {
                                 className={`num text-[56px] font-extrabold leading-[0.85] tracking-[-0.045em] ${
                                     highCount > 0 ? 'text-blood-2' : 'text-jade'
                                 }`}
-                                aria-label={`고위험 계정 ${highCount}건`}
                             >
+                                {/* The visible digit is mid-count during the reveal,
+                                    so the final value is announced separately. A bare
+                                    aria-label on a role-less div is not reliably read. */}
+                                <span className="sr-only">고위험 계정 {highCount}건</span>
                                 <span aria-hidden="true">{revealedHighCount}</span>
                             </div>
                             <p

@@ -19,8 +19,8 @@ CREATE INDEX result_feedback_request_id_created_at_idx
 CREATE INDEX result_feedback_created_at_idx
     ON public.result_feedback(created_at DESC);
 
--- 같은 판독에 대해 무한 접수를 막는다. 소유자가 여러 건을 남길 수는 있으나
--- 라우트에서 분당 제한을 건다.
+-- 소유자는 같은 판독에 여러 건을 남길 수 있다. 접수 빈도 제한은 아직 없으므로
+-- 남용이 관측되면 라우트에 추가한다.
 ALTER TABLE public.result_feedback ENABLE ROW LEVEL SECURITY;
 
 -- 정책 없음: anon/authenticated 는 접근 불가. service_role 은 RLS 를 우회한다.

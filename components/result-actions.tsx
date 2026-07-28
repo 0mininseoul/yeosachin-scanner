@@ -86,30 +86,39 @@ export function ResultActions({
 
   /* Instagram exposes no way to prefill a DM or to choose a recipient from the
      outside — `direct-inbox` only opens the inbox. So the link goes to the
-     clipboard first and the user pastes it into whichever chat they pick. */
+     clipboard first and the user pastes it into whichever chat they pick.
+     Nothing blocking may sit between the copy and the scheme navigation: iOS
+     Safari drops custom-scheme navigations that have drifted too far from the
+     originating gesture, and an alert() in between is enough to lose it. */
   const shareToInstagramDm = async () => {
-    let copiedToClipboard = false;
     try {
       await navigator.clipboard.writeText(copyUrl);
-      copiedToClipboard = true;
     } catch {
-      copiedToClipboard = false;
+      // Opening the inbox is still useful without the clipboard.
     }
     setOpen(false);
-    if (copiedToClipboard) {
-      alert('링크를 복사했어요. 인스타그램 DM 창에 붙여넣어 주세요.');
-    }
 
     // The app scheme silently does nothing on desktop, so fall back to the web
     // inbox if we are still here a moment later.
     const openedAt = Date.now();
+    let onVisibilityChange: (() => void) | null = null;
     const fallback = window.setTimeout(() => {
+      if (onVisibilityChange) {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        onVisibilityChange = null;
+      }
       if (document.visibilityState === 'visible' && Date.now() - openedAt < 2500) {
         window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
       }
     }, 1200);
-    const clearFallback = () => window.clearTimeout(fallback);
-    document.addEventListener('visibilitychange', clearFallback, { once: true });
+    onVisibilityChange = () => {
+      window.clearTimeout(fallback);
+      if (onVisibilityChange) {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        onVisibilityChange = null;
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     window.location.href = INSTAGRAM_DM_APP_URL;
   };
 
