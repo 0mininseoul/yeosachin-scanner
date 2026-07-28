@@ -10,6 +10,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const SHARE_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const SHARE_REQUEST_SELECT = 'id, user_id, pipeline_version, status, share_token, share_enabled';
 const LEGACY_PIPELINE_FILTER = 'pipeline_version.eq.v1,pipeline_version.is.null';
+const V2_PIPELINE_FILTER = 'pipeline_version.eq.v2';
 
 interface ShareRequestRecord {
     id: string;
@@ -22,6 +23,18 @@ interface ShareRequestRecord {
 
 function isLegacySharePipeline(pipelineVersion: unknown): pipelineVersion is 'v1' | null {
     return pipelineVersion === null || pipelineVersion === 'v1';
+}
+
+function isSupportedSharePipeline(
+    pipelineVersion: unknown
+): pipelineVersion is 'v1' | 'v2' | null {
+    return isLegacySharePipeline(pipelineVersion) || pipelineVersion === 'v2';
+}
+
+function pipelineFilter(pipelineVersion: 'v1' | 'v2' | null): string {
+    return pipelineVersion === 'v2'
+        ? V2_PIPELINE_FILTER
+        : LEGACY_PIPELINE_FILTER;
 }
 
 function isStoredShareToken(value: unknown): value is string {
@@ -40,7 +53,11 @@ function unsupportedPipelineResponse(pipelineVersion: unknown) {
     );
 }
 
-async function readEnabledLegacyWinner(requestId: string, userId: string) {
+async function readEnabledWinner(
+    requestId: string,
+    userId: string,
+    pipelineVersion: 'v1' | 'v2' | null
+) {
     return supabaseAdmin
         .from('analysis_requests')
         .select(SHARE_REQUEST_SELECT)
@@ -48,7 +65,7 @@ async function readEnabledLegacyWinner(requestId: string, userId: string) {
         .eq('user_id', userId)
         .eq('status', 'completed')
         .eq('share_enabled', true)
-        .or(LEGACY_PIPELINE_FILTER)
+        .or(pipelineFilter(pipelineVersion))
         .maybeSingle();
 }
 
@@ -56,6 +73,7 @@ async function compareAndSetShareEnabled(
     requestId: string,
     userId: string,
     expectedToken: string | null,
+    pipelineVersion: 'v1' | 'v2' | null,
 ) {
     const candidateToken = expectedToken ?? generateShareToken();
     const baseMutation = supabaseAdmin
@@ -67,7 +85,7 @@ async function compareAndSetShareEnabled(
         .eq('id', requestId)
         .eq('user_id', userId)
         .eq('status', 'completed')
-        .or(LEGACY_PIPELINE_FILTER);
+        .or(pipelineFilter(pipelineVersion));
     const conditionalMutation = expectedToken === null
         ? baseMutation.is('share_token', null)
         : baseMutation
@@ -80,7 +98,7 @@ async function compareAndSetShareEnabled(
     if (mutation.error) return { data: null, error: mutation.error };
     if (
         mutation.data
-        && isLegacySharePipeline(mutation.data.pipeline_version)
+        && mutation.data.pipeline_version === pipelineVersion
         && mutation.data.status === 'completed'
         && mutation.data.share_enabled === true
         && isStoredShareToken(mutation.data.share_token)
@@ -90,7 +108,7 @@ async function compareAndSetShareEnabled(
 
     // A concurrent request may have won the compare-and-set. Always return
     // the committed winner rather than the losing request's candidate token.
-    return readEnabledLegacyWinner(requestId, userId);
+    return readEnabledWinner(requestId, userId, pipelineVersion);
 }
 
 export async function POST(request: Request) {
@@ -154,9 +172,7 @@ export async function POST(request: Request) {
             );
         }
 
-        // V2 results have an owner-only DTO backed by dedicated tables. They
-        // must never fall through this V1 share path or create a legacy token.
-        if (!isLegacySharePipeline(analysisRequest.pipeline_version)) {
+        if (!isSupportedSharePipeline(analysisRequest.pipeline_version)) {
             return unsupportedPipelineResponse(analysisRequest.pipeline_version);
         }
 
@@ -175,7 +191,12 @@ export async function POST(request: Request) {
             const expectedToken = isStoredShareToken(analysisRequest.share_token)
                 ? analysisRequest.share_token
                 : null;
-            const mutation = await compareAndSetShareEnabled(requestId, user.id, expectedToken);
+            const mutation = await compareAndSetShareEnabled(
+                requestId,
+                user.id,
+                expectedToken,
+                analysisRequest.pipeline_version
+            );
             if (mutation.error) {
                 console.error('Share compare-and-set failed');
                 return NextResponse.json(
@@ -210,14 +231,24 @@ export async function POST(request: Request) {
             `/share/${shareToken}`,
             appOriginForRequest(request.url)
         ).toString();
+        const ogImageUrl = new URL(
+            `/api/share/${shareToken}/opengraph-image`,
+            appOriginForRequest(request.url)
+        ).toString();
 
         return NextResponse.json({
             success: true,
             shareToken,
             shareUrl,
+            ogImageUrl,
+        }, {
+            headers: {
+                'Cache-Control': 'private, no-store, max-age=0',
+                Vary: 'Cookie',
+            },
         });
-    } catch (error) {
-        console.error('Share enable error:', error);
+    } catch {
+        console.error('Share enable error');
         return NextResponse.json(
             { error: '서버 오류가 발생했습니다.' },
             demoRecognized

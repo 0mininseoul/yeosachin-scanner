@@ -49,6 +49,7 @@ describe('analysis V2 public contracts', () => {
             ...legacy,
             analysisUnavailableMutuals: 1,
         });
+        expect(parsed.targetFullName).toBeNull();
         expect(parsed).not.toHaveProperty('successfullyScreenedMutuals');
         expect(parsed).not.toHaveProperty('fetchUnavailableMutuals');
         expect(parsed).not.toHaveProperty('mediaUnavailableMutuals');
@@ -64,6 +65,31 @@ describe('analysis V2 public contracts', () => {
         expect(analysisResultSummaryV1Schema.safeParse({
             ...legacy,
             genderStats: { male: 1, female: 1, unknown: 0 },
+        }).success).toBe(false);
+        expect(analysisResultSummaryV1Schema.parse({
+            ...legacy,
+            targetFullName: '김준호',
+        }).targetFullName).toBe('김준호');
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
+            targetFullName: '가'.repeat(201),
+        }).success).toBe(false);
+        const shareToken = 'a'.repeat(64);
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
+            targetProfileImage:
+                `/api/share/${shareToken}/image?kind=target`,
+        }).success).toBe(true);
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
+            targetProfileImage:
+                `/api/share/${shareToken}/image?kind=target`
+                + '&candidateId=unexpected',
+        }).success).toBe(false);
+        expect(analysisResultSummaryV1Schema.safeParse({
+            ...legacy,
+            targetProfileImage:
+                `/api/share/${shareToken}/image?kind=female`,
         }).success).toBe(false);
     });
 

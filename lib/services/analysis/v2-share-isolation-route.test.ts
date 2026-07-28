@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    encodeResultCursor,
+    ResultPaginationError,
+} from '@/lib/domain/analysis/result-pagination';
 
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
@@ -6,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     from: vi.fn(),
     demoFind: vi.fn(),
     generateToken: vi.fn(),
+    loadV2Page: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -16,6 +21,9 @@ vi.mock('@/lib/services/demo-analysis/store', () => ({
 vi.mock('@/lib/services/share/generate-token', () => ({
     generateShareToken: mocks.generateToken,
 }));
+vi.mock('@/lib/services/share/v2-result-share', () => ({
+    v2ShareResultService: { loadPage: mocks.loadV2Page },
+}));
 
 import { POST as enableShare } from '@/app/api/share/enable/route';
 import { GET as sharedResult } from '@/app/api/share/[token]/route';
@@ -24,7 +32,19 @@ const userId = '123e4567-e89b-42d3-a456-426614174000';
 const requestId = '223e4567-e89b-42d3-a456-426614174000';
 const token = 'a'.repeat(64);
 
+function resultCursor(list: 'public' | 'private') {
+    return encodeResultCursor({
+        version: 1,
+        list,
+        direction: 'asc',
+        sortKeyType: 'number',
+        sortKey: 1,
+        candidateId: `candidate:${list}`,
+    });
+}
+
 function requestChain(record: Record<string, unknown> | null) {
+    let state = record ? { ...record } : null;
     const chain = {
         select: vi.fn(),
         eq: vi.fn(),
@@ -38,9 +58,18 @@ function requestChain(record: Record<string, unknown> | null) {
     chain.eq.mockReturnValue(chain);
     chain.is.mockReturnValue(chain);
     chain.or.mockReturnValue(chain);
-    chain.update.mockReturnValue(chain);
-    chain.single.mockResolvedValue({ data: record, error: record ? null : { code: 'PGRST116' } });
-    chain.maybeSingle.mockResolvedValue({ data: record, error: null });
+    chain.update.mockImplementation((patch: Record<string, unknown>) => {
+        if (state) state = { ...state, ...patch };
+        return chain;
+    });
+    chain.single.mockImplementation(async () => ({
+        data: state ? { ...state } : null,
+        error: state ? null : { code: 'PGRST116' },
+    }));
+    chain.maybeSingle.mockImplementation(async () => ({
+        data: state ? { ...state } : null,
+        error: null,
+    }));
     return chain;
 }
 
@@ -149,7 +178,7 @@ describe('V2 share isolation', () => {
         mocks.generateToken.mockReturnValue('b'.repeat(64));
     });
 
-    it('rejects a completed V2 owner request before token mutation', async () => {
+    it('enables a completed V2 owner result and returns absolute page and OG URLs', async () => {
         const request = requestChain({
             id: requestId,
             user_id: userId,
@@ -165,12 +194,22 @@ describe('V2 share isolation', () => {
             body: JSON.stringify({ requestId }),
         }));
 
-        expect(response.status).toBe(409);
-        await expect(response.json()).resolves.toEqual({
-            code: 'V2_SHARE_UNSUPPORTED',
-            error: '이 판독 결과는 아직 공유할 수 없습니다.',
+        expect(response.status).toBe(200);
+        expect(response.headers.get('cache-control')).toBe(
+            'private, no-store, max-age=0'
+        );
+        await expect(response.json()).resolves.toMatchObject({
+            success: true,
+            shareToken: 'b'.repeat(64),
+            shareUrl: `https://yeosachin.com/share/${'b'.repeat(64)}`,
+            ogImageUrl:
+                `https://yeosachin.com/api/share/${'b'.repeat(64)}/opengraph-image`,
         });
-        expect(request.update).not.toHaveBeenCalled();
+        expect(request.update).toHaveBeenCalledWith({
+            share_token: 'b'.repeat(64),
+            share_enabled: true,
+        });
+        expect(request.or).toHaveBeenCalledWith('pipeline_version.eq.v2');
         expect(request.select).toHaveBeenCalledWith(
             'id, user_id, pipeline_version, status, share_token, share_enabled'
         );
@@ -200,7 +239,7 @@ describe('V2 share isolation', () => {
         }
     );
 
-    it.each(['v2', 'v3', '', 'malformed'] as const)(
+    it.each(['v3', '', 'malformed'] as const)(
         'rejects unsupported pipeline %s before token mutation',
         async pipelineVersion => {
             const request = requestChain({
@@ -220,9 +259,7 @@ describe('V2 share isolation', () => {
 
             expect(response.status).toBe(409);
             await expect(response.json()).resolves.toMatchObject({
-                code: pipelineVersion === 'v2'
-                    ? 'V2_SHARE_UNSUPPORTED'
-                    : 'SHARE_PIPELINE_UNSUPPORTED',
+                code: 'SHARE_PIPELINE_UNSUPPORTED',
             });
             expect(request.update).not.toHaveBeenCalled();
         }
@@ -265,6 +302,41 @@ describe('V2 share isolation', () => {
         }
     });
 
+    it('returns one committed token to concurrent V2 enable requests', async () => {
+        mocks.generateToken
+            .mockReturnValueOnce('b'.repeat(64))
+            .mockReturnValueOnce('c'.repeat(64));
+        const store = installConcurrentShareStore({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v2',
+            status: 'completed',
+            share_token: null,
+            share_enabled: false,
+        });
+        const post = () => enableShare(
+            new Request('https://example.com/api/share/enable', {
+                method: 'POST',
+                body: JSON.stringify({ requestId }),
+            })
+        );
+
+        const responses = await Promise.all([post(), post()]);
+        const bodies = await Promise.all(responses.map(response => response.json()));
+
+        expect(responses.map(response => response.status)).toEqual([200, 200]);
+        expect(bodies[0].shareToken).toBe(bodies[1].shareToken);
+        expect(bodies[0].ogImageUrl).toBe(bodies[1].ogImageUrl);
+        expect(store.record()).toMatchObject({
+            pipeline_version: 'v2',
+            share_enabled: true,
+            share_token: bodies[0].shareToken,
+        });
+        for (const mutation of store.mutations) {
+            expect(mutation.or).toContain('pipeline_version.eq.v2');
+        }
+    });
+
     it('conditionally re-enables one stored token and rereads the winner under concurrency', async () => {
         const store = installConcurrentShareStore({
             id: requestId,
@@ -296,7 +368,87 @@ describe('V2 share isolation', () => {
         }
     });
 
-    it.each(['v2', 'future', 'malformed'] as const)(
+    it('returns a paginated V2 shared DTO with public no-store headers', async () => {
+        const request = requestChain({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v2',
+            status: 'completed',
+            share_token: token,
+            share_enabled: true,
+        });
+        mocks.from.mockReturnValue(request);
+        mocks.loadV2Page.mockResolvedValue({
+            schemaVersion: 1,
+            requestId,
+            summary: { targetInstagramId: 'target' },
+            femaleAccounts: [{ instagramId: 'visible.account' }],
+            privateAccounts: [{ instagramId: 'visible.private' }],
+            femaleNextCursor: 'next-public',
+            privateNextCursor: 'next-private',
+            isShared: true,
+        });
+
+        const response = await sharedResult(
+            new Request(
+                `https://example.com/api/share/${token}`
+                + `?femaleCursor=${resultCursor('public')}`
+                + `&privateCursor=${resultCursor('private')}&pageSize=25`
+            ),
+            { params: Promise.resolve({ token }) },
+        );
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('cache-control')).toBe(
+            'private, no-store, max-age=0'
+        );
+        await expect(response.json()).resolves.toMatchObject({
+            isShared: true,
+            femaleNextCursor: 'next-public',
+            privateNextCursor: 'next-private',
+            femaleAccounts: [{ instagramId: 'visible.account' }],
+        });
+        expect(mocks.loadV2Page).toHaveBeenCalledWith({
+            requestId,
+            ownerUserId: userId,
+            shareToken: token,
+            femaleCursor: resultCursor('public'),
+            privateCursor: resultCursor('private'),
+            pageSize: 25,
+        });
+    });
+
+    it('maps malformed V2 cursors and duplicate pagination keys to 400', async () => {
+        const request = requestChain({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v2',
+            status: 'completed',
+            share_token: token,
+            share_enabled: true,
+        });
+        mocks.from.mockReturnValue(request);
+        mocks.loadV2Page.mockRejectedValue(
+            new ResultPaginationError('INVALID_CURSOR')
+        );
+
+        const malformed = await sharedResult(
+            new Request(
+                `https://example.com/api/share/${token}?femaleCursor=invalid`
+            ),
+            { params: Promise.resolve({ token }) },
+        );
+        const duplicate = await sharedResult(
+            new Request(
+                `https://example.com/api/share/${token}?pageSize=10&pageSize=20`
+            ),
+            { params: Promise.resolve({ token }) },
+        );
+
+        expect([malformed.status, duplicate.status]).toEqual([400, 400]);
+    });
+
+    it.each(['future', 'malformed'] as const)(
         'fails closed for a stale %s public token before legacy result reads',
         async pipelineVersion => {
             const request = requestChain({
