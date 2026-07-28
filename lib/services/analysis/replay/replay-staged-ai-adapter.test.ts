@@ -502,4 +502,38 @@ describe('replay staged AI adapter telemetry', () => {
         },
     );
 
+    it('rethrows an unexpected v2.12 resolver fault through the outer admission boundary', async () => {
+        mocks.createGenderResolutionResultIdentity.mockReturnValue({
+            operationKey: 'resolver:identity',
+        });
+        mocks.genderResolution.mockRejectedValue(
+            new Error('unexpected resolver logic fault'),
+        );
+
+        await expect(createReplayStagedAiAdapter('ai-stage-policy-v2.12')
+            .resolveGender?.({
+                ordinal: 1,
+                media: [],
+                signal: new AbortController().signal,
+            }))
+            .rejects.toThrow('unexpected resolver logic fault');
+    });
+
+    it('preserves v2.11 resolver fault isolation', async () => {
+        mocks.createGenderResolutionResultIdentity.mockReturnValue({
+            operationKey: 'resolver:identity',
+        });
+        mocks.genderResolution.mockRejectedValue(
+            new Error('unexpected resolver logic fault'),
+        );
+
+        await expect(createReplayStagedAiAdapter('ai-stage-policy-v2.11')
+            .resolveGender?.({
+                ordinal: 1,
+                media: [],
+                signal: new AbortController().signal,
+            }))
+            .resolves.toMatchObject({ outcome: 'failed' });
+    });
+
 });

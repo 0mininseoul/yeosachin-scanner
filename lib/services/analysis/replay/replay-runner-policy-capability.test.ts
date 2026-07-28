@@ -392,6 +392,56 @@ describe('replay staged AI runner policy capability', () => {
         expect(serialized).not.toContain('MAX_TOKENS');
     });
 
+    it('propagates an unexpected v2.12 resolver fault to the replay boundary', async () => {
+        ai.genderTriageMicrobatch.mockResolvedValue([{
+            accountId: `account:${'b'.repeat(64)}`,
+            result: {
+                assessment: {
+                    inferredGender: 'unknown', confidence: 'low',
+                    ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis',
+                routingReason: 'conserve_female_recall',
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'uncertain',
+            },
+            source: 'checkpoint',
+        }]);
+        ai.featureAnalysis.mockResolvedValue({
+            features: { accountContext: 'personal' },
+            finalGenderDecision: 'unresolved',
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        ai.genderResolution.mockRejectedValue(
+            new Error('unexpected resolver logic fault'),
+        );
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: {
+                ...historicalV212Bundle,
+                profiles: [{
+                    ...historicalV212Bundle.profiles[0]!,
+                    media: [
+                        historicalV212Bundle.profiles[0]!.media[0]!,
+                        {
+                            ...historicalV212Bundle.profiles[0]!.media[0]!,
+                            selectionId: 'm2',
+                            postId: 'p2',
+                        },
+                    ],
+                    triageSelectionIds: ['m1', 'm2'],
+                    featureSelectionIds: ['m1', 'm2'],
+                    resolverSelectionIds: ['m1', 'm2'],
+                    coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+                }],
+            },
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12' as never),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+        })).rejects.toThrow('unexpected resolver logic fault');
+    });
+
     it('keeps a triage-personal but deterministically collective account out of feature and resolver', async () => {
         ai.genderTriageMicrobatch.mockResolvedValue([{
             accountId: `account:${'b'.repeat(64)}`,

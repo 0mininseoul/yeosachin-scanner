@@ -13,11 +13,19 @@ import {
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib/services/ai/private-name-analysis';
-import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
+import {
+    AI_AMBIGUOUS_GENERATION_ERROR_PREFIX,
+    AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
+    AI_RATE_LIMIT_ERROR_PREFIX,
+    classifyGeminiGenerationError,
+} from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
-import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
+import {
+    AI_STAGE_POLICY_V212_VERSION,
+    aiStagePolicySupports,
+} from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import type {
     ReplayAiRunner,
@@ -63,6 +71,53 @@ interface InvocationTelemetry {
     rateLimited: number;
     failureDisposition: Record<string, number>;
     attemptLatenciesMs: number[];
+}
+
+const V212_RESOLVER_CAPACITY_SKIP_CODE =
+    'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED';
+
+type V212ResolverTerminalDisposition =
+    | 'ambiguous'
+    | 'rate_limited'
+    | 'rejected'
+    | 'response_rejected';
+
+function isV212ResolverCapacitySkip(error: unknown): boolean {
+    return error instanceof Error
+        && error.message === V212_RESOLVER_CAPACITY_SKIP_CODE;
+}
+
+function expectedV212ResolverTerminalDisposition(
+    error: unknown,
+): V212ResolverTerminalDisposition | null {
+    if (!(error instanceof Error)) return null;
+    if (error.message.startsWith(AI_AMBIGUOUS_GENERATION_ERROR_PREFIX)) {
+        return 'ambiguous';
+    }
+    if (error.message.startsWith(AI_RATE_LIMIT_ERROR_PREFIX)) {
+        return 'rate_limited';
+    }
+    if (error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX)) {
+        return 'response_rejected';
+    }
+    if (error.message.startsWith('AI_GENERATION_REQUEST_ERROR:')) {
+        return 'rejected';
+    }
+    return null;
+}
+
+/**
+ * v2.12 isolates only terminal provider/admission outcomes. The explicit
+ * error marker and matching terminal telemetry prevent raw adapter/audit
+ * faults from being reclassified as a per-account unknown result.
+ */
+function isExpectedV212ResolverFailure(
+    error: unknown,
+    telemetry: InvocationTelemetry,
+): boolean {
+    if (isV212ResolverCapacitySkip(error)) return true;
+    const disposition = expectedV212ResolverTerminalDisposition(error);
+    return disposition !== null && telemetry.failureDisposition[disposition] > 0;
 }
 
 function normalized(media: readonly ReplayMedia[]) {
@@ -128,7 +183,10 @@ function statelessAudit(
     };
 }
 
-async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Promise<ReplayInvocation<T>> {
+async function invoke<T>(
+    task: (state: InvocationTelemetry) => Promise<T>,
+    isolateError: (error: unknown, telemetry: InvocationTelemetry) => boolean = () => true,
+): Promise<ReplayInvocation<T>> {
     const started = performance.now();
     const state: InvocationTelemetry = {
         calls: 0,
@@ -152,6 +210,7 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
             elapsedMs: Math.round(performance.now() - started),
         };
     } catch (error) {
+        if (!isolateError(error, state)) throw error;
         return {
             outcome: outcome(error, state),
             calls: state.calls,
@@ -270,6 +329,7 @@ export function createReplayStagedAiAdapter(
         aiStagePolicyVersion,
         'genderQualityV211',
     );
+    const strictV212Resolver = aiStagePolicyVersion === AI_STAGE_POLICY_V212_VERSION;
     // Replay remains stateless, but v2.11 uses the same bounded call shape as scheduler-v1.
     // Waiting is local admission only: no provider attempt exists before the semaphore opens.
     const runTriage = genderQualityV211
@@ -457,34 +517,43 @@ export function createReplayStagedAiAdapter(
         resolveGender: input => (runResolver && runResolverShared
             ? (() => {
                 const deadlineAtMs = performance.now() + 5_000;
-                return runResolver(() => runResolverShared(() => invoke(async state => {
-            const aiInput = { media: normalized(input.media) };
-            const identity = createGenderResolutionResultIdentity(
-                aiInput,
-                aiStagePolicyVersion,
-            );
-            return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
-                onAttemptStart: value => input.onAttemptStart?.({
-                    attempt: value.attempt,
-                    retryCount: value.retryCount,
-                }),
-                onAttemptTelemetry: value => input.onAttemptTelemetry?.({
-                    attempt: value.attempt,
-                    retryCount: value.retryCount,
-                    disposition: value.disposition,
-                    latencyMs: value.latencyMs,
-                }),
-            }), {
-                abortSignal: input.signal,
-                admissionDeadlineAtMs: deadlineAtMs,
-                aiStagePolicyVersion,
-                replayCapability,
-            });
-            }), input.signal, deadlineAtMs), input.signal, deadlineAtMs);
-            })().catch(() => ({
-                outcome: 'capacity_skipped' as const,
-                attempts: 0, retries: 0, elapsedMs: 0,
-            }))
+                const invocation = runResolver(() => runResolverShared(() => invoke(async state => {
+                    const aiInput = { media: normalized(input.media) };
+                    const identity = createGenderResolutionResultIdentity(
+                        aiInput,
+                        aiStagePolicyVersion,
+                    );
+                    return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
+                        onAttemptStart: value => input.onAttemptStart?.({
+                            attempt: value.attempt,
+                            retryCount: value.retryCount,
+                        }),
+                        onAttemptTelemetry: value => input.onAttemptTelemetry?.({
+                            attempt: value.attempt,
+                            retryCount: value.retryCount,
+                            disposition: value.disposition,
+                            latencyMs: value.latencyMs,
+                        }),
+                    }), {
+                        abortSignal: input.signal,
+                        admissionDeadlineAtMs: deadlineAtMs,
+                        aiStagePolicyVersion,
+                        replayCapability,
+                    });
+                }, strictV212Resolver ? isExpectedV212ResolverFailure : undefined), input.signal, deadlineAtMs), input.signal, deadlineAtMs);
+                return strictV212Resolver
+                    ? invocation.catch(error => {
+                        if (!isV212ResolverCapacitySkip(error)) throw error;
+                        return {
+                            outcome: 'capacity_skipped' as const,
+                            attempts: 0, retries: 0, elapsedMs: 0,
+                        };
+                    })
+                    : invocation.catch(() => ({
+                        outcome: 'capacity_skipped' as const,
+                        attempts: 0, retries: 0, elapsedMs: 0,
+                    }));
+            })()
             : invoke(async state => {
                 const aiInput = { media: normalized(input.media) };
                 const identity = createGenderResolutionResultIdentity(aiInput, aiStagePolicyVersion);
