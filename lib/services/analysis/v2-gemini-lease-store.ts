@@ -94,6 +94,7 @@ const acquireInputSchema = z.object({
         AI_STAGE_POLICY_V211_VERSION,
     ]).optional(),
     abortSignal: z.custom<AbortSignal>(value => value instanceof AbortSignal).optional(),
+    admissionDeadlineAtMs: z.number().finite().nonnegative().optional(),
 }).strict().superRefine((input, context) => {
     const v2 = input.aiStagePolicyVersion !== undefined
         && aiStagePolicySupports(input.aiStagePolicyVersion, 'durableGeminiLease');
@@ -151,6 +152,8 @@ export interface AnalysisV2GeminiLeaseStore {
         operationKey?: string;
         stage?: AiStageName;
         aiStagePolicyVersion?: AiStagePolicyVersion;
+        abortSignal?: AbortSignal;
+        admissionDeadlineAtMs?: number;
     }): Promise<AnalysisV2GeminiLease>;
     renew(lease: AnalysisV2GeminiLease): Promise<AnalysisV2GeminiLease>;
     release(lease: AnalysisV2GeminiLease): Promise<void>;
@@ -275,7 +278,7 @@ export function createAnalysisV2GeminiLeaseStore(
             const isV211Resolver = input.data.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION
                 && input.data.stage === 'genderResolution';
             const deadlineAtMs = Math.min(
-                dependencies.nowMs() + V211_RESOLVER_LEASE_GRACE_MS,
+                input.data.admissionDeadlineAtMs ?? (dependencies.nowMs() + V211_RESOLVER_LEASE_GRACE_MS),
                 input.data.handlerDeadlineAtMs - AI_GEMINI_MIN_REMAINING_MS,
             );
             let data: unknown;

@@ -1285,6 +1285,10 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     attempt: telemetry.attempt,
                     handlerDeadlineAtMs,
                     aiStagePolicyVersion,
+                    ...(telemetry.admissionDeadlineAtMs !== undefined
+                        ? { admissionDeadlineAtMs: telemetry.admissionDeadlineAtMs }
+                        : {}),
+                    ...(telemetry.abortSignal ? { abortSignal: telemetry.abortSignal } : {}),
                 });
                 let reservation: AnalysisV2AiAttemptReservation;
                 try {

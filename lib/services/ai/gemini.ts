@@ -139,6 +139,7 @@ async function runWithGenerationSlot<T>(
     policyVersion: AiStagePolicyVersion,
     task: () => Promise<T>,
     abortSignal?: AbortSignal,
+    admissionDeadlineAtMs?: number,
 ): Promise<T> {
     if (!stage) {
         return generationLimiterState.shared.run(task);
@@ -147,7 +148,8 @@ async function runWithGenerationSlot<T>(
     const stageSemaphore = getStageGenerationSemaphore(policyVersion, stage);
     if (stage === 'genderResolution') {
         if (aiStagePolicySupports(policyVersion, 'genderQualityV211')) {
-            const deadlineAtMs = performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS;
+            const deadlineAtMs = admissionDeadlineAtMs
+                ?? performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS;
             while (performance.now() < deadlineAtMs && !abortSignal?.aborted) {
                 const releaseStage = await stageSemaphore.tryAcquireWithin(deadlineAtMs, abortSignal);
                 if (!releaseStage) break;
@@ -305,6 +307,8 @@ export interface GeminiAttemptStartTelemetry {
     maxOutputTokens: number;
     attempt: number;
     retryCount: number;
+    admissionDeadlineAtMs?: number;
+    abortSignal?: AbortSignal;
 }
 
 export interface AnalyzeWithGeminiOptions<T> {
@@ -881,6 +885,10 @@ export async function analyzeWithGemini<T>(
             }
 
             let response;
+            const resolverAdmissionDeadlineAtMs = stage === 'genderResolution'
+                && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+                ? performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS
+                : undefined;
             try {
                 const config: GenerateContentConfig = {
                     responseMimeType: 'application/json',
@@ -924,6 +932,13 @@ export async function analyzeWithGemini<T>(
                                         ?? stagePolicy.maxOutputTokens,
                                     attempt: attemptNumber,
                                     retryCount: attemptNumber - 1,
+                                    ...(stage === 'genderResolution'
+                                        && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+                                        ? {
+                                            admissionDeadlineAtMs: resolverAdmissionDeadlineAtMs!,
+                                            ...(abortSignal ? { abortSignal } : {}),
+                                        }
+                                        : {}),
                                 });
                             } catch (error) {
                                 if (
@@ -945,6 +960,7 @@ export async function analyzeWithGemini<T>(
                         });
                     },
                     abortSignal,
+                    resolverAdmissionDeadlineAtMs,
                 );
             } catch (generationError) {
                 if (
