@@ -13,6 +13,7 @@ import {
     lstat,
     mkdir,
     open,
+    opendir,
     readFile,
     readlink,
     readdir,
@@ -87,6 +88,9 @@ const NODE_BUILTINS = new Set(builtinModules.flatMap(name => (
 )));
 const IMMUTABLE_IMAGE_DIGEST =
     /^[a-z0-9][a-z0-9._-]*(?:[./][a-z0-9][a-z0-9._-]*)+@sha256:[a-f0-9]{64}$/;
+const MAX_PHYSICAL_PACKAGE_TREE_ENTRIES = 20_000;
+const MAX_PHYSICAL_PACKAGE_TREE_BYTES = 512 * 1024 * 1024;
+const MAX_PHYSICAL_PACKAGE_TREE_DEPTH = 32;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const stub = resolve(
     root,
@@ -275,6 +279,86 @@ export async function copyReplayAnalysisV2JobPhysicalDependencyClosure({
         arch: process.arch,
         packages,
     };
+}
+
+function isStrictDescendant(parent, candidate) {
+    const nested = relative(parent, candidate);
+    return (
+        nested !== ''
+        && nested !== '..'
+        && !nested.startsWith(`..${sep}`)
+        && !isAbsolute(nested)
+    );
+}
+
+async function verifyPhysicalPackageTree({
+    packageDirectory,
+    nodeModulesDirectory,
+    budget,
+}) {
+    try {
+        const packageRoot = resolve(packageDirectory);
+        const nodeModulesRoot = resolve(nodeModulesDirectory);
+        if (!isStrictDescendant(nodeModulesRoot, packageRoot)) {
+            throw new Error('package root escape');
+        }
+        const pending = [{
+            path: packageRoot,
+            depth: 0,
+        }];
+        while (pending.length > 0) {
+            const current = pending.pop();
+            if (
+                current.depth > MAX_PHYSICAL_PACKAGE_TREE_DEPTH
+                || (
+                    current.path !== packageRoot
+                    && !isStrictDescendant(
+                        packageRoot,
+                        current.path,
+                    )
+                )
+                || !isStrictDescendant(
+                    nodeModulesRoot,
+                    current.path,
+                )
+            ) {
+                throw new Error('package tree escape or depth');
+            }
+            const entry = await lstat(current.path);
+            budget.entries += 1;
+            if (
+                budget.entries
+                > MAX_PHYSICAL_PACKAGE_TREE_ENTRIES
+            ) {
+                throw new Error('package tree entry limit');
+            }
+            if (entry.isFile()) {
+                budget.bytes += entry.size;
+                if (
+                    budget.bytes
+                    > MAX_PHYSICAL_PACKAGE_TREE_BYTES
+                ) {
+                    throw new Error('package tree byte limit');
+                }
+                continue;
+            }
+            if (!entry.isDirectory()) {
+                throw new Error('package tree special entry');
+            }
+            const directory = await opendir(current.path);
+            for await (const child of directory) {
+                pending.push({
+                    path: join(current.path, child.name),
+                    depth: current.depth + 1,
+                });
+            }
+        }
+    } catch (cause) {
+        throw new Error(
+            'physical closure package tree invalid',
+            { cause },
+        );
+    }
 }
 
 function forbiddenGraph(reason) {
@@ -565,6 +649,10 @@ export async function verifyReplayAnalysisV2JobContainerFilesystem({
                 'physical closure provenance mismatch',
             );
         }
+        const packageTreeBudget = {
+            entries: 0,
+            bytes: 0,
+        };
         for (const entry of provenance.packages) {
             const locked = imageLockfile.packages?.[entry.path];
             const packageDirectory = join(
@@ -606,6 +694,11 @@ export async function verifyReplayAnalysisV2JobContainerFilesystem({
                     'physical closure provenance mismatch',
                 );
             }
+            await verifyPhysicalPackageTree({
+                packageDirectory,
+                nodeModulesDirectory: nodeModulesPath,
+                budget: packageTreeBudget,
+            });
         }
     } catch (cause) {
         throw new Error(

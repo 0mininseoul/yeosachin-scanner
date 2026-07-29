@@ -10,10 +10,12 @@ import {
     rename,
     rm,
     symlink,
+    truncate,
     writeFile,
 } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import {
     closeSync as closeDescriptorSync,
     fstatSync as fstatDescriptorSync,
@@ -160,6 +162,66 @@ async function stageContainerRootPackages(input: {
         }, null, 2)}\n`,
         { mode: 0o600 },
     );
+}
+
+async function stagePhysicalContainerFixture() {
+    const {
+        copyReplayAnalysisV2JobPhysicalDependencyClosure,
+        createReplayAnalysisV2JobContainerLaunchContract,
+        createReplayAnalysisV2JobRuntimeManifest,
+        verifyReplayAnalysisV2JobContainerFilesystem,
+    } = await buildModule();
+    const imageRoot = await mkdtemp(join(
+        process.platform === 'win32' ? tmpdir() : '/tmp',
+        'rj-physical-',
+    ));
+    const workspace = join(imageRoot, 'workspace');
+    const lockfile = JSON.parse(await readFile(
+        join(process.cwd(), 'package-lock.json'),
+        'utf8',
+    ));
+    const manifest = createReplayAnalysisV2JobRuntimeManifest(
+        lockfile,
+        immutableImageDigest,
+    );
+    const contract = createReplayAnalysisV2JobContainerLaunchContract({
+        imageDigest: immutableImageDigest,
+        entrypoint: '/workspace/replay-job/job.mjs',
+    });
+    await mkdir(workspace, {
+        recursive: true,
+        mode: 0o700,
+    });
+    await stageContainerArtifactPointer(workspace);
+    await copyReplayAnalysisV2JobPhysicalDependencyClosure({
+        sourceWorkspace: process.cwd(),
+        imageWorkspace: workspace,
+    });
+    return {
+        contract,
+        imageRoot,
+        manifest,
+        verifyReplayAnalysisV2JobContainerFilesystem,
+        workspace,
+    };
+}
+
+async function expectPhysicalPackageTreeRejection(
+    fixture: Awaited<ReturnType<typeof stagePhysicalContainerFixture>>,
+) {
+    const error =
+        await fixture.verifyReplayAnalysisV2JobContainerFilesystem({
+            imageRoot: fixture.imageRoot,
+            contract: fixture.contract,
+            manifest: fixture.manifest,
+        }).then(() => undefined, cause => cause);
+    expect(error).toMatchObject({
+        message:
+            'ANALYSIS_V2_REPLAY_JOB_CONTAINER_FILESYSTEM_INVALID',
+        cause: {
+            message: 'physical closure package tree invalid',
+        },
+    });
 }
 
 describe('stateless replay job build contract', () => {
@@ -568,6 +630,151 @@ describe('stateless replay job build contract', () => {
             });
         } finally {
             await rm(imageRoot, { recursive: true, force: true });
+        }
+    }, 30_000);
+
+    it.each([
+        [
+            'absolute import-entrypoint',
+            'node_modules/zod/index.js',
+            'node_modules/zod/index.js',
+            'absolute',
+        ],
+        [
+            'relative import-entrypoint',
+            'node_modules/zod/index.js',
+            'node_modules/zod/index.js',
+            'relative',
+        ],
+        [
+            'absolute nested arbitrary',
+            'node_modules/google-auth-library/build/src/auth/googleauth.js',
+            'node_modules/google-auth-library/build/src/auth/googleauth.js',
+            'absolute',
+        ],
+        [
+            'relative nested arbitrary',
+            'node_modules/google-auth-library/build/src/auth/googleauth.js',
+            'node_modules/google-auth-library/build/src/auth/googleauth.js',
+            'relative',
+        ],
+    ] as const)(
+        'rejects a %s host file symlink inside a provenance package',
+        async (_label, imagePath, hostPath, style) => {
+            const fixture = await stagePhysicalContainerFixture();
+            try {
+                const target = join(fixture.workspace, imagePath);
+                const hostTarget = join(process.cwd(), hostPath);
+                await rm(target);
+                await symlink(
+                    style === 'absolute'
+                        ? hostTarget
+                        : relative(dirname(target), hostTarget),
+                    target,
+                    'file',
+                );
+
+                await expectPhysicalPackageTreeRejection(fixture);
+            } finally {
+                await rm(fixture.imageRoot, {
+                    recursive: true,
+                    force: true,
+                });
+            }
+        },
+        30_000,
+    );
+
+    it('rejects an internal directory symlink inside a provenance package', async () => {
+        const fixture = await stagePhysicalContainerFixture();
+        try {
+            await symlink(
+                'locales',
+                join(
+                    fixture.workspace,
+                    'node_modules/zod/linked-locales',
+                ),
+                'dir',
+            );
+
+            await expectPhysicalPackageTreeRejection(fixture);
+        } finally {
+            await rm(fixture.imageRoot, {
+                recursive: true,
+                force: true,
+            });
+        }
+    }, 30_000);
+
+    it('rejects a socket inside a provenance package when the platform supports it', async () => {
+        if (process.platform === 'win32') return;
+        const fixture = await stagePhysicalContainerFixture();
+        const socketPath = join(
+            fixture.workspace,
+            'node_modules/zod/internal.sock',
+        );
+        const server = createServer();
+        try {
+            await new Promise<void>((resolveListen, rejectListen) => {
+                server.once('error', rejectListen);
+                server.listen(socketPath, () => {
+                    server.off('error', rejectListen);
+                    resolveListen();
+                });
+            });
+
+            await expectPhysicalPackageTreeRejection(fixture);
+        } finally {
+            await new Promise<void>(resolveClose => {
+                server.close(() => resolveClose());
+            });
+            await rm(fixture.imageRoot, {
+                recursive: true,
+                force: true,
+            });
+        }
+    }, 30_000);
+
+    it('rejects a package tree deeper than the verifier bound', async () => {
+        const fixture = await stagePhysicalContainerFixture();
+        try {
+            let directory = join(
+                fixture.workspace,
+                'node_modules/zod/deep',
+            );
+            for (let depth = 0; depth < 40; depth += 1) {
+                directory = join(directory, 'x');
+            }
+            await mkdir(directory, { recursive: true });
+
+            await expectPhysicalPackageTreeRejection(fixture);
+        } finally {
+            await rm(fixture.imageRoot, {
+                recursive: true,
+                force: true,
+            });
+        }
+    }, 30_000);
+
+    it('rejects a package tree exceeding the verifier byte bound', async () => {
+        const fixture = await stagePhysicalContainerFixture();
+        try {
+            const oversizedFile = join(
+                fixture.workspace,
+                'node_modules/zod/oversized-sparse-file',
+            );
+            await writeFile(oversizedFile, '');
+            await truncate(
+                oversizedFile,
+                512 * 1024 * 1024 + 1,
+            );
+
+            await expectPhysicalPackageTreeRejection(fixture);
+        } finally {
+            await rm(fixture.imageRoot, {
+                recursive: true,
+                force: true,
+            });
         }
     }, 30_000);
 
