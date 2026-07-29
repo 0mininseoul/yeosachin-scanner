@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
+import { PLAN_IDS, type PlanId } from '../../domain/analysis/plan-catalog';
 
 const TOKEN_PREFIX = 'analysis-test-entitlement-v1';
 const ADMISSION_TOKEN_PREFIX = 'analysis-test-admission-v1';
