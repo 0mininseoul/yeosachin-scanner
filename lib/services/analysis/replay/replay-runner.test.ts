@@ -1873,6 +1873,127 @@ describe('AI-only replay runner', () => {
         );
     });
 
+    it('keeps a pre-feature official unknown blocked while reporting accepted name and visual counterfactual fusion', async () => {
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v217-public-name-visual-fusion-shadow' as const,
+            aiStage: 'ai-stage-policy-v2.17' as const,
+        };
+        const value = validPartialBundle();
+        const publicProfile = {
+            ...value.profiles[0]!,
+            username: 'v217_pre_feature_official',
+            fullName: 'Official Studio',
+            bio: 'New single "Signal" out now',
+        };
+        const sourceIdentities = [{
+            ordinal: publicProfile.ordinal,
+            username: publicProfile.username,
+            partition: 'public' as const,
+        }];
+        const officialBundle = {
+            ...value,
+            profiles: [publicProfile],
+            capture: {
+                ...value.capture,
+                evaluationPolicy,
+                partial: {
+                    sourceIdentities,
+                    sourceUniverseDigest:
+                        historicalPartialSourceUniverseDigest(sourceIdentities),
+                    mediaUnavailable: [],
+                },
+            },
+        } satisfies AnalysisV2ReplayBundle;
+        const feature = vi.fn();
+        const resolveGender = vi.fn();
+        const lines: string[] = [];
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: officialBundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability('ai-stage-policy-v2.17'),
+            write: line => lines.push(line),
+            runner: v217Runner({
+                privateNames: async accounts => ({
+                    outcome: 'ok',
+                    calls: 1,
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: [{
+                        id: accounts[0]!.id,
+                        femaleScore: 1,
+                        isName: true,
+                        confidence: 1,
+                    }],
+                }),
+                triage: async ({ media }) => ({
+                    outcome: 'ok',
+                    calls: 1,
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'female',
+                            confidence: 'high',
+                            ownerConsistency: 'same_person',
+                            evidenceSelectionIds:
+                                media.map(item => item.selectionId),
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds:
+                            media.map(item => item.selectionId),
+                        v29AccountContext: 'personal',
+                    },
+                }),
+                feature,
+                resolveGender,
+            }),
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(resolveGender).not.toHaveBeenCalled();
+        expect(report.genderQuality?.feature.admission).toMatchObject({
+            nonpersonal_or_official: 1,
+        });
+        expect(report.publicNameFusion).toMatchObject({
+            publicAnalyzed: 1,
+            providerOk: true,
+            officialNegative: {
+                known: 1,
+                attempted: 1,
+                accepted: 1,
+            },
+            unknown: {
+                eligible: 0,
+                predicted: 0,
+                rescuedMale: 0,
+                rescuedFemale: 0,
+                unresolved: 1,
+            },
+            baseline: { male: 0, female: 0, unknown: 1 },
+            final: { male: 0, female: 0, unknown: 1 },
+            gates: {
+                officialNegativePass: false,
+                adoptionPass: false,
+            },
+        });
+        expect(report.gender).toEqual({
+            male: 0,
+            female: 0,
+            unknown: 1,
+            unknownRate: 1,
+        });
+        expect(validateReplayAnalysisV2JobTerminalLine(lines[0]))
+            .toBe(lines[0]);
+    });
+
     it('fails the full v2.17 public cohort closed when any name batch disposition is non-success', async () => {
         const evaluationPolicy = {
             capability:
