@@ -47,27 +47,37 @@ export function kakaoJavascriptKey(): string | null {
     return key && key.trim().length > 0 ? key.trim() : null;
 }
 
+/* Memoized so a second caller joins the in-flight load instead of listening to
+   a script element whose load event may already have fired — those listeners
+   would never run, leaving the promise pending forever. */
+let sdkLoad: Promise<KakaoSdk | null> | null = null;
+
 function loadKakaoSdk(): Promise<KakaoSdk | null> {
     if (typeof window === 'undefined') return Promise.resolve(null);
     if (window.Kakao) return Promise.resolve(window.Kakao);
+    if (sdkLoad) return sdkLoad;
 
-    return new Promise((resolve) => {
-        const existing = document.getElementById(KAKAO_SDK_ELEMENT_ID);
-        if (existing) {
-            existing.addEventListener('load', () => resolve(window.Kakao ?? null), { once: true });
-            existing.addEventListener('error', () => resolve(null), { once: true });
-            return;
-        }
+    sdkLoad = new Promise<KakaoSdk | null>((resolve) => {
+        const failed = () => {
+            // Drop the dead element and the memo so a later attempt can retry.
+            document.getElementById(KAKAO_SDK_ELEMENT_ID)?.remove();
+            sdkLoad = null;
+            resolve(null);
+        };
         const script = document.createElement('script');
         script.id = KAKAO_SDK_ELEMENT_ID;
         script.src = KAKAO_SDK_SRC;
         script.integrity = KAKAO_SDK_INTEGRITY;
         script.crossOrigin = 'anonymous';
         script.async = true;
-        script.addEventListener('load', () => resolve(window.Kakao ?? null), { once: true });
-        script.addEventListener('error', () => resolve(null), { once: true });
+        script.addEventListener('load', () => {
+            if (window.Kakao) resolve(window.Kakao);
+            else failed();
+        }, { once: true });
+        script.addEventListener('error', failed, { once: true });
         document.head.appendChild(script);
     });
+    return sdkLoad;
 }
 
 /**
@@ -81,26 +91,34 @@ function loadKakaoSdk(): Promise<KakaoSdk | null> {
 export function kakaoSdkIfReady(): KakaoSdk | null {
     if (typeof window === 'undefined') return null;
     const sdk = window.Kakao;
-    if (!sdk?.Share) return null;
+    if (!sdk) return null;
     try {
-        return sdk.isInitialized() ? sdk : null;
+        // `Share` is attached by init(), so it is only meaningful once the SDK
+        // reports itself initialized — see readyKakao().
+        return sdk.isInitialized() && sdk.Share ? sdk : null;
     } catch {
         return null;
     }
 }
 
-/** Resolves to the initialized SDK, or null when the key is unset or the CDN is unreachable. */
+/** Resolves to the initialized SDK, or null when the key is unset or the CDN is unreachable.
+ *
+ * Loading the script only gives you `Kakao` with `VERSION`, `init` and
+ * `isInitialized` on it. Every module — `Share` included — is attached by
+ * `init()`. Testing for `Share` before initializing therefore always fails, and
+ * fails silently, which is what kept KakaoTalk share from ever running.
+ */
 export async function readyKakao(): Promise<KakaoSdk | null> {
     const key = kakaoJavascriptKey();
     if (!key) return null;
     const sdk = await loadKakaoSdk();
-    if (!sdk?.Share) return null;
+    if (!sdk) return null;
     try {
         if (!sdk.isInitialized()) sdk.init(key);
     } catch {
         return null;
     }
-    return sdk.isInitialized() ? sdk : null;
+    return sdk.isInitialized() && sdk.Share ? sdk : null;
 }
 
 export interface ResultShareContent {
@@ -130,10 +148,9 @@ function feedTemplate(content: ResultShareContent): KakaoFeedTemplate {
  */
 export function shareToKakaoNow(
     content: ResultShareContent,
-    /* Everything this app controls — key, SRI, CORS, template — can be verified
-       from outside, so a failure here is almost always Kakao-side console
-       configuration. The reason is surfaced rather than swallowed because it is
-       the only part that cannot be reproduced anywhere but a real device. */
+    /* Surfaced rather than swallowed. A bare catch here once hid a bug for this
+       feature's whole life: every send failed, the caller quietly fell back to
+       the OS share sheet, and nothing ever said why. */
     onError?: (reason: string) => void,
 ): boolean {
     const sdk = kakaoSdkIfReady();
