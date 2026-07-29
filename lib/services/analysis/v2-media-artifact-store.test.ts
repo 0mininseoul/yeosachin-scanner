@@ -487,6 +487,57 @@ describe('analysis V2 media artifact orchestration', () => {
             { selectionId: 'post:1', normalizedJpeg: jpeg2 },
         ]);
     });
+
+    it('reuses a valid immutable bundle on retry even when normalization bytes drift', async () => {
+        let storedBytes: Buffer | null = null;
+        let storedReference: AnalysisV2MediaArtifactRef | null = null;
+        const objectClient = objects({
+            create: vi.fn(async input => {
+                storedBytes = input.bytes;
+                return { created: true, generation: '1234567890123456' };
+            }),
+            read: vi.fn(async () => storedBytes ?? Buffer.alloc(0)),
+        });
+        const registryClient = registry({
+            register: vi.fn(async input => {
+                storedReference = input;
+                return input;
+            }),
+            load: vi.fn(async () => storedReference),
+        });
+        const store = createAnalysisV2MediaArtifactStore({ objects: objectClient, registry: registryClient });
+        const base = { requestId, jobKey, claimToken, bundleId: 'candidate:retry' };
+        const first = await store.persistBundle({
+            ...base,
+            media: [{ selectionId: 'profile:1', normalizedJpeg: jpeg }],
+        });
+        const retried = await store.persistBundle({
+            ...base,
+            media: [{ selectionId: 'profile:1', normalizedJpeg: jpeg2 }],
+        });
+        expect(retried).toEqual(first);
+        expect(objectClient.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects an invalid retry JPEG before registry or object operations', async () => {
+        const objectClient = objects({
+            create: vi.fn(),
+            read: vi.fn(),
+        });
+        const registryClient = registry({ load: vi.fn() });
+        const store = createAnalysisV2MediaArtifactStore({ objects: objectClient, registry: registryClient });
+
+        await expect(store.persistBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId: 'candidate:invalid-retry',
+            media: [{ selectionId: 'profile:1', normalizedJpeg: Buffer.from([0x00]) }],
+        })).rejects.toThrow('ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR');
+        expect(registryClient.load).not.toHaveBeenCalled();
+        expect(objectClient.create).not.toHaveBeenCalled();
+        expect(objectClient.read).not.toHaveBeenCalled();
+    });
 });
 
 describe('Google Cloud private media object adapter', () => {
