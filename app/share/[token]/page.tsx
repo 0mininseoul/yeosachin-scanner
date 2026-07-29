@@ -5,7 +5,10 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { shareResult } from '@/lib/services/result-share';
-import { OWNER_GENDER_LABELS } from '@/lib/services/analysis/owner-view-presentation';
+import {
+    genderBreakdownFromStats,
+    OWNER_GENDER_LABELS,
+} from '@/lib/services/analysis/owner-view-presentation';
 import {
     TopBar,
     Eyebrow,
@@ -18,8 +21,7 @@ import {
     primaryCls,
 } from '@/components/case-ui';
 import { SuspectRow } from '@/components/suspect-row';
-import { mapV2Result } from '@/app/result/[requestId]/page';
-import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
+import type { V2SharedResultPage } from '@/lib/services/share/v2-result-share';
 
 interface PageProps {
     params: Promise<{ token: string }>;
@@ -37,6 +39,55 @@ const getProxyImageUrl = (url: string | undefined): string | undefined => {
         ? url
         : undefined;
 };
+
+/* The shared payload is its own shape, not the owner's with fields removed:
+   handles arrive pre-truncated as `handleMasked`, names blanked as
+   `fullNameMasked`, and identity is carried by an opaque `accountKey` that is
+   only valid within this share token. Reusing the owner mapper here read
+   `instagramId` off rows that no longer have one. */
+function mapV2SharedResult(result: V2SharedResultPage): ResultData {
+    const stats = result.summary.genderStats;
+    return {
+        requestId: result.requestId,
+        status: 'completed',
+        isShared: true,
+        maskedByClient: false,
+        summary: {
+            targetInstagramId: result.summary.targetInstagramId,
+            targetProfileImage: result.summary.targetProfileImage ?? undefined,
+            mutualFollows: result.summary.detectedMutuals,
+            genderRatio: stats
+                ? genderBreakdownFromStats(stats)
+                : {
+                    male: { count: 0, percentage: 0 },
+                    female: { count: 0, percentage: 0 },
+                    unknown: { count: 0, percentage: 0 },
+                },
+        },
+        femaleAccounts: result.femaleAccounts.map(account => ({
+            accountKey: account.accountKey,
+            instagramId: account.handleMasked,
+            fullName: account.fullNameMasked ?? undefined,
+            profileImage: account.profileImage ?? undefined,
+            instagramUrl: '',
+            riskGrade: account.riskBand,
+            bio: account.bio || '',
+            recentMutualRank: account.recentMutualRank !== null && account.recentMutualRank <= 5
+                ? account.recentMutualRank as 1 | 2 | 3 | 4 | 5
+                : undefined,
+            riskAnalysis: account.highRiskNarrative ? [...account.highRiskNarrative] : [],
+            oneLineOverview: account.oneLineOverview ?? undefined,
+            displayScore: account.displayScore,
+        })),
+        privateAccounts: result.privateAccounts.map(account => ({
+            accountKey: account.accountKey,
+            instagramId: account.handleMasked,
+            fullName: account.fullNameMasked ?? undefined,
+            profileImage: account.profileImage ?? undefined,
+            instagramUrl: '',
+        })),
+    };
+}
 
 function ProfileImage({
     src,
@@ -66,6 +117,8 @@ interface GenderRatio {
 }
 
 interface FemaleAccount {
+    /** Stable within this share token only; never derived from the handle. */
+    accountKey?: string;
     instagramId: string;
     fullName?: string;
     profileImage?: string;
@@ -77,6 +130,7 @@ interface FemaleAccount {
 }
 
 interface PrivateAccount {
+    accountKey?: string;
     instagramId: string;
     fullName?: string;
     profileImage?: string;
@@ -88,6 +142,11 @@ interface ResultData {
     requestId: string;
     status: string;
     isShared: boolean;
+    /* v2 arrives already masked by the server — handles truncated, names blanked,
+       avatars downsampled — so blurring it again would only smear characters that
+       are already bullets. Legacy v1 shares still carry the real values and have
+       nothing but this page between them and the reader. */
+    maskedByClient: boolean;
     summary: {
         targetInstagramId: string;
         targetProfileImage?: string;
@@ -116,41 +175,14 @@ export default function ShareResultPage({ params }: PageProps) {
                     throw new Error(result.error || '결과를 불러올 수 없습니다.');
                 }
 
-                // V2 shares return the owner result page shape plus isShared, so
-                // the same mapper the result page uses turns it into this view's
-                // DTO. Legacy v1 shares already arrive in that shape.
+                // v2 shares carry their own masked shape; legacy v1 shares still
+                // arrive as this view's DTO with real identities in it.
                 const isV2 = result?.schemaVersion === 1
                     && result.summary
                     && 'detectedMutuals' in result.summary;
                 const display: ResultData = isV2
-                    ? (() => {
-                        const mapped = mapV2Result(result as AnalysisResultPageV1, false);
-                        return {
-                            requestId: mapped.requestId,
-                            status: mapped.status,
-                            isShared: true,
-                            summary: {
-                                targetInstagramId: mapped.summary.targetInstagramId,
-                                targetProfileImage: mapped.summary.targetProfileImage,
-                                mutualFollows: mapped.summary.mutualFollows,
-                                genderRatio: mapped.summary.genderRatio ?? {
-                                    male: { count: 0, percentage: 0 },
-                                    female: { count: 0, percentage: 0 },
-                                    unknown: { count: 0, percentage: 0 },
-                                },
-                            },
-                            femaleAccounts: mapped.femaleAccounts.map(account => ({
-                                ...account,
-                                instagramUrl: account.instagramUrl ?? '',
-                                bio: account.bio,
-                            })),
-                            privateAccounts: mapped.privateAccounts.map(account => ({
-                                ...account,
-                                instagramUrl: account.instagramUrl ?? '',
-                            })),
-                        };
-                    })()
-                    : result;
+                    ? mapV2SharedResult(result as V2SharedResultPage)
+                    : { ...(result as ResultData), maskedByClient: true };
 
                 setData(display);
                 if (!resultViewTrackedRef.current) {
@@ -340,16 +372,18 @@ export default function ShareResultPage({ params }: PageProps) {
                                    accounts listed here never agreed to appear on it,
                                    so their handles are masked. */
                                 <SuspectRow
-                                    key={account.instagramId}
+                                    key={account.accountKey ?? account.instagramId}
                                     account={account}
                                     rank={i + 1}
-                                    avatar={
+                                    avatar={data.maskedByClient ? (
                                         <MaskedAvatar>
                                             <ProfileImage src={account.profileImage} variant="person" />
                                         </MaskedAvatar>
-                                    }
+                                    ) : (
+                                        <ProfileImage src={account.profileImage} variant="person" />
+                                    )}
                                     externalProfileLinks={false}
-                                    maskHandle
+                                    maskHandle={data.maskedByClient}
                                 />
                             ))}
                         </div>
@@ -367,21 +401,33 @@ export default function ShareResultPage({ params }: PageProps) {
                     ) : (
                         <div className="mt-5">
                             {privateAccounts.map((account) => (
-                                <div key={account.instagramId} className="flex items-center gap-3.5 border-b border-line py-3.5">
+                                <div key={account.accountKey ?? account.instagramId} className="flex items-center gap-3.5 border-b border-line py-3.5">
                                     <div className="relative h-10 w-10 shrink-0 overflow-hidden border border-line bg-panel">
-                                        <MaskedAvatar>
+                                        {data.maskedByClient ? (
+                                            <MaskedAvatar>
+                                                <ProfileImage src={account.profileImage} variant="private" />
+                                            </MaskedAvatar>
+                                        ) : (
                                             <ProfileImage src={account.profileImage} variant="private" />
-                                        </MaskedAvatar>
+                                        )}
                                     </div>
                                     <div className="min-w-0 flex-1">
                                         {/* Masked for the same reason as the public list. */}
-                                        <MaskedHandle
-                                            value={account.instagramId}
-                                            className="text-[14px] font-bold text-fg/90"
-                                        />
+                                        {data.maskedByClient ? (
+                                            <MaskedHandle
+                                                value={account.instagramId}
+                                                className="text-[14px] font-bold text-fg/90"
+                                            />
+                                        ) : (
+                                            <span className="block truncate text-[14px] font-bold text-fg/90">
+                                                @{account.instagramId}
+                                            </span>
+                                        )}
                                         {(account.fullName || account.bio) && (
                                             <p className="mt-0.5 truncate text-[12px] text-fg-dim">
-                                                {account.fullName && <MaskedText value={account.fullName} />}
+                                                {account.fullName && (data.maskedByClient
+                                                    ? <MaskedText value={account.fullName} />
+                                                    : <span>{account.fullName}</span>)}
                                                 {account.fullName && account.bio && ' · '}
                                                 {account.bio}
                                             </p>
