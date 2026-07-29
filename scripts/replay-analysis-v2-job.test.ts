@@ -447,8 +447,11 @@ describe('Cloud Run analysis V2 replay job', () => {
     });
 
     it('runs the V2.14 job only with its own authenticated feature-model shadow bundle', async () => {
-        const { runReplayAnalysisV2Job, V214_EVALUATION } = await import(
-            './replay-analysis-v2-job'
+        const {
+            REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+            runV214ReplayAnalysisV2Job,
+        } = await import(
+            './replay-analysis-v214-job'
         );
         const v214Bundle = v213Bundle();
         v214Bundle.capture.evaluationPolicy = {
@@ -461,7 +464,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         safe.replay_ai_policy = 'ai-stage-policy-v2.14';
         const createRunner = vi.fn(() => Object.freeze({}));
 
-        await runReplayAnalysisV2Job({
+        await runV214ReplayAnalysisV2Job({
             env: validEnv(),
             runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: () => async () => undefined,
@@ -476,12 +479,14 @@ describe('Cloud Run analysis V2 replay job', () => {
             }),
             createRunner,
             runReplay: vi.fn(async input => {
-                expect(input.evaluationPolicy).toEqual(V214_EVALUATION);
+                expect(input.evaluationPolicy).toEqual(
+                    REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+                );
                 input.write(JSON.stringify(safe));
             }),
             installSignalCleanup: vi.fn(() => () => undefined),
             writeStdout: vi.fn(),
-        }, V214_EVALUATION);
+        });
 
         expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.14');
     });
