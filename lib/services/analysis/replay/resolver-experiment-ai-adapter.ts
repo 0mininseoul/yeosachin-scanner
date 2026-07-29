@@ -33,6 +33,9 @@ import type {
     ReplayOutcome,
     ReplayTriageInput,
 } from './replay-runner';
+import type {
+    ReplayStageFailureDispositionCounts,
+} from './replay-job-report-contract';
 
 const experimentRunnerBrand = Symbol('strong-uncertain-resolver-runner');
 const issuedExperimentRunners = new WeakSet<object>();
@@ -44,7 +47,7 @@ type InvocationState = {
     retries: number;
     attempts: number;
     rateLimited: number;
-    failureDisposition: Record<string, number>;
+    failureDisposition: ReplayStageFailureDispositionCounts;
     attemptLatenciesMs: number[];
 };
 

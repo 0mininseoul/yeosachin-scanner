@@ -1,4 +1,5 @@
 import { mkdtemp, chmod, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
+import { closeSync as closeDescriptorSync } from 'node:fs';
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -502,6 +503,25 @@ describe('analysis V2 replay bundle', () => {
             },
         })).rejects.toThrow('injected close failure');
 
+        await expect(stat(keyPath)).rejects.toThrow();
+    });
+
+    it('closes exactly once and unlinks its O_EXCL inode when fstat fails', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'partial-fstat.key');
+        const closeSync = vi.fn((descriptor: number) => {
+            closeDescriptorSync(descriptor);
+        });
+
+        await expect(createReplayKeyFile(keyPath, {
+            fstatSync: () => {
+                throw new Error('injected fstat failure');
+            },
+            closeSync,
+        })).rejects.toThrow('injected fstat failure');
+
+        expect(closeSync).toHaveBeenCalledOnce();
         await expect(stat(keyPath)).rejects.toThrow();
     });
 

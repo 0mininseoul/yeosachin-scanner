@@ -25,6 +25,10 @@ import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/
 
 const execFileAsync = promisify(execFile);
 type NodeFileHandle = Awaited<ReturnType<typeof open>>;
+const immutableImageDigest =
+    `asia-northeast3-docker.pkg.dev/replay/jobs/analysis@sha256:${
+        'a'.repeat(64)
+    }`;
 
 async function gateFileHandleStat(directory: string): Promise<{
     release: () => void;
@@ -84,6 +88,7 @@ function validEnv(): Record<string, string> {
         ANALYSIS_V2_REPLAY_JOB_EXPECTED_EXECUTION: 'replay-job-abc123',
         ANALYSIS_V2_REPLAY_JOB_TOKEN: 'a'.repeat(43),
         ANALYSIS_V2_REPLAY_JOB_EXPECTED_TOKEN: 'a'.repeat(43),
+        ANALYSIS_V2_REPLAY_JOB_EXPECTED_IMAGE_DIGEST: immutableImageDigest,
         ANALYSIS_V2_REPLAY_JOB_BUNDLE_PATH: '/tmp/private-replay/input.enc',
         ANALYSIS_V2_REPLAY_JOB_KEY_PATH: '/tmp/private-replay/input.key',
         ANALYSIS_V2_REPLAY_JOB_BUNDLE_BYTES: '123',
@@ -246,6 +251,28 @@ describe('Cloud Run analysis V2 replay job', () => {
         expect(source).toContain('runAnalysisV2AiReplay');
     });
 
+    it('rejects a runtime image digest mismatch before GCS or provider creation', async () => {
+        const { runReplayAnalysisV2Job } = await import(
+            './replay-analysis-v2-job'
+        );
+        const createGcsClient = vi.fn();
+        const createRunner = vi.fn();
+
+        await expect(runReplayAnalysisV2Job({
+            env: validEnv(),
+            runtimeImageDigest:
+                `asia-northeast3-docker.pkg.dev/replay/jobs/analysis@sha256:${
+                    'b'.repeat(64)
+                }`,
+            createGcsClient,
+            createRunner,
+        })).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST_MISMATCH',
+        );
+        expect(createGcsClient).not.toHaveBeenCalled();
+        expect(createRunner).not.toHaveBeenCalled();
+    });
+
     it('creates the claim before exactly one runner and uploads before stdout', async () => {
         const { runReplayAnalysisV2Job } = await import(
             './replay-analysis-v2-job'
@@ -264,6 +291,7 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({
                 bundle: {
@@ -329,8 +357,14 @@ describe('Cloud Run analysis V2 replay job', () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
         } = await import('./replay-analysis-v2-job');
+        const {
+            validateReplayAnalysisV2JobTerminalLine: gcsValidator,
+        } = await import(
+            '../lib/services/analysis/replay/replay-job-gcs'
+        );
         const raw = await actualDiagnosticV212SafeLine();
 
+        expect(validateReplayAnalysisV2JobTerminalLine).toBe(gcsValidator);
         expect(validateReplayAnalysisV2JobTerminalLine(raw)).toBe(raw);
     });
 
@@ -544,17 +578,18 @@ describe('Cloud Run analysis V2 replay job', () => {
     });
 
     it('builds the recursive stateless graph and boots the real ESM artifact', async () => {
-        const outputDirectory = await mkdtemp(join(
+        const outputParent = await mkdtemp(join(
             tmpdir(),
             '.replay-job-build-',
         ));
+        const outputDirectory = join(outputParent, 'bundle-v1');
         const outfile = join(outputDirectory, 'replay-job.mjs');
         const metafile = join(outputDirectory, 'metafile.json');
         const runtimeManifest = join(outputDirectory, 'runtime.json');
         try {
             await symlink(
                 join(process.cwd(), 'node_modules'),
-                join(outputDirectory, 'node_modules'),
+                join(outputParent, 'node_modules'),
                 'dir',
             );
             await execFileAsync(process.execPath, [
@@ -565,6 +600,8 @@ describe('Cloud Run analysis V2 replay job', () => {
                 metafile,
                 '--runtime-manifest',
                 runtimeManifest,
+                '--image-digest',
+                immutableImageDigest,
             ], {
                 cwd: process.cwd(),
                 env: {
@@ -589,6 +626,7 @@ describe('Cloud Run analysis V2 replay job', () => {
             expect(() => verifyReplayAnalysisV2JobRuntimeManifest(
                 runtime,
                 lockfile,
+                immutableImageDigest,
             )).not.toThrow();
             const graph = JSON.stringify(metadata);
             expect(graph).not.toMatch(
@@ -611,7 +649,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                 '--conditions=react-server',
                 outfile,
             ], {
-                cwd: outputDirectory,
+                cwd: outputParent,
                 env: {
                     NODE_ENV: 'test',
                     PATH: process.env.PATH,
@@ -629,7 +667,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                 '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
             );
         } finally {
-            await rm(outputDirectory, { recursive: true, force: true });
+            await rm(outputParent, { recursive: true, force: true });
         }
     }, 30_000);
 
@@ -912,6 +950,7 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: () => async () => undefined,
             installSignalCleanup: vi.fn(() => {
                 events.push('signals');
@@ -953,6 +992,7 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: vi.fn(() => {
                 events.push('bind');
                 return initialOwnedCleanup;
@@ -1035,6 +1075,7 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         await expect(runReplayAnalysisV2Job({
             env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({ bundle, cleanup })),
             createGcsClient: () => ({
@@ -1059,6 +1100,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         const cleanup = vi.fn();
         await expect(runReplayAnalysisV2Job({
             env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({
                 bundle: { ...v212Bundle(), expired: false },
@@ -1089,6 +1131,7 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         await expect(runReplayAnalysisV2Job({
             env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({
                 bundle: {

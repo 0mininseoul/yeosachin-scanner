@@ -1,10 +1,13 @@
 import {
     lstat,
+    mkdir,
     mkdtemp,
+    open,
     readFile,
     readdir,
     rename,
     rm,
+    symlink,
     writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -14,6 +17,11 @@ import { describe, expect, it, vi } from 'vitest';
 async function buildModule() {
     return import('./build-replay-analysis-v2-job.mjs');
 }
+
+const immutableImageDigest =
+    `asia-northeast3-docker.pkg.dev/replay/jobs/analysis@sha256:${
+        'a'.repeat(64)
+    }`;
 
 function validMetafile(
     inputs: readonly string[],
@@ -115,12 +123,21 @@ describe('stateless replay job build contract', () => {
             join(process.cwd(), 'package-lock.json'),
             'utf8',
         ));
-        const manifest = createReplayAnalysisV2JobRuntimeManifest(lockfile);
+        const manifest = createReplayAnalysisV2JobRuntimeManifest(
+            lockfile,
+            immutableImageDigest,
+        );
 
         expect(manifest).toEqual({
-            schema: 'analysis-v2-replay-job-runtime-v1',
+            schema: 'analysis-v2-replay-job-runtime-v2',
             node: '24.x',
             conditions: ['react-server'],
+            dependencyClosure: {
+                authority: 'immutable-container-image',
+                image: immutableImageDigest,
+                workspace: '/workspace',
+                nodeModules: '/workspace/node_modules',
+            },
             bundle: {
                 format: 'esm',
                 packages: 'external',
@@ -146,6 +163,7 @@ describe('stateless replay job build contract', () => {
         expect(() => verifyReplayAnalysisV2JobRuntimeManifest(
             manifest,
             lockfile,
+            immutableImageDigest,
         )).not.toThrow();
         expect(() => verifyReplayAnalysisV2JobRuntimeManifest({
             ...manifest,
@@ -156,78 +174,210 @@ describe('stateless replay job build contract', () => {
                     integrity: 'sha512-forged',
                 },
             },
-        }, lockfile)).toThrow(
+        }, lockfile, immutableImageDigest)).toThrow(
             'ANALYSIS_V2_REPLAY_JOB_RUNTIME_MANIFEST_INVALID',
         );
+        expect(() => createReplayAnalysisV2JobRuntimeManifest(
+            lockfile,
+            'asia-northeast3-docker.pkg.dev/replay/jobs/analysis:latest',
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST_INVALID');
+        expect(() => createReplayAnalysisV2JobRuntimeManifest(
+            lockfile,
+            'sha256:abc',
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST_INVALID');
     });
 
-    it('audits before writes and rolls back all three prior outputs on publish failure', async () => {
+    it('exposes an exact image-owned Node launcher contract', async () => {
+        const {
+            createReplayAnalysisV2JobContainerLaunchContract,
+        } = await buildModule();
+
+        expect(createReplayAnalysisV2JobContainerLaunchContract({
+            imageDigest: immutableImageDigest,
+            entrypoint: '/workspace/replay-job/job.mjs',
+        })).toEqual({
+            image: immutableImageDigest,
+            workdir: '/workspace',
+            nodeModules: '/workspace/node_modules',
+            command: [
+                'node',
+                '--conditions=react-server',
+                '/workspace/replay-job/job.mjs',
+            ],
+            environment: {
+                ANALYSIS_V2_REPLAY_JOB_EXPECTED_IMAGE_DIGEST:
+                    immutableImageDigest,
+            },
+        });
+    });
+
+    it('accepts only an image-owned node_modules container fixture', async () => {
+        const {
+            createReplayAnalysisV2JobContainerLaunchContract,
+            verifyReplayAnalysisV2JobContainerFilesystem,
+        } = await buildModule();
+        const imageRoot = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-image-root-',
+        ));
+        const workspace = join(imageRoot, 'workspace');
+        const nodeModules = join(workspace, 'node_modules');
+        const entrypoint = join(workspace, 'replay-job', 'job.mjs');
+        const contract = createReplayAnalysisV2JobContainerLaunchContract({
+            imageDigest: immutableImageDigest,
+            entrypoint: '/workspace/replay-job/job.mjs',
+        });
+        try {
+            await mkdir(nodeModules, { recursive: true, mode: 0o755 });
+            await mkdir(join(workspace, 'replay-job'), {
+                recursive: true,
+                mode: 0o755,
+            });
+            await writeFile(entrypoint, 'export {};', { mode: 0o600 });
+
+            await expect(
+                verifyReplayAnalysisV2JobContainerFilesystem({
+                    imageRoot,
+                    contract,
+                }),
+            ).resolves.toBeUndefined();
+
+            await rm(nodeModules, { recursive: true });
+            await symlink(
+                join(process.cwd(), 'node_modules'),
+                nodeModules,
+                'dir',
+            );
+            await expect(
+                verifyReplayAnalysisV2JobContainerFilesystem({
+                    imageRoot,
+                    contract,
+                }),
+            ).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_CONTAINER_FILESYSTEM_INVALID',
+            );
+        } finally {
+            await rm(imageRoot, { recursive: true, force: true });
+        }
+    });
+
+    it('removes every staging directory after pre-publish faults', async () => {
         const {
             REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
             buildReplayAnalysisV2Job,
         } = await buildModule();
-        const directory = await mkdtemp(join(
+        const parent = await mkdtemp(join(
             tmpdir(),
             'replay-job-atomic-build-',
         ));
-        const outfile = join(directory, 'job.mjs');
-        const metafile = join(directory, 'meta.json');
-        const runtimeManifest = join(directory, 'runtime.json');
+        const failureSteps = [
+            'staging-directory-created',
+            'job.mjs-durable',
+            'meta.json-durable',
+            'runtime.json-durable',
+            'staging-directory-durable',
+        ];
         try {
-            await Promise.all([
-                writeFile(outfile, 'old-job', { mode: 0o600 }),
-                writeFile(metafile, 'old-meta', { mode: 0o600 }),
-                writeFile(runtimeManifest, 'old-runtime', { mode: 0o600 }),
-            ]);
-            const buildImpl = vi.fn(async (options: {
-                write?: boolean;
-            }) => {
-                expect(options.write).toBe(false);
-                return {
-                    metafile: validMetafile(
-                        REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
-                        outfile,
-                    ),
-                    outputFiles: [{
-                        path: outfile,
-                        contents: new TextEncoder().encode('new-job'),
-                    }],
-                };
-            });
-            let publishRenames = 0;
-            const renameImpl = vi.fn(async (
-                source: string,
-                target: string,
-            ) => {
-                if (
-                    source.includes('.tmp-')
-                    && ++publishRenames === 2
-                ) {
-                    throw new Error('injected publish failure');
-                }
-                await rename(source, target);
-            });
+            for (const [index, failureStep] of failureSteps.entries()) {
+                const finalDirectory = join(parent, `bundle-${index}`);
+                const outfile = join(finalDirectory, 'job.mjs');
+                const metafile = join(finalDirectory, 'meta.json');
+                const runtimeManifest = join(
+                    finalDirectory,
+                    'runtime.json',
+                );
+                const buildImpl = vi.fn(async (options: {
+                    write?: boolean;
+                }) => {
+                    expect(options.write).toBe(false);
+                    return {
+                        metafile: validMetafile(
+                            REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+                            outfile,
+                        ),
+                        outputFiles: [{
+                            path: outfile,
+                            contents: new TextEncoder().encode('new-job'),
+                        }],
+                    };
+                });
 
+                await expect(buildReplayAnalysisV2Job({
+                    outfile,
+                    metafile,
+                    runtimeManifest,
+                    imageDigest: immutableImageDigest,
+                    buildImpl,
+                    publishStep: step => {
+                        if (step === failureStep) {
+                            throw new Error(`injected ${failureStep}`);
+                        }
+                    },
+                })).rejects.toThrow(`injected ${failureStep}`);
+                expect(buildImpl).toHaveBeenCalledOnce();
+                expect(await readdir(parent)).toEqual([]);
+            }
+        } finally {
+            await rm(parent, { recursive: true, force: true });
+        }
+    });
+
+    it('closes once and removes staging when a durable file close fails', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+            buildReplayAnalysisV2Job,
+        } = await buildModule();
+        const parent = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-close-failure-',
+        ));
+        const finalDirectory = join(parent, 'bundle-v1');
+        const outfile = join(finalDirectory, 'job.mjs');
+        const metafile = join(finalDirectory, 'meta.json');
+        const runtimeManifest = join(finalDirectory, 'runtime.json');
+        const buildImpl = vi.fn(async () => ({
+            metafile: validMetafile(
+                REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+                outfile,
+            ),
+            outputFiles: [{
+                path: outfile,
+                contents: new TextEncoder().encode('new-job'),
+            }],
+        }));
+        const close = vi.fn(async () => {});
+        let firstFile = true;
+        const openImpl: typeof open = async (
+            path,
+            flags = 'r',
+            mode,
+        ) => {
+            const handle = await open(path, flags, mode);
+            if (!firstFile) return handle;
+            firstFile = false;
+            const closeHandle = handle.close.bind(handle);
+            close.mockImplementationOnce(async () => {
+                await closeHandle();
+                throw new Error('injected close failure');
+            });
+            handle.close = close;
+            return handle;
+        };
+        try {
             await expect(buildReplayAnalysisV2Job({
                 outfile,
                 metafile,
                 runtimeManifest,
+                imageDigest: immutableImageDigest,
                 buildImpl,
-                renameImpl,
-            })).rejects.toThrow('injected publish failure');
-
-            expect(buildImpl).toHaveBeenCalledOnce();
-            await expect(readFile(outfile, 'utf8')).resolves.toBe('old-job');
-            await expect(readFile(metafile, 'utf8')).resolves.toBe('old-meta');
-            await expect(readFile(runtimeManifest, 'utf8'))
-                .resolves.toBe('old-runtime');
-            expect(await readdir(directory)).toEqual([
-                'job.mjs',
-                'meta.json',
-                'runtime.json',
-            ]);
+                openImpl,
+            })).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_STAGING_FILE_FAILED',
+            );
+            expect(close).toHaveBeenCalledOnce();
+            expect(await readdir(parent)).toEqual([]);
         } finally {
-            await rm(directory, { recursive: true, force: true });
+            await rm(parent, { recursive: true, force: true });
         }
     });
 
@@ -262,6 +412,7 @@ describe('stateless replay job build contract', () => {
                 outfile,
                 metafile,
                 runtimeManifest,
+                imageDigest: immutableImageDigest,
                 buildImpl,
             })).rejects.toThrow(
                 'Replay job build outputs must share one directory',
@@ -275,24 +426,20 @@ describe('stateless replay job build contract', () => {
         }
     });
 
-    it('preserves an unrestored backup when rollback restore itself fails', async () => {
+    it('keeps the complete immutable directory after the publish rename', async () => {
         const {
             REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
             buildReplayAnalysisV2Job,
         } = await buildModule();
-        const directory = await mkdtemp(join(
+        const parent = await mkdtemp(join(
             tmpdir(),
-            'replay-job-restore-failure-',
+            'replay-job-post-publish-failure-',
         ));
-        const outfile = join(directory, 'job.mjs');
-        const metafile = join(directory, 'meta.json');
-        const runtimeManifest = join(directory, 'runtime.json');
+        const finalDirectory = join(parent, 'bundle-v1');
+        const outfile = join(finalDirectory, 'job.mjs');
+        const metafile = join(finalDirectory, 'meta.json');
+        const runtimeManifest = join(finalDirectory, 'runtime.json');
         try {
-            await Promise.all([
-                writeFile(outfile, 'old-job', { mode: 0o600 }),
-                writeFile(metafile, 'old-meta', { mode: 0o600 }),
-                writeFile(runtimeManifest, 'old-runtime', { mode: 0o600 }),
-            ]);
             const buildImpl = vi.fn(async () => ({
                 metafile: validMetafile(
                     REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
@@ -303,46 +450,29 @@ describe('stateless replay job build contract', () => {
                     contents: new TextEncoder().encode('new-job'),
                 }],
             }));
-            let publishRenames = 0;
-            const renameImpl = vi.fn(async (
-                source: string,
-                target: string,
-            ) => {
-                if (
-                    source.includes('.tmp-')
-                    && ++publishRenames === 2
-                ) {
-                    throw new Error('injected publish failure');
-                }
-                if (
-                    source.includes('.bak-')
-                    && target === runtimeManifest
-                ) {
-                    throw new Error('injected restore failure');
-                }
-                await rename(source, target);
-            });
 
             await expect(buildReplayAnalysisV2Job({
                 outfile,
                 metafile,
                 runtimeManifest,
+                imageDigest: immutableImageDigest,
                 buildImpl,
-                renameImpl,
+                publishStep: step => {
+                    if (step === 'final-directory-published') {
+                        throw new Error('injected post-publish failure');
+                    }
+                },
             })).rejects.toThrow(
-                'ANALYSIS_V2_REPLAY_JOB_BUILD_ROLLBACK_INCOMPLETE',
+                'injected post-publish failure',
             );
-
-            const runtimeBackup = (await readdir(directory)).find(name => (
-                name.startsWith('.runtime.json.bak-')
-            ));
-            expect(runtimeBackup).toBeDefined();
-            await expect(readFile(
-                join(directory, runtimeBackup!),
-                'utf8',
-            )).resolves.toBe('old-runtime');
+            expect(await readdir(parent)).toEqual(['bundle-v1']);
+            expect(await readdir(finalDirectory)).toEqual([
+                'job.mjs',
+                'meta.json',
+                'runtime.json',
+            ]);
         } finally {
-            await rm(directory, { recursive: true, force: true });
+            await rm(parent, { recursive: true, force: true });
         }
     });
 
@@ -350,18 +480,20 @@ describe('stateless replay job build contract', () => {
         const {
             buildReplayAnalysisV2Job,
         } = await buildModule();
-        const directory = await mkdtemp(join(
+        const parent = await mkdtemp(join(
             tmpdir(),
             'replay-job-private-build-',
         ));
-        const outfile = join(directory, 'job.mjs');
-        const metafile = join(directory, 'meta.json');
-        const runtimeManifest = join(directory, 'runtime.json');
+        const finalDirectory = join(parent, 'bundle-v1');
+        const outfile = join(finalDirectory, 'job.mjs');
+        const metafile = join(finalDirectory, 'meta.json');
+        const runtimeManifest = join(finalDirectory, 'runtime.json');
         try {
             await buildReplayAnalysisV2Job({
                 outfile,
                 metafile,
                 runtimeManifest,
+                imageDigest: immutableImageDigest,
             });
 
             for (const path of [outfile, metafile, runtimeManifest]) {
@@ -370,7 +502,97 @@ describe('stateless replay job build contract', () => {
                 expect(file.mode & 0o777).toBe(0o600);
             }
         } finally {
-            await rm(directory, { recursive: true, force: true });
+            await rm(parent, { recursive: true, force: true });
         }
     }, 30_000);
+
+    it('fails closed without overwrite when the immutable final directory exists', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+            buildReplayAnalysisV2Job,
+        } = await buildModule();
+        const parent = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-create-only-',
+        ));
+        const finalDirectory = join(parent, 'bundle-v1');
+        const outfile = join(finalDirectory, 'job.mjs');
+        const metafile = join(finalDirectory, 'meta.json');
+        const runtimeManifest = join(finalDirectory, 'runtime.json');
+        await mkdir(finalDirectory, { mode: 0o700 });
+        await writeFile(outfile, 'existing', { mode: 0o600 });
+        const buildImpl = vi.fn(async () => ({
+            metafile: validMetafile(
+                REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+                outfile,
+            ),
+            outputFiles: [{
+                path: outfile,
+                contents: new TextEncoder().encode('new-job'),
+            }],
+        }));
+        try {
+            await expect(buildReplayAnalysisV2Job({
+                outfile,
+                metafile,
+                runtimeManifest,
+                imageDigest: immutableImageDigest,
+                buildImpl,
+            })).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_FINAL_DIRECTORY_EXISTS',
+            );
+            expect(buildImpl).not.toHaveBeenCalled();
+            await expect(readFile(outfile, 'utf8'))
+                .resolves.toBe('existing');
+            expect(await readdir(parent)).toEqual(['bundle-v1']);
+        } finally {
+            await rm(parent, { recursive: true, force: true });
+        }
+    });
+
+    it('publishes the complete triplet with one final directory rename', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+            buildReplayAnalysisV2Job,
+        } = await buildModule();
+        const parent = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-directory-publish-',
+        ));
+        const finalDirectory = join(parent, 'bundle-v1');
+        const outfile = join(finalDirectory, 'job.mjs');
+        const metafile = join(finalDirectory, 'meta.json');
+        const runtimeManifest = join(finalDirectory, 'runtime.json');
+        const buildImpl = vi.fn(async () => ({
+            metafile: validMetafile(
+                REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+                outfile,
+            ),
+            outputFiles: [{
+                path: outfile,
+                contents: new TextEncoder().encode('new-job'),
+            }],
+        }));
+        const renameImpl = vi.fn(rename);
+        try {
+            await buildReplayAnalysisV2Job({
+                outfile,
+                metafile,
+                runtimeManifest,
+                imageDigest: immutableImageDigest,
+                buildImpl,
+                renameImpl,
+            });
+
+            expect(renameImpl).toHaveBeenCalledOnce();
+            expect(renameImpl.mock.calls[0]![1]).toBe(finalDirectory);
+            expect(await readdir(finalDirectory)).toEqual([
+                'job.mjs',
+                'meta.json',
+                'runtime.json',
+            ]);
+        } finally {
+            await rm(parent, { recursive: true, force: true });
+        }
+    });
 });

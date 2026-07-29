@@ -1,9 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import {
     close as closeDescriptor,
+    closeSync as closeDescriptorSync,
     constants as fileConstants,
     fstatSync,
     openSync,
+    unlinkSync,
     write as writeDescriptor,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
@@ -325,6 +327,8 @@ export interface ReplayArtifactCreationScope {
 export interface ReplayArtifactWriteDependencies {
     scope?: ReplayArtifactCreationScope;
     afterOwnershipRegistration?: () => void;
+    fstatSync?: typeof fstatSync;
+    closeSync?: typeof closeDescriptorSync;
     writeFile?: (handle: ReplayArtifactFileHandle, bytes: Buffer) => Promise<void>;
     close?: (handle: ReplayArtifactFileHandle) => Promise<void>;
 }
@@ -472,7 +476,13 @@ function creationState(scope: ReplayArtifactCreationScope): ReplayArtifactCreati
     return state;
 }
 
-function openExclusiveReplayArtifact(path: string): {
+function openExclusiveReplayArtifact(
+    path: string,
+    dependencies: Pick<
+        ReplayArtifactWriteDependencies,
+        'closeSync' | 'fstatSync'
+    >,
+): {
     handle: ReplayArtifactFileHandle;
     identity: ReplayArtifactIdentity;
 } {
@@ -483,7 +493,35 @@ function openExclusiveReplayArtifact(path: string): {
             | fileConstants.O_EXCL,
         0o600,
     );
-    const opened = fstatSync(descriptor);
+    let opened: Stats;
+    try {
+        opened = (dependencies.fstatSync ?? fstatSync)(descriptor);
+    } catch (error) {
+        const cleanupErrors: unknown[] = [error];
+        try {
+            (dependencies.closeSync ?? closeDescriptorSync)(descriptor);
+        } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+        }
+        try {
+            unlinkSync(path);
+        } catch (cleanupError) {
+            if (
+                !(cleanupError instanceof Error)
+                || !('code' in cleanupError)
+                || cleanupError.code !== 'ENOENT'
+            ) {
+                cleanupErrors.push(cleanupError);
+            }
+        }
+        if (cleanupErrors.length > 1) {
+            throw new Error(
+                'ANALYSIS_V2_REPLAY_ARTIFACT_OPEN_CLEANUP_FAILED',
+                { cause: new AggregateError(cleanupErrors) },
+            );
+        }
+        throw error;
+    }
     let closed = false;
     return {
         identity: identityOf(opened),
@@ -533,7 +571,7 @@ async function securelyCreateReplayArtifact(
     if (state.active) bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_ACTIVE');
     // A synchronous O_EXCL open makes ownership visible to signal cleanup before
     // the event loop can dispatch a signal between file creation and registration.
-    const opened = openExclusiveReplayArtifact(path);
+    const opened = openExclusiveReplayArtifact(path, dependencies);
     const record: ActiveReplayArtifactCreation = {
         path: resolve(path),
         handle: opened.handle,

@@ -675,6 +675,46 @@ describe('AI-only replay runner', () => {
             .toEqual({ response_rejected: 1 });
     });
 
+    it('rejects an unknown adapter disposition at the typed normalization boundary', async () => {
+        const runner = v27Runner({
+            triage: vi.fn(async () => ({
+                outcome: 'ok' as const,
+                value: {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: ['m1'],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: ['m1'],
+                },
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+            })),
+            privateNames: vi.fn(async () => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                failureDisposition: {
+                    private_handle: 1,
+                },
+            })) as unknown as NonNullable<ReplayAiRunner['privateNames']>,
+        });
+
+        await expect(runAnalysisV2AiReplay({
+            bundle,
+            runner,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+        })).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_FAILURE_DISPOSITION_INVALID',
+        );
+    });
+
     it('excludes only a high-confidence same-owner male before feature work', async () => {
         const feature = vi.fn();
         const report = await runAnalysisV2AiReplay({

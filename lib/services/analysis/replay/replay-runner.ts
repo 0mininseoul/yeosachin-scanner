@@ -32,28 +32,24 @@ import {
     type DiagnosticPartialCoverageCliCapability,
 } from './diagnostic-partial-coverage-capability';
 import { evaluateReplayGenderQualityGate } from './replay-gender-quality-gate';
+export {
+    REPLAY_STAGE_FAILURE_DISPOSITIONS,
+} from './replay-job-report-contract';
+import {
+    replayStageFailureDispositionEntries,
+    type ReplayStageFailureDisposition,
+    type ReplayStageFailureDispositionCounts,
+} from './replay-job-report-contract';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
-export const REPLAY_STAGE_FAILURE_DISPOSITIONS = Object.freeze([
-    'success',
-    'rate_limited',
-    'ambiguous',
-    'rejected',
-    'response_rejected',
-    'retry_exhausted',
-    'failed',
-    'capacity_skipped',
-    'cutoff',
-    'backoff_cutoff',
-] as const);
 
 export interface ReplayInvocation<T> {
     outcome: ReplayOutcome;
     value?: T;
     calls?: number;
     rateLimited?: number;
-    failureDisposition?: Readonly<Record<string, number>>;
+    failureDisposition?: Readonly<ReplayStageFailureDispositionCounts>;
     failureKind?: Readonly<Partial<Record<GeminiGenerationFailureKind, number>>>;
     triageSource?: 'checkpoint' | 'safe_fallback';
     attemptLatenciesMs?: readonly number[];
@@ -111,12 +107,12 @@ async function assertReplayAiRunnerPolicy(
 export interface ReplayCaption { evidenceRefId: string; selectionId: string; text: string; }
 export interface ReplayAttemptStart { attempt: number; retryCount: number; }
 export interface ReplayAttemptTelemetry extends ReplayAttemptStart {
-    disposition: string;
+    disposition: ReplayStageFailureDisposition;
     failureKind?: GeminiGenerationFailureKind;
     latencyMs: number;
 }
 export interface ReplayStageMetrics {
-    calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: Record<string, number>; failureKind?: Partial<Record<GeminiGenerationFailureKind, number>>;
+    calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: ReplayStageFailureDispositionCounts; failureKind?: Partial<Record<GeminiGenerationFailureKind, number>>;
 }
 export interface AnalysisV2AiReplayReport {
     benchmarkScope: 'ai-only-exact-replay' | 'ai-only-historical-partial-available';
@@ -205,7 +201,7 @@ interface TrackedResolver {
         retries: number;
         rateLimited: number;
         attemptLatenciesMs: number[];
-        failureDisposition: Record<string, number>;
+        failureDisposition: ReplayStageFailureDispositionCounts;
         failureKind: Partial<Record<GeminiGenerationFailureKind, number>>;
         pendingAttemptStartedAt?: number;
     };
@@ -393,7 +389,9 @@ function collect(stage: ReplayStageMetrics, durations: number[], invocation: Rep
     }
     stage.rateLimited += invocation.rateLimited
         ?? (invocation.outcome === 'rate_limited' ? 1 : 0);
-    const recordedFailureEntries = Object.entries(invocation.failureDisposition ?? {})
+    const recordedFailureEntries = replayStageFailureDispositionEntries(
+        invocation.failureDisposition ?? {},
+    )
         .filter(([, count]) => Number.isInteger(count) && count > 0);
     for (const [disposition, count] of recordedFailureEntries) {
         stage.failureDisposition[disposition] =
@@ -420,7 +418,7 @@ function collectCutoffResolver(
     stage.calls += tracked.telemetry.calls;
     stage.retries += tracked.telemetry.retries;
     stage.rateLimited += tracked.telemetry.rateLimited;
-    for (const [disposition, count] of Object.entries(
+    for (const [disposition, count] of replayStageFailureDispositionEntries(
         tracked.telemetry.failureDisposition,
     )) {
         stage.failureDisposition[disposition] =

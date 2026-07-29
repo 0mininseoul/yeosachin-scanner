@@ -36,6 +36,9 @@ import type {
     ReplayTriageInput,
 } from './replay-runner';
 import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineage';
+import type {
+    ReplayStageFailureDispositionCounts,
+} from './replay-job-report-contract';
 
 interface IssuedReplayRunner {
     policyVersion: ReplaySupportedAiStagePolicyVersion;
@@ -70,7 +73,7 @@ interface InvocationTelemetry {
     retries: number;
     attempts: number;
     rateLimited: number;
-    failureDisposition: Record<string, number>;
+    failureDisposition: ReplayStageFailureDispositionCounts;
     failureKind: Partial<Record<GeminiGenerationFailureKind, number>>;
     attemptLatenciesMs: number[];
 }

@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import {
+    lstat,
+    mkdir,
     open,
     readFile,
     realpath,
     rename,
-    unlink,
+    rm,
 } from 'node:fs/promises';
 import {
     basename,
@@ -12,6 +14,7 @@ import {
     isAbsolute,
     join,
     resolve,
+    sep,
 } from 'node:path';
 import { builtinModules } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +43,7 @@ export const REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS = Object.freeze([
     'lib/services/analysis/replay/replay-bundle.ts',
     'lib/services/analysis/replay/replay-gender-quality-gate.ts',
     'lib/services/analysis/replay/replay-job-gcs.ts',
+    'lib/services/analysis/replay/replay-job-report-contract.ts',
     'lib/services/analysis/replay/replay-runner.ts',
     'lib/services/analysis/replay/replay-source-lineage.ts',
     'lib/services/analysis/replay/replay-staged-ai-adapter.ts',
@@ -67,6 +71,8 @@ const EXTERNAL_PACKAGES = Object.freeze([
 const NODE_BUILTINS = new Set(builtinModules.flatMap(name => (
     name.startsWith('node:') ? [name] : [name, `node:${name}`]
 )));
+const IMMUTABLE_IMAGE_DIGEST =
+    /^[a-z0-9][a-z0-9._-]*(?:[./][a-z0-9][a-z0-9._-]*)+@sha256:[a-f0-9]{64}$/;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const stub = resolve(
     root,
@@ -126,11 +132,121 @@ function runtimePackage(lockfile, name) {
     };
 }
 
-export function createReplayAnalysisV2JobRuntimeManifest(lockfile) {
+function assertImmutableImageDigest(imageDigest) {
+    if (
+        typeof imageDigest !== 'string'
+        || !IMMUTABLE_IMAGE_DIGEST.test(imageDigest)
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST_INVALID',
+        );
+    }
+    return imageDigest;
+}
+
+export function createReplayAnalysisV2JobContainerLaunchContract({
+    imageDigest,
+    entrypoint,
+}) {
+    const image = assertImmutableImageDigest(imageDigest);
+    if (
+        typeof entrypoint !== 'string'
+        || !entrypoint.startsWith('/workspace/')
+        || resolve(entrypoint) !== entrypoint
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_JOB_CONTAINER_LAUNCH_INVALID',
+        );
+    }
     return {
-        schema: 'analysis-v2-replay-job-runtime-v1',
+        image,
+        workdir: '/workspace',
+        nodeModules: '/workspace/node_modules',
+        command: [
+            'node',
+            '--conditions=react-server',
+            entrypoint,
+        ],
+        environment: {
+            ANALYSIS_V2_REPLAY_JOB_EXPECTED_IMAGE_DIGEST: image,
+        },
+    };
+}
+
+export async function verifyReplayAnalysisV2JobContainerFilesystem({
+    imageRoot,
+    contract,
+}) {
+    try {
+        const expected = createReplayAnalysisV2JobContainerLaunchContract({
+            imageDigest: contract?.image,
+            entrypoint: contract?.command?.[2],
+        });
+        if (JSON.stringify(contract) !== JSON.stringify(expected)) {
+            throw new Error('contract mismatch');
+        }
+        const rootPath = await realpath(imageRoot);
+        const mountedPath = path => {
+            const candidate = resolve(rootPath, `.${path}`);
+            if (!candidate.startsWith(`${rootPath}${sep}`)) {
+                throw new Error('path escape');
+            }
+            return candidate;
+        };
+        const workspacePath = mountedPath(contract.workdir);
+        const nodeModulesPath = mountedPath(contract.nodeModules);
+        const entrypointPath = mountedPath(contract.command[2]);
+        const [workspace, nodeModules, entrypoint] = await Promise.all([
+            lstat(workspacePath),
+            lstat(nodeModulesPath),
+            lstat(entrypointPath),
+        ]);
+        if (
+            workspace.isSymbolicLink()
+            || !workspace.isDirectory()
+            || nodeModules.isSymbolicLink()
+            || !nodeModules.isDirectory()
+            || entrypoint.isSymbolicLink()
+            || !entrypoint.isFile()
+        ) {
+            throw new Error('invalid filesystem type');
+        }
+        const [realWorkspace, realNodeModules, realEntrypoint] =
+            await Promise.all([
+                realpath(workspacePath),
+                realpath(nodeModulesPath),
+                realpath(entrypointPath),
+            ]);
+        if (
+            realWorkspace !== workspacePath
+            || realNodeModules !== nodeModulesPath
+            || realEntrypoint !== entrypointPath
+        ) {
+            throw new Error('filesystem indirection');
+        }
+    } catch (cause) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_JOB_CONTAINER_FILESYSTEM_INVALID',
+            { cause },
+        );
+    }
+}
+
+export function createReplayAnalysisV2JobRuntimeManifest(
+    lockfile,
+    imageDigest,
+) {
+    const image = assertImmutableImageDigest(imageDigest);
+    return {
+        schema: 'analysis-v2-replay-job-runtime-v2',
         node: '24.x',
         conditions: ['react-server'],
+        dependencyClosure: {
+            authority: 'immutable-container-image',
+            image,
+            workspace: '/workspace',
+            nodeModules: '/workspace/node_modules',
+        },
         bundle: {
             format: 'esm',
             packages: 'external',
@@ -147,8 +263,12 @@ export function createReplayAnalysisV2JobRuntimeManifest(lockfile) {
 export function verifyReplayAnalysisV2JobRuntimeManifest(
     manifest,
     lockfile,
+    imageDigest,
 ) {
-    const expected = createReplayAnalysisV2JobRuntimeManifest(lockfile);
+    const expected = createReplayAnalysisV2JobRuntimeManifest(
+        lockfile,
+        imageDigest,
+    );
     if (JSON.stringify(manifest) !== JSON.stringify(expected)) {
         throw new Error(
             'ANALYSIS_V2_REPLAY_JOB_RUNTIME_MANIFEST_INVALID',
@@ -163,127 +283,106 @@ function resolvedMetafile(metafile) {
     ));
 }
 
-async function stagePrivateFile(target, contents) {
-    const temporary = join(
-        dirname(target),
-        `.${basename(target)}.tmp-${randomUUID()}`,
+function durableWriteError(cause) {
+    return new Error(
+        'ANALYSIS_V2_REPLAY_JOB_STAGING_FILE_FAILED',
+        { cause },
     );
-    const handle = await open(temporary, 'wx', 0o600);
+}
+
+async function closeAfterOperation(handle, operation) {
+    let operationError;
     try {
+        await operation();
+    } catch (error) {
+        operationError = error;
+    }
+    let closeError;
+    try {
+        await handle.close();
+    } catch (error) {
+        closeError = error;
+    }
+    if (operationError && closeError) {
+        throw durableWriteError(new AggregateError([
+            operationError,
+            closeError,
+        ]));
+    }
+    if (operationError || closeError) {
+        throw durableWriteError(operationError ?? closeError);
+    }
+}
+
+async function stagePrivateFile(target, contents, openImpl) {
+    const handle = await openImpl(target, 'wx', 0o600);
+    await closeAfterOperation(handle, async () => {
         await handle.writeFile(contents);
         await handle.sync();
+    });
+}
+
+async function syncDirectory(path, openImpl) {
+    const handle = await openImpl(path, 'r');
+    await closeAfterOperation(handle, () => handle.sync());
+}
+
+async function assertFinalDirectoryAbsent(finalDirectory) {
+    try {
+        await lstat(finalDirectory);
     } catch (error) {
-        await handle.close();
-        await removeIfPresent(temporary);
+        if (error?.code === 'ENOENT') return;
         throw error;
     }
-    await handle.close();
-    return temporary;
+    throw new Error(
+        'ANALYSIS_V2_REPLAY_JOB_FINAL_DIRECTORY_EXISTS',
+    );
 }
 
-async function removeIfPresent(path) {
+async function publishImmutableDirectory({
+    finalDirectory,
+    files,
+    mkdirImpl,
+    openImpl,
+    publishStep,
+    renameImpl,
+    rmImpl,
+}) {
+    const parentDirectory = dirname(finalDirectory);
+    const stagingDirectory = join(
+        parentDirectory,
+        `.${basename(finalDirectory)}.tmp-${randomUUID()}`,
+    );
+    let stagingCreated = false;
+    let published = false;
     try {
-        await unlink(path);
-    } catch (error) {
-        if (error?.code !== 'ENOENT') {
-            throw error;
-        }
-    }
-}
-
-async function publishAtomically(files, renameImpl) {
-    const staged = [];
-    try {
+        await mkdirImpl(stagingDirectory, { mode: 0o700 });
+        stagingCreated = true;
+        await publishStep?.('staging-directory-created');
         for (const file of files) {
-            staged.push({
-                ...file,
-                temporary: await stagePrivateFile(
-                    file.target,
-                    file.contents,
-                ),
-                backup: join(
-                    dirname(file.target),
-                    `.${basename(file.target)}.bak-${randomUUID()}`,
-                ),
-                backedUp: false,
-                published: false,
+            await stagePrivateFile(
+                join(stagingDirectory, basename(file.target)),
+                file.contents,
+                openImpl,
+            );
+            await publishStep?.(`${basename(file.target)}-durable`);
+        }
+        await syncDirectory(stagingDirectory, openImpl);
+        await publishStep?.('staging-directory-durable');
+        await assertFinalDirectoryAbsent(finalDirectory);
+        await renameImpl(stagingDirectory, finalDirectory);
+        published = true;
+        await publishStep?.('final-directory-published');
+        await syncDirectory(parentDirectory, openImpl);
+        await publishStep?.('parent-directory-durable');
+    } finally {
+        if (stagingCreated && !published) {
+            await rmImpl(stagingDirectory, {
+                recursive: true,
+                force: true,
             });
         }
-
-        try {
-            for (const file of staged) {
-                try {
-                    await renameImpl(file.target, file.backup);
-                    file.backedUp = true;
-                } catch (error) {
-                    if (error?.code !== 'ENOENT') {
-                        throw error;
-                    }
-                }
-            }
-            for (const file of staged) {
-                await renameImpl(file.temporary, file.target);
-                file.published = true;
-            }
-        } catch (error) {
-            const rollbackErrors = [];
-            for (const file of [...staged].reverse()) {
-                if (file.published) {
-                    try {
-                        await removeIfPresent(file.target);
-                        file.published = false;
-                    } catch (rollbackError) {
-                        rollbackErrors.push(rollbackError);
-                    }
-                }
-            }
-            for (const file of [...staged].reverse()) {
-                if (file.backedUp) {
-                    try {
-                        await renameImpl(file.backup, file.target);
-                        file.backedUp = false;
-                    } catch (rollbackError) {
-                        rollbackErrors.push(rollbackError);
-                    }
-                }
-            }
-            if (rollbackErrors.length > 0) {
-                throw new Error(
-                    'ANALYSIS_V2_REPLAY_JOB_BUILD_ROLLBACK_INCOMPLETE',
-                    {
-                        cause: new AggregateError([
-                            error,
-                            ...rollbackErrors,
-                        ]),
-                    },
-                );
-            }
-            throw error;
-        }
-
-        for (const file of staged) {
-            if (file.backedUp) {
-                await removeIfPresent(file.backup);
-                file.backedUp = false;
-            }
-        }
-    } finally {
-        for (const file of staged) {
-            await removeIfPresent(file.temporary);
-            if (!file.backedUp) {
-                await removeIfPresent(file.backup);
-            }
-        }
     }
-}
-
-async function canonicalOutput(path) {
-    const resolved = resolve(path);
-    const directory = await realpath(dirname(resolved));
-    return {
-        directory,
-        path: join(directory, basename(resolved)),
-    };
 }
 
 /**
@@ -291,18 +390,28 @@ async function canonicalOutput(path) {
  *   outfile: string;
  *   metafile: string;
  *   runtimeManifest: string;
+ *   imageDigest: string;
  *   buildImpl?: (
  *     options: { write?: boolean; [key: string]: unknown }
  *   ) => Promise<any>;
+ *   mkdirImpl?: typeof mkdir;
+ *   openImpl?: typeof open;
+ *   publishStep?: (step: string) => void | Promise<void>;
  *   renameImpl?: (source: string, target: string) => Promise<void>;
+ *   rmImpl?: typeof rm;
  * }} input
  */
 export async function buildReplayAnalysisV2Job({
     outfile,
     metafile,
     runtimeManifest,
+    imageDigest,
     buildImpl = build,
+    mkdirImpl = mkdir,
+    openImpl = open,
+    publishStep,
     renameImpl = rename,
+    rmImpl = rm,
 }) {
     for (const [name, path] of Object.entries({
         outfile,
@@ -313,28 +422,40 @@ export async function buildReplayAnalysisV2Job({
             throw new Error(`Missing absolute --${name}`);
         }
     }
-    const canonicalOutputs = await Promise.all(
-        [outfile, metafile, runtimeManifest].map(canonicalOutput),
-    );
+    assertImmutableImageDigest(imageDigest);
+    const resolvedOutputs = [outfile, metafile, runtimeManifest]
+        .map(path => resolve(path));
     if (
-        new Set(canonicalOutputs.map(output => output.path)).size !== 3
+        new Set(resolvedOutputs).size !== 3
     ) {
         throw new Error('Replay job build outputs must be distinct');
     }
+    const outputDirectories = resolvedOutputs.map(dirname);
     if (
-        new Set(canonicalOutputs.map(output => output.directory)).size !== 1
+        new Set(outputDirectories).size !== 1
     ) {
         throw new Error(
             'Replay job build outputs must share one directory',
         );
     }
+    const unresolvedFinalDirectory = outputDirectories[0];
+    await realpath(dirname(unresolvedFinalDirectory));
+    const finalDirectory = unresolvedFinalDirectory;
+    await assertFinalDirectoryAbsent(finalDirectory);
 
     const lockfile = JSON.parse(await readFile(
         resolve(root, 'package-lock.json'),
         'utf8',
     ));
-    const manifest = createReplayAnalysisV2JobRuntimeManifest(lockfile);
-    verifyReplayAnalysisV2JobRuntimeManifest(manifest, lockfile);
+    const manifest = createReplayAnalysisV2JobRuntimeManifest(
+        lockfile,
+        imageDigest,
+    );
+    verifyReplayAnalysisV2JobRuntimeManifest(
+        manifest,
+        lockfile,
+        imageDigest,
+    );
 
     const result = await buildImpl({
         entryPoints: [
@@ -348,6 +469,10 @@ export async function buildReplayAnalysisV2Job({
         bundle: true,
         conditions: ['react-server'],
         format: 'esm',
+        define: {
+            __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__:
+                JSON.stringify(imageDigest),
+        },
         metafile: true,
         packages: 'external',
         platform: 'node',
@@ -366,24 +491,32 @@ export async function buildReplayAnalysisV2Job({
         );
     }
 
-    await publishAtomically([
-        {
-            target: outfile,
-            contents: output.contents,
-        },
-        {
-            target: metafile,
-            contents: `${JSON.stringify(
-                resolvedMetafile(result.metafile),
-                null,
-                2,
-            )}\n`,
-        },
-        {
-            target: runtimeManifest,
-            contents: `${JSON.stringify(manifest, null, 2)}\n`,
-        },
-    ], renameImpl);
+    await publishImmutableDirectory({
+        finalDirectory,
+        files: [
+            {
+                target: outfile,
+                contents: output.contents,
+            },
+            {
+                target: metafile,
+                contents: `${JSON.stringify(
+                    resolvedMetafile(result.metafile),
+                    null,
+                    2,
+                )}\n`,
+            },
+            {
+                target: runtimeManifest,
+                contents: `${JSON.stringify(manifest, null, 2)}\n`,
+            },
+        ],
+        mkdirImpl,
+        openImpl,
+        publishStep,
+        renameImpl,
+        rmImpl,
+    });
 }
 
 function argument(name) {
@@ -395,6 +528,13 @@ function argument(name) {
     return value;
 }
 
+function literalArgument(name) {
+    const index = process.argv.indexOf(name);
+    const value = index >= 0 ? process.argv[index + 1] : undefined;
+    if (!value) throw new Error(`Missing ${name}`);
+    return value;
+}
+
 if (
     process.argv[1]
     && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
@@ -403,5 +543,6 @@ if (
         outfile: argument('--outfile'),
         metafile: argument('--metafile'),
         runtimeManifest: argument('--runtime-manifest'),
+        imageDigest: literalArgument('--image-digest'),
     });
 }
