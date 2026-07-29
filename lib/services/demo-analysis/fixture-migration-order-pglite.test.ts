@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createDemoFixture } from './demo-analysis';
+import { DEMO_FIXTURE_VERSION, createDemoFixture } from './demo-analysis';
 
 const migrationPaths = [
     '20260726050000_add_demo_analysis_runs.sql',
@@ -13,18 +13,25 @@ const migrationPaths = [
     '20260730020000_upgrade_demo_fixture_v4_bijective_forward.sql',
     '20260730030000_restore_demo_fixture_authority_after_v4.sql',
 ];
+const v2RealismMigration = '20260730040000_upgrade_demo_fixture_v2_realism.sql';
 
 const userId = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite | undefined;
 
-function payload() {
-    const fixture = createDemoFixture('pglite-migration-order-fixture');
+function historicalPayload() {
+    const fixture = createDemoFixture('pglite-migration-order-fixture', DEMO_FIXTURE_VERSION);
     return JSON.stringify({
         target: {
             username: 'junho_dem', fullName: '모의 분석용 공개 계정', bio: '산책과 사진을 기록하는 데모 프로필입니다.',
             profileImage: '/demo-avatars/demo-v3-target-000.webp', followersCount: 600, followingCount: 580, isPrivate: false,
         },
-        summary: fixture.summary,
+        summary: {
+            ...fixture.summary,
+            detectedMutuals: 229,
+            publicMutuals: 84,
+            privateMutuals: 145,
+            screenedMutuals: 84,
+        },
         public: fixture.publicAccounts,
         private: fixture.privateAccounts,
     }).replace(/'/g, "''");
@@ -89,7 +96,7 @@ describe('demo fixture migration history', () => {
         `);
         expect(privileges.rows).toEqual([{ service: true, public: false, anon: false, authenticated: false }]);
 
-        const fixturePayload = payload();
+        const fixturePayload = historicalPayload();
         await db.exec(`
             INSERT INTO public.demo_analysis_fixtures (version, status, payload)
             VALUES ('operator-editable-fixture-order', 'draft', '${fixturePayload}'::jsonb);
@@ -127,6 +134,22 @@ describe('demo fixture migration history', () => {
         `);
         expect(replay.rows).toEqual([{ fixture_version: 'operator-editable-fixture-order', created: false }]);
 
+        // Deployment ordering matters: existing generic operator runs must
+        // remain valid when the V2-only five-minute constraint is added.
+        await db.exec(`
+            INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
+            VALUES ('${userId}', 'junho_dem', 'operator-editable-fixture-canary', 'standard', 'generic-operator-duration-key-000001', 38);
+        `);
+        await db.exec(readFileSync(
+            new URL(`../../../supabase/migrations/${v2RealismMigration}`, import.meta.url),
+            'utf8',
+        ));
+        const canary = await db.query<{ duration_seconds: number }>(`
+            SELECT duration_seconds FROM public.demo_analysis_runs
+            WHERE idempotency_key = 'generic-operator-duration-key-000001'
+        `);
+        expect(canary.rows).toEqual([{ duration_seconds: 38 }]);
+
         await db.exec(`
             INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
             VALUES
@@ -135,5 +158,10 @@ describe('demo fixture migration history', () => {
               ('${userId}', 'junho_dem', 'authorized-redacted-fixture-v3', 'standard', 'legacy-v3-duration-key-000001', 45),
               ('${userId}', 'junho_dem', 'authorized-redacted-fixture-v4', 'standard', 'legacy-v4-duration-key-000001', 30);
         `);
+
+        await expect(db.exec(`
+            INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
+            VALUES ('${userId}', 'junho_dem', 'operator-editable-fixture-v2', 'standard', 'v2-wrong-duration-key-000001', 38);
+        `)).rejects.toThrow();
     }, 20_000);
 });

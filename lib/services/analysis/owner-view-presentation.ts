@@ -77,7 +77,7 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
 }
 
 export function analysisDurationProgressCopy(isDemo: boolean): string {
-    return isDemo ? '약 60~90초' : '완료 시간 측정 중';
+    return isDemo ? '약 5분' : '완료 시간 측정 중';
 }
 
 export const OWNER_RESULT_PAGE_SIZE = 50;

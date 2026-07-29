@@ -87,7 +87,6 @@ export function parseSafePublicRiskNarrative(value: unknown): [string, string] |
         || !parsed.every(isSafePublicRiskNarrativeLine)
         || !hasPublicRiskInteractionReference(parsed[1])
         || !hasPublicRiskCoverageCaveat(parsed[1])
-        || !hasCynicalPublicRiskTone(parsed)
     ) {
         return null;
     }

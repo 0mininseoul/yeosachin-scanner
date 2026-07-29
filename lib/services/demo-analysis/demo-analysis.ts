@@ -23,15 +23,20 @@ export const LEGACY_DEMO_FIXTURE_VERSION = 'synthetic-fixture-v1' as const;
 export const AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION = 'authorized-text-fixture-v2' as const;
 /** Persisted v3 rows remain replayable after the bijective v4 fixture becomes current. */
 export const REDACTED_DEMO_FIXTURE_VERSION = 'authorized-redacted-fixture-v3' as const;
-/** New runs use the bijective redacted fixture and locally baked source-derived avatar assets. */
-export const DEMO_FIXTURE_VERSION = 'authorized-redacted-fixture-v4' as const;
+/** Historical v4 rows remain replayable after the operator-owned v2 fixture becomes current. */
+export const REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION = 'authorized-redacted-fixture-v4' as const;
+/** New runs use the operator-published, fully synthetic v2 fixture. */
+export const DEMO_FIXTURE_VERSION = 'operator-editable-fixture-v2' as const;
 export type DemoFixtureVersion =
     | typeof LEGACY_DEMO_FIXTURE_VERSION
     | typeof AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION
     | typeof REDACTED_DEMO_FIXTURE_VERSION
+    | typeof REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION
     | typeof DEMO_FIXTURE_VERSION;
 export const DEMO_ASSET_PREFIX = '/demo-avatars/synthetic-blurred-avatar-' as const;
 export const DEMO_V3_ASSET_PREFIX = '/demo-avatars/demo-v3-' as const;
+/** Verified against the committed rasters, not a CSS filter or remote image. */
+export const DEMO_V2_BAKED_AVATAR_MAX_EDGE_SCORE = 2;
 export const DEMO_PREFLIGHT_TTL_MS = 30 * 60_000;
 
 export function demoResponseCapabilities() {
@@ -80,7 +85,8 @@ export async function validateDemoAssetManifest(): Promise<string[]> {
             edgeTotal += Math.abs(data[offset]! - data[left]!) + Math.abs(data[offset]! - data[up]!);
             edgeCount += 2;
         }
-        if (edgeTotal / Math.max(1, edgeCount) > 35) throw new Error(`Synthetic demo image is not sufficiently defocused: ${asset}`);
+        const maxEdgeScore = asset.endsWith('.webp') ? DEMO_V2_BAKED_AVATAR_MAX_EDGE_SCORE : 35;
+        if (edgeTotal / Math.max(1, edgeCount) > maxEdgeScore) throw new Error(`Synthetic demo image is not sufficiently defocused: ${asset}`);
     }));
     return assets;
 }
@@ -92,9 +98,10 @@ type DemoEnvironment = Readonly<{
 }>;
 
 export function demoDurationSeconds(env: DemoEnvironment = process.env as DemoEnvironment): number {
-    const value = Number.parseInt(env.DEMO_ANALYSIS_DURATION_SECONDS ?? '', 10);
-    if (!Number.isFinite(value)) return 38;
-    return Math.max(30, Math.min(45, value));
+    // Future demo runs are deliberately server-owned. Browser input and runtime
+    // environment tuning must not alter the published V2 contract.
+    void env;
+    return 300;
 }
 
 export function demoPreflightLifecycle(
@@ -134,7 +141,9 @@ function v3Avatar(kind: 'target' | 'female' | 'private', sortOrdinal: number): s
 
 function isRedactedFixture(fixtureVersion: string | undefined): boolean {
     const version = fixtureVersion ?? DEMO_FIXTURE_VERSION;
-    return version === REDACTED_DEMO_FIXTURE_VERSION || version === DEMO_FIXTURE_VERSION;
+    return version === REDACTED_DEMO_FIXTURE_VERSION
+        || version === REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION
+        || version === DEMO_FIXTURE_VERSION;
 }
 
 function isV3Fixture(fixtureVersion: string): boolean {
@@ -843,6 +852,10 @@ function v4ProgressProfileId(progressBp: number): string {
     return `${DEMO_V4_SOURCE_FIXTURE.public[index]!.instagramId}*`;
 }
 
+function syntheticV2ProgressProfileId(progressBp: number): string {
+    return `${syntheticV2Handle(Math.floor(progressBp / 1_000) % 84)}*`;
+}
+
 function privateAccount(index: number): PrivateResultRowV1 {
     return {
         instagramId: fixtureIdentifier(DEMO_PRIVATE_HANDLES, index),
@@ -866,6 +879,73 @@ function v4PrivateAccount(index: number): PrivateResultRowV1 {
         instagramId: source.instagramId,
         fullName: source.fullName,
         profileImage: v3Avatar('private', source.imageSortOrdinal),
+    };
+}
+
+// This generator is intentionally self-contained: it does not read the
+// historical source fixtures, external profiles, or runtime data. The two
+// coprime rotations form a fixed permutation of 230 distinct Korean display
+// names, leaving one spare while keeping every visible V2 account unique.
+const SYNTHETIC_V2_SURNAMES = [
+    '김', '이', '박', '최', '정', '강', '조', '윤', '장', '임', '한', '오',
+    '서', '신', '권', '황', '안', '송', '류', '문', '차', '배', '백',
+] as const;
+const SYNTHETIC_V2_GIVEN_NAMES = [
+    '가람', '다온', '라온', '마루', '나래', '새봄', '여울', '하늘', '누리', '이든',
+] as const;
+const SYNTHETIC_V2_HANDLE_LEFT = [
+    'willow', 'amber', 'paper', 'violet', 'harbor', 'mellow', 'copper', 'maple',
+    'lunar', 'pocket', 'sunday', 'velvet', 'tangerine', 'meadow', 'puddle', 'porch',
+    'dawn', 'marble', 'breeze', 'canvas', 'pebble', 'ribbon', 'horizon',
+] as const;
+const SYNTHETIC_V2_HANDLE_RIGHT = [
+    'window', 'archive', 'garden', 'letter', 'weather', 'library', 'picnic', 'notebook',
+    'terrace', 'postcard',
+] as const;
+
+function syntheticV2Name(index: number): string {
+    return `${SYNTHETIC_V2_SURNAMES[index % SYNTHETIC_V2_SURNAMES.length]!}${
+        SYNTHETIC_V2_GIVEN_NAMES[(index * 7) % SYNTHETIC_V2_GIVEN_NAMES.length]!
+    }`;
+}
+
+function syntheticV2Handle(index: number): string {
+    return `${SYNTHETIC_V2_HANDLE_LEFT[(index * 13 + 3) % SYNTHETIC_V2_HANDLE_LEFT.length]!}.${
+        SYNTHETIC_V2_HANDLE_RIGHT[(index * 7 + 5) % SYNTHETIC_V2_HANDLE_RIGHT.length]!}`;
+}
+
+function syntheticV2NamePermutation(index: number): string {
+    return syntheticV2Name((index * 97 + 41) % 230);
+}
+
+function syntheticV2PublicAccount(index: number): FemaleResultRowV1 {
+    const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
+    const displayScore = index === 0 ? 8 : index === 1 ? 6 : index === 2 ? 5 : 1 + (index % 3);
+    return {
+        instagramId: syntheticV2Handle(index),
+        fullName: syntheticV2NamePermutation(index),
+        profileImage: v3Avatar('female', index + 1),
+        bio: null,
+        displayScore,
+        riskBand,
+        featuredRank: index < 3 ? index + 1 : null,
+        recentMutualRank: index < 10 ? index + 1 : null,
+        analysisDepth: index === 0 ? 'narrative' : 'features',
+        oneLineOverview: '공개 범위에서 최근 좋아요와 댓글 흐름을 함께 확인했습니다. 수집 범위 밖의 맥락은 포함하지 않아 단정할 수 없습니다.',
+        highRiskNarrative: index === 0
+            ? [
+                '공개 범위에서 최근 맞팔 흐름과 프로필 정보를 함께 확인했습니다.',
+                '좋아요와 댓글 등 공개 상호작용은 수집 범위 밖의 맥락을 담지 않으므로 관계나 의도를 단정할 수 없습니다.',
+            ]
+            : null,
+    };
+}
+
+function syntheticV2PrivateAccount(index: number): PrivateResultRowV1 {
+    return {
+        instagramId: syntheticV2Handle(index + 84),
+        fullName: syntheticV2NamePermutation(index + 84),
+        profileImage: v3Avatar('private', index + 85),
     };
 }
 
@@ -900,10 +980,10 @@ export function demoReadyPreflight(
             username: DEMO_TARGET_USERNAME,
             fullName: fixtureTarget?.fullName ?? (fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                 ? '준호의 공개 프로필'
-                : '모의 분석용 공개 계정'),
+                : fixtureVersion === DEMO_FIXTURE_VERSION ? '김도윤' : '모의 분석용 공개 계정'),
             bio: fixtureTarget?.bio ?? (fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
                 ? '사진과 일상을 기록하는 공개 프로필입니다.'
-                : '산책과 사진을 기록하는 데모 프로필입니다.'),
+                : fixtureVersion === DEMO_FIXTURE_VERSION ? null : '산책과 사진을 기록하는 데모 프로필입니다.'),
             profileImage: fixtureTarget?.profileImage ?? (isRedactedFixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0)),
             followersCount: counts.followers,
             followingCount: counts.following,
@@ -934,6 +1014,8 @@ export function createDemoFixture(
 ): DemoFixture {
     if (!requestId) throw new TypeError('A demo run id is required.');
     const publicAccounts = fixtureVersion === DEMO_FIXTURE_VERSION
+        ? Array.from({ length: 84 }, (_, index) => syntheticV2PublicAccount(index))
+        : fixtureVersion === REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION
         ? DEMO_V4_SOURCE_FIXTURE.public.map((_, index) => v4PublicAccount(index))
         : Array.from({ length: 242 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
             ? legacyPublicAccount(index)
@@ -941,27 +1023,32 @@ export function createDemoFixture(
                 ? v3PublicAccount(index)
                 : publicAccount(index));
     const privateAccounts = fixtureVersion === DEMO_FIXTURE_VERSION
+        ? Array.from({ length: 145 }, (_, index) => syntheticV2PrivateAccount(index))
+        : fixtureVersion === REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION
         ? DEMO_V4_SOURCE_FIXTURE.private.map((_, index) => v4PrivateAccount(index))
         : Array.from({ length: 142 }, (_, index) => fixtureVersion === LEGACY_DEMO_FIXTURE_VERSION
             ? legacyPrivateAccount(index)
             : isV3Fixture(fixtureVersion)
                 ? v3PrivateAccount(index)
                 : privateAccount(index));
-    const isV4Fixture = fixtureVersion === DEMO_FIXTURE_VERSION;
+    const isV4Fixture = fixtureVersion === REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION;
+    const isSyntheticV2Fixture = fixtureVersion === DEMO_FIXTURE_VERSION;
     return {
         version: fixtureVersion,
         summary: {
             targetInstagramId: DEMO_TARGET_USERNAME,
-            targetFullName: '김준호',
+            targetFullName: isSyntheticV2Fixture ? '김도윤' : '김준호',
             targetProfileImage: isRedactedFixture(fixtureVersion) ? v3Avatar('target', 0) : avatar(0),
             planId: 'standard',
             followers: { declared: 600, collected: 600, coverageRatio: 1, meetsCoverageGate: true, exactCountMatch: true },
             following: { declared: 580, collected: 580, coverageRatio: 1, meetsCoverageGate: true, exactCountMatch: true },
-            detectedMutuals: isV4Fixture ? 229 : 384,
-            publicMutuals: publicAccounts.length,
+            detectedMutuals: isSyntheticV2Fixture ? 313 : isV4Fixture ? 229 : 384,
+            publicMutuals: isSyntheticV2Fixture ? 168 : publicAccounts.length,
             privateMutuals: privateAccounts.length,
-            screenedMutuals: publicAccounts.length,
-            genderStats: isV4Fixture ? { male: 0, female: 84, unknown: 0 } : { male: 112, female: 96, unknown: 34 },
+            screenedMutuals: isSyntheticV2Fixture ? 168 : publicAccounts.length,
+            genderStats: isSyntheticV2Fixture
+                ? { male: 74, female: 84, unknown: 10 }
+                : isV4Fixture ? { male: 0, female: 84, unknown: 0 } : { male: 112, female: 96, unknown: 34 },
             notScreenedMutuals: 0,
             exclusionApplied: false,
             scorePolicyVersion: 'risk-policy-v2.3',
@@ -1091,6 +1178,8 @@ export function projectDemoProgress(input: {
                     ? 'profile.***'
                     : input.fixture
                         ? `${input.fixture.publicAccounts[Math.floor(progressBp / 1_000) % input.fixture.publicAccounts.length]!.instagramId}*`
+                        : (input.fixtureVersion ?? DEMO_FIXTURE_VERSION) === DEMO_FIXTURE_VERSION
+                            ? syntheticV2ProgressProfileId(progressBp)
                         : isRedactedFixture(input.fixtureVersion)
                         ? isV3Fixture(input.fixtureVersion ?? DEMO_FIXTURE_VERSION)
                             ? v3ProgressProfileId(progressBp)

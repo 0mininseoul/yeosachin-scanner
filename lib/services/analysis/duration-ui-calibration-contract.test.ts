@@ -11,9 +11,7 @@ describe('analysis duration UI calibration contract', () => {
         const analyze = source('app/analyze/page.tsx');
 
         expect(analyze).toContain('<p className="eyebrow">예상 소요 시간</p>');
-        expect(analyze).toMatch(
-            /<p className="mt-1 text-\[15px\] font-bold text-fg">\s*완료 시간 측정 중\s*<\/p>/,
-        );
+        expect(analyze).toContain("{analyticsEligible ? '완료 시간 측정 중' : '약 5분'}");
         expect(analyze).toContain('계정 규모와 수집 상황에 따라 달라집니다. 정확한 완료 시간은 현재 측정 중이에요.');
         expect(analyze).not.toContain('analysisDurationRangeLabel');
         expect(analyze).not.toContain('estimatePreflightAnalysisDuration');
@@ -35,7 +33,9 @@ describe('analysis duration UI calibration contract', () => {
     });
 
     it('keeps demo timing distinct from the real calibration status', () => {
-        expect(analysisDurationProgressCopy(true)).toBe('약 60~90초');
+        const analyze = source('app/analyze/page.tsx');
+        expect(analyze).toContain('정확한 완료 시간은 계정 규모와 수집 상황에 따라 달라질 수 있습니다.');
+        expect(analysisDurationProgressCopy(true)).toBe('약 5분');
         expect(analysisDurationProgressCopy(false)).toBe('완료 시간 측정 중');
     });
 });

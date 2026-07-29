@@ -50,6 +50,7 @@ import { SuspectRow } from '@/components/suspect-row';
 import { ResultActions } from '@/components/result-actions';
 import { ResultFeedback } from '@/components/result-feedback';
 import { ResultPagination } from '@/components/result-pagination';
+import { ProfilePreviewDialog, type InternalProfilePreview } from '@/components/profile-preview-dialog';
 import { useCountUp } from '@/hooks/useCountUp';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
@@ -295,6 +296,7 @@ export default function ResultPage({ params }: PageProps) {
     const privateSectionRef = useRef<HTMLElement>(null);
     const resultViewTrackedRef = useRef(false);
     const [externalProfileLinks, setExternalProfileLinks] = useState(true);
+    const [profilePreview, setProfilePreview] = useState<InternalProfilePreview | null>(null);
     const router = useRouter();
     const requestedPipeline = useSearchParams().get('pipeline');
 
@@ -951,6 +953,13 @@ export default function ResultPage({ params }: PageProps) {
                                     }
                                     avatar={<ProfileImage src={account.profileImage} variant="person" />}
                                     externalProfileLinks={externalProfileLinks}
+                                    onPreview={!externalProfileLinks ? () => setProfilePreview({
+                                        instagramId: account.instagramId,
+                                        fullName: account.fullName,
+                                        profileImage: account.profileImage,
+                                        bio: account.bio,
+                                        overview: account.oneLineOverview,
+                                    }) : undefined}
                                 />
                             ))}
                         </div>
@@ -1007,6 +1016,20 @@ export default function ResultPage({ params }: PageProps) {
                                     {account.instagramUrl && externalProfileLinks && (
                                         <InstaButton url={account.instagramUrl} />
                                     )}
+                                    {!account.instagramUrl && !externalProfileLinks && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setProfilePreview({
+                                                instagramId: account.instagramId,
+                                                fullName: account.fullName,
+                                                profileImage: account.profileImage,
+                                                bio: account.bio,
+                                            })}
+                                            className="shrink-0 border border-line px-3 py-2 text-[11px] font-bold text-fg transition-colors hover:border-fg-dim"
+                                        >
+                                            프로필 보기
+                                        </button>
+                                    )}
                                 </div>
                             ))}
                         </div>
@@ -1025,6 +1048,14 @@ export default function ResultPage({ params }: PageProps) {
                         />
                     )}
                 </section>
+                )}
+
+                {profilePreview && (
+                    <ProfilePreviewDialog
+                        profile={profilePreview}
+                        onClose={() => setProfilePreview(null)}
+                        avatar={<ProfileImage src={profilePreview.profileImage} variant="person" />}
+                    />
                 )}
 
                 {/* share */}

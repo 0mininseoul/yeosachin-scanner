@@ -4,8 +4,10 @@ import {
     AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION,
     DEMO_FIXTURE_VARIANTS,
     DEMO_FIXTURE_VERSION,
+    DEMO_V2_BAKED_AVATAR_MAX_EDGE_SCORE,
     LEGACY_DEMO_FIXTURE_VERSION,
     REDACTED_DEMO_FIXTURE_VERSION,
+    REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION,
     DEMO_TARGET_USERNAME,
     createDemoFixture,
     demoReadyPreflight,
@@ -39,11 +41,11 @@ describe('synthetic demo analysis policy', () => {
         expect(isDemoEligible(ownerId, 'junho_dem', { ...env, DEMO_ANALYSIS_ENABLED: 'TRUE' })).toBe(false);
     });
 
-    it('bounds duration without accepting a browser supplied value', () => {
-        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(30);
-        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '999' })).toBe(45);
-        expect(demoDurationSeconds({})).toBe(38);
-        expect(DEMO_FIXTURE_VERSION).toBe('authorized-redacted-fixture-v4');
+    it('uses the server-canonical five minute duration for the new v2 fixture', () => {
+        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '1' })).toBe(300);
+        expect(demoDurationSeconds({ DEMO_ANALYSIS_DURATION_SECONDS: '999' })).toBe(300);
+        expect(demoDurationSeconds({})).toBe(300);
+        expect(DEMO_FIXTURE_VERSION).toBe('operator-editable-fixture-v2');
     });
 
     it('expires an unstarted preflight exactly at its boundary but preserves a started replay', () => {
@@ -57,6 +59,52 @@ describe('synthetic demo analysis policy', () => {
 });
 
 describe('isolated demo fixtures', () => {
+    it('builds the deterministic v2 public aggregate separately from its visible female list', () => {
+        const fixture = createDemoFixture(requestId);
+
+        expect(fixture.version).toBe('operator-editable-fixture-v2');
+        expect(fixture.publicAccounts).toHaveLength(84);
+        expect(fixture.privateAccounts).toHaveLength(145);
+        expect(fixture.summary).toMatchObject({
+            detectedMutuals: 313,
+            publicMutuals: 168,
+            privateMutuals: 145,
+            screenedMutuals: 168,
+            notScreenedMutuals: 0,
+            genderStats: { male: 74, female: 84, unknown: 10 },
+        });
+        expect(new Set([...fixture.publicAccounts, ...fixture.privateAccounts].map(row => row.fullName)).size).toBe(229);
+        expect(fixture.publicAccounts.every(row => row.bio == null || row.bio === '')).toBe(true);
+    });
+
+    it('keeps the v2 target fictional and bio-free without simulation copy', () => {
+        const preflight = demoReadyPreflight({ id: requestId, created_at: '2026-07-01T00:00:00.000Z' });
+
+        expect(preflight.target).toMatchObject({ username: 'junho_dem', fullName: '김도윤', bio: null });
+        expect(JSON.stringify(preflight.target)).not.toContain('모의 분석용 공개 계정');
+    });
+
+    it('uses distinct natural-looking V2 handles and neutral public-scope copy', () => {
+        const fixture = createDemoFixture(requestId);
+        const accounts = [...fixture.publicAccounts, ...fixture.privateAccounts];
+        const visibleText = [
+            fixture.summary.targetFullName ?? '',
+            ...fixture.publicAccounts.flatMap(account => [
+                account.oneLineOverview,
+                ...(account.highRiskNarrative ?? []),
+            ]),
+        ].join(' ');
+
+        expect(new Set(accounts.map(account => account.instagramId)).size).toBe(229);
+        expect(accounts.map(account => account.instagramId).every(handle =>
+            !/(?:mosaic|quiet|record|(?:_|\.)\d{3})/iu.test(handle),
+        )).toBe(true);
+        expect(new Set(accounts.map(account => account.fullName)).size).toBe(229);
+        expect(visibleText).not.toMatch(/(?:합성|데모|fixture)/iu);
+        expect(visibleText).toContain('공개 범위');
+        expect(visibleText).toContain('단정할 수 없습니다');
+    });
+
     it('dispatches legacy and current runs to distinct static fixtures', () => {
         const requestId = '123e4567-e89b-42d3-a456-426614174000';
         const legacy = createDemoFixture(requestId, LEGACY_DEMO_FIXTURE_VERSION);
@@ -105,6 +153,7 @@ describe('isolated demo fixtures', () => {
         expect(legacy.plans).toEqual(current.plans);
     });
     it('uses only existing local permanently defocused raster assets', async () => {
+        expect(DEMO_V2_BAKED_AVATAR_MAX_EDGE_SCORE).toBe(2);
         const assets = await validateDemoAssetManifest();
         expect(assets).toHaveLength(234);
         expect(assets).toContain('/demo-avatars/demo-v3-target-000.webp');
@@ -133,12 +182,12 @@ describe('isolated demo fixtures', () => {
         expect(first.publicAccounts.every(row => !/가상 프로필|비공개 프로필/u.test(row.fullName ?? ''))).toBe(true);
         expect(first.summary.genderStats.male + first.summary.genderStats.female + first.summary.genderStats.unknown)
             .toBe(first.summary.screenedMutuals);
-        expect(first.summary.publicMutuals).toBe(first.publicAccounts.length);
+        expect(first.summary.publicMutuals).toBe(168);
         expect(first.summary.privateMutuals).toBe(first.privateAccounts.length);
-        expect(first.summary.screenedMutuals).toBe(first.publicAccounts.length);
+        expect(first.summary.screenedMutuals).toBe(168);
     });
 
-    it('uses static redacted v4 text and only local baked blurred avatars', () => {
+    it('uses synthetic v2 text and only local baked blurred avatars', () => {
         const fixture = createDemoFixture(requestId);
         const publicRows = fixture.publicAccounts;
         const preflight = demoReadyPreflight({ id: requestId, created_at: '2026-07-01T00:00:00.000Z' });
@@ -162,10 +211,9 @@ describe('isolated demo fixtures', () => {
             ...fixture.privateAccounts.map(row => row.instagramId),
         ];
 
-        expect(new Set(publicRows.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
-        expect(new Set(publicRows.map(row => row.bio)).size).toBeGreaterThanOrEqual(12);
-        expect(new Set(publicRows.map(row => row.oneLineOverview)).size).toBeGreaterThanOrEqual(12);
-        expect(new Set(fixture.privateAccounts.map(row => row.fullName)).size).toBeGreaterThanOrEqual(16);
+        expect(new Set(publicRows.map(row => row.fullName)).size).toBe(84);
+        expect(publicRows.every(row => row.bio === null)).toBe(true);
+        expect(new Set(fixture.privateAccounts.map(row => row.fullName)).size).toBe(145);
         expect(renderedFixtureText.every(value => !/(?:https?:\/\/|www\.|instagram(?:\.com)?)/iu.test(value))).toBe(true);
         expect(renderedFixtureIdentifiers.every(value => !unsafeFixtureIdentifierPattern.test(value))).toBe(true);
         expect(externalFixtureReferencePattern.test('preview.example.xyz/path')).toBe(true);
@@ -181,8 +229,8 @@ describe('isolated demo fixtures', () => {
         )).toBe(true);
     });
 
-    it('keeps the requested current account normal and moves the third featured caution rank to a distinct row', () => {
-        const fixture = createDemoFixture(requestId, DEMO_FIXTURE_VERSION);
+    it('keeps the requested historical v4 account normal and moves the third featured caution rank to a distinct row', () => {
+        const fixture = createDemoFixture(requestId, REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION);
         const requested = fixture.publicAccounts.find(row => row.instagramId === 'bl1ckcherdk_cuu6');
         const featuredCaution = fixture.publicAccounts.find(row => row.riskBand === 'caution' && row.featuredRank === 3);
 

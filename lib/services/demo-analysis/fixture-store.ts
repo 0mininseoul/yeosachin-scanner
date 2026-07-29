@@ -12,6 +12,7 @@ import {
     createDemoFixture,
     DEMO_FIXTURE_VERSION,
     LEGACY_DEMO_FIXTURE_VERSION,
+    REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION,
     REDACTED_DEMO_FIXTURE_VERSION,
     type DemoFixture,
 } from './demo-analysis';
@@ -45,7 +46,18 @@ export const demoFixturePayloadSchema = z.object({
         if (identifiers.has(account.instagramId)) context.addIssue({ code: 'custom', message: 'fixture Instagram IDs must be unique across public and private accounts' });
         identifiers.add(account.instagramId);
     });
-    if (value.summary.publicMutuals !== 84 || value.summary.privateMutuals !== 145 || value.summary.screenedMutuals !== 84) {
+    const isHistoricalAggregate = value.summary.publicMutuals === 84
+        && value.summary.privateMutuals === 145
+        && value.summary.screenedMutuals === 84;
+    const isV2Aggregate = value.summary.detectedMutuals === 313
+        && value.summary.publicMutuals === 168
+        && value.summary.privateMutuals === 145
+        && value.summary.screenedMutuals === 168
+        && value.summary.notScreenedMutuals === 0
+        && value.summary.genderStats.male === 74
+        && value.summary.genderStats.female === 84
+        && value.summary.genderStats.unknown === 10;
+    if (!isHistoricalAggregate && !isV2Aggregate) {
         context.addIssue({ code: 'custom', message: 'fixture summary counts do not match its lists' });
     }
 }).superRefine((value, context) => {
@@ -54,6 +66,22 @@ export const demoFixturePayloadSchema = z.object({
         context.addIssue({ code: 'custom', message: 'fixture payload contains an external URL' });
     }
 });
+
+function parseFixturePayloadForVersion(version: string, payload: unknown): z.infer<typeof demoFixturePayloadSchema> | null {
+    const parsed = demoFixturePayloadSchema.safeParse(payload);
+    if (!parsed.success) return null;
+    if (version !== DEMO_FIXTURE_VERSION) return parsed.data;
+    const allAccounts = [...parsed.data.public, ...parsed.data.private];
+    const uniqueNames = new Set(allAccounts.map(account => account.fullName));
+    if (
+        parsed.data.target.bio !== null
+        || parsed.data.target.fullName === '모의 분석용 공개 계정'
+        || parsed.data.summary.targetFullName !== '김도윤'
+        || !parsed.data.public.every(account => account.bio === null)
+        || uniqueNames.size !== 229
+    ) return null;
+    return parsed.data;
+}
 
 export type DatabaseDemoFixture = Readonly<{
     version: string;
@@ -66,7 +94,7 @@ const staticVersions = new Set<string>([
     LEGACY_DEMO_FIXTURE_VERSION,
     AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION,
     REDACTED_DEMO_FIXTURE_VERSION,
-    DEMO_FIXTURE_VERSION,
+    REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION,
 ]);
 
 function staticFixture(version: string): DatabaseDemoFixture | null {
@@ -97,13 +125,13 @@ export async function loadDemoFixtureForVersion(version: string): Promise<Databa
     if (error || !data || typeof data !== 'object') return null;
     const row = data as { version?: unknown; status?: unknown; payload?: unknown };
     if (row.version !== version || (row.status !== 'published' && row.status !== 'retired')) return null;
-    const parsed = demoFixturePayloadSchema.safeParse(row.payload);
-    if (!parsed.success) return null;
+    const parsed = parseFixturePayloadForVersion(version, row.payload);
+    if (!parsed) return null;
     return {
         version,
-        target: parsed.data.target,
-        fixture: { version, summary: parsed.data.summary, publicAccounts: parsed.data.public, privateAccounts: parsed.data.private },
-        payload: parsed.data,
+        target: parsed.target,
+        fixture: { version, summary: parsed.summary, publicAccounts: parsed.public, privateAccounts: parsed.private },
+        payload: parsed,
     };
 }
 
@@ -112,10 +140,10 @@ export async function loadPublishedDemoFixture(): Promise<DatabaseDemoFixture | 
         .select('version, status, payload').eq('status', 'published').maybeSingle();
     if (error || !data || typeof data !== 'object') return null;
     const row = data as { version?: unknown; status?: unknown; payload?: unknown };
-    if (typeof row.version !== 'string' || row.status !== 'published') return null;
-    const parsed = demoFixturePayloadSchema.safeParse(row.payload);
-    return parsed.success ? {
-        version: row.version, target: parsed.data.target,
-        fixture: { version: row.version, summary: parsed.data.summary, publicAccounts: parsed.data.public, privateAccounts: parsed.data.private }, payload: parsed.data,
+    if (row.version !== DEMO_FIXTURE_VERSION || row.status !== 'published') return null;
+    const parsed = parseFixturePayloadForVersion(row.version, row.payload);
+    return parsed ? {
+        version: row.version, target: parsed.target,
+        fixture: { version: row.version, summary: parsed.summary, publicAccounts: parsed.public, privateAccounts: parsed.private }, payload: parsed,
     } : null;
 }
