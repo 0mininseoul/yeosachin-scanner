@@ -25,12 +25,17 @@ const rowSchema = z.object({
     ...rowFields,
     // New versions are database-owned names, while these static names remain replay-only.
     fixture_version: z.string().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-    duration_seconds: z.number().int().min(30).max(90),
+    duration_seconds: z.number().int().min(30).max(300),
 }).passthrough().superRefine((value, context) => {
     if (value.fixture_version === LEGACY_DEMO_FIXTURE_VERSION && (value.duration_seconds < 60 || value.duration_seconds > 90)) {
         context.addIssue({ code: 'custom', message: 'legacy demo duration is invalid' });
     }
-    if (value.fixture_version !== LEGACY_DEMO_FIXTURE_VERSION && (value.duration_seconds < 30 || value.duration_seconds > 45)) {
+    if (value.fixture_version === DEMO_FIXTURE_VERSION && value.duration_seconds !== 300) {
+        context.addIssue({ code: 'custom', message: 'v2 demo duration is invalid' });
+    }
+    if (value.fixture_version !== LEGACY_DEMO_FIXTURE_VERSION
+        && value.fixture_version !== DEMO_FIXTURE_VERSION
+        && (value.duration_seconds < 30 || value.duration_seconds > 45)) {
         context.addIssue({ code: 'custom', message: 'demo duration is invalid' });
     }
 });
@@ -47,8 +52,8 @@ function parseRow(value: unknown): DemoAnalysisRun | null {
 }
 
 /** New fixture versions cannot replay a persisted run from an earlier fixture namespace. */
-export function demoFixtureIdempotencyKey(idempotencyKey: string): string {
-    return `fixture-db-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
+export function demoFixtureIdempotencyKey(idempotencyKey: string, fixtureVersion: string = DEMO_FIXTURE_VERSION): string {
+    return `fixture-${createHash('sha256').update(`${fixtureVersion}:${idempotencyKey}`).digest('hex')}`;
 }
 
 export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({
@@ -64,7 +69,7 @@ export const demoAnalysisStore = {
         const { data, error } = await supabaseAdmin.rpc(DEMO_ANALYSIS_DATABASE_NAMES.createRpc, {
             p_user_id: input.userId,
             p_target_instagram_id: DEMO_TARGET_USERNAME,
-            p_idempotency_key: demoFixtureIdempotencyKey(input.idempotencyKey),
+            p_idempotency_key: demoFixtureIdempotencyKey(input.idempotencyKey, fixture.version),
             p_duration_seconds: demoDurationSeconds(),
             p_fixture_version: fixture.version,
             p_fixture_payload: fixture.payload,

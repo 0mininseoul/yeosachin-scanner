@@ -39,12 +39,15 @@ export function SuspectRow({
   rank,
   avatar,
   externalProfileLinks,
+  onPreview,
   maskHandle = false,
 }: {
   account: SuspectRowAccount;
   rank: number;
   avatar: ReactNode;
   externalProfileLinks: boolean;
+  /** Local detail view used when an external profile URL is unavailable. */
+  onPreview?: () => void;
   /**
    * Blurs the account's handle. Used on the shared view, where the reader never
    * consented to being listed.
@@ -146,6 +149,15 @@ export function SuspectRow({
             url={account.instagramUrl!}
             emphasis={isHighRisk ? "high" : "default"}
           />
+        )}
+        {!showProfileLink && onPreview && !maskHandle && (
+          <button
+            type="button"
+            onClick={onPreview}
+            className="shrink-0 border border-line px-3 py-2 text-[11px] font-bold text-fg transition-colors hover:border-fg-dim"
+          >
+            프로필 보기
+          </button>
         )}
       </div>
     </div>

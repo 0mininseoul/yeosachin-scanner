@@ -5,15 +5,15 @@
 import { createDemoFixture, DEMO_FIXTURE_VERSION } from '../lib/services/demo-analysis/demo-analysis';
 import { supabaseAdmin } from '../lib/supabase/admin';
 
-export const OPERATOR_EDITABLE_DEMO_FIXTURE_VERSION = 'operator-editable-fixture-v1';
+export const OPERATOR_EDITABLE_DEMO_FIXTURE_VERSION = 'operator-editable-fixture-v2';
 
 export function createBootstrapDemoFixturePayload() {
     const fixture = createDemoFixture('operator-bootstrap', DEMO_FIXTURE_VERSION);
     return {
         target: {
             username: 'junho_dem',
-            fullName: '모의 분석용 공개 계정',
-            bio: '산책과 사진을 기록하는 데모 프로필입니다.',
+            fullName: '김도윤',
+            bio: null,
             profileImage: '/demo-avatars/demo-v3-target-000.webp',
             followersCount: 600,
             followingCount: 580,

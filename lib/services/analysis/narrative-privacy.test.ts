@@ -43,7 +43,7 @@ describe('public risk narrative privacy', () => {
         )).toBe(true);
     });
 
-    it('requires exactly two safe, cynical lines with interactions and a sampling caveat', () => {
+    it('requires exactly two safe, evidence-calibrated lines with interactions and a sampling caveat', () => {
         expect(parseSafePublicRiskNarrative([
             '프로필과 피드는 꽤 눈에 띕니다.',
             '댓글 내용은 제법 친절하지만 수집 표본 밖 누락은 가능합니다.',
@@ -58,7 +58,10 @@ describe('public risk narrative privacy', () => {
         expect(parseSafePublicRiskNarrative([
             '프로필은 꽤 활발합니다.',
             '댓글 흔적은 확인되지만 수집 표본 밖 누락은 가능합니다.',
-        ])).toBeNull();
+        ])).toEqual([
+            '프로필은 꽤 활발합니다.',
+            '댓글 흔적은 확인되지만 수집 표본 밖 누락은 가능합니다.',
+        ]);
         expect(parseSafePublicRiskNarrative([
             '프로필과 피드는 굳이 눈에 띕니다.',
             '좋아요 three times가 관측됐지만, 수집 표본 밖 누락 가능성은 남습니다.',

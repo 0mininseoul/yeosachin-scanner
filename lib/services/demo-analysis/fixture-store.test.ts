@@ -4,15 +4,28 @@ const mocks = vi.hoisted(() => ({ from: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { from: mocks.from } }));
 
 import { loadDemoFixtureForVersion } from './fixture-store';
-import { createDemoFixture } from './demo-analysis';
+import { createDemoFixture, REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION } from './demo-analysis';
 
 const version = 'operator-editable-fixture-v1';
 
 function payload() {
-    const source = createDemoFixture('fixture-source');
+    const source = createDemoFixture('fixture-source', REDACTED_BIJECTIVE_DEMO_FIXTURE_VERSION);
     return {
         target: {
             username: 'junho_dem', fullName: '모의 분석용 공개 계정', bio: '산책과 사진을 기록하는 데모 프로필입니다.',
+            profileImage: '/demo-avatars/demo-v3-target-000.webp', followersCount: 600, followingCount: 580, isPrivate: false,
+        },
+        summary: source.summary,
+        public: source.publicAccounts,
+        private: source.privateAccounts,
+    };
+}
+
+function v2Payload() {
+    const source = createDemoFixture('fixture-source');
+    return {
+        target: {
+            username: 'junho_dem', fullName: '김도윤', bio: null,
             profileImage: '/demo-avatars/demo-v3-target-000.webp', followersCount: 600, followingCount: 580, isPrivate: false,
         },
         summary: source.summary,
@@ -58,5 +71,19 @@ describe('database demo fixture loader', () => {
         invalid.target.bio = 'www.example.test';
         selectFixture({ version, status: 'published', payload: invalid });
         await expect(loadDemoFixtureForVersion(version)).resolves.toBeNull();
+    });
+
+    it('rejects non-synthetic v2 account bios while retaining the v1 replay schema', async () => {
+        const invalid = v2Payload();
+        invalid.public[0] = { ...invalid.public[0]!, bio: 'real-looking profile text' };
+        selectFixture({ version: 'operator-editable-fixture-v2', status: 'published', payload: invalid });
+        await expect(loadDemoFixtureForVersion('operator-editable-fixture-v2')).resolves.toBeNull();
+    });
+
+    it('never selects a published v1 payload for a new demo run', async () => {
+        const maybeSingle = vi.fn().mockResolvedValue({ data: { version: 'operator-editable-fixture-v1', status: 'published', payload: payload() }, error: null });
+        mocks.from.mockReturnValue({ select: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle }) }) });
+        const { loadPublishedDemoFixture } = await import('./fixture-store');
+        await expect(loadPublishedDemoFixture()).resolves.toBeNull();
     });
 });

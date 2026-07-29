@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn(), loadPublished: vi
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.rpc, from: mocks.from } }));
 vi.mock('./fixture-store', () => ({ loadPublishedDemoFixture: mocks.loadPublished }));
 
-import { demoAnalysisStore, isCurrentDemoFixtureRun } from './store';
+import { demoAnalysisStore, demoFixtureIdempotencyKey, isCurrentDemoFixtureRun } from './store';
 import { DEMO_FIXTURE_VERSION, REDACTED_DEMO_FIXTURE_VERSION } from './demo-analysis';
 
 const ownerId = '123e4567-e89b-42d3-a456-426614174000';
@@ -15,7 +15,7 @@ const anotherRunId = '423e4567-e89b-42d3-a456-426614174000';
 function row(id = runId, userId = ownerId, startedAt: string | null = null, fixtureVersion = DEMO_FIXTURE_VERSION) {
     return {
         id, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: fixtureVersion,
-        idempotency_key: 'demo-idempotency-key-000000', duration_seconds: 38,
+        idempotency_key: 'demo-idempotency-key-000000', duration_seconds: 300,
         created_at: '2026-07-01T00:00:00.000Z', started_at: startedAt,
     };
 }
@@ -24,6 +24,12 @@ describe('demo analysis store idempotency and ownership boundary', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.loadPublished.mockResolvedValue({ version: 'operator-editable-fixture-v1', payload: { target: {}, summary: {}, public: [], private: [] } });
+    });
+
+    it('namespaces a browser idempotency key by fixture version', () => {
+        const browserKey = 'demo-idempotency-key-000000';
+        expect(demoFixtureIdempotencyKey(browserKey, 'operator-editable-fixture-v2'))
+            .not.toBe(demoFixtureIdempotencyKey(browserKey, 'operator-editable-fixture-v1'));
     });
 
     it('preserves a replayed run and start timestamp while a fresh key receives a new run', async () => {
@@ -44,7 +50,7 @@ describe('demo analysis store idempotency and ownership boundary', () => {
         expect(fresh?.run.id).toBe(anotherRunId);
         expect(mocks.rpc).toHaveBeenNthCalledWith(1, 'create_demo_analysis_preflight', expect.objectContaining({
             p_user_id: ownerId,
-            p_duration_seconds: 38,
+            p_duration_seconds: 300,
             p_idempotency_key: expect.not.stringMatching(/^demo-idempotency-key-000000$/),
         }));
     });
@@ -68,6 +74,10 @@ describe('demo analysis store idempotency and ownership boundary', () => {
             error: null,
         });
 
+        mocks.rpc.mockResolvedValue({
+            data: [{ ...row(), fixture_version: REDACTED_DEMO_FIXTURE_VERSION, duration_seconds: 38, created: false }],
+            error: null,
+        });
         const result = await demoAnalysisStore.startForOwner(runId, ownerId);
 
         expect(result?.fixture_version).toBe(REDACTED_DEMO_FIXTURE_VERSION);

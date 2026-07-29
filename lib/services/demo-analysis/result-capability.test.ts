@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { mapV2Result } from '@/app/result/[requestId]/page';
 import { demoResultPage } from './demo-analysis';
 
@@ -15,5 +16,17 @@ describe('result capability mapping', () => {
             expect(JSON.stringify(mapped)).not.toContain('instagram.com');
         }
         expect(mapV2Result(first, true).femaleAccounts[0]?.instagramUrl).toContain('instagram.com');
+    });
+
+    it('offers an internal detail action when external profiles are disabled without changing real links', () => {
+        const resultPage = readFileSync(new URL('../../../app/result/[requestId]/page.tsx', import.meta.url), 'utf8');
+        const suspectRow = readFileSync(new URL('../../../components/suspect-row.tsx', import.meta.url), 'utf8');
+
+        expect(suspectRow).toContain('onPreview?: () => void');
+        expect(suspectRow).toContain('프로필 보기');
+        expect(resultPage).toContain('setProfilePreview');
+        expect(resultPage).toContain('프로필 정보');
+        expect(mapV2Result(demoResultPage({ requestId, femaleCursor: null, privateCursor: null, pageSize: 1 }), true)
+            .femaleAccounts[0]?.instagramUrl).toContain('instagram.com');
     });
 });

@@ -114,6 +114,14 @@ interface PrivateAccount {
     bio?: string;
 }
 
+interface InternalProfilePreview {
+    instagramId: string;
+    fullName?: string;
+    profileImage?: string;
+    bio?: string;
+    overview?: string;
+}
+
 interface ResultData {
     requestId: string;
     status: string;
@@ -295,6 +303,7 @@ export default function ResultPage({ params }: PageProps) {
     const privateSectionRef = useRef<HTMLElement>(null);
     const resultViewTrackedRef = useRef(false);
     const [externalProfileLinks, setExternalProfileLinks] = useState(true);
+    const [profilePreview, setProfilePreview] = useState<InternalProfilePreview | null>(null);
     const router = useRouter();
     const requestedPipeline = useSearchParams().get('pipeline');
 
@@ -951,6 +960,13 @@ export default function ResultPage({ params }: PageProps) {
                                     }
                                     avatar={<ProfileImage src={account.profileImage} variant="person" />}
                                     externalProfileLinks={externalProfileLinks}
+                                    onPreview={!externalProfileLinks ? () => setProfilePreview({
+                                        instagramId: account.instagramId,
+                                        fullName: account.fullName,
+                                        profileImage: account.profileImage,
+                                        bio: account.bio,
+                                        overview: account.oneLineOverview,
+                                    }) : undefined}
                                 />
                             ))}
                         </div>
@@ -1007,6 +1023,20 @@ export default function ResultPage({ params }: PageProps) {
                                     {account.instagramUrl && externalProfileLinks && (
                                         <InstaButton url={account.instagramUrl} />
                                     )}
+                                    {!account.instagramUrl && !externalProfileLinks && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setProfilePreview({
+                                                instagramId: account.instagramId,
+                                                fullName: account.fullName,
+                                                profileImage: account.profileImage,
+                                                bio: account.bio,
+                                            })}
+                                            className="shrink-0 border border-line px-3 py-2 text-[11px] font-bold text-fg transition-colors hover:border-fg-dim"
+                                        >
+                                            프로필 보기
+                                        </button>
+                                    )}
                                 </div>
                             ))}
                         </div>
@@ -1025,6 +1055,26 @@ export default function ResultPage({ params }: PageProps) {
                         />
                     )}
                 </section>
+                )}
+
+                {profilePreview && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-5" role="dialog" aria-modal="true" aria-label="프로필 정보">
+                        <div className="w-full max-w-sm border border-line bg-ink-2 p-5 shadow-2xl">
+                            <div className="flex items-start gap-3">
+                                <div className="relative h-12 w-12 shrink-0 overflow-hidden border border-line bg-panel">
+                                    <ProfileImage src={profilePreview.profileImage} variant="person" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                    <p className="truncate text-[15px] font-bold text-fg">@{profilePreview.instagramId}</p>
+                                    {profilePreview.fullName && <p className="mt-0.5 text-[12px] text-fg-dim">{profilePreview.fullName}</p>}
+                                </div>
+                                <button type="button" onClick={() => setProfilePreview(null)} className="text-[12px] font-bold text-fg-dim hover:text-fg">닫기</button>
+                            </div>
+                            {(profilePreview.bio || profilePreview.overview) && (
+                                <p className="mt-4 text-[12px] leading-relaxed text-fg-dim">{profilePreview.overview || profilePreview.bio}</p>
+                            )}
+                        </div>
+                    </div>
                 )}
 
                 {/* share */}

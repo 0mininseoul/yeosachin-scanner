@@ -2,9 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { bootstrapDemoEditableFixture, createBootstrapDemoFixturePayload } from './bootstrap-demo-editable-fixture';
 
 describe('operator editable demo fixture bootstrap', () => {
-    it('builds the redacted v4 payload with the complete dashboard-editable shape', () => {
+    it('builds the synthetic v2 payload with the complete dashboard-editable shape', () => {
         const payload = createBootstrapDemoFixturePayload();
-        expect(payload).toMatchObject({ target: { username: 'junho_dem' }, summary: { publicMutuals: 84, privateMutuals: 145 } });
+        expect(payload).toMatchObject({
+            target: { username: 'junho_dem', fullName: '김도윤', bio: null },
+            summary: { detectedMutuals: 313, publicMutuals: 168, privateMutuals: 145, screenedMutuals: 168 },
+        });
         expect(payload.public).toHaveLength(84);
         expect(payload.private).toHaveLength(145);
         expect(payload.public.every(row => row.profileImage?.startsWith('/demo-avatars/'))).toBe(true);
