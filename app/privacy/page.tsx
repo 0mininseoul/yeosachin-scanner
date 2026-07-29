@@ -1,4 +1,30 @@
+import type { Metadata } from 'next';
 import { TopBar, Eyebrow } from '@/components/case-ui';
+import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
+
+const TITLE = '개인정보처리방침 | AI 위장 여사친 판독기';
+const DESCRIPTION = 'AI 위장 여사친 판독기의 개인정보 수집, 이용, 보관 및 보호 기준을 안내합니다.';
+const URL = `${CANONICAL_APP_ORIGIN}/privacy`;
+
+export const metadata: Metadata = {
+    title: TITLE,
+    description: DESCRIPTION,
+    alternates: {
+        canonical: '/privacy',
+    },
+    openGraph: {
+        type: 'website',
+        locale: 'ko_KR',
+        url: URL,
+        title: TITLE,
+        description: DESCRIPTION,
+    },
+    twitter: {
+        card: 'summary',
+        title: TITLE,
+        description: DESCRIPTION,
+    },
+};
 
 /*
  * 개인정보처리방침 — AI 위장 여사친 판독기 (Ascentum)

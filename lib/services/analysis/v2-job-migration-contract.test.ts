@@ -27,6 +27,11 @@ function expectInOrder(source: string, fragments: readonly string[]): void {
 }
 
 describe('analysis V2 job migration concurrency contract', () => {
+    it('keeps the durable claim upper bound aligned with the 600-second transport window', () => {
+        const claim = functionDefinition('claim_analysis_v2_job');
+        expect(claim).toContain('p_lease_seconds NOT BETWEEN 30 AND 600');
+    });
+
     it('keeps terminal-capable paths on the preflight -> request -> job lock order', () => {
         for (const name of [
             'claim_analysis_v2_job',

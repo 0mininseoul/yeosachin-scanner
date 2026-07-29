@@ -1,13 +1,16 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { TopBar, CaseCard, Eyebrow } from '@/components/case-ui';
+import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
 import { createClient } from '@/lib/supabase/server';
 import { loadLatestEarlybirdOrder } from '@/lib/services/earlybird/order-status';
 import { EarlybirdStatus } from './earlybird-status';
 
 export const dynamic = 'force-dynamic';
 
-export const metadata = {
+export const metadata: Metadata = {
+    ...NOINDEX_METADATA,
     title: '얼리버드 사전 구매 현황 - AI 위장 여사친 판독기',
 };
 

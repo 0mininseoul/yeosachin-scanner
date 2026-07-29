@@ -203,6 +203,24 @@ function progressReporter(): AnalysisV2ProgressReporter {
 }
 
 describe('analysis V2 durable DAG worker', () => {
+    it('passes the route-selected durable lease to the exact claim', async () => {
+        const legacyStore = store(bootstrapClaim);
+        await processAnalysisV2TaskDelivery(delivery, {
+            store: legacyStore,
+            jobLeaseSeconds: 360,
+            handler: async () => [],
+        });
+        expect(legacyStore.claim).toHaveBeenCalledWith(delivery, 360);
+
+        const currentStore = store(bootstrapClaim);
+        await processAnalysisV2TaskDelivery(delivery, {
+            store: currentStore,
+            jobLeaseSeconds: 600,
+            handler: async () => [],
+        });
+        expect(currentStore.claim).toHaveBeenCalledWith(delivery, 600);
+    });
+
     it('passes the immutable AI stage policy to the screening executor', async () => {
         const screeningState: AnalysisV2DagState = {
             ...baseState(),

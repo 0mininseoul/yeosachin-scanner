@@ -145,7 +145,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     required_plan_id: enumValidator(['basic', 'standard', 'plus']),
     result_count: integerValidator(0, 10_000),
     share_channel: enumValidator(['clipboard', 'kakao', 'web_share']),
-    source: enumValidator(['direct', 'google', 'instagram', 'kakao']),
+    source: enumValidator(['direct', 'google', 'instagram', 'kakao', 'chatgpt']),
     stage: enumValidator([
         'analysis',
         'anonymous',

@@ -34,6 +34,10 @@ describe('Amplitude funnel helpers', () => {
 
     it('accepts only the closed attribution vocabulary', () => {
         expect(readAttribution('')).toEqual({ source: 'direct', medium: 'direct' });
+        expect(readAttribution('?utm_source=google&utm_medium=organic')).toEqual({
+            source: 'google',
+            medium: 'organic',
+        });
         expect(readAttribution(
             '?utm_source=instagram&utm_medium=paid_social&utm_campaign=launch_2026'
             + '&utm_content=hero-a&utm_term=detector',
@@ -44,10 +48,41 @@ describe('Amplitude funnel helpers', () => {
             content: 'hero-a',
             term: 'detector',
         });
+        expect(readAttribution('?utm_source=kakao&utm_medium=referral')).toEqual({
+            source: 'kakao',
+            medium: 'referral',
+        });
         expect(readAttribution(
             '?utm_source=person%40example.com&utm_medium=https%3A%2F%2Fevil.test'
             + '&utm_campaign=secret&utm_content=%40raw_target&utm_term=token',
         )).toEqual({});
+    });
+
+    it('normalizes ChatGPT Search referrals and supplies only a missing medium', () => {
+        expect(readAttribution('?utm_source=chatgpt.com')).toEqual({
+            source: 'chatgpt',
+            medium: 'referral',
+        });
+        expect(readAttribution(
+            '?utm_source=chatgpt.com&utm_medium=organic',
+        )).toEqual({
+            source: 'chatgpt',
+            medium: 'organic',
+        });
+    });
+
+    it('never returns raw or arbitrary attribution values', () => {
+        const attribution = readAttribution(
+            '?utm_source=https%3A%2F%2Fchatgpt.com%2Fshare%2Fsecret'
+            + '&utm_medium=private-referrer&utm_campaign=raw-query'
+            + '&utm_content=person%40example.com&utm_term=token',
+        );
+
+        expect(attribution).toEqual({});
+        expect(Object.keys(attribution)).toEqual([]);
+        expect(JSON.stringify(attribution)).not.toMatch(
+            /https?:|chatgpt\.com|private-referrer|raw-query|person@|token/,
+        );
     });
 
     it('maps operational failures to the registered error vocabulary', () => {
