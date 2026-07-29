@@ -8,11 +8,11 @@ import AnalysisList from './analysis-list';
 import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { demoArchiveItems } from '@/lib/services/demo-analysis/archive';
-import { NOINDEX_ROBOTS } from '@/lib/services/seo/discovery';
+import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
 
 export const metadata: Metadata = {
+    ...NOINDEX_METADATA,
     title: '보관함 - 위장여사친 판독기',
-    robots: NOINDEX_ROBOTS,
 };
 
 export default async function MyPage() {

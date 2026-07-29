@@ -1,3 +1,5 @@
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 const CANONICAL_ORIGIN = 'https://yeosachin.com';
@@ -61,6 +63,24 @@ describe('JSON-LD', () => {
         expect(JSON.parse(serialized)).toEqual(value);
     });
 
+    it('renders one parseable JSON-LD script with escaped data', async () => {
+        const { JsonLd } = await import('@/components/seo/json-ld');
+        const value = {
+            '@context': 'https://schema.org',
+            description: '</script><script>alert("unsafe")</script>',
+        };
+
+        const markup = renderToStaticMarkup(createElement(JsonLd, { data: value }));
+        const scripts = [...markup.matchAll(
+            /<script type="application\/ld\+json">([\s\S]*?)<\/script>/g,
+        )];
+
+        expect(scripts).toHaveLength(1);
+        expect(scripts[0]?.[1]).not.toContain('<');
+        expect(scripts[0]?.[1]).toContain('\\u003c/script>');
+        expect(JSON.parse(scripts[0]?.[1] ?? '')).toEqual(value);
+    });
+
     it('describes only the truthful homepage WebSite and Organization graph', async () => {
         const { buildHomepageJsonLd } = await import('./discovery');
         const graph = buildHomepageJsonLd();
@@ -89,7 +109,7 @@ describe('JSON-LD', () => {
 });
 
 describe('route metadata', () => {
-    it('gives terms and privacy unique descriptions and self-canonicals', async () => {
+    it('gives terms and privacy unique search and social metadata', async () => {
         const [
             { metadata: terms },
             { metadata: privacy },
@@ -106,11 +126,28 @@ describe('route metadata', () => {
         expect(terms.description).not.toEqual(privacy.description);
         expect(terms.alternates?.canonical).toBe('/terms');
         expect(privacy.alternates?.canonical).toBe('/privacy');
+
+        for (const [metadata, url] of [
+            [terms, `${CANONICAL_ORIGIN}/terms`],
+            [privacy, `${CANONICAL_ORIGIN}/privacy`],
+        ] as const) {
+            expect(metadata.openGraph).toMatchObject({
+                type: 'website',
+                locale: 'ko_KR',
+                url,
+                title: metadata.title,
+                description: metadata.description,
+            });
+            expect(metadata.twitter).toMatchObject({
+                title: metadata.title,
+                description: metadata.description,
+            });
+        }
     });
 
-    it('reuses the shared noindex policy on every search-ineligible HTML route', async () => {
+    it('clears inherited canonicals on every search-ineligible HTML route', async () => {
         const [
-            { NOINDEX_ROBOTS },
+            { NOINDEX_ROBOTS, NOINDEX_METADATA },
             { metadata: admin },
             { metadata: analyze },
             { metadata: login },
@@ -130,6 +167,10 @@ describe('route metadata', () => {
         ]);
 
         expect(NOINDEX_ROBOTS).toEqual({ index: false, follow: false });
+        expect(NOINDEX_METADATA).toEqual({
+            robots: NOINDEX_ROBOTS,
+            alternates: { canonical: null },
+        });
         for (const metadata of [
             admin,
             analyze,
@@ -140,6 +181,7 @@ describe('route metadata', () => {
             mypage,
         ]) {
             expect(metadata.robots).toBe(NOINDEX_ROBOTS);
+            expect(metadata.alternates?.canonical).toBeNull();
         }
     });
 });

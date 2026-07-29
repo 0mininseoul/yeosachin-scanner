@@ -30,6 +30,13 @@ export const NOINDEX_ROBOTS: NonNullable<Metadata['robots']> = {
     follow: false,
 };
 
+export const NOINDEX_METADATA: Metadata = {
+    robots: NOINDEX_ROBOTS,
+    alternates: {
+        canonical: null,
+    },
+};
+
 export function buildHomepageJsonLd() {
     const websiteId = `${CANONICAL_APP_ORIGIN}/#website`;
     const organizationId = `${CANONICAL_APP_ORIGIN}/#organization`;
