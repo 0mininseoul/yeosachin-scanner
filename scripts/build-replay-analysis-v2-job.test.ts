@@ -343,7 +343,48 @@ describe('stateless replay job build contract', () => {
         )).toThrow('ANALYSIS_V2_REPLAY_JOB_BUILD_GRAPH_FORBIDDEN');
     });
 
-    it('fails closed for an entry policy outside the sealed V2.13 through V2.18 allowlist', async () => {
+    it('accepts only the V2.19 entry and Pro treatment modules with its exact source allowlist', async () => {
+        const {
+            auditReplayAnalysisV2JobBuildGraph,
+            REPLAY_ANALYSIS_V219_JOB_LOCAL_INPUTS,
+        } = await buildModule();
+        const exact = validMetafile(
+            REPLAY_ANALYSIS_V219_JOB_LOCAL_INPUTS,
+        );
+
+        expect(() => auditReplayAnalysisV2JobBuildGraph(
+            exact,
+            'ai-stage-policy-v2.19',
+        )).not.toThrow();
+        expect(REPLAY_ANALYSIS_V219_JOB_LOCAL_INPUTS).toEqual(
+            expect.arrayContaining([
+                'lib/services/analysis/replay/replay-v219-ai-adapter.ts',
+                'lib/services/analysis/replay/replay-v219-budget.ts',
+                'lib/services/analysis/replay/replay-v219-gender-second-look.ts',
+                'lib/services/analysis/replay/replay-v219-preflight.ts',
+                'scripts/replay-analysis-v219-job.ts',
+            ]),
+        );
+        expect(REPLAY_ANALYSIS_V219_JOB_LOCAL_INPUTS).not.toEqual(
+            expect.arrayContaining([
+                expect.stringMatching(/instagram\/providers/),
+                expect.stringMatching(/apify/i),
+                expect.stringMatching(/supabase\/admin/),
+                expect.stringMatching(/result-store/),
+            ]),
+        );
+        const crossed = validMetafile(
+            REPLAY_ANALYSIS_V219_JOB_LOCAL_INPUTS.filter(
+                path => path !== 'scripts/replay-analysis-v219-job.ts',
+            ).concat('scripts/replay-analysis-v218-job.ts'),
+        );
+        expect(() => auditReplayAnalysisV2JobBuildGraph(
+            crossed,
+            'ai-stage-policy-v2.19',
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_BUILD_GRAPH_FORBIDDEN');
+    });
+
+    it('fails closed for an entry policy outside the sealed V2.13 through V2.19 allowlist', async () => {
         const { buildReplayAnalysisV2Job } = await buildModule();
         const parent = await mkdtemp(join(tmpdir(), 'replay-job-policy-'));
         const outputDirectory = join(parent, 'artifact');
@@ -353,7 +394,7 @@ describe('stateless replay job build contract', () => {
                 metafile: join(outputDirectory, 'meta.json'),
                 runtimeManifest: join(outputDirectory, 'runtime.json'),
                 imageDigest: immutableImageDigest,
-                evaluationAiPolicy: 'ai-stage-policy-v2.19' as never,
+                evaluationAiPolicy: 'ai-stage-policy-v2.20' as never,
                 buildImpl: vi.fn(),
             })).rejects.toThrow(
                 'ANALYSIS_V2_REPLAY_JOB_BUILD_ENTRY_POLICY_INVALID',

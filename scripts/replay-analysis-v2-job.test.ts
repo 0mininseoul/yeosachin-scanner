@@ -389,6 +389,149 @@ async function actualDiagnosticV218SafeLine(): Promise<string> {
     return JSON.stringify(actual);
 }
 
+async function actualDiagnosticV219SafeLine(): Promise<string> {
+    const actual = JSON.parse(await actualDiagnosticV218SafeLine());
+    const {
+        deriveV219ReplayBudgetPlan,
+    } = await import(
+        '../lib/services/analysis/replay/replay-v219-budget'
+    );
+    const plan = deriveV219ReplayBudgetPlan(0);
+    actual.evaluation_ai_policy = 'ai-stage-policy-v2.19';
+    actual.replay_ai_policy = 'ai-stage-policy-v2.19';
+    actual.stages.proGenderSecondLook = {
+        ...actual.stages.genderResolution,
+        calls: 0,
+        retries: 0,
+        rate_limited: 0,
+        mean_latency_ms: 0,
+        p50_latency_ms: 0,
+        p95_latency_ms: 0,
+        failure_disposition: {},
+        failure_kind: {},
+    };
+    const zeroStage = {
+        logicalCalls: 0,
+        providerDispatches: 0,
+        terminalDispatches: 0,
+    };
+    actual.pro_gender_second_look_v219 = {
+        mediaCountHistogram: {
+            '2': 0,
+            '3': 0,
+            '4': 0,
+            '5': 0,
+            '6': 0,
+            '7': 0,
+            '8': 0,
+            '9': 0,
+        },
+        evaluation: {
+            staticTreatmentCohort: 0,
+            invocationOutcomes: {
+                ok: 0,
+                rate_limited: 0,
+                retry_exhausted: 0,
+                rejected: 0,
+                failed: 0,
+                capacity_skipped: 0,
+            },
+            calibration: {
+                overall: {
+                    known: 0,
+                    predicted: 0,
+                    agreed: 0,
+                    disagreed: 0,
+                    wilsonLowerBoundBps: 0,
+                },
+                male: {
+                    known: 0,
+                    predicted: 0,
+                    agreed: 0,
+                    disagreed: 0,
+                    wilsonLowerBoundBps: 0,
+                },
+                female: {
+                    known: 0,
+                    predicted: 0,
+                    agreed: 0,
+                    disagreed: 0,
+                    wilsonLowerBoundBps: 0,
+                },
+                knownMaleToFemale: 0,
+                interpretation:
+                    'control_consistency_not_ground_truth',
+            },
+            officialNegative: {
+                known: 0,
+                attempted: 0,
+                accepted: 0,
+            },
+            unknown: {
+                baseline: 0,
+                treatmentCandidates: 0,
+                counterfactualRescuedMale: 0,
+                counterfactualRescuedFemale: 0,
+                appliedRescuedMale: 0,
+                appliedRescuedFemale: 0,
+                final: 0,
+                nullReasons: {
+                    provider_non_ok: 0,
+                    nonbinary_gender: 0,
+                    low_gender_confidence: 0,
+                    owner_not_same: 0,
+                    insufficient_gender_evidence: 0,
+                    nonpersonal_context: 0,
+                    low_context_confidence: 0,
+                    insufficient_context_evidence: 0,
+                    official_or_group: 0,
+                    unavailable_control: 0,
+                    stage_conflict_mismatch: 0,
+                },
+            },
+            baselineFinal: { male: 0, female: 0, unknown: 0 },
+            final: { male: 0, female: 0, unknown: 0 },
+            observedPublic: 0,
+            missingPublic: 1,
+            gates: {
+                calibrationVolumePass: false,
+                overallAgreementPass: false,
+                maleVolumePass: false,
+                maleAgreementPass: false,
+                femaleVolumePass: false,
+                femaleAgreementPass: false,
+                falseFemalePass: true,
+                officialNegativePass: true,
+                observedUnknownRate: 0,
+                observedUnknownPass: true,
+                worstCaseUnknownRate: 1,
+                worstCaseUnknownPass: false,
+                adoptionPass: false,
+            },
+        },
+        budget: {
+            plan,
+            actual: {
+                logicalCalls: 0,
+                providerDispatches: 0,
+                reservedCostUsd: 0,
+                costCeilingUsd: plan.costCeilingUsd,
+                usageComplete: true,
+                usageMissingDispatches: 0,
+                estimatedCostUsd: 0,
+                stages: {
+                    genderTriage: { ...zeroStage },
+                    featureAnalysis: { ...zeroStage },
+                    privateAccountName: { ...zeroStage },
+                    genderResolution: { ...zeroStage },
+                    proGenderSecondLook: { ...zeroStage },
+                },
+            },
+        },
+    };
+    return JSON.stringify(actual);
+}
+
 interface V213TerminalReportFixture {
     diagnostic_partial_coverage_override: {
         retained_profiles: number;
@@ -879,6 +1022,59 @@ describe('Cloud Run analysis V2 replay job', () => {
         });
 
         expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.18');
+    });
+
+    it('preflights the V2.19 source before issuing its exact budgeted runner', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+            runV219ReplayAnalysisV2Job,
+        } = await import(
+            './replay-analysis-v219-job'
+        );
+        const v219Bundle = v213Bundle();
+        v219Bundle.capture.evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v219-pro-gender-second-look-shadow',
+            aiStage: 'ai-stage-policy-v2.19',
+        } as never;
+        const preflightV219 = vi.fn(() => ({
+            treatment: { staticCohort: 0 },
+        }));
+        const createRunner = vi.fn(() => Object.freeze({}));
+
+        await runV219ReplayAnalysisV2Job({
+            env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
+            bindLocalCleanup: () => async () => undefined,
+            loadArtifacts: vi.fn(async () => ({
+                bundle: { ...v219Bundle, expired: false },
+                cleanup: async () => undefined,
+            })),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            preflightV219: preflightV219 as never,
+            createRunner,
+            runReplay: vi.fn(async input => {
+                expect(input.evaluationPolicy).toEqual(
+                    REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+                );
+                input.write(await actualDiagnosticV219SafeLine());
+            }),
+            installSignalCleanup: vi.fn(() => () => undefined),
+            writeStdout: vi.fn(),
+        });
+
+        expect(preflightV219).toHaveBeenCalledOnce();
+        expect(createRunner).toHaveBeenCalledWith(
+            'ai-stage-policy-v2.19',
+            { v219TreatmentLogicalCalls: 0 },
+        );
+        expect(
+            preflightV219.mock.invocationCallOrder[0],
+        ).toBeLessThan(createRunner.mock.invocationCallOrder[0]!);
     });
 
     it('accepts the actual v2.12 diagnostic partial-coverage safe-line key', async () => {
@@ -1550,6 +1746,7 @@ describe('Cloud Run analysis V2 replay job', () => {
             const {
                 copyReplayAnalysisV2JobPhysicalDependencyClosure,
                 createReplayAnalysisV2JobContainerLaunchContract,
+                REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
                 verifyReplayAnalysisV2JobContainerFilesystem,
                 verifyReplayAnalysisV2JobRuntimeManifest,
             } = await import('./build-replay-analysis-v2-job.mjs');
@@ -1622,7 +1819,9 @@ describe('Cloud Run analysis V2 replay job', () => {
                     manifest: runtime,
                 }),
             ).resolves.toBeUndefined();
-            expect(Object.keys(metadata.inputs)).toHaveLength(42);
+            expect(Object.keys(metadata.inputs)).toHaveLength(
+                REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS.length,
+            );
             const graph = JSON.stringify(metadata);
             expect(graph).not.toMatch(
                 /supabase\/admin|supabase-js|result-store|attempt-store|lease-store|apify|(?:^|[/_-])r2(?:[/_.-]|$)|@google-cloud\/tasks|cloud-tasks|analysis-tasks|tasks-client|tasks-store|app\/api/i,

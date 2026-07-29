@@ -13,6 +13,7 @@ import {
     AI_STAGE_POLICY_V216_VERSION,
     AI_STAGE_POLICY_V217_VERSION,
     AI_STAGE_POLICY_V218_VERSION,
+    AI_STAGE_POLICY_V219_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
 } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
@@ -43,6 +44,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
@@ -57,6 +59,12 @@ import {
     parseDiagnosticPartialCoverageCliCapability,
     type DiagnosticPartialCoverageCliCapability,
 } from '../lib/services/analysis/replay/diagnostic-partial-coverage-capability';
+import {
+    createV219ReplayPreflightReport,
+} from '../lib/services/analysis/replay/replay-v219-preflight';
+import type {
+    runAnalysisV2AiReplay,
+} from '../lib/services/analysis/replay/replay-runner';
 
 type ReplayCliOptions =
     | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: false }
@@ -162,6 +170,12 @@ function evaluationPolicy(value: string | undefined, historicalOfficialE2E = fal
             aiStage: AI_STAGE_POLICY_V218_VERSION,
         };
     }
+    if (value === AI_STAGE_POLICY_V219_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V219_VERSION,
+        };
+    }
     if (value !== AI_STAGE_POLICY_V29_VERSION) {
         throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     }
@@ -265,13 +279,19 @@ const SERVER_ONLY_RUNTIME_MESSAGE =
 
 export async function createPaidReplayRunner(
     replayAiPolicy: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
+    options: {
+        v219TreatmentLogicalCalls?: number;
+    } = {},
 ) {
     try {
         await import('server-only');
         const adapter = await import(
             '../lib/services/analysis/replay/replay-staged-ai-adapter'
         );
-        return adapter.createReplayStagedAiAdapter(replayAiPolicy);
+        return adapter.createReplayStagedAiAdapter(
+            replayAiPolicy,
+            options,
+        );
     } catch (error) {
         if (error instanceof Error && error.message === SERVER_ONLY_RUNTIME_MESSAGE) {
             throw new Error('ANALYSIS_V2_REPLAY_SERVER_RUNTIME_REQUIRED');
@@ -421,6 +441,8 @@ export async function runReplayCli(
     args: readonly string[],
     dependencies: {
         beforeOwnedArtifactRemoval?: () => Promise<void>;
+        createPaidRunner?: typeof createPaidReplayRunner;
+        runReplay?: typeof runAnalysisV2AiReplay;
     } = {},
 ): Promise<{ exitCode: 0 | 1 }> {
     const options = parseReplayCliArgs(args);
@@ -451,15 +473,45 @@ export async function runReplayCli(
         if (partialArtifact !== Boolean(options.historicalPartialAvailable)) {
             throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_SCOPE_MISMATCH');
         }
+        if (
+            options.mode === 'dry-run'
+            && options.evaluationPolicy?.aiStage
+                === AI_STAGE_POLICY_V219_VERSION
+        ) {
+            const v219DryPreflight =
+                createV219ReplayPreflightReport(
+                    authenticated.bundle,
+                );
+            process.stdout.write(
+                `${JSON.stringify(v219DryPreflight)}\n`,
+            );
+            return { exitCode: 0 };
+        }
         const replayAiPolicy = resolveReplayAiStagePolicyVersion(
             authenticated.bundle.capture.sourceLineage,
             options.evaluationPolicy,
         );
+        const v219Preflight = replayAiPolicy
+            === AI_STAGE_POLICY_V219_VERSION
+            ? createV219ReplayPreflightReport(authenticated.bundle)
+            : undefined;
+        const createRunner =
+            dependencies.createPaidRunner ?? createPaidReplayRunner;
         const runner = options.mode === 'paid-ai'
-            ? await createPaidReplayRunner(replayAiPolicy)
+            ? (
+                v219Preflight
+                    ? await createRunner(replayAiPolicy, {
+                        v219TreatmentLogicalCalls:
+                            v219Preflight.treatment.staticCohort,
+                    })
+                    : await createRunner(replayAiPolicy)
+            )
             : {};
-        const { runAnalysisV2AiReplay } = await import('../lib/services/analysis/replay/replay-runner');
-        await runAnalysisV2AiReplay({
+        const executeReplay = dependencies.runReplay
+            ?? (await import(
+                '../lib/services/analysis/replay/replay-runner'
+            )).runAnalysisV2AiReplay;
+        await executeReplay({
             bundle: authenticated.bundle,
             runner,
             mode: options.mode,

@@ -39,6 +39,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
 } from '../lib/services/analysis/replay/replay-source-lineage';
 import {
     parseDiagnosticPartialCoverageCliCapability,
@@ -74,13 +75,18 @@ export const V218_EVALUATION = Object.freeze({
     capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.18' as const,
 });
+export const V219_EVALUATION = Object.freeze({
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.19' as const,
+});
 type ReplayEvaluation =
     | typeof V213_EVALUATION
     | typeof V214_EVALUATION
     | typeof V215_EVALUATION
     | typeof V216_EVALUATION
     | typeof V217_EVALUATION
-    | typeof V218_EVALUATION;
+    | typeof V218_EVALUATION
+    | typeof V219_EVALUATION;
 declare const __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__: string;
 declare const __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__: string;
 const BUILT_IMAGE_DIGEST = typeof __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
@@ -496,7 +502,15 @@ interface ReplayAnalysisV2JobDependencies {
     createGcsClient?: (
         config: ReplayAnalysisV2JobConfig,
     ) => ReplayJobGcsClient;
-    createRunner?: (policy: ReplayEvaluation['aiStage']) => unknown;
+    createRunner?: (
+        policy: ReplayEvaluation['aiStage'],
+        options?: { v219TreatmentLogicalCalls?: number },
+    ) => unknown;
+    preflightV219?: (
+        bundle: AnalysisV2ReplayBundle,
+    ) => {
+        treatment: { staticCohort: number };
+    };
     runReplay?: (input: {
         bundle: AnalysisV2ReplayBundle;
         runner: unknown;
@@ -650,14 +664,40 @@ export async function runReplayAnalysisV2Job(
         });
         cleanupCoordinator.replace(loaded.cleanup);
         const bundle = authenticatedFeatureShadowBundle(loaded.bundle, evaluation);
+        const v219TreatmentLogicalCalls =
+            evaluation.aiStage === 'ai-stage-policy-v2.19'
+                ? dependencies.preflightV219?.(bundle)
+                    .treatment.staticCohort
+                : undefined;
+        if (
+            evaluation.aiStage === 'ai-stage-policy-v2.19'
+            && (
+                !Number.isSafeInteger(v219TreatmentLogicalCalls)
+                || v219TreatmentLogicalCalls! < 0
+                || v219TreatmentLogicalCalls! > 235
+            )
+        ) {
+            throw new Error(
+                'ANALYSIS_V2_REPLAY_JOB_V219_PREFLIGHT_REQUIRED',
+            );
+        }
         await gcs.createClaim(JSON.stringify({
             status: 'claimed',
             schema: 'analysis-v2-replay-job-claim-v1',
         }));
         const runner = (
             dependencies.createRunner
-                ?? (policy => createReplayStagedAiAdapter(policy))
-        )(evaluation.aiStage);
+                ?? ((policy, options) => (
+                    createReplayStagedAiAdapter(policy, options)
+                ))
+        )(
+            evaluation.aiStage,
+            ...(v219TreatmentLogicalCalls === undefined
+                ? []
+                : [{
+                    v219TreatmentLogicalCalls,
+                }]),
+        );
         const diagnosticPartialCoverageCapability =
             parseDiagnosticPartialCoverageCliCapability([
                 '--run',

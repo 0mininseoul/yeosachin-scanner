@@ -1,11 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 const testRunnerPolicies = vi.hoisted(() => new WeakMap<object, string>());
+const testRunnerV219Budgets = vi.hoisted(() => new WeakMap<object, {
+    plan: unknown;
+    snapshot: unknown;
+}>());
 
 vi.mock('./replay-staged-ai-adapter', () => ({
     lookupReplayStagedAiAdapterPolicy: (runner: object) => (
         testRunnerPolicies.get(runner)
     ),
+    lookupReplayStagedAiAdapterV219BudgetPlan: (runner: object) => (
+        testRunnerV219Budgets.get(runner)?.plan
+    ),
+    lookupReplayStagedAiAdapterV219BudgetSnapshot: (
+        runner: object,
+    ) => testRunnerV219Budgets.get(runner)?.snapshot,
 }));
 
 import {
@@ -18,6 +28,9 @@ import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
 import { validateReplayAnalysisV2JobTerminalLine } from './replay-job-report-contract';
 import { parseReplayCliArgs } from '../../../../scripts/replay-analysis-v2';
+import {
+    deriveV219ReplayBudgetPlan,
+} from './replay-v219-budget';
 
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
@@ -82,6 +95,88 @@ function v217Runner(operations: ReplayAiRunner): ReplayAiRunner {
 function v218Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
     testRunnerPolicies.set(runner, 'ai-stage-policy-v2.18');
+    return runner;
+}
+
+function v219Runner(
+    operations: ReplayAiRunner,
+    treatmentLogicalCalls: number,
+    actualOverrides: Partial<Record<
+        'genderTriage'
+        | 'featureAnalysis'
+        | 'privateAccountName'
+        | 'genderResolution'
+        | 'proGenderSecondLook',
+        {
+            logicalCalls: number;
+            providerDispatches: number;
+            terminalDispatches: number;
+        }
+    >> = {},
+): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.19');
+    const plan = deriveV219ReplayBudgetPlan(
+        treatmentLogicalCalls,
+    );
+    const stages = Object.fromEntries(Object.keys(
+        plan.stages,
+    ).map(stage => [
+        stage,
+        actualOverrides[
+            stage as keyof typeof actualOverrides
+        ] ?? {
+            logicalCalls:
+                stage === 'proGenderSecondLook'
+                    ? treatmentLogicalCalls
+                    : 0,
+            providerDispatches:
+                stage === 'proGenderSecondLook'
+                    ? treatmentLogicalCalls
+                    : 0,
+            terminalDispatches:
+                stage === 'proGenderSecondLook'
+                    ? treatmentLogicalCalls
+                    : 0,
+        },
+    ])) as Record<
+        keyof typeof plan.stages,
+        {
+            logicalCalls: number;
+            providerDispatches: number;
+            terminalDispatches: number;
+        }
+    >;
+    const logicalCalls = Object.values(stages).reduce(
+        (sum, stage) => sum + stage.logicalCalls,
+        0,
+    );
+    const providerDispatches = Object.values(stages).reduce(
+        (sum, stage) => sum + stage.providerDispatches,
+        0,
+    );
+    const reservedCostUsd = Number(Object.entries(stages).reduce(
+        (sum, [stage, value]) => sum
+            + value.providerDispatches
+                * plan.stages[
+                    stage as keyof typeof plan.stages
+                ].costUsdPerDispatch,
+        0,
+    ).toFixed(9));
+    testRunnerV219Budgets.set(runner, {
+        plan,
+        snapshot: {
+            logicalCalls,
+            providerDispatches,
+            reservedCostUsd,
+            costCeilingUsd: plan.costCeilingUsd,
+            usageComplete: true,
+            usageMissingDispatches: 0,
+            estimatedCostUsd:
+                Number((providerDispatches * 0.001).toFixed(9)),
+            stages,
+        },
+    });
     return runner;
 }
 
@@ -2384,6 +2479,372 @@ describe('AI-only replay runner', () => {
         );
         expect(validateReplayAnalysisV2JobTerminalLine(lines[0]))
             .toBe(lines[0]);
+    });
+
+    it('runs the V2.19 static Pro cohort once per eligible source row regardless of control outcome', async () => {
+        const value = validPartialBundle();
+        const profiles = Array.from({ length: 4 }, (_, index) => {
+            const ordinal = index + 1;
+            const mediaCount = ordinal === 4 ? 1 : 2;
+            const media = Array.from(
+                { length: mediaCount },
+                (_unused, mediaIndex) => ({
+                    selectionId:
+                        `v219-source-${ordinal}-${mediaIndex + 1}`,
+                    kind: 'feed' as const,
+                    postId:
+                        `v219-post-${ordinal}-${mediaIndex + 1}`,
+                    caption: null,
+                    jpegBase64: '/9j/2Q==',
+                }),
+            );
+            return {
+                ...value.profiles[0]!,
+                ordinal,
+                username: `v219_public_${ordinal}`,
+                media,
+                triageSelectionIds:
+                    media.map(item => item.selectionId),
+                featureSelectionIds:
+                    media.map(item => item.selectionId),
+                resolverSelectionIds:
+                    media.map(item => item.selectionId),
+                coverage: {
+                    selectedCount: mediaCount,
+                    normalizedCount: mediaCount,
+                    failures: [],
+                },
+            };
+        });
+        const sourceIdentities = profiles.map(profile => ({
+            ordinal: profile.ordinal,
+            username: profile.username,
+            partition: 'public' as const,
+        }));
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v219-pro-gender-second-look-shadow' as const,
+            aiStage: 'ai-stage-policy-v2.19' as const,
+        };
+        const replayBundle = {
+            ...value,
+            profiles,
+            capture: {
+                ...value.capture,
+                evaluationPolicy,
+                partial: {
+                    sourceIdentities,
+                    sourceUniverseDigest:
+                        historicalPartialSourceUniverseDigest(
+                            sourceIdentities,
+                        ),
+                    mediaUnavailable: [],
+                },
+            },
+        } satisfies AnalysisV2ReplayBundle;
+        const treatmentOrdinals: number[] = [];
+        const operations: ReplayAiRunner = {
+            privateNames: async () => ({
+                outcome: 'failed',
+                calls: 1,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+            }),
+            triage: async ({ ordinal, media }) => ({
+                outcome: 'ok',
+                calls: 1,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender:
+                            ordinal === 1 ? 'male' : 'unknown',
+                        confidence:
+                            ordinal === 1 ? 'high' : 'low',
+                        ownerConsistency:
+                            ordinal === 1
+                                ? 'same_person'
+                                : 'multiple_or_unclear',
+                        evidenceSelectionIds:
+                            media.map(item => item.selectionId),
+                    },
+                    routingDecision: ordinal === 1
+                        ? 'exclude_high_confidence_male'
+                        : 'route_to_feature_analysis',
+                    routingReason: ordinal === 1
+                        ? 'high_confidence_same_owner_male'
+                        : 'conserve_female_recall',
+                    analyzedSelectionIds:
+                        media.map(item => item.selectionId),
+                    v29AccountContext: 'personal',
+                },
+            }),
+            feature: async ({ ordinal, media }) => ({
+                outcome: 'ok',
+                calls: 1,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    features: {
+                        gender: ordinal === 2
+                            ? 'female'
+                            : ordinal === 4
+                                ? 'male'
+                                : 'unknown',
+                        genderConfidence:
+                            ordinal === 3 ? 'low' : 'high',
+                        ownerConsistency:
+                            ordinal === 3
+                                ? 'not_visible'
+                                : 'same_person',
+                        appearanceGrade: 3,
+                        exposureScore: 0,
+                        businessClassification: 'uncertain',
+                        businessConfidence: 'low',
+                        accountContext: 'personal',
+                        marriageEvidence: 'none',
+                        partnerEvidence: 'none',
+                        partnerExclusionContext: 'none',
+                        evidenceSelectionIds: {
+                            gender:
+                                media.map(item => item.selectionId),
+                            appearance: [],
+                            exposure: [],
+                            business: [],
+                            accountContext: [],
+                            marriagePartner: [],
+                        },
+                        oneLineOverview:
+                            '고정된 공개 자료만 사용하는 충분히 긴 V2.19 테스트 요약입니다.',
+                    },
+                    finalGenderDecision: ordinal === 2
+                        ? 'verified_female'
+                        : ordinal === 4
+                            ? 'verified_non_female'
+                            : 'unresolved',
+                    analyzedSelectionIds:
+                        media.map(item => item.selectionId),
+                },
+            }),
+            resolveGender: async () => ({
+                outcome: 'capacity_skipped',
+                calls: 0,
+                attempts: 0,
+                retries: 0,
+                elapsedMs: 0,
+            }),
+            proGenderSecondLook: async ({ ordinal, media }) => {
+                treatmentOrdinals.push(ordinal);
+                return {
+                    outcome: 'ok',
+                    calls: 1,
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        inferredGender:
+                            ordinal === 1 ? 'male' : 'female',
+                        genderConfidence: 'high',
+                        ownerConsistency: 'same_person',
+                        accountContext: 'personal',
+                        contextConfidence: 'high',
+                        genderEvidenceIds:
+                            media.slice(0, 2).map(
+                                item => item.selectionId,
+                            ),
+                        contextEvidenceIds:
+                            [media[0]!.selectionId],
+                    },
+                };
+            },
+        };
+        const wrongRunner = v219Runner(operations, 2);
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: replayBundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(
+                    'ai-stage-policy-v2.18',
+                ),
+            runner: wrongRunner,
+        })).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_V219_STATIC_COHORT_MISMATCH',
+        );
+        expect(treatmentOrdinals).toEqual([]);
+
+        const lines: string[] = [];
+        const report = await runAnalysisV2AiReplay({
+            bundle: replayBundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(
+                    'ai-stage-policy-v2.18',
+                ),
+            runner: v219Runner(operations, 3, {
+                genderTriage: {
+                    logicalCalls: 2,
+                    providerDispatches: 4,
+                    terminalDispatches: 4,
+                },
+                featureAnalysis: {
+                    logicalCalls: 3,
+                    providerDispatches: 3,
+                    terminalDispatches: 3,
+                },
+                privateAccountName: {
+                    logicalCalls: 1,
+                    providerDispatches: 1,
+                    terminalDispatches: 1,
+                },
+                genderResolution: {
+                    logicalCalls: 3,
+                    providerDispatches: 0,
+                    terminalDispatches: 0,
+                },
+            }),
+            write: line => lines.push(line),
+        });
+
+        expect(treatmentOrdinals.sort((left, right) => left - right))
+            .toEqual([1, 2, 3]);
+        expect(report.proGenderSecondLook).toMatchObject({
+            mediaCountHistogram: {
+                2: 3,
+                3: 0,
+                4: 0,
+                5: 0,
+                6: 0,
+                7: 0,
+                8: 0,
+                9: 0,
+            },
+            evaluation: {
+                staticTreatmentCohort: 3,
+                invocationOutcomes: { ok: 3 },
+                calibration: {
+                    overall: {
+                        known: 2,
+                        predicted: 2,
+                        agreed: 2,
+                    },
+                    male: { known: 1, predicted: 1, agreed: 1 },
+                    female: {
+                        known: 1,
+                        predicted: 1,
+                        agreed: 1,
+                    },
+                    interpretation:
+                        'control_consistency_not_ground_truth',
+                },
+                unknown: {
+                    baseline: 1,
+                    treatmentCandidates: 1,
+                    counterfactualRescuedFemale: 1,
+                    appliedRescuedFemale: 0,
+                    final: 1,
+                },
+                baselineFinal: {
+                    male: 2,
+                    female: 1,
+                    unknown: 1,
+                },
+                final: { male: 2, female: 1, unknown: 1 },
+                gates: {
+                    calibrationVolumePass: false,
+                    adoptionPass: false,
+                },
+            },
+            budget: {
+                plan: {
+                    treatmentLogicalCalls: 3,
+                    treatmentProviderDispatches: 12,
+                    totalLogicalCalls: 713,
+                    totalProviderDispatches: 2_852,
+                },
+                actual: {
+                    providerDispatches: 11,
+                    usageComplete: true,
+                },
+            },
+        });
+        expect(report.stages.proGenderSecondLook).toMatchObject({
+            calls: 3,
+            retries: 0,
+        });
+        expect(report.gender).toEqual({
+            male: 2,
+            female: 1,
+            unknown: 1,
+            unknownRate: 0.25,
+        });
+        const safe = JSON.parse(lines[0]!);
+        expect(safe.pro_gender_second_look_v219)
+            .toEqual(report.proGenderSecondLook);
+        expect(JSON.stringify(safe)).not.toMatch(
+            /v219_public|v219-source|v219-post|ordinal:/,
+        );
+        expect(validateReplayAnalysisV2JobTerminalLine(lines[0]))
+            .toBe(lines[0]);
+        type MutableV219SafeLine = {
+            gender: { unknown: number };
+            pro_gender_second_look_v219: {
+                evaluation: {
+                    calibration: { overall: { known: number } };
+                    unknown: {
+                        nullReasons: { provider_non_ok: number };
+                    };
+                    evidenceIds?: string[];
+                };
+                budget: {
+                    plan: { totalProviderDispatches: number };
+                    actual: { reservedCostUsd: number };
+                };
+            };
+        };
+        const mutations: Array<(
+            value: MutableV219SafeLine,
+        ) => void> = [
+            value => {
+                value.pro_gender_second_look_v219
+                    .evaluation.calibration.overall.known++;
+            },
+            value => {
+                value.pro_gender_second_look_v219
+                    .evaluation.unknown.nullReasons.provider_non_ok++;
+            },
+            value => {
+                value.pro_gender_second_look_v219
+                    .budget.plan.totalProviderDispatches++;
+            },
+            value => {
+                value.pro_gender_second_look_v219
+                    .budget.actual.reservedCostUsd = 0;
+            },
+            value => {
+                value.gender.unknown++;
+            },
+            value => {
+                value.pro_gender_second_look_v219
+                    .evaluation.evidenceIds = ['forbidden'];
+            },
+        ];
+        for (const mutate of mutations) {
+            const drifted = JSON.parse(
+                lines[0]!,
+            ) as MutableV219SafeLine;
+            mutate(drifted);
+            expect(() => validateReplayAnalysisV2JobTerminalLine(
+                JSON.stringify(drifted),
+            )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+        }
     });
 
     it('classifies only exact profile-one media as the v2.16 expanded cohort', () => {

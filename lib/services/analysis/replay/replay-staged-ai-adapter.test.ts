@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
     genderResolution: vi.fn(),
     genderTriage: vi.fn(),
     genderTriageMicrobatch: vi.fn(),
+    createProGenderSecondLookResultIdentityV219: vi.fn(),
+    runProGenderSecondLookGenerationV219: vi.fn(),
 }));
 
 vi.mock('@/lib/services/ai/private-name-analysis', () => ({
@@ -30,7 +32,18 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     genderTriageMicrobatch: mocks.genderTriageMicrobatch,
 }));
 
-import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
+vi.mock('./replay-v219-ai-adapter', () => ({
+    createProGenderSecondLookResultIdentityV219:
+        mocks.createProGenderSecondLookResultIdentityV219,
+    runProGenderSecondLookGenerationV219:
+        mocks.runProGenderSecondLookGenerationV219,
+}));
+
+import {
+    createReplayStagedAiAdapter,
+    lookupReplayStagedAiAdapterPolicy,
+    lookupReplayStagedAiAdapterV219BudgetSnapshot,
+} from './replay-staged-ai-adapter';
 
 describe('replay staged AI adapter telemetry', () => {
     beforeEach(() => vi.clearAllMocks());
@@ -822,6 +835,233 @@ describe('replay staged AI adapter telemetry', () => {
         expect(maxActive).toBe(3);
         expect(mocks.featureAnalysis).toHaveBeenCalledTimes(4);
         expect(results.map(result => result.calls)).toEqual([1, 1, 1, 1]);
+    });
+
+    it('requires an exact static cohort before issuing a v2.19 runner', () => {
+        expect(() => createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.19',
+        )).toThrow(
+            'ANALYSIS_V2_REPLAY_V219_STATIC_COHORT_REQUIRED',
+        );
+        expect(lookupReplayStagedAiAdapterPolicy({
+            proGenderSecondLook: vi.fn(),
+        })).toBeUndefined();
+    });
+
+    it('shares one issued budget across v2.19 retries and reserves before dispatch', async () => {
+        mocks.createProGenderSecondLookResultIdentityV219.mockReturnValue({
+            operationKey: 'feature-analysis:identity',
+        });
+        mocks.runProGenderSecondLookGenerationV219.mockImplementation(
+            async (input: {
+                audit: {
+                    onBeforeAttempt(value: {
+                        attempt: number;
+                        retryCount: number;
+                    }): void;
+                    onProviderDispatch?(value: {
+                        attempt: number;
+                        retryCount: number;
+                    }): void;
+                    onAttemptTelemetry(value: {
+                        attempt: number;
+                        retryCount: number;
+                        disposition: 'rate_limited' | 'success';
+                        latencyMs: number;
+                        estimatedCostUsd: number;
+                    }): void;
+                };
+                runProviderAttempt<T>(
+                    task: () => Promise<T>,
+                ): Promise<T>;
+            }) => {
+                for (const [attempt, disposition] of [
+                    [1, 'rate_limited'],
+                    [2, 'success'],
+                ] as const) {
+                    await input.runProviderAttempt(async () => {
+                        const start = {
+                            attempt,
+                            retryCount: attempt - 1,
+                        };
+                        input.audit.onBeforeAttempt(start);
+                        input.audit.onProviderDispatch?.(start);
+                        expect(
+                            lookupReplayStagedAiAdapterV219BudgetSnapshot(
+                                runner,
+                            )?.stages.proGenderSecondLook
+                                .providerDispatches,
+                        ).toBe(attempt);
+                        input.audit.onAttemptTelemetry({
+                            ...start,
+                            disposition,
+                            latencyMs: 1,
+                            estimatedCostUsd: 0.01,
+                        });
+                    });
+                }
+                return {
+                    inferredGender: 'female',
+                    genderConfidence: 'high',
+                    ownerConsistency: 'same_person',
+                    accountContext: 'personal',
+                    contextConfidence: 'high',
+                    genderEvidenceIds: ['m1', 'm2'],
+                    contextEvidenceIds: ['m1'],
+                };
+            },
+        );
+        const runner = createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.19',
+            { v219TreatmentLogicalCalls: 1 },
+        );
+
+        const result = await runner.proGenderSecondLook?.({
+            ordinal: 1,
+            media: [
+                {
+                    selectionId: 'm1',
+                    kind: 'profile',
+                    jpegBase64: '/9j/2Q==',
+                },
+                {
+                    selectionId: 'm2',
+                    kind: 'feed',
+                    jpegBase64: '/9j/2Q==',
+                },
+            ],
+        });
+
+        expect(result).toMatchObject({
+            outcome: 'ok',
+            calls: 2,
+            attempts: 2,
+            retries: 1,
+        });
+        expect(
+            lookupReplayStagedAiAdapterV219BudgetSnapshot(runner),
+        ).toMatchObject({
+            logicalCalls: 1,
+            providerDispatches: 2,
+            usageComplete: true,
+            estimatedCostUsd: 0.02,
+            stages: {
+                proGenderSecondLook: {
+                    logicalCalls: 1,
+                    providerDispatches: 2,
+                    terminalDispatches: 2,
+                },
+            },
+        });
+    });
+
+    it('caps v2.19 Pro second-look provider concurrency at two', async () => {
+        mocks.createProGenderSecondLookResultIdentityV219.mockReturnValue({
+            operationKey: 'feature-analysis:identity',
+        });
+        let active = 0;
+        let maximumActive = 0;
+        let admitted = 0;
+        let release!: () => void;
+        let twoAdmitted!: () => void;
+        const gate = new Promise<void>(resolve => {
+            release = resolve;
+        });
+        const reachedTwo = new Promise<void>(resolve => {
+            twoAdmitted = resolve;
+        });
+        mocks.runProGenderSecondLookGenerationV219.mockImplementation(
+            async (input: {
+                audit: {
+                    onBeforeAttempt(value: {
+                        attempt: number;
+                        retryCount: number;
+                    }): void;
+                    onProviderDispatch?(value: {
+                        attempt: number;
+                        retryCount: number;
+                    }): void;
+                    onAttemptTelemetry(value: {
+                        attempt: number;
+                        retryCount: number;
+                        disposition: 'success';
+                        latencyMs: number;
+                        estimatedCostUsd: number;
+                    }): void;
+                };
+                runProviderAttempt<T>(
+                    task: () => Promise<T>,
+                ): Promise<T>;
+            }) => input.runProviderAttempt(async () => {
+                active++;
+                admitted++;
+                maximumActive = Math.max(maximumActive, active);
+                const start = { attempt: 1, retryCount: 0 };
+                input.audit.onBeforeAttempt(start);
+                input.audit.onProviderDispatch?.(start);
+                if (admitted === 2) twoAdmitted();
+                await gate;
+                input.audit.onAttemptTelemetry({
+                    ...start,
+                    disposition: 'success',
+                    latencyMs: 1,
+                    estimatedCostUsd: 0.01,
+                });
+                active--;
+                return {
+                    inferredGender: 'unknown',
+                    genderConfidence: 'low',
+                    ownerConsistency: 'not_visible',
+                    accountContext: 'uncertain',
+                    contextConfidence: 'low',
+                    genderEvidenceIds: [],
+                    contextEvidenceIds: [],
+                };
+            }),
+        );
+        const runner = createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.19',
+            { v219TreatmentLogicalCalls: 3 },
+        );
+
+        const invocations = Array.from({ length: 3 }, (_, index) => (
+            runner.proGenderSecondLook!({
+                ordinal: index + 1,
+                media: [
+                    {
+                        selectionId: `p${index}`,
+                        kind: 'profile',
+                        jpegBase64: '/9j/2Q==',
+                    },
+                    {
+                        selectionId: `f${index}`,
+                        kind: 'feed',
+                        jpegBase64: '/9j/2Q==',
+                    },
+                ],
+            })
+        ));
+
+        await reachedTwo;
+        expect(admitted).toBe(2);
+        expect(maximumActive).toBe(2);
+        release();
+        await Promise.all(invocations);
+
+        expect(maximumActive).toBe(2);
+        expect(
+            lookupReplayStagedAiAdapterV219BudgetSnapshot(runner),
+        ).toMatchObject({
+            logicalCalls: 3,
+            providerDispatches: 3,
+            stages: {
+                proGenderSecondLook: {
+                    logicalCalls: 3,
+                    providerDispatches: 3,
+                    terminalDispatches: 3,
+                },
+            },
+        });
     });
 
 });

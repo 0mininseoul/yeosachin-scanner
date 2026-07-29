@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import { oneSidedWilsonLowerBoundBps95 } from './replay-public-gender-headroom-v218';
+import {
+    deriveV219ReplayBudgetPlan,
+    V219_REPLAY_BUDGET_STAGES,
+} from './replay-v219-budget';
 
 export const REPLAY_STAGE_FAILURE_DISPOSITIONS = Object.freeze([
     'success',
@@ -896,6 +900,498 @@ const replayAnalysisV2JobTerminalV218Schema =
         }
     });
 
+const usdAmountV219 = z.number().finite().min(0).max(1_000_000);
+const v219CalibrationValues = z.object({
+    known: aggregateCount,
+    predicted: aggregateCount,
+    agreed: aggregateCount,
+    disagreed: aggregateCount,
+    wilsonLowerBoundBps: z.number().int().min(0).max(10_000),
+}).strict();
+const v219InvocationOutcomes = z.object({
+    ok: aggregateCount,
+    rate_limited: aggregateCount,
+    retry_exhausted: aggregateCount,
+    rejected: aggregateCount,
+    failed: aggregateCount,
+    capacity_skipped: aggregateCount,
+}).strict();
+const v219NullReasons = z.object({
+    provider_non_ok: aggregateCount,
+    nonbinary_gender: aggregateCount,
+    low_gender_confidence: aggregateCount,
+    owner_not_same: aggregateCount,
+    insufficient_gender_evidence: aggregateCount,
+    nonpersonal_context: aggregateCount,
+    low_context_confidence: aggregateCount,
+    insufficient_context_evidence: aggregateCount,
+    official_or_group: aggregateCount,
+    unavailable_control: aggregateCount,
+    stage_conflict_mismatch: aggregateCount,
+}).strict();
+const v219GenderCounts = z.object({
+    male: aggregateCount,
+    female: aggregateCount,
+    unknown: aggregateCount,
+}).strict();
+const v219Evaluation = z.object({
+    staticTreatmentCohort: aggregateCount.max(235),
+    invocationOutcomes: v219InvocationOutcomes,
+    calibration: z.object({
+        overall: v219CalibrationValues,
+        male: v219CalibrationValues,
+        female: v219CalibrationValues,
+        knownMaleToFemale: aggregateCount,
+        interpretation:
+            z.literal('control_consistency_not_ground_truth'),
+    }).strict(),
+    officialNegative: z.object({
+        known: aggregateCount,
+        attempted: aggregateCount,
+        accepted: aggregateCount,
+    }).strict(),
+    unknown: z.object({
+        baseline: aggregateCount,
+        treatmentCandidates: aggregateCount,
+        counterfactualRescuedMale: aggregateCount,
+        counterfactualRescuedFemale: aggregateCount,
+        appliedRescuedMale: aggregateCount,
+        appliedRescuedFemale: aggregateCount,
+        final: aggregateCount,
+        nullReasons: v219NullReasons,
+    }).strict(),
+    baselineFinal: v219GenderCounts,
+    final: v219GenderCounts,
+    observedPublic: aggregateCount,
+    missingPublic: aggregateCount,
+    gates: z.object({
+        calibrationVolumePass: z.boolean(),
+        overallAgreementPass: z.boolean(),
+        maleVolumePass: z.boolean(),
+        maleAgreementPass: z.boolean(),
+        femaleVolumePass: z.boolean(),
+        femaleAgreementPass: z.boolean(),
+        falseFemalePass: z.boolean(),
+        officialNegativePass: z.boolean(),
+        observedUnknownRate: aggregateRate,
+        observedUnknownPass: z.boolean(),
+        worstCaseUnknownRate: aggregateRate,
+        worstCaseUnknownPass: z.boolean(),
+        adoptionPass: z.boolean(),
+    }).strict(),
+}).strict();
+const v219BudgetStagePlan = z.object({
+    model: z.enum([
+        'gemini-3.1-flash-lite',
+        'gemini-3-flash-preview',
+        'gemini-3.1-pro-preview',
+    ]),
+    logicalCallCeiling: aggregateCount,
+    providerDispatchCeiling: aggregateCount,
+    inputUnitsPerDispatch: aggregateCount,
+    outputUnitsPerDispatch: aggregateCount,
+    costUsdPerDispatch: usdAmountV219,
+    costCeilingUsd: usdAmountV219,
+}).strict();
+const v219BudgetPlan = z.object({
+    controlLogicalCalls: aggregateCount,
+    controlProviderDispatches: aggregateCount,
+    treatmentLogicalCalls: aggregateCount.max(235),
+    treatmentProviderDispatches: aggregateCount,
+    totalLogicalCalls: aggregateCount,
+    totalProviderDispatches: aggregateCount,
+    costCeilingUsd: usdAmountV219,
+    stages: z.object({
+        genderTriage: v219BudgetStagePlan,
+        featureAnalysis: v219BudgetStagePlan,
+        privateAccountName: v219BudgetStagePlan,
+        genderResolution: v219BudgetStagePlan,
+        proGenderSecondLook: v219BudgetStagePlan,
+    }).strict(),
+}).strict();
+const v219BudgetStageActual = z.object({
+    logicalCalls: aggregateCount,
+    providerDispatches: aggregateCount,
+    terminalDispatches: aggregateCount,
+}).strict();
+const v219BudgetActual = z.object({
+    logicalCalls: aggregateCount,
+    providerDispatches: aggregateCount,
+    reservedCostUsd: usdAmountV219,
+    costCeilingUsd: usdAmountV219,
+    usageComplete: z.boolean(),
+    usageMissingDispatches: aggregateCount,
+    estimatedCostUsd: usdAmountV219.nullable(),
+    stages: z.object({
+        genderTriage: v219BudgetStageActual,
+        featureAnalysis: v219BudgetStageActual,
+        privateAccountName: v219BudgetStageActual,
+        genderResolution: v219BudgetStageActual,
+        proGenderSecondLook: v219BudgetStageActual,
+    }).strict(),
+}).strict();
+const v219ProTreatment = z.object({
+    mediaCountHistogram: z.object({
+        '2': aggregateCount,
+        '3': aggregateCount,
+        '4': aggregateCount,
+        '5': aggregateCount,
+        '6': aggregateCount,
+        '7': aggregateCount,
+        '8': aggregateCount,
+        '9': aggregateCount,
+    }).strict(),
+    evaluation: v219Evaluation,
+    budget: z.object({
+        plan: v219BudgetPlan,
+        actual: v219BudgetActual,
+    }).strict(),
+}).strict();
+
+function fixedRateV219(
+    numerator: number,
+    denominator: number,
+): number {
+    return denominator === 0
+        ? 0
+        : Number((numerator / denominator).toFixed(4));
+}
+
+function validV219Calibration(
+    values: z.infer<typeof v219CalibrationValues>,
+): boolean {
+    return values.predicted <= values.known
+        && values.predicted === values.agreed + values.disagreed
+        && values.wilsonLowerBoundBps
+            === oneSidedWilsonLowerBoundBps95(
+                values.agreed,
+                values.predicted,
+            );
+}
+
+const replayAnalysisV2JobTerminalV219Schema =
+    replayAnalysisV2JobTerminalV212Schema.extend({
+        evaluation_ai_policy: z.literal('ai-stage-policy-v2.19'),
+        replay_ai_policy: z.literal('ai-stage-policy-v2.19'),
+        stages:
+            replayAnalysisV2JobTerminalV212Schema.shape.stages.extend({
+                proGenderSecondLook: stageMetricsSchema,
+            }).strict(),
+        public_name_fusion: publicNameFusionCounts,
+        public_gender_headroom_v218: publicGenderHeadroomV218,
+        pro_gender_second_look_v219: v219ProTreatment,
+    }).strict().superRefine((report, context) => {
+        const treatment = report.pro_gender_second_look_v219;
+        const evaluation = treatment.evaluation;
+        const calibration = evaluation.calibration;
+        const unknown = evaluation.unknown;
+        const plan = treatment.budget.plan;
+        const actual = treatment.budget.actual;
+        const expectedPlan = deriveV219ReplayBudgetPlan(
+            evaluation.staticTreatmentCohort,
+        );
+        const calibrationVolumePass =
+            calibration.overall.predicted >= 30;
+        const overallAgreementPass =
+            calibration.overall.predicted > 0
+            && calibration.overall.agreed * 10_000
+                >= calibration.overall.predicted * 9_500;
+        const maleVolumePass = calibration.male.predicted >= 10;
+        const maleAgreementPass = maleVolumePass
+            && calibration.male.predicted > 0
+            && calibration.male.agreed * 10_000
+                >= calibration.male.predicted * 9_500;
+        const femaleVolumePass =
+            calibration.female.predicted >= 10;
+        const femaleAgreementPass = femaleVolumePass
+            && calibration.female.predicted > 0
+            && calibration.female.agreed * 10_000
+                >= calibration.female.predicted * 9_500;
+        const falseFemalePass =
+            calibration.knownMaleToFemale === 0;
+        const officialNegativePass =
+            evaluation.officialNegative.accepted === 0;
+        const calibrationPass = calibrationVolumePass
+            && overallAgreementPass
+            && maleVolumePass
+            && maleAgreementPass
+            && femaleVolumePass
+            && femaleAgreementPass
+            && falseFemalePass
+            && officialNegativePass;
+        const observedUnknownRate = fixedRateV219(
+            evaluation.final.unknown,
+            evaluation.observedPublic,
+        );
+        const worstTotal = evaluation.observedPublic
+            + evaluation.missingPublic;
+        const worstUnknown = evaluation.final.unknown
+            + evaluation.missingPublic;
+        const worstCaseUnknownRate = fixedRateV219(
+            worstUnknown,
+            worstTotal,
+        );
+        const observedUnknownPass =
+            evaluation.final.unknown * 5
+                <= evaluation.observedPublic;
+        const worstCaseUnknownPass =
+            worstUnknown * 5 <= worstTotal;
+        const adoptionPass = calibrationPass
+            && observedUnknownPass
+            && worstCaseUnknownPass;
+        const invocationTotal = Object.values(
+            evaluation.invocationOutcomes,
+        ).reduce((sum, count) => sum + count, 0);
+        const histogramTotal = Object.values(
+            treatment.mediaCountHistogram,
+        ).reduce((sum, count) => sum + count, 0);
+        const nullReasonTotal = Object.values(
+            unknown.nullReasons,
+        ).reduce((sum, count) => sum + count, 0);
+        const stageLogicalTotal = Object.values(
+            actual.stages,
+        ).reduce((sum, stage) => sum + stage.logicalCalls, 0);
+        const stageProviderTotal = Object.values(
+            actual.stages,
+        ).reduce(
+            (sum, stage) => sum + stage.providerDispatches,
+            0,
+        );
+        const stageTerminalTotal = Object.values(
+            actual.stages,
+        ).reduce(
+            (sum, stage) => sum + stage.terminalDispatches,
+            0,
+        );
+        const expectedReservedCostUsd = Number(
+            V219_REPLAY_BUDGET_STAGES.reduce(
+                (sum, stage) => sum
+                    + actual.stages[stage].providerDispatches
+                        * plan.stages[stage].costUsdPerDispatch,
+                0,
+            ).toFixed(9),
+        );
+        const stageCallsMatch = (
+            [
+                'genderTriage',
+                'featureAnalysis',
+                'privateAccountName',
+                'genderResolution',
+                'proGenderSecondLook',
+            ] as const
+        ).every(stage => (
+            actual.stages[stage].providerDispatches
+                === report.stages[stage].calls
+            && actual.stages[stage].logicalCalls
+                <= plan.stages[stage].logicalCallCeiling
+            && actual.stages[stage].providerDispatches
+                <= plan.stages[stage].providerDispatchCeiling
+            && actual.stages[stage].terminalDispatches
+                === actual.stages[stage].providerDispatches
+        ));
+        const {
+            pro_gender_second_look_v219: _treatment,
+            stages: allStages,
+            ...controlTop
+        } = report;
+        void _treatment;
+        const {
+            proGenderSecondLook: _proStage,
+            ...controlStages
+        } = allStages;
+        void _proStage;
+        const controlObservedUnknownRate = fixedRateV219(
+            evaluation.baselineFinal.unknown,
+            evaluation.observedPublic,
+        );
+        const controlWorstUnknown =
+            evaluation.baselineFinal.unknown
+                + evaluation.missingPublic;
+        const controlWorstUnknownRate = fixedRateV219(
+            controlWorstUnknown,
+            worstTotal,
+        );
+        const controlCompatible = {
+            ...controlTop,
+            evaluation_ai_policy: 'ai-stage-policy-v2.18',
+            replay_ai_policy: 'ai-stage-policy-v2.18',
+            stages: controlStages,
+            gender: {
+                ...evaluation.baselineFinal,
+                unknownRate: controlObservedUnknownRate,
+            },
+            gender_quality: {
+                ...report.gender_quality,
+                qualityGate: {
+                    observedUnknownRate:
+                        controlObservedUnknownRate,
+                    worstCaseUnknownRate:
+                        controlWorstUnknownRate,
+                    observedPass:
+                        evaluation.baselineFinal.unknown * 5
+                            <= evaluation.observedPublic,
+                    worstCasePass:
+                        controlWorstUnknown * 5 <= worstTotal,
+                },
+            },
+        };
+        const expectedPlanMatches =
+            JSON.stringify(plan) === JSON.stringify(expectedPlan);
+        const expectedAppliedMale = calibrationPass
+            ? unknown.counterfactualRescuedMale
+            : 0;
+        const expectedAppliedFemale = calibrationPass
+            ? unknown.counterfactualRescuedFemale
+            : 0;
+        const coverageMissingPublic =
+            report.diagnostic_partial_coverage_override.source_profiles
+                - report.diagnostic_partial_coverage_override
+                    .retained_profiles;
+        const valid =
+            replayAnalysisV2JobTerminalV218Schema.safeParse(
+                controlCompatible,
+            ).success
+            && expectedPlanMatches
+            && invocationTotal
+                === evaluation.staticTreatmentCohort
+            && histogramTotal
+                === evaluation.staticTreatmentCohort
+            && evaluation.staticTreatmentCohort
+                <= evaluation.observedPublic
+            && calibration.overall.known
+                === calibration.male.known
+                    + calibration.female.known
+            && calibration.overall.predicted
+                === calibration.male.predicted
+                    + calibration.female.predicted
+            && calibration.overall.agreed
+                === calibration.male.agreed
+                    + calibration.female.agreed
+            && calibration.overall.disagreed
+                === calibration.male.disagreed
+                    + calibration.female.disagreed
+            && validV219Calibration(calibration.overall)
+            && validV219Calibration(calibration.male)
+            && validV219Calibration(calibration.female)
+            && calibration.knownMaleToFemale
+                <= calibration.male.disagreed
+            && calibration.overall.known
+                <= evaluation.staticTreatmentCohort
+            && evaluation.officialNegative.known
+                <= evaluation.staticTreatmentCohort
+            && evaluation.officialNegative.attempted
+                <= evaluation.officialNegative.known
+            && evaluation.officialNegative.accepted
+                <= evaluation.officialNegative.attempted
+            && unknown.baseline
+                === evaluation.baselineFinal.unknown
+            && unknown.treatmentCandidates
+                === unknown.counterfactualRescuedMale
+                    + unknown.counterfactualRescuedFemale
+                    + nullReasonTotal
+            && unknown.treatmentCandidates
+                <= evaluation.staticTreatmentCohort
+            && unknown.appliedRescuedMale
+                === expectedAppliedMale
+            && unknown.appliedRescuedFemale
+                === expectedAppliedFemale
+            && unknown.final
+                === unknown.baseline
+                    - unknown.appliedRescuedMale
+                    - unknown.appliedRescuedFemale
+            && evaluation.baselineFinal.male
+                + evaluation.baselineFinal.female
+                + evaluation.baselineFinal.unknown
+                    === evaluation.observedPublic
+            && evaluation.final.male
+                === evaluation.baselineFinal.male
+                    + unknown.appliedRescuedMale
+            && evaluation.final.female
+                === evaluation.baselineFinal.female
+                    + unknown.appliedRescuedFemale
+            && evaluation.final.unknown === unknown.final
+            && evaluation.final.male
+                + evaluation.final.female
+                + evaluation.final.unknown
+                    === evaluation.observedPublic
+            && evaluation.missingPublic
+                === coverageMissingPublic
+            && evaluation.baselineFinal.male
+                === report.public_name_fusion.final.male
+            && evaluation.baselineFinal.female
+                === report.public_name_fusion.final.female
+            && evaluation.baselineFinal.unknown
+                === report.public_name_fusion.final.unknown
+            && evaluation.final.male === report.gender.male
+            && evaluation.final.female === report.gender.female
+            && evaluation.final.unknown === report.gender.unknown
+            && report.gender.unknownRate === observedUnknownRate
+            && evaluation.gates.calibrationVolumePass
+                === calibrationVolumePass
+            && evaluation.gates.overallAgreementPass
+                === overallAgreementPass
+            && evaluation.gates.maleVolumePass === maleVolumePass
+            && evaluation.gates.maleAgreementPass
+                === maleAgreementPass
+            && evaluation.gates.femaleVolumePass
+                === femaleVolumePass
+            && evaluation.gates.femaleAgreementPass
+                === femaleAgreementPass
+            && evaluation.gates.falseFemalePass === falseFemalePass
+            && evaluation.gates.officialNegativePass
+                === officialNegativePass
+            && evaluation.gates.observedUnknownRate
+                === observedUnknownRate
+            && evaluation.gates.observedUnknownPass
+                === observedUnknownPass
+            && evaluation.gates.worstCaseUnknownRate
+                === worstCaseUnknownRate
+            && evaluation.gates.worstCaseUnknownPass
+                === worstCaseUnknownPass
+            && evaluation.gates.adoptionPass === adoptionPass
+            && report.gender_quality.qualityGate.observedUnknownRate
+                === observedUnknownRate
+            && report.gender_quality.qualityGate.observedPass
+                === observedUnknownPass
+            && report.gender_quality.qualityGate.worstCaseUnknownRate
+                === worstCaseUnknownRate
+            && report.gender_quality.qualityGate.worstCasePass
+                === worstCaseUnknownPass
+            && stageLogicalTotal === actual.logicalCalls
+            && stageProviderTotal === actual.providerDispatches
+            && stageTerminalTotal === actual.providerDispatches
+            && stageCallsMatch
+            && actual.stages.proGenderSecondLook.logicalCalls
+                === evaluation.staticTreatmentCohort
+            && actual.costCeilingUsd === plan.costCeilingUsd
+            && actual.reservedCostUsd === expectedReservedCostUsd
+            && actual.logicalCalls <= plan.totalLogicalCalls
+            && actual.providerDispatches
+                <= plan.totalProviderDispatches
+            && actual.usageMissingDispatches
+                <= actual.providerDispatches
+            && actual.usageComplete
+                === (actual.usageMissingDispatches === 0)
+            && (
+                actual.usageComplete
+                    ? (
+                        actual.estimatedCostUsd !== null
+                        && actual.estimatedCostUsd
+                            <= actual.reservedCostUsd
+                    )
+                    : actual.estimatedCostUsd === null
+            )
+            && report.stages.proGenderSecondLook.calls
+                <= evaluation.staticTreatmentCohort * 4;
+        if (!valid) {
+            context.addIssue({
+                code: 'custom',
+                message:
+                    'ANALYSIS_V2_REPLAY_V219_TREATMENT_CONSERVATION_FAILED',
+            });
+        }
+    });
+
 export const replayAnalysisV2JobTerminalSchema = z.union([
     replayAnalysisV2JobTerminalV212Schema,
     replayAnalysisV2JobTerminalV213Schema,
@@ -904,6 +1400,7 @@ export const replayAnalysisV2JobTerminalSchema = z.union([
     replayAnalysisV2JobTerminalV216Schema,
     replayAnalysisV2JobTerminalV217Schema,
     replayAnalysisV2JobTerminalV218Schema,
+    replayAnalysisV2JobTerminalV219Schema,
 ]);
 
 export function replayStageFailureDispositionEntries(

@@ -83,6 +83,23 @@ describe('estimateGeminiRequestCost', () => {
         expect(estimate?.totalCostUsd).toBe(3.5);
     });
 
+    it('prices global Gemini 3.1 Pro Preview at the reviewed sub-200k rates', () => {
+        const estimate = estimateGeminiRequestCost({
+            promptTokens: 100_000,
+            completionTokens: 60_000,
+            totalTokens: 160_000,
+        }, 'gemini-3.1-pro-preview', 'global');
+
+        expect(estimate).toMatchObject({
+            canonicalModelName: 'gemini-3.1-pro-preview',
+            inputUsdPerMillionTokens: 2,
+            outputUsdPerMillionTokens: 12,
+            inputCostUsd: 0.2,
+            outputCostUsd: 0.72,
+            totalCostUsd: 0.92,
+        });
+    });
+
     it('supports Vertex resource names and returns null for unknown pricing', () => {
         const known = estimateGeminiRequestCost({
             promptTokens: 1_000,

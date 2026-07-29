@@ -10,6 +10,9 @@ import {
 } from '../lib/services/analysis/replay/replay-bundle';
 import { parseReplayCliArgs, runReplayCli } from './replay-analysis-v2';
 import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/replay/historical-partial-available-artifact';
+import {
+    createV219SealedSourceTestBundle,
+} from '../lib/services/analysis/replay/replay-v219-preflight.test-fixture';
 import packageJson from '../package.json';
 
 const temporaryPaths: string[] = [];
@@ -91,6 +94,24 @@ async function partialArtifacts(now: number) {
     const keyPath = join(directory, 'bundle.key');
     await createReplayKeyFile(keyPath);
     await writeReplayBundle({ bundle: partialReplayBundle(now), bundlePath, keyPath, now });
+    return { bundlePath, keyPath };
+}
+
+async function v219Artifacts(now: number) {
+    const directory = await mkdtemp(join(
+        tmpdir(),
+        'analysis-v2-replay-v219-cli-',
+    ));
+    temporaryPaths.push(directory);
+    const bundlePath = join(directory, 'bundle.enc');
+    const keyPath = join(directory, 'bundle.key');
+    await createReplayKeyFile(keyPath);
+    await writeReplayBundle({
+        bundle: createV219SealedSourceTestBundle(now),
+        bundlePath,
+        keyPath,
+        now,
+    });
     return { bundlePath, keyPath };
 }
 
@@ -254,6 +275,39 @@ describe('analysis V2 replay CLI', () => {
             '--run', '--paid-ai', '--confirm-paid-ai',
             '--historical-official-e2e',
             '--evaluation-ai-policy=ai-stage-policy-v2.18',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.19 behind its Pro second-look partial capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.19',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v219-pro-gender-second-look-shadow',
+                aiStage: 'ai-stage-policy-v2.19',
+            },
+        });
+        expect(parseReplayCliArgs([
+            '--capture',
+            '--historical-partial-available',
+            '--request-id=00000000-0000-4000-8000-000000000000',
+            '--evaluation-ai-policy=ai-stage-policy-v2.19',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v219-pro-gender-second-look-shadow',
+                aiStage: 'ai-stage-policy-v2.19',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.19',
             '--bundle=/tmp/bundle', '--key=/tmp/key',
         ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     });
@@ -508,6 +562,58 @@ describe('analysis V2 replay CLI', () => {
         });
         await expect(stat(partial.bundlePath)).rejects.toMatchObject({ code: 'ENOENT' });
         await expect(stat(partial.keyPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('runs V2.19 dry preflight without constructing a paid runner or entering replay execution', async () => {
+        const artifacts = await v219Artifacts(Date.now());
+        const output: string[] = [];
+        const original = process.stdout.write;
+        const createPaidRunner = () => {
+            throw new Error('PAID_RUNNER_CONSTRUCTED');
+        };
+        const runReplay = () => {
+            throw new Error('REPLAY_EXECUTION_ENTERED');
+        };
+        process.stdout.write = ((line: string) => {
+            output.push(line);
+            return true;
+        }) as typeof process.stdout.write;
+        try {
+            await runReplayCli([
+                '--run',
+                '--dry-run',
+                '--historical-partial-available',
+                '--evaluation-ai-policy=ai-stage-policy-v2.19',
+                `--bundle=${artifacts.bundlePath}`,
+                `--key=${artifacts.keyPath}`,
+            ], {
+                createPaidRunner,
+                runReplay,
+            });
+        } finally {
+            process.stdout.write = original;
+        }
+
+        expect(JSON.parse(output.join(''))).toMatchObject({
+            schema: 'analysis-v2-replay-v219-preflight-v1',
+            treatment: { staticCohort: 235 },
+            budget: {
+                totalLogicalCalls: 945,
+                totalProviderDispatches: 3_780,
+                costCeilingUsd: 121.1792,
+            },
+            externalEffects: {
+                geminiClientsConstructed: 0,
+                providerDispatches: 0,
+                apifyClientsConstructed: 0,
+                instagramTransportsConstructed: 0,
+                productionStoresConstructed: 0,
+                resultWritersConstructed: 0,
+                cloudRunExecutionsCreated: 0,
+            },
+        });
+        await expect(stat(artifacts.bundlePath)).rejects.toThrow();
+        await expect(stat(artifacts.keyPath)).rejects.toThrow();
     });
 
     it('parses an exact capture selector and artifact paths', () => {

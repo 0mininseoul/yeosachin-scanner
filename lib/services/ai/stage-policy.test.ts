@@ -14,6 +14,7 @@ import {
     AI_STAGE_POLICY_V216_VERSION,
     AI_STAGE_POLICY_V217_VERSION,
     AI_STAGE_POLICY_V218_VERSION,
+    AI_STAGE_POLICY_V219_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -196,6 +197,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.16',
             'ai-stage-policy-v2.17',
             'ai-stage-policy-v2.18',
+            'ai-stage-policy-v2.19',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -227,6 +229,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.16',
             'ai-stage-policy-v2.17',
             'ai-stage-policy-v2.18',
+            'ai-stage-policy-v2.19',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -285,6 +288,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.16',
             'ai-stage-policy-v2.17',
             'ai-stage-policy-v2.18',
+            'ai-stage-policy-v2.19',
         ]);
         expect(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V210_VERSION])
             .toEqual(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V29_VERSION]);
@@ -625,6 +629,40 @@ describe('V2 AI stage policy', () => {
         expect(aiStagePolicySupports(
             AI_STAGE_POLICY_V217_VERSION,
             'publicGenderHeadroomDiagnosticV218',
+        )).toBe(false);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('keeps v2.19 control stage bytes identical to v2.18 and adds only replay Pro second-look support', () => {
+        const v218 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V218_VERSION];
+        const v219 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V219_VERSION];
+
+        expect(v219).toBeDefined();
+        expect(v219).toEqual(v218);
+        for (const stage of AI_STAGE_NAMES_V27) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V219_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V218_VERSION, stage));
+        }
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V219_VERSION,
+            'publicNameVisualFusionShadowV217',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V219_VERSION,
+            'publicGenderHeadroomDiagnosticV218',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V219_VERSION,
+            'proGenderSecondLookShadowV219',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V218_VERSION,
+            'proGenderSecondLookShadowV219',
         )).toBe(false);
         expect(selectAiStagePolicyVersion({
             rolloutMode: 'production',

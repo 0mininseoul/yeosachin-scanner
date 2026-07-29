@@ -12,6 +12,7 @@ import {
     AI_STAGE_POLICY_V216_VERSION,
     AI_STAGE_POLICY_V217_VERSION,
     AI_STAGE_POLICY_V218_VERSION,
+    AI_STAGE_POLICY_V219_VERSION,
     aiStagePolicySupports,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
@@ -32,6 +33,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -51,12 +53,27 @@ import {
 import { evaluateReplayGenderQualityGate } from './replay-gender-quality-gate';
 import {
     evaluatePublicNameVisualFusion,
+    publicNameVote,
+    publicVisualVote,
     type PublicNameVisualFusionReport,
 } from './replay-public-name-fusion';
 import {
     evaluatePublicGenderHeadroomV218,
     type PublicGenderHeadroomReportV218,
 } from './replay-public-gender-headroom-v218';
+import type {
+    ProGenderSecondLookResultV219,
+} from './replay-v219-gender-second-look';
+import {
+    evaluateProGenderSecondLookV219,
+    selectProGenderSecondLookMediaV219,
+    type ProGenderSecondLookCandidateV219,
+    type ProGenderSecondLookReportV219,
+} from './replay-v219-gender-second-look';
+import type {
+    V219ReplayBudgetPlan,
+    V219ReplayBudgetSnapshot,
+} from './replay-v219-budget';
 export {
     REPLAY_STAGE_FAILURE_DISPOSITIONS,
 } from './replay-job-report-contract';
@@ -136,6 +153,11 @@ export interface ReplayAiRunner {
         onProviderDispatch?: (value: ReplayAttemptStart) => void;
         onAttemptTelemetry?: (value: ReplayAttemptTelemetry) => void;
     }): Promise<ReplayInvocation<GenderResolutionResult>>;
+    /** V2.19-only static-cohort Pro treatment. */
+    proGenderSecondLook?(input: {
+        ordinal: number;
+        media: readonly ReplayMedia[];
+    }): Promise<ReplayInvocation<ProGenderSecondLookResultV219>>;
 }
 
 async function assertReplayAiRunnerPolicy(
@@ -198,12 +220,25 @@ export interface AnalysisV2AiReplayReport {
     };
     stages: Record<'genderTriage' | 'featureAnalysis' | 'privateAccountName' | 'genderResolution', ReplayStageMetrics> & {
         featureAnalysisShadowRescue?: ReplayStageMetrics;
+        proGenderSecondLook?: ReplayStageMetrics;
     };
     gender: { male: number; female: number; unknown: number; unknownRate: number };
     /** v2.17-only, aggregate and deliberately PII-free evaluation shadow. */
     publicNameFusion?: PublicNameVisualFusionReport;
     /** v2.18-only fixed aggregate headroom matrix. */
     publicGenderHeadroom?: PublicGenderHeadroomReportV218;
+    /** V2.19-only fixed aggregate Pro treatment evaluation. */
+    proGenderSecondLook?: {
+        mediaCountHistogram: Record<
+            '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9',
+            number
+        >;
+        evaluation: ProGenderSecondLookReportV219;
+        budget: {
+            plan: V219ReplayBudgetPlan;
+            actual: V219ReplayBudgetSnapshot;
+        };
+    };
     resolver: {
         ready: number;
         applied: number;
@@ -335,6 +370,12 @@ type ReplayBaselineClassification =
     | 'unresolved_stage_conflict'
     | 'unresolved'
     | 'analysis_unavailable';
+
+function replayBinaryGender(
+    value: unknown,
+): value is 'female' | 'male' {
+    return value === 'female' || value === 'male';
+}
 
 interface TrackedResolver {
     abort: AbortController;
@@ -501,7 +542,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
@@ -737,6 +779,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                     || report.replayAiPolicy === AI_STAGE_POLICY_V216_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V217_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V218_VERSION
+                    || report.replayAiPolicy === AI_STAGE_POLICY_V219_VERSION
                 )
                     ? { failure_kind: values.failureKind ?? {} }
                     : {}),
@@ -750,6 +793,12 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
             : {}),
         ...(report.publicGenderHeadroom
             ? { public_gender_headroom_v218: report.publicGenderHeadroom }
+            : {}),
+        ...(report.proGenderSecondLook
+            ? {
+                pro_gender_second_look_v219:
+                    report.proGenderSecondLook,
+            }
             : {}),
     });
 }
@@ -857,6 +906,10 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         'publicGenderHeadroomDiagnosticV218',
     );
+    const proGenderSecondLookShadowV219 = aiStagePolicySupports(
+        replayAiPolicy,
+        'proGenderSecondLookShadowV219',
+    );
     const featureShadowPolicy = (
         replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
@@ -870,6 +923,7 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy === AI_STAGE_POLICY_V212_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V217_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V218_VERSION
+        || replayAiPolicy === AI_STAGE_POLICY_V219_VERSION
         || Boolean(featureShadowPolicy);
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
@@ -887,6 +941,15 @@ export async function runAnalysisV2AiReplay(input: {
     ) {
         throw new Error(
             'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_RUNNER_REQUIRED',
+        );
+    }
+    if (
+        proGenderSecondLookShadowV219
+        && input.mode === 'paid-ai'
+        && !paidRunner?.proGenderSecondLook
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_V219_TREATMENT_RUNNER_REQUIRED',
         );
     }
     const cutoffBookkeepingMs = input.resolverCutoffMs ?? 25;
@@ -910,6 +973,9 @@ export async function runAnalysisV2AiReplay(input: {
     const stageNames = [
         ...controlStageNames,
         ...(featureShadowPolicy ? ['featureAnalysisShadowRescue' as const] : []),
+        ...(proGenderSecondLookShadowV219
+            ? ['proGenderSecondLook' as const]
+            : []),
     ];
     const stages = Object.fromEntries(stageNames.map(name => [
         name,
@@ -921,6 +987,8 @@ export async function runAnalysisV2AiReplay(input: {
     const gender = { male: 0, female: 0, unknown: 0, unknownRate: 0 };
     let publicNameFusion: PublicNameVisualFusionReport | undefined;
     let publicGenderHeadroom: PublicGenderHeadroomReportV218 | undefined;
+    let proGenderSecondLook:
+        AnalysisV2AiReplayReport['proGenderSecondLook'];
     const genderQuality = genderQualityV211 ? {
         triage: {
             nonOk: 0,
@@ -1054,6 +1122,33 @@ export async function runAnalysisV2AiReplay(input: {
                 )
                 : canonicalResolverMedia;
         };
+        const staticProTreatment = proGenderSecondLookShadowV219
+            ? publicProfiles.flatMap(profile => {
+                const media = selectProGenderSecondLookMediaV219(
+                    policySelectedResolverMedia(profile),
+                );
+                return media.length >= 2
+                    ? [{ profile, media }]
+                    : [];
+            })
+            : [];
+        let v219BudgetPlan: V219ReplayBudgetPlan | undefined;
+        if (proGenderSecondLookShadowV219) {
+            const {
+                lookupReplayStagedAiAdapterV219BudgetPlan,
+            } = await import('./replay-staged-ai-adapter');
+            v219BudgetPlan =
+                lookupReplayStagedAiAdapterV219BudgetPlan(runner);
+            if (
+                !v219BudgetPlan
+                || v219BudgetPlan.treatmentLogicalCalls
+                    !== staticProTreatment.length
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_V219_STATIC_COHORT_MISMATCH',
+                );
+            }
+        }
         const baselinePublicOutcomes: Array<{
             profile: typeof publicProfiles[number];
             classification: 'male' | 'female' | 'unknown';
@@ -1061,6 +1156,9 @@ export async function runAnalysisV2AiReplay(input: {
             feature?: ReplayInvocation<FeatureAnalysisResult>;
             passedPreFeatureAdmission: boolean;
             officialOrGroupExcluded: boolean;
+            controlTerminal:
+                ProGenderSecondLookCandidateV219['controlTerminal'];
+            conflictingGenders?: readonly ('female' | 'male')[];
         }> = [];
         const recordPublicFinalClassification = (
             profile: typeof publicProfiles[number],
@@ -1070,6 +1168,10 @@ export async function runAnalysisV2AiReplay(input: {
                 feature?: ReplayInvocation<FeatureAnalysisResult>;
                 passedPreFeatureAdmission?: boolean;
                 officialOrGroupExcluded?: boolean;
+                controlTerminal?:
+                    ProGenderSecondLookCandidateV219['controlTerminal'];
+                conflictingGenders?:
+                    readonly ('female' | 'male')[];
             } = {},
         ): void => {
             baselinePublicOutcomes.push({
@@ -1081,6 +1183,18 @@ export async function runAnalysisV2AiReplay(input: {
                     control.passedPreFeatureAdmission === true,
                 officialOrGroupExcluded:
                     control.officialOrGroupExcluded === true,
+                controlTerminal: control.controlTerminal
+                    ?? (
+                        classification === 'unknown'
+                            ? 'unresolved'
+                            : 'known'
+                    ),
+                ...(control.conflictingGenders
+                    ? {
+                        conflictingGenders:
+                            control.conflictingGenders,
+                    }
+                    : {}),
             });
             if (classification === 'male') {
                 gender.male++;
@@ -1418,7 +1532,11 @@ export async function runAnalysisV2AiReplay(input: {
                         genderQuality.feature.routeTerminal.triage_non_ok =
                             (genderQuality.feature.routeTerminal.triage_non_ok ?? 0) + 1;
                     }
-                    recordPublicFinalClassification(profile, 'unknown');
+                    recordPublicFinalClassification(
+                        profile,
+                        'unknown',
+                        { controlTerminal: 'analysis_unavailable' },
+                    );
                     return;
                 }
                 await processTriageResult(
@@ -1552,6 +1670,30 @@ export async function runAnalysisV2AiReplay(input: {
                     passedPreFeatureAdmission: true,
                     officialOrGroupExcluded:
                         outcome.resolverExcludedByFeatureOfficial === true,
+                    controlTerminal:
+                        reconciliation.finalClassification
+                            === 'verified_female'
+                        || reconciliation.finalClassification
+                            === 'verified_non_female'
+                            ? 'known'
+                            : outcome.baseline ===
+                                'unresolved_stage_conflict'
+                                ? 'unresolved_stage_conflict'
+                                : outcome.baseline ===
+                                    'analysis_unavailable'
+                                    ? 'analysis_unavailable'
+                                    : 'unresolved',
+                    ...(outcome.baseline ===
+                        'unresolved_stage_conflict'
+                        ? {
+                            conflictingGenders: [...new Set([
+                                outcome.triage.assessment
+                                    .inferredGender,
+                                outcome.feature?.value
+                                    ?.features.gender,
+                            ].filter(replayBinaryGender))],
+                        }
+                        : {}),
                 },
             );
             if (genderQuality) {
@@ -1578,6 +1720,23 @@ export async function runAnalysisV2AiReplay(input: {
                 }
             }
         }));
+        const baselineByOrdinal = new Map(
+            baselinePublicOutcomes.map(outcome => [
+                outcome.profile.ordinal,
+                outcome,
+            ]),
+        );
+        if (baselineByOrdinal.size !== publicProfiles.length) {
+            throw new Error(
+                'ANALYSIS_V2_REPLAY_CONTROL_CONSERVATION_FAILED',
+            );
+        }
+        const finalBeforeTreatmentByOrdinal = new Map(
+            baselinePublicOutcomes.map(outcome => [
+                outcome.profile.ordinal,
+                outcome.classification,
+            ]),
+        );
         if (publicNameVisualFusionShadowV217) {
             const expectedIds = publicAccounts.map(account => account.id);
             const parsedNames = publicNameInvocation?.outcome === 'ok'
@@ -1597,17 +1756,6 @@ export async function runAnalysisV2AiReplay(input: {
                     ? parsedNames.data.map(result => [result.id, result])
                     : [],
             );
-            const baselineByOrdinal = new Map(
-                baselinePublicOutcomes.map(outcome => [
-                    outcome.profile.ordinal,
-                    outcome,
-                ]),
-            );
-            if (baselineByOrdinal.size !== publicProfiles.length) {
-                throw new Error(
-                    'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_CONSERVATION_FAILED',
-                );
-            }
             publicNameFusion = evaluatePublicNameVisualFusion({
                 candidates: publicProfiles.map(profile => {
                     const baseline = baselineByOrdinal.get(profile.ordinal);
@@ -1725,6 +1873,38 @@ export async function runAnalysisV2AiReplay(input: {
             gender.male = publicNameFusion.final.male;
             gender.female = publicNameFusion.final.female;
             gender.unknown = publicNameFusion.final.unknown;
+            for (const outcome of baselinePublicOutcomes) {
+                if (outcome.classification !== 'unknown') continue;
+                const id = `ordinal:${outcome.profile.ordinal}`;
+                const visual = publicVisualVote({
+                    ...(outcome.feature?.outcome === 'ok'
+                        && outcome.feature.value
+                        ? { feature: outcome.feature.value }
+                        : {}),
+                    ...(outcome.triage
+                        ? { triage: outcome.triage }
+                        : {}),
+                });
+                const name = providerOk
+                    ? namesById.get(id)
+                    : undefined;
+                const nameVote = name?.id === id
+                    ? publicNameVote(name)
+                    : null;
+                const officialOrGroup =
+                    outcome.officialOrGroupExcluded
+                    || visual.officialOrGroup;
+                if (
+                    !officialOrGroup
+                    && nameVote
+                    && visual.vote === nameVote
+                ) {
+                    finalBeforeTreatmentByOrdinal.set(
+                        outcome.profile.ordinal,
+                        nameVote,
+                    );
+                }
+            }
             if (publicGenderHeadroomDiagnosticV218) {
                 publicGenderHeadroom = evaluatePublicGenderHeadroomV218({
                     candidates: publicProfiles.map(profile => {
@@ -1771,6 +1951,222 @@ export async function runAnalysisV2AiReplay(input: {
                     fusion: publicNameFusion,
                 });
             }
+        }
+        if (proGenderSecondLookShadowV219) {
+            const treatmentStage = stages.proGenderSecondLook;
+            const treatmentDurations =
+                durations.proGenderSecondLook;
+            if (
+                !runner.proGenderSecondLook
+                || !treatmentStage
+                || !treatmentDurations
+                || !v219BudgetPlan
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_V219_TREATMENT_RUNNER_REQUIRED',
+                );
+            }
+            const mediaCountKeys = [
+                '2', '3', '4', '5', '6', '7', '8', '9',
+            ] as const;
+            const mediaCountHistogram: Record<
+                typeof mediaCountKeys[number],
+                number
+            > = {
+                '2': 0,
+                '3': 0,
+                '4': 0,
+                '5': 0,
+                '6': 0,
+                '7': 0,
+                '8': 0,
+                '9': 0,
+            };
+            for (const candidate of staticProTreatment) {
+                const key =
+                    mediaCountKeys[candidate.media.length - 2];
+                if (!key) {
+                    throw new Error(
+                        'ANALYSIS_V2_REPLAY_V219_STATIC_COHORT_MISMATCH',
+                    );
+                }
+                mediaCountHistogram[key]++;
+            }
+            const invocationByOrdinal = new Map<
+                number,
+                ReplayInvocation<ProGenderSecondLookResultV219>
+            >();
+            await runBounded(
+                staticProTreatment,
+                2,
+                async candidate => {
+                    const invocation =
+                        await runner.proGenderSecondLook!({
+                            ordinal: candidate.profile.ordinal,
+                            media: candidate.media,
+                        });
+                    if (
+                        invocationByOrdinal.has(
+                            candidate.profile.ordinal,
+                        )
+                    ) {
+                        throw new Error(
+                            'ANALYSIS_V2_REPLAY_V219_TREATMENT_CONSERVATION_FAILED',
+                        );
+                    }
+                    invocationByOrdinal.set(
+                        candidate.profile.ordinal,
+                        invocation,
+                    );
+                    collect(
+                        treatmentStage,
+                        treatmentDurations,
+                        invocation,
+                    );
+                },
+            );
+            const baselineFinal = {
+                male: gender.male,
+                female: gender.female,
+                unknown: gender.unknown,
+            };
+            const finalBeforeTreatmentCounts = {
+                male: 0,
+                female: 0,
+                unknown: 0,
+            };
+            for (const classification of
+                finalBeforeTreatmentByOrdinal.values()) {
+                finalBeforeTreatmentCounts[classification]++;
+            }
+            if (
+                finalBeforeTreatmentCounts.male
+                    !== baselineFinal.male
+                || finalBeforeTreatmentCounts.female
+                    !== baselineFinal.female
+                || finalBeforeTreatmentCounts.unknown
+                    !== baselineFinal.unknown
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_V219_TREATMENT_CONSERVATION_FAILED',
+                );
+            }
+            const candidates =
+                staticProTreatment.map(candidate => {
+                    const baseline = baselineByOrdinal.get(
+                        candidate.profile.ordinal,
+                    );
+                    const finalBeforeTreatment =
+                        finalBeforeTreatmentByOrdinal.get(
+                            candidate.profile.ordinal,
+                        );
+                    const invocation = invocationByOrdinal.get(
+                        candidate.profile.ordinal,
+                    );
+                    if (
+                        !baseline
+                        || !finalBeforeTreatment
+                        || !invocation
+                    ) {
+                        throw new Error(
+                            'ANALYSIS_V2_REPLAY_V219_TREATMENT_CONSERVATION_FAILED',
+                        );
+                    }
+                    const unavailable =
+                        baseline.controlTerminal
+                            === 'fetch_unavailable'
+                        || baseline.controlTerminal
+                            === 'media_unavailable'
+                        || baseline.controlTerminal
+                            === 'analysis_unavailable';
+                    return {
+                        key: `candidate:${candidate.profile.ordinal}`,
+                        controlLabel:
+                            baseline.classification === 'male'
+                                ? 'male' as const
+                                : baseline.classification ===
+                                    'female'
+                                    ? 'female' as const
+                                    : unavailable
+                                        ? 'unavailable' as const
+                                        : 'unknown' as const,
+                        finalBeforeTreatment,
+                        controlTerminal:
+                            baseline.controlTerminal,
+                        ...(baseline.conflictingGenders
+                            ? {
+                                conflictingGenders:
+                                    baseline.conflictingGenders,
+                            }
+                            : {}),
+                        officialOrGroupExcluded:
+                            baseline.officialOrGroupExcluded,
+                        invocationOutcome: invocation.outcome,
+                        ...(invocation.outcome === 'ok'
+                            && invocation.value
+                            ? {
+                                treatment:
+                                    invocation.value,
+                            }
+                            : {}),
+                    } satisfies ProGenderSecondLookCandidateV219;
+                });
+            const evaluation =
+                evaluateProGenderSecondLookV219({
+                    candidates,
+                    baselineFinal,
+                    observedPublic: publicProfiles.length,
+                    missingPublic,
+                });
+            const {
+                lookupReplayStagedAiAdapterV219BudgetSnapshot,
+            } = await import('./replay-staged-ai-adapter');
+            const actual =
+                lookupReplayStagedAiAdapterV219BudgetSnapshot(
+                    runner,
+                );
+            const treatmentBudget =
+                actual?.stages.proGenderSecondLook;
+            if (
+                !actual
+                || !treatmentBudget
+                || invocationByOrdinal.size
+                    !== staticProTreatment.length
+                || treatmentBudget.logicalCalls
+                    !== staticProTreatment.length
+                || treatmentBudget.providerDispatches
+                    !== treatmentStage.calls
+                || treatmentBudget.providerDispatches
+                    > v219BudgetPlan
+                        .treatmentProviderDispatches
+                || treatmentBudget.terminalDispatches
+                    > treatmentBudget.providerDispatches
+                || actual.providerDispatches
+                    > v219BudgetPlan.totalProviderDispatches
+                || actual.logicalCalls
+                    > v219BudgetPlan.totalLogicalCalls
+                || actual.costCeilingUsd
+                    !== v219BudgetPlan.costCeilingUsd
+                || Object.values(mediaCountHistogram).reduce(
+                    (sum, value) => sum + value,
+                    0,
+                ) !== staticProTreatment.length
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_V219_TREATMENT_CONSERVATION_FAILED',
+                );
+            }
+            proGenderSecondLook = {
+                mediaCountHistogram,
+                evaluation,
+                budget: {
+                    plan: v219BudgetPlan,
+                    actual,
+                },
+            };
+            gender.male = evaluation.final.male;
+            gender.female = evaluation.final.female;
+            gender.unknown = evaluation.final.unknown;
         }
         if (featureShadowPolicy && shadowRescue) {
             shadowRescue.baselineMale = gender.male;
@@ -2055,6 +2451,7 @@ export async function runAnalysisV2AiReplay(input: {
         resolver,
         ...(publicNameFusion ? { publicNameFusion } : {}),
         ...(publicGenderHeadroom ? { publicGenderHeadroom } : {}),
+        ...(proGenderSecondLook ? { proGenderSecondLook } : {}),
         ...(genderQuality ? {
             genderQuality: {
                 ...genderQuality,

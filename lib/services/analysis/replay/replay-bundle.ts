@@ -24,6 +24,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
     replayEvaluationPolicySchema,
     replaySourceLineageSchema,
 } from './replay-source-lineage';
@@ -133,6 +134,7 @@ const exactBundleSchema = baseBundleSchema.superRefine((value, context) => {
         || value.capture.evaluationPolicy?.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY
         || value.capture.evaluationPolicy?.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY
         || value.capture.evaluationPolicy?.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY
+        || value.capture.evaluationPolicy?.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY
     ) {
         context.addIssue({ code: 'custom', path: ['capture', 'evaluationPolicy'], message: 'Partial capability cannot authenticate an exact artifact.' });
     }
@@ -184,6 +186,10 @@ const partialCaptureFields = {
         z.object({
             capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY),
             aiStage: z.literal('ai-stage-policy-v2.18'),
+        }).strict(),
+        z.object({
+            capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY),
+            aiStage: z.literal('ai-stage-policy-v2.19'),
         }).strict(),
     ]),
     partial: z.object({
