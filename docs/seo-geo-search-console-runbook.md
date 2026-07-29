@@ -4,7 +4,8 @@
 
 ## 사전 준비
 
-- Google Search Console에서 확인된 소유자 권한을 준비한다.
+- Google 계정으로 Search Console에 로그인할 수 있어야 한다.
+- `yeosachin.com` DNS TXT 레코드를 추가·수정할 권한과 DNS 관리 화면 접근 권한을 준비한다.
 - 배포 후보와 프로덕션의 HTTP 응답 및 HTML 메타데이터를 읽기 전용으로 확인할 수 있어야 한다.
 - Google 확인 토큰, 자격 증명, 쿠키, 사용자 ID는 이 문서나 작업 로그에 붙여 넣지 않는다.
 

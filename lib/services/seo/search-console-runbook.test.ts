@@ -40,9 +40,19 @@ function prerequisiteIssues(section: string): string[] {
     const issues: string[] = [];
     if (!body) issues.push('empty');
     if (
-        !/Search Console[^\n]*(확인|인증|소유권|소유자)[^\n]*(권한|접근)/i.test(body)
+        !/Google[^\n]*(계정|account)[^\n]*Search Console[^\n]*(로그인|sign in|접속)|Search Console[^\n]*(로그인|sign in|접속)[^\n]*Google[^\n]*(계정|account)/i
+            .test(body)
     ) {
-        issues.push('ownership-access');
+        issues.push('google-account-sign-in');
+    }
+    if (
+        !/yeosachin\.com[^\n]*DNS[^\n]*TXT[^\n]*(편집|수정|추가|권한|접근)|DNS[^\n]*TXT[^\n]*yeosachin\.com[^\n]*(편집|수정|추가|권한|접근)/i
+            .test(body)
+    ) {
+        issues.push('dns-txt-edit-access');
+    }
+    if (/(확인된|verified)[^\n]*(소유자|owner)[^\n]*(권한|access)/i.test(body)) {
+        issues.push('circular-verified-owner');
     }
     if (
         !/(배포|프로덕션)[^\n]*(HTTP|엔드포인트|endpoint)[^\n]*(응답|response)[^\n]*(확인|검사|inspect)/i
@@ -150,8 +160,20 @@ describe('SEO/GEO Search Console operations runbook', () => {
         const emptyPrerequisites = '## 사전 준비\n\n';
         expect(prerequisiteIssues(emptyPrerequisites)).toEqual([
             'empty',
-            'ownership-access',
+            'google-account-sign-in',
+            'dns-txt-edit-access',
             'deployed-response-inspection',
+        ]);
+        const circularPrerequisites = [
+            '## 사전 준비',
+            '',
+            '- Google Search Console에서 확인된 소유자 권한을 준비한다.',
+            '- 배포 후보의 HTTP 응답을 확인할 수 있어야 한다.',
+        ].join('\n');
+        expect(prerequisiteIssues(circularPrerequisites)).toEqual([
+            'google-account-sign-in',
+            'dns-txt-edit-access',
+            'circular-verified-owner',
         ]);
 
         const deployment = readSection(runbook, '## 1. 배포 전·후 URL 확인');
