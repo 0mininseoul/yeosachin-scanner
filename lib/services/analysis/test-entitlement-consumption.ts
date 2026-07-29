@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
     PLAN_IDS,
@@ -13,8 +12,8 @@ import {
     authorizedTestProviderExecutionPolicySchema,
     type AuthorizedTestProviderExecutionPolicy,
 } from './authorized-test-provider-policy';
-
-const ENTITLEMENT_JTI_DOMAIN = 'analysis-test-entitlement-jti-v1';
+export { hashAnalysisTestEntitlementJti } from './test-entitlement-jti';
+import { hashAnalysisTestEntitlementJti } from './test-entitlement-jti';
 
 const uuidSchema = z.string().uuid();
 const usernameSchema = z.string()
@@ -349,15 +348,6 @@ export function validatePreflightForTestEntitlement(
         selectedPlanId,
         state: row.status,
     });
-}
-
-export function hashAnalysisTestEntitlementJti(nonce: string): string {
-    if (!/^[A-Za-z0-9_-]{16,64}$/.test(nonce)) {
-        throw new Error('ANALYSIS_V2_ENTITLEMENT_JTI_ERROR: invalid nonce.');
-    }
-    return createHash('sha256')
-        .update(`${ENTITLEMENT_JTI_DOMAIN}\n${nonce}`, 'utf8')
-        .digest('hex');
 }
 
 export async function consumeAnalysisV2TestEntitlement(
