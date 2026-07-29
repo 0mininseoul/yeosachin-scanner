@@ -15,7 +15,7 @@ readonly DEFAULT_CPU="2"
 readonly DEFAULT_MEMORY="2Gi"
 readonly DEFAULT_CONCURRENCY="8"
 readonly DEFAULT_MAX_INSTANCES="1"
-readonly DEFAULT_TIMEOUT_SECONDS="300"
+readonly DEFAULT_TIMEOUT_SECONDS="600"
 readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 readonly SERVICE_JSON_NOT_FOUND_STATUS="44"
 readonly REVISION_OBSERVATION_MAX_ATTEMPTS="5"
@@ -93,7 +93,7 @@ Optional deployment environment variables:
   ANALYSIS_V2_WORKER_MEMORY                  Defaults to 2Gi.
   ANALYSIS_V2_WORKER_CONCURRENCY             Defaults to 8; allowed range 1..8.
   ANALYSIS_V2_WORKER_MAX_INSTANCES           Fixed at 1 while Gemini concurrency is process-local.
-  ANALYSIS_V2_WORKER_TIMEOUT_SECONDS         Fixed launch value: 300.
+  ANALYSIS_V2_WORKER_TIMEOUT_SECONDS         Fixed launch value: 600.
   ANALYSIS_V2_WORKER_ENABLED                 Enables authenticated worker drain; defaults false.
   ANALYSIS_V2_RECOVERY_ENABLED               Enables scheduled recovery; defaults false.
   EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED    Enables recovery-only admission of validated paid
@@ -388,7 +388,7 @@ validate_runtime_tuning() {
   [[ "$worker_max_instances" == "$DEFAULT_MAX_INSTANCES" ]] \
     || die "ANALYSIS_V2_WORKER_MAX_INSTANCES must remain 1 while Gemini concurrency is process-local"
   [[ "$worker_timeout_seconds" == "$DEFAULT_TIMEOUT_SECONDS" ]] \
-    || die "ANALYSIS_V2_WORKER_TIMEOUT_SECONDS must remain 300 at launch"
+    || die "ANALYSIS_V2_WORKER_TIMEOUT_SECONDS must remain 600 at launch"
 
   local capacity=$((10#$worker_concurrency * 10#$worker_max_instances))
   local queue_rate="${ANALYSIS_V2_TASKS_MAX_DISPATCHES_PER_SECOND:-8}"
@@ -1031,26 +1031,26 @@ perform_prune_primary_drain() {
 
   if [[ "$mode" == "dry-run" ]]; then
     print_command sleep "$DEFAULT_TIMEOUT_SECONDS"
-    log "[dry-run] apply will re-read generation, traffic, active revision, refs, sharding, and destination after the 300-second drain"
+    log "[dry-run] apply will re-read generation, traffic, active revision, refs, sharding, and destination after the 600-second drain"
     prune_primary_drain_baseline_verified="true"
     return 0
   fi
 
   sleep "$DEFAULT_TIMEOUT_SECONDS"
   end_config="$(service_json)" \
-    || die "Cloud Run service was not observable after the 300-second prune drain"
+    || die "Cloud Run service was not observable after the 600-second prune drain"
   end_generation="$(service_generation_identity "$end_config")" \
     || die "explicit pruning requires an exactly observed Cloud Run service generation after the drain"
   [[ "$end_generation" == "$start_generation" ]] \
-    || die "Cloud Run service generation changed during the 300-second prune drain"
+    || die "Cloud Run service generation changed during the 600-second prune drain"
   service_has_no_traffic_tags "$end_config" \
-    || die "Cloud Run traffic tags appeared during the 300-second prune drain"
+    || die "Cloud Run traffic tags appeared during the 600-second prune drain"
   service_traffic_matches_revision "$end_config" "$known_good_revision" \
-    || die "active Cloud Run traffic changed during the 300-second prune drain"
+    || die "active Cloud Run traffic changed during the 600-second prune drain"
   end_active_config="$(revision_json "$known_good_revision")" \
-    || die "active Cloud Run revision was not observable after the 300-second prune drain"
+    || die "active Cloud Run revision was not observable after the 600-second prune drain"
   revision_is_ready "$end_active_config" "$known_good_revision" \
-    || die "active Cloud Run revision was not Ready after the 300-second prune drain"
+    || die "active Cloud Run revision was not Ready after the 600-second prune drain"
   verify_prune_apify_secret_inventory "$end_config" "$end_active_config"
   verify_prune_supabase_destination "$end_config" "$end_active_config"
 

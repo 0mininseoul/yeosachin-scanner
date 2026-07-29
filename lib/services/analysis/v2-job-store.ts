@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT } from './v2-worker-task-contract';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -9,8 +10,10 @@ const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:
 const TASK_NAME_PATTERN = /^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/locations\/[a-z]+-[a-z]+[0-9]\/queues\/[a-z](?:[a-z0-9-]{0,98}[a-z0-9])?\/tasks\/analysis-v2-[a-z0-9-]+$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 
-// Keep a completion-RPC margin beyond the 300-second Cloud Tasks transport deadline.
-export const ANALYSIS_V2_JOB_LEASE_SECONDS = 360;
+// Match the 600-second Cloud Tasks transport window. The route stops paid scheduling at 540s,
+// preserving 60 seconds for the final checkpoint and lease release.
+export const ANALYSIS_V2_JOB_LEASE_SECONDS =
+    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT.jobLeaseSeconds;
 
 /** RPC names are a shared contract with the additive Phase C migration. */
 export const ANALYSIS_V2_DATABASE_NAMES = Object.freeze({

@@ -5,6 +5,7 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import {
     ANALYSIS_V2_DATABASE_NAMES,
+    ANALYSIS_V2_JOB_LEASE_SECONDS,
     AnalysisV2JobDispatchNotReadyError,
     AnalysisV2JobFenceError,
     AnalysisV2JobLeaseBusyError,
@@ -55,6 +56,10 @@ function claimedJob(): ClaimedAnalysisV2Job {
 }
 
 describe('analysis V2 job store', () => {
+    it('holds a claimed job for the full 600-second transport window', () => {
+        expect(ANALYSIS_V2_JOB_LEASE_SECONDS).toBe(600);
+    });
+
     it('reserves a deterministic dispatch generation through the service RPC', async () => {
         const dispatchFence = randomUUID();
         const rpc = vi.fn().mockResolvedValue({
@@ -259,7 +264,7 @@ describe('analysis V2 job store', () => {
             p_dispatch_generation: 1,
             p_dispatch_token: dispatchFence,
             p_claim_token: expect.stringMatching(/^[0-9a-f-]{36}$/),
-            p_lease_seconds: 360,
+            p_lease_seconds: 600,
             p_max_attempts: 7,
         });
     });

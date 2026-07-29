@@ -196,11 +196,15 @@ describe('analysis V2 Cloud Tasks', () => {
             };
         };
         expect(request.task.name).toContain(analysisV2TaskId(requestId, jobKey, 1));
-        expect(request.task.dispatchDeadline.seconds).toBe(300);
+        expect(request.task.dispatchDeadline.seconds).toBe(600);
         expect(request.task.httpRequest.url).toBe(config.targetUrl);
         expect(request.task.httpRequest.oidcToken).toEqual({
             audience: config.oidcAudience,
             serviceAccountEmail: config.serviceAccountEmail,
+        });
+        expect(request.task.httpRequest.headers).toEqual({
+            'Content-Type': 'application/json',
+            'X-Analysis-V2-Worker-Contract': '2',
         });
         expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
             .toEqual({

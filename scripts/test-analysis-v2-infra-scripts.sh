@@ -988,7 +988,7 @@ case "$command_line" in
             },
             spec: {
               serviceAccountName: "analysis-recovery@test-project.iam.gserviceaccount.com",
-              timeoutSeconds: 300,
+              timeoutSeconds: 600,
               containerConcurrency: 8,
               containers: ([{
                 resources: {limits: {cpu: "2", memory: "2Gi"}},
@@ -2763,7 +2763,7 @@ fi
 assert_contains "$temp_dir/worker-prune-unobserved-generation.out" \
   'requires an exactly observed Cloud Run service generation before the drain'
 
-# The prune command owns the 300-second unchanged-service drain. Dry-run prints
+# The prune command owns the 600-second unchanged-service drain. Dry-run prints
 # it without mutating or auditing the durable fence; apply acquires the fence
 # before requesting bounded service-role evidence.
 printf '0\n' >"$temp_dir/prune-dry-run-acquire-count"
@@ -2798,7 +2798,7 @@ assert_not_contains "$temp_dir/worker-prune-ready.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 assert_not_contains "$temp_dir/worker-prune-ready.out" \
   "$repo_source_commit"
-assert_contains "$temp_dir/worker-prune-ready.out" 'sleep 300'
+assert_contains "$temp_dir/worker-prune-ready.out" 'sleep 600'
 [[ "$(<"$temp_dir/prune-dry-run-acquire-count")" == "0" ]] \
   || fail "prune dry-run mutated the durable fence"
 [[ "$(<"$temp_dir/prune-dry-run-clear-count")" == "0" ]] \
@@ -3017,7 +3017,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
 assert_contains "$temp_dir/worker-prune-primary-only-check.out" \
   'verified: private worker runtime, bounded scaling, and default dynamic egress'
 
-# Apply refuses any update during its own 300-second drain, even if the final
+# Apply refuses any update during its own 600-second drain, even if the final
 # service shape would otherwise still look valid.
 printf 'ready\n' >"$temp_dir/prune-generation-drift-state"
 printf '42\n' >"$temp_dir/prune-generation-drift-generation"
@@ -3042,7 +3042,7 @@ if env "${common_env[@]}" \
   fail "explicit prune apply accepted generation drift during its drain"
 fi
 assert_contains "$temp_dir/worker-prune-generation-drift.out" \
-  'Cloud Run service generation changed during the 300-second prune drain'
+  'Cloud Run service generation changed during the 600-second prune drain'
 
 printf 'ready\n' >"$temp_dir/prune-traffic-drift-state"
 printf '42\n' >"$temp_dir/prune-traffic-drift-generation"
@@ -3067,7 +3067,7 @@ if env "${common_env[@]}" \
   fail "explicit prune apply accepted active-revision drift during its drain"
 fi
 assert_contains "$temp_dir/worker-prune-traffic-drift.out" \
-  'active Cloud Run traffic changed during the 300-second prune drain'
+  'active Cloud Run traffic changed during the 600-second prune drain'
 
 printf 'ready\n' >"$temp_dir/prune-apply-state"
 printf '42\n' >"$temp_dir/prune-apply-generation"
@@ -3105,8 +3105,8 @@ env "${common_env[@]}" \
   || fail "explicit prune apply cleared its durable fence"
 [[ "$(<"$temp_dir/prune-apply-state")" == "promoted" ]] \
   || fail "explicit prune apply did not promote the primary-only revision"
-[[ "$(<"$temp_dir/prune-apply-sleep")" == "300" ]] \
-  || fail "explicit prune apply did not execute exactly one 300-second drain"
+[[ "$(<"$temp_dir/prune-apply-sleep")" == "600" ]] \
+  || fail "explicit prune apply did not execute exactly one 600-second drain"
 assert_not_contains "$temp_dir/worker-prune-apply.out" \
   'SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'
 assert_not_contains "$temp_dir/worker-prune-apply.out" \
