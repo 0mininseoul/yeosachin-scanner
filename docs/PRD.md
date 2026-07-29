@@ -228,10 +228,24 @@ const totalScore = featureScore + recencyBonus + interactionScore; // 최대 290
 
 ### 위험순위 분류
 
-- **≤30명**: 상위 **1명** = 고위험군
-- **31~70명**: 상위 **2명** = 고위험군
-- **71명+**: 상위 **3명** = 고위험군
-- 나머지의 20% = 주의, 80% = 보통
+현행 `risk-policy-v2.5`는 natural score를 먼저 계산한 뒤, 개인 위험도 후보에만
+relative tier를 적용한다. 공식/그룹 계정과 strong-partner 증거가 있는 후보는 이 강제
+배정에서 제외하며 자연 결과를 유지한다.
+
+- eligible이 3명 미만이면 자연 등급을 유지한다. 3명이면 고위험 최소 1명과 주의 2명을
+  배정한다.
+- inbound 증거가 하나라도 있으면 고위험 pool은 inbound 후보만이다. 모든 eligible 후보의
+  inbound 증거가 0일 때만 eligible 전체를 고위험 pool로 사용한다.
+- eligible이 4명 이상이면 고위험 목표 floor는 2명이다. 다만 실제 수는 고위험 pool의 수와
+  주의 2명을 남기는 `eligible - 2` 중 작은 값으로 제한한다.
+- eligible이 5명 이상이고 고위험 pool이 3명 이상이며 세 번째 후보의 natural public score가
+  주의 기준(4.2) 이상이면 고위험 목표 floor를 3명으로 올린다. 같은 feasibility cap이
+  적용된다.
+- 고위험은 최대 3명, 주의는 남은 eligible 안에서 최소 2명·최대 10명이다. 후보→대상과
+  대상→후보 태그/캡션 멘션은 모두 natural score에 보존된다.
+
+구현의 정본은 [`relative-risk-policy.ts`](../lib/domain/analysis/relative-risk-policy.ts)와
+그 경계 테스트다.
 
 ---
 
