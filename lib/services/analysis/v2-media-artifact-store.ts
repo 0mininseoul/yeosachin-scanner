@@ -998,6 +998,9 @@ export function createAnalysisV2MediaArtifactStore(input: {
         async persistBundle(value) {
             const fence = assertFence(value);
             const artifactKey = analysisV2MediaBundleArtifactKey(value.bundleId);
+            // Validate the retry input before any registry/object I/O, even if a prior immutable
+            // bundle will ultimately be reused.
+            const bytes = serializeAnalysisV2MediaBundle(value.media);
             const existing = await registry.load({ ...fence, artifactKey });
             if (existing) {
                 if (
@@ -1019,7 +1022,6 @@ export function createAnalysisV2MediaArtifactStore(input: {
                 );
                 return existing;
             }
-            const bytes = serializeAnalysisV2MediaBundle(value.media);
             const contentSha256 = sha256(bytes);
             const objectName = analysisV2MediaArtifactObjectName({
                 requestId: fence.requestId,

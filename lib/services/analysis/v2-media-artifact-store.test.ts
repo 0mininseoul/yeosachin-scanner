@@ -518,6 +518,26 @@ describe('analysis V2 media artifact orchestration', () => {
         expect(retried).toEqual(first);
         expect(objectClient.create).toHaveBeenCalledTimes(1);
     });
+
+    it('rejects an invalid retry JPEG before registry or object operations', async () => {
+        const objectClient = objects({
+            create: vi.fn(),
+            read: vi.fn(),
+        });
+        const registryClient = registry({ load: vi.fn() });
+        const store = createAnalysisV2MediaArtifactStore({ objects: objectClient, registry: registryClient });
+
+        await expect(store.persistBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId: 'candidate:invalid-retry',
+            media: [{ selectionId: 'profile:1', normalizedJpeg: Buffer.from([0x00]) }],
+        })).rejects.toThrow('ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR');
+        expect(registryClient.load).not.toHaveBeenCalled();
+        expect(objectClient.create).not.toHaveBeenCalled();
+        expect(objectClient.read).not.toHaveBeenCalled();
+    });
 });
 
 describe('Google Cloud private media object adapter', () => {
