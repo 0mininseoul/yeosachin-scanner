@@ -16,7 +16,7 @@ const SAFE_OBJECT = /^[a-z0-9][a-z0-9._/-]{0,190}$/;
 const MAX_ENCRYPTED_BUNDLE_BYTES =
     Math.ceil(272 * 1024 * 1024 * 4 / 3) + 4_096;
 const ADC_REFRESH_SKEW_MS = 60_000;
-const UNSAFE_KEY = /(?:user_?name|full_?name|bio|caption|url|prompt|base64|raw|error|token|secret|request_?id)/i;
+const UNSAFE_KEY = /(?:user_?name|full_?name|bio|caption|url|prompt|base64|raw|error|token|secret|request_?id|^handle$|^terminal$)/i;
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
 function unsafeJsonValue(value: unknown): boolean {

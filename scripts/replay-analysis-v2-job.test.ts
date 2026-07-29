@@ -8,6 +8,7 @@ import {
     readFile,
     rename,
     rm,
+    symlink,
     unlink,
     writeFile,
 } from 'node:fs/promises';
@@ -127,6 +128,20 @@ async function actualV212SafeLine(): Promise<string> {
     return lines[0]!;
 }
 
+async function actualDiagnosticV212SafeLine(): Promise<string> {
+    const actual = JSON.parse(await actualV212SafeLine());
+    actual.diagnostic_partial_coverage_override = {
+        used: true,
+        retained_profiles: 49,
+        source_profiles: 50,
+        retained_media: 49,
+        exact_selected_media: 50,
+        profile_retention_bps: 9_800,
+        media_retention_bps: 9_800,
+    };
+    return JSON.stringify(actual);
+}
+
 describe('Cloud Run analysis V2 replay job', () => {
     it.each([
         ['CLOUD_RUN_TASK_COUNT', '2'],
@@ -216,10 +231,11 @@ describe('Cloud Run analysis V2 replay job', () => {
             expect(line).toBe(`${safeLine}\n`);
         });
         const cleanup = vi.fn(async () => { events.push('cleanup'); });
-        const safeLine = await actualV212SafeLine();
+        const safeLine = await actualDiagnosticV212SafeLine();
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
+            bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({
                 bundle: {
                     schemaVersion: 2,
@@ -284,19 +300,192 @@ describe('Cloud Run analysis V2 replay job', () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
         } = await import('./replay-analysis-v2-job');
-        const actual = JSON.parse(await actualV212SafeLine());
-        actual.diagnostic_partial_coverage_override = {
-            used: true,
-            retained_profiles: 49,
-            source_profiles: 50,
-            retained_media: 49,
-            exact_selected_media: 50,
-            profile_retention_bps: 9_800,
-            media_retention_bps: 9_800,
+        const raw = await actualDiagnosticV212SafeLine();
+
+        expect(validateReplayAnalysisV2JobTerminalLine(raw)).toBe(raw);
+    });
+
+    it('accepts only the enumerated aggregate map keys', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV212SafeLine());
+        actual.stages.genderTriage.failure_disposition = {
+            success: 1,
+            rate_limited: 1,
+            ambiguous: 1,
+            rejected: 1,
+            response_rejected: 1,
+            retry_exhausted: 1,
+            failed: 1,
+            capacity_skipped: 1,
+            cutoff: 1,
+        };
+        actual.stages.genderTriage.failure_kind = {
+            http_408: 1,
+            http_429: 1,
+            http_4xx: 1,
+            http_5xx: 1,
+            transport: 1,
+            unknown_sdk: 1,
+        };
+        actual.gender_quality.triage.outcome = {
+            ok: 1,
+            rate_limited: 1,
+            retry_exhausted: 1,
+            rejected: 1,
+            failed: 1,
+            capacity_skipped: 1,
+        };
+        actual.gender_quality.triage.source = {
+            checkpoint: 1,
+            safe_fallback: 1,
+            unknown: 1,
+            non_ok: 1,
+        };
+        actual.gender_quality.triage.genderConfidence = {
+            'female:low': 1,
+            'female:medium': 1,
+            'female:high': 1,
+            'male:low': 1,
+            'male:medium': 1,
+            'male:high': 1,
+            'unknown:low': 1,
+            'unknown:medium': 1,
+            'unknown:high': 1,
+        };
+        actual.gender_quality.triage.accountContext = {
+            personal: 1,
+            individual_creator: 1,
+            official_group_or_brand: 1,
+            uncertain: 1,
+            absent: 1,
+        };
+        actual.gender_quality.feature.admission = {
+            eligible: 1,
+            nonpersonal_or_official: 1,
+            unsupported_unknown: 1,
+        };
+        actual.gender_quality.feature.finalDecision = {
+            verified_female: 1,
+            verified_non_female: 1,
+            unresolved: 1,
+            unresolved_stage_conflict: 1,
+        };
+        actual.gender_quality.feature.accountContext = {
+            personal: 1,
+            individual_creator: 1,
+            official_group_or_brand: 1,
+            uncertain: 1,
+        };
+        actual.gender_quality.feature.routeTerminal = {
+            not_routed_high_male: 1,
+            excluded_official: 1,
+            completed: 1,
+            provider_non_ok: 1,
+            triage_non_ok: 1,
+        };
+        actual.gender_quality.resolver.outcome = {
+            official_excluded: 1,
+            cutoff: 1,
+            ok: 1,
+            rate_limited: 1,
+            retry_exhausted: 1,
+            rejected: 1,
+            failed: 1,
+            capacity_skipped: 1,
+        };
+        actual.gender_quality.finalClassificationSource = {
+            triage: 1,
+            feature: 1,
+            gender_resolution: 1,
+            unknown: 1,
+            unavailable: 1,
+            triage_non_ok: 1,
         };
         const raw = JSON.stringify(actual);
 
         expect(validateReplayAnalysisV2JobTerminalLine(raw)).toBe(raw);
+    });
+
+    it.each([
+        ['stage disposition', ['stages', 'genderTriage', 'failure_disposition']],
+        ['stage failure kind', ['stages', 'genderTriage', 'failure_kind']],
+        ['triage outcome', ['gender_quality', 'triage', 'outcome']],
+        ['triage source', ['gender_quality', 'triage', 'source']],
+        ['triage confidence', ['gender_quality', 'triage', 'genderConfidence']],
+        ['triage context', ['gender_quality', 'triage', 'accountContext']],
+        ['feature admission', ['gender_quality', 'feature', 'admission']],
+        ['feature decision', ['gender_quality', 'feature', 'finalDecision']],
+        ['feature context', ['gender_quality', 'feature', 'accountContext']],
+        ['feature terminal', ['gender_quality', 'feature', 'routeTerminal']],
+        ['resolver outcome', ['gender_quality', 'resolver', 'outcome']],
+        ['final source', ['gender_quality', 'finalClassificationSource']],
+    ])('rejects handle-like aggregate keys in %s', async (
+        _name,
+        path,
+    ) => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        for (const key of ['handle', 'terminal']) {
+            const actual = JSON.parse(
+                await actualDiagnosticV212SafeLine(),
+            );
+            let target = actual;
+            for (const segment of path) target = target[segment];
+            target[key] = 1;
+
+            expect(() => validateReplayAnalysisV2JobTerminalLine(
+                JSON.stringify(actual),
+            )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+        }
+    });
+
+    it.each([
+        ['benchmark scope', (report: Record<string, unknown>) => {
+            report.benchmark_scope = 'ai-only-exact-replay';
+        }],
+        ['source plan', (report: Record<string, unknown>) => {
+            report.source_plan = 'plus';
+        }],
+        ['source pipeline', (report: Record<string, unknown>) => {
+            report.source_pipeline = 'v3';
+        }],
+        ['source AI', (report: Record<string, unknown>) => {
+            report.source_ai_policy = 'ai-stage-policy-v2.8';
+        }],
+        ['source risk', (report: Record<string, unknown>) => {
+            report.source_risk_policy = 'risk-policy-v2.4';
+        }],
+        ['evaluation AI', (report: Record<string, unknown>) => {
+            report.evaluation_ai_policy = null;
+        }],
+        ['replay AI', (report: Record<string, unknown>) => {
+            report.replay_ai_policy = 'ai-stage-policy-v2.11';
+        }],
+        ['not exact', (report: Record<string, unknown>) => {
+            delete report.not_exact;
+        }],
+        ['media substitution', (report: Record<string, unknown>) => {
+            delete report.no_media_substitution;
+        }],
+        ['diagnostic override', (report: Record<string, unknown>) => {
+            delete report.diagnostic_partial_coverage_override;
+        }],
+    ] as const)('rejects replay job provenance drift: %s', async (
+        _name,
+        mutate,
+    ) => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV212SafeLine());
+        mutate(actual);
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     });
 
     it('rejects PII-shaped nested fields even when the top-level report is valid', async () => {
@@ -313,18 +502,26 @@ describe('Cloud Run analysis V2 replay job', () => {
 
     it('builds the recursive stateless graph and boots the real ESM artifact', async () => {
         const outputDirectory = await mkdtemp(join(
-            process.cwd(),
+            tmpdir(),
             '.replay-job-build-',
         ));
         const outfile = join(outputDirectory, 'replay-job.mjs');
         const metafile = join(outputDirectory, 'metafile.json');
+        const runtimeManifest = join(outputDirectory, 'runtime.json');
         try {
+            await symlink(
+                join(process.cwd(), 'node_modules'),
+                join(outputDirectory, 'node_modules'),
+                'dir',
+            );
             await execFileAsync(process.execPath, [
                 'scripts/build-replay-analysis-v2-job.mjs',
                 '--outfile',
                 outfile,
                 '--metafile',
                 metafile,
+                '--runtime-manifest',
+                runtimeManifest,
             ], {
                 cwd: process.cwd(),
                 env: {
@@ -335,16 +532,43 @@ describe('Cloud Run analysis V2 replay job', () => {
             const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
                 inputs: Record<string, unknown>;
             };
+            const runtime = JSON.parse(await readFile(
+                runtimeManifest,
+                'utf8',
+            ));
+            const {
+                verifyReplayAnalysisV2JobRuntimeManifest,
+            } = await import('./build-replay-analysis-v2-job.mjs');
+            const lockfile = JSON.parse(await readFile(
+                join(process.cwd(), 'package-lock.json'),
+                'utf8',
+            ));
+            expect(() => verifyReplayAnalysisV2JobRuntimeManifest(
+                runtime,
+                lockfile,
+            )).not.toThrow();
             const graph = JSON.stringify(metadata);
             expect(graph).not.toMatch(
                 /supabase\/admin|supabase-js|result-store|attempt-store|lease-store|apify|(?:^|[/_-])r2(?:[/_.-]|$)|@google-cloud\/tasks|cloud-tasks|analysis-tasks|tasks-client|tasks-store|app\/api/i,
             );
+            expect(runtime).toMatchObject({
+                node: '24.x',
+                conditions: ['react-server'],
+                externalPackages: {
+                    '@google/genai': { version: '2.7.0' },
+                    sharp: { version: '0.35.3' },
+                    zod: { version: '4.3.6' },
+                },
+            });
+            for (const path of [outfile, metafile, runtimeManifest]) {
+                expect((await lstat(path)).mode & 0o777).toBe(0o600);
+            }
 
             const boot = await execFileAsync(process.execPath, [
                 '--conditions=react-server',
                 outfile,
             ], {
-                cwd: process.cwd(),
+                cwd: outputDirectory,
                 env: {
                     NODE_ENV: 'test',
                     PATH: process.env.PATH,
@@ -433,6 +657,46 @@ describe('Cloud Run analysis V2 replay job', () => {
         }
     });
 
+    it('makes exact owned local cleanup idempotent without deleting a replacement', async () => {
+        const {
+            removeReplayAnalysisV2JobLocalArtifact,
+        } = await import('./replay-analysis-v2-job');
+        const directory = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-idempotent-cleanup-',
+        ));
+        const artifactPath = join(directory, 'input.key');
+        try {
+            await writeFile(artifactPath, 'owned', { mode: 0o600 });
+            const owned = await lstat(artifactPath);
+            const identity = {
+                device: owned.dev,
+                inode: owned.ino,
+            };
+
+            await removeReplayAnalysisV2JobLocalArtifact(
+                artifactPath,
+                identity,
+            );
+            await expect(removeReplayAnalysisV2JobLocalArtifact(
+                artifactPath,
+                identity,
+            )).resolves.toBeUndefined();
+
+            await writeFile(artifactPath, 'replacement', { mode: 0o600 });
+            await expect(removeReplayAnalysisV2JobLocalArtifact(
+                artifactPath,
+                identity,
+            )).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_RACE',
+            );
+            await expect(readFile(artifactPath, 'utf8'))
+                .resolves.toBe('replacement');
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
     it('does not swallow a failure-cleanup inode race', async () => {
         const {
             loadReplayAnalysisV2JobArtifacts,
@@ -479,10 +743,11 @@ describe('Cloud Run analysis V2 replay job', () => {
         );
         const events: string[] = [];
         const cleanup = vi.fn();
-        const safeLine = await actualV212SafeLine();
+        const safeLine = await actualDiagnosticV212SafeLine();
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
+            bindLocalCleanup: () => async () => undefined,
             installSignalCleanup: vi.fn(() => {
                 events.push('signals');
                 return () => undefined;
@@ -505,6 +770,65 @@ describe('Cloud Run analysis V2 replay job', () => {
         });
 
         expect(events.slice(0, 2)).toEqual(['signals', 'load']);
+    });
+
+    it('binds owned cleanup before load and awaits final cleanup before uninstall', async () => {
+        const { runReplayAnalysisV2Job } = await import(
+            './replay-analysis-v2-job'
+        );
+        const events: string[] = [];
+        const initialOwnedCleanup = vi.fn(async () => {
+            events.push('initial-cleanup');
+        });
+        const loadedCleanup = vi.fn(async () => {
+            events.push('loaded-cleanup');
+        });
+        let signalCleanup: (() => Promise<void>) | undefined;
+        const safeLine = await actualDiagnosticV212SafeLine();
+
+        await runReplayAnalysisV2Job({
+            env: validEnv(),
+            bindLocalCleanup: vi.fn(() => {
+                events.push('bind');
+                return initialOwnedCleanup;
+            }),
+            installSignalCleanup: vi.fn(input => {
+                events.push('signals');
+                signalCleanup = input.cleanup;
+                return () => {
+                    events.push('uninstall');
+                };
+            }),
+            loadArtifacts: vi.fn(async () => {
+                events.push('load');
+                await signalCleanup?.();
+                events.push('after-initial-signal');
+                return {
+                    bundle: { ...v212Bundle(), expired: false },
+                    cleanup: loadedCleanup,
+                };
+            }),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            createRunner: vi.fn(() => Object.freeze({})),
+            runReplay: vi.fn(async input => input.write(safeLine)),
+            writeStdout: vi.fn(),
+        });
+
+        expect(initialOwnedCleanup).toHaveBeenCalledOnce();
+        expect(loadedCleanup).toHaveBeenCalledOnce();
+        expect(events).toEqual([
+            'bind',
+            'signals',
+            'load',
+            'initial-cleanup',
+            'after-initial-signal',
+            'loaded-cleanup',
+            'uninstall',
+        ]);
     });
 
     it('uses a fail-closed persistence stub in the replay build', async () => {
@@ -546,6 +870,7 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         await expect(runReplayAnalysisV2Job({
             env: validEnv(),
+            bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({ bundle, cleanup })),
             createGcsClient: () => ({
                 downloadBundle: vi.fn(),
@@ -569,6 +894,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         const cleanup = vi.fn();
         await expect(runReplayAnalysisV2Job({
             env: validEnv(),
+            bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({
                 bundle: { ...v212Bundle(), expired: false },
                 cleanup,
@@ -598,6 +924,7 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         await expect(runReplayAnalysisV2Job({
             env: validEnv(),
+            bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({
                 bundle: {
                     schemaVersion: 2,

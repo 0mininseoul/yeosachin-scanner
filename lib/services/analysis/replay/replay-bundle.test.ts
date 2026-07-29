@@ -513,7 +513,7 @@ describe('analysis V2 replay bundle', () => {
         const handlers = new Map<string, () => void>();
         const exit = vi.fn();
         const processLike = {
-            once: vi.fn((signal: string, handler: () => void) => {
+            on: vi.fn((signal: string, handler: () => void) => {
                 handlers.set(signal, handler);
                 return processLike;
             }),

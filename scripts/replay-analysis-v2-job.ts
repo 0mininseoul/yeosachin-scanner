@@ -1,5 +1,9 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { constants as fileConstants } from 'node:fs';
+import {
+    constants as fileConstants,
+    lstatSync,
+    realpathSync,
+} from 'node:fs';
 import {
     link,
     lstat,
@@ -59,10 +63,93 @@ const FALSE_GATES = [
 
 const aggregateCount = z.number().int().min(0).max(100_000_000);
 const aggregateRate = z.number().finite().min(0).max(1);
-const aggregateMap = z.record(
-    z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/),
-    aggregateCount,
-);
+const replayOutcomeCounts = z.object({
+    ok: aggregateCount.optional(),
+    rate_limited: aggregateCount.optional(),
+    retry_exhausted: aggregateCount.optional(),
+    rejected: aggregateCount.optional(),
+    failed: aggregateCount.optional(),
+    capacity_skipped: aggregateCount.optional(),
+}).strict();
+const stageFailureDispositionCounts = z.object({
+    success: aggregateCount.optional(),
+    rate_limited: aggregateCount.optional(),
+    ambiguous: aggregateCount.optional(),
+    rejected: aggregateCount.optional(),
+    response_rejected: aggregateCount.optional(),
+    retry_exhausted: aggregateCount.optional(),
+    failed: aggregateCount.optional(),
+    capacity_skipped: aggregateCount.optional(),
+    cutoff: aggregateCount.optional(),
+}).strict();
+const stageFailureKindCounts = z.object({
+    http_408: aggregateCount.optional(),
+    http_429: aggregateCount.optional(),
+    http_4xx: aggregateCount.optional(),
+    http_5xx: aggregateCount.optional(),
+    transport: aggregateCount.optional(),
+    unknown_sdk: aggregateCount.optional(),
+}).strict();
+const triageSourceCounts = z.object({
+    checkpoint: aggregateCount.optional(),
+    safe_fallback: aggregateCount.optional(),
+    unknown: aggregateCount.optional(),
+    non_ok: aggregateCount.optional(),
+}).strict();
+const genderConfidenceCounts = z.object({
+    'female:low': aggregateCount.optional(),
+    'female:medium': aggregateCount.optional(),
+    'female:high': aggregateCount.optional(),
+    'male:low': aggregateCount.optional(),
+    'male:medium': aggregateCount.optional(),
+    'male:high': aggregateCount.optional(),
+    'unknown:low': aggregateCount.optional(),
+    'unknown:medium': aggregateCount.optional(),
+    'unknown:high': aggregateCount.optional(),
+}).strict();
+const triageAccountContextCounts = z.object({
+    personal: aggregateCount.optional(),
+    individual_creator: aggregateCount.optional(),
+    official_group_or_brand: aggregateCount.optional(),
+    uncertain: aggregateCount.optional(),
+    absent: aggregateCount.optional(),
+}).strict();
+const featureAdmissionCounts = z.object({
+    eligible: aggregateCount.optional(),
+    nonpersonal_or_official: aggregateCount.optional(),
+    unsupported_unknown: aggregateCount.optional(),
+}).strict();
+const featureFinalDecisionCounts = z.object({
+    verified_female: aggregateCount.optional(),
+    verified_non_female: aggregateCount.optional(),
+    unresolved: aggregateCount.optional(),
+    unresolved_stage_conflict: aggregateCount.optional(),
+}).strict();
+const featureAccountContextCounts = z.object({
+    personal: aggregateCount.optional(),
+    individual_creator: aggregateCount.optional(),
+    official_group_or_brand: aggregateCount.optional(),
+    uncertain: aggregateCount.optional(),
+}).strict();
+const featureRouteTerminalCounts = z.object({
+    not_routed_high_male: aggregateCount.optional(),
+    excluded_official: aggregateCount.optional(),
+    completed: aggregateCount.optional(),
+    provider_non_ok: aggregateCount.optional(),
+    triage_non_ok: aggregateCount.optional(),
+}).strict();
+const resolverOutcomeCounts = replayOutcomeCounts.extend({
+    official_excluded: aggregateCount.optional(),
+    cutoff: aggregateCount.optional(),
+}).strict();
+const finalClassificationSourceCounts = z.object({
+    triage: aggregateCount.optional(),
+    feature: aggregateCount.optional(),
+    gender_resolution: aggregateCount.optional(),
+    unknown: aggregateCount.optional(),
+    unavailable: aggregateCount.optional(),
+    triage_non_ok: aggregateCount.optional(),
+}).strict();
 const stageMetricsSchema = z.object({
     calls: aggregateCount,
     rate_limited: aggregateCount,
@@ -70,26 +157,21 @@ const stageMetricsSchema = z.object({
     mean_latency_ms: z.number().finite().min(0).max(3_600_000),
     p50_latency_ms: z.number().finite().min(0).max(3_600_000),
     p95_latency_ms: z.number().finite().min(0).max(3_600_000),
-    failure_disposition: aggregateMap,
-    failure_kind: aggregateMap,
+    failure_disposition: stageFailureDispositionCounts,
+    failure_kind: stageFailureKindCounts,
 }).strict();
 const replayAnalysisV2JobTerminalSchema = z.object({
     status: z.literal('ok'),
-    benchmark_scope: z.enum([
-        'ai-only-exact-replay',
-        'ai-only-historical-partial-available',
-    ]),
-    source_plan: z.enum(['standard', 'plus']),
+    benchmark_scope: z.literal('ai-only-historical-partial-available'),
+    source_plan: z.literal('standard'),
     source_pipeline: z.literal('v2'),
-    source_ai_policy: z.string().regex(/^[a-z0-9][a-z0-9.-]{0,127}$/),
-    source_risk_policy: z.string().regex(/^[a-z0-9][a-z0-9.-]{0,127}$/),
-    evaluation_ai_policy: z.string()
-        .regex(/^[a-z0-9][a-z0-9.-]{0,127}$/)
-        .nullable(),
+    source_ai_policy: z.literal('ai-stage-policy-v2.7'),
+    source_risk_policy: z.literal('risk-policy-v2.3'),
+    evaluation_ai_policy: z.literal('ai-stage-policy-v2.12'),
     replay_ai_policy: z.literal('ai-stage-policy-v2.12'),
     full_e2e_evidence: z.literal(false),
-    not_exact: z.literal(true).optional(),
-    no_media_substitution: z.literal(true).optional(),
+    not_exact: z.literal(true),
+    no_media_substitution: z.literal(true),
     diagnostic_partial_coverage_override: z.object({
         used: z.literal(true),
         retained_profiles: aggregateCount,
@@ -98,7 +180,7 @@ const replayAnalysisV2JobTerminalSchema = z.object({
         exact_selected_media: aggregateCount,
         profile_retention_bps: z.number().int().min(0).max(10_000),
         media_retention_bps: z.number().int().min(0).max(10_000),
-    }).strict().optional(),
+    }).strict(),
     total_elapsed_ms: z.number().finite().min(0).max(86_400_000),
     stages: z.object({
         genderTriage: stageMetricsSchema,
@@ -140,23 +222,23 @@ const replayAnalysisV2JobTerminalSchema = z.object({
         triage: z.object({
             nonOk: aggregateCount,
             capacity: aggregateCount,
-            outcome: aggregateMap,
-            source: aggregateMap,
-            genderConfidence: aggregateMap,
-            accountContext: aggregateMap,
+            outcome: replayOutcomeCounts,
+            source: triageSourceCounts,
+            genderConfidence: genderConfidenceCounts,
+            accountContext: triageAccountContextCounts,
         }).strict(),
         feature: z.object({
-            admission: aggregateMap,
-            finalDecision: aggregateMap,
-            accountContext: aggregateMap,
-            routeTerminal: aggregateMap,
+            admission: featureAdmissionCounts,
+            finalDecision: featureFinalDecisionCounts,
+            accountContext: featureAccountContextCounts,
+            routeTerminal: featureRouteTerminalCounts,
         }).strict(),
         resolver: z.object({
             earlyAdmission: aggregateCount,
             lateAdmission: aggregateCount,
-            outcome: aggregateMap,
+            outcome: resolverOutcomeCounts,
         }).strict(),
-        finalClassificationSource: aggregateMap,
+        finalClassificationSource: finalClassificationSourceCounts,
         qualityGate: z.object({
             observedUnknownRate: aggregateRate,
             worstCaseUnknownRate: aggregateRate,
@@ -292,7 +374,16 @@ export async function removeReplayAnalysisV2JobLocalArtifact(
 ): Promise<void> {
     if (!identity) return;
     const quarantinePath = `${path}.cleanup-${randomUUID()}`;
-    await rename(path, quarantinePath);
+    try {
+        await rename(path, quarantinePath);
+    } catch (error) {
+        if (
+            error instanceof Error
+            && 'code' in error
+            && error.code === 'ENOENT'
+        ) return;
+        throw error;
+    }
     const quarantined = await lstat(quarantinePath);
     if (
         quarantined.dev !== identity.device
@@ -499,8 +590,118 @@ interface ReplayAnalysisV2JobDependencies {
         diagnosticPartialCoverageCapability: object;
         write: (line: string) => void;
     }) => Promise<unknown>;
+    bindLocalCleanup?: (
+        config: ReplayAnalysisV2JobConfig,
+    ) => () => Promise<void>;
     installSignalCleanup?: typeof installReplayArtifactSignalCleanup;
     writeStdout?: (line: string) => void;
+}
+
+function localArtifactInvalid(): never {
+    throw new Error('ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_INVALID');
+}
+
+function bindReplayAnalysisV2JobLocalCleanup(
+    config: ReplayAnalysisV2JobConfig,
+): () => Promise<void> {
+    const bundlePath = resolve(config.bundlePath);
+    const keyPath = resolve(config.keyPath);
+    const directory = dirname(bundlePath);
+    if (
+        dirname(keyPath) !== directory
+        || !basename(bundlePath).endsWith('.enc')
+        || !basename(keyPath).endsWith('.key')
+    ) {
+        localArtifactInvalid();
+    }
+
+    let realDirectory: string;
+    let realTemporaryRoot: string;
+    let directoryStat: ReturnType<typeof lstatSync>;
+    let keyStat: ReturnType<typeof lstatSync>;
+    try {
+        realDirectory = realpathSync(directory);
+        realTemporaryRoot = realpathSync(tmpdir());
+        directoryStat = lstatSync(realDirectory);
+        keyStat = lstatSync(keyPath);
+    } catch {
+        localArtifactInvalid();
+    }
+    if (
+        !realDirectory.startsWith(`${realTemporaryRoot}${sep}`)
+        || !directoryStat.isDirectory()
+        || (directoryStat.mode & 0o777) !== 0o700
+        || !keyStat.isFile()
+        || keyStat.isSymbolicLink()
+        || (keyStat.mode & 0o777) !== 0o600
+    ) {
+        localArtifactInvalid();
+    }
+    try {
+        lstatSync(bundlePath);
+        localArtifactInvalid();
+    } catch (error) {
+        if (
+            !(error instanceof Error)
+            || !('code' in error)
+            || error.code !== 'ENOENT'
+        ) {
+            throw error;
+        }
+    }
+    const keyIdentity = {
+        device: keyStat.dev,
+        inode: keyStat.ino,
+    };
+    return async () => {
+        await Promise.all([
+            removeReplayAnalysisV2JobLocalArtifact(bundlePath),
+            removeReplayAnalysisV2JobLocalArtifact(
+                keyPath,
+                keyIdentity,
+            ),
+        ]);
+    };
+}
+
+function createCleanupCoordinator(
+    initialCleanup: () => Promise<void>,
+): {
+    cleanup: () => Promise<void>;
+    replace: (cleanup: () => Promise<void>) => void;
+} {
+    let cleanup = initialCleanup;
+    let generation = 0;
+    let completedGeneration = -1;
+    let active: Promise<void> | undefined;
+    return {
+        replace(nextCleanup) {
+            cleanup = nextCleanup;
+            generation += 1;
+        },
+        async cleanup() {
+            while (completedGeneration < generation) {
+                if (active) {
+                    await active;
+                    continue;
+                }
+                const runningGeneration = generation;
+                const running = Promise.resolve().then(() => cleanup());
+                active = running;
+                try {
+                    await running;
+                    completedGeneration = Math.max(
+                        completedGeneration,
+                        runningGeneration,
+                    );
+                } finally {
+                    if (active === running) {
+                        active = undefined;
+                    }
+                }
+            }
+        },
+    };
 }
 
 export async function runReplayAnalysisV2Job(
@@ -512,11 +713,13 @@ export async function runReplayAnalysisV2Job(
     const gcs = (dependencies.createGcsClient ?? (value => (
         createReplayJobGcsClient(value)
     )))(config);
-    let activeCleanup: () => Promise<void> = async () => undefined;
+    const initialCleanup = dependencies.bindLocalCleanup?.(config)
+        ?? bindReplayAnalysisV2JobLocalCleanup(config);
+    const cleanupCoordinator = createCleanupCoordinator(initialCleanup);
     const uninstallSignals = (
         dependencies.installSignalCleanup
             ?? installReplayArtifactSignalCleanup
-    )({ cleanup: () => activeCleanup() });
+    )({ cleanup: cleanupCoordinator.cleanup });
     let loaded: Awaited<ReturnType<
         typeof loadReplayAnalysisV2JobArtifacts
     >> | undefined;
@@ -525,9 +728,9 @@ export async function runReplayAnalysisV2Job(
         loaded = await (
             dependencies.loadArtifacts ?? loadReplayAnalysisV2JobArtifacts
         )(config, gcs, cleanup => {
-            activeCleanup = cleanup;
+            cleanupCoordinator.replace(cleanup);
         });
-        activeCleanup = loaded.cleanup;
+        cleanupCoordinator.replace(loaded.cleanup);
         const bundle = authenticatedV212Bundle(loaded.bundle);
         await gcs.createClaim(JSON.stringify({
             status: 'claimed',
@@ -578,8 +781,11 @@ export async function runReplayAnalysisV2Job(
         terminalLine = validateReplayAnalysisV2JobTerminalLine(terminalLine);
         await gcs.createReport(terminalLine);
     } finally {
-        uninstallSignals();
-        if (loaded) await loaded.cleanup();
+        try {
+            await cleanupCoordinator.cleanup();
+        } finally {
+            uninstallSignals();
+        }
     }
     (dependencies.writeStdout ?? (line => process.stdout.write(line)))(
         `${terminalLine}\n`,
@@ -588,7 +794,9 @@ export async function runReplayAnalysisV2Job(
 
 function isDirectExecution(): boolean {
     return Boolean(process.argv[1])
-        && import.meta.url === pathToFileURL(process.argv[1]!).href;
+        && import.meta.url === pathToFileURL(
+            realpathSync(process.argv[1]!),
+        ).href;
 }
 
 if (isDirectExecution()) {

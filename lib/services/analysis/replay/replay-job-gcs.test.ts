@@ -114,6 +114,24 @@ describe('replay job GCS JSON API client', () => {
         expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it.each(['handle', 'terminal'])(
+        'rejects handle-like aggregate key %s before ADC fetch',
+        async key => {
+            const fetchMock = vi.fn();
+            const client = createReplayJobGcsClient(baseConfig, {
+                fetch: fetchMock,
+            });
+
+            await expect(client.createReport(JSON.stringify({
+                status: 'ok',
+                aggregate: { [key]: 1 },
+            }))).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT',
+            );
+            expect(fetchMock).not.toHaveBeenCalled();
+        },
+    );
+
     it('refreshes ADC metadata tokens after their bounded lifetime', async () => {
         let now = 0;
         const fetchMock = vi.fn()

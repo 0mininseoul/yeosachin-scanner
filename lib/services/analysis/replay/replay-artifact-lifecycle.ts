@@ -1,7 +1,7 @@
 type ReplaySignal = 'SIGINT' | 'SIGTERM';
 
 export interface ReplaySignalProcess {
-    once(signal: ReplaySignal, handler: () => void): unknown;
+    on(signal: ReplaySignal, handler: () => void): unknown;
     off(signal: ReplaySignal, handler: () => void): unknown;
     exit(code: number): unknown;
 }
@@ -30,13 +30,15 @@ export function installReplayArtifactSignalCleanup(input: {
         const handler = () => {
             if (handling) return;
             handling = true;
-            uninstall();
             void input.cleanup()
                 .catch(() => undefined)
-                .finally(() => processLike.exit(exitCode));
+                .finally(() => {
+                    uninstall();
+                    processLike.exit(exitCode);
+                });
         };
         handlers.set(signal, handler);
-        processLike.once(signal, handler);
+        processLike.on(signal, handler);
     }
     return uninstall;
 }
