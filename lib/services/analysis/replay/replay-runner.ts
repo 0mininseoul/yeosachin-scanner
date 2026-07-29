@@ -1,4 +1,8 @@
 import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
+import {
+    GEMINI_GENERATION_FAILURE_KINDS,
+    type GeminiGenerationFailureKind,
+} from '@/lib/services/ai/gemini-generation-policy';
 import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-reconciliation';
 import {
     AI_STAGE_POLICY_V212_VERSION,
@@ -38,6 +42,8 @@ export interface ReplayInvocation<T> {
     calls?: number;
     rateLimited?: number;
     failureDisposition?: Readonly<Record<string, number>>;
+    failureKind?: Readonly<Partial<Record<GeminiGenerationFailureKind, number>>>;
+    triageSource?: 'checkpoint' | 'safe_fallback';
     attemptLatenciesMs?: readonly number[];
     attempts: number;
     retries: number;
@@ -94,10 +100,11 @@ export interface ReplayCaption { evidenceRefId: string; selectionId: string; tex
 export interface ReplayAttemptStart { attempt: number; retryCount: number; }
 export interface ReplayAttemptTelemetry extends ReplayAttemptStart {
     disposition: string;
+    failureKind?: GeminiGenerationFailureKind;
     latencyMs: number;
 }
 export interface ReplayStageMetrics {
-    calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: Record<string, number>;
+    calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: Record<string, number>; failureKind?: Partial<Record<GeminiGenerationFailureKind, number>>;
 }
 export interface AnalysisV2AiReplayReport {
     benchmarkScope: 'ai-only-exact-replay' | 'ai-only-historical-partial-available';
@@ -151,6 +158,7 @@ export interface AnalysisV2AiReplayReport {
             nonOk: number;
             capacity: number;
             outcome: Record<string, number>;
+            source: Record<string, number>;
             genderConfidence: Record<string, number>;
             accountContext: Record<string, number>;
         };
@@ -186,6 +194,7 @@ interface TrackedResolver {
         rateLimited: number;
         attemptLatenciesMs: number[];
         failureDisposition: Record<string, number>;
+        failureKind: Partial<Record<GeminiGenerationFailureKind, number>>;
         pendingAttemptStartedAt?: number;
     };
 }
@@ -290,6 +299,7 @@ function metrics(): ReplayStageMetrics {
         p50LatencyMs: 0,
         p95LatencyMs: 0,
         failureDisposition: {},
+        failureKind: {},
     };
 }
 
@@ -377,6 +387,12 @@ function collect(stage: ReplayStageMetrics, durations: number[], invocation: Rep
         stage.failureDisposition[disposition] =
             (stage.failureDisposition[disposition] ?? 0) + count;
     }
+    const failureKind = stage.failureKind ?? (stage.failureKind = {});
+    for (const kind of GEMINI_GENERATION_FAILURE_KINDS) {
+        const count = invocation.failureKind?.[kind];
+        if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) continue;
+        failureKind[kind] = (failureKind[kind] ?? 0) + count;
+    }
     if (invocation.outcome !== 'ok' && recordedFailureEntries.length === 0) {
         stage.failureDisposition[invocation.outcome] =
             (stage.failureDisposition[invocation.outcome] ?? 0) + 1;
@@ -396,6 +412,12 @@ function collectCutoffResolver(
     )) {
         stage.failureDisposition[disposition] =
             (stage.failureDisposition[disposition] ?? 0) + count;
+    }
+    const failureKind = stage.failureKind ?? (stage.failureKind = {});
+    for (const kind of GEMINI_GENERATION_FAILURE_KINDS) {
+        const count = tracked.telemetry.failureKind[kind];
+        if (!count) continue;
+        failureKind[kind] = (failureKind[kind] ?? 0) + count;
     }
     durations.push(...tracked.telemetry.attemptLatenciesMs);
     if (tracked.telemetry.pendingAttemptStartedAt !== undefined) {
@@ -531,6 +553,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                 p50_latency_ms: values.p50LatencyMs,
                 p95_latency_ms: values.p95LatencyMs,
                 failure_disposition: values.failureDisposition,
+                failure_kind: values.failureKind ?? {},
             },
         ])),
         gender: report.gender,
@@ -659,6 +682,7 @@ export async function runAnalysisV2AiReplay(input: {
             nonOk: 0,
             capacity: 0,
             outcome: {} as Record<string, number>,
+            source: {} as Record<string, number>,
             genderConfidence: {} as Record<string, number>,
             accountContext: {} as Record<string, number>,
         },
@@ -747,6 +771,7 @@ export async function runAnalysisV2AiReplay(input: {
         const processTriageResult = async (
             profile: typeof publicProfiles[number],
             triage: GenderTriageResult,
+            triageSource: 'checkpoint' | 'safe_fallback' | 'unknown',
         ) => {
             if (replayWorkFailed) return;
             const canonicalResolverMedia = mediaFor(
@@ -776,6 +801,8 @@ export async function runAnalysisV2AiReplay(input: {
                 const context = triage.v29AccountContext ?? 'absent';
                 const genderConfidence = `${triage.assessment.inferredGender}:${triage.assessment.confidence}`;
                 genderQuality.triage.outcome.ok = (genderQuality.triage.outcome.ok ?? 0) + 1;
+                genderQuality.triage.source[triageSource] =
+                    (genderQuality.triage.source[triageSource] ?? 0) + 1;
                 genderQuality.triage.genderConfidence[genderConfidence] =
                     (genderQuality.triage.genderConfidence[genderConfidence] ?? 0) + 1;
                 genderQuality.triage.accountContext[context] =
@@ -845,6 +872,7 @@ export async function runAnalysisV2AiReplay(input: {
                         rateLimited: 0,
                         attemptLatenciesMs: [],
                         failureDisposition: {},
+                        failureKind: {},
                         pendingAttemptStartedAt: undefined,
                     },
                 };
@@ -876,6 +904,11 @@ export async function runAnalysisV2AiReplay(input: {
                                 tracked.telemetry.failureDisposition;
                             failures[value.disposition] =
                                 (failures[value.disposition] ?? 0) + 1;
+                        }
+                        if (value.failureKind) {
+                            const kinds = tracked.telemetry.failureKind;
+                            kinds[value.failureKind] =
+                                (kinds[value.failureKind] ?? 0) + 1;
                         }
                     },
                 });
@@ -985,6 +1018,8 @@ export async function runAnalysisV2AiReplay(input: {
                         genderQuality.triage.nonOk++;
                         genderQuality.triage.outcome[triage.outcome] =
                             (genderQuality.triage.outcome[triage.outcome] ?? 0) + 1;
+                        genderQuality.triage.source.non_ok =
+                            (genderQuality.triage.source.non_ok ?? 0) + 1;
                         if (triage.outcome === 'capacity_skipped') genderQuality.triage.capacity++;
                         genderQuality.finalClassificationSource.triage_non_ok =
                             (genderQuality.finalClassificationSource.triage_non_ok ?? 0) + 1;
@@ -994,7 +1029,11 @@ export async function runAnalysisV2AiReplay(input: {
                     gender.unknown++;
                     return;
                 }
-                await processTriageResult(profile, triage.value);
+                await processTriageResult(
+                    profile,
+                    triage.value,
+                    triage.triageSource ?? 'unknown',
+                );
             },
         ));
         try {
@@ -1128,6 +1167,7 @@ export async function runAnalysisV2AiReplay(input: {
             .reduce((total, value) => total + value, 0);
         const observedPublic = input.bundle.profiles.filter(profile => !profile.isPrivate).length;
         const triageOutcomes = sum(genderQuality.triage.outcome);
+        const triageSources = sum(genderQuality.triage.source);
         const finalSources = sum(genderQuality.finalClassificationSource);
         const resolverAdmissions = genderQuality.resolver.earlyAdmission
             + genderQuality.resolver.lateAdmission;
@@ -1140,6 +1180,7 @@ export async function runAnalysisV2AiReplay(input: {
         if (
             total !== observedPublic
             || triageOutcomes !== observedPublic
+            || triageSources !== observedPublic
             || finalSources !== observedPublic
             || resolverAdmissions !== resolverOutcomes
             || featureRouteTerminals !== observedPublic

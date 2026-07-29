@@ -26,6 +26,8 @@ import {
     AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
     AI_RATE_LIMIT_ERROR_PREFIX,
     classifyGeminiGenerationError,
+    classifyGeminiGenerationFailureKind,
+    type GeminiGenerationFailureKind,
 } from './gemini-generation-policy';
 import {
     AI_STAGE_POLICY_VERSION,
@@ -297,6 +299,7 @@ export interface GeminiAttemptTelemetry extends GeminiRequestTelemetry {
     attempt: number;
     retryCount: number;
     disposition: GeminiAttemptDisposition;
+    failureKind?: GeminiGenerationFailureKind;
     finishReason: string | null;
     responseRejection?: GeminiResponseValidationDiagnostics;
 }
@@ -1035,6 +1038,7 @@ export async function analyzeWithGemini<T>(
                     throw generationError;
                 }
                 const disposition = classifyGeminiGenerationError(generationError);
+                const failureKind = classifyGeminiGenerationFailureKind(generationError);
                 await emitAttemptTelemetry({
                     tokenUsage: null,
                     usageComplete: false,
@@ -1053,6 +1057,7 @@ export async function analyzeWithGemini<T>(
                     attempt: attemptNumber,
                     retryCount: attemptNumber - 1,
                     disposition,
+                    failureKind,
                     finishReason: null,
                 }, onAttemptTelemetry);
                 throw sanitizeGenerationError(generationError);

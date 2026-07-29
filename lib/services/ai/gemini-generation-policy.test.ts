@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
     classifyGeminiGenerationError,
+    classifyGeminiGenerationFailureKind,
     isAmbiguousGeminiGenerationError,
     isRecoverableGeminiResponseError,
 } from './gemini-generation-policy';
 
 describe('classifyGeminiGenerationError', () => {
+    it.each([
+        [{ cause: { response: { status: '408' } } }, 'http_408'],
+        [{ cause: { statusCode: 429 } }, 'http_429'],
+        [{ status: 418 }, 'http_4xx'],
+        [{ response: { status: 503 } }, 'http_5xx'],
+        [new Error('fetch failed: ECONNRESET api-key=raw-secret'), 'transport'],
+        [new Error('opaque SDK failure raw-secret'), 'unknown_sdk'],
+    ] as const)('classifies a bounded safe generation failure kind', (error, expected) => {
+        expect(classifyGeminiGenerationFailureKind(error)).toBe(expected);
+        expect(classifyGeminiGenerationFailureKind(error)).not.toContain('raw-secret');
+    });
+
     it('only marks an explicit rate-limit rejection as retryable', () => {
         expect(classifyGeminiGenerationError({ status: 429, message: 'RESOURCE_EXHAUSTED' }))
             .toBe('rate_limited');

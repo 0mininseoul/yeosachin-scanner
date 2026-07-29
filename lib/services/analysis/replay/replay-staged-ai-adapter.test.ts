@@ -445,8 +445,28 @@ describe('replay staged AI adapter telemetry', () => {
         mocks.createGenderTriageMicrobatchResultIdentity.mockReturnValue({
             operationKey: 'ambiguous-batch',
         });
-        mocks.genderTriageMicrobatch.mockImplementation(async accounts => (
-            accounts.map((account: { accountId: string }) => ({
+        mocks.genderTriageMicrobatch.mockImplementation(async (
+            accounts,
+            audit: {
+                onBeforeAttempt?: (value: {
+                    attempt: number; retryCount: number;
+                }) => void;
+                onAttemptTelemetry?: (value: {
+                    attempt: number; retryCount: number;
+                    disposition: 'ambiguous'; failureKind: 'transport';
+                    latencyMs: number;
+                }) => void;
+            },
+        ) => {
+            audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            audit.onAttemptTelemetry?.({
+                attempt: 1,
+                retryCount: 0,
+                disposition: 'ambiguous',
+                failureKind: 'transport',
+                latencyMs: 7,
+            });
+            return accounts.map((account: { accountId: string }) => ({
                 accountId: account.accountId,
                 source: 'safe_fallback',
                 result: {
@@ -458,8 +478,8 @@ describe('replay staged AI adapter telemetry', () => {
                     },
                     routingDecision: 'route_to_feature_analysis',
                 },
-            }))
-        ));
+            }));
+        });
         const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.9');
 
         const results = await Promise.all([1, 2].map(ordinal => adapter.triage!({
@@ -476,6 +496,14 @@ describe('replay staged AI adapter telemetry', () => {
         expect(results).toHaveLength(2);
         expect(results.every(result => result.outcome === 'ok' && result.value))
             .toBe(true);
+        expect(results.every(result => result.triageSource === 'safe_fallback'))
+            .toBe(true);
+        expect(results.reduce((total, result) => total + (result.calls ?? 0), 0))
+            .toBe(1);
+        expect(results.reduce(
+            (total, result) => total + (result.failureKind?.transport ?? 0),
+            0,
+        )).toBe(1);
         expect(mocks.genderTriage).not.toHaveBeenCalled();
     });
 

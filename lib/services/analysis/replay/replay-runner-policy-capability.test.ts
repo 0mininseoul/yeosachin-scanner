@@ -318,6 +318,7 @@ describe('replay staged AI runner policy capability', () => {
         expect(ai.genderResolution).toHaveBeenCalledOnce();
         expect(report.gender.female).toBe(1);
         expect(report.genderQuality).toMatchObject({
+            triage: { source: { checkpoint: 1 } },
             resolver: { earlyAdmission: 0, lateAdmission: 1 },
             qualityGate: { observedPass: true, worstCasePass: true },
         });
@@ -457,6 +458,99 @@ describe('replay staged AI runner policy capability', () => {
             .toEqual({ ambiguous: 1 });
         expect(serialized).not.toContain('AI_AMBIGUOUS_GENERATION_ERROR');
         expect(serialized).not.toContain('Gemini generation status');
+    });
+
+    it('reports safe failure kinds and account-level triage fallback source', async () => {
+        const rawSecret = 'socket hang up credential=raw-secret';
+        ai.genderTriageMicrobatch.mockImplementationOnce(async (
+            accounts: Array<{ accountId: string }>,
+            audit: {
+                onBeforeAttempt?: (value: { attempt: number; retryCount: number }) => void;
+                onAttemptTelemetry?: (value: {
+                    attempt: number; retryCount: number;
+                    disposition: string; failureKind: string; latencyMs: number;
+                }) => void;
+            },
+        ) => {
+            audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            audit.onAttemptTelemetry?.({
+                attempt: 1,
+                retryCount: 0,
+                disposition: 'ambiguous',
+                failureKind: 'transport',
+                latencyMs: 3,
+            });
+            return accounts.map(account => ({
+                accountId: account.accountId,
+                source: 'safe_fallback',
+                result: {
+                    assessment: {
+                        inferredGender: 'unknown', confidence: 'low',
+                        ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis',
+                    routingReason: 'conserve_female_recall',
+                    analyzedSelectionIds: ['m1'],
+                    v29AccountContext: 'uncertain',
+                },
+            }));
+        });
+        ai.featureAnalysis.mockImplementationOnce(async (
+            _input: unknown,
+            audit: {
+                onBeforeAttempt?: (value: { attempt: number; retryCount: number }) => void;
+                onAttemptTelemetry?: (value: {
+                    attempt: number; retryCount: number;
+                    disposition: string; failureKind: string; latencyMs: number;
+                }) => void;
+            },
+        ) => {
+            audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            audit.onAttemptTelemetry?.({
+                attempt: 1,
+                retryCount: 0,
+                disposition: 'ambiguous',
+                failureKind: 'unknown_sdk',
+                latencyMs: 5,
+            });
+            throw new Error(rawSecret);
+        });
+        let serialized = '';
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: historicalV212Bundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.12'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV212Evaluation,
+            write: line => { serialized = line; },
+        });
+
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+        expect(report.stages.genderTriage).toMatchObject({
+            failureDisposition: { ambiguous: 1 },
+            failureKind: { transport: 1 },
+        });
+        expect(report.stages.featureAnalysis).toMatchObject({
+            failureDisposition: { ambiguous: 1 },
+            failureKind: { unknown_sdk: 1 },
+        });
+        expect(report.genderQuality).toMatchObject({
+            triage: {
+                outcome: { ok: 1 },
+                source: { safe_fallback: 1 },
+            },
+            feature: { routeTerminal: { provider_non_ok: 1 } },
+            finalClassificationSource: { unknown: 1 },
+        });
+        expect(JSON.parse(serialized).stages).toMatchObject({
+            genderTriage: { failure_kind: { transport: 1 } },
+            featureAnalysis: { failure_kind: { unknown_sdk: 1 } },
+        });
+        expect(JSON.parse(serialized).gender_quality.triage.source)
+            .toEqual({ safe_fallback: 1 });
+        expect(serialized).not.toContain(rawSecret);
+        expect(serialized).not.toContain('credential');
     });
 
     it('reconciles a paid v2.12 resolver result that analyzed nine selected images', async () => {

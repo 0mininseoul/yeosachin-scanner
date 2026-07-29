@@ -127,6 +127,7 @@ describe('analyzeWithGemini generation retry policy', () => {
             attempt: 1,
             retryCount: 0,
             disposition: 'ambiguous',
+            failureKind: 'transport',
             tokenUsage: null,
             usageComplete: false,
             estimatedCostUsd: null,
@@ -148,6 +149,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).toHaveBeenCalledOnce();
         expect(attemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
             disposition: 'ambiguous',
+            failureKind: 'unknown_sdk',
         }));
     });
 
@@ -172,6 +174,8 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(attemptTelemetry).toHaveBeenCalledTimes(4);
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['rate_limited', 'rate_limited', 'rate_limited', 'rate_limited']);
+        expect(attemptTelemetry.mock.calls.map(call => call[0].failureKind))
+            .toEqual(['http_429', 'http_429', 'http_429', 'http_429']);
         expect(attemptTelemetry.mock.calls.map(call => call[0].retryCount))
             .toEqual([0, 1, 2, 3]);
     });
@@ -202,6 +206,10 @@ describe('analyzeWithGemini generation retry policy', () => {
         }));
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['rate_limited', 'success']);
+        expect(attemptTelemetry.mock.calls[0]![0]).toMatchObject({
+            failureKind: 'http_429',
+        });
+        expect(attemptTelemetry.mock.calls[1]![0]).not.toHaveProperty('failureKind');
     });
 
     it.each(['ai-stage-policy-v2.11', 'ai-stage-policy-v2.12'] as const)(
@@ -271,6 +279,7 @@ describe('analyzeWithGemini generation retry policy', () => {
                 thinkingTokens: 0,
             },
         }));
+        expect(attemptTelemetry.mock.calls[0]![0]).not.toHaveProperty('failureKind');
     });
 
     it('does not retry schema-invalid responses', async () => {

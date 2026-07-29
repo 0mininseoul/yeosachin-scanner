@@ -18,6 +18,7 @@ import {
     AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
     AI_RATE_LIMIT_ERROR_PREFIX,
     classifyGeminiGenerationError,
+    type GeminiGenerationFailureKind,
 } from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
@@ -70,6 +71,7 @@ interface InvocationTelemetry {
     attempts: number;
     rateLimited: number;
     failureDisposition: Record<string, number>;
+    failureKind: Partial<Record<GeminiGenerationFailureKind, number>>;
     attemptLatenciesMs: number[];
 }
 
@@ -165,6 +167,10 @@ function recordTerminal(state: InvocationTelemetry, value: GeminiAttemptTelemetr
         state.failureDisposition[value.disposition] =
             (state.failureDisposition[value.disposition] ?? 0) + 1;
     }
+    if (value.failureKind) {
+        state.failureKind[value.failureKind] =
+            (state.failureKind[value.failureKind] ?? 0) + 1;
+    }
 }
 
 function statelessAudit(
@@ -203,6 +209,7 @@ async function invoke<T>(
         attempts: 0,
         rateLimited: 0,
         failureDisposition: {},
+        failureKind: {},
         attemptLatenciesMs: [],
     };
     try {
@@ -213,6 +220,7 @@ async function invoke<T>(
             calls: state.calls,
             rateLimited: state.rateLimited,
             failureDisposition: state.failureDisposition,
+            failureKind: state.failureKind,
             attemptLatenciesMs: state.attemptLatenciesMs,
             attempts: state.attempts,
             retries: state.retries,
@@ -225,6 +233,7 @@ async function invoke<T>(
             calls: state.calls,
             rateLimited: state.rateLimited,
             failureDisposition: state.failureDisposition,
+            failureKind: state.failureKind,
             attemptLatenciesMs: state.attemptLatenciesMs,
             attempts: state.attempts || (state.calls ? 1 : 0),
             retries: state.retries,
@@ -419,21 +428,27 @@ export function createReplayStagedAiAdapter(
             });
             const byAccount = new Map(invocation.value?.map(result => [
                 result.accountId,
-                result.result,
+                result,
             ]));
             let metricsOwned = false;
             for (const member of batch) {
-                const result = byAccount.get(member.accountId);
+                const accountResult = byAccount.get(member.accountId);
                 for (const waiter of member.value.waiters) {
                     const ownsMetrics = !metricsOwned;
                     metricsOwned = true;
                     waiter.resolve({
                         outcome: invocation.outcome,
-                        ...(result ? { value: result } : {}),
+                        ...(accountResult ? {
+                            value: accountResult.result,
+                            triageSource: accountResult.source,
+                        } : {}),
                         calls: ownsMetrics ? invocation.calls : 0,
                         rateLimited: ownsMetrics ? invocation.rateLimited : 0,
                         failureDisposition: ownsMetrics
                             ? invocation.failureDisposition
+                            : {},
+                        failureKind: ownsMetrics
+                            ? invocation.failureKind
                             : {},
                         attemptLatenciesMs: ownsMetrics
                             ? invocation.attemptLatenciesMs
@@ -542,6 +557,9 @@ export function createReplayStagedAiAdapter(
                             retryCount: value.retryCount,
                             disposition: value.disposition,
                             latencyMs: value.latencyMs,
+                            ...(value.failureKind
+                                ? { failureKind: value.failureKind }
+                                : {}),
                         }),
                     }), {
                         abortSignal: input.signal,
@@ -568,7 +586,15 @@ export function createReplayStagedAiAdapter(
                 const identity = createGenderResolutionResultIdentity(aiInput, aiStagePolicyVersion);
                 return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
                     onAttemptStart: value => input.onAttemptStart?.({ attempt: value.attempt, retryCount: value.retryCount }),
-                    onAttemptTelemetry: value => input.onAttemptTelemetry?.({ attempt: value.attempt, retryCount: value.retryCount, disposition: value.disposition, latencyMs: value.latencyMs }),
+                    onAttemptTelemetry: value => input.onAttemptTelemetry?.({
+                        attempt: value.attempt,
+                        retryCount: value.retryCount,
+                        disposition: value.disposition,
+                        latencyMs: value.latencyMs,
+                        ...(value.failureKind
+                            ? { failureKind: value.failureKind }
+                            : {}),
+                    }),
                 }), { abortSignal: input.signal, aiStagePolicyVersion, replayCapability });
             })),
         privateNames: accounts => invoke(async state => {
