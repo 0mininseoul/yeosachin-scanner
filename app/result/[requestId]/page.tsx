@@ -597,10 +597,17 @@ export default function ResultPage({ params }: PageProps) {
 
         const target = sharePreparedRef.current;
         let kakaoError = '';
+        // The card repeats the headline the OG image already carries, and states
+        // the scope of the reading underneath. Nothing about what was found —
+        // that is what the recipient opens the link for.
+        const card = {
+            title: `${summary.targetFullName ?? summary.targetInstagramId}님의 위장 여사친 판독 결과`,
+            ...(counts ? { description: `맞팔 ${counts.mutual.toLocaleString()}명 중 모든 공개 계정들을 판독했습니다.` } : {}),
+        };
         // Everything was resolved before the tap, so the send stays inside the
         // tap's own task — which is the only way Kakao's sheet is allowed to open.
         if (target && shareToKakaoNow(
-            { ...target, title: '위장여사친 판독 결과' },
+            { ...target, ...card },
             reason => { kakaoError = reason; },
         )) {
             trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: 'kakao' });
@@ -628,7 +635,7 @@ export default function ResultPage({ params }: PageProps) {
         try {
             const resolved = target ?? await prepareShare();
             const channel = await shareResultToKakao(
-                { ...resolved, title: '위장여사친 판독 결과' },
+                { ...resolved, ...card },
                 {
                     ...(navigator.share
                         ? { share: (payload: { title: string; text: string; url: string }) => navigator.share(payload) }

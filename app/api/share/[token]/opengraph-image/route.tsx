@@ -26,6 +26,21 @@ const NO_STORE_HEADERS = {
     'CDN-Cache-Control': 'private, no-store',
     'Vercel-CDN-Cache-Control': 'private, no-store',
 } as const;
+
+/* The card image is fetched by chat clients, not by the owner's browser, and
+ * they give it a short deadline. Rendering it costs a DB read, an R2 read, a
+ * font read and a satori pass, so serving it no-store meant paying all of that
+ * on every single scrape.
+ *
+ * Only reachable with the 64-hex share token, and only while the owner keeps
+ * sharing enabled — revoking clears the token, so a cached copy can no longer
+ * be addressed. Kept off the browser cache so a revoked link does not linger in
+ * one, while the CDN absorbs the repeated scrapes. */
+const SHARE_IMAGE_CACHE_HEADERS = {
+    'Cache-Control': 'public, no-store, max-age=0',
+    'CDN-Cache-Control': 'public, max-age=600',
+    'Vercel-CDN-Cache-Control': 'public, max-age=600',
+} as const;
 const paperlogyFont = readFile(
     path.join(
         process.cwd(),
@@ -195,7 +210,7 @@ export async function GET(
             }],
         }
     );
-    for (const [name, value] of Object.entries(NO_STORE_HEADERS)) {
+    for (const [name, value] of Object.entries(SHARE_IMAGE_CACHE_HEADERS)) {
         response.headers.set(name, value);
     }
     return response;

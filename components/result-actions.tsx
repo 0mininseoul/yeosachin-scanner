@@ -32,13 +32,12 @@ function isPhone(): boolean {
   return /iphone|ipad|ipod|android/i.test(navigator.userAgent);
 }
 
-/* Copies without yielding the thread.
+/* Last-resort copy for browsers without the async clipboard API.
  *
- * `navigator.clipboard.writeText` returns a promise, and awaiting it before a
- * custom-scheme navigation costs us the gesture iOS needs to hand off to the
- * app. It also leaves us unable to say whether the copy worked until after the
- * hand-off has already happened. The selection dance below is synchronous, so
- * the answer is known before Instagram takes over.
+ * Not the first choice: on iOS `execCommand('copy')` reports success and copies
+ * nothing, which is worse than failing — it produced a "링크를 복사했어요"
+ * notice over an empty clipboard. Only reachable when `navigator.clipboard` is
+ * missing entirely, where a wrong answer beats no attempt.
  *
  * iOS ignores `select()` on a readonly field, hence the explicit Range. */
 function copyTextSync(text: string): boolean {
@@ -141,10 +140,11 @@ export function ResultActions({
 
   const copy = async () => {
     let ok = false;
-    try {
-      await navigator.clipboard.writeText(linkToShare);
-      ok = true;
-    } catch {
+    if (navigator.clipboard?.writeText) {
+      // A rejection here is the real answer; copyTextSync would only paper over
+      // it with a success it cannot deliver.
+      ok = await navigator.clipboard.writeText(linkToShare).then(() => true, () => false);
+    } else {
       ok = copyTextSync(linkToShare);
     }
     if (!ok) {
@@ -172,18 +172,16 @@ export function ResultActions({
      the browser; there is no reliable signal that a scheme handoff succeeded, so
      the platform decides instead of a guess. */
   const shareToInstagramDm = () => {
-    // Nothing may be awaited here: the app hand-off below needs this task's
-    // gesture, and the notice has to be queued before the app takes the screen.
-    const copied = copyTextSync(linkToShare);
-    if (!copied) void navigator.clipboard?.writeText(linkToShare).catch(() => {});
+    /* Nothing may be awaited here: the app hand-off below needs this task's
+       gesture. `writeText` is *started* inside the gesture and left to settle on
+       its own — the page survives the app switch, so the write completes and its
+       result can still correct the notice afterwards. */
+    const write = navigator.clipboard?.writeText(linkToShare);
     setOpen(false);
-    // The switch to Instagram is instant, so this is really for the trip back —
-    // its countdown only runs while this tab is on screen.
-    setNotice(
-      copied
-        ? '링크를 복사했어요. DM 입력창에 붙여넣어 주세요.'
-        : 'DM 입력창에 링크를 붙여넣어 주세요.',
-    );
+    setNotice('링크를 복사했어요. DM 입력창에 길게 눌러 붙여넣어 주세요.');
+    const failed = () => setNotice('링크를 복사하지 못했어요. 결과 페이지에서 다시 시도해 주세요.');
+    if (write) write.catch(failed);
+    else if (!copyTextSync(linkToShare)) failed();
 
     if (isPhone()) {
       window.location.href = INSTAGRAM_DM_APP_URL;
@@ -272,7 +270,10 @@ export function ResultActions({
           </button>
           <button type="button" role="menuitem" onClick={shareToInstagramDm} className={itemCls}>
             <InstagramMark className="h-3.5 w-3.5 shrink-0" />
-            DM 공유
+            {/* Instagram cannot be handed a prefilled DM, so the flow is really
+                copy-then-open. Saying so here is the only place it lands: the
+                app takes the screen instantly, long before a toast is read. */}
+            링크 복사 후 DM 열기
           </button>
           <button type="button" role="menuitem" onClick={copy} className={itemCls}>
             {copied ? (
