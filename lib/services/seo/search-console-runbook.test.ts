@@ -37,21 +37,43 @@ function readSection(markdown: string, heading: string): string {
 
 function prerequisiteIssues(section: string): string[] {
     const body = section.replace(/^##[^\n]*\n?/, '').trim();
+    const lines = body.split('\n');
     const issues: string[] = [];
     if (!body) issues.push('empty');
-    if (
-        !/Google[^\n]*(계정|account)[^\n]*Search Console[^\n]*(로그인|sign in|접속)|Search Console[^\n]*(로그인|sign in|접속)[^\n]*Google[^\n]*(계정|account)/i
-            .test(body)
-    ) {
+
+    const hasAffirmativeLogin = lines.some(line => (
+        /Google[^\n]*(계정|account)/i.test(line)
+        && /Search Console/i.test(line)
+        && /(로그인할 수 있어야|로그인할 수 있는|로그인(?:이 )?가능|로그인 권한|can sign in|sign-in access)/i
+            .test(line)
+        && !/(로그인|sign in|sign-in)[^\n]*(없|않|못|불가|cannot|can't)|읽기\s*전용|read[- ]?only/i
+            .test(line)
+    ));
+    if (!hasAffirmativeLogin) {
         issues.push('google-account-sign-in');
     }
-    if (
-        !/yeosachin\.com[^\n]*DNS[^\n]*TXT[^\n]*(편집|수정|추가|권한|접근)|DNS[^\n]*TXT[^\n]*yeosachin\.com[^\n]*(편집|수정|추가|권한|접근)/i
-            .test(body)
-    ) {
+
+    const hasDnsEditAbility = lines.some(line => (
+        /yeosachin\.com/i.test(line)
+        && /DNS/i.test(line)
+        && /TXT/i.test(line)
+        && (
+            /(추가|수정|편집|변경)[^\n]*(권한|가능|할 수 있어야|할 수 있는)/i.test(line)
+            || /(권한|가능|할 수 있어야|할 수 있는)[^\n]*(추가|수정|편집|변경)/i.test(line)
+        )
+        && !/(읽기\s*(?:접근|전용)|read[- ]?only|(?:추가|수정|편집|변경|권한)[^\n]*(없|않|못|불가|cannot|can't)|권한만)/i
+            .test(line)
+    ));
+    if (!hasDnsEditAbility) {
         issues.push('dns-txt-edit-access');
     }
-    if (/(확인된|verified)[^\n]*(소유자|owner)[^\n]*(권한|access)/i.test(body)) {
+
+    const requiresVerifiedOwner = lines.some(line => (
+        /(확인된|verified)[^\n]*(소유자|owner)[^\n]*(권한|access)/i.test(line)
+        && /(준비|필요|요구|있어야|갖추|필수)/i.test(line)
+        && !/(요구|필요|준비|필수)[^\n]*(하지|않|없|아니)|없어도|불필요/i.test(line)
+    ));
+    if (requiresVerifiedOwner) {
         issues.push('circular-verified-owner');
     }
     if (
@@ -175,6 +197,50 @@ describe('SEO/GEO Search Console operations runbook', () => {
             'dns-txt-edit-access',
             'circular-verified-owner',
         ]);
+        const validDnsAndDeployment = [
+            '- `yeosachin.com` DNS TXT 레코드를 추가·수정할 권한을 준비한다.',
+            '- 배포 후보의 HTTP 응답을 확인할 수 있어야 한다.',
+        ];
+        for (const negatedLogin of [
+            '- Google 계정으로 Search Console에 로그인할 수 없다.',
+            '- Google 계정은 Search Console 읽기 전용이며 로그인 권한이 없다.',
+        ]) {
+            expect(prerequisiteIssues([
+                '## 사전 준비',
+                '',
+                negatedLogin,
+                ...validDnsAndDeployment,
+            ].join('\n'))).toEqual(['google-account-sign-in']);
+        }
+        const validLoginAndDeployment = [
+            '- Google 계정으로 Search Console에 로그인할 수 있어야 한다.',
+            '- 배포 후보의 HTTP 응답을 확인할 수 있어야 한다.',
+        ];
+        for (const insufficientDnsAccess of [
+            '- `yeosachin.com` DNS TXT 레코드에 읽기 접근 권한만 준비한다.',
+            '- `yeosachin.com` DNS TXT 레코드 접근 권한을 준비한다.',
+        ]) {
+            expect(prerequisiteIssues([
+                '## 사전 준비',
+                '',
+                ...validLoginAndDeployment,
+                insufficientDnsAccess,
+            ].join('\n'))).toEqual(['dns-txt-edit-access']);
+        }
+        for (const warning of [
+            '- 확인된 소유자 권한을 요구하지 않는다.',
+            '- 확인된 소유자 권한은 필요 없다.',
+        ]) {
+            const negatedCircularWarning = [
+                '## 사전 준비',
+                '',
+                '- Google 계정으로 Search Console에 로그인할 수 있어야 한다.',
+                '- `yeosachin.com` DNS TXT 레코드를 변경할 권한을 준비한다.',
+                warning,
+                '- 배포 후보의 HTTP 응답을 확인할 수 있어야 한다.',
+            ].join('\n');
+            expect(prerequisiteIssues(negatedCircularWarning)).toEqual([]);
+        }
 
         const deployment = readSection(runbook, '## 1. 배포 전·후 URL 확인');
         expect(deployment).toMatch(
