@@ -38,6 +38,8 @@ import { LandingSignatureCard } from '@/components/landing-signature-card';
 import { LandingOverture, useOverture } from '@/components/landing-overture';
 import { LandingReviews } from '@/components/landing-reviews';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
+import { JsonLd } from '@/components/seo/json-ld';
+import { HOMEPAGE_JSON_LD } from '@/lib/services/seo/discovery';
 
 const STEPS = [
   {
@@ -143,6 +145,7 @@ export default function LandingPage() {
        containing block for position: fixed, which pinned the overture to the
        full document height and centred its text ~1500px below the fold. */
     <>
+    <JsonLd data={HOMEPAGE_JSON_LD} />
     {overturePlaying && <LandingOverture />}
     <div className={`min-h-dvh ${overturePlaying ? 'overture-page-in' : ''}`}>
       <TopBar

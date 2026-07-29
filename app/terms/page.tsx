@@ -1,4 +1,13 @@
+import type { Metadata } from 'next';
 import { TopBar, Eyebrow } from '@/components/case-ui';
+
+export const metadata: Metadata = {
+    title: '이용약관 | AI 위장 여사친 판독기',
+    description: 'AI 위장 여사친 판독기 서비스의 이용 조건과 회원의 권리 및 의무를 안내합니다.',
+    alternates: {
+        canonical: '/terms',
+    },
+};
 
 /*
  * 이용약관 — AI 위장 여사친 판독기 (Ascentum)

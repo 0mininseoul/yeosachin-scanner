@@ -1,4 +1,13 @@
+import type { Metadata } from 'next';
 import { TopBar, Eyebrow } from '@/components/case-ui';
+
+export const metadata: Metadata = {
+    title: '개인정보처리방침 | AI 위장 여사친 판독기',
+    description: 'AI 위장 여사친 판독기의 개인정보 수집, 이용, 보관 및 보호 기준을 안내합니다.',
+    alternates: {
+        canonical: '/privacy',
+    },
+};
 
 /*
  * 개인정보처리방침 — AI 위장 여사친 판독기 (Ascentum)
