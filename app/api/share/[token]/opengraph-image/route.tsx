@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import sharp from 'sharp';
 import { ImageResponse } from 'next/og';
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -12,6 +13,9 @@ import {
 } from '@/lib/services/media/result-image-resolver';
 
 export const runtime = 'nodejs';
+
+/** Rendered size of the avatar on the card; the source is re-encoded to match. */
+const AVATAR_PX = 220;
 
 const shareTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const shareRecordSchema = z.object({
@@ -80,8 +84,8 @@ function ogCard(displayName: string, imageDataUrl: string | null) {
                 <img
                     src={imageDataUrl}
                     alt=""
-                    width="220"
-                    height="220"
+                    width={AVATAR_PX}
+                    height={AVATAR_PX}
                     style={{
                         width: 220,
                         height: 220,
@@ -191,7 +195,15 @@ export async function GET(
     if (resolved?.source === 'r2') {
         try {
             const bytes = await readAnalysisV2ResultImageObject(resolved);
-            imageDataUrl = `data:image/webp;base64,${bytes.toString('base64')}`;
+            /* Result images are stored as WebP, which the OG renderer cannot
+               decode — it fails with "u2 is not iterable" while measuring the
+               image, taking the whole card down with it. Re-encoding as PNG at
+               the size the card actually draws also keeps the data URL small. */
+            const png = await sharp(bytes, { animated: false, failOn: 'error' })
+                .resize(AVATAR_PX, AVATAR_PX, { fit: 'cover' })
+                .png()
+                .toBuffer();
+            imageDataUrl = `data:image/png;base64,${png.toString('base64')}`;
         } catch {
             imageDataUrl = null;
         }

@@ -301,10 +301,30 @@ export function Redaction({ className = "", style }: { className?: string; style
  *
  * Blur is applied to the rendered image, so the underlying source is still in
  * the payload — treat this as presentation, not as a privacy boundary. */
-export const MASK_BLUR_PX = 9;
+
+/* Tuned on a 40px avatar. At 9px nothing survived at all — not hair, not a
+   silhouette — which reads as a failed image rather than a hidden one. The
+   point is to show that a real account is behind this without saying which. */
+export const MASK_AVATAR_BLUR_PX = 4;
+
+/** Text needs less: shapes stay unreadable well before they stop being letters. */
+const MASK_TEXT_BLUR_PX = 5;
 
 /** Leading characters left legible on a masked handle. */
 const MASK_VISIBLE_CHARS = 2;
+
+/** A name carries more than a handle does, so none of it is left legible. */
+export function MaskedText({ value, className = "" }: { value: string; className?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-block max-w-full select-none truncate align-bottom ${className}`}
+      style={{ filter: `blur(${MASK_TEXT_BLUR_PX}px)` }}
+    >
+      {value}
+    </span>
+  );
+}
 
 export function MaskedHandle({ value, className = "" }: { value: string; className?: string }) {
   const head = value.slice(0, MASK_VISIBLE_CHARS);
@@ -316,7 +336,7 @@ export function MaskedHandle({ value, className = "" }: { value: string; classNa
         <span
           aria-hidden="true"
           className="min-w-0 select-none truncate"
-          style={{ filter: `blur(${MASK_BLUR_PX * 0.55}px)` }}
+          style={{ filter: `blur(${MASK_TEXT_BLUR_PX}px)` }}
         >
           {tail}
         </span>
@@ -331,8 +351,8 @@ export function MaskedAvatar({ children }: { children: ReactNode }) {
     <div
       // Scaled up because a blur samples past its own bounds; without it the
       // frame gets a translucent rim of whatever sits behind it.
-      className="h-full w-full scale-125"
-      style={{ filter: `blur(${MASK_BLUR_PX}px)` }}
+      className="h-full w-full scale-110"
+      style={{ filter: `blur(${MASK_AVATAR_BLUR_PX}px)` }}
     >
       {children}
     </div>

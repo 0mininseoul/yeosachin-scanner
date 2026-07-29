@@ -31,6 +31,7 @@ vi.mock('next/og', () => ({
 }));
 
 import { GET } from '@/app/api/share/[token]/opengraph-image/route';
+import { TINY_WEBP } from './tiny-image-fixture';
 
 const token = 'a'.repeat(64);
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
@@ -95,7 +96,7 @@ describe('V2 dynamic share Open Graph image', () => {
             byteSize: 4,
             expiresAt: '2026-08-28T00:00:00.000Z',
         });
-        mocks.read.mockResolvedValue(Buffer.from([1, 2, 3, 4]));
+        mocks.read.mockResolvedValue(TINY_WEBP);
     });
 
     it('renders an 800x400 result-specific card with an inline R2 target image', async () => {
