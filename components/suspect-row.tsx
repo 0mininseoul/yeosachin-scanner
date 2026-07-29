@@ -5,6 +5,7 @@ import {
   GradeRail,
   InstaButton,
   MaskedHandle,
+  MaskedText,
   RecentMutualBadge,
   RiskTag,
   ThreatBar,
@@ -97,7 +98,11 @@ export function SuspectRow({
           </div>
           {(account.fullName || account.bio) && (
             <p className="mt-0.5 truncate text-[12px] text-fg-dim">
-              {account.fullName && <span>{account.fullName}</span>}
+              {/* A real name identifies far more directly than a handle does, so
+                  on a shared report none of it is left legible. */}
+              {account.fullName && (maskHandle
+                ? <MaskedText value={account.fullName} />
+                : <span>{account.fullName}</span>)}
               {account.fullName && account.bio && " · "}
               {account.bio}
             </p>

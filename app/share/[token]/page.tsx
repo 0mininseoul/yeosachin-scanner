@@ -12,6 +12,7 @@ import {
     CaseCard,
     MaskedAvatar,
     MaskedHandle,
+    MaskedText,
     ProfileFallback,
     ghostCls,
     primaryCls,
@@ -380,7 +381,7 @@ export default function ShareResultPage({ params }: PageProps) {
                                         />
                                         {(account.fullName || account.bio) && (
                                             <p className="mt-0.5 truncate text-[12px] text-fg-dim">
-                                                {account.fullName && <span>{account.fullName}</span>}
+                                                {account.fullName && <MaskedText value={account.fullName} />}
                                                 {account.fullName && account.bio && ' · '}
                                                 {account.bio}
                                             </p>

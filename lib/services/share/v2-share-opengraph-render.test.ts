@@ -18,6 +18,7 @@ vi.mock('@/lib/services/media/result-image-resolver', () => ({
 // next/og deliberately NOT mocked — the point is to run the real renderer.
 
 import { GET } from '@/app/api/share/[token]/opengraph-image/route';
+import { TINY_WEBP } from './tiny-image-fixture';
 
 const token = 'a'.repeat(64);
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
@@ -48,6 +49,23 @@ describe('share OG image actually renders', () => {
         mocks.loadPage.mockResolvedValue({
             summary: { targetFullName: '박영민', targetInstagramId: 'youngmin' },
         });
+        const response = await GET(new Request('https://yeosachin.com'), {
+            params: Promise.resolve({ token }),
+        });
+        expect(response.status).toBe(200);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        expect(bytes.byteLength).toBeGreaterThan(1000);
+    }, 30000);
+
+    /* The avatar is the branch production actually takes, and the one the
+       first version of this test skipped by resolving the locator to null. */
+    it('renders with the target avatar embedded', async () => {
+        mocks.loadPage.mockResolvedValue({
+            summary: { targetFullName: '박영민', targetInstagramId: 'youngmin' },
+        });
+        mocks.resolve.mockResolvedValue({ source: 'r2', key: 'x' });
+        mocks.read.mockResolvedValue(TINY_WEBP);
+
         const response = await GET(new Request('https://yeosachin.com'), {
             params: Promise.resolve({ token }),
         });
