@@ -524,6 +524,12 @@ const featureRowSchema = z.object({
     if (!value.mediaContext || !genderPair) {
         context.addIssue({ code: 'custom', message: 'Analyzed profiles require media and triage.' });
     }
+    if (preFeatureSkip && value.mediaContext?.featureAnalyzedSelectionIds.length !== 0) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Pre-feature admission requires no feature-analyzed media.',
+        });
+    }
     if (preFeatureSkip && (
         value.classification !== 'unresolved'
         || value.feature !== null

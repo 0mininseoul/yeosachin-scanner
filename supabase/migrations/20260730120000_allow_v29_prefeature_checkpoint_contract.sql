@@ -15,6 +15,9 @@ ALTER TABLE public.analysis_v2_candidate_feature_rows
             AND pre_feature_admission IS NULL
         )
         OR (
+            pre_feature_policy_version IS NOT NULL
+            AND pre_feature_admission IS NOT NULL
+            AND
             pre_feature_policy_version IN (
                 'ai-stage-policy-v2.9',
                 'ai-stage-policy-v2.10'
@@ -42,6 +45,17 @@ ALTER TABLE public.analysis_v2_candidate_feature_rows
             AND gender_resolution_status = 'not_eligible'
             AND gender_resolution_operation_key IS NULL
             AND gender_resolution_result_hash IS NULL
+            AND (
+                CASE
+                    WHEN pg_catalog.jsonb_typeof(
+                        media_context->'featureAnalyzedSelectionIds'
+                    ) = 'array'
+                        THEN pg_catalog.jsonb_array_length(
+                            media_context->'featureAnalyzedSelectionIds'
+                        )
+                    ELSE -1
+                END
+            ) = 0
         )
     );
 
@@ -198,6 +212,19 @@ BEGIN
                             OR NOT public.analysis_v2_result_valid_media_context(
                                 item.value->'mediaContext'
                             )
+                            OR (
+                                CASE
+                                    WHEN pg_catalog.jsonb_typeof(
+                                        item.value->'mediaContext'
+                                            ->'featureAnalyzedSelectionIds'
+                                    ) = 'array'
+                                        THEN pg_catalog.jsonb_array_length(
+                                            item.value->'mediaContext'
+                                                ->'featureAnalyzedSelectionIds'
+                                        )
+                                    ELSE -1
+                                END
+                            ) <> 0
                             OR item.value->>'genderOperationKey'
                                 !~ '^gender-triage:[a-f0-9]{64}$'
                             OR item.value->>'genderResultHash' !~ '^[a-f0-9]{64}$'

@@ -747,6 +747,83 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
         ] });
     });
 
+    it('rejects a pre-feature skip with feature-analyzed media without staging rows', async () => {
+        const policyVersion = 'ai-stage-policy-v2.9';
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+        const rows = preFeatureSkipRows(policyVersion).map(row => ({
+            ...row,
+            mediaContext: {
+                ...row.mediaContext,
+                featureAnalyzedSelectionIds: ['selection-1'],
+            },
+        }));
+
+        await expect(checkpointCandidates(rows)).rejects.toThrow(/ANALYSIS_V2_RESULT_INVALID/);
+        await expectNoCandidateCheckpointArtifacts();
+    });
+
+    it('rejects a direct policy-only pre-feature provenance insert', async () => {
+        const policyVersion = 'ai-stage-policy-v2.9';
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+        await checkpointCandidates(preFeatureSkipRows(policyVersion));
+
+        await expect(db.query(`
+            INSERT INTO public.analysis_v2_candidate_feature_rows (
+                request_id, batch, candidate_id, instagram_id,
+                full_name, profile_image_url, bio,
+                terminal_classification, media_context,
+                appearance_grade, exposure_score, is_business_account,
+                feature_partner_evidence_strong, one_line_overview,
+                gender_operation_key, gender_result_hash,
+                feature_operation_key, feature_result_hash,
+                baseline_classification, classification_source,
+                gender_resolution_status, gender_resolution_operation_key,
+                gender_resolution_result_hash,
+                pre_feature_policy_version, pre_feature_admission
+            )
+            SELECT request_id, batch, 'candidate:policy-only', 'policy.only',
+                   full_name, profile_image_url, bio,
+                   terminal_classification, media_context,
+                   appearance_grade, exposure_score, is_business_account,
+                   feature_partner_evidence_strong, one_line_overview,
+                   gender_operation_key, gender_result_hash,
+                   feature_operation_key, feature_result_hash,
+                   baseline_classification, classification_source,
+                   gender_resolution_status, gender_resolution_operation_key,
+                   gender_resolution_result_hash,
+                   pre_feature_policy_version, NULL
+            FROM public.analysis_v2_candidate_feature_rows
+            WHERE request_id = $1 AND candidate_id = 'candidate:female'
+        `, [REQUEST_ID])).rejects.toThrow(
+            /analysis_v2_candidate_feature_pre_feature_admission_check/
+        );
+    });
+
+    it('rejects a direct admission-only pre-feature provenance update', async () => {
+        const policyVersion = 'ai-stage-policy-v2.10';
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+        await checkpointCandidates(preFeatureSkipRows(policyVersion));
+
+        await expect(db.query(
+            `UPDATE public.analysis_v2_candidate_feature_rows
+             SET pre_feature_policy_version = NULL
+             WHERE request_id = $1 AND candidate_id = 'candidate:female'`,
+            [REQUEST_ID]
+        )).rejects.toThrow(/analysis_v2_candidate_feature_pre_feature_admission_check/);
+    });
+
     it('rejects a pre-feature retry that changes durable admission provenance', async () => {
         const policyVersion = 'ai-stage-policy-v2.9';
         await seedCandidateBatch({

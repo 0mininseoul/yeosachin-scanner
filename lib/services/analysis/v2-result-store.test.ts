@@ -259,6 +259,31 @@ describe('analysis V2 result checkpoint store', () => {
         );
     });
 
+    it('rejects a pre-feature skip that claims feature-analyzed media', async () => {
+        const row = {
+            ...preFeatureSkipRow(
+                15,
+                'ai-stage-policy-v2.9',
+                'nonpersonal_or_official'
+            ),
+            mediaContext: {
+                ...mediaContext(),
+                featureAnalyzedSelectionIds: ['profile:candidate'],
+            },
+        } as unknown as AnalysisV2ProfileClassificationRow;
+        const fake = rpcClient({
+            data: { ...manifest(), itemCount: 1, rowCount: 1 },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+
+        await expect(store.checkpointFeatureBatch({
+            ...claim(), batch: 0, analyzedCount: 1, rows: [row],
+        })).rejects.toThrow('Pre-feature admission requires no feature-analyzed media.');
+
+        expect(fake.rpc).not.toHaveBeenCalled();
+    });
+
     it('rejects duplicate candidates, incomplete batches, and malformed terminal payloads', async () => {
         const fake = rpcClient();
         const store = createSupabaseAnalysisV2ResultStore(fake.client);
