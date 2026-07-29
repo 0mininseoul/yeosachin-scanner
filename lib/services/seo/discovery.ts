@@ -69,6 +69,11 @@ export function buildHomepageJsonLd() {
                 '@id': organizationId,
                 url: `${CANONICAL_APP_ORIGIN}/`,
                 name: 'Ascentum',
+                legalName: 'Ascentum',
+                brand: {
+                    '@type': 'Brand',
+                    name: '위장여사친 판독기',
+                },
             },
         ],
     };

@@ -95,11 +95,20 @@ describe('JSON-LD', () => {
                     alternateName: 'AI 위장 여사친 판독기',
                     url: `${CANONICAL_ORIGIN}/`,
                     inLanguage: 'ko-KR',
+                    publisher: {
+                        '@id': `${CANONICAL_ORIGIN}/#organization`,
+                    },
                 }),
                 expect.objectContaining({
                     '@type': 'Organization',
+                    '@id': `${CANONICAL_ORIGIN}/#organization`,
                     name: 'Ascentum',
+                    legalName: 'Ascentum',
                     url: `${CANONICAL_ORIGIN}/`,
+                    brand: {
+                        '@type': 'Brand',
+                        name: '위장여사친 판독기',
+                    },
                 }),
             ]),
         });
