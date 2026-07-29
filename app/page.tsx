@@ -38,6 +38,8 @@ import { LandingSignatureCard } from '@/components/landing-signature-card';
 import { LandingOverture, useOverture } from '@/components/landing-overture';
 import { LandingReviews } from '@/components/landing-reviews';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
+import { JsonLd } from '@/components/seo/json-ld';
+import { HOMEPAGE_JSON_LD } from '@/lib/services/seo/discovery';
 
 const STEPS = [
   {
@@ -143,6 +145,7 @@ export default function LandingPage() {
        containing block for position: fixed, which pinned the overture to the
        full document height and centred its text ~1500px below the fold. */
     <>
+    <JsonLd data={HOMEPAGE_JSON_LD} />
     {overturePlaying && <LandingOverture />}
     <div className={`min-h-dvh ${overturePlaying ? 'overture-page-in' : ''}`}>
       <TopBar
@@ -364,6 +367,9 @@ export default function LandingPage() {
             판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
           </p>
           <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[12px] text-fg-dim">
+            <Link href="/guide/wijang-yeosachin" className="transition-colors hover:text-fg">
+              위장여사친 구분법
+            </Link>
             <Link href="/terms" className="transition-colors hover:text-fg">
               이용약관
             </Link>

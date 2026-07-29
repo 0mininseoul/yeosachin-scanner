@@ -1,4 +1,30 @@
+import type { Metadata } from 'next';
 import { TopBar, Eyebrow } from '@/components/case-ui';
+import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
+
+const TITLE = '이용약관 | AI 위장 여사친 판독기';
+const DESCRIPTION = 'AI 위장 여사친 판독기 서비스의 이용 조건과 회원의 권리 및 의무를 안내합니다.';
+const URL = `${CANONICAL_APP_ORIGIN}/terms`;
+
+export const metadata: Metadata = {
+    title: TITLE,
+    description: DESCRIPTION,
+    alternates: {
+        canonical: '/terms',
+    },
+    openGraph: {
+        type: 'website',
+        locale: 'ko_KR',
+        url: URL,
+        title: TITLE,
+        description: DESCRIPTION,
+    },
+    twitter: {
+        card: 'summary',
+        title: TITLE,
+        description: DESCRIPTION,
+    },
+};
 
 /*
  * 이용약관 — AI 위장 여사친 판독기 (Ascentum)

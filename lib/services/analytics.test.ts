@@ -1374,6 +1374,38 @@ describe('Amplitude analytics adapter', () => {
         ]);
     });
 
+    it('accepts normalized ChatGPT referral attribution but rejects its raw source', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, {
+            source: 'chatgpt',
+            medium: 'referral',
+        });
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, {
+            source: 'chatgpt.com',
+            medium: 'referral',
+            referrer: 'https://chatgpt.com/share/private',
+            query: 'private search query',
+            url: 'https://yeosachin.com/?utm_source=chatgpt.com',
+        });
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['landing_viewed', {
+                source: 'chatgpt',
+                medium: 'referral',
+            }],
+            ['landing_viewed', {
+                medium: 'referral',
+            }],
+        ]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toMatch(
+            /chatgpt\.com|private search query|utm_source|referrer/,
+        );
+    });
+
     it('ignores unapproved events and contains tracking errors', async () => {
         enableBrowser();
         const analytics = await loadAnalytics();
