@@ -28,6 +28,21 @@ const itemCls =
 const INSTAGRAM_DM_APP_URL = 'instagram://direct-inbox';
 const INSTAGRAM_DM_WEB_URL = 'https://www.instagram.com/direct/inbox/';
 
+/* Long enough to read the toast, short enough not to feel stalled. The app
+   switch is instant, so without this pause nothing about the copy is ever
+   seen — the screen simply changes. */
+const DM_OPEN_DELAY_MS = 2000;
+/* If the scheme hand-off is refused the page just stays put, with no event to
+   tell us. Still being visible this long after the attempt is the only signal
+   available, and it costs nothing when the app did open. */
+const DM_HANDOFF_CHECK_MS = 1500;
+
+interface Notice {
+    text: string;
+    /** Carries its own gesture, for when a delayed navigation was refused. */
+    action?: { label: string; run: () => void };
+}
+
 function isPhone(): boolean {
   return /iphone|ipad|ipod|android/i.test(navigator.userAgent);
 }
@@ -92,9 +107,14 @@ export function ResultActions({
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const openTimers = useRef<number[]>([]);
+
+  useEffect(() => () => {
+    for (const timer of openTimers.current) window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -120,6 +140,9 @@ export function ResultActions({
   // way back, so its countdown only runs while this tab is actually on screen.
   useEffect(() => {
     if (!notice) return;
+    // One that offers a way out stays until it is used or dismissed; timing it
+    // out would take the escape hatch away exactly when it is needed.
+    if (notice.action) return;
     let timer = 0;
     const arm = () => {
       window.clearTimeout(timer);
@@ -149,7 +172,7 @@ export function ResultActions({
     }
     if (!ok) {
       setOpen(false);
-      setNotice('링크 복사에 실패했습니다.');
+      setNotice({ text: '링크 복사에 실패했습니다.' });
       return;
     }
     setCopied(true);
@@ -172,22 +195,35 @@ export function ResultActions({
      the browser; there is no reliable signal that a scheme handoff succeeded, so
      the platform decides instead of a guess. */
   const shareToInstagramDm = () => {
-    /* Nothing may be awaited here: the app hand-off below needs this task's
-       gesture. `writeText` is *started* inside the gesture and left to settle on
-       its own — the page survives the app switch, so the write completes and its
-       result can still correct the notice afterwards. */
+    /* The clipboard write must not be awaited — it is *started* inside the
+       gesture and left to settle on its own, so nothing delays what follows. */
     const write = navigator.clipboard?.writeText(linkToShare);
     setOpen(false);
-    setNotice('링크를 복사했어요. DM 입력창에 길게 눌러 붙여넣어 주세요.');
-    const failed = () => setNotice('링크를 복사하지 못했어요. 결과 페이지에서 다시 시도해 주세요.');
+    // A second tap restarts the sequence rather than stacking another hand-off.
+    for (const timer of openTimers.current) window.clearTimeout(timer);
+    openTimers.current = [];
+    const failed = () => setNotice({ text: '링크를 복사하지 못했어요. 결과 페이지에서 다시 시도해 주세요.' });
     if (write) write.catch(failed);
     else if (!copyTextSync(linkToShare)) failed();
 
-    if (isPhone()) {
-      window.location.href = INSTAGRAM_DM_APP_URL;
+    if (!isPhone()) {
+      setNotice({ text: '링크를 복사했어요. DM 입력창에 붙여넣어 주세요.' });
+      window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
       return;
     }
-    window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
+
+    setNotice({ text: '링크를 복사했어요. 잠시 후 인스타그램이 열립니다.' });
+    const openApp = () => { window.location.href = INSTAGRAM_DM_APP_URL; };
+    openTimers.current.push(window.setTimeout(() => {
+      openApp();
+      openTimers.current.push(window.setTimeout(() => {
+        if (document.visibilityState !== 'visible') return;
+        setNotice({
+          text: '링크를 복사했어요. 인스타그램이 열리지 않았다면 눌러 주세요.',
+          action: { label: '인스타그램 열기', run: openApp },
+        });
+      }, DM_HANDOFF_CHECK_MS));
+    }, DM_OPEN_DELAY_MS));
   };
 
   return (
@@ -201,7 +237,16 @@ export function ResultActions({
             role="status"
             className="fixed inset-x-4 bottom-6 z-50 mx-auto max-w-[420px] border border-line-2 bg-ink-2 px-4 py-3 text-center text-[12.5px] font-semibold text-fg shadow-[0_8px_28px_-8px_rgba(0,0,0,0.85)]"
           >
-            {notice}
+            {notice.text}
+            {notice.action && (
+              <button
+                type="button"
+                onClick={notice.action.run}
+                className="mt-2.5 block w-full border border-line-2 py-2 text-[12.5px] font-semibold text-fg transition-colors hover:bg-panel"
+              >
+                {notice.action.label}
+              </button>
+            )}
           </div>,
           document.body,
         )}
@@ -270,10 +315,7 @@ export function ResultActions({
           </button>
           <button type="button" role="menuitem" onClick={shareToInstagramDm} className={itemCls}>
             <InstagramMark className="h-3.5 w-3.5 shrink-0" />
-            {/* Instagram cannot be handed a prefilled DM, so the flow is really
-                copy-then-open. Saying so here is the only place it lands: the
-                app takes the screen instantly, long before a toast is read. */}
-            링크 복사 후 DM 열기
+            DM 공유
           </button>
           <button type="button" role="menuitem" onClick={copy} className={itemCls}>
             {copied ? (
