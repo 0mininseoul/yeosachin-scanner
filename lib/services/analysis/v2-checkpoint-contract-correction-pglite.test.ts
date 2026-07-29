@@ -480,6 +480,26 @@ function preFeatureSkipRows(
     }));
 }
 
+async function expectNoCandidateCheckpointArtifacts(): Promise<void> {
+    const [rows, manifests] = await Promise.all([
+        db.query(
+            `SELECT candidate_id
+             FROM public.analysis_v2_candidate_feature_rows
+             WHERE request_id = $1`,
+            [REQUEST_ID]
+        ),
+        db.query(
+            `SELECT batch
+             FROM public.analysis_v2_candidate_feature_manifests
+             WHERE request_id = $1`,
+            [REQUEST_ID]
+        ),
+    ]);
+
+    expect(rows.rows).toEqual([]);
+    expect(manifests.rows).toEqual([]);
+}
+
 async function persistFemaleResultFromCandidate(): Promise<void> {
     await db.query(
         'INSERT INTO public.analysis_v2_result_summaries (request_id) VALUES ($1)',
@@ -725,6 +745,96 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
                 pre_feature_admission: 'unsupported_unknown',
             },
         ] });
+    });
+
+    it('rejects a pre-feature retry that changes durable admission provenance', async () => {
+        const policyVersion = 'ai-stage-policy-v2.9';
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+        const rows = preFeatureSkipRows(policyVersion);
+
+        await expect(checkpointCandidates(rows)).resolves.toBeDefined();
+        await expect(checkpointCandidates(rows)).resolves.toBeDefined();
+
+        const beforeRows = await db.query(`
+            SELECT candidate_id, terminal_classification, media_context,
+                   gender_operation_key, gender_result_hash,
+                   pre_feature_policy_version, pre_feature_admission
+            FROM public.analysis_v2_candidate_feature_rows
+            WHERE request_id = $1
+            ORDER BY candidate_id
+        `, [REQUEST_ID]);
+        const beforeManifest = await db.query(`
+            SELECT producer_job_key, producer_input_hash, producer_claim_token,
+                   item_count, row_count, result_hash
+            FROM public.analysis_v2_candidate_feature_manifests
+            WHERE request_id = $1 AND batch = 0
+        `, [REQUEST_ID]);
+        const changedAdmissionRows = rows.map((row, index) => index === 0
+            ? { ...row, preFeatureAdmission: 'unsupported_unknown' }
+            : row
+        );
+
+        await expect(checkpointCandidates(changedAdmissionRows)).rejects.toThrow(
+            /ANALYSIS_V2_RESULT_CONFLICT/
+        );
+
+        await expect(db.query(`
+            SELECT candidate_id, terminal_classification, media_context,
+                   gender_operation_key, gender_result_hash,
+                   pre_feature_policy_version, pre_feature_admission
+            FROM public.analysis_v2_candidate_feature_rows
+            WHERE request_id = $1
+            ORDER BY candidate_id
+        `, [REQUEST_ID])).resolves.toMatchObject({ rows: beforeRows.rows });
+        await expect(db.query(`
+            SELECT producer_job_key, producer_input_hash, producer_claim_token,
+                   item_count, row_count, result_hash
+            FROM public.analysis_v2_candidate_feature_manifests
+            WHERE request_id = $1 AND batch = 0
+        `, [REQUEST_ID])).resolves.toMatchObject({ rows: beforeManifest.rows });
+    });
+
+    it('rejects a pre-feature checkpoint when its gender triage checkpoint is missing without staging rows', async () => {
+        const policyVersion = 'ai-stage-policy-v2.9';
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+        await db.query(
+            `DELETE FROM public.analysis_v2_ai_result_checkpoints
+             WHERE request_id = $1 AND operation_key = $2`,
+            [REQUEST_ID, FEMALE_GENDER_OPERATION]
+        );
+
+        await expect(checkpointCandidates(preFeatureSkipRows(policyVersion))).rejects.toThrow(
+            /ANALYSIS_V2_RESULT_NOT_READY/
+        );
+        await expectNoCandidateCheckpointArtifacts();
+    });
+
+    it('rejects a pre-feature checkpoint when its gender triage hash differs without staging rows', async () => {
+        const policyVersion = 'ai-stage-policy-v2.10';
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+        await db.query(
+            `UPDATE public.analysis_v2_ai_result_checkpoints
+             SET result_hash = $3
+             WHERE request_id = $1 AND operation_key = $2`,
+            [REQUEST_ID, FEMALE_GENDER_OPERATION, WRONG_RESULT_HASH]
+        );
+
+        await expect(checkpointCandidates(preFeatureSkipRows(policyVersion))).rejects.toThrow(
+            /ANALYSIS_V2_RESULT_NOT_READY/
+        );
+        await expectNoCandidateCheckpointArtifacts();
     });
 
     it.each([

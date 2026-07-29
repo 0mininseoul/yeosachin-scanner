@@ -233,6 +233,78 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
+    PERFORM public.analysis_v2_assert_result_job_fence(
+        p_request_id,
+        p_job_key,
+        p_claim_token,
+        p_job_input_hash
+    );
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+        WHERE pg_catalog.jsonb_typeof(item.value->'preFeaturePolicyVersion') = 'string'
+          AND NOT EXISTS (
+                SELECT 1
+                FROM public.analysis_v2_ai_result_checkpoints AS result
+                WHERE result.request_id = p_request_id
+                  AND result.job_key = p_job_key
+                  AND result.operation_key = item.value->>'genderOperationKey'
+                  AND result.stage = 'genderTriage'
+                  AND result.result_hash = item.value->>'genderResultHash'
+          )
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_RESULT_NOT_READY',
+            ERRCODE = 'P0001';
+    END IF;
+
+    PERFORM 1
+    FROM public.analysis_v2_candidate_feature_manifests AS manifest
+    WHERE manifest.request_id = p_request_id
+      AND manifest.batch = p_batch
+    FOR UPDATE;
+
+    IF FOUND THEN
+        PERFORM 1
+        FROM public.analysis_v2_candidate_feature_rows AS feature
+        WHERE feature.request_id = p_request_id
+          AND feature.batch = p_batch
+        FOR UPDATE;
+
+        IF EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
+            LEFT JOIN public.analysis_v2_candidate_feature_rows AS feature
+              ON feature.request_id = p_request_id
+             AND feature.batch = p_batch
+             AND feature.candidate_id = item.value->>'candidateId'
+            WHERE pg_catalog.jsonb_typeof(item.value->'preFeaturePolicyVersion') = 'string'
+              AND (
+                    feature.candidate_id IS NULL
+                    OR feature.terminal_classification IS DISTINCT FROM 'unresolved'
+                    OR feature.media_context IS DISTINCT FROM item.value->'mediaContext'
+                    OR feature.gender_operation_key
+                        IS DISTINCT FROM item.value->>'genderOperationKey'
+                    OR feature.gender_result_hash
+                        IS DISTINCT FROM item.value->>'genderResultHash'
+                    OR feature.baseline_classification IS DISTINCT FROM 'unresolved'
+                    OR feature.classification_source IS DISTINCT FROM 'unknown'
+                    OR feature.gender_resolution_status IS DISTINCT FROM 'not_eligible'
+                    OR feature.gender_resolution_operation_key IS NOT NULL
+                    OR feature.gender_resolution_result_hash IS NOT NULL
+                    OR feature.pre_feature_policy_version
+                        IS DISTINCT FROM item.value->>'preFeaturePolicyVersion'
+                    OR feature.pre_feature_admission
+                        IS DISTINCT FROM item.value->>'preFeatureAdmission'
+              )
+        ) THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ANALYSIS_V2_RESULT_CONFLICT',
+                ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
     SELECT pg_catalog.jsonb_agg(
         CASE
             WHEN pg_catalog.jsonb_typeof(item.value->'preFeaturePolicyVersion') = 'string'
@@ -279,25 +351,6 @@ BEGIN
         p_analyzed_count,
         v_rows
     );
-
-    IF EXISTS (
-        SELECT 1
-        FROM pg_catalog.jsonb_array_elements(p_rows) AS item(value)
-        WHERE pg_catalog.jsonb_typeof(item.value->'preFeaturePolicyVersion') = 'string'
-          AND NOT EXISTS (
-                SELECT 1
-                FROM public.analysis_v2_ai_result_checkpoints AS result
-                WHERE result.request_id = p_request_id
-                  AND result.job_key = p_job_key
-                  AND result.operation_key = item.value->>'genderOperationKey'
-                  AND result.stage = 'genderTriage'
-                  AND result.result_hash = item.value->>'genderResultHash'
-          )
-    ) THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_V2_RESULT_NOT_READY',
-            ERRCODE = 'P0001';
-    END IF;
 
     UPDATE public.analysis_v2_candidate_feature_rows AS feature
     SET terminal_classification = CASE
