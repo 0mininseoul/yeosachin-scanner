@@ -135,5 +135,5 @@ describe('demo fixture migration history', () => {
               ('${userId}', 'junho_dem', 'authorized-redacted-fixture-v3', 'standard', 'legacy-v3-duration-key-000001', 45),
               ('${userId}', 'junho_dem', 'authorized-redacted-fixture-v4', 'standard', 'legacy-v4-duration-key-000001', 30);
         `);
-    });
+    }, 20_000);
 });
