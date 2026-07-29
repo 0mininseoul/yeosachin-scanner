@@ -602,7 +602,7 @@ export default function ResultPage({ params }: PageProps) {
         // that is what the recipient opens the link for.
         const card = {
             title: `${summary.targetFullName ?? summary.targetInstagramId}님의 위장 여사친 판독 결과`,
-            ...(counts ? { description: `맞팔 ${counts.mutual.toLocaleString()}명 중 모든 공개 계정들을 판독했습니다.` } : {}),
+            description: `${summary.targetFullName ?? summary.targetInstagramId}님의 위장여사친을 지금 확인해보세요!`,
         };
         // Everything was resolved before the tap, so the send stays inside the
         // tap's own task — which is the only way Kakao's sheet is allowed to open.

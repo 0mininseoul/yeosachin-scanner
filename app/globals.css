@@ -235,6 +235,16 @@ body::before {
 .overture-out { animation: overture-out 1s var(--ease-settle) 1.55s both; }
 .overture-page-in { animation: overture-page-in 0.95s var(--ease-settle) 1.7s both; }
 
+/* Toast. Anchored to the bottom edge with no gap and no border radius, so it
+   reads as part of the viewport frame rather than as one more card on a page
+   that already has plenty. The crimson top rule is what carries the attention;
+   it is the same signal the report uses for anything that matters. */
+.toast-rise { animation: toast-rise 0.42s var(--ease-settle) both; }
+@keyframes toast-rise {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 /* Gauges fill rather than appear filled, so the meter reads as a reading taken. */
 .meter-fill { width: 0; animation: meter-fill 1.1s var(--ease-settle) both; }
 @keyframes meter-fill { to { width: var(--meter-width); } }

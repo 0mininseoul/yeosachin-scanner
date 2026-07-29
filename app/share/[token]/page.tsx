@@ -10,6 +10,8 @@ import {
     TopBar,
     Eyebrow,
     CaseCard,
+    MaskedAvatar,
+    MaskedHandle,
     ProfileFallback,
     ghostCls,
     primaryCls,
@@ -22,9 +24,17 @@ interface PageProps {
     params: Promise<{ token: string }>;
 }
 
+/* v2 results sign their images to /api/share/<token>/image, which is the route
+   built to serve a share viewer who is not logged in. Only /api/image-proxy was
+   accepted here, so every v2 avatar failed this check and fell back to the grey
+   placeholder — the whole page looked like it had no photos at all. */
+const SHARE_IMAGE_PATH = /^\/api\/share\/[0-9a-f]{64}\/image\?/;
+
 const getProxyImageUrl = (url: string | undefined): string | undefined => {
     if (!url) return undefined;
-    return url.startsWith('/api/image-proxy?') ? url : undefined;
+    return url.startsWith('/api/image-proxy?') || SHARE_IMAGE_PATH.test(url)
+        ? url
+        : undefined;
 };
 
 function ProfileImage({
@@ -332,7 +342,11 @@ export default function ShareResultPage({ params }: PageProps) {
                                     key={account.instagramId}
                                     account={account}
                                     rank={i + 1}
-                                    avatar={<ProfileImage src={account.profileImage} variant="person" />}
+                                    avatar={
+                                        <MaskedAvatar>
+                                            <ProfileImage src={account.profileImage} variant="person" />
+                                        </MaskedAvatar>
+                                    }
                                     externalProfileLinks={false}
                                     maskHandle
                                 />
@@ -354,16 +368,16 @@ export default function ShareResultPage({ params }: PageProps) {
                             {privateAccounts.map((account) => (
                                 <div key={account.instagramId} className="flex items-center gap-3.5 border-b border-line py-3.5">
                                     <div className="relative h-10 w-10 shrink-0 overflow-hidden border border-line bg-panel">
-                                        <ProfileImage src={account.profileImage} variant="private" />
+                                        <MaskedAvatar>
+                                            <ProfileImage src={account.profileImage} variant="private" />
+                                        </MaskedAvatar>
                                     </div>
                                     <div className="min-w-0 flex-1">
                                         {/* Masked for the same reason as the public list. */}
-                                        <span
-                                            aria-hidden="true"
-                                            className="block select-none truncate text-[14px] font-bold text-fg/90 blur-[5px]"
-                                        >
-                                            @{account.instagramId}
-                                        </span>
+                                        <MaskedHandle
+                                            value={account.instagramId}
+                                            className="text-[14px] font-bold text-fg/90"
+                                        />
                                         {(account.fullName || account.bio) && (
                                             <p className="mt-0.5 truncate text-[12px] text-fg-dim">
                                                 {account.fullName && <span>{account.fullName}</span>}
