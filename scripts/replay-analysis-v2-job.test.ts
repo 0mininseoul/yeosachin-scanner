@@ -4,12 +4,12 @@ import {
     access,
     chmod,
     lstat,
+    mkdir,
     mkdtemp,
     open,
     readFile,
     rename,
     rm,
-    symlink,
     unlink,
     writeFile,
 } from 'node:fs/promises';
@@ -577,21 +577,36 @@ describe('Cloud Run analysis V2 replay job', () => {
         )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     });
 
-    it('builds the recursive stateless graph and boots the real ESM artifact', async () => {
-        const outputParent = await mkdtemp(join(
+    it('boots the real ESM artifact from a platform-native physical dependency closure', async () => {
+        const imageRoot = await mkdtemp(join(
             tmpdir(),
-            '.replay-job-build-',
+            '.replay-job-image-',
         ));
-        const outputDirectory = join(outputParent, 'bundle-v1');
-        const outfile = join(outputDirectory, 'replay-job.mjs');
-        const metafile = join(outputDirectory, 'metafile.json');
+        const workspace = join(imageRoot, 'workspace');
+        const outputDirectory = join(workspace, 'replay-job');
+        const outfile = join(outputDirectory, 'job.mjs');
+        const metafile = join(outputDirectory, 'meta.json');
         const runtimeManifest = join(outputDirectory, 'runtime.json');
         try {
-            await symlink(
-                join(process.cwd(), 'node_modules'),
-                join(outputParent, 'node_modules'),
-                'dir',
-            );
+            await mkdir(workspace, { mode: 0o700 });
+            const {
+                copyReplayAnalysisV2JobPhysicalDependencyClosure,
+                createReplayAnalysisV2JobContainerLaunchContract,
+                verifyReplayAnalysisV2JobContainerFilesystem,
+                verifyReplayAnalysisV2JobRuntimeManifest,
+            } = await import('./build-replay-analysis-v2-job.mjs');
+            const closure =
+                await copyReplayAnalysisV2JobPhysicalDependencyClosure({
+                    sourceWorkspace: process.cwd(),
+                    imageWorkspace: workspace,
+                });
+            expect(closure).toMatchObject({
+                platform: process.platform,
+                arch: process.arch,
+            });
+            expect(closure.packages.length).toBeGreaterThanOrEqual(45);
+            expect((await lstat(join(workspace, 'node_modules')))
+                .isSymbolicLink()).toBe(false);
             await execFileAsync(process.execPath, [
                 'scripts/build-replay-analysis-v2-job.mjs',
                 '--outfile',
@@ -616,9 +631,6 @@ describe('Cloud Run analysis V2 replay job', () => {
                 runtimeManifest,
                 'utf8',
             ));
-            const {
-                verifyReplayAnalysisV2JobRuntimeManifest,
-            } = await import('./build-replay-analysis-v2-job.mjs');
             const lockfile = JSON.parse(await readFile(
                 join(process.cwd(), 'package-lock.json'),
                 'utf8',
@@ -628,6 +640,19 @@ describe('Cloud Run analysis V2 replay job', () => {
                 lockfile,
                 immutableImageDigest,
             )).not.toThrow();
+            const contract =
+                createReplayAnalysisV2JobContainerLaunchContract({
+                    imageDigest: immutableImageDigest,
+                    entrypoint: '/workspace/replay-job/job.mjs',
+                });
+            await expect(
+                verifyReplayAnalysisV2JobContainerFilesystem({
+                    imageRoot,
+                    contract,
+                    manifest: runtime,
+                }),
+            ).resolves.toBeUndefined();
+            expect(Object.keys(metadata.inputs)).toHaveLength(40);
             const graph = JSON.stringify(metadata);
             expect(graph).not.toMatch(
                 /supabase\/admin|supabase-js|result-store|attempt-store|lease-store|apify|(?:^|[/_-])r2(?:[/_.-]|$)|@google-cloud\/tasks|cloud-tasks|analysis-tasks|tasks-client|tasks-store|app\/api/i,
@@ -649,7 +674,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                 '--conditions=react-server',
                 outfile,
             ], {
-                cwd: outputParent,
+                cwd: workspace,
                 env: {
                     NODE_ENV: 'test',
                     PATH: process.env.PATH,
@@ -667,7 +692,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                 '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
             );
         } finally {
-            await rm(outputParent, { recursive: true, force: true });
+            await rm(imageRoot, { recursive: true, force: true });
         }
     }, 30_000);
 

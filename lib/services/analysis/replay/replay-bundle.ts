@@ -5,7 +5,6 @@ import {
     constants as fileConstants,
     fstatSync,
     openSync,
-    unlinkSync,
     write as writeDescriptor,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
@@ -502,17 +501,6 @@ function openExclusiveReplayArtifact(
             (dependencies.closeSync ?? closeDescriptorSync)(descriptor);
         } catch (cleanupError) {
             cleanupErrors.push(cleanupError);
-        }
-        try {
-            unlinkSync(path);
-        } catch (cleanupError) {
-            if (
-                !(cleanupError instanceof Error)
-                || !('code' in cleanupError)
-                || cleanupError.code !== 'ENOENT'
-            ) {
-                cleanupErrors.push(cleanupError);
-            }
         }
         if (cleanupErrors.length > 1) {
             throw new Error(

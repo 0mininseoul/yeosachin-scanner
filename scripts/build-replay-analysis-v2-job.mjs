@@ -1,18 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import {
+    closeSync as closeDescriptorSync,
+    constants as fileConstants,
+    fstatSync as fstatDescriptorSync,
+    lstatSync,
+    renameSync,
+} from 'node:fs';
+import {
+    chmod,
+    copyFile,
+    cp,
     lstat,
     mkdir,
     open,
     readFile,
+    readlink,
+    readdir,
     realpath,
-    rename,
     rm,
+    symlink,
+    writeFile,
 } from 'node:fs/promises';
 import {
     basename,
     dirname,
     isAbsolute,
     join,
+    relative,
     resolve,
     sep,
 } from 'node:path';
@@ -78,6 +92,190 @@ const stub = resolve(
     root,
     'scripts/replay-analysis-v2-job-supabase-stub.ts',
 );
+
+function packageParentKey(packageKey) {
+    const marker = '/node_modules/';
+    const markerIndex = packageKey.lastIndexOf(marker);
+    return markerIndex < 0
+        ? ''
+        : packageKey.slice(0, markerIndex);
+}
+
+async function physicalPackageDirectory(workspace, packageKey) {
+    const nodeModules = join(workspace, 'node_modules');
+    const path = join(workspace, packageKey);
+    let entry;
+    try {
+        entry = await lstat(path);
+    } catch (error) {
+        if (error?.code === 'ENOENT') return undefined;
+        throw error;
+    }
+    if (
+        entry.isSymbolicLink()
+        || !entry.isDirectory()
+        || await realpath(path) !== path
+        || (
+            path !== nodeModules
+            && !path.startsWith(`${nodeModules}${sep}`)
+        )
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_JOB_PHYSICAL_CLOSURE_INVALID',
+        );
+    }
+    return path;
+}
+
+async function resolvePhysicalDependencyKey({
+    dependency,
+    fromKey,
+    lockfile,
+    workspace,
+}) {
+    let ancestor = fromKey;
+    while (true) {
+        const candidate = ancestor
+            ? `${ancestor}/node_modules/${dependency}`
+            : `node_modules/${dependency}`;
+        if (
+            lockfile.packages?.[candidate]
+            && await physicalPackageDirectory(
+                workspace,
+                candidate,
+            )
+        ) {
+            return candidate;
+        }
+        if (!ancestor) return undefined;
+        ancestor = packageParentKey(ancestor);
+    }
+}
+
+export async function resolveReplayAnalysisV2JobPhysicalDependencyClosure({
+    lockfile,
+    sourceWorkspace,
+}) {
+    const workspace = await realpath(sourceWorkspace);
+    const pending = EXTERNAL_PACKAGES.map(
+        name => `node_modules/${name}`,
+    );
+    const packages = new Set();
+    while (pending.length > 0) {
+        const packageKey = pending.shift();
+        if (packages.has(packageKey)) continue;
+        const locked = lockfile.packages?.[packageKey];
+        if (
+            !locked
+            || !await physicalPackageDirectory(workspace, packageKey)
+        ) {
+            throw new Error(
+                'ANALYSIS_V2_REPLAY_JOB_PHYSICAL_CLOSURE_INVALID',
+            );
+        }
+        packages.add(packageKey);
+        const requiredPeers = Object.keys(
+            locked.peerDependencies ?? {},
+        ).filter(name => (
+            !locked.peerDependenciesMeta?.[name]?.optional
+        ));
+        const dependencies = new Set([
+            ...Object.keys(locked.dependencies ?? {}),
+            ...Object.keys(locked.optionalDependencies ?? {}),
+            ...requiredPeers,
+        ]);
+        for (const dependency of dependencies) {
+            const resolvedDependency =
+                await resolvePhysicalDependencyKey({
+                    dependency,
+                    fromKey: packageKey,
+                    lockfile,
+                    workspace,
+                });
+            const required = dependency in (
+                locked.dependencies ?? {}
+            ) || requiredPeers.includes(dependency);
+            if (!resolvedDependency) {
+                if (required) {
+                    throw new Error(
+                        'ANALYSIS_V2_REPLAY_JOB_PHYSICAL_CLOSURE_INVALID',
+                    );
+                }
+                continue;
+            }
+            pending.push(resolvedDependency);
+        }
+    }
+    return [...packages].sort();
+}
+
+export async function copyReplayAnalysisV2JobPhysicalDependencyClosure({
+    sourceWorkspace,
+    imageWorkspace,
+}) {
+    const source = await realpath(sourceWorkspace);
+    const destination = await realpath(imageWorkspace);
+    const lockfilePath = join(source, 'package-lock.json');
+    const lockfile = JSON.parse(await readFile(lockfilePath, 'utf8'));
+    const packages =
+        await resolveReplayAnalysisV2JobPhysicalDependencyClosure({
+            lockfile,
+            sourceWorkspace: source,
+        });
+    const nodeModules = join(destination, 'node_modules');
+    await mkdir(nodeModules, { mode: 0o755 });
+    for (const packageKey of packages) {
+        const sourcePackage = join(source, packageKey);
+        const destinationPackage = join(destination, packageKey);
+        await mkdir(dirname(destinationPackage), {
+            recursive: true,
+        });
+        await cp(sourcePackage, destinationPackage, {
+            recursive: true,
+            dereference: true,
+            errorOnExist: true,
+            force: false,
+            filter: path => {
+                const nested = relative(sourcePackage, path);
+                return !nested
+                    || !nested.split(sep).includes('node_modules');
+            },
+        });
+    }
+    const imageLockfile = join(destination, 'package-lock.json');
+    await copyFile(
+        lockfilePath,
+        imageLockfile,
+        fileConstants.COPYFILE_EXCL,
+    );
+    await chmod(imageLockfile, 0o600);
+    const provenance = {
+        schema: 'analysis-v2-replay-job-physical-closure-v1',
+        platform: process.platform,
+        arch: process.arch,
+        packages: packages.map(path => ({
+            path,
+            version: lockfile.packages[path].version,
+            integrity: lockfile.packages[path].integrity ?? null,
+        })),
+    };
+    await writeFile(
+        join(
+            destination,
+            'replay-job-dependency-provenance.json',
+        ),
+        `${JSON.stringify(provenance, null, 2)}\n`,
+        {
+            flag: 'wx',
+            mode: 0o600,
+        },
+    );
+    return {
+        platform: process.platform,
+        arch: process.arch,
+        packages,
+    };
+}
 
 function forbiddenGraph(reason) {
     throw new Error(
@@ -176,6 +374,7 @@ export function createReplayAnalysisV2JobContainerLaunchContract({
 export async function verifyReplayAnalysisV2JobContainerFilesystem({
     imageRoot,
     contract,
+    manifest,
 }) {
     try {
         const expected = createReplayAnalysisV2JobContainerLaunchContract({
@@ -196,33 +395,217 @@ export async function verifyReplayAnalysisV2JobContainerFilesystem({
         const workspacePath = mountedPath(contract.workdir);
         const nodeModulesPath = mountedPath(contract.nodeModules);
         const entrypointPath = mountedPath(contract.command[2]);
-        const [workspace, nodeModules, entrypoint] = await Promise.all([
+        const packageLockPath = mountedPath(
+            manifest?.dependencyClosure?.packageLock,
+        );
+        const provenancePath = mountedPath(
+            manifest?.dependencyClosure?.provenance,
+        );
+        if (
+            manifest?.dependencyClosure?.authority
+                !== 'immutable-container-image'
+            || manifest.dependencyClosure.image !== contract.image
+            || manifest.dependencyClosure.workspace !== contract.workdir
+            || manifest.dependencyClosure.nodeModules
+                !== contract.nodeModules
+            || manifest.dependencyClosure.packageLock
+                !== '/workspace/package-lock.json'
+            || manifest.dependencyClosure.provenance
+                !== '/workspace/replay-job-dependency-provenance.json'
+            || manifest.schema !== 'analysis-v2-replay-job-runtime-v2'
+        ) {
+            throw new Error('runtime manifest closure mismatch');
+        }
+        const [
+            workspace,
+            nodeModules,
+            packageLock,
+            provenanceFile,
+        ] = await Promise.all([
             lstat(workspacePath),
             lstat(nodeModulesPath),
-            lstat(entrypointPath),
+            lstat(packageLockPath),
+            lstat(provenancePath),
         ]);
         if (
             workspace.isSymbolicLink()
             || !workspace.isDirectory()
             || nodeModules.isSymbolicLink()
             || !nodeModules.isDirectory()
-            || entrypoint.isSymbolicLink()
-            || !entrypoint.isFile()
+            || packageLock.isSymbolicLink()
+            || !packageLock.isFile()
+            || provenanceFile.isSymbolicLink()
+            || !provenanceFile.isFile()
         ) {
             throw new Error('invalid filesystem type');
         }
-        const [realWorkspace, realNodeModules, realEntrypoint] =
+        const [
+            realWorkspace,
+            realNodeModules,
+            realPackageLock,
+            realProvenance,
+        ] =
             await Promise.all([
                 realpath(workspacePath),
                 realpath(nodeModulesPath),
-                realpath(entrypointPath),
+                realpath(packageLockPath),
+                realpath(provenancePath),
             ]);
         if (
             realWorkspace !== workspacePath
             || realNodeModules !== nodeModulesPath
-            || realEntrypoint !== entrypointPath
+            || realPackageLock !== packageLockPath
+            || realProvenance !== provenancePath
         ) {
             throw new Error('filesystem indirection');
+        }
+        const pointer = await verifyReplayAnalysisV2JobArtifactPointer({
+            finalDirectory: dirname(entrypointPath),
+        });
+        if (
+            basename(entrypointPath) !== 'job.mjs'
+            || await realpath(entrypointPath)
+                !== join(
+                    await realpath(pointer.contentDirectory),
+                    'job.mjs',
+                )
+        ) {
+            throw new Error('entrypoint pointer mismatch');
+        }
+        const imageLockfile = JSON.parse(await readFile(
+            packageLockPath,
+            'utf8',
+        ));
+        for (const name of EXTERNAL_PACKAGES) {
+            const expected = manifest.externalPackages?.[name];
+            const packageDirectory = join(nodeModulesPath, name);
+            let packageEntry;
+            try {
+                packageEntry = await lstat(packageDirectory);
+            } catch (error) {
+                if (error?.code === 'ENOENT') {
+                    throw new Error('dependency package missing');
+                }
+                throw error;
+            }
+            if (
+                packageEntry.isSymbolicLink()
+                || !packageEntry.isDirectory()
+                || await realpath(packageDirectory) !== packageDirectory
+            ) {
+                throw new Error('dependency package is not physical');
+            }
+            const packageJsonPath = join(
+                packageDirectory,
+                'package.json',
+            );
+            const packageJsonEntry = await lstat(packageJsonPath);
+            if (
+                packageJsonEntry.isSymbolicLink()
+                || !packageJsonEntry.isFile()
+                || await realpath(packageJsonPath) !== packageJsonPath
+            ) {
+                throw new Error('dependency package is not physical');
+            }
+            const packageJson = JSON.parse(await readFile(
+                packageJsonPath,
+                'utf8',
+            ));
+            if (
+                packageJson.name !== name
+                || packageJson.version !== expected?.version
+            ) {
+                throw new Error(
+                    'dependency package provenance mismatch',
+                );
+            }
+            const locked = imageLockfile?.packages?.[
+                `node_modules/${name}`
+            ];
+            if (
+                locked?.version !== expected.version
+                || locked?.integrity !== expected.integrity
+            ) {
+                throw new Error(
+                    'dependency lock provenance mismatch',
+                );
+            }
+        }
+        const provenance = JSON.parse(await readFile(
+            provenancePath,
+            'utf8',
+        ));
+        let computedPackages;
+        try {
+            computedPackages =
+                await resolveReplayAnalysisV2JobPhysicalDependencyClosure({
+                    lockfile: imageLockfile,
+                    sourceWorkspace: workspacePath,
+                });
+        } catch {
+            throw new Error(
+                'physical closure provenance mismatch',
+            );
+        }
+        if (
+            provenance?.schema
+                !== 'analysis-v2-replay-job-physical-closure-v1'
+            || provenance.platform !== process.platform
+            || provenance.arch !== process.arch
+            || !Array.isArray(provenance.packages)
+            || provenance.packages.length
+                !== computedPackages.length
+            || provenance.packages.some((entry, index) => (
+                !entry
+                || typeof entry !== 'object'
+                || entry.path !== computedPackages[index]
+            ))
+        ) {
+            throw new Error(
+                'physical closure provenance mismatch',
+            );
+        }
+        for (const entry of provenance.packages) {
+            const locked = imageLockfile.packages?.[entry.path];
+            const packageDirectory = join(
+                workspacePath,
+                entry.path,
+            );
+            const packageJsonPath = join(
+                packageDirectory,
+                'package.json',
+            );
+            let packageJson;
+            try {
+                const packageJsonEntry = await lstat(packageJsonPath);
+                if (
+                    packageJsonEntry.isSymbolicLink()
+                    || !packageJsonEntry.isFile()
+                    || await realpath(packageJsonPath)
+                        !== packageJsonPath
+                ) {
+                    throw new Error('not physical');
+                }
+                packageJson = JSON.parse(await readFile(
+                    packageJsonPath,
+                    'utf8',
+                ));
+            } catch {
+                throw new Error(
+                    'physical closure provenance mismatch',
+                );
+            }
+            if (
+                typeof entry.version !== 'string'
+                || packageJson.version !== entry.version
+                || locked?.version !== entry.version
+                || (locked.integrity ?? null)
+                    !== entry.integrity
+            ) {
+                throw new Error(
+                    'physical closure provenance mismatch',
+                );
+            }
         }
     } catch (cause) {
         throw new Error(
@@ -246,6 +629,9 @@ export function createReplayAnalysisV2JobRuntimeManifest(
             image,
             workspace: '/workspace',
             nodeModules: '/workspace/node_modules',
+            packageLock: '/workspace/package-lock.json',
+            provenance:
+                '/workspace/replay-job-dependency-provenance.json',
         },
         bundle: {
             format: 'esm',
@@ -290,7 +676,14 @@ function durableWriteError(cause) {
     );
 }
 
-async function closeAfterOperation(handle, operation) {
+async function closeAfterOperation(
+    handle,
+    operation,
+    {
+        closeSyncImpl,
+        fstatSyncImpl,
+    },
+) {
     let operationError;
     try {
         await operation();
@@ -303,28 +696,55 @@ async function closeAfterOperation(handle, operation) {
     } catch (error) {
         closeError = error;
     }
-    if (operationError && closeError) {
-        throw durableWriteError(new AggregateError([
-            operationError,
-            closeError,
-        ]));
+    let fallbackError;
+    if (
+        closeError
+        && Number.isInteger(handle.fd)
+        && handle.fd >= 0
+    ) {
+        try {
+            fstatSyncImpl(handle.fd);
+            closeSyncImpl(handle.fd);
+        } catch (error) {
+            if (error?.code !== 'EBADF') {
+                fallbackError = error;
+            }
+        }
     }
-    if (operationError || closeError) {
-        throw durableWriteError(operationError ?? closeError);
+    const errors = [
+        operationError,
+        closeError,
+        fallbackError,
+    ].filter(Boolean);
+    if (errors.length > 0) {
+        throw durableWriteError(
+            errors.length === 1
+                ? errors[0]
+                : new AggregateError(errors),
+        );
     }
 }
 
-async function stagePrivateFile(target, contents, openImpl) {
+async function stagePrivateFile(
+    target,
+    contents,
+    openImpl,
+    closeDependencies,
+) {
     const handle = await openImpl(target, 'wx', 0o600);
     await closeAfterOperation(handle, async () => {
         await handle.writeFile(contents);
         await handle.sync();
-    });
+    }, closeDependencies);
 }
 
-async function syncDirectory(path, openImpl) {
+async function syncDirectory(path, openImpl, closeDependencies) {
     const handle = await openImpl(path, 'r');
-    await closeAfterOperation(handle, () => handle.sync());
+    await closeAfterOperation(
+        handle,
+        () => handle.sync(),
+        closeDependencies,
+    );
 }
 
 async function assertFinalDirectoryAbsent(finalDirectory) {
@@ -339,47 +759,208 @@ async function assertFinalDirectoryAbsent(finalDirectory) {
     );
 }
 
+async function removeOwnedUnpublishedContent({
+    contentDirectory,
+    identity,
+    rmImpl,
+}) {
+    let current;
+    try {
+        current = lstatSync(contentDirectory);
+    } catch (error) {
+        if (error?.code === 'ENOENT') return;
+        throw error;
+    }
+    if (
+        current.isSymbolicLink()
+        || !current.isDirectory()
+        || current.dev !== identity.device
+        || current.ino !== identity.inode
+    ) {
+        return;
+    }
+    const quarantine = `${contentDirectory}.cleanup-${randomUUID()}`;
+    renameSync(contentDirectory, quarantine);
+    const moved = lstatSync(quarantine);
+    if (
+        moved.isSymbolicLink()
+        || !moved.isDirectory()
+        || moved.dev !== identity.device
+        || moved.ino !== identity.inode
+    ) {
+        return;
+    }
+    await rmImpl(quarantine, {
+        recursive: true,
+        force: true,
+    });
+}
+
+const REPLAY_JOB_ARTIFACT_FILES = Object.freeze([
+    'job.mjs',
+    'meta.json',
+    'runtime.json',
+]);
+
+export async function verifyReplayAnalysisV2JobArtifactPointer({
+    finalDirectory,
+}) {
+    try {
+        const resolvedFinalDirectory = resolve(finalDirectory);
+        const parentDirectory = dirname(resolvedFinalDirectory);
+        const canonicalParent = await realpath(parentDirectory);
+        const pointer = await lstat(resolvedFinalDirectory);
+        if (!pointer.isSymbolicLink()) {
+            throw new Error('final path is not a symlink');
+        }
+        const relativeTarget = await readlink(resolvedFinalDirectory);
+        const expectedPrefix = `.${basename(resolvedFinalDirectory)}.content-`;
+        if (
+            relativeTarget !== basename(relativeTarget)
+            || !relativeTarget.startsWith(expectedPrefix)
+            || relativeTarget.length === expectedPrefix.length
+        ) {
+            throw new Error('pointer target is not a unique sibling');
+        }
+        const contentDirectory = join(parentDirectory, relativeTarget);
+        const canonicalContentDirectory = join(
+            canonicalParent,
+            relativeTarget,
+        );
+        const content = await lstat(contentDirectory);
+        if (
+            content.isSymbolicLink()
+            || !content.isDirectory()
+            || (content.mode & 0o077) !== 0
+        ) {
+            throw new Error('content directory is not private and physical');
+        }
+        const [realContent, realPointer] = await Promise.all([
+            realpath(contentDirectory),
+            realpath(resolvedFinalDirectory),
+        ]);
+        if (
+            realContent !== canonicalContentDirectory
+            || realPointer !== canonicalContentDirectory
+        ) {
+            throw new Error('pointer escaped its owned sibling');
+        }
+        const files = (await readdir(contentDirectory)).sort();
+        if (
+            files.length !== REPLAY_JOB_ARTIFACT_FILES.length
+            || files.some((
+                file,
+                index,
+            ) => file !== REPLAY_JOB_ARTIFACT_FILES[index])
+        ) {
+            throw new Error('immutable content triplet mismatch');
+        }
+        for (const file of files) {
+            const path = join(contentDirectory, file);
+            const entry = await lstat(path);
+            if (
+                entry.isSymbolicLink()
+                || !entry.isFile()
+                || (entry.mode & 0o077) !== 0
+                || await realpath(path) !== join(
+                    canonicalContentDirectory,
+                    file,
+                )
+            ) {
+                throw new Error('immutable content file invalid');
+            }
+        }
+        return {
+            contentDirectory,
+            files,
+        };
+    } catch (cause) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_JOB_ARTIFACT_POINTER_INVALID',
+            { cause },
+        );
+    }
+}
+
 async function publishImmutableDirectory({
     finalDirectory,
     files,
+    closeDependencies,
     mkdirImpl,
     openImpl,
     publishStep,
-    renameImpl,
     rmImpl,
+    symlinkImpl,
 }) {
     const parentDirectory = dirname(finalDirectory);
-    const stagingDirectory = join(
+    const contentDirectory = join(
         parentDirectory,
-        `.${basename(finalDirectory)}.tmp-${randomUUID()}`,
+        `.${basename(finalDirectory)}.content-${randomUUID()}`,
     );
-    let stagingCreated = false;
+    let contentCreated = false;
+    let contentIdentity;
     let published = false;
     try {
-        await mkdirImpl(stagingDirectory, { mode: 0o700 });
-        stagingCreated = true;
-        await publishStep?.('staging-directory-created');
+        await mkdirImpl(contentDirectory, { mode: 0o700 });
+        contentCreated = true;
+        const created = await lstat(contentDirectory);
+        contentIdentity = {
+            device: created.dev,
+            inode: created.ino,
+        };
+        await publishStep?.('content-directory-created');
         for (const file of files) {
             await stagePrivateFile(
-                join(stagingDirectory, basename(file.target)),
+                join(contentDirectory, basename(file.target)),
                 file.contents,
                 openImpl,
+                closeDependencies,
             );
             await publishStep?.(`${basename(file.target)}-durable`);
         }
-        await syncDirectory(stagingDirectory, openImpl);
-        await publishStep?.('staging-directory-durable');
+        await syncDirectory(
+            contentDirectory,
+            openImpl,
+            closeDependencies,
+        );
+        await publishStep?.('content-directory-durable');
         await assertFinalDirectoryAbsent(finalDirectory);
-        await renameImpl(stagingDirectory, finalDirectory);
+        await publishStep?.('final-path-absent');
+        try {
+            await symlinkImpl(
+                basename(contentDirectory),
+                finalDirectory,
+                'dir',
+            );
+        } catch (error) {
+            if (error?.code === 'EEXIST') {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_JOB_FINAL_DIRECTORY_EXISTS',
+                    { cause: error },
+                );
+            }
+            throw error;
+        }
         published = true;
-        await publishStep?.('final-directory-published');
-        await syncDirectory(parentDirectory, openImpl);
+        await publishStep?.('final-pointer-published');
+        await syncDirectory(
+            parentDirectory,
+            openImpl,
+            closeDependencies,
+        );
         await publishStep?.('parent-directory-durable');
+        await verifyReplayAnalysisV2JobArtifactPointer({
+            finalDirectory,
+        });
     } finally {
-        if (stagingCreated && !published) {
-            await rmImpl(stagingDirectory, {
-                recursive: true,
-                force: true,
+        // Never scan or delete residue from another invocation. Only the
+        // inode captured immediately after this invocation's mkdir is eligible
+        // for pre-pointer cleanup; crash residue stays inert and unreachable.
+        if (contentCreated && contentIdentity && !published) {
+            await removeOwnedUnpublishedContent({
+                contentDirectory,
+                identity: contentIdentity,
+                rmImpl,
             });
         }
     }
@@ -394,11 +975,13 @@ async function publishImmutableDirectory({
  *   buildImpl?: (
  *     options: { write?: boolean; [key: string]: unknown }
  *   ) => Promise<any>;
+ *   closeSyncImpl?: typeof closeDescriptorSync;
+ *   fstatSyncImpl?: typeof fstatDescriptorSync;
  *   mkdirImpl?: typeof mkdir;
  *   openImpl?: typeof open;
  *   publishStep?: (step: string) => void | Promise<void>;
- *   renameImpl?: (source: string, target: string) => Promise<void>;
  *   rmImpl?: typeof rm;
+ *   symlinkImpl?: typeof symlink;
  * }} input
  */
 export async function buildReplayAnalysisV2Job({
@@ -407,11 +990,13 @@ export async function buildReplayAnalysisV2Job({
     runtimeManifest,
     imageDigest,
     buildImpl = build,
+    closeSyncImpl = closeDescriptorSync,
+    fstatSyncImpl = fstatDescriptorSync,
     mkdirImpl = mkdir,
     openImpl = open,
     publishStep,
-    renameImpl = rename,
     rmImpl = rm,
+    symlinkImpl = symlink,
 }) {
     for (const [name, path] of Object.entries({
         outfile,
@@ -493,6 +1078,10 @@ export async function buildReplayAnalysisV2Job({
 
     await publishImmutableDirectory({
         finalDirectory,
+        closeDependencies: {
+            closeSyncImpl,
+            fstatSyncImpl,
+        },
         files: [
             {
                 target: outfile,
@@ -514,8 +1103,8 @@ export async function buildReplayAnalysisV2Job({
         mkdirImpl,
         openImpl,
         publishStep,
-        renameImpl,
         rmImpl,
+        symlinkImpl,
     });
 }
 

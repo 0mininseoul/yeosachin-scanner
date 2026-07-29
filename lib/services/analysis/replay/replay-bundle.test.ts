@@ -1,5 +1,9 @@
 import { mkdtemp, chmod, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
-import { closeSync as closeDescriptorSync } from 'node:fs';
+import {
+    closeSync as closeDescriptorSync,
+    renameSync,
+    writeFileSync,
+} from 'node:fs';
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -506,7 +510,7 @@ describe('analysis V2 replay bundle', () => {
         await expect(stat(keyPath)).rejects.toThrow();
     });
 
-    it('closes exactly once and unlinks its O_EXCL inode when fstat fails', async () => {
+    it('closes exactly once and leaves only an empty artifact when fstat fails', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
         temporaryPaths.push(directory);
         const keyPath = join(directory, 'partial-fstat.key');
@@ -522,7 +526,35 @@ describe('analysis V2 replay bundle', () => {
         })).rejects.toThrow('injected fstat failure');
 
         expect(closeSync).toHaveBeenCalledOnce();
-        await expect(stat(keyPath)).rejects.toThrow();
+        await expect(stat(keyPath)).resolves.toMatchObject({
+            size: 0,
+        });
+    });
+
+    it('preserves a replacement installed by the fstat-failure close hook', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'partial-fstat-race.key');
+        const ownedEmptyPath = join(directory, 'owned-empty.key');
+        const closeSync = vi.fn((descriptor: number) => {
+            closeDescriptorSync(descriptor);
+            renameSync(keyPath, ownedEmptyPath);
+            writeFileSync(keyPath, 'replacement', { mode: 0o600 });
+        });
+
+        await expect(createReplayKeyFile(keyPath, {
+            fstatSync: () => {
+                throw new Error('injected fstat failure');
+            },
+            closeSync,
+        })).rejects.toThrow('injected fstat failure');
+
+        expect(closeSync).toHaveBeenCalledOnce();
+        await expect(readFile(keyPath, 'utf8'))
+            .resolves.toBe('replacement');
+        await expect(stat(ownedEmptyPath)).resolves.toMatchObject({
+            size: 0,
+        });
     });
 
     it('cleans an active partial creation when the signal lifecycle runs', async () => {
