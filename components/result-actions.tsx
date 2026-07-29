@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 /* Kakao's speech-bubble mark in its brand yellow. Inside the menu it identifies
    the channel; on the closed trigger it would be the only saturated colour above
@@ -31,6 +32,41 @@ function isPhone(): boolean {
   return /iphone|ipad|ipod|android/i.test(navigator.userAgent);
 }
 
+/* Copies without yielding the thread.
+ *
+ * `navigator.clipboard.writeText` returns a promise, and awaiting it before a
+ * custom-scheme navigation costs us the gesture iOS needs to hand off to the
+ * app. It also leaves us unable to say whether the copy worked until after the
+ * hand-off has already happened. The selection dance below is synchronous, so
+ * the answer is known before Instagram takes over.
+ *
+ * iOS ignores `select()` on a readonly field, hence the explicit Range. */
+function copyTextSync(text: string): boolean {
+  try {
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.contentEditable = 'true';
+    field.readOnly = false;
+    // Off-screen but still focusable; `display:none` would break the selection.
+    field.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;';
+    document.body.appendChild(field);
+
+    const range = document.createRange();
+    range.selectNodeContents(field);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    field.setSelectionRange(0, text.length);
+
+    const copied = document.execCommand('copy');
+    selection?.removeAllRanges();
+    field.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
+
 /* Overflow menu for the report's secondary actions.
  *
  * These sit above the headline, where anything with a border and a label wins the
@@ -42,14 +78,18 @@ export function ResultActions({
   kakaoBusy,
   kakaoAvailable,
   copyUrl,
-  onOpen,
+  shareUrl,
+  onPrepare,
 }: {
   onKakaoShare: () => void;
   kakaoBusy: boolean;
   kakaoAvailable: boolean;
+  /** Where the links point until this result's own share link is minted. */
   copyUrl: string;
-  /** Fired when the menu opens, so slow work can finish before the tap. */
-  onOpen?: () => void;
+  /** This result's share link; null while it is still being minted. */
+  shareUrl: string | null;
+  /** Fired on intent, so the slow work is done before the tap. */
+  onPrepare?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -95,19 +135,29 @@ export function ResultActions({
     };
   }, [notice]);
 
+  // Falls back to the service link only while this result's own link is still
+  // being minted, so a share is never silently pointed at the wrong page.
+  const linkToShare = shareUrl ?? copyUrl;
+
   const copy = async () => {
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(copyUrl);
-      setCopied(true);
-      // Let the confirmation register before the menu disappears.
-      window.setTimeout(() => {
-        setOpen(false);
-        setCopied(false);
-      }, 900);
+      await navigator.clipboard.writeText(linkToShare);
+      ok = true;
     } catch {
-      setOpen(false);
-      alert('링크 복사에 실패했습니다.');
+      ok = copyTextSync(linkToShare);
     }
+    if (!ok) {
+      setOpen(false);
+      setNotice('링크 복사에 실패했습니다.');
+      return;
+    }
+    setCopied(true);
+    // Let the confirmation register before the menu disappears.
+    window.setTimeout(() => {
+      setOpen(false);
+      setCopied(false);
+    }, 900);
   };
 
   /* Instagram exposes no way to prefill a DM or to choose a recipient from the
@@ -121,18 +171,19 @@ export function ResultActions({
      even when the app had opened, leaving instagram.com sitting in a tab behind
      the browser; there is no reliable signal that a scheme handoff succeeded, so
      the platform decides instead of a guess. */
-  const shareToInstagramDm = async () => {
-    let copied = false;
-    try {
-      await navigator.clipboard.writeText(copyUrl);
-      copied = true;
-    } catch {
-      // Opening the inbox is still useful without the clipboard.
-    }
+  const shareToInstagramDm = () => {
+    // Nothing may be awaited here: the app hand-off below needs this task's
+    // gesture, and the notice has to be queued before the app takes the screen.
+    const copied = copyTextSync(linkToShare);
+    if (!copied) void navigator.clipboard?.writeText(linkToShare).catch(() => {});
     setOpen(false);
-    // Shown before the handoff so it is still on screen when the reader comes
-    // back from Instagram — otherwise the copy happens with no sign at all.
-    if (copied) setNotice('링크를 복사했어요. DM 입력창에 붙여넣어 주세요.');
+    // The switch to Instagram is instant, so this is really for the trip back —
+    // its countdown only runs while this tab is on screen.
+    setNotice(
+      copied
+        ? '링크를 복사했어요. DM 입력창에 붙여넣어 주세요.'
+        : 'DM 입력창에 링크를 붙여넣어 주세요.',
+    );
 
     if (isPhone()) {
       window.location.href = INSTAGRAM_DM_APP_URL;
@@ -143,20 +194,28 @@ export function ResultActions({
 
   return (
     <div ref={rootRef} className="relative shrink-0">
-      {notice && (
-        <div
-          role="status"
-          className="fixed inset-x-4 bottom-6 z-50 mx-auto max-w-[420px] border border-line-2 bg-ink-2 px-4 py-3 text-center text-[12.5px] font-semibold text-fg shadow-[0_8px_28px_-8px_rgba(0,0,0,0.85)]"
-        >
-          {notice}
-        </div>
-      )}
+      {/* Portalled to the body: a `position: fixed` toast resolves against the
+          nearest transformed ancestor, and this page animates its blocks, so
+          in place it would land wherever that transform put it. */}
+      {notice && typeof document !== 'undefined'
+        && createPortal(
+          <div
+            role="status"
+            className="fixed inset-x-4 bottom-6 z-50 mx-auto max-w-[420px] border border-line-2 bg-ink-2 px-4 py-3 text-center text-[12.5px] font-semibold text-fg shadow-[0_8px_28px_-8px_rgba(0,0,0,0.85)]"
+          >
+            {notice}
+          </div>,
+          document.body,
+        )}
       <button
         ref={triggerRef}
         type="button"
+        // On press rather than on click: the token round trip is the slowest
+        // link in the chain, and this buys it the whole press-to-release span.
+        onPointerDown={() => { if (!open) onPrepare?.(); }}
         onClick={() => {
           setOpen(value => {
-            if (!value) onOpen?.();
+            if (!value) onPrepare?.();
             return !value;
           });
         }}
@@ -191,7 +250,10 @@ export function ResultActions({
               setOpen(false);
               onKakaoShare();
             }}
-            disabled={kakaoBusy}
+            /* Kakao opens its sheet from inside the tap, so the link has to
+               exist before the finger lands. Staying disabled for the extra
+               moment is what keeps this off the OS share sheet. */
+            disabled={kakaoBusy || (kakaoAvailable && !shareUrl)}
             className={itemCls}
           >
             {kakaoAvailable ? (
@@ -206,7 +268,7 @@ export function ResultActions({
                 />
               </svg>
             )}
-            {kakaoAvailable ? '카카오톡 공유' : '공유'}
+            {kakaoAvailable ? (shareUrl ? '카카오톡 공유' : '카카오톡 공유 준비 중…') : '공유'}
           </button>
           <button type="button" role="menuitem" onClick={shareToInstagramDm} className={itemCls}>
             <InstagramMark className="h-3.5 w-3.5 shrink-0" />

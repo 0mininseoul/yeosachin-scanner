@@ -282,6 +282,9 @@ export default function ResultPage({ params }: PageProps) {
     // read the destination without awaiting anything.
     const sharePrepRef = useRef<Promise<Omit<ResultShareContent, 'title'>> | null>(null);
     const sharePreparedRef = useRef<Omit<ResultShareContent, 'title'> | null>(null);
+    // Mirrors the ref so the menu can hold the Kakao item back until the link
+    // exists. The ref stays the source of truth for the tap itself.
+    const [shareTarget, setShareTarget] = useState<Omit<ResultShareContent, 'title'> | null>(null);
     const [deleting, setDeleting] = useState(false);
     const [pageAction, setPageAction] = useState<ResultPageAction | null>(null);
     const [pageError, setPageError] = useState<ResultPageAction | null>(null);
@@ -551,32 +554,40 @@ export default function ResultPage({ params }: PageProps) {
      * the popup is blocked, which is what pushed iOS onto the OS share sheet. So
      * everything slow happens when the menu opens, one interaction earlier. */
     const prepareShare = useCallback(() => {
-        void readyKakao();
         if (sharePrepRef.current) return sharePrepRef.current;
         sharePrepRef.current = (async () => {
-            try {
-                const response = await fetch('/api/share/enable', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ requestId }),
-                });
-                const payload = await response.json();
-                if (response.ok && payload?.success && typeof payload.shareUrl === 'string') {
-                    sharePreparedRef.current = {
-                        url: payload.shareUrl as string,
-                        // Kakao ignores the page's OG tags, so the per-result card
-                        // has to be handed over explicitly.
-                        imageUrl: typeof payload.shareToken === 'string'
-                            ? `${CANONICAL_APP_ORIGIN}/api/share/${payload.shareToken}/opengraph-image`
-                            : `${CANONICAL_APP_ORIGIN}/og.png`,
-                    };
-                    return sharePreparedRef.current;
-                }
-            } catch {
-                // fall through to the service link
-            }
-            sharePrepRef.current = null; // let a later attempt retry
-            return { url: CANONICAL_APP_ORIGIN, imageUrl: `${CANONICAL_APP_ORIGIN}/og.png` };
+            // The SDK download and the token round trip are independent, so they
+            // run together rather than one after the other.
+            const [, link] = await Promise.all([
+                readyKakao(),
+                (async () => {
+                    try {
+                        const response = await fetch('/api/share/enable', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ requestId }),
+                        });
+                        const payload = await response.json();
+                        if (response.ok && payload?.success && typeof payload.shareUrl === 'string') {
+                            return {
+                                url: payload.shareUrl as string,
+                                // Kakao ignores the page's OG tags, so the per-result
+                                // card has to be handed over explicitly.
+                                imageUrl: typeof payload.shareToken === 'string'
+                                    ? `${CANONICAL_APP_ORIGIN}/api/share/${payload.shareToken}/opengraph-image`
+                                    : `${CANONICAL_APP_ORIGIN}/og.png`,
+                            };
+                        }
+                    } catch {
+                        // fall through to the service link
+                    }
+                    sharePrepRef.current = null; // let a later attempt retry
+                    return { url: CANONICAL_APP_ORIGIN, imageUrl: `${CANONICAL_APP_ORIGIN}/og.png` };
+                })(),
+            ]);
+            sharePreparedRef.current = link;
+            setShareTarget(link);
+            return link;
         })();
         return sharePrepRef.current;
     }, [requestId]);
@@ -585,10 +596,26 @@ export default function ResultPage({ params }: PageProps) {
         if (kakaoShareLoading) return;
 
         const target = sharePreparedRef.current;
-        // The happy path: everything was resolved when the menu opened, so the
-        // send stays inside the tap's own task.
+        // Everything was resolved before the tap, so the send stays inside the
+        // tap's own task — which is the only way Kakao's sheet is allowed to open.
         if (target && shareToKakaoNow({ ...target, title: '위장여사친 판독 결과' })) {
             trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: 'kakao' });
+            return;
+        }
+
+        /* Past this point the gesture is spent, so Kakao can no longer open. The
+           async path below ends at the OS share sheet, which is the wrong answer
+           for a button that says 카카오톡 — it is only correct when Kakao was
+           never on the table (no key configured), where the button reads 공유. */
+        if (kakaoJavascriptKey() !== null) {
+            const link = target?.url ?? (await prepareShare()).url;
+            const copied = await navigator.clipboard?.writeText(link).then(() => true, () => false);
+            alert(copied
+                ? '카카오톡 공유를 열지 못해 링크를 복사했습니다.'
+                : '카카오톡 공유를 열지 못했습니다. 잠시 후 다시 시도해 주세요.');
+            if (copied) {
+                trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: 'clipboard' });
+            }
             return;
         }
 
@@ -739,10 +766,11 @@ export default function ResultPage({ params }: PageProps) {
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
                     <ResultActions
                         onKakaoShare={handleKakaoShare}
-                        onOpen={prepareShare}
+                        onPrepare={prepareShare}
                         kakaoBusy={kakaoShareLoading}
                         kakaoAvailable={kakaoJavascriptKey() !== null}
                         copyUrl={CANONICAL_APP_ORIGIN}
+                        shareUrl={shareTarget?.url ?? null}
                     />
                 </div>
                 {/* pipeline-specific summary */}
