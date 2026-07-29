@@ -1,6 +1,6 @@
 # V2.19 Pro Gender Second-Look Implementation Plan
 
-**Design:** `docs/superpowers/specs/2026-07-30-v219-pro-gender-second-look-design.md`  
+**Design:** `docs/superpowers/specs/2026-07-30-v219-pro-gender-second-look-design.md`<br>
 **Execution boundary:** implement and verify through zero-provider dry preflight;
 do not create or execute a paid job.
 

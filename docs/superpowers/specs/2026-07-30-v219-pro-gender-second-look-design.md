@@ -1,10 +1,10 @@
 # V2.19 Pro Gender Second-Look Replay Design
 
-**Status:** implementation design approved  
-**Date:** 2026-07-30  
-**Scope:** authenticated, sealed-source, paid-AI replay evaluation only  
-**Control:** immutable V2.18/V2.12 provider path  
-**Treatment model:** `gemini-3.1-pro-preview`  
+**Status:** implementation design approved<br>
+**Date:** 2026-07-30<br>
+**Scope:** authenticated, sealed-source, paid-AI replay evaluation only<br>
+**Control:** immutable V2.18/V2.12 provider path<br>
+**Treatment model:** `gemini-3.1-pro-preview`<br>
 **Out of scope:** production policy selection, persisted user results, a new
 Instagram/Apify read, threshold relaxation, frontend copy, and paid execution
 before a separate cost-gate approval
