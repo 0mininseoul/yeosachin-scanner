@@ -7,6 +7,10 @@ const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 4_000;
 const IMMEDIATE_RETRY_MAX_DELAY_MS = 2_000;
 const MIN_HOOK_SECRET_LENGTH = 32;
+const INTERNAL_INTEGRATION_PROJECT_SLUGS = new Set([
+    'ai-baram-detector',
+    'ai-baram-detector-1',
+]);
 
 interface DiscordConfig {
     botToken: string;
@@ -278,7 +282,8 @@ export function parseProductionSentryInternalIntegrationIssue(rawBody: string): 
     if (!root || root.action !== 'created' || !issue) return null;
 
     const projectSlug = safeProjectSlug(stringAt(issue, ['project', 'slug']));
-    if (projectSlug !== 'ai-baram-detector-1' || !isProduction(internalIssueEnvironment(issue))) return null;
+    if (!projectSlug || !INTERNAL_INTEGRATION_PROJECT_SLUGS.has(projectSlug)
+        || !isProduction(internalIssueEnvironment(issue))) return null;
 
     const issueId = typeof issue.id === 'string' && issue.id.trim() ? issue.id.trim() : null;
     const timestamp = typeof issue.firstSeen === 'string'
