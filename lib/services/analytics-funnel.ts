@@ -85,6 +85,9 @@ export function readAttribution(search: string): {
     if (!hasAttribution) return { source: 'direct', medium: 'direct' };
 
     const result: ReturnType<typeof readAttribution> = {};
+    const isChatGptReferral = params.get('utm_source')?.trim().toLowerCase() === 'chatgpt.com';
+    if (isChatGptReferral) result.source = 'chatgpt';
+
     for (const [property, queryKey] of [
         ['source', 'utm_source'],
         ['medium', 'utm_medium'],
@@ -97,6 +100,7 @@ export function readAttribution(search: string): {
             result[property] = value;
         }
     }
+    if (isChatGptReferral && !params.has('utm_medium')) result.medium = 'referral';
     return result;
 }
 
