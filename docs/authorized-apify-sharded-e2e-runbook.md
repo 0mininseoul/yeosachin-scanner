@@ -310,7 +310,7 @@ paid account instead of rotating free accounts.
 6. Record total duration, stage durations, provider usage, Gemini usage, and any fallback reason without recording credentials or private payloads.
 7. When fresh admission produced a schema-v1 attested target profile run, confirm target evidence replayed that run ID without a second profile Actor or `analysis_v2_provider_runs` row. Attribute its cost only to the preflight. If no attested descriptor exists, confirm the existing bound profile fallback was used instead.
 
-## Historical canary teardown
+## Historical canary teardown (`primary:3`)
 
 이 절의 최종 selected baseline `primary:3`은 위 역사적 canary의 teardown 기록이다. 현재
 production selected slot을 의미하거나 변경하지 않는다.
