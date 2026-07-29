@@ -37,6 +37,15 @@ export const NOINDEX_METADATA: Metadata = {
     },
 };
 
+export const GUIDE_PATH = '/guide/wijang-yeosachin';
+export const GUIDE_URL = `${CANONICAL_APP_ORIGIN}${GUIDE_PATH}`;
+export const GUIDE_TITLE = '위장여사친 구분법 | 위장여사친 판독기';
+export const GUIDE_H1 = '위장여사친 구분법: 인스타 공개 신호로 확인하는 기준';
+export const GUIDE_DESCRIPTION = '맞팔 관계와 좋아요·댓글·태그·멘션 등 인스타그램 공개 신호로 위장여사친 후보를 구분하는 기준과 AI 판독 방식을 설명합니다.';
+export const GUIDE_PUBLISHED_DATE = '2026-07-29';
+export const GUIDE_MODIFIED_DATE = '2026-07-29';
+export const GUIDE_PUBLISHER = 'Ascentum';
+
 export function buildHomepageJsonLd() {
     const websiteId = `${CANONICAL_APP_ORIGIN}/#website`;
     const organizationId = `${CANONICAL_APP_ORIGIN}/#organization`;
@@ -64,3 +73,49 @@ export function buildHomepageJsonLd() {
 }
 
 export const HOMEPAGE_JSON_LD = buildHomepageJsonLd();
+
+export function buildGuideJsonLd() {
+    return {
+        '@context': 'https://schema.org',
+        '@graph': [
+            {
+                '@type': 'Article',
+                '@id': `${GUIDE_URL}#article`,
+                url: GUIDE_URL,
+                headline: GUIDE_TITLE,
+                description: GUIDE_DESCRIPTION,
+                datePublished: GUIDE_PUBLISHED_DATE,
+                dateModified: GUIDE_MODIFIED_DATE,
+                inLanguage: 'ko-KR',
+                author: {
+                    '@type': 'Organization',
+                    name: GUIDE_PUBLISHER,
+                },
+                publisher: {
+                    '@type': 'Organization',
+                    name: GUIDE_PUBLISHER,
+                },
+            },
+            {
+                '@type': 'BreadcrumbList',
+                '@id': `${GUIDE_URL}#breadcrumb`,
+                itemListElement: [
+                    {
+                        '@type': 'ListItem',
+                        position: 1,
+                        name: '위장여사친 판독기',
+                        item: `${CANONICAL_APP_ORIGIN}/`,
+                    },
+                    {
+                        '@type': 'ListItem',
+                        position: 2,
+                        name: GUIDE_TITLE,
+                        item: GUIDE_URL,
+                    },
+                ],
+            },
+        ],
+    };
+}
+
+export const GUIDE_JSON_LD = buildGuideJsonLd();

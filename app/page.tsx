@@ -367,6 +367,9 @@ export default function LandingPage() {
             판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
           </p>
           <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[12px] text-fg-dim">
+            <Link href="/guide/wijang-yeosachin" className="transition-colors hover:text-fg">
+              위장여사친 구분법
+            </Link>
             <Link href="/terms" className="transition-colors hover:text-fg">
               이용약관
             </Link>
