@@ -580,11 +580,13 @@ export function createReplayStagedAiAdapter(
                         if (!isV212ResolverCapacitySkip(error)) throw error;
                         return {
                             outcome: 'capacity_skipped' as const,
+                            calls: 0,
                             attempts: 0, retries: 0, elapsedMs: 0,
                         };
                     })
                     : invocation.catch(() => ({
                         outcome: 'capacity_skipped' as const,
+                        calls: 0,
                         attempts: 0, retries: 0, elapsedMs: 0,
                     }));
             })()

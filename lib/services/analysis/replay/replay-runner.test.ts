@@ -35,6 +35,12 @@ function v210Runner(operations: ReplayAiRunner): ReplayAiRunner {
     return runner;
 }
 
+function v212Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.12');
+    return runner;
+}
+
 function diagnosticPartialCoverageCapability(
     aiStagePolicy: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' =
         'ai-stage-policy-v2.9',
@@ -785,6 +791,102 @@ describe('AI-only replay runner', () => {
         });
         expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
         expect(report.resolver).toMatchObject({ ready: 1, applied: 1, inconclusive: 0, cutoff: 0 });
+    });
+
+    it('reports only bounded aggregate resolver headroom diagnostics', async () => {
+        const evaluationPolicy = {
+            capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v212-gender-quality' as const,
+            aiStage: 'ai-stage-policy-v2.12' as const,
+        };
+        const publicProfiles = [1, 2, 3, 4].map(ordinal => ({
+            ...bundle.profiles[0]!,
+            ordinal,
+            username: `candidate-${ordinal}`,
+        }));
+        const v212Bundle = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        aiStage: 'ai-stage-policy-v2.7' as const,
+                        risk: 'risk-policy-v2.3' as const,
+                    },
+                },
+                evaluationPolicy,
+            },
+            profiles: publicProfiles,
+        };
+        const featureResult = (
+            accountContext: 'personal' | 'individual_creator' | 'uncertain',
+            finalGenderDecision: FeatureAnalysisResult['finalGenderDecision'],
+        ): FeatureAnalysisResult => ({
+            features: {
+                gender: 'unknown', genderConfidence: 'low', ownerConsistency: 'multiple_or_unclear',
+                appearanceGrade: 3, exposureScore: 1, businessClassification: 'personal',
+                businessConfidence: 'medium', accountContext,
+                marriageEvidence: 'none', partnerEvidence: 'none', partnerExclusionContext: 'none',
+                evidenceSelectionIds: { gender: ['m1'], appearance: ['m1'], exposure: ['m1'], business: ['m1'], accountContext: ['m1'], marriagePartner: [] },
+                oneLineOverview: '충분히 긴 형식 검증용 한국어 계정 맥락 요약입니다.',
+            },
+            finalGenderDecision,
+            analyzedSelectionIds: ['m1', 'm2'],
+        });
+        const lines: string[] = [];
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: v212Bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            write: line => lines.push(line),
+            runner: v212Runner({
+                triage: async ({ ordinal }) => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: ordinal === 2
+                            ? { inferredGender: 'female', confidence: 'high', ownerConsistency: 'same_person', evidenceSelectionIds: ['m1', 'm2'] }
+                            : { inferredGender: 'unknown', confidence: 'low', ownerConsistency: 'multiple_or_unclear', evidenceSelectionIds: ['m1'] },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                        v29AccountContext: ordinal === 3 ? 'uncertain' : 'personal',
+                    },
+                }),
+                feature: async ({ ordinal }) => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: ordinal === 4
+                        ? featureResult('personal', 'verified_female')
+                        : featureResult(ordinal === 3 ? 'uncertain' : 'personal', 'unresolved'),
+                }),
+                resolveGender: async ({ ordinal }) => ordinal === 1
+                    ? { outcome: 'capacity_skipped' as const, attempts: 0, retries: 0, elapsedMs: 0 }
+                    : {
+                        outcome: 'ok' as const, attempts: 1, retries: 0, elapsedMs: 1,
+                        value: {
+                            assessment: { inferredGender: 'female' as const, confidence: 'high' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1', 'm2'] },
+                            analyzedSelectionIds: ['m1', 'm2'],
+                        },
+                    },
+            }),
+        });
+
+        expect(report.genderQuality?.headroom).toEqual({
+            finalUnknownWithResolverMediaAtLeast2: 3,
+            highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2: 1,
+            featureUnresolvedWithUncertainAccountContext: 1,
+            capacitySkippedFinalUnknown: 1,
+            earlyResolverReadyFeatureFinalKnown: 1,
+        });
+        expect(report.stages.genderResolution.calls).toBe(1);
+        const safe = JSON.parse(lines[0]!);
+        expect(safe.gender_quality.headroom).toEqual(report.genderQuality?.headroom);
+        expect(Object.keys(safe.gender_quality.headroom)).toHaveLength(5);
+        expect(JSON.stringify(safe)).not.toContain('candidate-');
+        expect(JSON.stringify(safe)).not.toContain('m1');
+        expect(JSON.stringify(safe)).not.toContain('형식 검증');
     });
 
     it('runs the v2.9 resolver for an ambiguous personal account without admitting feature', async () => {

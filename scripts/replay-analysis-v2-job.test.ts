@@ -464,6 +464,13 @@ describe('Cloud Run analysis V2 replay job', () => {
             unavailable: 1,
             triage_non_ok: 1,
         };
+        actual.gender_quality.headroom = {
+            finalUnknownWithResolverMediaAtLeast2: 1,
+            highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2: 1,
+            featureUnresolvedWithUncertainAccountContext: 1,
+            capacitySkippedFinalUnknown: 1,
+            earlyResolverReadyFeatureFinalKnown: 1,
+        };
         const raw = JSON.stringify(actual);
 
         expect(validateReplayAnalysisV2JobTerminalLine(raw)).toBe(raw);
@@ -498,6 +505,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         ['feature terminal', ['gender_quality', 'feature', 'routeTerminal']],
         ['resolver outcome', ['gender_quality', 'resolver', 'outcome']],
         ['final source', ['gender_quality', 'finalClassificationSource']],
+        ['resolver headroom', ['gender_quality', 'headroom']],
     ])('rejects handle-like aggregate keys in %s', async (
         _name,
         path,
@@ -505,7 +513,9 @@ describe('Cloud Run analysis V2 replay job', () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
         } = await import('./replay-analysis-v2-job');
-        for (const key of ['handle', 'terminal']) {
+        for (const key of [
+            'handle', 'name', 'bio', 'url', 'mediaId', 'rawEvidence', 'terminal',
+        ]) {
             const actual = JSON.parse(
                 await actualDiagnosticV212SafeLine(),
             );

@@ -178,6 +178,14 @@ export interface AnalysisV2AiReplayReport {
         };
         resolver: { earlyAdmission: number; lateAdmission: number; outcome: Record<string, number> };
         finalClassificationSource: Record<string, number>;
+        /** Bounded v2.13 diagnostic aggregates; no account or evidence fields. */
+        headroom: {
+            finalUnknownWithResolverMediaAtLeast2: number;
+            highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2: number;
+            featureUnresolvedWithUncertainAccountContext: number;
+            capacitySkippedFinalUnknown: number;
+            earlyResolverReadyFeatureFinalKnown: number;
+        };
         qualityGate: ReturnType<typeof evaluateReplayGenderQualityGate>;
     };
     totalElapsedMs: number;
@@ -220,6 +228,8 @@ interface PreparedPublicReplay {
     triage: GenderTriageResult;
     feature?: ReplayInvocation<FeatureAnalysisResult>;
     resolver?: TrackedResolver;
+    resolverMediaCount: number;
+    resolverAdmission?: 'early' | 'late';
     resolverExcludedByFeatureOfficial?: boolean;
 }
 
@@ -377,14 +387,15 @@ function percentile(values: number[], p: number): number {
 }
 
 function collect(stage: ReplayStageMetrics, durations: number[], invocation: ReplayInvocation<unknown>): void {
-    stage.calls += invocation.calls ?? 1;
+    const calls = invocation.calls ?? (invocation.attempts > 0 ? 1 : 0);
+    stage.calls += calls;
     stage.retries += Math.max(0, invocation.retries);
     const attemptLatencies = invocation.attemptLatenciesMs?.filter(value => (
         Number.isFinite(value) && value >= 0
     ));
     if (attemptLatencies?.length) {
         durations.push(...attemptLatencies);
-    } else if ((invocation.calls ?? 1) > 0) {
+    } else if (calls > 0) {
         durations.push(Math.max(0, invocation.elapsedMs));
     }
     stage.rateLimited += invocation.rateLimited
@@ -711,6 +722,13 @@ export async function runAnalysisV2AiReplay(input: {
         },
         resolver: { earlyAdmission: 0, lateAdmission: 0, outcome: {} as Record<string, number> },
         finalClassificationSource: {} as Record<string, number>,
+        headroom: {
+            finalUnknownWithResolverMediaAtLeast2: 0,
+            highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2: 0,
+            featureUnresolvedWithUncertainAccountContext: 0,
+            capacitySkippedFinalUnknown: 0,
+            earlyResolverReadyFeatureFinalKnown: 0,
+        },
     } : null;
     const resolver: AnalysisV2AiReplayReport['resolver'] = {
         ready: 0,
@@ -878,8 +896,10 @@ export async function runAnalysisV2AiReplay(input: {
             }
             const abort = new AbortController();
             let trackedResolver: TrackedResolver | undefined;
-            const startResolver = () => {
+            let resolverAdmission: PreparedPublicReplay['resolverAdmission'];
+            const startResolver = (admission: NonNullable<PreparedPublicReplay['resolverAdmission']>) => {
                 if (trackedResolver || !runner.resolveGender) return;
+                resolverAdmission = admission;
                 const tracked: TrackedResolver = {
                     abort,
                     settled: false,
@@ -944,7 +964,7 @@ export async function runAnalysisV2AiReplay(input: {
             };
             if (eligible) {
                 if (genderQuality) genderQuality.resolver.earlyAdmission++;
-                startResolver();
+                startResolver('early');
             }
             const feature = featurePromise ? await featurePromise : undefined;
             if (feature) collect(stages.featureAnalysis, durations.featureAnalysis, feature);
@@ -975,6 +995,33 @@ export async function runAnalysisV2AiReplay(input: {
                         (genderQuality.feature.accountContext[context] ?? 0) + 1;
                 }
             }
+            if (genderQuality && feature?.outcome === 'ok' && feature.value) {
+                const featureDecision = feature.value.finalGenderDecision;
+                const featureUnresolved = featureDecision === 'unresolved'
+                    || featureDecision === 'unresolved_stage_conflict';
+                const featurePersonal = feature.value.features.accountContext === 'personal'
+                    || feature.value.features.accountContext === 'individual_creator';
+                const highBinary = (
+                    triage.assessment.inferredGender === 'female'
+                    || triage.assessment.inferredGender === 'male'
+                )
+                    && triage.assessment.confidence === 'high'
+                    && triage.assessment.ownerConsistency === 'same_person'
+                    && new Set(triage.assessment.evidenceSelectionIds).size >= 2;
+                if (highBinary && featureUnresolved && featurePersonal && resolverMedia.length >= 2) {
+                    genderQuality.headroom
+                        .highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2++;
+                }
+                if (
+                    featureUnresolved
+                    && (
+                        triage.v29AccountContext === 'uncertain'
+                        || feature.value.features.accountContext === 'uncertain'
+                    )
+                ) {
+                    genderQuality.headroom.featureUnresolvedWithUncertainAccountContext++;
+                }
+            }
             const resolverExcludedByFeatureOfficial = genderQualityV211
                 && feature?.outcome === 'ok'
                 && feature.value !== undefined
@@ -1003,13 +1050,15 @@ export async function runAnalysisV2AiReplay(input: {
                 )
             ) {
                 if (genderQuality) genderQuality.resolver.lateAdmission++;
-                startResolver();
+                startResolver('late');
             }
             prepared.push({
                 baseline,
                 triage,
                 feature,
                 resolver: trackedResolver,
+                resolverMediaCount: resolverMedia.length,
+                ...(resolverAdmission ? { resolverAdmission } : {}),
                 ...(resolverExcludedByFeatureOfficial
                     ? { resolverExcludedByFeatureOfficial: true }
                     : {}),
@@ -1168,6 +1217,23 @@ export async function runAnalysisV2AiReplay(input: {
             else if (reconciliation.finalClassification === 'verified_non_female') gender.male++;
             else gender.unknown++;
             if (genderQuality) {
+                const finalUnknown = reconciliation.finalClassification !== 'verified_female'
+                    && reconciliation.finalClassification !== 'verified_non_female';
+                if (finalUnknown && outcome.resolverMediaCount >= 2) {
+                    genderQuality.headroom.finalUnknownWithResolverMediaAtLeast2++;
+                }
+                if (finalUnknown && resolved?.outcome === 'capacity_skipped') {
+                    genderQuality.headroom.capacitySkippedFinalUnknown++;
+                }
+                const featureFinalKnown = outcome.feature?.value?.finalGenderDecision === 'verified_female'
+                    || outcome.feature?.value?.finalGenderDecision === 'verified_non_female';
+                if (
+                    outcome.resolverAdmission === 'early'
+                    && resolved?.outcome === 'ok'
+                    && featureFinalKnown
+                ) {
+                    genderQuality.headroom.earlyResolverReadyFeatureFinalKnown++;
+                }
                 const source = reconciliation.classificationSource;
                 genderQuality.finalClassificationSource[source] =
                     (genderQuality.finalClassificationSource[source] ?? 0) + 1;
@@ -1194,6 +1260,7 @@ export async function runAnalysisV2AiReplay(input: {
         const featureCompleted = genderQuality.feature.routeTerminal.completed ?? 0;
         const featureProviderNonOk =
             genderQuality.feature.routeTerminal.provider_non_ok ?? 0;
+        const headroom = genderQuality.headroom;
         if (
             total !== observedPublic
             || triageOutcomes !== observedPublic
@@ -1202,6 +1269,15 @@ export async function runAnalysisV2AiReplay(input: {
             || resolverAdmissions !== resolverOutcomes
             || featureRouteTerminals !== observedPublic
             || featureAdmitted !== featureCompleted + featureProviderNonOk
+            || headroom.finalUnknownWithResolverMediaAtLeast2 > gender.unknown
+            || headroom.capacitySkippedFinalUnknown
+                > headroom.finalUnknownWithResolverMediaAtLeast2
+            || headroom.earlyResolverReadyFeatureFinalKnown
+                > genderQuality.resolver.earlyAdmission
+            || headroom.highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2
+                > featureCompleted
+            || headroom.featureUnresolvedWithUncertainAccountContext
+                > featureCompleted
         ) {
             throw new Error('ANALYSIS_V2_REPLAY_GENDER_QUALITY_CONSERVATION_FAILED');
         }

@@ -577,6 +577,26 @@ describe('replay staged AI adapter telemetry', () => {
         });
     });
 
+    it('reports zero provider calls when v2.12 resolver capacity admission is skipped before an attempt', async () => {
+        const controller = new AbortController();
+        controller.abort();
+
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.12')
+            .resolveGender?.({
+                ordinal: 1,
+                media: [],
+                signal: controller.signal,
+            });
+
+        expect(result).toMatchObject({
+            outcome: 'capacity_skipped',
+            calls: 0,
+            attempts: 0,
+            retries: 0,
+        });
+        expect(mocks.genderResolution).not.toHaveBeenCalled();
+    });
+
     it('rethrows an unexpected v2.12 resolver fault through the outer admission boundary', async () => {
         mocks.createGenderResolutionResultIdentity.mockReturnValue({
             operationKey: 'resolver:identity',

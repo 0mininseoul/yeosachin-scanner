@@ -105,6 +105,13 @@ const finalClassificationSourceCounts = z.object({
     unavailable: aggregateCount.optional(),
     triage_non_ok: aggregateCount.optional(),
 }).strict();
+const resolverHeadroomCounts = z.object({
+    finalUnknownWithResolverMediaAtLeast2: aggregateCount,
+    highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2: aggregateCount,
+    featureUnresolvedWithUncertainAccountContext: aggregateCount,
+    capacitySkippedFinalUnknown: aggregateCount,
+    earlyResolverReadyFeatureFinalKnown: aggregateCount,
+}).strict();
 const stageMetricsSchema = z.object({
     calls: aggregateCount,
     rate_limited: aggregateCount,
@@ -195,6 +202,7 @@ export const replayAnalysisV2JobTerminalSchema = z.object({
             outcome: resolverOutcomeCounts,
         }).strict(),
         finalClassificationSource: finalClassificationSourceCounts,
+        headroom: resolverHeadroomCounts,
         qualityGate: z.object({
             observedUnknownRate: aggregateRate,
             worstCaseUnknownRate: aggregateRate,
