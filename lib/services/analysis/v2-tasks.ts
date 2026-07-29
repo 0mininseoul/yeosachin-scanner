@@ -14,6 +14,11 @@ import {
     type AnalysisV2JobStore,
     type AnalysisV2TaskDelivery,
 } from './v2-job-store';
+import {
+    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT,
+    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION,
+    ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER,
+} from './v2-worker-task-contract';
 
 const PROJECT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const LOCATION_PATTERN = /^[a-z]+-[a-z]+[0-9]$/;
@@ -22,7 +27,9 @@ const SERVICE_ACCOUNT_PATTERN = /^[a-z0-9-]{1,63}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 
-export const ANALYSIS_V2_TASK_DISPATCH_DEADLINE_SECONDS = 300;
+// Match the Cloud Run request window. The route retains a 60-second completion margin.
+export const ANALYSIS_V2_TASK_DISPATCH_DEADLINE_SECONDS =
+    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT.dispatchDeadlineSeconds;
 export const ANALYSIS_V2_TASK_MAX_DELAY_SECONDS = 300;
 
 export interface AnalysisV2TasksConfig {
@@ -272,7 +279,13 @@ export async function enqueueAnalysisV2Task(
         httpRequest: {
             httpMethod: 'POST',
             url: config.targetUrl,
-            headers: { 'Content-Type': 'application/json' },
+            // A header preserves old worker strict-body compatibility during a rolling deploy.
+            headers: {
+                'Content-Type': 'application/json',
+                [ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER]: String(
+                    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION,
+                ),
+            },
             body: Buffer.from(JSON.stringify(payload)).toString('base64'),
             oidcToken: {
                 serviceAccountEmail: config.serviceAccountEmail,

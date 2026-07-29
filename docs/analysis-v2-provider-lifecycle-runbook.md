@@ -4,6 +4,31 @@ V2 never retries an ambiguous Actor start. Every confirmed Apify run ID is resum
 stopped, terminalized, and cost-reconciled with the credential slot stored on its ledger row.
 The recovery endpoint repeats these operations with bounded concurrency.
 
+## Worker time-window contract
+
+The current Cloud Run request timeout and Cloud Tasks dispatch deadline are both 600 seconds. A
+current-contract V2 job claim uses the same 600-second lease, while the route stops admitting new
+paid AI work at 540 seconds. This reserves the final 60 seconds for result checkpointing and
+fence release.
+
+The route module's `maxDuration` remains 300 seconds so a Vercel Hobby build stays valid; Cloud
+Tasks targets the canonical Cloud Run worker, where the independent 600-second request timeout
+applies.
+
+The Gemini SDK timeout (210 seconds) and its 15-second durable commit reserve are intentionally
+unchanged. If `ANALYSIS_V2_AI_DEADLINE_TOO_SHORT` rises, inspect queue delivery, worker timeout,
+and job-lease drift before altering model policy, concurrency, or retry behavior.
+
+Tasks created under this contract carry `X-Analysis-V2-Worker-Contract: 2` inside the
+OIDC-authenticated Cloud Tasks request. The strict task body remains unchanged so an older worker
+can safely ignore the header. An absent or unknown header remains on the original 300-second
+handler and 360-second lease contract. This prevents a rolling worker deploy from making a
+pre-existing 300-second delivery outlive its Cloud Tasks deadline.
+
+Rollback must restore the route, task dispatch, Cloud Run timeout, and claim-lease values as one
+release. Do not roll back only one surface while jobs are live: allow their current 600-second
+leases to expire or complete first, then verify recovery has re-enqueued only fenced work.
+
 ## Normal recovery
 
 - `SCRAPING_RUN_PENDING_ERROR` and `SCRAPING_DATASET_TRANSIENT_ERROR` retry the exact

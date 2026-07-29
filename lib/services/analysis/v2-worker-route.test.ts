@@ -44,7 +44,11 @@ vi.mock('@/lib/services/analysis/v2-worker', () => ({
     processAnalysisV2TaskDelivery: mocks.process,
 }));
 
-import { POST } from '@/app/api/analysis/v2/worker/route';
+import {
+    ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS,
+    maxDuration,
+    POST,
+} from '@/app/api/analysis/v2/worker/route';
 
 const config = {
     project: 'example-project',
@@ -61,10 +65,20 @@ const payload = {
     reservationToken: '223e4567-e89b-42d3-a456-426614174000', // gitleaks:allow -- UUID fixture
 };
 
-function request(body: unknown = payload, authorization = 'Bearer signed') {
+function request(
+    body: unknown = payload,
+    authorization = 'Bearer signed',
+    workerContractHeader?: string,
+) {
     return new Request('https://worker.example.com/api/analysis/v2/worker', {
         method: 'POST',
-        headers: { authorization, 'Content-Type': 'application/json' },
+        headers: {
+            authorization,
+            'Content-Type': 'application/json',
+            ...(workerContractHeader === undefined
+                ? {}
+                : { 'X-Analysis-V2-Worker-Contract': workerContractHeader }),
+        },
         body: JSON.stringify(body),
     });
 }
@@ -88,11 +102,14 @@ describe('analysis V2 worker route', () => {
 
     it('authenticates OIDC and processes only a strict task payload', async () => {
         vi.spyOn(performance, 'now').mockReturnValue(12_345);
+        expect(maxDuration).toBe(300);
+        expect(ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS).toBe(540_000);
         const response = await POST(request());
         expect(response.status).toBe(200);
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
         expect(mocks.process).toHaveBeenCalledWith(payload, {
             handlerDeadlineAtMs: 312_345,
+            jobLeaseSeconds: 360,
         });
 
         const malformed = await POST(request({ ...payload, username: 'raw_user' }));
@@ -104,6 +121,44 @@ describe('analysis V2 worker route', () => {
             'analysis_v2.worker_failed',
         ]);
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('raw_user');
+    });
+
+    it('uses the 540-second/600-second contract only when the authenticated task declares header v2', async () => {
+        vi.spyOn(performance, 'now').mockReturnValue(12_345);
+
+        const response = await POST(request(payload, 'Bearer signed', '2'));
+
+        expect(response.status).toBe(200);
+        expect(mocks.process).toHaveBeenCalledWith(payload, {
+            handlerDeadlineAtMs: 552_345,
+            jobLeaseSeconds: 600,
+        });
+    });
+
+    it('fails safe to the legacy contract for an unknown authenticated contract header', async () => {
+        vi.spyOn(performance, 'now').mockReturnValue(12_345);
+
+        const response = await POST(request(payload, 'Bearer signed', '3'));
+
+        expect(response.status).toBe(200);
+        expect(mocks.process).toHaveBeenCalledWith(payload, {
+            handlerDeadlineAtMs: 312_345,
+            jobLeaseSeconds: 360,
+        });
+    });
+
+    it('anchors the execution deadline before OIDC verification latency', async () => {
+        vi.spyOn(performance, 'now')
+            .mockReturnValueOnce(12_345)
+            .mockReturnValue(200_000);
+
+        const response = await POST(request(payload, 'Bearer signed', '2'));
+
+        expect(response.status).toBe(200);
+        expect(mocks.process).toHaveBeenCalledWith(payload, {
+            handlerDeadlineAtMs: 552_345,
+            jobLeaseSeconds: 600,
+        });
     });
 
     it('uses only the worker drain gate, independently from new admission', async () => {
