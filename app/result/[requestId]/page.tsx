@@ -596,9 +596,13 @@ export default function ResultPage({ params }: PageProps) {
         if (kakaoShareLoading) return;
 
         const target = sharePreparedRef.current;
+        let kakaoError = '';
         // Everything was resolved before the tap, so the send stays inside the
         // tap's own task — which is the only way Kakao's sheet is allowed to open.
-        if (target && shareToKakaoNow({ ...target, title: '위장여사친 판독 결과' })) {
+        if (target && shareToKakaoNow(
+            { ...target, title: '위장여사친 판독 결과' },
+            reason => { kakaoError = reason; },
+        )) {
             trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: 'kakao' });
             return;
         }
@@ -610,9 +614,10 @@ export default function ResultPage({ params }: PageProps) {
         if (kakaoJavascriptKey() !== null) {
             const link = target?.url ?? (await prepareShare()).url;
             const copied = await navigator.clipboard?.writeText(link).then(() => true, () => false);
-            alert(copied
+            const detail = kakaoError ? `\n(${kakaoError})` : '';
+            alert((copied
                 ? '카카오톡 공유를 열지 못해 링크를 복사했습니다.'
-                : '카카오톡 공유를 열지 못했습니다. 잠시 후 다시 시도해 주세요.');
+                : '카카오톡 공유를 열지 못했습니다. 잠시 후 다시 시도해 주세요.') + detail);
             if (copied) {
                 trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: 'clipboard' });
             }

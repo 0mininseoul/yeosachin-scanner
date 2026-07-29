@@ -128,13 +128,24 @@ function feedTemplate(content: ResultShareContent): KakaoFeedTemplate {
  * Sends through Kakao in the same task as the tap. Returns false when the SDK is
  * not ready, leaving the caller to fall back.
  */
-export function shareToKakaoNow(content: ResultShareContent): boolean {
+export function shareToKakaoNow(
+    content: ResultShareContent,
+    /* Everything this app controls — key, SRI, CORS, template — can be verified
+       from outside, so a failure here is almost always Kakao-side console
+       configuration. The reason is surfaced rather than swallowed because it is
+       the only part that cannot be reproduced anywhere but a real device. */
+    onError?: (reason: string) => void,
+): boolean {
     const sdk = kakaoSdkIfReady();
-    if (!sdk?.Share) return false;
+    if (!sdk?.Share) {
+        onError?.('SDK_NOT_READY');
+        return false;
+    }
     try {
         sdk.Share.sendDefault(feedTemplate(content));
         return true;
-    } catch {
+    } catch (error) {
+        onError?.(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
         return false;
     }
 }
