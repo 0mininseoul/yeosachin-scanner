@@ -252,6 +252,9 @@ const replayAnalysisV2JobTerminalV213Schema =
         const shadow = report.gender_quality.shadow_rescue;
         const publicCount =
             report.gender.male + report.gender.female + report.gender.unknown;
+        const coverageMissingPublic =
+            report.diagnostic_partial_coverage_override.source_profiles
+            - report.diagnostic_partial_coverage_override.retained_profiles;
         const providerNonOk = Object.values(shadow.providerNonOk)
             .reduce((sum, count) => sum + count, 0);
         const expectedUnknownRate = publicCount === 0
@@ -263,7 +266,8 @@ const replayAnalysisV2JobTerminalV213Schema =
             ? 0
             : Number((worstCaseUnknown / worstCaseTotal).toFixed(4));
         const valid =
-            shadow.baselineMale
+            shadow.missingPublic === coverageMissingPublic
+            && shadow.baselineMale
                 + shadow.baselineFemale
                 + shadow.baselineUnknown === publicCount
             && shadow.finalMale

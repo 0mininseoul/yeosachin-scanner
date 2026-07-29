@@ -221,10 +221,27 @@ async function actualDiagnosticV213SafeLine(): Promise<string> {
         profile_retention_bps: 9_800,
         media_retention_bps: 9_800,
     };
+    const missingPublic =
+        actual.diagnostic_partial_coverage_override.source_profiles
+        - actual.diagnostic_partial_coverage_override.retained_profiles;
+    const observedTotal =
+        actual.gender.male + actual.gender.female + actual.gender.unknown;
+    const worstCaseUnknown = actual.gender.unknown + missingPublic;
+    const worstCaseTotal = observedTotal + missingPublic;
+    actual.gender_quality.shadow_rescue.missingPublic = missingPublic;
+    actual.gender_quality.qualityGate.worstCaseUnknownRate =
+        worstCaseTotal === 0
+            ? 0
+            : Number((worstCaseUnknown / worstCaseTotal).toFixed(4));
+    actual.gender_quality.qualityGate.worstCasePass =
+        worstCaseUnknown * 5 <= worstCaseTotal;
     return JSON.stringify(actual);
 }
 
 interface V213TerminalReportFixture {
+    diagnostic_partial_coverage_override: {
+        retained_profiles: number;
+    };
     gender: {
         female: number;
     };
@@ -680,9 +697,11 @@ describe('Cloud Run analysis V2 replay job', () => {
         const actual = JSON.parse(
             await actualDiagnosticV213SafeLine(),
         ) as V213TerminalReportFixture;
-        actual.gender_quality.shadow_rescue.missingPublic = 1;
-        actual.gender_quality.qualityGate.worstCaseUnknownRate = 1;
-        actual.gender_quality.qualityGate.worstCasePass = false;
+        expect(actual.gender_quality.shadow_rescue.missingPublic).toBe(1);
+        expect(actual.gender_quality.qualityGate).toMatchObject({
+            worstCaseUnknownRate: 1,
+            worstCasePass: false,
+        });
 
         expect(() => validateReplayAnalysisV2JobTerminalLine(
             JSON.stringify(actual),
@@ -717,6 +736,14 @@ describe('Cloud Run analysis V2 replay job', () => {
         ['worst-case pass', (report: V213TerminalReportFixture) => {
             report.gender_quality.qualityGate.worstCasePass =
                 !report.gender_quality.qualityGate.worstCasePass;
+        }],
+        ['missing-public provenance', (report: V213TerminalReportFixture) => {
+            report.gender_quality.shadow_rescue.missingPublic = 0;
+            report.gender_quality.qualityGate.worstCaseUnknownRate = 0;
+            report.gender_quality.qualityGate.worstCasePass = true;
+        }],
+        ['retained-profile provenance', (report: V213TerminalReportFixture) => {
+            report.diagnostic_partial_coverage_override.retained_profiles -= 1;
         }],
         ['nested PII', (report: V213TerminalReportFixture) => {
             report.gender_quality.shadow_rescue.account = 'private-person';
