@@ -140,7 +140,7 @@ describe('Sentry Service Hook Discord bridge', () => {
         )).toBe(false);
     });
 
-    it('accepts only a created production ai-baram-detector-1 issue and uses a stable privacy-safe dedupe key', () => {
+    it('accepts only created production issues from the two confirmed project slugs and uses a stable privacy-safe dedupe key', () => {
         const accepted = parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue());
         const duplicate = parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
             data: { issue: {
@@ -154,15 +154,27 @@ describe('Sentry Service Hook Discord bridge', () => {
             errorType: 'TypeError', release: 'v1.2.3',
         });
         expect(duplicate?.dedupeKey).toBe(accepted?.dedupeKey);
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: {
+                id: '987654322', project: { slug: 'ai-baram-detector' },
+                firstSeen: '2026-07-28T00:00:00Z', environment: 'production',
+            } },
+        }))).toMatchObject({ projectSlug: 'ai-baram-detector' });
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({ action: 'resolved' }))).toBeNull();
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
             data: { issue: { id: '987654321', project: { slug: 'other-project' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
         }))).toBeNull();
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
-            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
+            data: { issue: { id: '987654321', project: { slug: ' ai-baram-detector ' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
         }))).toBeNull();
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
             data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector-1' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'staging' } },
+        }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector-1' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'Production' } },
+        }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector-1' }, firstSeen: '2026-07-28T00:00:00Z', environment: ' production ' } },
         }))).toBeNull();
         expect(JSON.stringify(accepted)).not.toContain('person@example.test');
         expect(JSON.stringify(accepted)).not.toContain('private exception title');

@@ -44,7 +44,10 @@ describe('Kakao signup Discord notification', () => {
         configured();
     });
 
-    afterEach(() => vi.unstubAllEnvs());
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.unstubAllEnvs();
+    });
 
     it.each([
         ['김', '*'],
@@ -181,6 +184,28 @@ describe('Kakao signup Discord notification', () => {
             p_outcome: 'ambiguous_failed', p_failure_code: code,
         }));
         expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits ten seconds before aborting a Discord delivery and terminalizes it without retrying', async () => {
+        vi.useFakeTimers();
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ error: null });
+        const fetcher = vi.fn().mockImplementation((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        }));
+
+        const delivery = deliverKakaoSignupDiscordNotifications({ fetcher });
+        await vi.advanceTimersByTimeAsync(9_999);
+        expect(mocks.rpc).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(delivery).resolves.toBe(1);
+        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(mocks.rpc).toHaveBeenCalledWith('complete_kakao_signup_discord_outbox', expect.objectContaining({
+            p_outcome: 'ambiguous_failed',
+            p_failure_code: 'DISCORD_TIMEOUT_OR_NETWORK_AMBIGUOUS',
+        }));
     });
 
     it('keeps bot credentials and recipient data out of logs and Sentry on a Discord rejection', async () => {

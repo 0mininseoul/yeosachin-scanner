@@ -7,6 +7,10 @@ const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 4_000;
 const IMMEDIATE_RETRY_MAX_DELAY_MS = 2_000;
 const MIN_HOOK_SECRET_LENGTH = 32;
+const INTERNAL_INTEGRATION_PROJECT_SLUGS = new Set([
+    'ai-baram-detector',
+    'ai-baram-detector-1',
+]);
 
 interface DiscordConfig {
     botToken: string;
@@ -207,17 +211,17 @@ function eventEnvironment(value: unknown): string | null {
 
 function internalIssueEnvironment(issue: Record<string, unknown>): string | null {
     const direct = issue.environment;
-    if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    if (typeof direct === 'string' && direct.trim()) return direct;
     const metadata = asRecord(issue.metadata);
     const metadataEnvironment = metadata?.environment;
     if (typeof metadataEnvironment === 'string' && metadataEnvironment.trim())
-        return metadataEnvironment.trim();
+        return metadataEnvironment;
     const environments = issue.environments;
     if (!Array.isArray(environments) || environments.length !== 1) return null;
     const environment = environments[0];
-    if (typeof environment === 'string' && environment.trim()) return environment.trim();
+    if (typeof environment === 'string' && environment.trim()) return environment;
     const name = asRecord(environment)?.name;
-    return typeof name === 'string' && name.trim() ? name.trim() : null;
+    return typeof name === 'string' && name.trim() ? name : null;
 }
 
 /** Parse the official v0 Service Hook shape: top-level project, group, event. */
@@ -277,8 +281,14 @@ export function parseProductionSentryInternalIntegrationIssue(rawBody: string): 
     const issue = data ? asRecord(data.issue) : null;
     if (!root || root.action !== 'created' || !issue) return null;
 
-    const projectSlug = safeProjectSlug(stringAt(issue, ['project', 'slug']));
-    if (projectSlug !== 'ai-baram-detector-1' || !isProduction(internalIssueEnvironment(issue))) return null;
+    // This signed intake deliberately compares the source values as received:
+    // normalization could turn an unapproved slug or environment into an allowed one.
+    const project = asRecord(issue.project);
+    const projectSlug = typeof project?.slug === 'string'
+        ? project.slug
+        : null;
+    if (!projectSlug || !INTERNAL_INTEGRATION_PROJECT_SLUGS.has(projectSlug)
+        || internalIssueEnvironment(issue) !== 'production') return null;
 
     const issueId = typeof issue.id === 'string' && issue.id.trim() ? issue.id.trim() : null;
     const timestamp = typeof issue.firstSeen === 'string'

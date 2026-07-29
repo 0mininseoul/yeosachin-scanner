@@ -4,7 +4,7 @@ import * as Sentry from '@sentry/nextjs';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
-const DISCORD_TIMEOUT_MS = 4_000;
+const DISCORD_TIMEOUT_MS = 10_000;
 
 export interface KakaoSignupProfile {
     name: unknown;
