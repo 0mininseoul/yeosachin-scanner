@@ -602,7 +602,7 @@ export default function ResultPage({ params }: PageProps) {
         // that is what the recipient opens the link for.
         const card = {
             title: `${summary.targetFullName ?? summary.targetInstagramId}님의 위장 여사친 판독 결과`,
-            description: `${summary.targetFullName ?? summary.targetInstagramId}님의 위장여사친을 지금 확인해보세요!`,
+            description: '지금 바로 확인해보세요!',
         };
         // Everything was resolved before the tap, so the send stays inside the
         // tap's own task — which is the only way Kakao's sheet is allowed to open.
@@ -1024,9 +1024,6 @@ export default function ResultPage({ params }: PageProps) {
                             onGoto={(pageIndex) => goToResultPage('private', pageIndex)}
                         />
                     )}
-                    <p className="mt-3 text-[11px] text-fg-mute">
-                        비공개 계정은 이름 텍스트의 여성형 가능성 순이며, 이 추정은 틀릴 수 있어요.
-                    </p>
                 </section>
                 )}
 

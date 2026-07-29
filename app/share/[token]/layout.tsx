@@ -69,16 +69,18 @@ export async function generateMetadata(
     }
     if (!displayName) return FALLBACK;
 
+    /* No `robots: noindex` here. Instagram's preview fetcher stopped at the
+       title and never asked for the image while it was set, and the 64-hex token
+       is what keeps this page unreachable — a crawler cannot guess a URL it has
+       never seen, and a directive is not what was protecting it. */
     // Same words the Kakao card and the OG image already use.
     const title = `${displayName}님의 위장 여사친 판독 결과`;
-    const description = `${displayName}님의 위장여사친을 지금 확인해보세요!`;
+    const description = '지금 바로 확인해보세요!';
     const image = `${CANONICAL_APP_ORIGIN}/api/share/${token.data}/opengraph-image`;
 
     return {
         title,
         description,
-        // A share link is for the recipient's eyes, not for a search index.
-        robots: { index: false, follow: false },
         openGraph: {
             type: 'website',
             locale: 'ko_KR',
@@ -86,7 +88,7 @@ export async function generateMetadata(
             title,
             description,
             url: `${CANONICAL_APP_ORIGIN}/share/${token.data}`,
-            images: [{ url: image, width: 800, height: 400, alt: title }],
+            images: [{ url: image, width: 800, height: 800, alt: title }],
         },
         twitter: { card: 'summary_large_image', title, description, images: [image] },
     };

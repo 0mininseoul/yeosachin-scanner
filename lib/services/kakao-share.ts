@@ -26,6 +26,10 @@ interface KakaoFeedTemplate {
         title: string;
         description?: string;
         imageUrl: string;
+        /* Declared, because KakaoTalk otherwise guesses at the thumbnail box and
+           centre-crops to it. The card is square so a crop changes nothing. */
+        imageWidth: number;
+        imageHeight: number;
         link: KakaoShareLink;
     };
     buttons: { title: string; link: KakaoShareLink }[];
@@ -122,6 +126,9 @@ export async function readyKakao(): Promise<KakaoSdk | null> {
     return sdk.isInitialized() && sdk.Share ? sdk : null;
 }
 
+/** Edge length of the generated card; kept in step with the OG image route. */
+export const SHARE_CARD_PX = 800;
+
 export interface ResultShareContent {
     /** Publicly reachable destination. Never an auth-gated result URL. */
     url: string;
@@ -140,6 +147,8 @@ function feedTemplate(content: ResultShareContent): KakaoFeedTemplate {
             title: content.title,
             ...(content.description ? { description: content.description } : {}),
             imageUrl: content.imageUrl,
+            imageWidth: SHARE_CARD_PX,
+            imageHeight: SHARE_CARD_PX,
             link,
         },
         buttons: [{ title: '결과 보기', link }],
