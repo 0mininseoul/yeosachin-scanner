@@ -108,6 +108,20 @@ export async function GET(
 
     try {
         const bytes = await readAnalysisV2ResultImageObject(resolved);
+        /* Only the third parties are degraded. The analysis target is the
+           subject the owner is deliberately sharing — their name heads the page
+           and their face fills the card image — so shrinking them to 24px here
+           protected nobody and just left the header looking broken. */
+        if (locator.kind === 'target') {
+            return new NextResponse(new Uint8Array(bytes), {
+                status: 200,
+                headers: {
+                    ...IMAGE_HEADERS,
+                    'Content-Type': 'image/webp',
+                    'Content-Length': String(bytes.byteLength),
+                },
+            });
+        }
         const downsampled = await sharp(bytes, {
             failOn: 'error',
             limitInputPixels: 16_777_216,

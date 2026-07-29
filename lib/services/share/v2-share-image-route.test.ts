@@ -102,6 +102,21 @@ describe('V2 shared result image route', () => {
         expect(mocks.read).toHaveBeenCalledWith(locator);
     });
 
+    it('leaves the analysis target undegraded', async () => {
+        /* The target is who the owner set out to share: their name heads the
+           page and their face fills the card image. Degrading them here bought
+           no privacy and only made the header look broken. */
+        const response = await GET(
+            new Request(`https://example.com/api/share/${token}/image?kind=target`),
+            context()
+        );
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe('image/webp');
+        const output = Buffer.from(await response.arrayBuffer());
+        expect(output).toEqual(sourceImage);
+    });
+
     it('rejects raw candidate ids in the public image URL', async () => {
         const response = await GET(
             new Request(
