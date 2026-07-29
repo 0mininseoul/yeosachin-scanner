@@ -123,7 +123,7 @@ const stageMetricsSchema = z.object({
     failure_kind: stageFailureKindCounts,
 }).strict();
 
-export const replayAnalysisV2JobTerminalSchema = z.object({
+const replayAnalysisV2JobTerminalV212Schema = z.object({
     status: z.literal('ok'),
     benchmark_scope: z.literal('ai-only-historical-partial-available'),
     source_plan: z.literal('standard'),
@@ -211,6 +211,100 @@ export const replayAnalysisV2JobTerminalSchema = z.object({
         }).strict(),
     }).strict(),
 }).strict();
+
+const shadowRescueCounts = z.object({
+    baselineMale: aggregateCount,
+    baselineFemale: aggregateCount,
+    baselineUnknown: aggregateCount,
+    officialOrGroupExcluded: aggregateCount,
+    insufficientMedia: aggregateCount,
+    controlUnavailable: aggregateCount,
+    eligible: aggregateCount,
+    attempted: aggregateCount,
+    rescuedMale: aggregateCount,
+    rescuedFemale: aggregateCount,
+    unresolved: aggregateCount,
+    providerNonOk: z.object({
+        rateLimited: aggregateCount,
+        retryExhausted: aggregateCount,
+        rejected: aggregateCount,
+        failed: aggregateCount,
+        capacitySkipped: aggregateCount,
+    }).strict(),
+    finalMale: aggregateCount,
+    finalFemale: aggregateCount,
+    finalUnknown: aggregateCount,
+}).strict();
+
+const replayAnalysisV2JobTerminalV213Schema =
+    replayAnalysisV2JobTerminalV212Schema.extend({
+        evaluation_ai_policy: z.literal('ai-stage-policy-v2.13'),
+        replay_ai_policy: z.literal('ai-stage-policy-v2.13'),
+        stages: replayAnalysisV2JobTerminalV212Schema.shape.stages.extend({
+            featureAnalysisShadowRescue: stageMetricsSchema,
+        }).strict(),
+        gender_quality:
+            replayAnalysisV2JobTerminalV212Schema.shape.gender_quality.extend({
+                shadow_rescue: shadowRescueCounts,
+            }).strict(),
+    }).strict().superRefine((report, context) => {
+        const shadow = report.gender_quality.shadow_rescue;
+        const publicCount =
+            report.gender.male + report.gender.female + report.gender.unknown;
+        const providerNonOk = Object.values(shadow.providerNonOk)
+            .reduce((sum, count) => sum + count, 0);
+        const expectedUnknownRate = publicCount === 0
+            ? 0
+            : Number((report.gender.unknown / publicCount).toFixed(4));
+        const valid =
+            shadow.baselineMale
+                + shadow.baselineFemale
+                + shadow.baselineUnknown === publicCount
+            && shadow.finalMale
+                + shadow.finalFemale
+                + shadow.finalUnknown === publicCount
+            && shadow.baselineUnknown
+                === shadow.officialOrGroupExcluded
+                    + shadow.insufficientMedia
+                    + shadow.controlUnavailable
+                    + shadow.eligible
+            && shadow.eligible === shadow.attempted
+            && shadow.attempted
+                === shadow.rescuedMale
+                    + shadow.rescuedFemale
+                    + shadow.unresolved
+                    + providerNonOk
+            && shadow.finalMale
+                === shadow.baselineMale + shadow.rescuedMale
+            && shadow.finalFemale
+                === shadow.baselineFemale + shadow.rescuedFemale
+            && shadow.finalUnknown
+                === shadow.baselineUnknown
+                    - shadow.rescuedMale
+                    - shadow.rescuedFemale
+            && shadow.finalMale === report.gender.male
+            && shadow.finalFemale === report.gender.female
+            && shadow.finalUnknown === report.gender.unknown
+            && report.stages.featureAnalysisShadowRescue.calls
+                <= shadow.attempted * 4
+            && report.gender.unknownRate === expectedUnknownRate
+            && report.gender_quality.qualityGate.observedUnknownRate
+                === expectedUnknownRate
+            && report.gender_quality.qualityGate.observedPass
+                === (report.gender.unknown * 5 <= publicCount);
+        if (!valid) {
+            context.addIssue({
+                code: 'custom',
+                message:
+                    'ANALYSIS_V2_REPLAY_V213_SHADOW_CONSERVATION_FAILED',
+            });
+        }
+    });
+
+export const replayAnalysisV2JobTerminalSchema = z.union([
+    replayAnalysisV2JobTerminalV212Schema,
+    replayAnalysisV2JobTerminalV213Schema,
+]);
 
 export function replayStageFailureDispositionEntries(
     value: unknown,

@@ -33,6 +33,7 @@ import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_V212_VERSION,
+    AI_STAGE_POLICY_V213_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
     AI_GEMINI_SDK_TIMEOUT_MS,
     aiStagePolicySupports,
@@ -834,13 +835,17 @@ export async function analyzeWithGemini<T>(
         ? assertSupportedAiStagePolicyVersion(aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION)
         : AI_STAGE_POLICY_VERSION;
     const replayFailureTaxonomy = statelessReplay
-        && resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION;
+        && (
+            resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V213_VERSION
+        );
     const replayProviderAdmission = Boolean(
         runProviderAttempt
         && statelessReplay
         && (
             resolvedPolicyVersion === AI_STAGE_POLICY_V211_VERSION
             || resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V213_VERSION
         )
         && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
         && (

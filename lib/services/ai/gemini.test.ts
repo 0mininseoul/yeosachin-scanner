@@ -271,7 +271,11 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
-    it.each(['ai-stage-policy-v2.11', 'ai-stage-policy-v2.12'] as const)(
+    it.each([
+        'ai-stage-policy-v2.11',
+        'ai-stage-policy-v2.12',
+        'ai-stage-policy-v2.13',
+    ] as const)(
         'runs a replay provider fence once for each SDK attempt under %s, including a retry',
         async aiStagePolicyVersion => {
         vi.useFakeTimers();
@@ -301,7 +305,10 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(fence).toHaveBeenCalledTimes(2);
         expect(providerDispatch).toHaveBeenCalledTimes(2);
         const failedAttempt = audit.onAttemptTelemetry.mock.calls[0]![0];
-        if (aiStagePolicyVersion === 'ai-stage-policy-v2.12') {
+        if (
+            aiStagePolicyVersion === 'ai-stage-policy-v2.12'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.13'
+        ) {
             expect(failedAttempt).toMatchObject({ failureKind: 'http_429' });
         } else {
             expect(failedAttempt).not.toHaveProperty('failureKind');

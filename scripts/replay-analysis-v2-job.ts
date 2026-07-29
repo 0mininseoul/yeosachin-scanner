@@ -33,7 +33,7 @@ import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/rep
 import { createReplayStagedAiAdapter } from '../lib/services/analysis/replay/replay-staged-ai-adapter';
 import { runAnalysisV2AiReplay } from '../lib/services/analysis/replay/replay-runner';
 import {
-    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
 } from '../lib/services/analysis/replay/replay-source-lineage';
 import {
     parseDiagnosticPartialCoverageCliCapability,
@@ -45,9 +45,9 @@ import {
     validateReplayAnalysisV2JobTerminalLine,
 } from '../lib/services/analysis/replay/replay-job-report-contract';
 
-const V212_EVALUATION = Object.freeze({
-    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
-    aiStage: 'ai-stage-policy-v2.12' as const,
+const V213_EVALUATION = Object.freeze({
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.13' as const,
 });
 declare const __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__: string;
 const BUILT_IMAGE_DIGEST = typeof __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
@@ -421,7 +421,7 @@ export async function loadReplayAnalysisV2JobArtifacts(
     }
 }
 
-function authenticatedV212Bundle(value: unknown): AnalysisV2ReplayBundle {
+function authenticatedV213Bundle(value: unknown): AnalysisV2ReplayBundle {
     const candidate = value as AnalysisV2ReplayBundle & { expired?: unknown };
     const { expired, ...withoutExpiry } = candidate;
     const bundle = withoutExpiry as AnalysisV2ReplayBundle;
@@ -432,8 +432,8 @@ function authenticatedV212Bundle(value: unknown): AnalysisV2ReplayBundle {
         || expired !== false
         || bundle.capture.scope !== 'ai-only-historical-partial-available'
         || policy?.capability
-            !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY
-        || policy.aiStage !== 'ai-stage-policy-v2.12'
+            !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY
+        || policy.aiStage !== 'ai-stage-policy-v2.13'
         || lineage.selectedPlanId !== 'standard'
         || lineage.policyVersions.pipeline !== 'v2'
         || lineage.policyVersions.aiStage !== 'ai-stage-policy-v2.7'
@@ -457,13 +457,13 @@ interface ReplayAnalysisV2JobDependencies {
     createGcsClient?: (
         config: ReplayAnalysisV2JobConfig,
     ) => ReplayJobGcsClient;
-    createRunner?: (policy: 'ai-stage-policy-v2.12') => unknown;
+    createRunner?: (policy: 'ai-stage-policy-v2.13') => unknown;
     runReplay?: (input: {
         bundle: AnalysisV2ReplayBundle;
         runner: unknown;
         mode: 'paid-ai';
         paidAiOptIn: true;
-        evaluationPolicy: typeof V212_EVALUATION;
+        evaluationPolicy: typeof V213_EVALUATION;
         diagnosticPartialCoverageCapability: object;
         write: (line: string) => void;
     }) => Promise<unknown>;
@@ -609,7 +609,7 @@ export async function runReplayAnalysisV2Job(
             cleanupCoordinator.replace(cleanup);
         });
         cleanupCoordinator.replace(loaded.cleanup);
-        const bundle = authenticatedV212Bundle(loaded.bundle);
+        const bundle = authenticatedV213Bundle(loaded.bundle);
         await gcs.createClaim(JSON.stringify({
             status: 'claimed',
             schema: 'analysis-v2-replay-job-claim-v1',
@@ -617,7 +617,7 @@ export async function runReplayAnalysisV2Job(
         const runner = (
             dependencies.createRunner
                 ?? (policy => createReplayStagedAiAdapter(policy))
-        )('ai-stage-policy-v2.12');
+        )('ai-stage-policy-v2.13');
         const diagnosticPartialCoverageCapability =
             parseDiagnosticPartialCoverageCliCapability([
                 '--run',
@@ -642,7 +642,7 @@ export async function runReplayAnalysisV2Job(
                 runner,
                 mode: 'paid-ai',
                 paidAiOptIn: true,
-                evaluationPolicy: V212_EVALUATION,
+                evaluationPolicy: V213_EVALUATION,
                 diagnosticPartialCoverageCapability,
                 write: line => {
                     if (terminalLine !== undefined) {

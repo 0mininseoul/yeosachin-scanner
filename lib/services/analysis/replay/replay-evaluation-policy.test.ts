@@ -35,6 +35,11 @@ const historicalPartialV212Evaluation = {
     capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.12' as const,
 } satisfies ReplayEvaluationPolicy;
+const historicalPartialV213Evaluation = {
+    capability:
+        'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow',
+    aiStage: 'ai-stage-policy-v2.13',
+} as const;
 const standard = (aiStage: 'ai-stage-policy-v2.7' | 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9') => ({
     selectedPlanId: 'standard' as const,
     policyVersions: {
@@ -134,6 +139,30 @@ describe('replay cross-policy evaluation capability', () => {
         expect(replayEvaluationPolicySchema.safeParse({
             capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
             aiStage: 'ai-stage-policy-v2.11',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.13 only behind its own feature shadow capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV213Evaluation as never,
+        )).toBe('ai-stage-policy-v2.13');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.13',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: historicalPartialV213Evaluation.capability,
+            aiStage: 'ai-stage-policy-v2.12',
         }).success).toBe(false);
     });
 

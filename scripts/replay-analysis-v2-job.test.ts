@@ -143,6 +143,21 @@ function v212Bundle(now = Date.now()) {
     };
 }
 
+function v213Bundle(now = Date.now()) {
+    const bundle = v212Bundle(now);
+    return {
+        ...bundle,
+        capture: {
+            ...bundle.capture,
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow' as const,
+                aiStage: 'ai-stage-policy-v2.13' as const,
+            },
+        },
+    };
+}
+
 async function actualV212SafeLine(): Promise<string> {
     const { runAnalysisV2AiReplay } = await import(
         '../lib/services/analysis/replay/replay-runner'
@@ -174,6 +189,60 @@ async function actualDiagnosticV212SafeLine(): Promise<string> {
         media_retention_bps: 9_800,
     };
     return JSON.stringify(actual);
+}
+
+async function actualV213SafeLine(): Promise<string> {
+    const { runAnalysisV2AiReplay } = await import(
+        '../lib/services/analysis/replay/replay-runner'
+    );
+    const lines: string[] = [];
+    await runAnalysisV2AiReplay({
+        bundle: v213Bundle(),
+        mode: 'dry-run',
+        evaluationPolicy: {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow',
+            aiStage: 'ai-stage-policy-v2.13',
+        },
+        write: line => lines.push(line),
+    });
+    expect(lines).toHaveLength(1);
+    return lines[0]!;
+}
+
+async function actualDiagnosticV213SafeLine(): Promise<string> {
+    const actual = JSON.parse(await actualV213SafeLine());
+    actual.diagnostic_partial_coverage_override = {
+        used: true,
+        retained_profiles: 49,
+        source_profiles: 50,
+        retained_media: 49,
+        exact_selected_media: 50,
+        profile_retention_bps: 9_800,
+        media_retention_bps: 9_800,
+    };
+    return JSON.stringify(actual);
+}
+
+interface V213TerminalReportFixture {
+    gender: {
+        female: number;
+    };
+    stages: {
+        featureAnalysisShadowRescue: {
+            calls: number;
+        };
+    };
+    gender_quality: {
+        shadow_rescue: {
+            [key: string]: unknown;
+            baselineUnknown: number;
+            insufficientMedia: number;
+            eligible: number;
+            unresolved: number;
+            finalFemale: number;
+        };
+    };
 }
 
 describe('Cloud Run analysis V2 replay job', () => {
@@ -287,7 +356,7 @@ describe('Cloud Run analysis V2 replay job', () => {
             expect(line).toBe(`${safeLine}\n`);
         });
         const cleanup = vi.fn(async () => { events.push('cleanup'); });
-        const safeLine = await actualDiagnosticV212SafeLine();
+        const safeLine = await actualDiagnosticV213SafeLine();
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
@@ -308,8 +377,8 @@ describe('Cloud Run analysis V2 replay job', () => {
                         },
                         evaluationPolicy: {
                             capability:
-                                'historical-partial-available-standard-v27-risk-v23-to-ai-v212-gender-quality',
-                            aiStage: 'ai-stage-policy-v2.12',
+                                'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow',
+                            aiStage: 'ai-stage-policy-v2.13',
                         },
                     },
                     expired: false,
@@ -331,7 +400,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                     mode: 'paid-ai',
                     paidAiOptIn: true,
                     evaluationPolicy: {
-                        aiStage: 'ai-stage-policy-v2.12',
+                        aiStage: 'ai-stage-policy-v2.13',
                     },
                     runner: createRunner.mock.results[0]!.value,
                 });
@@ -343,6 +412,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         });
 
         expect(createRunner).toHaveBeenCalledOnce();
+        expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.13');
         expect(events).toEqual([
             'claim',
             'runner',
@@ -581,6 +651,57 @@ describe('Cloud Run analysis V2 replay job', () => {
         } = await import('./replay-analysis-v2-job');
         const actual = JSON.parse(await actualV212SafeLine());
         actual.gender.label = 'private-person';
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+    });
+
+    it('accepts the strict V2.13 shadow-rescue aggregate report', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const line = await actualDiagnosticV213SafeLine();
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            line,
+        )).not.toThrow();
+    });
+
+    it.each([
+        ['baseline conservation', (report: V213TerminalReportFixture) => {
+            report.gender_quality.shadow_rescue.baselineUnknown += 1;
+        }],
+        ['cohort partition', (report: V213TerminalReportFixture) => {
+            report.gender_quality.shadow_rescue.insufficientMedia += 1;
+        }],
+        ['eligible attempted equality', (report: V213TerminalReportFixture) => {
+            report.gender_quality.shadow_rescue.eligible += 1;
+        }],
+        ['attempt outcome partition', (report: V213TerminalReportFixture) => {
+            report.gender_quality.shadow_rescue.unresolved += 1;
+        }],
+        ['final arithmetic', (report: V213TerminalReportFixture) => {
+            report.gender_quality.shadow_rescue.finalFemale += 1;
+        }],
+        ['report gender equality', (report: V213TerminalReportFixture) => {
+            report.gender.female += 1;
+        }],
+        ['provider dispatch bound', (report: V213TerminalReportFixture) => {
+            report.stages.featureAnalysisShadowRescue.calls = 1;
+        }],
+        ['nested PII', (report: V213TerminalReportFixture) => {
+            report.gender_quality.shadow_rescue.account = 'private-person';
+        }],
+    ] as const)('rejects V2.13 shadow-rescue report drift: %s', async (
+        _name,
+        mutate,
+    ) => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV213SafeLine());
+        mutate(actual);
 
         expect(() => validateReplayAnalysisV2JobTerminalLine(
             JSON.stringify(actual),
@@ -981,7 +1102,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         );
         const events: string[] = [];
         const cleanup = vi.fn();
-        const safeLine = await actualDiagnosticV212SafeLine();
+        const safeLine = await actualDiagnosticV213SafeLine();
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
@@ -994,7 +1115,7 @@ describe('Cloud Run analysis V2 replay job', () => {
             loadArtifacts: vi.fn(async () => {
                 events.push('load');
                 return {
-                    bundle: { ...v212Bundle(), expired: false },
+                    bundle: { ...v213Bundle(), expired: false },
                     cleanup,
                 };
             }),
@@ -1023,7 +1144,7 @@ describe('Cloud Run analysis V2 replay job', () => {
             events.push('loaded-cleanup');
         });
         let signalCleanup: (() => Promise<void>) | undefined;
-        const safeLine = await actualDiagnosticV212SafeLine();
+        const safeLine = await actualDiagnosticV213SafeLine();
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
@@ -1044,7 +1165,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                 await signalCleanup?.();
                 events.push('after-initial-signal');
                 return {
-                    bundle: { ...v212Bundle(), expired: false },
+                    bundle: { ...v213Bundle(), expired: false },
                     cleanup: loadedCleanup,
                 };
             }),
@@ -1091,6 +1212,11 @@ describe('Cloud Run analysis V2 replay job', () => {
                 },
             },
         }],
+        ['sealed V2.12 evaluation', {
+            capture: {
+                evaluationPolicy: v212Bundle().capture.evaluationPolicy,
+            },
+        }],
     ])('rejects %s bundle before runner and cleans up', async (
         _name,
         override,
@@ -1101,7 +1227,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         const createRunner = vi.fn();
         const cleanup = vi.fn();
         const base = {
-            ...v212Bundle(),
+            ...v213Bundle(),
             expired: false,
         };
         const bundle = 'capture' in override
@@ -1138,7 +1264,7 @@ describe('Cloud Run analysis V2 replay job', () => {
             runtimeImageDigest: immutableImageDigest,
             bindLocalCleanup: () => async () => undefined,
             loadArtifacts: vi.fn(async () => ({
-                bundle: { ...v212Bundle(), expired: false },
+                bundle: { ...v213Bundle(), expired: false },
                 cleanup,
             })),
             createGcsClient: () => ({
@@ -1183,8 +1309,8 @@ describe('Cloud Run analysis V2 replay job', () => {
                         },
                         evaluationPolicy: {
                             capability:
-                                'historical-partial-available-standard-v27-risk-v23-to-ai-v212-gender-quality',
-                            aiStage: 'ai-stage-policy-v2.12',
+                                'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow',
+                            aiStage: 'ai-stage-policy-v2.13',
                         },
                     },
                     expired: false,

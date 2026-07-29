@@ -25,6 +25,7 @@ import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-statele
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
 import {
     AI_STAGE_POLICY_V212_VERSION,
+    AI_STAGE_POLICY_V213_VERSION,
     aiStagePolicySupports,
 } from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
@@ -44,6 +45,7 @@ interface IssuedReplayRunner {
     policyVersion: ReplaySupportedAiStagePolicyVersion;
     triage: ReplayAiRunner['triage'];
     feature: ReplayAiRunner['feature'];
+    shadowFeature: ReplayAiRunner['shadowFeature'];
     privateNames: ReplayAiRunner['privateNames'];
     resolveGender: ReplayAiRunner['resolveGender'];
 }
@@ -60,6 +62,7 @@ export function lookupReplayStagedAiAdapterPolicy(
         || !Object.isFrozen(runner)
         || runner.triage !== issued.triage
         || runner.feature !== issued.feature
+        || runner.shadowFeature !== issued.shadowFeature
         || runner.privateNames !== issued.privateNames
         || runner.resolveGender !== issued.resolveGender
     ) {
@@ -354,6 +357,9 @@ export function createReplayStagedAiAdapter(
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
+    const controlPolicyVersion = aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION
+        ? AI_STAGE_POLICY_V212_VERSION
+        : aiStagePolicyVersion;
     const supportsGenderTriageMicrobatch = aiStagePolicySupports(
         aiStagePolicyVersion,
         'genderTriageMicrobatchV29',
@@ -362,7 +368,9 @@ export function createReplayStagedAiAdapter(
         aiStagePolicyVersion,
         'genderQualityV211',
     );
-    const strictV212Resolver = aiStagePolicyVersion === AI_STAGE_POLICY_V212_VERSION;
+    const strictV212Resolver =
+        aiStagePolicyVersion === AI_STAGE_POLICY_V212_VERSION
+        || aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION;
     // Replay remains stateless, but v2.11 uses the same bounded call shape as scheduler-v1.
     // Waiting is local admission only: no provider attempt exists before the semaphore opens.
     const runTriage = genderQualityV211
@@ -433,7 +441,7 @@ export function createReplayStagedAiAdapter(
                     accounts,
                     statelessAudit(requestId, identity, state),
                     {
-                        aiStagePolicyVersion,
+                        aiStagePolicyVersion: controlPolicyVersion,
                         replayCapability,
                         ...(runTriageProviderAttempt
                             ? { runProviderAttempt: runTriageProviderAttempt }
@@ -510,12 +518,15 @@ export function createReplayStagedAiAdapter(
                 const aiInput = { media: normalized(input.media) };
                 const identity = createGenderTriageResultIdentity(
                     aiInput,
-                    aiStagePolicyVersion,
+                    controlPolicyVersion,
                 );
                 return genderTriage(
                     aiInput,
                     statelessAudit(requestId, identity, state),
-                    { aiStagePolicyVersion, replayCapability },
+                    {
+                        aiStagePolicyVersion: controlPolicyVersion,
+                        replayCapability,
+                    },
                 );
             }),
         }),
@@ -529,9 +540,12 @@ export function createReplayStagedAiAdapter(
                 media: normalized(input.media),
                 captions: [...input.captions],
             };
-            const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
+            const identity = createFeatureAnalysisResultIdentity(
+                aiInput,
+                controlPolicyVersion,
+            );
             return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), {
-                aiStagePolicyVersion,
+                aiStagePolicyVersion: controlPolicyVersion,
                 replayCapability,
                 ...(runFeatureProviderAttempt
                     ? { runProviderAttempt: runFeatureProviderAttempt }
@@ -547,12 +561,43 @@ export function createReplayStagedAiAdapter(
                 media: normalized(input.media),
                 captions: [...input.captions],
             };
-            const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
+            const identity = createFeatureAnalysisResultIdentity(
+                aiInput,
+                controlPolicyVersion,
+            );
             return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), {
-                aiStagePolicyVersion,
+                aiStagePolicyVersion: controlPolicyVersion,
                 replayCapability,
             });
         }))),
+        ...(aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION ? {
+            shadowFeature: input => invoke(async state => {
+                const aiInput = {
+                    triage: input.triage,
+                    bio: input.bio,
+                    ...(input.accountProfile
+                        ? { accountProfile: input.accountProfile }
+                        : {}),
+                    media: normalized(input.media),
+                    captions: [...input.captions],
+                };
+                const identity = createFeatureAnalysisResultIdentity(
+                    aiInput,
+                    AI_STAGE_POLICY_V213_VERSION,
+                );
+                return featureAnalysis(
+                    aiInput,
+                    statelessAudit(requestId, identity, state),
+                    {
+                        aiStagePolicyVersion: AI_STAGE_POLICY_V213_VERSION,
+                        replayCapability,
+                        ...(runFeatureProviderAttempt
+                            ? { runProviderAttempt: runFeatureProviderAttempt }
+                            : {}),
+                    },
+                );
+            }),
+        } : {}),
         resolveGender: input => (runResolver && runResolverShared
             ? (() => {
                 const deadlineAtMs = performance.now() + 5_000;
@@ -560,7 +605,7 @@ export function createReplayStagedAiAdapter(
                     const aiInput = { media: normalized(input.media) };
                     const identity = createGenderResolutionResultIdentity(
                         aiInput,
-                        aiStagePolicyVersion,
+                        controlPolicyVersion,
                     );
                     return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
                         onAttemptStart: value => input.onAttemptStart?.({
@@ -583,7 +628,7 @@ export function createReplayStagedAiAdapter(
                     }), {
                         abortSignal: input.signal,
                         admissionDeadlineAtMs: deadlineAtMs,
-                        aiStagePolicyVersion,
+                        aiStagePolicyVersion: controlPolicyVersion,
                         replayCapability,
                     });
                 }, strictV212Resolver ? isolateExpectedV212ResolverFailure : undefined), input.signal, deadlineAtMs), input.signal, deadlineAtMs);
@@ -604,7 +649,10 @@ export function createReplayStagedAiAdapter(
             })()
             : invoke(async state => {
                 const aiInput = { media: normalized(input.media) };
-                const identity = createGenderResolutionResultIdentity(aiInput, aiStagePolicyVersion);
+                const identity = createGenderResolutionResultIdentity(
+                    aiInput,
+                    controlPolicyVersion,
+                );
                 return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
                     onAttemptStart: value => input.onAttemptStart?.({ attempt: value.attempt, retryCount: value.retryCount }),
                     onProviderDispatch: value => input.onProviderDispatch?.({
@@ -620,7 +668,11 @@ export function createReplayStagedAiAdapter(
                             ? { failureKind: value.failureKind }
                             : {}),
                     }),
-                }), { abortSignal: input.signal, aiStagePolicyVersion, replayCapability });
+                }), {
+                    abortSignal: input.signal,
+                    aiStagePolicyVersion: controlPolicyVersion,
+                    replayCapability,
+                });
             })),
         privateNames: accounts => invoke(async state => {
             const audit: PrivateNameAnalysisAudit = {
@@ -637,7 +689,7 @@ export function createReplayStagedAiAdapter(
                 },
             };
             return analyzePrivateAccountNames([...accounts], requestId, audit, {
-                aiStagePolicyVersion,
+                aiStagePolicyVersion: controlPolicyVersion,
                 replayCapability,
                 ...(runPrivateProviderAttempt
                     ? { runProviderAttempt: runPrivateProviderAttempt }
@@ -650,6 +702,7 @@ export function createReplayStagedAiAdapter(
         policyVersion: aiStagePolicyVersion,
         triage: runner.triage,
         feature: runner.feature,
+        shadowFeature: runner.shadowFeature,
         privateNames: runner.privateNames,
         resolveGender: runner.resolveGender,
     });

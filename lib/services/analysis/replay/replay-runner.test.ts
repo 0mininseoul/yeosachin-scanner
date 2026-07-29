@@ -41,8 +41,21 @@ function v212Runner(operations: ReplayAiRunner): ReplayAiRunner {
     return runner;
 }
 
+function v213Runner(
+    operations: ReplayAiRunner & {
+        shadowFeature?: ReplayAiRunner['feature'];
+    },
+): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.13');
+    return runner;
+}
+
 function diagnosticPartialCoverageCapability(
-    aiStagePolicy: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' =
+    aiStagePolicy:
+        | 'ai-stage-policy-v2.9'
+        | 'ai-stage-policy-v2.10'
+        | 'ai-stage-policy-v2.13' =
         'ai-stage-policy-v2.9',
 ) {
     const parsed = parseReplayCliArgs([
@@ -968,6 +981,309 @@ describe('AI-only replay runner', () => {
         expect(report.gender).toEqual({ male: 0, female: 0, unknown: 2, unknownRate: 1 });
         expect(report.genderQuality?.headroom.finalUnknownWithResolverMediaAtLeast2)
             .toBe(report.gender.unknown);
+    });
+
+    it('runs the full eligible v2.13 shadow cohort once after preserving the v2.12 control', async () => {
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow' as const,
+            aiStage: 'ai-stage-policy-v2.13' as const,
+        };
+        const profiles = Array.from({ length: 8 }, (_, index) => {
+            const ordinal = index + 1;
+            const mediaCount = ordinal === 6 ? 1 : 2;
+            const media = Array.from({ length: mediaCount }, (_, mediaIndex) => ({
+                selectionId: `candidate-${ordinal}-media-${mediaIndex + 1}`,
+                kind: 'feed' as const,
+                postId: `candidate-${ordinal}-post-${mediaIndex + 1}`,
+                caption: null,
+                jpegBase64: '/9j/2Q==',
+            }));
+            return {
+                ...bundle.profiles[0]!,
+                ordinal,
+                username: `sensitive_candidate_${ordinal}`,
+                fullName: null,
+                bio: null,
+                media,
+                triageSelectionIds: media.map(item => item.selectionId),
+                featureSelectionIds: media.map(item => item.selectionId),
+                resolverSelectionIds: media.map(item => item.selectionId),
+                coverage: {
+                    selectedCount: media.length,
+                    normalizedCount: media.length,
+                    failures: [],
+                },
+            };
+        });
+        const sourceIdentities = profiles.map(profile => ({
+            ordinal: profile.ordinal,
+            username: profile.username,
+            partition: 'public' as const,
+        }));
+        const v213Bundle = {
+            ...bundle,
+            schemaVersion: 2 as const,
+            capture: {
+                ...bundle.capture,
+                scope: 'ai-only-historical-partial-available' as const,
+                notExact: true as const,
+                fullE2eEvidence: false as const,
+                noMediaSubstitution: true as const,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        aiStage: 'ai-stage-policy-v2.7' as const,
+                        risk: 'risk-policy-v2.3' as const,
+                    },
+                },
+                evaluationPolicy,
+                partial: {
+                    sourceUniverseDigest:
+                        historicalPartialSourceUniverseDigest(sourceIdentities),
+                    sourceIdentities,
+                    mediaUnavailable: [],
+                },
+            },
+            profiles,
+        } satisfies AnalysisV2ReplayBundle;
+        const featureResult = (
+            gender: 'female' | 'male' | 'unknown',
+            finalGenderDecision: FeatureAnalysisResult['finalGenderDecision'],
+            accountContext:
+                | 'personal'
+                | 'individual_creator'
+                | 'official_group_or_brand'
+                | 'uncertain' = 'personal',
+        ): FeatureAnalysisResult => ({
+            features: {
+                gender,
+                genderConfidence: gender === 'unknown' ? 'low' : 'high',
+                ownerConsistency: gender === 'unknown'
+                    ? 'multiple_or_unclear'
+                    : 'same_person',
+                appearanceGrade: 1,
+                exposureScore: 0,
+                businessClassification: 'uncertain',
+                businessConfidence: 'low',
+                accountContext,
+                marriageEvidence: 'none',
+                partnerEvidence: 'none',
+                partnerExclusionContext: 'none',
+                evidenceSelectionIds: {
+                    gender: gender === 'unknown'
+                        ? []
+                        : ['candidate-2-media-1', 'candidate-2-media-2'],
+                    appearance: [],
+                    exposure: [],
+                    business: [],
+                    accountContext: ['candidate-2-media-1'],
+                    marriagePartner: [],
+                },
+                oneLineOverview: '고정된 공개 자료를 근거로 만든 충분히 긴 테스트용 계정 요약입니다.',
+            },
+            finalGenderDecision,
+            analyzedSelectionIds: ['candidate-2-media-1', 'candidate-2-media-2'],
+        });
+        const controlFeatureOrdinals: number[] = [];
+        const resolverOrdinals: number[] = [];
+        const shadowOrdinals: number[] = [];
+        const lines: string[] = [];
+        const report = await runAnalysisV2AiReplay({
+            bundle: v213Bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability('ai-stage-policy-v2.13'),
+            write: line => lines.push(line),
+            runner: v213Runner({
+                triage: async ({ ordinal, media }) => ordinal === 8
+                    ? {
+                        outcome: 'failed' as const,
+                        calls: 0,
+                        attempts: 0,
+                        retries: 0,
+                        elapsedMs: 0,
+                    }
+                    : {
+                        outcome: 'ok' as const,
+                        calls: 1,
+                        attempts: 1,
+                        retries: 0,
+                        elapsedMs: 1,
+                        value: {
+                            assessment: {
+                                inferredGender: 'unknown' as const,
+                                confidence: 'low' as const,
+                                ownerConsistency: 'multiple_or_unclear' as const,
+                                evidenceSelectionIds: [media[0]!.selectionId],
+                            },
+                            routingDecision: 'route_to_feature_analysis' as const,
+                            routingReason: 'conserve_female_recall' as const,
+                            analyzedSelectionIds: media.map(item => item.selectionId),
+                            v29AccountContext: 'personal' as const,
+                        },
+                    },
+                feature: async ({ ordinal }) => {
+                    controlFeatureOrdinals.push(ordinal);
+                    if (ordinal === 7) {
+                        return {
+                            outcome: 'rejected' as const,
+                            calls: 1,
+                            attempts: 1,
+                            retries: 0,
+                            elapsedMs: 2,
+                            failureDisposition: { rejected: 1 },
+                        };
+                    }
+                    return {
+                        outcome: 'ok',
+                        calls: 1,
+                        attempts: 1,
+                        retries: 0,
+                        elapsedMs: 2,
+                        value: ordinal === 1
+                            ? featureResult('female', 'verified_female')
+                            : featureResult(
+                                'unknown',
+                                'unresolved',
+                                ordinal === 4
+                                    ? 'uncertain'
+                                    : ordinal === 5
+                                        ? 'official_group_or_brand'
+                                        : 'personal',
+                            ),
+                    };
+                },
+                resolveGender: async ({ ordinal }) => {
+                    resolverOrdinals.push(ordinal);
+                    return {
+                        outcome: 'capacity_skipped',
+                        calls: 0,
+                        attempts: 0,
+                        retries: 0,
+                        elapsedMs: 0,
+                    };
+                },
+                shadowFeature: async ({ ordinal }) => {
+                    expect(controlFeatureOrdinals.sort((a, b) => a - b))
+                        .toEqual([1, 2, 3, 4, 5, 6, 7]);
+                    expect(resolverOrdinals.sort((a, b) => a - b))
+                        .toEqual([1, 2, 3, 4, 5, 7]);
+                    shadowOrdinals.push(ordinal);
+                    if (ordinal === 7) {
+                        return {
+                            outcome: 'failed',
+                            calls: 1,
+                            attempts: 1,
+                            retries: 0,
+                            elapsedMs: 7,
+                            failureDisposition: { response_rejected: 1 },
+                            failureKind: { http_4xx: 1 },
+                        };
+                    }
+                    return {
+                        outcome: 'ok',
+                        calls: 1,
+                        attempts: 1,
+                        retries: 0,
+                        elapsedMs: ordinal,
+                        value: ordinal === 2
+                            ? featureResult('female', 'verified_female')
+                            : ordinal === 3
+                                ? featureResult('male', 'verified_non_female')
+                                : featureResult(
+                                    'female',
+                                    'verified_female',
+                                    'uncertain',
+                                ),
+                    };
+                },
+            } as ReplayAiRunner & {
+                shadowFeature: NonNullable<ReplayAiRunner['feature']>;
+            }),
+        });
+
+        expect(shadowOrdinals.sort((a, b) => a - b)).toEqual([2, 3, 4, 7]);
+        expect(report.gender).toEqual({
+            male: 1,
+            female: 2,
+            unknown: 5,
+            unknownRate: 0.625,
+        });
+        expect(report.stages.featureAnalysis).toMatchObject({ calls: 7 });
+        expect((report.stages as Record<string, unknown>).featureAnalysisShadowRescue)
+            .toMatchObject({
+                calls: 4,
+                failureDisposition: { response_rejected: 1 },
+                failureKind: { http_4xx: 1 },
+            });
+        expect((report.genderQuality as {
+            shadowRescue: unknown;
+        }).shadowRescue).toEqual({
+            baselineMale: 0,
+            baselineFemale: 1,
+            baselineUnknown: 7,
+            officialOrGroupExcluded: 1,
+            insufficientMedia: 1,
+            controlUnavailable: 1,
+            eligible: 4,
+            attempted: 4,
+            rescuedMale: 1,
+            rescuedFemale: 1,
+            unresolved: 1,
+            providerNonOk: {
+                rateLimited: 0,
+                retryExhausted: 0,
+                rejected: 0,
+                failed: 1,
+                capacitySkipped: 0,
+            },
+            finalMale: 1,
+            finalFemale: 2,
+            finalUnknown: 5,
+        });
+        expect(report.genderQuality?.headroom.finalUnknownWithResolverMediaAtLeast2)
+            .toBe(6);
+        expect(report.genderQuality?.qualityGate.observedUnknownRate).toBe(0.625);
+        const safe = JSON.parse(lines[0]!);
+        expect(safe.gender_quality.shadow_rescue)
+            .toEqual((report.genderQuality as {
+                shadowRescue: unknown;
+            }).shadowRescue);
+        expect(JSON.stringify(safe)).not.toMatch(
+            /sensitive_candidate|candidate-[0-9]+-media/,
+        );
+    });
+
+    it('fails closed before control work when the authenticated v2.13 runner lacks shadow feature', async () => {
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow' as const,
+            aiStage: 'ai-stage-policy-v2.13' as const,
+        };
+        const partial = validPartialBundle();
+        const v213Bundle = {
+            ...partial,
+            capture: {
+                ...partial.capture,
+                evaluationPolicy,
+            },
+        } satisfies AnalysisV2ReplayBundle;
+        const triage = vi.fn();
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v213Bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability('ai-stage-policy-v2.13'),
+            runner: v213Runner({ triage }),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_V213_SHADOW_RUNNER_REQUIRED');
+        expect(triage).not.toHaveBeenCalled();
     });
 
     it('runs the v2.9 resolver for an ambiguous personal account without admitting feature', async () => {

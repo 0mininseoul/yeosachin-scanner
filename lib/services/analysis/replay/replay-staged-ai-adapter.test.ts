@@ -689,4 +689,130 @@ describe('replay staged AI adapter telemetry', () => {
         expect(result).not.toHaveProperty('failureKind');
     });
 
+    it('pins the v2.13 control feature to v2.12 and the shadow feature to v2.13', async () => {
+        mocks.createFeatureAnalysisResultIdentity.mockReturnValue({
+            operationKey: 'feature:identity',
+        });
+        mocks.featureAnalysis.mockImplementation(async (
+            _input: unknown,
+            audit: {
+                onBeforeAttempt(value: { attempt: number; retryCount: number }): void;
+                onProviderDispatch?(
+                    value: { attempt: number; retryCount: number },
+                ): void;
+                onAttemptTelemetry(value: {
+                    attempt: number;
+                    retryCount: number;
+                    disposition: 'success';
+                    latencyMs: number;
+                }): void;
+            },
+        ) => {
+            const attempt = { attempt: 1, retryCount: 0 };
+            audit.onBeforeAttempt(attempt);
+            audit.onProviderDispatch?.(attempt);
+            audit.onAttemptTelemetry({
+                ...attempt,
+                disposition: 'success',
+                latencyMs: 3,
+            });
+            return {};
+        });
+        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.13');
+        const input = {
+            ordinal: 1,
+            bio: null,
+            media: [],
+            captions: [],
+            triage: {} as never,
+        };
+
+        await adapter.feature?.(input);
+        await adapter.shadowFeature?.(input);
+
+        expect(mocks.createFeatureAnalysisResultIdentity.mock.calls.map(
+            call => call[1],
+        )).toEqual([
+            'ai-stage-policy-v2.12',
+            'ai-stage-policy-v2.13',
+        ]);
+        expect(mocks.featureAnalysis.mock.calls.map(
+            call => call[2].aiStagePolicyVersion,
+        )).toEqual([
+            'ai-stage-policy-v2.12',
+            'ai-stage-policy-v2.13',
+        ]);
+    });
+
+    it('caps v2.13 shadow provider dispatch at feature concurrency three', async () => {
+        mocks.createFeatureAnalysisResultIdentity.mockReturnValue({
+            operationKey: 'feature:identity',
+        });
+        let active = 0;
+        let maxActive = 0;
+        let admitted = 0;
+        let release!: () => void;
+        let threeAdmitted!: () => void;
+        const gate = new Promise<void>(resolve => {
+            release = resolve;
+        });
+        const reachedThree = new Promise<void>(resolve => {
+            threeAdmitted = resolve;
+        });
+        mocks.featureAnalysis.mockImplementation(async (
+            _input: unknown,
+            audit: {
+                onBeforeAttempt(value: { attempt: number; retryCount: number }): void;
+                onProviderDispatch?(
+                    value: { attempt: number; retryCount: number },
+                ): void;
+                onAttemptTelemetry(value: {
+                    attempt: number;
+                    retryCount: number;
+                    disposition: 'success';
+                    latencyMs: number;
+                }): void;
+            },
+            options: {
+                runProviderAttempt<T>(task: () => Promise<T>): Promise<T>;
+            },
+        ) => options.runProviderAttempt(async () => {
+            active++;
+            admitted++;
+            maxActive = Math.max(maxActive, active);
+            const attempt = { attempt: 1, retryCount: 0 };
+            audit.onBeforeAttempt(attempt);
+            audit.onProviderDispatch?.(attempt);
+            if (admitted === 3) threeAdmitted();
+            await gate;
+            audit.onAttemptTelemetry({
+                ...attempt,
+                disposition: 'success',
+                latencyMs: 5,
+            });
+            active--;
+            return {};
+        }));
+        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.13');
+        const invocations = Array.from({ length: 4 }, (_, index) => (
+            adapter.shadowFeature!({
+                ordinal: index + 1,
+                bio: null,
+                media: [],
+                captions: [],
+                triage: {} as never,
+            })
+        ));
+
+        await reachedThree;
+        expect(maxActive).toBe(3);
+        expect(admitted).toBe(3);
+        release();
+        const results = await Promise.all(invocations);
+
+        expect(maxActive).toBe(3);
+        expect(mocks.featureAnalysis).toHaveBeenCalledTimes(4);
+        expect(results.map(result => result.calls)).toEqual([1, 1, 1, 1]);
+    });
+
 });
