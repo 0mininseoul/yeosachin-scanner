@@ -7,11 +7,16 @@ const migration = readFileSync(
 );
 
 describe('operator editable fixture v2 migration contract', () => {
-    it('enforces the five minute v2 duration without weakening historical contracts', () => {
+    it('enforces five minutes only for V2 while preserving canonical generic operator durations', () => {
         expect(migration).toContain("fixture_version = 'operator-editable-fixture-v2' AND duration_seconds = 300");
         expect(migration).toContain("fixture_version = 'synthetic-fixture-v1' AND duration_seconds BETWEEN 60 AND 90");
-        expect(migration).toContain("p_fixture_version = 'operator-editable-fixture-v1' AND p_duration_seconds NOT BETWEEN 30 AND 45");
+        expect(migration).toContain("fixture_version ~ '^operator-editable-fixture-[a-z0-9][a-z0-9._-]{1,99}$'");
+        expect(migration).toContain("fixture_version <> 'operator-editable-fixture-v2'");
+        expect(migration).toContain('duration_seconds BETWEEN 30 AND 45');
         expect(migration).toContain("p_fixture_version = 'operator-editable-fixture-v2' AND p_duration_seconds <> 300");
+        expect(migration).toContain("p_fixture_version <> 'operator-editable-fixture-v2'");
+        expect(migration).toContain("p_fixture_version !~ '^operator-editable-fixture-[a-z0-9][a-z0-9._-]{1,99}$'");
+        expect(migration).toContain('p_duration_seconds NOT BETWEEN 30 AND 45');
     });
 
     it('keeps the final six-argument RPC service-role only with an empty search path', () => {

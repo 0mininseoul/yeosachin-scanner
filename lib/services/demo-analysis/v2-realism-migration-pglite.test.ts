@@ -43,10 +43,12 @@ describe('operator fixture v2 database runtime boundary', () => {
         invalidBio.target.bio = 'should remain empty';
         const wrongAggregate = JSON.parse(v2Payload());
         wrongAggregate.summary.publicMutuals = 84;
+        const publicBio = JSON.parse(v2Payload());
+        publicBio.public[0].bio = 'should remain empty';
         const nonLocalImage = JSON.parse(v2Payload());
         nonLocalImage.public[0].profileImage = 'https://example.test/avatar.webp';
 
-        for (const invalid of [invalidBio, wrongAggregate, nonLocalImage]) {
+        for (const invalid of [invalidBio, wrongAggregate, publicBio, nonLocalImage]) {
             await expect(db.exec(`
                 INSERT INTO public.demo_analysis_fixtures (version, status, payload)
                 VALUES ('operator-editable-fixture-v2', 'draft', '${quotedPayload(JSON.stringify(invalid))}'::jsonb)

@@ -12,8 +12,8 @@ const migrationPaths = [
     '20260730010000_demo_analysis_editable_fixture_authority.sql',
     '20260730020000_upgrade_demo_fixture_v4_bijective_forward.sql',
     '20260730030000_restore_demo_fixture_authority_after_v4.sql',
-    '20260730040000_upgrade_demo_fixture_v2_realism.sql',
 ];
+const v2RealismMigration = '20260730040000_upgrade_demo_fixture_v2_realism.sql';
 
 const userId = '123e4567-e89b-42d3-a456-426614174000';
 let db: PGlite | undefined;
@@ -134,6 +134,22 @@ describe('demo fixture migration history', () => {
         `);
         expect(replay.rows).toEqual([{ fixture_version: 'operator-editable-fixture-order', created: false }]);
 
+        // Deployment ordering matters: existing generic operator runs must
+        // remain valid when the V2-only five-minute constraint is added.
+        await db.exec(`
+            INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
+            VALUES ('${userId}', 'junho_dem', 'operator-editable-fixture-canary', 'standard', 'generic-operator-duration-key-000001', 38);
+        `);
+        await db.exec(readFileSync(
+            new URL(`../../../supabase/migrations/${v2RealismMigration}`, import.meta.url),
+            'utf8',
+        ));
+        const canary = await db.query<{ duration_seconds: number }>(`
+            SELECT duration_seconds FROM public.demo_analysis_runs
+            WHERE idempotency_key = 'generic-operator-duration-key-000001'
+        `);
+        expect(canary.rows).toEqual([{ duration_seconds: 38 }]);
+
         await db.exec(`
             INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
             VALUES
@@ -143,10 +159,6 @@ describe('demo fixture migration history', () => {
               ('${userId}', 'junho_dem', 'authorized-redacted-fixture-v4', 'standard', 'legacy-v4-duration-key-000001', 30);
         `);
 
-        await db.exec(`
-            INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
-            VALUES ('${userId}', 'junho_dem', 'operator-editable-fixture-canary', 'standard', 'generic-operator-duration-key-000001', 38);
-        `);
         await expect(db.exec(`
             INSERT INTO public.demo_analysis_runs (user_id, target_instagram_id, fixture_version, plan_id, idempotency_key, duration_seconds)
             VALUES ('${userId}', 'junho_dem', 'operator-editable-fixture-v2', 'standard', 'v2-wrong-duration-key-000001', 38);
