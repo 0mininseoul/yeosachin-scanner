@@ -238,7 +238,10 @@ const shadowRescueCounts = z.object({
 }).strict();
 
 function featureShadowTerminalSchema(
-    aiStage: 'ai-stage-policy-v2.13' | 'ai-stage-policy-v2.14',
+    aiStage:
+        | 'ai-stage-policy-v2.13'
+        | 'ai-stage-policy-v2.14'
+        | 'ai-stage-policy-v2.15',
 ) {
     return replayAnalysisV2JobTerminalV212Schema.extend({
         evaluation_ai_policy: z.literal(aiStage),
@@ -314,7 +317,9 @@ function featureShadowTerminalSchema(
                 message:
                     aiStage === 'ai-stage-policy-v2.13'
                         ? 'ANALYSIS_V2_REPLAY_V213_SHADOW_CONSERVATION_FAILED'
-                        : 'ANALYSIS_V2_REPLAY_V214_SHADOW_CONSERVATION_FAILED',
+                        : aiStage === 'ai-stage-policy-v2.14'
+                            ? 'ANALYSIS_V2_REPLAY_V214_SHADOW_CONSERVATION_FAILED'
+                            : 'ANALYSIS_V2_REPLAY_V215_SHADOW_CONSERVATION_FAILED',
             });
         }
     });
@@ -325,11 +330,15 @@ const replayAnalysisV2JobTerminalV213Schema =
 /** V2.14 preserves the V2.13 PII-free shadow aggregate contract byte-for-byte. */
 const replayAnalysisV2JobTerminalV214Schema =
     featureShadowTerminalSchema('ai-stage-policy-v2.14');
+/** V2.15 preserves the same strict PII-free shadow aggregate contract. */
+const replayAnalysisV2JobTerminalV215Schema =
+    featureShadowTerminalSchema('ai-stage-policy-v2.15');
 
 export const replayAnalysisV2JobTerminalSchema = z.union([
     replayAnalysisV2JobTerminalV212Schema,
     replayAnalysisV2JobTerminalV213Schema,
     replayAnalysisV2JobTerminalV214Schema,
+    replayAnalysisV2JobTerminalV215Schema,
 ]);
 
 export function replayStageFailureDispositionEntries(

@@ -5,6 +5,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     replayEvaluationPolicySchema,
     resolveReplayAiStagePolicyVersion,
@@ -44,6 +45,10 @@ const historicalPartialV213Evaluation = {
 const historicalPartialV214Evaluation = {
     capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.14',
+} as const;
+const historicalPartialV215Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.15',
 } as const;
 const standard = (aiStage: 'ai-stage-policy-v2.7' | 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9') => ({
     selectedPlanId: 'standard' as const,
@@ -192,6 +197,30 @@ describe('replay cross-policy evaluation capability', () => {
         expect(replayEvaluationPolicySchema.safeParse({
             capability: historicalPartialV213Evaluation.capability,
             aiStage: 'ai-stage-policy-v2.14',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.15 only behind its own feature output-cap shadow capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV215Evaluation as never,
+        )).toBe('ai-stage-policy-v2.15');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.14',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.15',
         }).success).toBe(false);
     });
 

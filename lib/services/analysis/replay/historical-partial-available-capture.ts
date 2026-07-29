@@ -11,6 +11,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     type ReplayEvaluationPolicy,
     type ReplaySourceLineage,
 } from './replay-source-lineage';
@@ -48,7 +49,8 @@ type HistoricalPartialAvailableEvaluationPolicy = Extract<
             | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY
             | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY
             | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY
-            | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY;
+            | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY
+            | typeof HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY;
     }
 >;
 
@@ -99,6 +101,9 @@ function isHistoricalPartialAvailableEvaluationPolicy(
     ) || (
         policy.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY
         && policy.aiStage === 'ai-stage-policy-v2.14'
+    ) || (
+        policy.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY
+        && policy.aiStage === 'ai-stage-policy-v2.15'
     );
 }
 

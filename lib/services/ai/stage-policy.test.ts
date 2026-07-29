@@ -10,6 +10,7 @@ import {
     AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V214_VERSION,
+    AI_STAGE_POLICY_V215_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -188,6 +189,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.12',
             'ai-stage-policy-v2.13',
             'ai-stage-policy-v2.14',
+            'ai-stage-policy-v2.15',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -215,6 +217,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.12',
             'ai-stage-policy-v2.13',
             'ai-stage-policy-v2.14',
+            'ai-stage-policy-v2.15',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -269,6 +272,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.12',
             'ai-stage-policy-v2.13',
             'ai-stage-policy-v2.14',
+            'ai-stage-policy-v2.15',
         ]);
         expect(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V210_VERSION])
             .toEqual(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V29_VERSION]);
@@ -481,6 +485,40 @@ describe('V2 AI stage policy', () => {
         expect(v214.featureAnalysis.thinkingLevel).toBe('MEDIUM');
         expect(v214.featureAnalysis.promptVersion).toBe(v212.featureAnalysis.promptVersion);
         expect(v214.featureAnalysis.schemaVersion).toBe(3);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('adds evaluation-only v2.15 by changing only the V2.14 feature output cap', () => {
+        const v214 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V214_VERSION];
+        const v215 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V215_VERSION];
+
+        expect(v215).toBeDefined();
+        for (const stage of AI_STAGE_NAMES_V27) {
+            if (stage === 'featureAnalysis') continue;
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V215_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V214_VERSION, stage));
+        }
+        expect(v215.featureAnalysis).toEqual({
+            ...v214.featureAnalysis,
+            maxOutputTokens: 4_096,
+        });
+        expect({
+            ...v215.featureAnalysis,
+            maxOutputTokens: undefined,
+        }).toEqual({
+            ...v214.featureAnalysis,
+            maxOutputTokens: undefined,
+        });
+        expect(v215.featureAnalysis.model).toBe('gemini-3-flash-preview');
+        expect(v215.featureAnalysis.promptVersion).toBe('feature-analysis-v4');
+        expect(v215.featureAnalysis.schemaVersion).toBe(3);
+        expect(v215.featureAnalysis.mediaResolution).toBe('MEDIUM');
+        expect(v215.featureAnalysis.thinkingLevel).toBe('MEDIUM');
         expect(selectAiStagePolicyVersion({
             rolloutMode: 'production',
             narrativeV28RolloutMode: 'production',

@@ -9,6 +9,7 @@ import {
     AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V213_VERSION,
     AI_STAGE_POLICY_V214_VERSION,
+    AI_STAGE_POLICY_V215_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
 } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
@@ -35,6 +36,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
@@ -128,6 +130,12 @@ function evaluationPolicy(value: string | undefined, historicalOfficialE2E = fal
         return {
             capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
             aiStage: AI_STAGE_POLICY_V214_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V215_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V215_VERSION,
         };
     }
     if (value !== AI_STAGE_POLICY_V29_VERSION) {

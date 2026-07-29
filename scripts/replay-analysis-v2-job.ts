@@ -35,6 +35,7 @@ import { runAnalysisV2AiReplay } from '../lib/services/analysis/replay/replay-ru
 import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
 } from '../lib/services/analysis/replay/replay-source-lineage';
 import {
     parseDiagnosticPartialCoverageCliCapability,
@@ -54,7 +55,14 @@ export const V214_EVALUATION = Object.freeze({
     capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.14' as const,
 });
-type FeatureShadowEvaluation = typeof V213_EVALUATION | typeof V214_EVALUATION;
+export const V215_EVALUATION = Object.freeze({
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.15' as const,
+});
+type FeatureShadowEvaluation =
+    | typeof V213_EVALUATION
+    | typeof V214_EVALUATION
+    | typeof V215_EVALUATION;
 declare const __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__: string;
 declare const __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__: string;
 const BUILT_IMAGE_DIGEST = typeof __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
@@ -693,7 +701,10 @@ function isDirectExecution(): boolean {
 
 if (
     isDirectExecution()
-    && BUILT_ENTRY_POLICY !== 'ai-stage-policy-v2.14'
+    && (
+        BUILT_ENTRY_POLICY === undefined
+        || BUILT_ENTRY_POLICY === 'ai-stage-policy-v2.13'
+    )
 ) {
     runReplayAnalysisV2Job().catch(error => {
         const message = error instanceof Error

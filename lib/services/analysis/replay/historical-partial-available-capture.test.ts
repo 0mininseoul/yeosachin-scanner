@@ -7,6 +7,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
 } from './replay-source-lineage';
 
 const lineage = {
@@ -157,6 +158,50 @@ describe('historical partial-available replay capture', () => {
             evaluationPolicy: {
                 capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
                 aiStage: 'ai-stage-policy-v2.13',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.15 output-cap shadow capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '9'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.15',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.15',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'a'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.15',
             } as never,
             source: {
                 profiles: [],

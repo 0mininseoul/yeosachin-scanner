@@ -51,11 +51,22 @@ function v213Runner(
     return runner;
 }
 
+function v215Runner(
+    operations: ReplayAiRunner & {
+        shadowFeature?: ReplayAiRunner['feature'];
+    },
+): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.15');
+    return runner;
+}
+
 function diagnosticPartialCoverageCapability(
     aiStagePolicy:
         | 'ai-stage-policy-v2.9'
         | 'ai-stage-policy-v2.10'
-        | 'ai-stage-policy-v2.13' =
+        | 'ai-stage-policy-v2.13'
+        | 'ai-stage-policy-v2.15' =
         'ai-stage-policy-v2.9',
 ) {
     const parsed = parseReplayCliArgs([
@@ -1305,6 +1316,34 @@ describe('AI-only replay runner', () => {
                 diagnosticPartialCoverageCapability('ai-stage-policy-v2.13'),
             runner: v213Runner({ triage }),
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_V213_SHADOW_RUNNER_REQUIRED');
+        expect(triage).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before control work when the authenticated v2.15 runner lacks shadow feature', async () => {
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v215-feature-output-cap-shadow' as const,
+            aiStage: 'ai-stage-policy-v2.15' as const,
+        };
+        const partial = validPartialBundle();
+        const v215Bundle = {
+            ...partial,
+            capture: {
+                ...partial.capture,
+                evaluationPolicy,
+            },
+        } satisfies AnalysisV2ReplayBundle;
+        const triage = vi.fn();
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v215Bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability('ai-stage-policy-v2.15'),
+            runner: v215Runner({ triage }),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_V215_SHADOW_RUNNER_REQUIRED');
         expect(triage).not.toHaveBeenCalled();
     });
 

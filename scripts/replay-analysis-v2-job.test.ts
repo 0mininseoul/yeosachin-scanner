@@ -491,6 +491,51 @@ describe('Cloud Run analysis V2 replay job', () => {
         expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.14');
     });
 
+    it('runs the V2.15 job only with its own authenticated output-cap shadow bundle', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+            runV215ReplayAnalysisV2Job,
+        } = await import(
+            './replay-analysis-v215-job'
+        );
+        const v215Bundle = v213Bundle();
+        v215Bundle.capture.evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v215-feature-output-cap-shadow',
+            aiStage: 'ai-stage-policy-v2.15',
+        } as never;
+        const safe = JSON.parse(await actualDiagnosticV213SafeLine());
+        safe.evaluation_ai_policy = 'ai-stage-policy-v2.15';
+        safe.replay_ai_policy = 'ai-stage-policy-v2.15';
+        const createRunner = vi.fn(() => Object.freeze({}));
+
+        await runV215ReplayAnalysisV2Job({
+            env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
+            bindLocalCleanup: () => async () => undefined,
+            loadArtifacts: vi.fn(async () => ({
+                bundle: { ...v215Bundle, expired: false },
+                cleanup: async () => undefined,
+            })),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            createRunner,
+            runReplay: vi.fn(async input => {
+                expect(input.evaluationPolicy).toEqual(
+                    REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+                );
+                input.write(JSON.stringify(safe));
+            }),
+            installSignalCleanup: vi.fn(() => () => undefined),
+            writeStdout: vi.fn(),
+        });
+
+        expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.15');
+    });
+
     it('accepts the actual v2.12 diagnostic partial-coverage safe-line key', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -749,6 +794,38 @@ describe('Cloud Run analysis V2 replay job', () => {
         )).not.toThrow();
     });
 
+    it('accepts the same strict PII-free shadow-rescue report contract for V2.15', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV213SafeLine());
+        actual.evaluation_ai_policy = 'ai-stage-policy-v2.15';
+        actual.replay_ai_policy = 'ai-stage-policy-v2.15';
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).not.toThrow();
+    });
+
+    it('rejects V2.15 shadow-rescue conservation drift', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(
+            await actualDiagnosticV213SafeLine(),
+        ) as V213TerminalReportFixture & {
+            evaluation_ai_policy: string;
+            replay_ai_policy: string;
+        };
+        actual.evaluation_ai_policy = 'ai-stage-policy-v2.15';
+        actual.replay_ai_policy = 'ai-stage-policy-v2.15';
+        actual.gender_quality.shadow_rescue.baselineUnknown += 1;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+    });
+
     it('accepts a V2.13 worst-case gate derived from final counts and missing public', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -872,6 +949,15 @@ describe('Cloud Run analysis V2 replay job', () => {
             const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
                 inputs: Record<string, unknown>;
             };
+            expect(metadata.inputs).toHaveProperty(
+                'scripts/replay-analysis-v2-job.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v214-job.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v215-job.ts',
+            );
             const runtime = JSON.parse(await readFile(
                 runtimeManifest,
                 'utf8',
@@ -1047,6 +1133,125 @@ describe('Cloud Run analysis V2 replay job', () => {
                 env: { NODE_ENV: 'test', PATH: process.env.PATH },
             }).then(() => {
                 throw new Error('Expected V2.14 replay job boot to fail closed');
+            }).catch(error => error as { code: number; stderr: string });
+            expect(boot.code).toBe(1);
+            expect(boot.stderr).toBe(
+                '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
+            );
+        } finally {
+            await rm(imageRoot, { recursive: true, force: true });
+        }
+    }, 30_000);
+
+    it('builds and invokes the immutable V2.15 common bootstrap entry', async () => {
+        const imageRoot = await mkdtemp(join(
+            tmpdir(),
+            '.replay-job-v215-image-',
+        ));
+        const workspace = join(imageRoot, 'workspace');
+        const outputDirectory = join(workspace, 'replay-job');
+        const outfile = join(outputDirectory, 'job.mjs');
+        const metafile = join(outputDirectory, 'meta.json');
+        const runtimeManifest = join(outputDirectory, 'runtime.json');
+        try {
+            await mkdir(workspace, { mode: 0o700 });
+            const {
+                copyReplayAnalysisV2JobPhysicalDependencyClosure,
+            } = await import('./build-replay-analysis-v2-job.mjs');
+            await copyReplayAnalysisV2JobPhysicalDependencyClosure({
+                sourceWorkspace: process.cwd(),
+                imageWorkspace: workspace,
+            });
+            await execFileAsync(process.execPath, [
+                'scripts/build-replay-analysis-v2-job.mjs',
+                '--outfile', outfile,
+                '--metafile', metafile,
+                '--runtime-manifest', runtimeManifest,
+                '--image-digest', immutableImageDigest,
+                '--evaluation-ai-policy=ai-stage-policy-v2.15',
+            ], {
+                cwd: process.cwd(),
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
+                inputs: Record<string, unknown>;
+            };
+            expect(metadata.inputs).toHaveProperty(
+                'scripts/replay-analysis-v215-job.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v214-job.ts',
+            );
+            const marker = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                '--eval',
+                `import(${JSON.stringify(pathToFileURL(outfile).href)}).then(m => process.stdout.write(m.REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY.aiStage))`,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            expect(marker.stdout).toBe('ai-stage-policy-v2.15');
+
+            const loaded = await import(
+                `${pathToFileURL(outfile).href}?bootstrap-v215-contract`
+            );
+            const runBuiltJob: unknown = Reflect.get(
+                loaded,
+                'runReplayAnalysisV2Job',
+            );
+            expect(runBuiltJob).toBeTypeOf('function');
+            if (typeof runBuiltJob !== 'function') {
+                throw new Error('V2.15 common bootstrap export missing');
+            }
+            const v215Bundle = v213Bundle();
+            v215Bundle.capture.evaluationPolicy = {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v215-feature-output-cap-shadow',
+                aiStage: 'ai-stage-policy-v2.15',
+            } as never;
+            const safe = JSON.parse(await actualDiagnosticV213SafeLine());
+            safe.evaluation_ai_policy = 'ai-stage-policy-v2.15';
+            safe.replay_ai_policy = 'ai-stage-policy-v2.15';
+            const createRunner = vi.fn(() => Object.freeze({}));
+            await runBuiltJob({
+                env: validEnv(),
+                runtimeImageDigest: immutableImageDigest,
+                bindLocalCleanup: () => async () => undefined,
+                loadArtifacts: async () => ({
+                    bundle: { ...v215Bundle, expired: false },
+                    cleanup: async () => undefined,
+                }),
+                createGcsClient: () => ({
+                    downloadBundle: vi.fn(),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                }),
+                createRunner,
+                runReplay: async (input: {
+                    evaluationPolicy: { aiStage: string };
+                    write(line: string): void;
+                }) => {
+                    expect(input.evaluationPolicy.aiStage).toBe(
+                        'ai-stage-policy-v2.15',
+                    );
+                    input.write(JSON.stringify(safe));
+                },
+                installSignalCleanup: () => () => undefined,
+                writeStdout: vi.fn(),
+            });
+            expect(createRunner).toHaveBeenCalledOnce();
+            expect(createRunner).toHaveBeenCalledWith(
+                'ai-stage-policy-v2.15',
+            );
+
+            const boot = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                outfile,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            }).then(() => {
+                throw new Error('Expected V2.15 replay job boot to fail closed');
             }).catch(error => error as { code: number; stderr: string });
             expect(boot.code).toBe(1);
             expect(boot.stderr).toBe(

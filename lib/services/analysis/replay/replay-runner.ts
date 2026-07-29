@@ -8,6 +8,7 @@ import {
     AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V213_VERSION,
     AI_STAGE_POLICY_V214_VERSION,
+    AI_STAGE_POLICY_V215_VERSION,
     aiStagePolicySupports,
 } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
@@ -19,6 +20,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -49,12 +51,17 @@ export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
 
 function featureShadowError(
-    policy: typeof AI_STAGE_POLICY_V213_VERSION | typeof AI_STAGE_POLICY_V214_VERSION,
+    policy:
+        | typeof AI_STAGE_POLICY_V213_VERSION
+        | typeof AI_STAGE_POLICY_V214_VERSION
+        | typeof AI_STAGE_POLICY_V215_VERSION,
     suffix: 'RUNNER_REQUIRED' | 'CONSERVATION_FAILED',
 ): string {
     return policy === AI_STAGE_POLICY_V213_VERSION
         ? `ANALYSIS_V2_REPLAY_V213_SHADOW_${suffix}`
-        : `ANALYSIS_V2_REPLAY_V214_SHADOW_${suffix}`;
+        : policy === AI_STAGE_POLICY_V214_VERSION
+            ? `ANALYSIS_V2_REPLAY_V214_SHADOW_${suffix}`
+            : `ANALYSIS_V2_REPLAY_V215_SHADOW_${suffix}`;
 }
 
 export interface ReplayInvocation<T> {
@@ -402,7 +409,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
@@ -634,6 +642,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                     report.replayAiPolicy === AI_STAGE_POLICY_V212_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
+                    || report.replayAiPolicy === AI_STAGE_POLICY_V215_VERSION
                 )
                     ? { failure_kind: values.failureKind ?? {} }
                     : {}),
@@ -739,6 +748,7 @@ export async function runAnalysisV2AiReplay(input: {
     const featureShadowPolicy = (
         replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
+        || replayAiPolicy === AI_STAGE_POLICY_V215_VERSION
     ) ? replayAiPolicy : null;
     const controlAiPolicy = featureShadowPolicy
         ? AI_STAGE_POLICY_V212_VERSION
