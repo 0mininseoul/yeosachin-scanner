@@ -21,11 +21,13 @@ describe('result capability mapping', () => {
     it('offers an internal detail action when external profiles are disabled without changing real links', () => {
         const resultPage = readFileSync(new URL('../../../app/result/[requestId]/page.tsx', import.meta.url), 'utf8');
         const suspectRow = readFileSync(new URL('../../../components/suspect-row.tsx', import.meta.url), 'utf8');
+        const profilePreviewDialog = readFileSync(new URL('../../../components/profile-preview-dialog.tsx', import.meta.url), 'utf8');
 
         expect(suspectRow).toContain('onPreview?: () => void');
         expect(suspectRow).toContain('프로필 보기');
         expect(resultPage).toContain('setProfilePreview');
-        expect(resultPage).toContain('프로필 정보');
+        expect(resultPage).toContain('ProfilePreviewDialog');
+        expect(profilePreviewDialog).toContain('프로필 정보');
         expect(mapV2Result(demoResultPage({ requestId, femaleCursor: null, privateCursor: null, pageSize: 1 }), true)
             .femaleAccounts[0]?.instagramUrl).toContain('instagram.com');
     });

@@ -1,37 +1,22 @@
 /**
- * One-off, deterministic source-file privacy hardening for the committed demo
- * rasters. It never downloads an image or uses the ImageGen calibration file.
+ * Guard for the one-time privacy hardening that produced the committed demo
+ * rasters. The source files are now the immutable output; rerunning a lossy
+ * WebP encode would make the script non-deterministic and gradually degrade
+ * them. Verify the committed set instead, then require an intentional new
+ * migration/tool if the source assets ever need replacing.
  */
-import { readdir, rename, unlink } from 'node:fs/promises';
-import path from 'node:path';
-import sharp from 'sharp';
+import { validateDemoAssetManifest } from '../lib/services/demo-analysis/demo-analysis';
 
-const avatarDirectory = path.join(process.cwd(), 'public', 'demo-avatars');
-const sourceFile = /^demo-v3-(?:target|female|private)-\d{3}\.webp$/u;
-
-async function blurCommittedDemoAvatars(): Promise<number> {
-    const files = (await readdir(avatarDirectory)).filter(file => sourceFile.test(file)).sort();
-    await Promise.all(files.map(async file => {
-        const source = path.join(avatarDirectory, file);
-        const temporary = `${source}.privacy-blur`;
-        try {
-            await sharp(source)
-                .blur(0.8)
-                .webp({ quality: 82, effort: 6, smartSubsample: true })
-                .toFile(temporary);
-            await rename(temporary, source);
-        } finally {
-            await unlink(temporary).catch(() => undefined);
-        }
-    }));
-    return files.length;
+async function blurCommittedDemoAvatars(): Promise<never> {
+    await validateDemoAssetManifest();
+    throw new Error('Demo avatar privacy blur is already baked; refusing to re-encode committed assets.');
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-    blurCommittedDemoAvatars().then(
-        count => process.stdout.write(`baked additional privacy blur into ${count} demo avatar assets\n`),
-        error => { process.stderr.write(`could not bake demo avatar blur: ${String(error)}\n`); process.exitCode = 1; },
-    );
+    blurCommittedDemoAvatars().catch(error => {
+        process.stderr.write(`could not bake demo avatar privacy blur: ${String(error)}\n`);
+        process.exitCode = 1;
+    });
 }
 
 export { blurCommittedDemoAvatars };

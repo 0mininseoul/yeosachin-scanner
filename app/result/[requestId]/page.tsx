@@ -50,6 +50,7 @@ import { SuspectRow } from '@/components/suspect-row';
 import { ResultActions } from '@/components/result-actions';
 import { ResultFeedback } from '@/components/result-feedback';
 import { ResultPagination } from '@/components/result-pagination';
+import { ProfilePreviewDialog, type InternalProfilePreview } from '@/components/profile-preview-dialog';
 import { useCountUp } from '@/hooks/useCountUp';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
@@ -112,14 +113,6 @@ interface PrivateAccount {
     profileImage?: string;
     instagramUrl?: string;
     bio?: string;
-}
-
-interface InternalProfilePreview {
-    instagramId: string;
-    fullName?: string;
-    profileImage?: string;
-    bio?: string;
-    overview?: string;
 }
 
 interface ResultData {
@@ -1058,23 +1051,11 @@ export default function ResultPage({ params }: PageProps) {
                 )}
 
                 {profilePreview && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-5" role="dialog" aria-modal="true" aria-label="프로필 정보">
-                        <div className="w-full max-w-sm border border-line bg-ink-2 p-5 shadow-2xl">
-                            <div className="flex items-start gap-3">
-                                <div className="relative h-12 w-12 shrink-0 overflow-hidden border border-line bg-panel">
-                                    <ProfileImage src={profilePreview.profileImage} variant="person" />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                    <p className="truncate text-[15px] font-bold text-fg">@{profilePreview.instagramId}</p>
-                                    {profilePreview.fullName && <p className="mt-0.5 text-[12px] text-fg-dim">{profilePreview.fullName}</p>}
-                                </div>
-                                <button type="button" onClick={() => setProfilePreview(null)} className="text-[12px] font-bold text-fg-dim hover:text-fg">닫기</button>
-                            </div>
-                            {(profilePreview.bio || profilePreview.overview) && (
-                                <p className="mt-4 text-[12px] leading-relaxed text-fg-dim">{profilePreview.overview || profilePreview.bio}</p>
-                            )}
-                        </div>
-                    </div>
+                    <ProfilePreviewDialog
+                        profile={profilePreview}
+                        onClose={() => setProfilePreview(null)}
+                        avatar={<ProfileImage src={profilePreview.profileImage} variant="person" />}
+                    />
                 )}
 
                 {/* share */}

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createDemoFixture } from './demo-analysis';
+import { DEMO_FIXTURE_VERSION, createDemoFixture } from './demo-analysis';
 
 const migration = readFileSync(
     new URL('../../../supabase/migrations/20260730010000_demo_analysis_editable_fixture_authority.sql', import.meta.url),
@@ -14,13 +14,19 @@ function payload() {
 }
 
 function runtimePayload() {
-    const fixture = createDemoFixture('pglite-runtime-fixture');
+    const fixture = createDemoFixture('pglite-runtime-fixture', DEMO_FIXTURE_VERSION);
     return JSON.stringify({
         target: {
             username: 'junho_dem', fullName: '모의 분석용 공개 계정', bio: '산책과 사진을 기록하는 데모 프로필입니다.',
             profileImage: '/demo-avatars/demo-v3-target-000.webp', followersCount: 600, followingCount: 580, isPrivate: false,
         },
-        summary: fixture.summary,
+        summary: {
+            ...fixture.summary,
+            detectedMutuals: 229,
+            publicMutuals: 84,
+            privateMutuals: 145,
+            screenedMutuals: 84,
+        },
         public: fixture.publicAccounts,
         private: fixture.privateAccounts,
     }).replace(/'/g, "''");

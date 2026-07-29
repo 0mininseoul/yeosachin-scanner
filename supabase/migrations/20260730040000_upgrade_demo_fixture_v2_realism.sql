@@ -10,7 +10,9 @@ ALTER TABLE public.demo_analysis_runs
     ADD CONSTRAINT demo_analysis_runs_fixture_version_duration_check CHECK (
         (fixture_version = 'synthetic-fixture-v1' AND duration_seconds BETWEEN 60 AND 90)
         OR (fixture_version IN ('authorized-text-fixture-v2', 'authorized-redacted-fixture-v3', 'authorized-redacted-fixture-v4') AND duration_seconds BETWEEN 30 AND 45)
-        OR (fixture_version = 'operator-editable-fixture-v1' AND duration_seconds BETWEEN 30 AND 45)
+        OR (fixture_version ~ '^operator-editable-fixture-[a-z0-9][a-z0-9._-]{1,99}$'
+            AND fixture_version <> 'operator-editable-fixture-v2'
+            AND duration_seconds BETWEEN 30 AND 45)
         OR (fixture_version = 'operator-editable-fixture-v2' AND duration_seconds = 300)
     );
 
@@ -114,9 +116,10 @@ DECLARE
 BEGIN
     IF p_target_instagram_id <> 'junho_dem'
        OR p_idempotency_key !~ '^[A-Za-z0-9._:-]{16,128}$'
-       OR (p_fixture_version = 'operator-editable-fixture-v1' AND p_duration_seconds NOT BETWEEN 30 AND 45)
        OR (p_fixture_version = 'operator-editable-fixture-v2' AND p_duration_seconds <> 300)
-       OR (p_fixture_version NOT IN ('operator-editable-fixture-v1', 'operator-editable-fixture-v2')) THEN
+       OR (p_fixture_version <> 'operator-editable-fixture-v2'
+           AND (p_fixture_version !~ '^operator-editable-fixture-[a-z0-9][a-z0-9._-]{1,99}$'
+               OR p_duration_seconds NOT BETWEEN 30 AND 45)) THEN
         RAISE EXCEPTION 'invalid database demo run input';
     END IF;
     IF EXISTS (SELECT 1 FROM public.demo_analysis_runs AS run WHERE run.user_id = p_user_id AND run.idempotency_key = p_idempotency_key) THEN
