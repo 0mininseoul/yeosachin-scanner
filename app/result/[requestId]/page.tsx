@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, use } from 'react';
+import { useCallback, useEffect, useRef, useState, use } from 'react';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { CircleHelp, Mars, Venus } from 'lucide-react';
@@ -14,7 +14,13 @@ import {
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
 import { shareResult } from '@/lib/services/result-share';
-import { kakaoJavascriptKey, shareResultToKakao } from '@/lib/services/kakao-share';
+import {
+    kakaoJavascriptKey,
+    readyKakao,
+    shareResultToKakao,
+    shareToKakaoNow,
+    type ResultShareContent,
+} from '@/lib/services/kakao-share';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 import {
     availablePendingTargetStorage,
@@ -272,6 +278,10 @@ export default function ResultPage({ params }: PageProps) {
     const [error, setError] = useState<string | null>(null);
     const [shareLoading, setShareLoading] = useState(false);
     const [kakaoShareLoading, setKakaoShareLoading] = useState(false);
+    // In-flight token mint, and its result once resolved, so the tap handler can
+    // read the destination without awaiting anything.
+    const sharePrepRef = useRef<Promise<Omit<ResultShareContent, 'title'>> | null>(null);
+    const sharePreparedRef = useRef<Omit<ResultShareContent, 'title'> | null>(null);
     const [deleting, setDeleting] = useState(false);
     const [pageAction, setPageAction] = useState<ResultPageAction | null>(null);
     const [pageError, setPageError] = useState<ResultPageAction | null>(null);
@@ -534,46 +544,59 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
-    // Shares the result itself. /result is auth-gated, so a share token is minted
-    // first and the recipient is sent to /share/{token}. If minting fails the
-    // share still goes out, pointing at the service rather than dropping the
-    // user's action on the floor.
-    const handleKakaoShare = async () => {
-        if (kakaoShareLoading) return;
-        setKakaoShareLoading(true);
-        try {
-            let shareUrl = CANONICAL_APP_ORIGIN;
-            let sharedResult = false;
+    /* Mints the share token and warms the Kakao SDK ahead of the tap.
+     *
+     * Kakao opens a popup, and Safari only permits that inside the task that
+     * handled the tap — awaiting a network round trip first loses the gesture and
+     * the popup is blocked, which is what pushed iOS onto the OS share sheet. So
+     * everything slow happens when the menu opens, one interaction earlier. */
+    const prepareShare = useCallback(() => {
+        void readyKakao();
+        if (sharePrepRef.current) return sharePrepRef.current;
+        sharePrepRef.current = (async () => {
             try {
-                const enabled = await fetch('/api/share/enable', {
+                const response = await fetch('/api/share/enable', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ requestId }),
                 });
-                const payload = await enabled.json();
-                if (enabled.ok && payload?.success && typeof payload.shareUrl === 'string') {
-                    shareUrl = payload.shareUrl;
-                    sharedResult = true;
+                const payload = await response.json();
+                if (response.ok && payload?.success && typeof payload.shareUrl === 'string') {
+                    sharePreparedRef.current = {
+                        url: payload.shareUrl as string,
+                        // Kakao ignores the page's OG tags, so the per-result card
+                        // has to be handed over explicitly.
+                        imageUrl: typeof payload.shareToken === 'string'
+                            ? `${CANONICAL_APP_ORIGIN}/api/share/${payload.shareToken}/opengraph-image`
+                            : `${CANONICAL_APP_ORIGIN}/og.png`,
+                    };
+                    return sharePreparedRef.current;
                 }
             } catch {
                 // fall through to the service link
             }
+            sharePrepRef.current = null; // let a later attempt retry
+            return { url: CANONICAL_APP_ORIGIN, imageUrl: `${CANONICAL_APP_ORIGIN}/og.png` };
+        })();
+        return sharePrepRef.current;
+    }, [requestId]);
 
-            // Kakao only accepts links and thumbnails on a domain registered in
-            // its console, so the fallback is pinned to the canonical origin even
-            // when this page is served from localhost.
-            const detected = data?.summary.v2?.highRiskCount
-                ?? data?.femaleAccounts.filter(account => account.riskGrade === 'high_risk').length
-                ?? 0;
+    const handleKakaoShare = async () => {
+        if (kakaoShareLoading) return;
+
+        const target = sharePreparedRef.current;
+        // The happy path: everything was resolved when the menu opened, so the
+        // send stays inside the tap's own task.
+        if (target && shareToKakaoNow({ ...target, title: '위장여사친 판독 결과' })) {
+            trackEvent(EVENTS.RESULT_SHARED, { request_id: requestId, share_channel: 'kakao' });
+            return;
+        }
+
+        setKakaoShareLoading(true);
+        try {
+            const resolved = target ?? await prepareShare();
             const channel = await shareResultToKakao(
-                {
-                    url: shareUrl,
-                    title: sharedResult ? '위장여사친 판독 결과' : '위장여사친 판독기',
-                    description: detected > 0
-                        ? `방금 판독했더니 고위험 계정 ${detected}건이 나왔어요.`
-                        : '남자친구가 맞팔 중인 여자들, AI가 5분이면 판독해줍니다.',
-                    imageUrl: `${CANONICAL_APP_ORIGIN}/og.png`,
-                },
+                { ...resolved, title: '위장여사친 판독 결과' },
                 {
                     ...(navigator.share
                         ? { share: (payload: { title: string; text: string; url: string }) => navigator.share(payload) }
@@ -716,6 +739,7 @@ export default function ResultPage({ params }: PageProps) {
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
                     <ResultActions
                         onKakaoShare={handleKakaoShare}
+                        onOpen={prepareShare}
                         kakaoBusy={kakaoShareLoading}
                         kakaoAvailable={kakaoJavascriptKey() !== null}
                         copyUrl={CANONICAL_APP_ORIGIN}
