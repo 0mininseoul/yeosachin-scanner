@@ -45,6 +45,8 @@ export const GUIDE_DESCRIPTION = '맞팔 관계와 좋아요·댓글·태그·�
 export const GUIDE_PUBLISHED_DATE = '2026-07-29';
 export const GUIDE_MODIFIED_DATE = '2026-07-29';
 export const GUIDE_PUBLISHER = 'Ascentum';
+export const GUIDE_BREADCRUMB_HOME_LABEL = '홈';
+export const GUIDE_BREADCRUMB_LABEL = '위장여사친 구분법';
 
 export function buildHomepageJsonLd() {
     const websiteId = `${CANONICAL_APP_ORIGIN}/#website`;
@@ -103,13 +105,13 @@ export function buildGuideJsonLd() {
                     {
                         '@type': 'ListItem',
                         position: 1,
-                        name: '위장여사친 판독기',
+                        name: GUIDE_BREADCRUMB_HOME_LABEL,
                         item: `${CANONICAL_APP_ORIGIN}/`,
                     },
                     {
                         '@type': 'ListItem',
                         position: 2,
-                        name: GUIDE_TITLE,
+                        name: GUIDE_BREADCRUMB_LABEL,
                         item: GUIDE_URL,
                     },
                 ],

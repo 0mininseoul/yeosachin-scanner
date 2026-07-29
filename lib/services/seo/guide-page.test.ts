@@ -37,6 +37,25 @@ describe('definitive disguised-friend guide', () => {
         expect(metadata.description).toBe(GUIDE_DESCRIPTION);
         expect(metadata.alternates?.canonical).toBe(GUIDE_PATH);
         expect(metadata.robots).toEqual({ index: true, follow: true });
+        expect(metadata.openGraph).toMatchObject({
+            type: 'article',
+            url: GUIDE_URL,
+            title: GUIDE_TITLE,
+            description: GUIDE_DESCRIPTION,
+            publishedTime: '2026-07-29',
+            modifiedTime: '2026-07-29',
+            images: [
+                expect.objectContaining({
+                    url: '/og.png',
+                }),
+            ],
+        });
+        expect(metadata.twitter).toMatchObject({
+            card: 'summary_large_image',
+            title: GUIDE_TITLE,
+            description: GUIDE_DESCRIPTION,
+            images: ['/og.png'],
+        });
     });
 
     it('renders the operational answer, service definition, method, limits, and navigation in static HTML', async () => {
@@ -104,6 +123,12 @@ describe('definitive disguised-friend guide', () => {
             '@graph': Array<Record<string, unknown>>;
         };
         const serialized = JSON.stringify(jsonLd);
+        const breadcrumb = jsonLd['@graph'][1] as {
+            itemListElement: Array<{ item: string; name: string }>;
+        };
+        const visibleBreadcrumb = markup.match(
+            /<nav aria-label="현재 위치"[\s\S]*?<\/nav>/,
+        )?.[0] ?? '';
 
         expect(jsonLd['@context']).toBe('https://schema.org');
         expect(jsonLd['@graph']).toHaveLength(2);
@@ -129,16 +154,26 @@ describe('definitive disguised-friend guide', () => {
             itemListElement: [
                 expect.objectContaining({
                     position: 1,
-                    name: '위장여사친 판독기',
+                    name: '홈',
                     item: 'https://yeosachin.com/',
                 }),
                 expect.objectContaining({
                     position: 2,
-                    name: GUIDE_TITLE,
+                    name: '위장여사친 구분법',
                     item: GUIDE_URL,
                 }),
             ],
         });
+        expect(visibleText(visibleBreadcrumb)).toBe('홈 / 위장여사친 구분법');
+        expect(visibleBreadcrumb).toContain('href="/"');
+        expect(breadcrumb.itemListElement.map(({ name }) => name)).toEqual([
+            '홈',
+            '위장여사친 구분법',
+        ]);
+        expect(breadcrumb.itemListElement.map(({ item }) => item)).toEqual([
+            'https://yeosachin.com/',
+            GUIDE_URL,
+        ]);
         expect(serialized).not.toMatch(
             /FAQPage|HowTo|Review|AggregateRating|sameAs/,
         );

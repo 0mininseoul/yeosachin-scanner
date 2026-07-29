@@ -3,6 +3,8 @@ import Link from 'next/link';
 import { CaseCard, Eyebrow, TopBar } from '@/components/case-ui';
 import { JsonLd } from '@/components/seo/json-ld';
 import {
+    GUIDE_BREADCRUMB_HOME_LABEL,
+    GUIDE_BREADCRUMB_LABEL,
     GUIDE_DESCRIPTION,
     GUIDE_H1,
     GUIDE_JSON_LD,
@@ -119,10 +121,10 @@ export default function GuidePage() {
                             className="flex items-center gap-2 border-b border-line py-4 text-[12px] text-fg-mute"
                         >
                             <Link href="/" className="transition-colors hover:text-fg">
-                                홈
+                                {GUIDE_BREADCRUMB_HOME_LABEL}
                             </Link>
                             <span aria-hidden="true">/</span>
-                            <span aria-current="page">위장여사친 구분법</span>
+                            <span aria-current="page">{GUIDE_BREADCRUMB_LABEL}</span>
                         </nav>
 
                         <header className="pb-10 pt-10">
