@@ -61,6 +61,12 @@ describe('earlybird checkout reconciliation migration contract', () => {
         expect(migration).toContain(
             'CREATE FUNCTION public.finalize_earlybird_groble_payment_reconciliation_aware'
         );
+        expect(migration).toContain(
+            'p_require_legacy_email_only BOOLEAN'
+        );
+        expect(migration).toContain(
+            'v_reconciliation_history_count INTEGER := 0'
+        );
         expect(migration).toMatch(
             /REVOKE ALL ON FUNCTION public\.finalize_earlybird_groble_payment_pre_reconciliation\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
         );
@@ -74,6 +80,27 @@ describe('earlybird checkout reconciliation migration contract', () => {
         expect(migration).toContain("'ambiguous_buyer'");
         expect(migration).not.toContain(
             "MESSAGE = 'EARLYBIRD_SELLER_REFERENCE_CONFLICT',\n            ERRCODE = 'P0001'"
+        );
+    });
+
+    it('keeps the rolling nine-argument overload behind the durable helper and a narrow ACL', () => {
+        expect(migration).toMatch(
+            /CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\(\s*p_event_id TEXT,\s*p_idempotency_key TEXT,\s*p_event_type TEXT,\s*p_occurred_at TIMESTAMP WITH TIME ZONE,\s*p_payment_id TEXT,\s*p_buyer_email TEXT,\s*p_product_id TEXT,\s*p_amount_krw INTEGER,\s*p_paid_at TIMESTAMP WITH TIME ZONE\s*\)[\s\S]*?finalize_earlybird_groble_payment_reconciliation_aware\(\s*NULL::UUID,\s*TRUE,/
+        );
+        expect(migration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.finalize_earlybird_groble_payment\(\s*TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,\s*TIMESTAMP WITH TIME ZONE\s*\) FROM PUBLIC, anon, authenticated/
+        );
+        expect(migration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.finalize_earlybird_groble_payment\(\s*TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,\s*TIMESTAMP WITH TIME ZONE\s*\) TO service_role/
+        );
+        expect(migration).toContain(
+            'Include owners from both candidate lineage and immutable'
+        );
+        expect(migration).toContain(
+            'SELECT payment_order.user_id'
+        );
+        expect(migration).toContain(
+            'SELECT attributed_order.user_id'
         );
     });
 });

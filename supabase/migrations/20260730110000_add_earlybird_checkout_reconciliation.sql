@@ -178,6 +178,7 @@ REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment_pre_reconciliati
 
 CREATE FUNCTION public.finalize_earlybird_groble_payment_reconciliation_aware(
     p_referenced_order_id UUID,
+    p_require_legacy_email_only BOOLEAN,
     p_event_id TEXT,
     p_idempotency_key TEXT,
     p_event_type TEXT,
@@ -208,6 +209,7 @@ DECLARE
     v_result RECORD;
     v_candidate_order_id UUID;
     v_lock_user_id UUID;
+    v_reconciliation_history_count INTEGER := 0;
     v_reconciled_count INTEGER := 0;
     v_live_count INTEGER := 0;
     v_reference_is_reconciled BOOLEAN := FALSE;
@@ -248,6 +250,63 @@ BEGIN
             0
         )
     );
+
+    -- Keep every entry point on the same payment -> product -> sorted-users
+    -- lock order. Include owners from both candidate lineage and immutable
+    -- duplicate attribution before any duplicate path can return.
+    FOR v_lock_user_id IN
+        SELECT potential_user.user_id
+        FROM (
+            SELECT candidate.user_id
+            FROM public.earlybird_orders AS candidate
+            WHERE candidate.expected_groble_product_id = p_product_id
+              AND (
+                  candidate.status IN ('payment_pending', 'cancelled')
+                  OR EXISTS (
+                      SELECT 1
+                      FROM public.earlybird_checkout_reconciliations AS reconciliation
+                      WHERE reconciliation.order_id = candidate.id
+                  )
+              )
+
+            UNION
+
+            SELECT referenced.user_id
+            FROM public.earlybird_orders AS referenced
+            WHERE referenced.id = p_referenced_order_id
+
+            UNION
+
+            SELECT payment_order.user_id
+            FROM public.earlybird_orders AS payment_order
+            WHERE payment_order.payment_id = p_payment_id
+
+            UNION
+
+            SELECT attributed_order.user_id
+            FROM public.earlybird_webhook_events AS attributed_event
+            JOIN public.earlybird_orders AS attributed_order
+              ON attributed_order.id = attributed_event.order_id
+            WHERE attributed_event.event_id = p_event_id
+               OR attributed_event.idempotency_key = p_idempotency_key
+               OR (
+                   attributed_event.payment_id = p_payment_id
+                   AND attributed_event.event_type = 'payment.completed'
+               )
+
+            UNION
+
+            SELECT buyer.id
+            FROM public.users AS buyer
+            WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+        ) AS potential_user
+        ORDER BY potential_user.user_id::TEXT
+    LOOP
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
+        );
+    END LOOP;
 
     SELECT webhook_event.*
     INTO v_event
@@ -318,40 +377,41 @@ BEGIN
         RETURN;
     END IF;
 
-    FOR v_lock_user_id IN
-        SELECT potential_user.user_id
-        FROM (
-            SELECT candidate.user_id
-            FROM public.earlybird_orders AS candidate
-            WHERE candidate.expected_groble_product_id = p_product_id
+    SELECT pg_catalog.count(*)::INTEGER
+    INTO v_reconciliation_history_count
+    FROM public.earlybird_orders AS candidate
+    JOIN public.earlybird_checkout_reconciliations AS reconciliation
+      ON reconciliation.order_id = candidate.id
+    WHERE candidate.expected_groble_product_id = p_product_id
+      AND (
+          (
+              candidate.buyer_match_policy = 'verified_kakao_phone'
+              AND candidate.expected_buyer_phone_verification_source
+                    = 'kakao_rest_api'
+              AND candidate.expected_buyer_phone_verified_at IS NOT NULL
               AND (
-                  candidate.status IN ('payment_pending', 'cancelled')
-                  OR EXISTS (
-                      SELECT 1
-                      FROM public.earlybird_checkout_reconciliations AS reconciliation
-                      WHERE reconciliation.order_id = candidate.id
+                  (
+                      p_buyer_phone_normalized IS NOT NULL
+                      AND candidate.expected_buyer_phone_number_normalized
+                            = p_buyer_phone_normalized
+                  )
+                  OR (
+                      p_require_legacy_email_only IS TRUE
+                      AND p_buyer_phone_normalized IS NULL
                   )
               )
-
-            UNION
-
-            SELECT referenced.user_id
-            FROM public.earlybird_orders AS referenced
-            WHERE referenced.id = p_referenced_order_id
-
-            UNION
-
-            SELECT buyer.id
-            FROM public.users AS buyer
-            WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
-                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
-        ) AS potential_user
-        ORDER BY potential_user.user_id::TEXT
-    LOOP
-        PERFORM pg_catalog.pg_advisory_xact_lock(
-            pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
-        );
-    END LOOP;
+          )
+          OR (
+              candidate.buyer_match_policy = 'legacy_email'
+              AND EXISTS (
+                  SELECT 1
+                  FROM public.users AS buyer
+                  WHERE buyer.id = candidate.user_id
+                    AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                        = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+              )
+          )
+      );
 
     SELECT pg_catalog.count(*)::INTEGER, pg_catalog.min(candidate.id::TEXT)::UUID
     INTO v_reconciled_count, v_candidate_order_id
@@ -414,6 +474,47 @@ BEGIN
               )
           )
       );
+
+    IF p_referenced_order_id IS NULL
+       AND p_require_legacy_email_only IS TRUE
+       AND v_reconciliation_history_count = 0 THEN
+        IF EXISTS (
+            SELECT 1
+            FROM public.earlybird_orders AS candidate
+            WHERE candidate.buyer_match_policy = 'verified_kakao_phone'
+              AND candidate.expected_groble_product_id = p_product_id
+              AND (
+                  candidate.status = 'payment_pending'
+                  OR (
+                      candidate.status = 'cancelled'
+                      AND candidate.payment_id IS NULL
+                  )
+              )
+        ) THEN
+            RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM public.earlybird_orders AS candidate
+            JOIN public.users AS buyer ON buyer.id = candidate.user_id
+            WHERE candidate.buyer_match_policy = 'legacy_email'
+              AND candidate.status IN ('payment_pending', 'cancelled')
+              AND candidate.payment_id IS NULL
+              AND candidate.expected_groble_product_id = p_product_id
+              AND (
+                  candidate.status = 'payment_pending'
+                  OR (
+                      candidate.expected_amount_krw >= p_amount_krw
+                      AND p_amount_krw >= 0
+                  )
+              )
+              AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                    = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+        ) THEN
+            RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
+        END IF;
+    END IF;
 
     IF p_referenced_order_id IS NOT NULL THEN
         SELECT referenced.*
@@ -530,8 +631,15 @@ BEGIN
             RETURN;
         END IF;
     ELSE
-        IF v_reconciled_count > 1
-           OR (v_reconciled_count = 1 AND v_live_count > 0) THEN
+        IF v_reconciliation_history_count > 1
+           OR (
+               v_reconciliation_history_count > 0
+               AND v_live_count > 0
+           )
+           OR (
+               v_reconciliation_history_count > 0
+               AND v_reconciled_count <> 1
+           ) THEN
             INSERT INTO public.earlybird_webhook_events (
                 event_id, idempotency_key, event_type, occurred_at,
                 payment_id, product_id, amount_krw, disposition
@@ -655,7 +763,7 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment_reconciliation_aware(
-    UUID, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT,
+    UUID, BOOLEAN, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT,
     TEXT, TEXT, TEXT, INTEGER, TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated, service_role;
 
@@ -688,6 +796,7 @@ BEGIN
     SELECT *
     FROM public.finalize_earlybird_groble_payment_reconciliation_aware(
         NULL::UUID,
+        FALSE,
         p_event_id,
         p_idempotency_key,
         p_event_type,
@@ -764,6 +873,7 @@ BEGIN
     INTO v_result
     FROM public.finalize_earlybird_groble_payment_reconciliation_aware(
         v_referenced_order_id,
+        FALSE,
         p_event_id,
         p_idempotency_key,
         p_event_type,
@@ -804,4 +914,56 @@ REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment_by_reference(
 GRANT EXECUTE ON FUNCTION public.finalize_earlybird_groble_payment_by_reference(
     TEXT, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT,
     TEXT, TEXT, TEXT, INTEGER, TIMESTAMP WITH TIME ZONE
+) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment(
+    p_event_id TEXT,
+    p_idempotency_key TEXT,
+    p_event_type TEXT,
+    p_occurred_at TIMESTAMP WITH TIME ZONE,
+    p_payment_id TEXT,
+    p_buyer_email TEXT,
+    p_product_id TEXT,
+    p_amount_krw INTEGER,
+    p_paid_at TIMESTAMP WITH TIME ZONE
+)
+RETURNS TABLE(
+    disposition TEXT,
+    order_id UUID,
+    status TEXT,
+    plan_sequence SMALLINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM public.finalize_earlybird_groble_payment_reconciliation_aware(
+        NULL::UUID,
+        TRUE,
+        p_event_id,
+        p_idempotency_key,
+        p_event_type,
+        p_occurred_at,
+        p_payment_id,
+        p_buyer_email,
+        NULL::TEXT,
+        NULL::TEXT,
+        NULL::TEXT,
+        p_product_id,
+        p_amount_krw,
+        p_paid_at
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment(
+    TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
+    TIMESTAMP WITH TIME ZONE
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.finalize_earlybird_groble_payment(
+    TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
+    TIMESTAMP WITH TIME ZONE
 ) TO service_role;
