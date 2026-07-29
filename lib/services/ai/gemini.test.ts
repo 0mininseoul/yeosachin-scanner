@@ -646,6 +646,41 @@ describe('analyzeWithGemini stage request policy', () => {
         }
     );
 
+    it('maps the v2.15 feature output cap into the generated SDK request', async () => {
+        const images = Array.from(
+            { length: 12 },
+            (_, index) => `image-${index}`,
+        );
+
+        await analyzeWithGemini('sensitive prompt', images, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.15',
+            ...stageAuditOptions(),
+        });
+
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        const request = mocks.generateContent.mock.calls[0][0];
+        expect(request).toMatchObject({
+            model: 'gemini-3-flash-preview',
+            config: {
+                maxOutputTokens: 4_096,
+                mediaResolution: 'medium',
+                thinkingConfig: { thinkingLevel: 'medium' },
+                responseMimeType: 'application/json',
+                responseJsonSchema: {
+                    type: 'object',
+                    properties: { value: { type: 'string' } },
+                    required: ['value'],
+                    additionalProperties: false,
+                },
+            },
+        });
+        expect(request.contents[0].parts.filter(
+            (part: { inlineData?: unknown }) => part.inlineData,
+        )).toHaveLength(11);
+    });
+
     it('admits only the bounded v2.9 two-account gender microbatch media override', async () => {
         const images = Array.from({ length: 11 }, (_, index) => `image-${index}`);
         await analyzeWithGemini('prompt', images, {
