@@ -798,7 +798,7 @@ describe('AI-only replay runner', () => {
             capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v212-gender-quality' as const,
             aiStage: 'ai-stage-policy-v2.12' as const,
         };
-        const publicProfiles = [1, 2, 3, 4].map(ordinal => ({
+        const publicProfiles = [1, 2, 3, 4, 5].map(ordinal => ({
             ...bundle.profiles[0]!,
             ordinal,
             username: `candidate-${ordinal}`,
@@ -859,9 +859,9 @@ describe('AI-only replay runner', () => {
                     outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
                     value: ordinal === 4
                         ? featureResult('personal', 'verified_female')
-                        : featureResult(ordinal === 3 ? 'uncertain' : 'personal', 'unresolved'),
+                        : featureResult(ordinal === 5 ? 'uncertain' : 'personal', 'unresolved'),
                 }),
-                resolveGender: async ({ ordinal }) => ordinal === 1
+                resolveGender: async ({ ordinal }) => [1, 3, 5].includes(ordinal)
                     ? { outcome: 'capacity_skipped' as const, attempts: 0, retries: 0, elapsedMs: 0 }
                     : {
                         outcome: 'ok' as const, attempts: 1, retries: 0, elapsedMs: 1,
@@ -874,12 +874,26 @@ describe('AI-only replay runner', () => {
         });
 
         expect(report.genderQuality?.headroom).toEqual({
-            finalUnknownWithResolverMediaAtLeast2: 3,
+            finalUnknownWithResolverMediaAtLeast2: 4,
             highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2: 1,
             featureUnresolvedWithUncertainAccountContext: 1,
-            capacitySkippedFinalUnknown: 1,
+            capacitySkippedFinalUnknown: 3,
             earlyResolverReadyFeatureFinalKnown: 1,
         });
+        const headroom = report.genderQuality!.headroom;
+        const featureUnresolved =
+            (report.genderQuality!.feature.finalDecision.unresolved ?? 0)
+            + (report.genderQuality!.feature.finalDecision.unresolved_stage_conflict ?? 0);
+        expect(headroom.capacitySkippedFinalUnknown)
+            .toBeLessThanOrEqual(report.resolver.capacitySkipped);
+        expect(headroom.earlyResolverReadyFeatureFinalKnown)
+            .toBeLessThanOrEqual(report.resolver.ready);
+        expect(headroom.highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2)
+            .toBeLessThanOrEqual(headroom.finalUnknownWithResolverMediaAtLeast2);
+        expect(headroom.highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2)
+            .toBeLessThanOrEqual(featureUnresolved);
+        expect(headroom.featureUnresolvedWithUncertainAccountContext)
+            .toBeLessThanOrEqual(featureUnresolved);
         expect(report.stages.genderResolution.calls).toBe(1);
         const safe = JSON.parse(lines[0]!);
         expect(safe.gender_quality.headroom).toEqual(report.genderQuality?.headroom);
@@ -887,6 +901,73 @@ describe('AI-only replay runner', () => {
         expect(JSON.stringify(safe)).not.toContain('candidate-');
         expect(JSON.stringify(safe)).not.toContain('m1');
         expect(JSON.stringify(safe)).not.toContain('형식 검증');
+    });
+
+    it('counts every final unknown with selected resolver media once across non-ok and official terminals', async () => {
+        const evaluationPolicy = {
+            capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v212-gender-quality' as const,
+            aiStage: 'ai-stage-policy-v2.12' as const,
+        };
+        const v212Bundle = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        aiStage: 'ai-stage-policy-v2.7' as const,
+                        risk: 'risk-policy-v2.3' as const,
+                    },
+                },
+                evaluationPolicy,
+            },
+            profiles: [
+                {
+                    ...bundle.profiles[0]!,
+                    ordinal: 1,
+                    username: 'non-ok-terminal',
+                },
+                {
+                    ...bundle.profiles[0]!,
+                    ordinal: 2,
+                    username: 'official-terminal',
+                    fullName: 'Official Studio',
+                    bio: 'New single out now',
+                },
+            ],
+        };
+        const feature = vi.fn();
+        const resolveGender = vi.fn();
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: v212Bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+            runner: v212Runner({
+                triage: async ({ ordinal }) => ordinal === 1
+                    ? { outcome: 'failed' as const, attempts: 0, retries: 0, elapsedMs: 0 }
+                    : {
+                        outcome: 'ok' as const, attempts: 1, retries: 0, elapsedMs: 1,
+                        value: {
+                            assessment: { inferredGender: 'unknown' as const, confidence: 'low' as const, ownerConsistency: 'multiple_or_unclear' as const, evidenceSelectionIds: ['m1'] },
+                            routingDecision: 'route_to_feature_analysis' as const,
+                            routingReason: 'conserve_female_recall' as const,
+                            analyzedSelectionIds: ['m1', 'm2'],
+                            v29AccountContext: 'official_group_or_brand' as const,
+                        },
+                    },
+                feature,
+                resolveGender,
+            }),
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(resolveGender).not.toHaveBeenCalled();
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 2, unknownRate: 1 });
+        expect(report.genderQuality?.headroom.finalUnknownWithResolverMediaAtLeast2)
+            .toBe(report.gender.unknown);
     });
 
     it('runs the v2.9 resolver for an ambiguous personal account without admitting feature', async () => {

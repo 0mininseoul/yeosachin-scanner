@@ -110,6 +110,13 @@ function validTerminalReport(): string {
                 outcome: {},
             },
             finalClassificationSource: {},
+            headroom: {
+                finalUnknownWithResolverMediaAtLeast2: 0,
+                highBinaryFeatureUnresolvedPersonalOrIndividualCreatorWithResolverMediaAtLeast2: 0,
+                featureUnresolvedWithUncertainAccountContext: 0,
+                capacitySkippedFinalUnknown: 0,
+                earlyResolverReadyFeatureFinalKnown: 0,
+            },
             qualityGate: {
                 observedUnknownRate: 0,
                 worstCaseUnknownRate: 0,
