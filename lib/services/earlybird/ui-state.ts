@@ -26,7 +26,6 @@ export interface EarlybirdPricingRefreshActions {
     reset: () => void;
     clearGirlfriendInstagramId: () => void;
     clearSelectedPlan: () => void;
-    clearDisclosureAccepted: () => void;
     clearWaitlistComplete: () => void;
     replaceAnalyzeRoute: () => void;
     showRefreshError: () => void;
@@ -164,7 +163,6 @@ export function applyEarlybirdPricingRefreshBoundary(
     actions.reset();
     actions.clearGirlfriendInstagramId();
     actions.clearSelectedPlan();
-    actions.clearDisclosureAccepted();
     actions.clearWaitlistComplete();
     actions.replaceAnalyzeRoute();
     actions.showRefreshError();
@@ -345,7 +343,7 @@ export function buildEarlybirdPlanPresentation(planId: PlanId) {
         referencePriceLabel: formatKrw(plan.referenceAmountKrw),
         priceLabel: formatKrw(plan.earlybirdAmountKrw),
         discountLabel: `${discountRate}%`,
-        actionLabel: '얼리버드 사전 구매하기',
+        actionLabel: '지금 분석하기',
     });
 }
 
