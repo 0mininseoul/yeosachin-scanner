@@ -612,7 +612,7 @@ describe('stateless replay job build contract', () => {
         },
     );
 
-    it('computes and copies the complete installed Mac dependency closure physically', async () => {
+    it('computes and copies the complete installed platform-native dependency closure physically', async () => {
         const {
             copyReplayAnalysisV2JobPhysicalDependencyClosure,
         } = await buildModule();
@@ -642,7 +642,7 @@ describe('stateless replay job build contract', () => {
             );
             expect(closure.packages).toEqual(expect.arrayContaining([
                 'node_modules/@google/genai',
-                'node_modules/@img/sharp-darwin-arm64',
+                `node_modules/@img/sharp-${process.platform}-${process.arch}`,
                 'node_modules/google-auth-library',
                 'node_modules/node-fetch/node_modules/data-uri-to-buffer',
                 'node_modules/sharp',
