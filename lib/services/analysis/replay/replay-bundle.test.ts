@@ -546,6 +546,49 @@ describe('analysis V2 replay bundle', () => {
         uninstall();
     });
 
+    it('registers bundle inode ownership before a signal can clean bundle and key', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'signal-bundle.key');
+        const bundlePath = join(directory, 'signal-bundle.enc');
+        const ownedKey = await createReplayKeyFile(keyPath);
+        const scope = createReplayArtifactCreationScope();
+        let signalCleanup: Promise<void> | undefined;
+        const afterOwnershipRegistration = vi.fn(() => {
+            signalCleanup = (async () => {
+                await scope.cleanupActive();
+                await removeOwnedReplayArtifacts({
+                    bundlePath,
+                    keyPath,
+                    ownedKey,
+                });
+            })();
+        });
+
+        const writing = writeReplayBundle({
+            bundle: bundle(),
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+            artifactWrite: {
+                scope,
+                afterOwnershipRegistration,
+            },
+        });
+        const interrupted = expect(writing).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_INTERRUPTED',
+        );
+
+        await vi.waitFor(() => {
+            expect(afterOwnershipRegistration).toHaveBeenCalledOnce();
+            expect(signalCleanup).toBeDefined();
+        });
+        await signalCleanup!;
+        await interrupted;
+        await expect(stat(bundlePath)).rejects.toThrow();
+        await expect(stat(keyPath)).rejects.toThrow();
+    });
+
     it('does not delete a raced bundle when exclusive creation returns EEXIST', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
         temporaryPaths.push(directory);

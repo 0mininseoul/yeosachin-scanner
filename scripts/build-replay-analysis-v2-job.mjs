@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
     open,
     readFile,
+    realpath,
     rename,
     unlink,
 } from 'node:fs/promises';
@@ -225,16 +226,37 @@ async function publishAtomically(files, renameImpl) {
                 file.published = true;
             }
         } catch (error) {
+            const rollbackErrors = [];
             for (const file of [...staged].reverse()) {
                 if (file.published) {
-                    await removeIfPresent(file.target);
+                    try {
+                        await removeIfPresent(file.target);
+                        file.published = false;
+                    } catch (rollbackError) {
+                        rollbackErrors.push(rollbackError);
+                    }
                 }
             }
             for (const file of [...staged].reverse()) {
                 if (file.backedUp) {
-                    await renameImpl(file.backup, file.target);
-                    file.backedUp = false;
+                    try {
+                        await renameImpl(file.backup, file.target);
+                        file.backedUp = false;
+                    } catch (rollbackError) {
+                        rollbackErrors.push(rollbackError);
+                    }
                 }
+            }
+            if (rollbackErrors.length > 0) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_JOB_BUILD_ROLLBACK_INCOMPLETE',
+                    {
+                        cause: new AggregateError([
+                            error,
+                            ...rollbackErrors,
+                        ]),
+                    },
+                );
             }
             throw error;
         }
@@ -248,9 +270,20 @@ async function publishAtomically(files, renameImpl) {
     } finally {
         for (const file of staged) {
             await removeIfPresent(file.temporary);
-            await removeIfPresent(file.backup);
+            if (!file.backedUp) {
+                await removeIfPresent(file.backup);
+            }
         }
     }
+}
+
+async function canonicalOutput(path) {
+    const resolved = resolve(path);
+    const directory = await realpath(dirname(resolved));
+    return {
+        directory,
+        path: join(directory, basename(resolved)),
+    };
 }
 
 /**
@@ -280,8 +313,20 @@ export async function buildReplayAnalysisV2Job({
             throw new Error(`Missing absolute --${name}`);
         }
     }
-    if (new Set([outfile, metafile, runtimeManifest]).size !== 3) {
+    const canonicalOutputs = await Promise.all(
+        [outfile, metafile, runtimeManifest].map(canonicalOutput),
+    );
+    if (
+        new Set(canonicalOutputs.map(output => output.path)).size !== 3
+    ) {
         throw new Error('Replay job build outputs must be distinct');
+    }
+    if (
+        new Set(canonicalOutputs.map(output => output.directory)).size !== 1
+    ) {
+        throw new Error(
+            'Replay job build outputs must share one directory',
+        );
     }
 
     const lockfile = JSON.parse(await readFile(

@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import {
     close as closeDescriptor,
     constants as fileConstants,
-    fstat as statDescriptor,
+    fstatSync,
     openSync,
     write as writeDescriptor,
 } from 'node:fs';
@@ -309,7 +309,7 @@ export type ReplayArtifactOwnership = ReplayArtifactIdentity & {
 type ActiveReplayArtifactCreation = {
     readonly path: string;
     readonly handle: ReplayArtifactFileHandle;
-    identity?: ReplayArtifactIdentity;
+    readonly identity: ReplayArtifactIdentity;
     aborted: boolean;
     cleanup?: Promise<void>;
 };
@@ -324,6 +324,7 @@ export interface ReplayArtifactCreationScope {
 
 export interface ReplayArtifactWriteDependencies {
     scope?: ReplayArtifactCreationScope;
+    afterOwnershipRegistration?: () => void;
     writeFile?: (handle: ReplayArtifactFileHandle, bytes: Buffer) => Promise<void>;
     close?: (handle: ReplayArtifactFileHandle) => Promise<void>;
 }
@@ -441,21 +442,12 @@ async function cleanupActiveCreation(record: ActiveReplayArtifactCreation): Prom
     if (record.cleanup) return record.cleanup;
     record.aborted = true;
     record.cleanup = (async () => {
-        let identity = record.identity;
-        if (!identity) {
-            try {
-                identity = identityOf(await record.handle.stat());
-                record.identity = identity;
-            } catch {
-                // Without a matching file identity, deleting by path would be unsafe.
-            }
-        }
         try {
             await record.handle.close();
         } catch {
             // An interrupted or failed close still permits identity-checked unlink.
         }
-        if (identity) await unlinkIfIdentityMatches(record.path, identity);
+        await unlinkIfIdentityMatches(record.path, record.identity);
     })();
     return record.cleanup;
 }
@@ -480,45 +472,53 @@ function creationState(scope: ReplayArtifactCreationScope): ReplayArtifactCreati
     return state;
 }
 
-function openExclusiveReplayArtifact(path: string): ReplayArtifactFileHandle {
-    const descriptor = openSync(path, 'wx', 0o600);
+function openExclusiveReplayArtifact(path: string): {
+    handle: ReplayArtifactFileHandle;
+    identity: ReplayArtifactIdentity;
+} {
+    const descriptor = openSync(
+        path,
+        fileConstants.O_WRONLY
+            | fileConstants.O_CREAT
+            | fileConstants.O_EXCL,
+        0o600,
+    );
+    const opened = fstatSync(descriptor);
     let closed = false;
     return {
-        stat: () => new Promise<Stats>((resolveStat, rejectStat) => {
-            statDescriptor(descriptor, (error, file) => {
-                if (error) rejectStat(error);
-                else resolveStat(file);
-            });
-        }),
-        writeFile: async bytes => {
-            let offset = 0;
-            while (offset < bytes.byteLength) {
-                const written = await new Promise<number>((resolveWrite, rejectWrite) => {
-                    writeDescriptor(
-                        descriptor,
-                        bytes,
-                        offset,
-                        bytes.byteLength - offset,
-                        null,
-                        (error, count) => {
-                            if (error) rejectWrite(error);
-                            else resolveWrite(count);
-                        },
-                    );
+        identity: identityOf(opened),
+        handle: {
+            stat: () => Promise.resolve(opened),
+            writeFile: async bytes => {
+                let offset = 0;
+                while (offset < bytes.byteLength) {
+                    const written = await new Promise<number>((resolveWrite, rejectWrite) => {
+                        writeDescriptor(
+                            descriptor,
+                            bytes,
+                            offset,
+                            bytes.byteLength - offset,
+                            null,
+                            (error, count) => {
+                                if (error) rejectWrite(error);
+                                else resolveWrite(count);
+                            },
+                        );
+                    });
+                    if (written <= 0) bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_WRITE_FAILED');
+                    offset += written;
+                }
+            },
+            close: () => {
+                if (closed) return Promise.resolve();
+                closed = true;
+                return new Promise<void>((resolveClose, rejectClose) => {
+                    closeDescriptor(descriptor, error => {
+                        if (error) rejectClose(error);
+                        else resolveClose();
+                    });
                 });
-                if (written <= 0) bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_WRITE_FAILED');
-                offset += written;
-            }
-        },
-        close: () => {
-            if (closed) return Promise.resolve();
-            closed = true;
-            return new Promise<void>((resolveClose, rejectClose) => {
-                closeDescriptor(descriptor, error => {
-                    if (error) rejectClose(error);
-                    else resolveClose();
-                });
-            });
+            },
         },
     };
 }
@@ -533,15 +533,20 @@ async function securelyCreateReplayArtifact(
     if (state.active) bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_ACTIVE');
     // A synchronous O_EXCL open makes ownership visible to signal cleanup before
     // the event loop can dispatch a signal between file creation and registration.
-    const handle = openExclusiveReplayArtifact(path);
-    const record: ActiveReplayArtifactCreation = { path: resolve(path), handle, aborted: false };
+    const opened = openExclusiveReplayArtifact(path);
+    const record: ActiveReplayArtifactCreation = {
+        path: resolve(path),
+        handle: opened.handle,
+        identity: opened.identity,
+        aborted: false,
+    };
     state.active = record;
     try {
-        record.identity = identityOf(await handle.stat());
+        dependencies.afterOwnershipRegistration?.();
         if (record.aborted) bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_INTERRUPTED');
-        await (dependencies.writeFile ?? ((file, payload) => file.writeFile(payload)))(handle, bytes);
+        await (dependencies.writeFile ?? ((file, payload) => file.writeFile(payload)))(opened.handle, bytes);
         if (record.aborted) bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_INTERRUPTED');
-        await (dependencies.close ?? (file => file.close()))(handle);
+        await (dependencies.close ?? (file => file.close()))(opened.handle);
         if (record.aborted) bundleError('ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_INTERRUPTED');
         state.active = undefined;
         return ownershipToken(record.path, record.identity);

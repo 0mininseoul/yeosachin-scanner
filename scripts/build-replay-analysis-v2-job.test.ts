@@ -231,6 +231,121 @@ describe('stateless replay job build contract', () => {
         }
     });
 
+    it('requires all three outputs to resolve inside one exact directory', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+            buildReplayAnalysisV2Job,
+        } = await buildModule();
+        const firstDirectory = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-output-a-',
+        ));
+        const secondDirectory = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-output-b-',
+        ));
+        const outfile = join(firstDirectory, 'job.mjs');
+        const metafile = join(secondDirectory, 'meta.json');
+        const runtimeManifest = join(secondDirectory, 'runtime.json');
+        const buildImpl = vi.fn(async () => ({
+            metafile: validMetafile(
+                REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+                outfile,
+            ),
+            outputFiles: [{
+                path: outfile,
+                contents: new TextEncoder().encode('new-job'),
+            }],
+        }));
+        try {
+            await expect(buildReplayAnalysisV2Job({
+                outfile,
+                metafile,
+                runtimeManifest,
+                buildImpl,
+            })).rejects.toThrow(
+                'Replay job build outputs must share one directory',
+            );
+            expect(buildImpl).not.toHaveBeenCalled();
+        } finally {
+            await Promise.all([
+                rm(firstDirectory, { recursive: true, force: true }),
+                rm(secondDirectory, { recursive: true, force: true }),
+            ]);
+        }
+    });
+
+    it('preserves an unrestored backup when rollback restore itself fails', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+            buildReplayAnalysisV2Job,
+        } = await buildModule();
+        const directory = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-restore-failure-',
+        ));
+        const outfile = join(directory, 'job.mjs');
+        const metafile = join(directory, 'meta.json');
+        const runtimeManifest = join(directory, 'runtime.json');
+        try {
+            await Promise.all([
+                writeFile(outfile, 'old-job', { mode: 0o600 }),
+                writeFile(metafile, 'old-meta', { mode: 0o600 }),
+                writeFile(runtimeManifest, 'old-runtime', { mode: 0o600 }),
+            ]);
+            const buildImpl = vi.fn(async () => ({
+                metafile: validMetafile(
+                    REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+                    outfile,
+                ),
+                outputFiles: [{
+                    path: outfile,
+                    contents: new TextEncoder().encode('new-job'),
+                }],
+            }));
+            let publishRenames = 0;
+            const renameImpl = vi.fn(async (
+                source: string,
+                target: string,
+            ) => {
+                if (
+                    source.includes('.tmp-')
+                    && ++publishRenames === 2
+                ) {
+                    throw new Error('injected publish failure');
+                }
+                if (
+                    source.includes('.bak-')
+                    && target === runtimeManifest
+                ) {
+                    throw new Error('injected restore failure');
+                }
+                await rename(source, target);
+            });
+
+            await expect(buildReplayAnalysisV2Job({
+                outfile,
+                metafile,
+                runtimeManifest,
+                buildImpl,
+                renameImpl,
+            })).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_BUILD_ROLLBACK_INCOMPLETE',
+            );
+
+            const runtimeBackup = (await readdir(directory)).find(name => (
+                name.startsWith('.runtime.json.bak-')
+            ));
+            expect(runtimeBackup).toBeDefined();
+            await expect(readFile(
+                join(directory, runtimeBackup!),
+                'utf8',
+            )).resolves.toBe('old-runtime');
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
     it('publishes all runtime contract outputs as private regular files', async () => {
         const {
             buildReplayAnalysisV2Job,

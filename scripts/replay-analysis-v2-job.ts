@@ -81,6 +81,7 @@ const stageFailureDispositionCounts = z.object({
     failed: aggregateCount.optional(),
     capacity_skipped: aggregateCount.optional(),
     cutoff: aggregateCount.optional(),
+    backoff_cutoff: aggregateCount.optional(),
 }).strict();
 const stageFailureKindCounts = z.object({
     http_408: aggregateCount.optional(),

@@ -305,22 +305,20 @@ describe('Cloud Run analysis V2 replay job', () => {
         expect(validateReplayAnalysisV2JobTerminalLine(raw)).toBe(raw);
     });
 
-    it('accepts only the enumerated aggregate map keys', async () => {
+    it('accepts the complete replay runner aggregate category sets', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
         } = await import('./replay-analysis-v2-job');
+        const {
+            REPLAY_STAGE_FAILURE_DISPOSITIONS,
+        } = await import(
+            '../lib/services/analysis/replay/replay-runner'
+        );
         const actual = JSON.parse(await actualDiagnosticV212SafeLine());
-        actual.stages.genderTriage.failure_disposition = {
-            success: 1,
-            rate_limited: 1,
-            ambiguous: 1,
-            rejected: 1,
-            response_rejected: 1,
-            retry_exhausted: 1,
-            failed: 1,
-            capacity_skipped: 1,
-            cutoff: 1,
-        };
+        actual.stages.genderTriage.failure_disposition =
+            Object.fromEntries(REPLAY_STAGE_FAILURE_DISPOSITIONS.map(
+                disposition => [disposition, 1],
+            ));
         actual.stages.genderTriage.failure_kind = {
             http_408: 1,
             http_429: 1,
@@ -406,6 +404,22 @@ describe('Cloud Run analysis V2 replay job', () => {
         const raw = JSON.stringify(actual);
 
         expect(validateReplayAnalysisV2JobTerminalLine(raw)).toBe(raw);
+    });
+
+    it.each([
+        'private_handle',
+        'victim.handle',
+        'somehandle',
+    ])('independently rejects terminal report key variant %s', async key => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV212SafeLine());
+        actual[key] = 1;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     });
 
     it.each([

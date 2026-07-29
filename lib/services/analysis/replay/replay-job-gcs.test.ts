@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createReplayJobGcsClient } from './replay-job-gcs';
+import {
+    REPLAY_STAGE_FAILURE_DISPOSITIONS,
+} from './replay-runner';
 
 const ciphertext = Buffer.from('exact encrypted replay bytes');
 const baseConfig = {
@@ -12,6 +15,110 @@ const baseConfig = {
     claimObject: 'claims/claim-0123456789abcdef.json',
     reportObject: 'reports/report-0123456789abcdef.json',
 };
+
+function validTerminalReport(): string {
+    const stage = () => ({
+        calls: 0,
+        rate_limited: 0,
+        retries: 0,
+        mean_latency_ms: 0,
+        p50_latency_ms: 0,
+        p95_latency_ms: 0,
+        failure_disposition: Object.fromEntries(
+            REPLAY_STAGE_FAILURE_DISPOSITIONS.map(
+                disposition => [disposition, 0],
+            ),
+        ),
+        failure_kind: {},
+    });
+    return JSON.stringify({
+        status: 'ok',
+        benchmark_scope: 'ai-only-historical-partial-available',
+        source_plan: 'standard',
+        source_pipeline: 'v2',
+        source_ai_policy: 'ai-stage-policy-v2.7',
+        source_risk_policy: 'risk-policy-v2.3',
+        evaluation_ai_policy: 'ai-stage-policy-v2.12',
+        replay_ai_policy: 'ai-stage-policy-v2.12',
+        full_e2e_evidence: false,
+        not_exact: true,
+        no_media_substitution: true,
+        diagnostic_partial_coverage_override: {
+            used: true,
+            retained_profiles: 1,
+            source_profiles: 1,
+            retained_media: 1,
+            exact_selected_media: 1,
+            profile_retention_bps: 10_000,
+            media_retention_bps: 10_000,
+        },
+        total_elapsed_ms: 0,
+        stages: {
+            genderTriage: stage(),
+            featureAnalysis: stage(),
+            privateAccountName: stage(),
+            genderResolution: stage(),
+        },
+        gender: {
+            male: 0,
+            female: 0,
+            unknown: 0,
+            unknownRate: 0,
+        },
+        resolver: {
+            ready: 0,
+            applied: 0,
+            inconclusive: 0,
+            cutoff: 0,
+            capacitySkipped: 0,
+            admission: {
+                eligible: 0,
+                alreadyVerified: 0,
+                officialOrGroup: 0,
+                uncertainOrAbsent: 0,
+                insufficientMedia: 0,
+            },
+            outcomes: {
+                readyHighConfirmed: 0,
+                evidenceInsufficient: 0,
+                mixed: 0,
+                unknown: 0,
+                reconciliationApplied: 0,
+                reconciliationInconclusive: 0,
+                cutoff: 0,
+                capacitySkipped: 0,
+            },
+        },
+        gender_quality: {
+            triage: {
+                nonOk: 0,
+                capacity: 0,
+                outcome: {},
+                source: {},
+                genderConfidence: {},
+                accountContext: {},
+            },
+            feature: {
+                admission: {},
+                finalDecision: {},
+                accountContext: {},
+                routeTerminal: {},
+            },
+            resolver: {
+                earlyAdmission: 0,
+                lateAdmission: 0,
+                outcome: {},
+            },
+            finalClassificationSource: {},
+            qualityGate: {
+                observedUnknownRate: 0,
+                worstCaseUnknownRate: 0,
+                observedPass: true,
+                worstCasePass: true,
+            },
+        },
+    });
+}
 
 function tokenResponse(
     accessToken = 'adc-access-token-value-1234567890',
@@ -42,7 +149,7 @@ describe('replay job GCS JSON API client', () => {
         await client.createClaim(
             '{"status":"claimed","schema":"analysis-v2-replay-job-claim-v1"}',
         );
-        await client.createReport('{"status":"ok"}');
+        await client.createReport(validTerminalReport());
 
         expect(fetchMock).toHaveBeenCalledTimes(4);
         const download = new URL(fetchMock.mock.calls[1]![0].toString());
@@ -128,6 +235,28 @@ describe('replay job GCS JSON API client', () => {
             }))).rejects.toThrow(
                 'ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT',
             );
+            expect(fetchMock).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        'private_handle',
+        'victim.handle',
+        'somehandle',
+    ])(
+        'rejects closed-report key variant %s before ADC fetch',
+        async key => {
+            const fetchMock = vi.fn();
+            const client = createReplayJobGcsClient(baseConfig, {
+                fetch: fetchMock,
+            });
+            const report = JSON.parse(validTerminalReport());
+            report[key] = 1;
+
+            await expect(client.createReport(JSON.stringify(report)))
+                .rejects.toThrow(
+                    'ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT',
+                );
             expect(fetchMock).not.toHaveBeenCalled();
         },
     );

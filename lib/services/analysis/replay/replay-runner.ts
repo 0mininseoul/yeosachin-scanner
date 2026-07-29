@@ -35,6 +35,18 @@ import { evaluateReplayGenderQualityGate } from './replay-gender-quality-gate';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
+export const REPLAY_STAGE_FAILURE_DISPOSITIONS = Object.freeze([
+    'success',
+    'rate_limited',
+    'ambiguous',
+    'rejected',
+    'response_rejected',
+    'retry_exhausted',
+    'failed',
+    'capacity_skipped',
+    'cutoff',
+    'backoff_cutoff',
+] as const);
 
 export interface ReplayInvocation<T> {
     outcome: ReplayOutcome;
