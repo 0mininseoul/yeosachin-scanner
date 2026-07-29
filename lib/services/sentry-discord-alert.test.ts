@@ -165,7 +165,16 @@ describe('Sentry Service Hook Discord bridge', () => {
             data: { issue: { id: '987654321', project: { slug: 'other-project' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
         }))).toBeNull();
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: ' ai-baram-detector ' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
+        }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
             data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector-1' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'staging' } },
+        }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector-1' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'Production' } },
+        }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector-1' }, firstSeen: '2026-07-28T00:00:00Z', environment: ' production ' } },
         }))).toBeNull();
         expect(JSON.stringify(accepted)).not.toContain('person@example.test');
         expect(JSON.stringify(accepted)).not.toContain('private exception title');
