@@ -84,6 +84,27 @@ describe('isolated demo fixtures', () => {
         expect(JSON.stringify(preflight.target)).not.toContain('모의 분석용 공개 계정');
     });
 
+    it('uses distinct natural-looking V2 handles and neutral public-scope copy', () => {
+        const fixture = createDemoFixture(requestId);
+        const accounts = [...fixture.publicAccounts, ...fixture.privateAccounts];
+        const visibleText = [
+            fixture.summary.targetFullName ?? '',
+            ...fixture.publicAccounts.flatMap(account => [
+                account.oneLineOverview,
+                ...(account.highRiskNarrative ?? []),
+            ]),
+        ].join(' ');
+
+        expect(new Set(accounts.map(account => account.instagramId)).size).toBe(229);
+        expect(accounts.map(account => account.instagramId).every(handle =>
+            !/(?:mosaic|quiet|record|(?:_|\.)\d{3})/iu.test(handle),
+        )).toBe(true);
+        expect(new Set(accounts.map(account => account.fullName)).size).toBe(229);
+        expect(visibleText).not.toMatch(/(?:합성|데모|fixture)/iu);
+        expect(visibleText).toContain('공개 범위');
+        expect(visibleText).toContain('단정할 수 없습니다');
+    });
+
     it('dispatches legacy and current runs to distinct static fixtures', () => {
         const requestId = '123e4567-e89b-42d3-a456-426614174000';
         const legacy = createDemoFixture(requestId, LEGACY_DEMO_FIXTURE_VERSION);

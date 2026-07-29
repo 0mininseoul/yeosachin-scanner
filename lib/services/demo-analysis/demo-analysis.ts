@@ -853,7 +853,7 @@ function v4ProgressProfileId(progressBp: number): string {
 }
 
 function syntheticV2ProgressProfileId(progressBp: number): string {
-    return `${syntheticV2Handle('public', Math.floor(progressBp / 1_000) % 84)}*`;
+    return `${syntheticV2Handle(Math.floor(progressBp / 1_000) % 84)}*`;
 }
 
 function privateAccount(index: number): PrivateResultRowV1 {
@@ -893,6 +893,15 @@ const SYNTHETIC_V2_SURNAMES = [
 const SYNTHETIC_V2_GIVEN_NAMES = [
     '가람', '다온', '라온', '마루', '나래', '새봄', '여울', '하늘', '누리', '이든',
 ] as const;
+const SYNTHETIC_V2_HANDLE_LEFT = [
+    'willow', 'amber', 'paper', 'violet', 'harbor', 'mellow', 'copper', 'maple',
+    'lunar', 'pocket', 'sunday', 'velvet', 'tangerine', 'meadow', 'puddle', 'porch',
+    'dawn', 'marble', 'breeze', 'canvas', 'pebble', 'ribbon', 'horizon',
+] as const;
+const SYNTHETIC_V2_HANDLE_RIGHT = [
+    'window', 'archive', 'garden', 'letter', 'weather', 'library', 'picnic', 'notebook',
+    'terrace', 'postcard',
+] as const;
 
 function syntheticV2Name(index: number): string {
     return `${SYNTHETIC_V2_SURNAMES[index % SYNTHETIC_V2_SURNAMES.length]!}${
@@ -900,16 +909,21 @@ function syntheticV2Name(index: number): string {
     }`;
 }
 
-function syntheticV2Handle(kind: 'public' | 'private', index: number): string {
-    return `${kind === 'public' ? 'mosaic' : 'quiet'}_record_${String(index + 1).padStart(3, '0')}`;
+function syntheticV2Handle(index: number): string {
+    return `${SYNTHETIC_V2_HANDLE_LEFT[(index * 13 + 3) % SYNTHETIC_V2_HANDLE_LEFT.length]!}.${
+        SYNTHETIC_V2_HANDLE_RIGHT[(index * 7 + 5) % SYNTHETIC_V2_HANDLE_RIGHT.length]!}`;
+}
+
+function syntheticV2NamePermutation(index: number): string {
+    return syntheticV2Name((index * 97 + 41) % 230);
 }
 
 function syntheticV2PublicAccount(index: number): FemaleResultRowV1 {
     const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
     const displayScore = index === 0 ? 8 : index === 1 ? 6 : index === 2 ? 5 : 1 + (index % 3);
     return {
-        instagramId: syntheticV2Handle('public', index),
-        fullName: syntheticV2Name(index),
+        instagramId: syntheticV2Handle(index),
+        fullName: syntheticV2NamePermutation(index),
         profileImage: v3Avatar('female', index + 1),
         bio: null,
         displayScore,
@@ -917,11 +931,11 @@ function syntheticV2PublicAccount(index: number): FemaleResultRowV1 {
         featuredRank: index < 3 ? index + 1 : null,
         recentMutualRank: index < 10 ? index + 1 : null,
         analysisDepth: index === 0 ? 'narrative' : 'features',
-        oneLineOverview: '공개 범위에서 최근 상호작용 흐름을 참고해 정리한 합성 신호입니다.',
+        oneLineOverview: '공개 범위에서 최근 좋아요와 댓글 흐름을 함께 확인했습니다. 수집 범위 밖의 맥락은 포함하지 않아 단정할 수 없습니다.',
         highRiskNarrative: index === 0
             ? [
-                '공개 프로필의 최근 피드와 맞팔 흐름을 함께 살펴볼 필요가 있는 신호가 확인됐습니다.',
-                '공개 범위의 좋아요와 댓글 흔적을 참고했지만, 수집 범위 밖의 맥락은 확인할 수 없어 결론으로 볼 수 없습니다.',
+                '공개 범위에서 최근 맞팔 흐름과 프로필 정보를 함께 확인했습니다.',
+                '좋아요와 댓글 등 공개 상호작용은 수집 범위 밖의 맥락을 담지 않으므로 관계나 의도를 단정할 수 없습니다.',
             ]
             : null,
     };
@@ -929,8 +943,8 @@ function syntheticV2PublicAccount(index: number): FemaleResultRowV1 {
 
 function syntheticV2PrivateAccount(index: number): PrivateResultRowV1 {
     return {
-        instagramId: syntheticV2Handle('private', index),
-        fullName: syntheticV2Name(index + 84),
+        instagramId: syntheticV2Handle(index + 84),
+        fullName: syntheticV2NamePermutation(index + 84),
         profileImage: v3Avatar('private', index + 85),
     };
 }
