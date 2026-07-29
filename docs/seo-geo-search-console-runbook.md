@@ -1,6 +1,12 @@
 # SEO/GEO Search Console 운영 런북
 
-이 문서는 `yeosachin.com` 배포 전후의 검색 노출 점검, Google Search Console 등록, Google 생성형 AI 노출 설정, ChatGPT 유입 측정을 위한 운영 절차다. 운영자는 Google Search Console의 확인된 소유자 권한과 배포 결과를 확인할 수 있어야 한다. DNS 사업자 계정, 인증 토큰, 사용자 ID, 쿠키, 자격 증명은 이 문서나 작업 로그에 기록하지 않는다.
+이 문서는 `yeosachin.com` 배포 전후의 검색 노출 점검, Google Search Console 등록, Google 생성형 AI 노출 설정, ChatGPT 유입 측정을 위한 운영 절차다.
+
+## 사전 준비
+
+- Google Search Console에서 확인된 소유자 권한을 준비한다.
+- 배포 후보와 프로덕션의 HTTP 응답 및 HTML 메타데이터를 읽기 전용으로 확인할 수 있어야 한다.
+- Google 확인 토큰, 자격 증명, 쿠키, 사용자 ID는 이 문서나 작업 로그에 붙여 넣지 않는다.
 
 ## 1. 배포 전·후 URL 확인
 
@@ -55,6 +61,8 @@
 - 마지막 크롤링과 페이지 가져오기 결과
 - **사용자 선언 표준 URL(User-declared canonical)**
 - **Google 선택 표준 URL(Google-selected canonical)**
+
+각 URL의 **사용자 선언 표준 URL**과 **Google에서 선택한 표준 URL**을 비교하여 해당 자기 참조 URL로 일치하는지 확인한다.
 
 두 canonical은 해당 행의 자기 참조 URL과 같아야 한다. Google 선택값이 아직 없으면 신규 URL의 처리 지연으로 기록하고 관찰 주기에 다시 확인한다.
 
@@ -141,5 +149,5 @@ Google-selected canonical과 User-declared canonical이 불일치하면 현재 U
 - Google Search Console: [Generative AI performance report](https://support.google.com/webmasters/answer/16984139)
 - Google Search Central: [AI features and your website](https://developers.google.com/search/docs/appearance/ai-features)
 - Google Search Central: [Build and submit a sitemap](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap)
-- OpenAI: [Crawler overview](https://platform.openai.com/docs/bots)
+- OpenAI: [Crawler overview](https://developers.openai.com/api/docs/bots)
 - OpenAI: [Publishers and Developers FAQ](https://help.openai.com/en/articles/12627856-publishers-and-developers-faq)
