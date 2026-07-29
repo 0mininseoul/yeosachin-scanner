@@ -1,13 +1,18 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
+    close as closeDescriptor,
+    closeSync,
     constants as fileConstants,
+    fstatSync,
+    fsync as syncDescriptor,
     lstatSync,
+    openSync,
     realpathSync,
+    write as writeDescriptor,
 } from 'node:fs';
 import {
     link,
     lstat,
-    open,
     realpath,
     rename,
     unlink,
@@ -419,6 +424,47 @@ async function exactPrivateFile(
     return { device: file.dev, inode: file.ino };
 }
 
+async function writeReplayJobArtifact(
+    descriptor: number,
+    bytes: Buffer,
+): Promise<void> {
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+        const written = await new Promise<number>((resolveWrite, rejectWrite) => {
+            writeDescriptor(
+                descriptor,
+                bytes,
+                offset,
+                bytes.byteLength - offset,
+                null,
+                (error, count) => {
+                    if (error) rejectWrite(error);
+                    else resolveWrite(count);
+                },
+            );
+        });
+        if (written <= 0) {
+            throw new Error('ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_INVALID');
+        }
+        offset += written;
+    }
+    await new Promise<void>((resolveSync, rejectSync) => {
+        syncDescriptor(descriptor, error => {
+            if (error) rejectSync(error);
+            else resolveSync();
+        });
+    });
+}
+
+function closeReplayJobArtifact(descriptor: number): Promise<void> {
+    return new Promise<void>((resolveClose, rejectClose) => {
+        closeDescriptor(descriptor, error => {
+            if (error) rejectClose(error);
+            else resolveClose();
+        });
+    });
+}
+
 export async function loadReplayAnalysisV2JobArtifacts(
     config: ReplayAnalysisV2JobConfig,
     gcs: ReplayJobGcsClient,
@@ -459,15 +505,21 @@ export async function loadReplayAnalysisV2JobArtifacts(
     });
     try {
         const ciphertext = await gcs.downloadBundle();
-        const handle = await open(
+        const descriptor = openSync(
             bundlePath,
             fileConstants.O_WRONLY
                 | fileConstants.O_CREAT
                 | fileConstants.O_EXCL,
             0o600,
         );
+        let ownershipRegistered = false;
         try {
-            const opened = await handle.stat();
+            const opened = fstatSync(descriptor);
+            bundleIdentity = {
+                device: opened.dev,
+                inode: opened.ino,
+            };
+            ownershipRegistered = true;
             if (
                 !opened.isFile()
                 || (opened.mode & 0o777) !== 0o600
@@ -476,14 +528,13 @@ export async function loadReplayAnalysisV2JobArtifacts(
                     'ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_INVALID',
                 );
             }
-            bundleIdentity = {
-                device: opened.dev,
-                inode: opened.ino,
-            };
-            await handle.writeFile(ciphertext);
-            await handle.sync();
+            await writeReplayJobArtifact(descriptor, ciphertext);
         } finally {
-            await handle.close();
+            if (ownershipRegistered) {
+                await closeReplayJobArtifact(descriptor);
+            } else {
+                closeSync(descriptor);
+            }
         }
         const observedBundleIdentity = await exactPrivateFile(
             bundlePath,

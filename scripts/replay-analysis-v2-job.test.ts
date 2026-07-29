@@ -5,6 +5,7 @@ import {
     chmod,
     lstat,
     mkdtemp,
+    open,
     readFile,
     rename,
     rm,
@@ -23,6 +24,34 @@ import {
 import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/replay/historical-partial-available-artifact';
 
 const execFileAsync = promisify(execFile);
+type NodeFileHandle = Awaited<ReturnType<typeof open>>;
+
+async function gateFileHandleStat(directory: string): Promise<{
+    release: () => void;
+    restore: () => void;
+}> {
+    const probePath = join(directory, 'file-handle-stat-probe');
+    const probe = await open(probePath, 'wx', 0o600);
+    const prototype = Object.getPrototypeOf(probe) as {
+        stat: NodeFileHandle['stat'];
+    };
+    const originalStat = prototype.stat;
+    await probe.close();
+    await unlink(probePath);
+    let release!: () => void;
+    const gate = new Promise<void>(resolveGate => {
+        release = resolveGate;
+    });
+    prototype.stat = (function (this: NodeFileHandle) {
+        return gate.then(() => originalStat.call(this));
+    }) as NodeFileHandle['stat'];
+    return {
+        release,
+        restore: () => {
+            prototype.stat = originalStat;
+        },
+    };
+}
 
 const falseGates = {
     ANALYSIS_TASKS_ENABLED: 'false',
@@ -639,6 +668,128 @@ describe('Cloud Run analysis V2 replay job', () => {
             await expect(access(bundlePath)).rejects.toThrow();
             await expect(access(keyPath)).rejects.toThrow();
         } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it('exposes actual loader bundle ownership to signal cleanup before FileHandle.stat can resolve', async () => {
+        const {
+            loadReplayAnalysisV2JobArtifacts,
+        } = await import('./replay-analysis-v2-job');
+        const directory = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-signal-open-',
+        ));
+        await chmod(directory, 0o700);
+        const bundlePath = join(directory, 'input.enc');
+        const keyPath = join(directory, 'input.key');
+        let releaseStat: () => void = () => undefined;
+        let restoreStat: () => void = () => undefined;
+        let settled = Promise.resolve();
+        try {
+            await createReplayKeyFile(keyPath);
+            await writeReplayBundle({
+                bundle: v212Bundle(),
+                bundlePath,
+                keyPath,
+            });
+            const ciphertext = await readFile(bundlePath);
+            await unlink(bundlePath);
+            const gate = await gateFileHandleStat(directory);
+            releaseStat = gate.release;
+            restoreStat = gate.restore;
+            let signalCleanup: (() => Promise<void>) | undefined;
+            const loading = loadReplayAnalysisV2JobArtifacts(
+                validateConfigPaths(bundlePath, keyPath),
+                {
+                    downloadBundle: vi.fn(async () => ciphertext),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                },
+                cleanup => {
+                    signalCleanup = cleanup;
+                },
+            );
+            settled = loading.then(
+                () => undefined,
+                () => undefined,
+            );
+
+            await vi.waitFor(async () => {
+                await expect(access(bundlePath)).resolves.toBeUndefined();
+            });
+            expect(signalCleanup).toBeDefined();
+            await signalCleanup!();
+            await expect(access(bundlePath)).rejects.toThrow();
+            await expect(access(keyPath)).rejects.toThrow();
+        } finally {
+            releaseStat();
+            await settled;
+            restoreStat();
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it('keeps a replacement inode when actual loader signal cleanup detects a race', async () => {
+        const {
+            loadReplayAnalysisV2JobArtifacts,
+        } = await import('./replay-analysis-v2-job');
+        const directory = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-signal-replacement-',
+        ));
+        await chmod(directory, 0o700);
+        const bundlePath = join(directory, 'input.enc');
+        const keyPath = join(directory, 'input.key');
+        const movedOwnerPath = join(directory, 'original.enc');
+        let releaseStat: () => void = () => undefined;
+        let restoreStat: () => void = () => undefined;
+        let settled = Promise.resolve();
+        try {
+            await createReplayKeyFile(keyPath);
+            await writeReplayBundle({
+                bundle: v212Bundle(),
+                bundlePath,
+                keyPath,
+            });
+            const ciphertext = await readFile(bundlePath);
+            await unlink(bundlePath);
+            const gate = await gateFileHandleStat(directory);
+            releaseStat = gate.release;
+            restoreStat = gate.restore;
+            let signalCleanup: (() => Promise<void>) | undefined;
+            const loading = loadReplayAnalysisV2JobArtifacts(
+                validateConfigPaths(bundlePath, keyPath),
+                {
+                    downloadBundle: vi.fn(async () => ciphertext),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                },
+                cleanup => {
+                    signalCleanup = cleanup;
+                },
+            );
+            settled = loading.then(
+                () => undefined,
+                () => undefined,
+            );
+
+            await vi.waitFor(async () => {
+                await expect(access(bundlePath)).resolves.toBeUndefined();
+            });
+            await rename(bundlePath, movedOwnerPath);
+            await writeFile(bundlePath, 'replacement', { mode: 0o600 });
+
+            await expect(signalCleanup!()).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_RACE',
+            );
+            await expect(readFile(bundlePath, 'utf8'))
+                .resolves.toBe('replacement');
+            await expect(access(movedOwnerPath)).resolves.toBeUndefined();
+        } finally {
+            releaseStat();
+            await settled;
+            restoreStat();
             await rm(directory, { recursive: true, force: true });
         }
     });
