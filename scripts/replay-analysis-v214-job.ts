@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import {
-    runReplayAnalysisV2Job,
+    runReplayAnalysisV2Job as runSharedReplayAnalysisV2Job,
     V214_EVALUATION,
 } from './replay-analysis-v2-job';
 
@@ -10,10 +10,13 @@ export const REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY = V214_EVALUATION;
 
 /** Injectable V2.14 entry bootstrap; the direct entry below uses this exact path. */
 export function runV214ReplayAnalysisV2Job(
-    dependencies: Parameters<typeof runReplayAnalysisV2Job>[0] = {},
+    dependencies: Parameters<typeof runSharedReplayAnalysisV2Job>[0] = {},
 ): Promise<void> {
-    return runReplayAnalysisV2Job(dependencies, V214_EVALUATION);
+    return runSharedReplayAnalysisV2Job(dependencies, V214_EVALUATION);
 }
+
+/** Cloud bootstrap compatibility: this common name remains pinned to V2.14. */
+export const runReplayAnalysisV2Job = runV214ReplayAnalysisV2Job;
 
 function isDirectExecution(): boolean {
     return Boolean(process.argv[1])

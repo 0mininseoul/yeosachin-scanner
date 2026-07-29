@@ -987,6 +987,58 @@ describe('Cloud Run analysis V2 replay job', () => {
             });
             expect(marker.stdout).toBe('ai-stage-policy-v2.14');
 
+            const loaded = await import(
+                `${pathToFileURL(outfile).href}?bootstrap-contract`
+            );
+            const runBuiltJob: unknown = Reflect.get(
+                loaded,
+                'runReplayAnalysisV2Job',
+            );
+            expect(runBuiltJob).toBeTypeOf('function');
+            if (typeof runBuiltJob !== 'function') {
+                throw new Error('V2.14 common bootstrap export missing');
+            }
+            const v214Bundle = v213Bundle();
+            v214Bundle.capture.evaluationPolicy = {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v214-feature-model-shadow',
+                aiStage: 'ai-stage-policy-v2.14',
+            } as never;
+            const safe = JSON.parse(await actualDiagnosticV213SafeLine());
+            safe.evaluation_ai_policy = 'ai-stage-policy-v2.14';
+            safe.replay_ai_policy = 'ai-stage-policy-v2.14';
+            const createRunner = vi.fn(() => Object.freeze({}));
+            await runBuiltJob({
+                env: validEnv(),
+                runtimeImageDigest: immutableImageDigest,
+                bindLocalCleanup: () => async () => undefined,
+                loadArtifacts: async () => ({
+                    bundle: { ...v214Bundle, expired: false },
+                    cleanup: async () => undefined,
+                }),
+                createGcsClient: () => ({
+                    downloadBundle: vi.fn(),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                }),
+                createRunner,
+                runReplay: async (input: {
+                    evaluationPolicy: { aiStage: string };
+                    write(line: string): void;
+                }) => {
+                    expect(input.evaluationPolicy.aiStage).toBe(
+                        'ai-stage-policy-v2.14',
+                    );
+                    input.write(JSON.stringify(safe));
+                },
+                installSignalCleanup: () => () => undefined,
+                writeStdout: vi.fn(),
+            });
+            expect(createRunner).toHaveBeenCalledOnce();
+            expect(createRunner).toHaveBeenCalledWith(
+                'ai-stage-policy-v2.14',
+            );
+
             const boot = await execFileAsync(process.execPath, [
                 '--conditions=react-server',
                 outfile,
