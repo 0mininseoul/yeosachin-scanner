@@ -22,7 +22,7 @@ import {
     createAnalysisV2AiResultInputHash,
     type AnalysisV2AiPreparedResult,
     type AnalysisV2AiResultIdentity,
-} from '@/lib/services/analysis/v2-ai-result-store';
+} from '@/lib/services/analysis/v2-ai-result-identity';
 
 export const PRIVATE_NAME_BATCH_SIZE = 100;
 const MAX_PRIVATE_NAME_ACCOUNTS = 10_000;

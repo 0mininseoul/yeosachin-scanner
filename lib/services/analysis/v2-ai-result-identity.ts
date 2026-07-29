@@ -32,12 +32,19 @@ const materialSchema = z.object({
     cacheScope: z.enum(['request', 'global_ttl']),
 }).strict().superRefine((value, context) => {
     if (value.cacheScope === 'global_ttl' && !GLOBAL.has(value.stage)) {
-        context.addIssue({ code: 'custom', path: ['cacheScope'], message: 'Invalid global cache stage.' });
+        context.addIssue({
+            code: 'custom',
+            path: ['cacheScope'],
+            message: 'Invalid global cache stage.',
+        });
     }
 });
 
-export type AnalysisV2AiResultIdentityMaterial = z.infer<typeof materialSchema>;
-export interface AnalysisV2AiResultIdentity extends AnalysisV2AiResultIdentityMaterial {
+export type AnalysisV2AiResultIdentityMaterial = z.infer<
+    typeof materialSchema
+>;
+export interface AnalysisV2AiResultIdentity
+    extends AnalysisV2AiResultIdentityMaterial {
     cacheKey: string;
     operationKey: string;
 }
@@ -54,10 +61,19 @@ export interface AnalysisV2AiPreparedResult<T> {
 }
 
 function sha256(domain: string, material: string): string {
-    if (!material.length || Buffer.byteLength(material, 'utf8') > MAX_HASH_MATERIAL_BYTES) {
-        throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid hash material.');
+    if (
+        !material.length
+        || Buffer.byteLength(material, 'utf8') > MAX_HASH_MATERIAL_BYTES
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid hash material.',
+        );
     }
-    return createHash('sha256').update(domain).update('\0').update(material).digest('hex');
+    return createHash('sha256')
+        .update(domain)
+        .update('\0')
+        .update(material)
+        .digest('hex');
 }
 export const createAnalysisV2AiResultInputHash = (value: string) =>
     sha256('analysis-v2-ai-result-input:v1', value);
@@ -67,8 +83,16 @@ export function createAnalysisV2AiMediaSnapshotHashFromParts(
     media: readonly AnalysisV2AiIdentityMediaPart[],
 ): string {
     const manifest = media.map((item, index) => {
-        if (!item.selectionId || item.selectionId.length > 240 || item.normalizedJpegBase64.length < 4) {
-            throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid identity media.');
+        if (
+            typeof item.selectionId !== 'string'
+            || item.selectionId.length < 1
+            || item.selectionId.length > 240
+            || typeof item.normalizedJpegBase64 !== 'string'
+            || item.normalizedJpegBase64.length < 4
+        ) {
+            throw new Error(
+                'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid identity media.',
+            );
         }
         return {
             index,
@@ -77,7 +101,8 @@ export function createAnalysisV2AiMediaSnapshotHashFromParts(
             postId: item.postId ?? null,
             contentHash: createHash('sha256')
                 .update('analysis-v2-ai-normalized-media-content:v1\0')
-                .update(item.normalizedJpegBase64).digest('hex'),
+                .update(item.normalizedJpegBase64)
+                .digest('hex'),
         };
     });
     return createAnalysisV2AiMediaSnapshotHash(JSON.stringify(manifest));
@@ -85,18 +110,39 @@ export function createAnalysisV2AiMediaSnapshotHashFromParts(
 export function createAnalysisV2AiResultIdentity(
     raw: AnalysisV2AiResultIdentityMaterial,
 ): AnalysisV2AiResultIdentity {
-    const value = materialSchema.parse(raw);
+    const parsed = materialSchema.safeParse(raw);
+    if (!parsed.success) {
+        throw new Error(
+            'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid result identity.',
+        );
+    }
+    const value = parsed.data;
     const cacheKey = createHash('sha256').update([
         'analysis-v2-ai-result-cache:v1', value.stage, value.modelName,
         value.thinkingLevel ?? '-', value.mediaResolution ?? '-',
         value.promptVersion, String(value.schemaVersion),
         String(value.maxOutputTokens), value.inputHash, value.mediaSnapshotHash,
     ].join('\n')).digest('hex');
-    return { ...value, cacheKey, operationKey: `${PREFIX[value.stage]}:${cacheKey}` };
+    return {
+        ...value,
+        cacheKey,
+        operationKey: `${PREFIX[value.stage]}:${cacheKey}`,
+    };
 }
 export function analysisV2AiResultIdentitiesEqual(
     left: AnalysisV2AiResultIdentity,
     right: AnalysisV2AiResultIdentity,
 ): boolean {
-    return JSON.stringify(left) === JSON.stringify(right);
+    return left.operationKey === right.operationKey
+        && left.cacheKey === right.cacheKey
+        && left.stage === right.stage
+        && left.modelName === right.modelName
+        && left.thinkingLevel === right.thinkingLevel
+        && left.mediaResolution === right.mediaResolution
+        && left.promptVersion === right.promptVersion
+        && left.schemaVersion === right.schemaVersion
+        && left.maxOutputTokens === right.maxOutputTokens
+        && left.inputHash === right.inputHash
+        && left.mediaSnapshotHash === right.mediaSnapshotHash
+        && left.cacheScope === right.cacheScope;
 }

@@ -1,13 +1,27 @@
 import { createHash } from 'node:crypto';
-import { access, chmod, mkdtemp, readFile, rm, unlink } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import {
+    access,
+    chmod,
+    lstat,
+    mkdtemp,
+    readFile,
+    rename,
+    rm,
+    unlink,
+    writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import {
     createReplayKeyFile,
     writeReplayBundle,
 } from '../lib/services/analysis/replay/replay-bundle';
 import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/replay/historical-partial-available-artifact';
+
+const execFileAsync = promisify(execFile);
 
 const falseGates = {
     ANALYSIS_TASKS_ENABLED: 'false',
@@ -94,6 +108,25 @@ function v212Bundle(now = Date.now()) {
     };
 }
 
+async function actualV212SafeLine(): Promise<string> {
+    const { runAnalysisV2AiReplay } = await import(
+        '../lib/services/analysis/replay/replay-runner'
+    );
+    const lines: string[] = [];
+    await runAnalysisV2AiReplay({
+        bundle: v212Bundle(),
+        mode: 'dry-run',
+        evaluationPolicy: {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v212-gender-quality',
+            aiStage: 'ai-stage-policy-v2.12',
+        },
+        write: line => lines.push(line),
+    });
+    expect(lines).toHaveLength(1);
+    return lines[0]!;
+}
+
 describe('Cloud Run analysis V2 replay job', () => {
     it.each([
         ['CLOUD_RUN_TASK_COUNT', '2'],
@@ -131,6 +164,16 @@ describe('Cloud Run analysis V2 replay job', () => {
         'ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE',
         'GOOGLE_APPLICATION_CREDENTIALS',
         'GOOGLE_SERVICE_ACCOUNT_KEY_BASE64',
+        'GOOGLE_API_KEY',
+        'GEMINI_API_KEY',
+        'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET',
+        'IMAGE_PROXY_SIGNING_SECRET',
+        'DATABASE_URL',
+        'DB_PASSWORD',
+        'UNRELATED_SECRET',
+        'UNRELATED_PASSWORD',
+        'UNRELATED_TOKEN',
+        'POSTGRES_URL',
     ])('rejects forbidden non-ADC environment %s', async key => {
         const { validateReplayAnalysisV2JobEnvironment } = await import(
             './replay-analysis-v2-job'
@@ -170,10 +213,10 @@ describe('Cloud Run analysis V2 replay job', () => {
         });
         const writeStdout = vi.fn((line: string) => {
             events.push('stdout');
-            expect(line).toBe('{"status":"ok"}\n');
+            expect(line).toBe(`${safeLine}\n`);
         });
         const cleanup = vi.fn(async () => { events.push('cleanup'); });
-        const safeLine = '{"status":"ok"}';
+        const safeLine = await actualV212SafeLine();
 
         await runReplayAnalysisV2Job({
             env: validEnv(),
@@ -237,6 +280,92 @@ describe('Cloud Run analysis V2 replay job', () => {
         ]);
     });
 
+    it('accepts the actual v2.12 diagnostic partial-coverage safe-line key', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualV212SafeLine());
+        actual.diagnostic_partial_coverage_override = {
+            used: true,
+            retained_profiles: 49,
+            source_profiles: 50,
+            retained_media: 49,
+            exact_selected_media: 50,
+            profile_retention_bps: 9_800,
+            media_retention_bps: 9_800,
+        };
+        const raw = JSON.stringify(actual);
+
+        expect(validateReplayAnalysisV2JobTerminalLine(raw)).toBe(raw);
+    });
+
+    it('rejects PII-shaped nested fields even when the top-level report is valid', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualV212SafeLine());
+        actual.gender.label = 'private-person';
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+    });
+
+    it('builds the recursive stateless graph and boots the real ESM artifact', async () => {
+        const outputDirectory = await mkdtemp(join(
+            process.cwd(),
+            '.replay-job-build-',
+        ));
+        const outfile = join(outputDirectory, 'replay-job.mjs');
+        const metafile = join(outputDirectory, 'metafile.json');
+        try {
+            await execFileAsync(process.execPath, [
+                'scripts/build-replay-analysis-v2-job.mjs',
+                '--outfile',
+                outfile,
+                '--metafile',
+                metafile,
+            ], {
+                cwd: process.cwd(),
+                env: {
+                    NODE_ENV: 'test',
+                    PATH: process.env.PATH,
+                },
+            });
+            const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
+                inputs: Record<string, unknown>;
+            };
+            const graph = JSON.stringify(metadata);
+            expect(graph).not.toMatch(
+                /supabase\/admin|supabase-js|result-store|attempt-store|lease-store|apify|(?:^|[/_-])r2(?:[/_.-]|$)|@google-cloud\/tasks|cloud-tasks|analysis-tasks|tasks-client|tasks-store|app\/api/i,
+            );
+
+            const boot = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                outfile,
+            ], {
+                cwd: process.cwd(),
+                env: {
+                    NODE_ENV: 'test',
+                    PATH: process.env.PATH,
+                },
+            }).then(() => {
+                throw new Error('Expected replay job boot to fail closed');
+            }).catch(error => error as {
+                code: number;
+                stdout: string;
+                stderr: string;
+            });
+            expect(boot.code).toBe(1);
+            expect(boot.stdout).toBe('');
+            expect(boot.stderr).toBe(
+                '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
+            );
+        } finally {
+            await rm(outputDirectory, { recursive: true, force: true });
+        }
+    }, 30_000);
+
     it('downloads into one private temp directory and deletes authenticated inodes', async () => {
         const {
             loadReplayAnalysisV2JobArtifacts,
@@ -274,6 +403,117 @@ describe('Cloud Run analysis V2 replay job', () => {
         } finally {
             await rm(directory, { recursive: true, force: true });
         }
+    });
+
+    it('quarantines before inode verification and reports a cleanup race', async () => {
+        const {
+            removeReplayAnalysisV2JobLocalArtifact,
+        } = await import('./replay-analysis-v2-job');
+        const directory = await mkdtemp(join(tmpdir(), 'replay-job-race-'));
+        const artifactPath = join(directory, 'input.key');
+        const movedOwnerPath = join(directory, 'original.key');
+        try {
+            await writeFile(artifactPath, 'owned', { mode: 0o600 });
+            const owned = await lstat(artifactPath);
+            await rename(artifactPath, movedOwnerPath);
+            await writeFile(artifactPath, 'replacement', { mode: 0o600 });
+
+            await expect(removeReplayAnalysisV2JobLocalArtifact(
+                artifactPath,
+                { device: owned.dev, inode: owned.ino },
+            )).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_RACE',
+            );
+            await expect(readFile(artifactPath, 'utf8'))
+                .resolves.toBe('replacement');
+            await expect(readFile(movedOwnerPath, 'utf8'))
+                .resolves.toBe('owned');
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it('does not swallow a failure-cleanup inode race', async () => {
+        const {
+            loadReplayAnalysisV2JobArtifacts,
+        } = await import('./replay-analysis-v2-job');
+        const directory = await mkdtemp(join(
+            tmpdir(),
+            'replay-job-failure-race-',
+        ));
+        await chmod(directory, 0o700);
+        const bundlePath = join(directory, 'input.enc');
+        const keyPath = join(directory, 'input.key');
+        const movedOwnerPath = join(directory, 'original.key');
+        try {
+            await createReplayKeyFile(keyPath);
+            await expect(loadReplayAnalysisV2JobArtifacts(
+                validateConfigPaths(bundlePath, keyPath),
+                {
+                    downloadBundle: vi.fn(async () => {
+                        await rename(keyPath, movedOwnerPath);
+                        await writeFile(keyPath, 'replacement', {
+                            mode: 0o600,
+                        });
+                        throw new Error(
+                            'ANALYSIS_V2_REPLAY_JOB_BUNDLE_DOWNLOAD_FAILED',
+                        );
+                    }),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                },
+            )).rejects.toThrow(
+                'ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_RACE',
+            );
+            await expect(readFile(keyPath, 'utf8'))
+                .resolves.toBe('replacement');
+            await expect(access(movedOwnerPath)).resolves.toBeUndefined();
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it('installs signal cleanup before artifact loading starts', async () => {
+        const { runReplayAnalysisV2Job } = await import(
+            './replay-analysis-v2-job'
+        );
+        const events: string[] = [];
+        const cleanup = vi.fn();
+        const safeLine = await actualV212SafeLine();
+
+        await runReplayAnalysisV2Job({
+            env: validEnv(),
+            installSignalCleanup: vi.fn(() => {
+                events.push('signals');
+                return () => undefined;
+            }),
+            loadArtifacts: vi.fn(async () => {
+                events.push('load');
+                return {
+                    bundle: { ...v212Bundle(), expired: false },
+                    cleanup,
+                };
+            }),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            createRunner: vi.fn(() => Object.freeze({})),
+            runReplay: vi.fn(async input => input.write(safeLine)),
+            writeStdout: vi.fn(),
+        });
+
+        expect(events.slice(0, 2)).toEqual(['signals', 'load']);
+    });
+
+    it('uses a fail-closed persistence stub in the replay build', async () => {
+        const { supabaseAdmin } = await import(
+            './replay-analysis-v2-job-supabase-stub'
+        );
+        expect(() => (
+            supabaseAdmin as { from: unknown }
+        ).from).toThrow('ANALYSIS_V2_REPLAY_JOB_FORBIDDEN_PERSISTENCE');
     });
 
     it.each([

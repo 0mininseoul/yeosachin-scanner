@@ -8,10 +8,14 @@ export interface ReplayJobGcsClient {
 
 interface ReplayJobGcsDependencies {
     fetch?: typeof fetch;
+    now?: () => number;
 }
 
 const SAFE_BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 const SAFE_OBJECT = /^[a-z0-9][a-z0-9._/-]{0,190}$/;
+const MAX_ENCRYPTED_BUNDLE_BYTES =
+    Math.ceil(272 * 1024 * 1024 * 4 / 3) + 4_096;
+const ADC_REFRESH_SKEW_MS = 60_000;
 const UNSAFE_KEY = /(?:user_?name|full_?name|bio|caption|url|prompt|base64|raw|error|token|secret|request_?id)/i;
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
@@ -61,18 +65,31 @@ export function createReplayJobGcsClient(
         !SAFE_BUCKET.test(config.bucket)
         || ![config.bundleObject, config.claimObject, config.reportObject]
             .every(value => SAFE_OBJECT.test(value) && !value.includes('..'))
-        || config.claimObject === config.reportObject
+        || new Set([
+            config.bundleObject,
+            config.claimObject,
+            config.reportObject,
+        ]).size !== 3
         || !/^[1-9][0-9]{0,19}$/.test(config.bundleGeneration)
         || !Number.isSafeInteger(config.bundleBytes)
         || config.bundleBytes < 1
+        || config.bundleBytes > MAX_ENCRYPTED_BUNDLE_BYTES
         || !/^[a-f0-9]{64}$/.test(config.bundleSha256)
     ) {
         throw new Error('ANALYSIS_V2_REPLAY_JOB_GCS_CONFIGURATION_INVALID');
     }
     const fetchImpl = dependencies.fetch ?? fetch;
-    let accessToken: Promise<string> | undefined;
-    const token = () => {
-        accessToken ??= fetchImpl(
+    const now = dependencies.now ?? Date.now;
+    let accessToken: {
+        value: string;
+        refreshAtMs: number;
+    } | undefined;
+    let tokenRequest: Promise<string> | undefined;
+    const token = (): Promise<string> => {
+        if (accessToken && now() < accessToken.refreshAtMs) {
+            return Promise.resolve(accessToken.value);
+        }
+        tokenRequest ??= fetchImpl(
             'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
             { headers: { 'Metadata-Flavor': 'Google' } },
         ).then(async response => {
@@ -82,17 +99,31 @@ export function createReplayJobGcsClient(
             const value = await response.json() as {
                 access_token?: unknown;
                 token_type?: unknown;
+                expires_in?: unknown;
             };
             if (
                 typeof value.access_token !== 'string'
                 || value.access_token.length < 20
                 || value.token_type !== 'Bearer'
+                || !Number.isInteger(value.expires_in)
+                || (value.expires_in as number) < 1
+                || (value.expires_in as number) > 86_400
             ) {
                 throw new Error('ANALYSIS_V2_REPLAY_JOB_ADC_UNAVAILABLE');
             }
-            return value.access_token;
+            accessToken = {
+                value: value.access_token,
+                refreshAtMs: now() + Math.max(
+                    0,
+                    (value.expires_in as number) * 1_000
+                        - ADC_REFRESH_SKEW_MS,
+                ),
+            };
+            return accessToken.value;
+        }).finally(() => {
+            tokenRequest = undefined;
         });
-        return accessToken;
+        return tokenRequest;
     };
     const authorization = async () => ({
         authorization: `Bearer ${await token()}`,

@@ -1,9 +1,17 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { constants as fileConstants } from 'node:fs';
-import { lstat, open, realpath, unlink } from 'node:fs/promises';
+import {
+    link,
+    lstat,
+    open,
+    realpath,
+    rename,
+    unlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { z } from 'zod';
 import {
     createReplayJobGcsClient,
     type ReplayJobGcsClient,
@@ -49,25 +57,114 @@ const FALSE_GATES = [
     'PREFLIGHT_TASKS_ENABLED',
 ] as const;
 
-const SAFE_REPORT_KEYS = new Set([
-    'status',
-    'benchmark_scope',
-    'source_plan',
-    'source_pipeline',
-    'source_ai_policy',
-    'source_risk_policy',
-    'evaluation_ai_policy',
-    'replay_ai_policy',
-    'full_e2e_evidence',
-    'not_exact',
-    'no_media_substitution',
-    'diagnostic_coverage_override',
-    'total_elapsed_ms',
-    'stages',
-    'gender',
-    'resolver',
-    'gender_quality',
-]);
+const aggregateCount = z.number().int().min(0).max(100_000_000);
+const aggregateRate = z.number().finite().min(0).max(1);
+const aggregateMap = z.record(
+    z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/),
+    aggregateCount,
+);
+const stageMetricsSchema = z.object({
+    calls: aggregateCount,
+    rate_limited: aggregateCount,
+    retries: aggregateCount,
+    mean_latency_ms: z.number().finite().min(0).max(3_600_000),
+    p50_latency_ms: z.number().finite().min(0).max(3_600_000),
+    p95_latency_ms: z.number().finite().min(0).max(3_600_000),
+    failure_disposition: aggregateMap,
+    failure_kind: aggregateMap,
+}).strict();
+const replayAnalysisV2JobTerminalSchema = z.object({
+    status: z.literal('ok'),
+    benchmark_scope: z.enum([
+        'ai-only-exact-replay',
+        'ai-only-historical-partial-available',
+    ]),
+    source_plan: z.enum(['standard', 'plus']),
+    source_pipeline: z.literal('v2'),
+    source_ai_policy: z.string().regex(/^[a-z0-9][a-z0-9.-]{0,127}$/),
+    source_risk_policy: z.string().regex(/^[a-z0-9][a-z0-9.-]{0,127}$/),
+    evaluation_ai_policy: z.string()
+        .regex(/^[a-z0-9][a-z0-9.-]{0,127}$/)
+        .nullable(),
+    replay_ai_policy: z.literal('ai-stage-policy-v2.12'),
+    full_e2e_evidence: z.literal(false),
+    not_exact: z.literal(true).optional(),
+    no_media_substitution: z.literal(true).optional(),
+    diagnostic_partial_coverage_override: z.object({
+        used: z.literal(true),
+        retained_profiles: aggregateCount,
+        source_profiles: aggregateCount,
+        retained_media: aggregateCount,
+        exact_selected_media: aggregateCount,
+        profile_retention_bps: z.number().int().min(0).max(10_000),
+        media_retention_bps: z.number().int().min(0).max(10_000),
+    }).strict().optional(),
+    total_elapsed_ms: z.number().finite().min(0).max(86_400_000),
+    stages: z.object({
+        genderTriage: stageMetricsSchema,
+        featureAnalysis: stageMetricsSchema,
+        privateAccountName: stageMetricsSchema,
+        genderResolution: stageMetricsSchema,
+    }).strict(),
+    gender: z.object({
+        male: aggregateCount,
+        female: aggregateCount,
+        unknown: aggregateCount,
+        unknownRate: aggregateRate,
+    }).strict(),
+    resolver: z.object({
+        ready: aggregateCount,
+        applied: aggregateCount,
+        inconclusive: aggregateCount,
+        cutoff: aggregateCount,
+        capacitySkipped: aggregateCount,
+        admission: z.object({
+            eligible: aggregateCount,
+            alreadyVerified: aggregateCount,
+            officialOrGroup: aggregateCount,
+            uncertainOrAbsent: aggregateCount,
+            insufficientMedia: aggregateCount,
+        }).strict(),
+        outcomes: z.object({
+            readyHighConfirmed: aggregateCount,
+            evidenceInsufficient: aggregateCount,
+            mixed: aggregateCount,
+            unknown: aggregateCount,
+            reconciliationApplied: aggregateCount,
+            reconciliationInconclusive: aggregateCount,
+            cutoff: aggregateCount,
+            capacitySkipped: aggregateCount,
+        }).strict(),
+    }).strict(),
+    gender_quality: z.object({
+        triage: z.object({
+            nonOk: aggregateCount,
+            capacity: aggregateCount,
+            outcome: aggregateMap,
+            source: aggregateMap,
+            genderConfidence: aggregateMap,
+            accountContext: aggregateMap,
+        }).strict(),
+        feature: z.object({
+            admission: aggregateMap,
+            finalDecision: aggregateMap,
+            accountContext: aggregateMap,
+            routeTerminal: aggregateMap,
+        }).strict(),
+        resolver: z.object({
+            earlyAdmission: aggregateCount,
+            lateAdmission: aggregateCount,
+            outcome: aggregateMap,
+        }).strict(),
+        finalClassificationSource: aggregateMap,
+        qualityGate: z.object({
+            observedUnknownRate: aggregateRate,
+            worstCaseUnknownRate: aggregateRate,
+            observedPass: z.boolean(),
+            worstCasePass: z.boolean(),
+        }).strict(),
+    }).strict(),
+}).strict();
 
 export interface ReplayAnalysisV2JobConfig {
     bundlePath: string;
@@ -97,6 +194,12 @@ function equalSecret(left: string, right: string): boolean {
 }
 
 function forbiddenEnvironmentKey(key: string): boolean {
+    if (
+        key === 'ANALYSIS_V2_REPLAY_JOB_TOKEN'
+        || key === 'ANALYSIS_V2_REPLAY_JOB_EXPECTED_TOKEN'
+    ) {
+        return false;
+    }
     return (
         key.startsWith('APIFY')
         || /SUPABASE.*(?:URL|KEY)/.test(key)
@@ -106,6 +209,12 @@ function forbiddenEnvironmentKey(key: string): boolean {
         || key.includes('MAINTENANCE')
         || /TASKS_.*(?:URL|SECRET|TOKEN|KEY|AUDIENCE)/.test(key)
         || /^GOOGLE_.*(?:APPLICATION_CREDENTIALS|JSON|KEY_BASE64|PRIVATE_KEY)$/.test(key)
+        || /^(?:GOOGLE|GEMINI)_API_KEY$/.test(key)
+        || /(?:^|_)(?:SECRET|PASSWORD|PASSWD)(?:_|$)/.test(key)
+        || /(?:^|_)TOKEN(?:_|$)/.test(key)
+        || /(?:^|_)(?:SIGNING|HMAC)_(?:KEY|SECRET)(?:_|$)/.test(key)
+        || /(?:^|_)API_KEY(?:_|$)/.test(key)
+        || /^(?:DATABASE|DB|POSTGRES)_URL$/.test(key)
     );
 }
 
@@ -177,19 +286,30 @@ export function validateReplayAnalysisV2JobEnvironment(
 
 type FileIdentity = { device: number; inode: number };
 
-async function unlinkIdentity(
+export async function removeReplayAnalysisV2JobLocalArtifact(
     path: string,
     identity?: FileIdentity,
 ): Promise<void> {
     if (!identity) return;
-    try {
-        const file = await lstat(path);
-        if (file.dev === identity.device && file.ino === identity.inode) {
-            await unlink(path);
+    const quarantinePath = `${path}.cleanup-${randomUUID()}`;
+    await rename(path, quarantinePath);
+    const quarantined = await lstat(quarantinePath);
+    if (
+        quarantined.dev !== identity.device
+        || quarantined.ino !== identity.inode
+    ) {
+        try {
+            await link(quarantinePath, path);
+            await unlink(quarantinePath);
+        } catch (cause) {
+            throw new Error(
+                'ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_RACE',
+                { cause },
+            );
         }
-    } catch {
-        return;
+        throw new Error('ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_RACE');
     }
+    await unlink(quarantinePath);
 }
 
 async function exactPrivateFile(
@@ -210,6 +330,7 @@ async function exactPrivateFile(
 export async function loadReplayAnalysisV2JobArtifacts(
     config: ReplayAnalysisV2JobConfig,
     gcs: ReplayJobGcsClient,
+    registerSignalCleanup?: (cleanup: () => Promise<void>) => void,
 ): Promise<{ bundle: unknown; cleanup: () => Promise<void> }> {
     const bundlePath = resolve(config.bundlePath);
     const keyPath = resolve(config.keyPath);
@@ -235,6 +356,15 @@ export async function loadReplayAnalysisV2JobArtifacts(
     }
     const keyIdentity = await exactPrivateFile(keyPath, 0o600);
     let bundleIdentity: FileIdentity | undefined;
+    registerSignalCleanup?.(async () => {
+        await Promise.all([
+            removeReplayAnalysisV2JobLocalArtifact(
+                bundlePath,
+                bundleIdentity,
+            ),
+            removeReplayAnalysisV2JobLocalArtifact(keyPath, keyIdentity),
+        ]);
+    });
     try {
         const ciphertext = await gcs.downloadBundle();
         const handle = await open(
@@ -245,12 +375,34 @@ export async function loadReplayAnalysisV2JobArtifacts(
             0o600,
         );
         try {
+            const opened = await handle.stat();
+            if (
+                !opened.isFile()
+                || (opened.mode & 0o777) !== 0o600
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_INVALID',
+                );
+            }
+            bundleIdentity = {
+                device: opened.dev,
+                inode: opened.ino,
+            };
             await handle.writeFile(ciphertext);
             await handle.sync();
         } finally {
             await handle.close();
         }
-        bundleIdentity = await exactPrivateFile(bundlePath, 0o600);
+        const observedBundleIdentity = await exactPrivateFile(
+            bundlePath,
+            0o600,
+        );
+        if (
+            observedBundleIdentity.device !== bundleIdentity.device
+            || observedBundleIdentity.inode !== bundleIdentity.inode
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_JOB_LOCAL_ARTIFACT_RACE');
+        }
         const authenticated = await readAuthenticatedReplayBundle({
             bundlePath,
             keyPath,
@@ -277,8 +429,11 @@ export async function loadReplayAnalysisV2JobArtifacts(
         };
     } catch (error) {
         await Promise.all([
-            unlinkIdentity(bundlePath, bundleIdentity),
-            unlinkIdentity(keyPath, keyIdentity),
+            removeReplayAnalysisV2JobLocalArtifact(
+                bundlePath,
+                bundleIdentity,
+            ),
+            removeReplayAnalysisV2JobLocalArtifact(keyPath, keyIdentity),
         ]);
         throw error;
     }
@@ -308,7 +463,9 @@ function authenticatedV212Bundle(value: unknown): AnalysisV2ReplayBundle {
     return bundle;
 }
 
-function assertSafeTerminalLine(raw: string | undefined): string {
+export function validateReplayAnalysisV2JobTerminalLine(
+    raw: string | undefined,
+): string {
     if (!raw) throw new Error('ANALYSIS_V2_REPLAY_JOB_REPORT_MISSING');
     let parsed: unknown;
     try {
@@ -316,13 +473,7 @@ function assertSafeTerminalLine(raw: string | undefined): string {
     } catch {
         throw new Error('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     }
-    if (
-        !parsed
-        || typeof parsed !== 'object'
-        || Array.isArray(parsed)
-        || (parsed as { status?: unknown }).status !== 'ok'
-        || Object.keys(parsed).some(key => !SAFE_REPORT_KEYS.has(key))
-    ) {
+    if (!replayAnalysisV2JobTerminalSchema.safeParse(parsed).success) {
         throw new Error('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     }
     return raw;
@@ -333,6 +484,7 @@ interface ReplayAnalysisV2JobDependencies {
     loadArtifacts?: (
         config: ReplayAnalysisV2JobConfig,
         gcs: ReplayJobGcsClient,
+        registerSignalCleanup: (cleanup: () => Promise<void>) => void,
     ) => Promise<{ bundle: unknown; cleanup: () => Promise<void> }>;
     createGcsClient?: (
         config: ReplayAnalysisV2JobConfig,
@@ -360,15 +512,22 @@ export async function runReplayAnalysisV2Job(
     const gcs = (dependencies.createGcsClient ?? (value => (
         createReplayJobGcsClient(value)
     )))(config);
-    const loaded = await (
-        dependencies.loadArtifacts ?? loadReplayAnalysisV2JobArtifacts
-    )(config, gcs);
+    let activeCleanup: () => Promise<void> = async () => undefined;
     const uninstallSignals = (
         dependencies.installSignalCleanup
             ?? installReplayArtifactSignalCleanup
-    )({ cleanup: loaded.cleanup });
+    )({ cleanup: () => activeCleanup() });
+    let loaded: Awaited<ReturnType<
+        typeof loadReplayAnalysisV2JobArtifacts
+    >> | undefined;
     let terminalLine: string | undefined;
     try {
+        loaded = await (
+            dependencies.loadArtifacts ?? loadReplayAnalysisV2JobArtifacts
+        )(config, gcs, cleanup => {
+            activeCleanup = cleanup;
+        });
+        activeCleanup = loaded.cleanup;
         const bundle = authenticatedV212Bundle(loaded.bundle);
         await gcs.createClaim(JSON.stringify({
             status: 'claimed',
@@ -416,11 +575,11 @@ export async function runReplayAnalysisV2Job(
         } finally {
             console.log = originalConsoleLog;
         }
-        terminalLine = assertSafeTerminalLine(terminalLine);
+        terminalLine = validateReplayAnalysisV2JobTerminalLine(terminalLine);
         await gcs.createReport(terminalLine);
     } finally {
         uninstallSignals();
-        await loaded.cleanup();
+        if (loaded) await loaded.cleanup();
     }
     (dependencies.writeStdout ?? (line => process.stdout.write(line)))(
         `${terminalLine}\n`,

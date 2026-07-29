@@ -219,6 +219,7 @@ export async function createPaidReplayRunner(
     replayAiPolicy: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
 ) {
     try {
+        await import('server-only');
         const adapter = await import(
             '../lib/services/analysis/replay/replay-staged-ai-adapter'
         );

@@ -13,10 +13,14 @@ const baseConfig = {
     reportObject: 'reports/report-0123456789abcdef.json',
 };
 
-function tokenResponse() {
+function tokenResponse(
+    accessToken = 'adc-access-token-value-1234567890',
+    expiresIn = 3_600,
+) {
     return new Response(JSON.stringify({
-        access_token: 'adc-access-token-value-1234567890',
+        access_token: accessToken,
         token_type: 'Bearer',
+        expires_in: expiresIn,
     }), { status: 200 });
 }
 
@@ -108,5 +112,92 @@ describe('replay job GCS JSON API client', () => {
             '{"status":"ok","username":"private-person"}',
         )).rejects.toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
         expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('refreshes ADC metadata tokens after their bounded lifetime', async () => {
+        let now = 0;
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(tokenResponse(
+                'first-adc-access-token-value-1234567890',
+            ))
+            .mockResolvedValueOnce(new Response(ciphertext, {
+                status: 200,
+                headers: { 'x-goog-generation': baseConfig.bundleGeneration },
+            }))
+            .mockResolvedValueOnce(tokenResponse(
+                'second-adc-access-token-value-123456789',
+            ))
+            .mockResolvedValueOnce(new Response(null, { status: 200 }));
+        const client = createReplayJobGcsClient(baseConfig, {
+            fetch: fetchMock,
+            now: () => now,
+        });
+
+        await client.downloadBundle();
+        now += 3_700_000;
+        await client.createClaim(
+            '{"status":"claimed","schema":"analysis-v2-replay-job-claim-v1"}',
+        );
+
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+        expect(fetchMock.mock.calls[1]![1].headers.authorization).toBe(
+            'Bearer first-adc-access-token-value-1234567890',
+        );
+        expect(fetchMock.mock.calls[3]![1].headers.authorization).toBe(
+            'Bearer second-adc-access-token-value-123456789',
+        );
+    });
+
+    it.each([
+        ['claim', {
+            claimObject: baseConfig.bundleObject,
+        }],
+        ['report', {
+            reportObject: baseConfig.bundleObject,
+        }],
+        ['claim-report', {
+            reportObject: baseConfig.claimObject,
+        }],
+    ])('requires bundle, claim, and report objects to be pairwise distinct (%s)', (
+        _name,
+        override,
+    ) => {
+        expect(() => createReplayJobGcsClient({
+            ...baseConfig,
+            ...override,
+        })).toThrow('ANALYSIS_V2_REPLAY_JOB_GCS_CONFIGURATION_INVALID');
+    });
+
+    it('rejects an oversized encrypted envelope before ADC or bundle fetch', () => {
+        const fetchMock = vi.fn();
+
+        expect(() => createReplayJobGcsClient({
+            ...baseConfig,
+            bundleBytes: 400 * 1024 * 1024,
+        }, {
+            fetch: fetchMock,
+        })).toThrow('ANALYSIS_V2_REPLAY_JOB_GCS_CONFIGURATION_INVALID');
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('never exposes a metadata token or raw metadata error', async () => {
+        const rawToken = 'raw-adc-token-that-must-never-escape';
+        const rawError = 'metadata backend leaked private details';
+        const invalidTokenFetch = vi.fn().mockResolvedValueOnce(
+            new Response(JSON.stringify({
+                access_token: rawToken,
+                token_type: 'Wrong',
+                error: rawError,
+            }), { status: 200 }),
+        );
+
+        const error = await createReplayJobGcsClient(baseConfig, {
+            fetch: invalidTokenFetch,
+        }).downloadBundle().catch(value => value);
+
+        expect(error).toBeInstanceOf(Error);
+        expect(error.message).toBe('ANALYSIS_V2_REPLAY_JOB_ADC_UNAVAILABLE');
+        expect(error.message).not.toContain(rawToken);
+        expect(error.message).not.toContain(rawError);
     });
 });
