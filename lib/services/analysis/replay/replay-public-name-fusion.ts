@@ -19,6 +19,7 @@ export type PublicNameFusionBaseline = PublicNameFusionVote | 'unknown';
 export interface PublicNameFusionCandidate {
     id: string;
     baseline: PublicNameFusionBaseline;
+    officialOrGroupExcluded: boolean;
     name?: PrivateNameAnalysisResult;
     feature?: FeatureAnalysisResult;
     triage?: GenderTriageResult;
@@ -40,7 +41,8 @@ export interface PublicNameVisualFusionReport {
     };
     officialNegative: {
         known: number;
-        fusionAccepted: number;
+        attempted: number;
+        accepted: number;
     };
     unknown: {
         eligible: number;
@@ -171,7 +173,7 @@ export function evaluatePublicNameVisualFusion(input: {
     calibration.known = baseline.male + baseline.female;
     calibration.male.known = baseline.male;
     calibration.female.known = baseline.female;
-    const officialNegative = { known: 0, fusionAccepted: 0 };
+    const officialNegative = { known: 0, attempted: 0, accepted: 0 };
     const unknown = {
         eligible: 0,
         predicted: 0,
@@ -182,36 +184,42 @@ export function evaluatePublicNameVisualFusion(input: {
 
     for (const candidate of input.candidates) {
         const visual = publicVisualVote(candidate);
-        if (visual.officialOrGroup) officialNegative.known++;
         const name = input.providerOk
             && candidate.name?.id === candidate.id
             ? publicNameVote(candidate.name)
             : null;
-        const eligible = name !== null && visual.vote !== null;
-        const prediction = eligible && name === visual.vote ? name : null;
-        if (visual.officialOrGroup && prediction) {
-            officialNegative.fusionAccepted++;
+        const officialOrGroup = candidate.officialOrGroupExcluded
+            || visual.officialOrGroup;
+        const modalityEligible = name !== null && visual.vote !== null;
+        const modalityAccepted =
+            modalityEligible && name === visual.vote;
+        if (officialOrGroup) {
+            officialNegative.known++;
+            if (modalityEligible) officialNegative.attempted++;
+            if (modalityAccepted) officialNegative.accepted++;
         }
-        if (candidate.baseline === 'unknown') {
-            if (eligible) unknown.eligible++;
-            if (!prediction) continue;
-            unknown.predicted++;
-            unknown.unresolved--;
-            if (prediction === 'male') unknown.rescuedMale++;
-            else unknown.rescuedFemale++;
+        if (candidate.baseline !== 'unknown') {
+            const sex = calibration[candidate.baseline];
+            if (!name) continue;
+            calibration.predicted++;
+            sex.predicted++;
+            if (name === candidate.baseline) {
+                calibration.agreed++;
+                sex.agreed++;
+            } else {
+                calibration.disagreed++;
+                sex.disagreed++;
+            }
             continue;
         }
-        const sex = calibration[candidate.baseline];
+        const eligible = !officialOrGroup && modalityEligible;
+        const prediction = eligible && modalityAccepted ? name : null;
+        if (eligible) unknown.eligible++;
         if (!prediction) continue;
-        calibration.predicted++;
-        sex.predicted++;
-        if (prediction === candidate.baseline) {
-            calibration.agreed++;
-            sex.agreed++;
-        } else {
-            calibration.disagreed++;
-            sex.disagreed++;
-        }
+        unknown.predicted++;
+        unknown.unresolved--;
+        if (prediction === 'male') unknown.rescuedMale++;
+        else unknown.rescuedFemale++;
     }
 
     const final = {
@@ -233,7 +241,7 @@ export function evaluatePublicNameVisualFusion(input: {
         calibration.female.predicted >= PUBLIC_NAME_FUSION_SEX_PREDICTED_MIN;
     const femaleAgreementPass =
         femaleVolumePass && agreementPass(calibration.female);
-    const officialNegativePass = officialNegative.fusionAccepted === 0;
+    const officialNegativePass = officialNegative.accepted === 0;
     const observedUnknownPass = final.unknown * 5 <= observedTotal;
     const worstCaseUnknownPass = worstCaseUnknown * 5 <= worstCaseTotal;
     const gates = {

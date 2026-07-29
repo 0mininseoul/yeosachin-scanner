@@ -285,7 +285,7 @@ async function actualDiagnosticV217SafeLine(): Promise<string> {
             male: { known: 0, predicted: 0, agreed: 0, disagreed: 0 },
             female: { known: 0, predicted: 0, agreed: 0, disagreed: 0 },
         },
-        officialNegative: { known: 0, fusionAccepted: 0 },
+        officialNegative: { known: 0, attempted: 0, accepted: 0 },
         unknown: {
             eligible: 0,
             predicted: 0,
@@ -344,10 +344,71 @@ interface V213TerminalReportFixture {
 }
 
 interface V217TerminalReportFixture {
+    gender: {
+        male: number;
+        female: number;
+        unknown: number;
+        unknownRate: number;
+    };
+    gender_quality: {
+        qualityGate: {
+            observedUnknownRate: number;
+            worstCaseUnknownRate: number;
+            observedPass: boolean;
+            worstCasePass: boolean;
+        };
+    };
     public_name_fusion: {
-        unknown: Record<string, unknown>;
-        final: { unknown: number };
-        gates: { adoptionPass: boolean };
+        publicAnalyzed: number;
+        providerOk: boolean;
+        calibration: {
+            known: number;
+            predicted: number;
+            agreed: number;
+            disagreed: number;
+            male: {
+                known: number;
+                predicted: number;
+                agreed: number;
+                disagreed: number;
+            };
+            female: {
+                known: number;
+                predicted: number;
+                agreed: number;
+                disagreed: number;
+            };
+        };
+        officialNegative: {
+            known: number;
+            attempted: number;
+            accepted: number;
+        };
+        unknown: {
+            [key: string]: unknown;
+            eligible: number;
+            predicted: number;
+            rescuedMale: number;
+            rescuedFemale: number;
+            unresolved: number;
+        };
+        baseline: { male: number; female: number; unknown: number };
+        final: { male: number; female: number; unknown: number };
+        missingPublic: number;
+        gates: {
+            calibrationVolumePass: boolean;
+            overallAgreementPass: boolean;
+            maleVolumePass: boolean;
+            maleAgreementPass: boolean;
+            femaleVolumePass: boolean;
+            femaleAgreementPass: boolean;
+            officialNegativePass: boolean;
+            observedUnknownRate: number;
+            observedUnknownPass: boolean;
+            worstCaseUnknownRate: number;
+            worstCaseUnknownPass: boolean;
+            adoptionPass: boolean;
+        };
     };
 }
 
@@ -1001,6 +1062,102 @@ describe('Cloud Run analysis V2 replay job', () => {
                 JSON.stringify(report),
             )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
         }
+    });
+
+    it('rejects V2.17 calibration predictions beyond the known baseline cohort', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const report = JSON.parse(
+            await actualDiagnosticV217SafeLine(),
+        ) as V217TerminalReportFixture;
+        report.public_name_fusion.calibration.predicted = 1;
+        report.public_name_fusion.calibration.agreed = 1;
+        report.public_name_fusion.calibration.female.predicted = 1;
+        report.public_name_fusion.calibration.female.agreed = 1;
+        report.public_name_fusion.gates.overallAgreementPass = true;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(report),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+    });
+
+    it('rejects V2.17 sex predictions beyond that sex known baseline cohort', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const report = JSON.parse(
+            await actualDiagnosticV217SafeLine(),
+        ) as V217TerminalReportFixture;
+        report.public_name_fusion.publicAnalyzed = 1;
+        report.public_name_fusion.baseline.male = 1;
+        report.public_name_fusion.final.male = 1;
+        report.public_name_fusion.calibration.known = 1;
+        report.public_name_fusion.calibration.predicted = 1;
+        report.public_name_fusion.calibration.agreed = 1;
+        report.public_name_fusion.calibration.male.known = 1;
+        report.public_name_fusion.calibration.female.predicted = 1;
+        report.public_name_fusion.calibration.female.agreed = 1;
+        report.gender.male = 1;
+        report.public_name_fusion.gates.overallAgreementPass = true;
+        report.public_name_fusion.gates.worstCaseUnknownRate = 0.5;
+        report.gender_quality.qualityGate.worstCaseUnknownRate = 0.5;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(report),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+    });
+
+    it('accepts a detectable V2.17 official-negative breach only with a failed gate', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const report = JSON.parse(
+            await actualDiagnosticV217SafeLine(),
+        ) as V217TerminalReportFixture;
+        report.public_name_fusion.publicAnalyzed = 1;
+        report.public_name_fusion.baseline.unknown = 1;
+        report.public_name_fusion.final.unknown = 1;
+        report.public_name_fusion.unknown.unresolved = 1;
+        report.public_name_fusion.officialNegative = {
+            known: 1,
+            attempted: 1,
+            accepted: 1,
+        };
+        report.public_name_fusion.gates.officialNegativePass = false;
+        report.public_name_fusion.gates.observedUnknownRate = 1;
+        report.public_name_fusion.gates.observedUnknownPass = false;
+        report.gender.unknown = 1;
+        report.gender.unknownRate = 1;
+        report.gender_quality.qualityGate.observedUnknownRate = 1;
+        report.gender_quality.qualityGate.observedPass = false;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(report),
+        )).not.toThrow();
+    });
+
+    it('rejects V2.17 provider-non-ok reports that fabricate prediction or rescue', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const report = JSON.parse(
+            await actualDiagnosticV217SafeLine(),
+        ) as V217TerminalReportFixture;
+        report.public_name_fusion.providerOk = false;
+        report.public_name_fusion.baseline.unknown = 1;
+        report.public_name_fusion.final.female = 1;
+        report.public_name_fusion.unknown.eligible = 1;
+        report.public_name_fusion.unknown.predicted = 1;
+        report.public_name_fusion.unknown.rescuedFemale = 1;
+        report.gender.female = 1;
+        report.gender.unknownRate = 0;
+        report.public_name_fusion.gates.worstCaseUnknownRate = 0.5;
+        report.gender_quality.qualityGate.worstCaseUnknownRate = 0.5;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(report),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     });
 
     it('rejects V2.15 shadow-rescue conservation drift', async () => {
@@ -1667,7 +1824,7 @@ describe('Cloud Run analysis V2 replay job', () => {
         }
     }, 30_000);
 
-    it('builds the immutable V2.17 entry with its pinned common bootstrap export', async () => {
+    it('builds and invokes the immutable V2.17 common bootstrap entry', async () => {
         const imageRoot = await mkdtemp(join(
             tmpdir(),
             '.replay-job-v217-image-',
@@ -1722,8 +1879,66 @@ describe('Cloud Run analysis V2 replay job', () => {
             const loaded = await import(
                 `${pathToFileURL(outfile).href}?bootstrap-v217-contract`
             );
-            expect(Reflect.get(loaded, 'runReplayAnalysisV2Job'))
-                .toBeTypeOf('function');
+            const runBuiltJob: unknown = Reflect.get(
+                loaded,
+                'runReplayAnalysisV2Job',
+            );
+            expect(runBuiltJob).toBeTypeOf('function');
+            if (typeof runBuiltJob !== 'function') {
+                throw new Error('V2.17 common bootstrap export missing');
+            }
+            const v217Bundle = v213Bundle();
+            v217Bundle.capture.evaluationPolicy = {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v217-public-name-visual-fusion-shadow',
+                aiStage: 'ai-stage-policy-v2.17',
+            } as never;
+            const safe = JSON.parse(await actualDiagnosticV217SafeLine());
+            const createRunner = vi.fn(() => Object.freeze({}));
+            await runBuiltJob({
+                env: validEnv(),
+                runtimeImageDigest: immutableImageDigest,
+                bindLocalCleanup: () => async () => undefined,
+                loadArtifacts: async () => ({
+                    bundle: { ...v217Bundle, expired: false },
+                    cleanup: async () => undefined,
+                }),
+                createGcsClient: () => ({
+                    downloadBundle: vi.fn(),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                }),
+                createRunner,
+                runReplay: async (input: {
+                    evaluationPolicy: { aiStage: string };
+                    write(line: string): void;
+                }) => {
+                    expect(input.evaluationPolicy.aiStage).toBe(
+                        'ai-stage-policy-v2.17',
+                    );
+                    input.write(JSON.stringify(safe));
+                },
+                installSignalCleanup: () => () => undefined,
+                writeStdout: vi.fn(),
+            });
+            expect(createRunner).toHaveBeenCalledOnce();
+            expect(createRunner).toHaveBeenCalledWith(
+                'ai-stage-policy-v2.17',
+            );
+
+            const boot = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                outfile,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            }).then(() => {
+                throw new Error('Expected V2.17 replay job boot to fail closed');
+            }).catch(error => error as { code: number; stderr: string });
+            expect(boot.code).toBe(1);
+            expect(boot.stderr).toBe(
+                '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
+            );
         } finally {
             await rm(imageRoot, { recursive: true, force: true });
         }

@@ -1601,6 +1601,8 @@ export async function runAnalysisV2AiReplay(input: {
                     return {
                         id,
                         baseline: baseline.classification,
+                        officialOrGroupExcluded:
+                            baseline.officialOrGroupExcluded,
                         ...(providerOk
                             ? { name: namesById.get(id) }
                             : {}),
@@ -1634,6 +1636,7 @@ export async function runAnalysisV2AiReplay(input: {
                     !== calibration.male.known + calibration.female.known
                 || calibration.predicted
                     !== calibration.agreed + calibration.disagreed
+                || calibration.predicted > calibration.known
                 || calibration.predicted
                     !== calibration.male.predicted
                         + calibration.female.predicted
@@ -1642,6 +1645,14 @@ export async function runAnalysisV2AiReplay(input: {
                 || calibration.disagreed
                     !== calibration.male.disagreed
                         + calibration.female.disagreed
+                || calibration.male.predicted
+                    !== calibration.male.agreed
+                        + calibration.male.disagreed
+                || calibration.male.predicted > calibration.male.known
+                || calibration.female.predicted
+                    !== calibration.female.agreed
+                        + calibration.female.disagreed
+                || calibration.female.predicted > calibration.female.known
                 || unknown.predicted
                     !== unknown.rescuedMale + unknown.rescuedFemale
                 || unknown.predicted > unknown.eligible
@@ -1654,10 +1665,39 @@ export async function runAnalysisV2AiReplay(input: {
                     !== publicNameFusion.baseline.female
                         + unknown.rescuedFemale
                 || publicNameFusion.final.unknown !== unknown.unresolved
-                || publicNameFusion.officialNegative.fusionAccepted !== 0
+                || publicNameFusion.officialNegative.attempted
+                    > publicNameFusion.officialNegative.known
+                || publicNameFusion.officialNegative.accepted
+                    > publicNameFusion.officialNegative.attempted
                 || publicNameFusion.missingPublic !== missingPublic
                 || publicNameFusion.publicAnalyzed
                     !== (providerOk ? publicProfiles.length : 0)
+                || (
+                    !providerOk
+                    && (
+                        calibration.predicted !== 0
+                        || calibration.agreed !== 0
+                        || calibration.disagreed !== 0
+                        || calibration.male.predicted !== 0
+                        || calibration.male.agreed !== 0
+                        || calibration.male.disagreed !== 0
+                        || calibration.female.predicted !== 0
+                        || calibration.female.agreed !== 0
+                        || calibration.female.disagreed !== 0
+                        || publicNameFusion.officialNegative.attempted !== 0
+                        || publicNameFusion.officialNegative.accepted !== 0
+                        || unknown.eligible !== 0
+                        || unknown.predicted !== 0
+                        || unknown.rescuedMale !== 0
+                        || unknown.rescuedFemale !== 0
+                        || publicNameFusion.final.male
+                            !== publicNameFusion.baseline.male
+                        || publicNameFusion.final.female
+                            !== publicNameFusion.baseline.female
+                        || publicNameFusion.final.unknown
+                            !== publicNameFusion.baseline.unknown
+                    )
+                )
             ) {
                 throw new Error(
                     'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_CONSERVATION_FAILED',

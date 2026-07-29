@@ -1845,7 +1845,7 @@ describe('AI-only replay runner', () => {
                     known: 1, predicted: 1, agreed: 1, disagreed: 0,
                 },
             },
-            officialNegative: { known: 1, fusionAccepted: 0 },
+            officialNegative: { known: 1, attempted: 0, accepted: 0 },
             unknown: {
                 eligible: 2,
                 predicted: 1,

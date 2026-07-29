@@ -423,7 +423,8 @@ const publicNameFusionCounts = z.object({
     }).strict(),
     officialNegative: z.object({
         known: aggregateCount,
-        fusionAccepted: aggregateCount,
+        attempted: aggregateCount,
+        accepted: aggregateCount,
     }).strict(),
     unknown: z.object({
         eligible: aggregateCount,
@@ -499,7 +500,7 @@ const replayAnalysisV2JobTerminalV217Schema =
             && calibration.female.agreed * 10_000
                 >= calibration.female.predicted * 9_500;
         const officialNegativePass =
-            fusion.officialNegative.fusionAccepted === 0;
+            fusion.officialNegative.accepted === 0;
         const observedUnknownPass =
             fusion.final.unknown * 5 <= observedTotal;
         const worstCaseUnknownPass =
@@ -527,6 +528,7 @@ const replayAnalysisV2JobTerminalV217Schema =
             && calibration.female.known === fusion.baseline.female
             && calibration.predicted
                 === calibration.agreed + calibration.disagreed
+            && calibration.predicted <= calibration.known
             && calibration.predicted
                 === calibration.male.predicted
                     + calibration.female.predicted
@@ -537,8 +539,10 @@ const replayAnalysisV2JobTerminalV217Schema =
                     + calibration.female.disagreed
             && calibration.male.predicted
                 === calibration.male.agreed + calibration.male.disagreed
+            && calibration.male.predicted <= calibration.male.known
             && calibration.female.predicted
                 === calibration.female.agreed + calibration.female.disagreed
+            && calibration.female.predicted <= calibration.female.known
             && unknown.predicted
                 === unknown.rescuedMale + unknown.rescuedFemale
             && unknown.predicted <= unknown.eligible
@@ -551,7 +555,33 @@ const replayAnalysisV2JobTerminalV217Schema =
                 === fusion.baseline.female + unknown.rescuedFemale
             && fusion.final.unknown === unknown.unresolved
             && fusion.officialNegative.known <= observedTotal
-            && fusion.officialNegative.fusionAccepted === 0
+            && fusion.officialNegative.attempted
+                <= fusion.officialNegative.known
+            && fusion.officialNegative.accepted
+                <= fusion.officialNegative.attempted
+            && (
+                fusion.providerOk
+                || (
+                    calibration.predicted === 0
+                    && calibration.agreed === 0
+                    && calibration.disagreed === 0
+                    && calibration.male.predicted === 0
+                    && calibration.male.agreed === 0
+                    && calibration.male.disagreed === 0
+                    && calibration.female.predicted === 0
+                    && calibration.female.agreed === 0
+                    && calibration.female.disagreed === 0
+                    && fusion.officialNegative.attempted === 0
+                    && fusion.officialNegative.accepted === 0
+                    && unknown.eligible === 0
+                    && unknown.predicted === 0
+                    && unknown.rescuedMale === 0
+                    && unknown.rescuedFemale === 0
+                    && fusion.final.male === fusion.baseline.male
+                    && fusion.final.female === fusion.baseline.female
+                    && fusion.final.unknown === fusion.baseline.unknown
+                )
+            )
             && fusion.final.male === report.gender.male
             && fusion.final.female === report.gender.female
             && fusion.final.unknown === report.gender.unknown

@@ -127,11 +127,104 @@ describe('V2.17 public name and visual fusion', () => {
         })).toEqual({ vote: null, officialOrGroup: false });
     });
 
+    it('calibrates every strong public name vote instead of only visual consensus', () => {
+        const candidates = Array.from({ length: 100 }, (_, index) => {
+            const baseline = index < 50 ? 'female' as const : 'male' as const;
+            const correctName = index % 50 >= 35;
+            const nameVote = correctName
+                ? baseline
+                : baseline === 'female' ? 'male' : 'female';
+            return {
+                id: `ordinal:${index + 1}`,
+                baseline,
+                officialOrGroupExcluded: false,
+                name: {
+                    id: `ordinal:${index + 1}`,
+                    isName: true,
+                    confidence: 1,
+                    femaleScore: nameVote === 'female' ? 1 : 0,
+                },
+                feature: feature(baseline),
+            };
+        });
+
+        const report = evaluatePublicNameVisualFusion({
+            candidates,
+            providerOk: true,
+            missingPublic: 0,
+        });
+
+        expect(report.calibration).toEqual({
+            known: 100,
+            predicted: 100,
+            agreed: 30,
+            disagreed: 70,
+            female: {
+                known: 50, predicted: 50, agreed: 15, disagreed: 35,
+            },
+            male: {
+                known: 50, predicted: 50, agreed: 15, disagreed: 35,
+            },
+        });
+        expect(report.gates).toMatchObject({
+            calibrationVolumePass: true,
+            overallAgreementPass: false,
+            adoptionPass: false,
+        });
+    });
+
+    it('hard-blocks canonical official provenance while measuring counterfactual acceptance', () => {
+        const report = evaluatePublicNameVisualFusion({
+            candidates: [{
+                id: 'ordinal:1',
+                baseline: 'unknown',
+                officialOrGroupExcluded: true,
+                name: {
+                    id: 'ordinal:1',
+                    isName: true,
+                    confidence: 1,
+                    femaleScore: 1,
+                },
+                triage: triage('female', {
+                    assessment: {
+                        inferredGender: 'female',
+                        confidence: 'high',
+                        ownerConsistency: 'same_person',
+                        evidenceSelectionIds: ['media-1'],
+                    },
+                }),
+            }],
+            providerOk: true,
+            missingPublic: 0,
+        });
+
+        expect(report.officialNegative).toEqual({
+            known: 1,
+            attempted: 1,
+            accepted: 1,
+        });
+        expect(report.unknown).toEqual({
+            eligible: 0,
+            predicted: 0,
+            rescuedMale: 0,
+            rescuedFemale: 0,
+            unresolved: 1,
+        });
+        expect(report.final).toEqual({
+            male: 0, female: 0, unknown: 1,
+        });
+        expect(report.gates).toMatchObject({
+            officialNegativePass: false,
+            adoptionPass: false,
+        });
+    });
+
     it('classifies only exact agreement and conserves calibration, unknown, official, and missing cohorts', () => {
         const candidates = [
             {
                 id: 'ordinal:1',
                 baseline: 'female' as const,
+                officialOrGroupExcluded: false,
                 name: { id: 'ordinal:1', isName: true, confidence: 1, femaleScore: 1 },
                 feature: feature('female'),
                 triage: triage('male'),
@@ -139,6 +232,7 @@ describe('V2.17 public name and visual fusion', () => {
             {
                 id: 'ordinal:2',
                 baseline: 'male' as const,
+                officialOrGroupExcluded: false,
                 name: { id: 'ordinal:2', isName: true, confidence: 1, femaleScore: 1 },
                 feature: feature('female'),
                 triage: triage('female'),
@@ -146,6 +240,7 @@ describe('V2.17 public name and visual fusion', () => {
             {
                 id: 'ordinal:3',
                 baseline: 'unknown' as const,
+                officialOrGroupExcluded: false,
                 name: { id: 'ordinal:3', isName: true, confidence: 1, femaleScore: 0 },
                 feature: feature('male'),
                 triage: triage('female'),
@@ -153,6 +248,7 @@ describe('V2.17 public name and visual fusion', () => {
             {
                 id: 'ordinal:4',
                 baseline: 'unknown' as const,
+                officialOrGroupExcluded: false,
                 name: { id: 'ordinal:4', isName: true, confidence: 1, femaleScore: 1 },
                 feature: feature('male'),
                 triage: triage('female'),
@@ -160,6 +256,7 @@ describe('V2.17 public name and visual fusion', () => {
             {
                 id: 'ordinal:5',
                 baseline: 'unknown' as const,
+                officialOrGroupExcluded: false,
                 name: { id: 'ordinal:5', isName: true, confidence: 1, femaleScore: 1 },
                 feature: feature('female', {
                     accountContext: 'official_group_or_brand',
@@ -185,7 +282,7 @@ describe('V2.17 public name and visual fusion', () => {
                 female: { known: 1, predicted: 1, agreed: 1, disagreed: 0 },
                 male: { known: 1, predicted: 1, agreed: 0, disagreed: 1 },
             },
-            officialNegative: { known: 1, fusionAccepted: 0 },
+            officialNegative: { known: 1, attempted: 0, accepted: 0 },
             unknown: {
                 eligible: 2,
                 predicted: 1,
@@ -216,6 +313,7 @@ describe('V2.17 public name and visual fusion', () => {
             candidates: [{
                 id: 'ordinal:1',
                 baseline: 'unknown',
+                officialOrGroupExcluded: false,
                 name: { id: 'ordinal:1', isName: true, confidence: 1, femaleScore: 1 },
                 feature: feature('female'),
                 triage: triage('female'),
