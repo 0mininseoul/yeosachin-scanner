@@ -316,7 +316,34 @@ describe('stateless replay job build contract', () => {
         )).toThrow('ANALYSIS_V2_REPLAY_JOB_BUILD_GRAPH_FORBIDDEN');
     });
 
-    it('fails closed for an entry policy outside the sealed V2.13 through V2.17 allowlist', async () => {
+    it('accepts only the V2.18 entry and aggregate diagnostic with its exact source allowlist', async () => {
+        const {
+            auditReplayAnalysisV2JobBuildGraph,
+            REPLAY_ANALYSIS_V218_JOB_LOCAL_INPUTS,
+        } = await buildModule();
+        const exact = validMetafile(
+            REPLAY_ANALYSIS_V218_JOB_LOCAL_INPUTS,
+        );
+
+        expect(() => auditReplayAnalysisV2JobBuildGraph(
+            exact,
+            'ai-stage-policy-v2.18',
+        )).not.toThrow();
+        expect(REPLAY_ANALYSIS_V218_JOB_LOCAL_INPUTS).toContain(
+            'lib/services/analysis/replay/replay-public-gender-headroom-v218.ts',
+        );
+        const crossed = validMetafile(
+            REPLAY_ANALYSIS_V218_JOB_LOCAL_INPUTS.filter(
+                path => path !== 'scripts/replay-analysis-v218-job.ts',
+            ).concat('scripts/replay-analysis-v217-job.ts'),
+        );
+        expect(() => auditReplayAnalysisV2JobBuildGraph(
+            crossed,
+            'ai-stage-policy-v2.18',
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_BUILD_GRAPH_FORBIDDEN');
+    });
+
+    it('fails closed for an entry policy outside the sealed V2.13 through V2.18 allowlist', async () => {
         const { buildReplayAnalysisV2Job } = await buildModule();
         const parent = await mkdtemp(join(tmpdir(), 'replay-job-policy-'));
         const outputDirectory = join(parent, 'artifact');
@@ -326,7 +353,7 @@ describe('stateless replay job build contract', () => {
                 metafile: join(outputDirectory, 'meta.json'),
                 runtimeManifest: join(outputDirectory, 'runtime.json'),
                 imageDigest: immutableImageDigest,
-                evaluationAiPolicy: 'ai-stage-policy-v2.18' as never,
+                evaluationAiPolicy: 'ai-stage-policy-v2.19' as never,
                 buildImpl: vi.fn(),
             })).rejects.toThrow(
                 'ANALYSIS_V2_REPLAY_JOB_BUILD_ENTRY_POLICY_INVALID',

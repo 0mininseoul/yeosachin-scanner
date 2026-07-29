@@ -314,6 +314,81 @@ async function actualDiagnosticV217SafeLine(): Promise<string> {
     return JSON.stringify(actual);
 }
 
+async function actualDiagnosticV218SafeLine(): Promise<string> {
+    const actual = JSON.parse(await actualDiagnosticV217SafeLine());
+    actual.evaluation_ai_policy = 'ai-stage-policy-v2.18';
+    actual.replay_ai_policy = 'ai-stage-policy-v2.18';
+    const calibration = () => ({
+        known: 0,
+        predicted: 0,
+        agreed: 0,
+        disagreed: 0,
+        wilsonLowerBoundBps: 0,
+    });
+    const calibrationGroup = () => ({
+        overall: calibration(),
+        male: calibration(),
+        female: calibration(),
+    });
+    actual.public_gender_headroom_v218 = {
+        baselineUnknown: 0,
+        finalUnknown: 0,
+        requiredAdditionalRescuesToObserved20: 0,
+        requiredAdditionalRescuesToWorst20: 1,
+        unknownNameVote: { female: 0, male: 0, none: 0 },
+        unknownVisualVote: {
+            female: 0,
+            male: 0,
+            none: 0,
+            nullReasons: {
+                missing_result: 0,
+                stage_conflict: 0,
+                nonbinary_gender: 0,
+                low_confidence: 0,
+                owner_mismatch_or_not_visible: 0,
+                no_evidence: 0,
+                nonpersonal_context: 0,
+                official_or_group: 0,
+            },
+        },
+        guardedFemaleNameOnly: {
+            strongName: 0,
+            officialBlocked: 0,
+            contextBlocked: 0,
+            stageConflictBlocked: 0,
+            maleVisualConflictBlocked: 0,
+            eligible: 0,
+        },
+        mediaHeadroom: {
+            finalUnknown: 0,
+            resolverMediaAtLeast2: 0,
+            distinctFeedPostsAtLeast2: 0,
+            profileOnly: 0,
+            noMedia: 0,
+            contextPersonalOrCreator: 0,
+            contextUncertain: 0,
+            contextOfficial: 0,
+            highBinaryTriageSameOwner: 0,
+            distinctPosts2AndPersonalOrCreator: 0,
+            distinctPosts2AndUncertain: 0,
+            distinctPosts2AndStrongFemaleName: 0,
+        },
+        knownCalibrationRestricted: {
+            ...calibrationGroup(),
+            fullNamePresent: calibrationGroup(),
+            usernameOnly: calibrationGroup(),
+        },
+        gates: {
+            guardedFemaleCandidateVolumePass: true,
+            restrictedFemaleSamplePass: false,
+            restrictedFemalePrecisionPass: false,
+            officialFinalRescuePass: true,
+            nameOnlyPathWorthFurtherStudy: false,
+        },
+    };
+    return JSON.stringify(actual);
+}
+
 interface V213TerminalReportFixture {
     diagnostic_partial_coverage_override: {
         retained_profiles: number;
@@ -764,6 +839,48 @@ describe('Cloud Run analysis V2 replay job', () => {
         expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.17');
     });
 
+    it('runs the V2.18 job only with its authenticated public-gender headroom bundle', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+            runV218ReplayAnalysisV2Job,
+        } = await import(
+            './replay-analysis-v218-job'
+        );
+        const v218Bundle = v213Bundle();
+        v218Bundle.capture.evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v218-public-gender-headroom-diagnostic',
+            aiStage: 'ai-stage-policy-v2.18',
+        } as never;
+        const createRunner = vi.fn(() => Object.freeze({}));
+
+        await runV218ReplayAnalysisV2Job({
+            env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
+            bindLocalCleanup: () => async () => undefined,
+            loadArtifacts: vi.fn(async () => ({
+                bundle: { ...v218Bundle, expired: false },
+                cleanup: async () => undefined,
+            })),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            createRunner,
+            runReplay: vi.fn(async input => {
+                expect(input.evaluationPolicy).toEqual(
+                    REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+                );
+                input.write(await actualDiagnosticV218SafeLine());
+            }),
+            installSignalCleanup: vi.fn(() => () => undefined),
+            writeStdout: vi.fn(),
+        });
+
+        expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.18');
+    });
+
     it('accepts the actual v2.12 diagnostic partial-coverage safe-line key', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -1160,6 +1277,86 @@ describe('Cloud Run analysis V2 replay job', () => {
         )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     });
 
+    it('accepts only conserved PII-free V2.18 public-gender headroom aggregates', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const line = await actualDiagnosticV218SafeLine();
+
+        expect(validateReplayAnalysisV2JobTerminalLine(line)).toBe(line);
+        const mutations: Array<(report: {
+            public_gender_headroom_v218: {
+                requiredAdditionalRescuesToWorst20: number;
+                unknownNameVote: Record<string, unknown>;
+                unknownVisualVote: {
+                    none: number;
+                    nullReasons: Record<string, number>;
+                };
+                mediaHeadroom: {
+                    distinctFeedPostsAtLeast2: number;
+                    distinctPosts2AndPersonalOrCreator: number;
+                };
+                knownCalibrationRestricted: {
+                    female: { wilsonLowerBoundBps: number };
+                };
+                gates: {
+                    nameOnlyPathWorthFurtherStudy: boolean;
+                };
+            };
+        }) => void> = [
+            report => {
+                report.public_gender_headroom_v218
+                    .unknownNameVote.username = 'private';
+            },
+            report => {
+                report.public_gender_headroom_v218
+                    .requiredAdditionalRescuesToWorst20++;
+            },
+            report => {
+                report.public_gender_headroom_v218
+                    .unknownVisualVote.none = 1;
+                report.public_gender_headroom_v218
+                    .unknownVisualVote.nullReasons.missing_result = 1;
+            },
+            report => {
+                report.public_gender_headroom_v218
+                    .mediaHeadroom.distinctPosts2AndPersonalOrCreator = 1;
+            },
+            report => {
+                report.public_gender_headroom_v218
+                    .knownCalibrationRestricted.female
+                    .wilsonLowerBoundBps = 1;
+            },
+            report => {
+                report.public_gender_headroom_v218
+                    .gates.nameOnlyPathWorthFurtherStudy = true;
+            },
+        ];
+        for (const mutate of mutations) {
+            const report = JSON.parse(line);
+            mutate(report);
+            expect(() => validateReplayAnalysisV2JobTerminalLine(
+                JSON.stringify(report),
+            )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+        }
+    });
+
+    it('rejects a fabricated V2.18 name vote when the provider is non-ok', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const report = JSON.parse(await actualDiagnosticV218SafeLine());
+        report.public_name_fusion.providerOk = false;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(report),
+        )).not.toThrow();
+        report.public_gender_headroom_v218.unknownNameVote.female = 1;
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(report),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+    });
+
     it('rejects V2.15 shadow-rescue conservation drift', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -1425,7 +1622,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                     manifest: runtime,
                 }),
             ).resolves.toBeUndefined();
-            expect(Object.keys(metadata.inputs)).toHaveLength(41);
+            expect(Object.keys(metadata.inputs)).toHaveLength(42);
             const graph = JSON.stringify(metadata);
             expect(graph).not.toMatch(
                 /supabase\/admin|supabase-js|result-store|attempt-store|lease-store|apify|(?:^|[/_-])r2(?:[/_.-]|$)|@google-cloud\/tasks|cloud-tasks|analysis-tasks|tasks-client|tasks-store|app\/api/i,
@@ -1934,6 +2131,126 @@ describe('Cloud Run analysis V2 replay job', () => {
                 env: { NODE_ENV: 'test', PATH: process.env.PATH },
             }).then(() => {
                 throw new Error('Expected V2.17 replay job boot to fail closed');
+            }).catch(error => error as { code: number; stderr: string });
+            expect(boot.code).toBe(1);
+            expect(boot.stderr).toBe(
+                '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
+            );
+        } finally {
+            await rm(imageRoot, { recursive: true, force: true });
+        }
+    }, 30_000);
+
+    it('builds, invokes, and directly boots the immutable V2.18 headroom entry', async () => {
+        const imageRoot = await mkdtemp(join(
+            tmpdir(),
+            '.replay-job-v218-image-',
+        ));
+        const workspace = join(imageRoot, 'workspace');
+        const outputDirectory = join(workspace, 'replay-job');
+        const outfile = join(outputDirectory, 'job.mjs');
+        const metafile = join(outputDirectory, 'meta.json');
+        const runtimeManifest = join(outputDirectory, 'runtime.json');
+        try {
+            await mkdir(workspace, { mode: 0o700 });
+            const {
+                copyReplayAnalysisV2JobPhysicalDependencyClosure,
+            } = await import('./build-replay-analysis-v2-job.mjs');
+            await copyReplayAnalysisV2JobPhysicalDependencyClosure({
+                sourceWorkspace: process.cwd(),
+                imageWorkspace: workspace,
+            });
+            await execFileAsync(process.execPath, [
+                'scripts/build-replay-analysis-v2-job.mjs',
+                '--outfile', outfile,
+                '--metafile', metafile,
+                '--runtime-manifest', runtimeManifest,
+                '--image-digest', immutableImageDigest,
+                '--evaluation-ai-policy=ai-stage-policy-v2.18',
+            ], {
+                cwd: process.cwd(),
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
+                inputs: Record<string, unknown>;
+            };
+            expect(metadata.inputs).toHaveProperty(
+                'scripts/replay-analysis-v218-job.ts',
+            );
+            expect(metadata.inputs).toHaveProperty(
+                'lib/services/analysis/replay/replay-public-gender-headroom-v218.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v217-job.ts',
+            );
+            const marker = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                '--eval',
+                `import(${JSON.stringify(pathToFileURL(outfile).href)}).then(m => process.stdout.write(m.REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY.aiStage))`,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            expect(marker.stdout).toBe('ai-stage-policy-v2.18');
+
+            const loaded = await import(
+                `${pathToFileURL(outfile).href}?bootstrap-v218-contract`
+            );
+            const runBuiltJob: unknown = Reflect.get(
+                loaded,
+                'runReplayAnalysisV2Job',
+            );
+            expect(runBuiltJob).toBeTypeOf('function');
+            if (typeof runBuiltJob !== 'function') {
+                throw new Error('V2.18 common bootstrap export missing');
+            }
+            const v218Bundle = v213Bundle();
+            v218Bundle.capture.evaluationPolicy = {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v218-public-gender-headroom-diagnostic',
+                aiStage: 'ai-stage-policy-v2.18',
+            } as never;
+            const safe = JSON.parse(await actualDiagnosticV218SafeLine());
+            const createRunner = vi.fn(() => Object.freeze({}));
+            await runBuiltJob({
+                env: validEnv(),
+                runtimeImageDigest: immutableImageDigest,
+                bindLocalCleanup: () => async () => undefined,
+                loadArtifacts: async () => ({
+                    bundle: { ...v218Bundle, expired: false },
+                    cleanup: async () => undefined,
+                }),
+                createGcsClient: () => ({
+                    downloadBundle: vi.fn(),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                }),
+                createRunner,
+                runReplay: async (input: {
+                    evaluationPolicy: { aiStage: string };
+                    write(line: string): void;
+                }) => {
+                    expect(input.evaluationPolicy.aiStage).toBe(
+                        'ai-stage-policy-v2.18',
+                    );
+                    input.write(JSON.stringify(safe));
+                },
+                installSignalCleanup: () => () => undefined,
+                writeStdout: vi.fn(),
+            });
+            expect(createRunner).toHaveBeenCalledOnce();
+            expect(createRunner).toHaveBeenCalledWith(
+                'ai-stage-policy-v2.18',
+            );
+
+            const boot = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                outfile,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            }).then(() => {
+                throw new Error('Expected V2.18 replay job boot to fail closed');
             }).catch(error => error as { code: number; stderr: string });
             expect(boot.code).toBe(1);
             expect(boot.stderr).toBe(

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { oneSidedWilsonLowerBoundBps95 } from './replay-public-gender-headroom-v218';
 
 export const REPLAY_STAGE_FAILURE_DISPOSITIONS = Object.freeze([
     'success',
@@ -616,6 +617,285 @@ const replayAnalysisV2JobTerminalV217Schema =
         }
     });
 
+const publicHeadroomCalibrationV218 = z.object({
+    known: aggregateCount,
+    predicted: aggregateCount,
+    agreed: aggregateCount,
+    disagreed: aggregateCount,
+    wilsonLowerBoundBps: z.number().int().min(0).max(10_000),
+}).strict();
+
+const publicHeadroomCalibrationGroupV218 = z.object({
+    overall: publicHeadroomCalibrationV218,
+    male: publicHeadroomCalibrationV218,
+    female: publicHeadroomCalibrationV218,
+}).strict();
+
+const publicGenderHeadroomV218 = z.object({
+    baselineUnknown: aggregateCount,
+    finalUnknown: aggregateCount,
+    requiredAdditionalRescuesToObserved20: aggregateCount,
+    requiredAdditionalRescuesToWorst20: aggregateCount,
+    unknownNameVote: z.object({
+        female: aggregateCount,
+        male: aggregateCount,
+        none: aggregateCount,
+    }).strict(),
+    unknownVisualVote: z.object({
+        female: aggregateCount,
+        male: aggregateCount,
+        none: aggregateCount,
+        nullReasons: z.object({
+            missing_result: aggregateCount,
+            stage_conflict: aggregateCount,
+            nonbinary_gender: aggregateCount,
+            low_confidence: aggregateCount,
+            owner_mismatch_or_not_visible: aggregateCount,
+            no_evidence: aggregateCount,
+            nonpersonal_context: aggregateCount,
+            official_or_group: aggregateCount,
+        }).strict(),
+    }).strict(),
+    guardedFemaleNameOnly: z.object({
+        strongName: aggregateCount,
+        officialBlocked: aggregateCount,
+        contextBlocked: aggregateCount,
+        stageConflictBlocked: aggregateCount,
+        maleVisualConflictBlocked: aggregateCount,
+        eligible: aggregateCount,
+    }).strict(),
+    mediaHeadroom: z.object({
+        finalUnknown: aggregateCount,
+        resolverMediaAtLeast2: aggregateCount,
+        distinctFeedPostsAtLeast2: aggregateCount,
+        profileOnly: aggregateCount,
+        noMedia: aggregateCount,
+        contextPersonalOrCreator: aggregateCount,
+        contextUncertain: aggregateCount,
+        contextOfficial: aggregateCount,
+        highBinaryTriageSameOwner: aggregateCount,
+        distinctPosts2AndPersonalOrCreator: aggregateCount,
+        distinctPosts2AndUncertain: aggregateCount,
+        distinctPosts2AndStrongFemaleName: aggregateCount,
+    }).strict(),
+    knownCalibrationRestricted:
+        publicHeadroomCalibrationGroupV218.extend({
+            fullNamePresent: publicHeadroomCalibrationGroupV218,
+            usernameOnly: publicHeadroomCalibrationGroupV218,
+        }).strict(),
+    gates: z.object({
+        guardedFemaleCandidateVolumePass: z.boolean(),
+        restrictedFemaleSamplePass: z.boolean(),
+        restrictedFemalePrecisionPass: z.boolean(),
+        officialFinalRescuePass: z.boolean(),
+        nameOnlyPathWorthFurtherStudy: z.boolean(),
+    }).strict(),
+}).strict();
+
+type HeadroomCalibrationV218 =
+    z.infer<typeof publicHeadroomCalibrationV218>;
+type HeadroomCalibrationGroupV218 =
+    z.infer<typeof publicHeadroomCalibrationGroupV218>;
+
+function validHeadroomCalibrationV218(
+    values: HeadroomCalibrationV218,
+): boolean {
+    return values.predicted <= values.known
+        && values.agreed + values.disagreed === values.predicted
+        && values.wilsonLowerBoundBps
+            === oneSidedWilsonLowerBoundBps95(
+                values.agreed,
+                values.predicted,
+            );
+}
+
+function validHeadroomCalibrationGroupV218(
+    group: HeadroomCalibrationGroupV218,
+): boolean {
+    return validHeadroomCalibrationV218(group.overall)
+        && validHeadroomCalibrationV218(group.male)
+        && validHeadroomCalibrationV218(group.female)
+        && group.overall.known === group.male.known + group.female.known
+        && group.overall.predicted
+            === group.male.predicted + group.female.predicted
+        && group.overall.agreed
+            === group.male.agreed + group.female.agreed
+        && group.overall.disagreed
+            === group.male.disagreed + group.female.disagreed;
+}
+
+const replayAnalysisV2JobTerminalV218Schema =
+    replayAnalysisV2JobTerminalV212Schema.extend({
+        evaluation_ai_policy: z.literal('ai-stage-policy-v2.18'),
+        replay_ai_policy: z.literal('ai-stage-policy-v2.18'),
+        public_name_fusion: publicNameFusionCounts,
+        public_gender_headroom_v218: publicGenderHeadroomV218,
+    }).strict().superRefine((report, context) => {
+        const {
+            public_gender_headroom_v218: headroom,
+            ...withoutHeadroom
+        } = report;
+        const fusionCompatible = {
+            ...withoutHeadroom,
+            evaluation_ai_policy: 'ai-stage-policy-v2.17',
+            replay_ai_policy: 'ai-stage-policy-v2.17',
+        };
+        const fusion = report.public_name_fusion;
+        const observedTotal = fusion.baseline.male
+            + fusion.baseline.female
+            + fusion.baseline.unknown;
+        const worstTotal = observedTotal + fusion.missingPublic;
+        const worstUnknown = fusion.final.unknown + fusion.missingPublic;
+        const requiredObserved = Math.max(
+            0,
+            fusion.final.unknown - Math.floor(observedTotal / 5),
+        );
+        const requiredWorst = Math.max(
+            0,
+            worstUnknown - Math.floor(worstTotal / 5),
+        );
+        const nameVoteTotal = headroom.unknownNameVote.female
+            + headroom.unknownNameVote.male
+            + headroom.unknownNameVote.none;
+        const visualVoteTotal = headroom.unknownVisualVote.female
+            + headroom.unknownVisualVote.male
+            + headroom.unknownVisualVote.none;
+        const visualNullTotal = Object.values(
+            headroom.unknownVisualVote.nullReasons,
+        ).reduce((sum, count) => sum + count, 0);
+        const guarded = headroom.guardedFemaleNameOnly;
+        const guardedPartition = guarded.officialBlocked
+            + guarded.contextBlocked
+            + guarded.stageConflictBlocked
+            + guarded.maleVisualConflictBlocked
+            + guarded.eligible;
+        const media = headroom.mediaHeadroom;
+        const restricted = headroom.knownCalibrationRestricted;
+        const mainRestrictedGroups = [
+            restricted.overall,
+            restricted.male,
+            restricted.female,
+        ];
+        const breakdowns = [
+            restricted.fullNamePresent,
+            restricted.usernameOnly,
+        ];
+        const providerNameFailClosed = fusion.providerOk || (
+            nameVoteTotal === 0
+            && guarded.strongName === 0
+            && guardedPartition === 0
+            && mainRestrictedGroups.every(values => (
+                values.predicted === 0
+                && values.agreed === 0
+                && values.disagreed === 0
+            ))
+            && breakdowns.every(group => (
+                [group.overall, group.male, group.female].every(values => (
+                    values.predicted === 0
+                    && values.agreed === 0
+                    && values.disagreed === 0
+                ))
+            ))
+        );
+        const calibrationBreakdownConserved = (
+            ['overall', 'male', 'female'] as const
+        ).every(sex => (
+            restricted[sex].known
+                === restricted.fullNamePresent[sex].known
+                    + restricted.usernameOnly[sex].known
+            && restricted[sex].predicted
+                === restricted.fullNamePresent[sex].predicted
+                    + restricted.usernameOnly[sex].predicted
+            && restricted[sex].agreed
+                === restricted.fullNamePresent[sex].agreed
+                    + restricted.usernameOnly[sex].agreed
+            && restricted[sex].disagreed
+                === restricted.fullNamePresent[sex].disagreed
+                    + restricted.usernameOnly[sex].disagreed
+        ));
+        const guardedVolumePass = guarded.eligible >= requiredObserved;
+        const restrictedFemaleSamplePass =
+            restricted.female.predicted >= 150;
+        const restrictedFemalePrecisionPass =
+            restricted.female.wilsonLowerBoundBps >= 9_500;
+        const officialFinalRescuePass =
+            fusion.officialNegative.accepted === 0;
+        const nameOnlyPathWorthFurtherStudy = fusion.providerOk
+            && guardedVolumePass
+            && restrictedFemaleSamplePass
+            && restrictedFemalePrecisionPass
+            && officialFinalRescuePass;
+        const valid =
+            replayAnalysisV2JobTerminalV217Schema.safeParse(
+                fusionCompatible,
+            ).success
+            && headroom.baselineUnknown === fusion.baseline.unknown
+            && headroom.finalUnknown === fusion.final.unknown
+            && headroom.requiredAdditionalRescuesToObserved20
+                === requiredObserved
+            && headroom.requiredAdditionalRescuesToWorst20
+                === requiredWorst
+            && (
+                fusion.providerOk
+                    ? nameVoteTotal === headroom.baselineUnknown
+                    : nameVoteTotal === 0
+            )
+            && visualVoteTotal === headroom.baselineUnknown
+            && visualNullTotal === headroom.unknownVisualVote.none
+            && guarded.strongName === guardedPartition
+            && guarded.strongName <= headroom.unknownNameVote.female
+            && providerNameFailClosed
+            && media.finalUnknown === headroom.finalUnknown
+            && media.resolverMediaAtLeast2 <= media.finalUnknown
+            && media.distinctFeedPostsAtLeast2 <= media.finalUnknown
+            && media.profileOnly + media.noMedia <= media.finalUnknown
+            && media.contextPersonalOrCreator
+                + media.contextUncertain
+                + media.contextOfficial === media.finalUnknown
+            && media.highBinaryTriageSameOwner <= media.finalUnknown
+            && media.distinctPosts2AndPersonalOrCreator
+                <= media.distinctFeedPostsAtLeast2
+            && media.distinctPosts2AndPersonalOrCreator
+                <= media.contextPersonalOrCreator
+            && media.distinctPosts2AndUncertain
+                <= media.distinctFeedPostsAtLeast2
+            && media.distinctPosts2AndUncertain
+                <= media.contextUncertain
+            && media.distinctPosts2AndStrongFemaleName
+                <= media.distinctFeedPostsAtLeast2
+            && media.distinctPosts2AndStrongFemaleName
+                <= headroom.unknownNameVote.female
+            && validHeadroomCalibrationGroupV218(restricted)
+            && validHeadroomCalibrationGroupV218(
+                restricted.fullNamePresent,
+            )
+            && validHeadroomCalibrationGroupV218(
+                restricted.usernameOnly,
+            )
+            && calibrationBreakdownConserved
+            && restricted.overall.known
+                <= fusion.calibration.known
+            && restricted.male.known <= fusion.baseline.male
+            && restricted.female.known <= fusion.baseline.female
+            && headroom.gates.guardedFemaleCandidateVolumePass
+                === guardedVolumePass
+            && headroom.gates.restrictedFemaleSamplePass
+                === restrictedFemaleSamplePass
+            && headroom.gates.restrictedFemalePrecisionPass
+                === restrictedFemalePrecisionPass
+            && headroom.gates.officialFinalRescuePass
+                === officialFinalRescuePass
+            && headroom.gates.nameOnlyPathWorthFurtherStudy
+                === nameOnlyPathWorthFurtherStudy;
+        if (!valid) {
+            context.addIssue({
+                code: 'custom',
+                message:
+                    'ANALYSIS_V2_REPLAY_V218_HEADROOM_CONSERVATION_FAILED',
+            });
+        }
+    });
+
 export const replayAnalysisV2JobTerminalSchema = z.union([
     replayAnalysisV2JobTerminalV212Schema,
     replayAnalysisV2JobTerminalV213Schema,
@@ -623,6 +903,7 @@ export const replayAnalysisV2JobTerminalSchema = z.union([
     replayAnalysisV2JobTerminalV215Schema,
     replayAnalysisV2JobTerminalV216Schema,
     replayAnalysisV2JobTerminalV217Schema,
+    replayAnalysisV2JobTerminalV218Schema,
 ]);
 
 export function replayStageFailureDispositionEntries(

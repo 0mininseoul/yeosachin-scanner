@@ -656,6 +656,7 @@ describe('replay staged AI adapter telemetry', () => {
     it.each([
         'ai-stage-policy-v2.12',
         'ai-stage-policy-v2.17',
+        'ai-stage-policy-v2.18',
     ] as const)('rethrows an unexpected strict resolver fault under %s through the outer admission boundary', async policy => {
         mocks.createGenderResolutionResultIdentity.mockReturnValue({
             operationKey: 'resolver:identity',

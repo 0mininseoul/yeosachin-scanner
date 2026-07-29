@@ -30,6 +30,7 @@ import {
     AI_STAGE_POLICY_V215_VERSION,
     AI_STAGE_POLICY_V216_VERSION,
     AI_STAGE_POLICY_V217_VERSION,
+    AI_STAGE_POLICY_V218_VERSION,
     aiStagePolicySupports,
 } from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
@@ -381,6 +382,7 @@ export function createReplayStagedAiAdapter(
     const strictV212Resolver =
         aiStagePolicyVersion === AI_STAGE_POLICY_V212_VERSION
         || aiStagePolicyVersion === AI_STAGE_POLICY_V217_VERSION
+        || aiStagePolicyVersion === AI_STAGE_POLICY_V218_VERSION
         || Boolean(featureShadowPolicy);
     // Replay remains stateless, but v2.11 uses the same bounded call shape as scheduler-v1.
     // Waiting is local admission only: no provider attempt exists before the semaphore opens.

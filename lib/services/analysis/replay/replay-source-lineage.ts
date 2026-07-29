@@ -10,6 +10,7 @@ import {
     AI_STAGE_POLICY_V215_VERSION,
     AI_STAGE_POLICY_V216_VERSION,
     AI_STAGE_POLICY_V217_VERSION,
+    AI_STAGE_POLICY_V218_VERSION,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
 
@@ -110,6 +111,9 @@ export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY =
 /** Evaluation-only public name and existing-visual agreement shadow over v2.12. */
 export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY =
     'historical-partial-available-standard-v27-risk-v23-to-ai-v217-public-name-visual-fusion-shadow' as const;
+/** Evaluation-only aggregate public-gender headroom diagnostic over v2.17. */
+export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY =
+    'historical-partial-available-standard-v27-risk-v23-to-ai-v218-public-gender-headroom-diagnostic' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -166,6 +170,10 @@ const historicalPartialAvailableV217EvaluationPolicySchema = z.object({
     capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V217_VERSION),
 }).strict();
+const historicalPartialAvailableV218EvaluationPolicySchema = z.object({
+    capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V218_VERSION),
+}).strict();
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
@@ -181,6 +189,7 @@ export const replayEvaluationPolicySchema = z.union([
     historicalPartialAvailableV215EvaluationPolicySchema,
     historicalPartialAvailableV216EvaluationPolicySchema,
     historicalPartialAvailableV217EvaluationPolicySchema,
+    historicalPartialAvailableV218EvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -197,6 +206,7 @@ export type ReplaySupportedAiStagePolicyVersion = Extract<
     | typeof AI_STAGE_POLICY_V215_VERSION
     | typeof AI_STAGE_POLICY_V216_VERSION
     | typeof AI_STAGE_POLICY_V217_VERSION
+    | typeof AI_STAGE_POLICY_V218_VERSION
 >;
 
 /**
@@ -244,6 +254,7 @@ export function resolveReplayAiStagePolicyVersion(
         || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY
         || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY
         || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY
+        || parsed.data.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY
     ) {
         if (
             lineage.selectedPlanId !== 'standard'

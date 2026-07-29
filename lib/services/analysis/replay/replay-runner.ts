@@ -11,6 +11,7 @@ import {
     AI_STAGE_POLICY_V215_VERSION,
     AI_STAGE_POLICY_V216_VERSION,
     AI_STAGE_POLICY_V217_VERSION,
+    AI_STAGE_POLICY_V218_VERSION,
     aiStagePolicySupports,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
@@ -30,6 +31,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -51,6 +53,10 @@ import {
     evaluatePublicNameVisualFusion,
     type PublicNameVisualFusionReport,
 } from './replay-public-name-fusion';
+import {
+    evaluatePublicGenderHeadroomV218,
+    type PublicGenderHeadroomReportV218,
+} from './replay-public-gender-headroom-v218';
 export {
     REPLAY_STAGE_FAILURE_DISPOSITIONS,
 } from './replay-job-report-contract';
@@ -196,6 +202,8 @@ export interface AnalysisV2AiReplayReport {
     gender: { male: number; female: number; unknown: number; unknownRate: number };
     /** v2.17-only, aggregate and deliberately PII-free evaluation shadow. */
     publicNameFusion?: PublicNameVisualFusionReport;
+    /** v2.18-only fixed aggregate headroom matrix. */
+    publicGenderHeadroom?: PublicGenderHeadroomReportV218;
     resolver: {
         ready: number;
         applied: number;
@@ -492,7 +500,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
@@ -727,6 +736,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                     || report.replayAiPolicy === AI_STAGE_POLICY_V215_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V216_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V217_VERSION
+                    || report.replayAiPolicy === AI_STAGE_POLICY_V218_VERSION
                 )
                     ? { failure_kind: values.failureKind ?? {} }
                     : {}),
@@ -737,6 +747,9 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         ...(safeGenderQuality ? { gender_quality: safeGenderQuality } : {}),
         ...(report.publicNameFusion
             ? { public_name_fusion: report.publicNameFusion }
+            : {}),
+        ...(report.publicGenderHeadroom
+            ? { public_gender_headroom_v218: report.publicGenderHeadroom }
             : {}),
     });
 }
@@ -840,6 +853,10 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         'publicNameVisualFusionShadowV217',
     );
+    const publicGenderHeadroomDiagnosticV218 = aiStagePolicySupports(
+        replayAiPolicy,
+        'publicGenderHeadroomDiagnosticV218',
+    );
     const featureShadowPolicy = (
         replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
@@ -852,6 +869,7 @@ export async function runAnalysisV2AiReplay(input: {
     const strictV212ResolverSettlement =
         replayAiPolicy === AI_STAGE_POLICY_V212_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V217_VERSION
+        || replayAiPolicy === AI_STAGE_POLICY_V218_VERSION
         || Boolean(featureShadowPolicy);
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
@@ -902,6 +920,7 @@ export async function runAnalysisV2AiReplay(input: {
     ) as Record<typeof stageNames[number], number[]>;
     const gender = { male: 0, female: 0, unknown: 0, unknownRate: 0 };
     let publicNameFusion: PublicNameVisualFusionReport | undefined;
+    let publicGenderHeadroom: PublicGenderHeadroomReportV218 | undefined;
     const genderQuality = genderQualityV211 ? {
         triage: {
             nonOk: 0,
@@ -1706,6 +1725,52 @@ export async function runAnalysisV2AiReplay(input: {
             gender.male = publicNameFusion.final.male;
             gender.female = publicNameFusion.final.female;
             gender.unknown = publicNameFusion.final.unknown;
+            if (publicGenderHeadroomDiagnosticV218) {
+                publicGenderHeadroom = evaluatePublicGenderHeadroomV218({
+                    candidates: publicProfiles.map(profile => {
+                        const baseline =
+                            baselineByOrdinal.get(profile.ordinal);
+                        if (!baseline) {
+                            throw new Error(
+                                'ANALYSIS_V2_REPLAY_V218_HEADROOM_CONSERVATION_FAILED',
+                            );
+                        }
+                        const id = `ordinal:${profile.ordinal}`;
+                        return {
+                            id,
+                            baseline: baseline.classification,
+                            officialOrGroupExcluded:
+                                baseline.officialOrGroupExcluded,
+                            fullNamePresent:
+                                Boolean(profile.fullName?.trim()),
+                            resolverMedia:
+                                policySelectedResolverMedia(profile).map(
+                                    media => media.kind === 'feed'
+                                        ? {
+                                            kind: 'feed' as const,
+                                            ...(media.postId
+                                                ? { postId: media.postId }
+                                                : {}),
+                                        }
+                                        : { kind: 'profile' as const },
+                                ),
+                            ...(providerOk
+                                ? { name: namesById.get(id) }
+                                : {}),
+                            ...(baseline.feature?.outcome === 'ok'
+                                && baseline.feature.value
+                                ? { feature: baseline.feature.value }
+                                : {}),
+                            ...(baseline.triage
+                                ? { triage: baseline.triage }
+                                : {}),
+                        };
+                    }),
+                    providerOk,
+                    missingPublic,
+                    fusion: publicNameFusion,
+                });
+            }
         }
         if (featureShadowPolicy && shadowRescue) {
             shadowRescue.baselineMale = gender.male;
@@ -1989,6 +2054,7 @@ export async function runAnalysisV2AiReplay(input: {
         gender,
         resolver,
         ...(publicNameFusion ? { publicNameFusion } : {}),
+        ...(publicGenderHeadroom ? { publicGenderHeadroom } : {}),
         ...(genderQuality ? {
             genderQuality: {
                 ...genderQuality,

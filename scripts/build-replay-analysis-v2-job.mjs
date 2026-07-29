@@ -59,6 +59,7 @@ export const REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS = Object.freeze([
     'lib/services/analysis/replay/replay-gender-quality-gate.ts',
     'lib/services/analysis/replay/replay-job-gcs.ts',
     'lib/services/analysis/replay/replay-job-report-contract.ts',
+    'lib/services/analysis/replay/replay-public-gender-headroom-v218.ts',
     'lib/services/analysis/replay/replay-public-name-fusion.ts',
     'lib/services/analysis/replay/replay-runner.ts',
     'lib/services/analysis/replay/replay-source-lineage.ts',
@@ -98,12 +99,18 @@ export const REPLAY_ANALYSIS_V217_JOB_LOCAL_INPUTS = Object.freeze([
     ...REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
     'scripts/replay-analysis-v217-job.ts',
 ]);
+/** V2.18 imports the sealed shared runtime but has its own direct entry. */
+export const REPLAY_ANALYSIS_V218_JOB_LOCAL_INPUTS = Object.freeze([
+    ...REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+    'scripts/replay-analysis-v218-job.ts',
+]);
 const REPLAY_ANALYSIS_V2_JOB_ENTRYPOINTS = Object.freeze({
     'ai-stage-policy-v2.13': 'scripts/replay-analysis-v2-job.ts',
     'ai-stage-policy-v2.14': 'scripts/replay-analysis-v214-job.ts',
     'ai-stage-policy-v2.15': 'scripts/replay-analysis-v215-job.ts',
     'ai-stage-policy-v2.16': 'scripts/replay-analysis-v216-job.ts',
     'ai-stage-policy-v2.17': 'scripts/replay-analysis-v217-job.ts',
+    'ai-stage-policy-v2.18': 'scripts/replay-analysis-v218-job.ts',
 });
 
 const EXTERNAL_PACKAGES = Object.freeze([
@@ -424,6 +431,9 @@ function replayJobLocalInputs(evaluationAiPolicy) {
     }
     if (evaluationAiPolicy === 'ai-stage-policy-v2.17') {
         return REPLAY_ANALYSIS_V217_JOB_LOCAL_INPUTS;
+    }
+    if (evaluationAiPolicy === 'ai-stage-policy-v2.18') {
+        return REPLAY_ANALYSIS_V218_JOB_LOCAL_INPUTS;
     }
     throw new Error('ANALYSIS_V2_REPLAY_JOB_BUILD_ENTRY_POLICY_INVALID');
 }
@@ -1138,7 +1148,7 @@ async function publishImmutableDirectory({
  *   metafile: string;
  *   runtimeManifest: string;
  *   imageDigest: string;
- *   evaluationAiPolicy?: 'ai-stage-policy-v2.13' | 'ai-stage-policy-v2.14' | 'ai-stage-policy-v2.15' | 'ai-stage-policy-v2.16' | 'ai-stage-policy-v2.17';
+ *   evaluationAiPolicy?: 'ai-stage-policy-v2.13' | 'ai-stage-policy-v2.14' | 'ai-stage-policy-v2.15' | 'ai-stage-policy-v2.16' | 'ai-stage-policy-v2.17' | 'ai-stage-policy-v2.18';
  *   buildImpl?: (
  *     options: { write?: boolean; [key: string]: unknown }
  *   ) => Promise<any>;

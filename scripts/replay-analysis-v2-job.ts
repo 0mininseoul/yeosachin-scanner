@@ -38,6 +38,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
 } from '../lib/services/analysis/replay/replay-source-lineage';
 import {
     parseDiagnosticPartialCoverageCliCapability,
@@ -69,12 +70,17 @@ export const V217_EVALUATION = Object.freeze({
     capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.17' as const,
 });
+export const V218_EVALUATION = Object.freeze({
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.18' as const,
+});
 type ReplayEvaluation =
     | typeof V213_EVALUATION
     | typeof V214_EVALUATION
     | typeof V215_EVALUATION
     | typeof V216_EVALUATION
-    | typeof V217_EVALUATION;
+    | typeof V217_EVALUATION
+    | typeof V218_EVALUATION;
 declare const __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__: string;
 declare const __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__: string;
 const BUILT_IMAGE_DIGEST = typeof __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
