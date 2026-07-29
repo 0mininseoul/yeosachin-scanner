@@ -85,8 +85,26 @@ describe('kakao SDK readiness', () => {
         expect(template.content.imageUrl).toBe('https://yeosachin.com/i.png');
         // The link the reader taps must be the result, never the bare origin.
         expect(template.content.link.mobileWebUrl).toBe('https://yeosachin.com/share/abc');
-        // No summary line rides along with the card.
+        // Omitted rather than sent empty when the caller has nothing factual.
         expect(template.content).not.toHaveProperty('description');
+    });
+
+    it('carries the description when the caller supplies one', async () => {
+        const { sdk, sendDefault } = fakeKakaoSdk();
+        (globalThis as { window: { Kakao?: unknown } }).window.Kakao = sdk;
+
+        const { readyKakao, shareToKakaoNow } = await import('./kakao-share');
+        await readyKakao();
+        shareToKakaoNow({
+            url: 'https://yeosachin.com/share/abc',
+            title: '박영민님의 위장 여사친 판독 결과',
+            description: '맞팔 385명 중 모든 공개 계정들을 판독했습니다.',
+            imageUrl: 'https://yeosachin.com/i.png',
+        });
+
+        const { content } = sendDefault.mock.calls[0][0];
+        expect(content.title).toBe('박영민님의 위장 여사친 판독 결과');
+        expect(content.description).toBe('맞팔 385명 중 모든 공개 계정들을 판독했습니다.');
     });
 
     it('reports SDK_NOT_READY rather than sending when init never ran', async () => {

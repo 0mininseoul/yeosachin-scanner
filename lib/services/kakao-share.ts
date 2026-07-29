@@ -24,6 +24,7 @@ interface KakaoFeedTemplate {
     objectType: 'feed';
     content: {
         title: string;
+        description?: string;
         imageUrl: string;
         link: KakaoShareLink;
     };
@@ -125,6 +126,8 @@ export interface ResultShareContent {
     /** Publicly reachable destination. Never an auth-gated result URL. */
     url: string;
     title: string;
+    /** One factual line under the title. Never a teaser about what was found. */
+    description?: string;
     imageUrl: string;
 }
 
@@ -135,6 +138,7 @@ function feedTemplate(content: ResultShareContent): KakaoFeedTemplate {
         objectType: 'feed',
         content: {
             title: content.title,
+            ...(content.description ? { description: content.description } : {}),
             imageUrl: content.imageUrl,
             link,
         },

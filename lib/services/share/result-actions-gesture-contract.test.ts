@@ -23,9 +23,34 @@ describe('share actions keep their user gesture', () => {
         // An async handler is the exact shape that lost the gesture before.
         expect(handler).not.toMatch(/^const shareToInstagramDm = async/);
         expect(handler).not.toMatch(/\bawait\b/);
-        // The synchronous copy is what makes that possible.
-        expect(handler).toContain('copyTextSync');
         expect(handler).toContain('INSTAGRAM_DM_APP_URL');
+    });
+
+    it('copies through the clipboard API, not execCommand', () => {
+        const handler = actions.match(/const shareToInstagramDm = [\s\S]*?\n  };/)?.[0];
+        // execCommand reports success on iOS while copying nothing, which left a
+        // "복사했어요" notice sitting over an empty clipboard.
+        const api = handler!.indexOf('navigator.clipboard?.writeText');
+        const legacy = handler!.indexOf('copyTextSync');
+        expect(api).toBeGreaterThan(-1);
+        expect(legacy, 'copyTextSync must remain the fallback').toBeGreaterThan(api);
+        expect(handler).toMatch(/else if \(!copyTextSync/);
+    });
+
+    it('holds the toast on screen before handing off to the app', () => {
+        // Opening immediately meant the copy was never witnessed — the screen
+        // just changed. The pause is what makes the notice readable at all.
+        const handler = actions.match(/const shareToInstagramDm = [\s\S]*?\n  };/)?.[0];
+        expect(handler).toMatch(/setNotice\([\s\S]*?잠시 후 인스타그램이 열립니다/);
+        expect(handler).toMatch(/setTimeout\([\s\S]*?DM_OPEN_DELAY_MS\)/);
+    });
+
+    it('offers a tappable way out when the delayed hand-off is refused', () => {
+        // A navigation this far from the tap can be blocked, and nothing fires
+        // to say so; still being visible afterwards is the only tell.
+        const handler = actions.match(/const shareToInstagramDm = [\s\S]*?\n  };/)?.[0];
+        expect(handler).toMatch(/document\.visibilityState !== 'visible'/);
+        expect(handler).toMatch(/action: \{ label: '인스타그램 열기'/);
     });
 
     it('holds the Kakao item back until the share link exists', () => {
