@@ -689,7 +689,10 @@ describe('replay staged AI adapter telemetry', () => {
         expect(result).not.toHaveProperty('failureKind');
     });
 
-    it('pins the v2.13 control feature to v2.12 and the shadow feature to v2.13', async () => {
+    it.each([
+        ['ai-stage-policy-v2.13'],
+        ['ai-stage-policy-v2.14'],
+    ] as const)('pins %s control feature to v2.12 and its shadow feature to itself', async shadowPolicy => {
         mocks.createFeatureAnalysisResultIdentity.mockReturnValue({
             operationKey: 'feature:identity',
         });
@@ -718,7 +721,7 @@ describe('replay staged AI adapter telemetry', () => {
             });
             return {};
         });
-        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.13');
+        const adapter = createReplayStagedAiAdapter(shadowPolicy);
         const input = {
             ordinal: 1,
             bio: null,
@@ -734,13 +737,13 @@ describe('replay staged AI adapter telemetry', () => {
             call => call[1],
         )).toEqual([
             'ai-stage-policy-v2.12',
-            'ai-stage-policy-v2.13',
+            shadowPolicy,
         ]);
         expect(mocks.featureAnalysis.mock.calls.map(
             call => call[2].aiStagePolicyVersion,
         )).toEqual([
             'ai-stage-policy-v2.12',
-            'ai-stage-policy-v2.13',
+            shadowPolicy,
         ]);
     });
 

@@ -445,6 +445,46 @@ describe('Cloud Run analysis V2 replay job', () => {
         ]);
     });
 
+    it('runs the V2.14 job only with its own authenticated feature-model shadow bundle', async () => {
+        const { runReplayAnalysisV2Job, V214_EVALUATION } = await import(
+            './replay-analysis-v2-job'
+        );
+        const v214Bundle = v213Bundle();
+        v214Bundle.capture.evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v214-feature-model-shadow',
+            aiStage: 'ai-stage-policy-v2.14',
+        } as never;
+        const safe = JSON.parse(await actualDiagnosticV213SafeLine());
+        safe.evaluation_ai_policy = 'ai-stage-policy-v2.14';
+        safe.replay_ai_policy = 'ai-stage-policy-v2.14';
+        const createRunner = vi.fn(() => Object.freeze({}));
+
+        await runReplayAnalysisV2Job({
+            env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
+            bindLocalCleanup: () => async () => undefined,
+            loadArtifacts: vi.fn(async () => ({
+                bundle: { ...v214Bundle, expired: false },
+                cleanup: async () => undefined,
+            })),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            createRunner,
+            runReplay: vi.fn(async input => {
+                expect(input.evaluationPolicy).toEqual(V214_EVALUATION);
+                input.write(JSON.stringify(safe));
+            }),
+            installSignalCleanup: vi.fn(() => () => undefined),
+            writeStdout: vi.fn(),
+        }, V214_EVALUATION);
+
+        expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.14');
+    });
+
     it('accepts the actual v2.12 diagnostic partial-coverage safe-line key', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -687,6 +727,19 @@ describe('Cloud Run analysis V2 replay job', () => {
 
         expect(() => validateReplayAnalysisV2JobTerminalLine(
             line,
+        )).not.toThrow();
+    });
+
+    it('accepts the same strict PII-free shadow-rescue report contract for V2.14', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV213SafeLine());
+        actual.evaluation_ai_policy = 'ai-stage-policy-v2.14';
+        actual.replay_ai_policy = 'ai-stage-policy-v2.14';
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
         )).not.toThrow();
     });
 

@@ -34,6 +34,7 @@ import { createReplayStagedAiAdapter } from '../lib/services/analysis/replay/rep
 import { runAnalysisV2AiReplay } from '../lib/services/analysis/replay/replay-runner';
 import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
 } from '../lib/services/analysis/replay/replay-source-lineage';
 import {
     parseDiagnosticPartialCoverageCliCapability,
@@ -49,6 +50,11 @@ const V213_EVALUATION = Object.freeze({
     capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.13' as const,
 });
+export const V214_EVALUATION = Object.freeze({
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.14' as const,
+});
+type FeatureShadowEvaluation = typeof V213_EVALUATION | typeof V214_EVALUATION;
 declare const __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__: string;
 const BUILT_IMAGE_DIGEST = typeof __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
     === 'string'
@@ -421,7 +427,10 @@ export async function loadReplayAnalysisV2JobArtifacts(
     }
 }
 
-function authenticatedV213Bundle(value: unknown): AnalysisV2ReplayBundle {
+function authenticatedFeatureShadowBundle(
+    value: unknown,
+    evaluation: FeatureShadowEvaluation,
+): AnalysisV2ReplayBundle {
     const candidate = value as AnalysisV2ReplayBundle & { expired?: unknown };
     const { expired, ...withoutExpiry } = candidate;
     const bundle = withoutExpiry as AnalysisV2ReplayBundle;
@@ -431,9 +440,8 @@ function authenticatedV213Bundle(value: unknown): AnalysisV2ReplayBundle {
         bundle?.schemaVersion !== 2
         || expired !== false
         || bundle.capture.scope !== 'ai-only-historical-partial-available'
-        || policy?.capability
-            !== HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY
-        || policy.aiStage !== 'ai-stage-policy-v2.13'
+        || policy?.capability !== evaluation.capability
+        || policy.aiStage !== evaluation.aiStage
         || lineage.selectedPlanId !== 'standard'
         || lineage.policyVersions.pipeline !== 'v2'
         || lineage.policyVersions.aiStage !== 'ai-stage-policy-v2.7'
@@ -457,13 +465,13 @@ interface ReplayAnalysisV2JobDependencies {
     createGcsClient?: (
         config: ReplayAnalysisV2JobConfig,
     ) => ReplayJobGcsClient;
-    createRunner?: (policy: 'ai-stage-policy-v2.13') => unknown;
+    createRunner?: (policy: FeatureShadowEvaluation['aiStage']) => unknown;
     runReplay?: (input: {
         bundle: AnalysisV2ReplayBundle;
         runner: unknown;
         mode: 'paid-ai';
         paidAiOptIn: true;
-        evaluationPolicy: typeof V213_EVALUATION;
+        evaluationPolicy: FeatureShadowEvaluation;
         diagnosticPartialCoverageCapability: object;
         write: (line: string) => void;
     }) => Promise<unknown>;
@@ -583,6 +591,7 @@ function createCleanupCoordinator(
 
 export async function runReplayAnalysisV2Job(
     dependencies: ReplayAnalysisV2JobDependencies = {},
+    evaluation: FeatureShadowEvaluation = V213_EVALUATION,
 ): Promise<void> {
     const config = validateReplayAnalysisV2JobEnvironment(
         dependencies.env ?? process.env,
@@ -609,7 +618,7 @@ export async function runReplayAnalysisV2Job(
             cleanupCoordinator.replace(cleanup);
         });
         cleanupCoordinator.replace(loaded.cleanup);
-        const bundle = authenticatedV213Bundle(loaded.bundle);
+        const bundle = authenticatedFeatureShadowBundle(loaded.bundle, evaluation);
         await gcs.createClaim(JSON.stringify({
             status: 'claimed',
             schema: 'analysis-v2-replay-job-claim-v1',
@@ -617,7 +626,7 @@ export async function runReplayAnalysisV2Job(
         const runner = (
             dependencies.createRunner
                 ?? (policy => createReplayStagedAiAdapter(policy))
-        )('ai-stage-policy-v2.13');
+        )(evaluation.aiStage);
         const diagnosticPartialCoverageCapability =
             parseDiagnosticPartialCoverageCliCapability([
                 '--run',
@@ -642,7 +651,7 @@ export async function runReplayAnalysisV2Job(
                 runner,
                 mode: 'paid-ai',
                 paidAiOptIn: true,
-                evaluationPolicy: V213_EVALUATION,
+                evaluationPolicy: evaluation,
                 diagnosticPartialCoverageCapability,
                 write: line => {
                     if (terminalLine !== undefined) {

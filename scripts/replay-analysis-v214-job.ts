@@ -1,0 +1,27 @@
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import {
+    runReplayAnalysisV2Job,
+    V214_EVALUATION,
+} from './replay-analysis-v2-job';
+
+function isDirectExecution(): boolean {
+    return Boolean(process.argv[1])
+        && import.meta.url === pathToFileURL(
+            realpathSync(process.argv[1]!),
+        ).href;
+}
+
+if (isDirectExecution()) {
+    runReplayAnalysisV2Job({}, V214_EVALUATION).catch(error => {
+        const message = error instanceof Error
+            && /^ANALYSIS_V2_REPLAY_JOB_[A-Z_]+$/.test(error.message)
+            ? error.message
+            : 'ANALYSIS_V2_REPLAY_JOB_FAILED';
+        process.stderr.write(`${JSON.stringify({
+            status: 'failed',
+            errorCode: message,
+        })}\n`);
+        process.exitCode = 1;
+    });
+}

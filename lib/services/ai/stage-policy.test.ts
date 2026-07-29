@@ -9,6 +9,7 @@ import {
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_V212_VERSION,
+    AI_STAGE_POLICY_V214_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -186,6 +187,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.11',
             'ai-stage-policy-v2.12',
             'ai-stage-policy-v2.13',
+            'ai-stage-policy-v2.14',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -212,6 +214,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.11',
             'ai-stage-policy-v2.12',
             'ai-stage-policy-v2.13',
+            'ai-stage-policy-v2.14',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -265,6 +268,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.11',
             'ai-stage-policy-v2.12',
             'ai-stage-policy-v2.13',
+            'ai-stage-policy-v2.14',
         ]);
         expect(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V210_VERSION])
             .toEqual(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V29_VERSION]);
@@ -451,6 +455,32 @@ describe('V2 AI stage policy', () => {
             mediaResolution: 'HIGH',
         });
         expect(v213?.featureAnalysis).not.toBe(v212.featureAnalysis);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('adds evaluation-only v2.14 by changing only the feature model from its v2.12 control', () => {
+        const v212 = AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.12'];
+        const v214 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V214_VERSION];
+
+        for (const stage of AI_STAGE_NAMES_V27) {
+            if (stage === 'featureAnalysis') continue;
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V214_VERSION, stage))
+                .toBe(getAiStagePolicy('ai-stage-policy-v2.12', stage));
+        }
+        expect(v214.featureAnalysis).toEqual({
+            ...v212.featureAnalysis,
+            model: 'gemini-3-flash-preview',
+        });
+        expect(v214.featureAnalysis).not.toBe(v212.featureAnalysis);
+        expect(v214.featureAnalysis.mediaResolution).toBe('MEDIUM');
+        expect(v214.featureAnalysis.thinkingLevel).toBe('MEDIUM');
+        expect(v214.featureAnalysis.promptVersion).toBe(v212.featureAnalysis.promptVersion);
+        expect(v214.featureAnalysis.schemaVersion).toBe(3);
         expect(selectAiStagePolicyVersion({
             rolloutMode: 'production',
             narrativeV28RolloutMode: 'production',

@@ -26,6 +26,7 @@ import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-mi
 import {
     AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V213_VERSION,
+    AI_STAGE_POLICY_V214_VERSION,
     aiStagePolicySupports,
 } from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
@@ -357,7 +358,11 @@ export function createReplayStagedAiAdapter(
 ): ReplayAiRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
-    const controlPolicyVersion = aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION
+    const featureShadowPolicy = (
+        aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION
+        || aiStagePolicyVersion === AI_STAGE_POLICY_V214_VERSION
+    ) ? aiStagePolicyVersion : null;
+    const controlPolicyVersion = featureShadowPolicy
         ? AI_STAGE_POLICY_V212_VERSION
         : aiStagePolicyVersion;
     const supportsGenderTriageMicrobatch = aiStagePolicySupports(
@@ -370,7 +375,7 @@ export function createReplayStagedAiAdapter(
     );
     const strictV212Resolver =
         aiStagePolicyVersion === AI_STAGE_POLICY_V212_VERSION
-        || aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION;
+        || Boolean(featureShadowPolicy);
     // Replay remains stateless, but v2.11 uses the same bounded call shape as scheduler-v1.
     // Waiting is local admission only: no provider attempt exists before the semaphore opens.
     const runTriage = genderQualityV211
@@ -570,7 +575,7 @@ export function createReplayStagedAiAdapter(
                 replayCapability,
             });
         }))),
-        ...(aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION ? {
+        ...(featureShadowPolicy ? {
             shadowFeature: input => invoke(async state => {
                 const aiInput = {
                     triage: input.triage,
@@ -583,13 +588,13 @@ export function createReplayStagedAiAdapter(
                 };
                 const identity = createFeatureAnalysisResultIdentity(
                     aiInput,
-                    AI_STAGE_POLICY_V213_VERSION,
+                    featureShadowPolicy,
                 );
                 return featureAnalysis(
                     aiInput,
                     statelessAudit(requestId, identity, state),
                     {
-                        aiStagePolicyVersion: AI_STAGE_POLICY_V213_VERSION,
+                        aiStagePolicyVersion: featureShadowPolicy,
                         replayCapability,
                         ...(runFeatureProviderAttempt
                             ? { runProviderAttempt: runFeatureProviderAttempt }

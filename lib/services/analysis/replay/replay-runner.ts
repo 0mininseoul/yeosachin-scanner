@@ -7,6 +7,7 @@ import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-recon
 import {
     AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V213_VERSION,
+    AI_STAGE_POLICY_V214_VERSION,
     aiStagePolicySupports,
 } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
@@ -17,6 +18,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -45,6 +47,15 @@ import {
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
+
+function featureShadowError(
+    policy: typeof AI_STAGE_POLICY_V213_VERSION | typeof AI_STAGE_POLICY_V214_VERSION,
+    suffix: 'RUNNER_REQUIRED' | 'CONSERVATION_FAILED',
+): string {
+    return policy === AI_STAGE_POLICY_V213_VERSION
+        ? `ANALYSIS_V2_REPLAY_V213_SHADOW_${suffix}`
+        : `ANALYSIS_V2_REPLAY_V214_SHADOW_${suffix}`;
+}
 
 export interface ReplayInvocation<T> {
     outcome: ReplayOutcome;
@@ -390,7 +401,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
@@ -621,6 +633,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                 ...((
                     report.replayAiPolicy === AI_STAGE_POLICY_V212_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
+                    || report.replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
                 )
                     ? { failure_kind: values.failureKind ?? {} }
                     : {}),
@@ -723,20 +736,23 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         'genderQualityV211',
     );
-    const featureShadowV213 = replayAiPolicy === AI_STAGE_POLICY_V213_VERSION;
-    const controlAiPolicy = featureShadowV213
+    const featureShadowPolicy = (
+        replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
+        || replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
+    ) ? replayAiPolicy : null;
+    const controlAiPolicy = featureShadowPolicy
         ? AI_STAGE_POLICY_V212_VERSION
         : replayAiPolicy;
     const strictV212ResolverSettlement =
-        replayAiPolicy === AI_STAGE_POLICY_V212_VERSION || featureShadowV213;
+        replayAiPolicy === AI_STAGE_POLICY_V212_VERSION || Boolean(featureShadowPolicy);
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
     const paidRunner = input.mode === 'paid-ai'
         ? await assertReplayAiRunnerPolicy(input.runner, replayAiPolicy)
         : undefined;
-    if (featureShadowV213 && input.mode === 'paid-ai' && !paidRunner?.shadowFeature) {
-        throw new Error('ANALYSIS_V2_REPLAY_V213_SHADOW_RUNNER_REQUIRED');
+    if (featureShadowPolicy && input.mode === 'paid-ai' && !paidRunner?.shadowFeature) {
+        throw new Error(featureShadowError(featureShadowPolicy, 'RUNNER_REQUIRED'));
     }
     const cutoffBookkeepingMs = input.resolverCutoffMs ?? 25;
     if (
@@ -758,7 +774,7 @@ export async function runAnalysisV2AiReplay(input: {
     ] as const;
     const stageNames = [
         ...controlStageNames,
-        ...(featureShadowV213 ? ['featureAnalysisShadowRescue' as const] : []),
+        ...(featureShadowPolicy ? ['featureAnalysisShadowRescue' as const] : []),
     ];
     const stages = Object.fromEntries(stageNames.map(name => [
         name,
@@ -806,7 +822,7 @@ export async function runAnalysisV2AiReplay(input: {
         : 0;
     const shadowRescue: NonNullable<
         NonNullable<AnalysisV2AiReplayReport['genderQuality']>['shadowRescue']
-    > | null = featureShadowV213 ? {
+    > | null = featureShadowPolicy ? {
             baselineMale: 0,
             baselineFemale: 0,
             baselineUnknown: 0,
@@ -1400,7 +1416,7 @@ export async function runAnalysisV2AiReplay(input: {
                 }
             }
         }));
-        if (featureShadowV213 && shadowRescue) {
+        if (featureShadowPolicy && shadowRescue) {
             shadowRescue.baselineMale = gender.male;
             shadowRescue.baselineFemale = gender.female;
             shadowRescue.baselineUnknown = gender.unknown;
@@ -1424,7 +1440,7 @@ export async function runAnalysisV2AiReplay(input: {
             const shadowStage = stages.featureAnalysisShadowRescue;
             const shadowDurations = durations.featureAnalysisShadowRescue;
             if (!runner.shadowFeature || !shadowStage || !shadowDurations) {
-                throw new Error('ANALYSIS_V2_REPLAY_V213_SHADOW_RUNNER_REQUIRED');
+                throw new Error(featureShadowError(featureShadowPolicy, 'RUNNER_REQUIRED'));
             }
             await runBounded(
                 candidates,
@@ -1577,7 +1593,7 @@ export async function runAnalysisV2AiReplay(input: {
                 || shadowCalls > shadowRescue.attempted * 4
             ) {
                 throw new Error(
-                    'ANALYSIS_V2_REPLAY_V213_SHADOW_CONSERVATION_FAILED',
+                    featureShadowError(featureShadowPolicy!, 'CONSERVATION_FAILED'),
                 );
             }
         }
