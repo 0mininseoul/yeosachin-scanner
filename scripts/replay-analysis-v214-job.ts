@@ -5,6 +5,9 @@ import {
     V214_EVALUATION,
 } from './replay-analysis-v2-job';
 
+/** Build-time entry marker: lets artifact verification distinguish this from V2.13. */
+export const REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY = V214_EVALUATION;
+
 function isDirectExecution(): boolean {
     return Boolean(process.argv[1])
         && import.meta.url === pathToFileURL(

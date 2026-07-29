@@ -15,6 +15,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -927,6 +928,70 @@ describe('Cloud Run analysis V2 replay job', () => {
             });
             expect(boot.code).toBe(1);
             expect(boot.stdout).toBe('');
+            expect(boot.stderr).toBe(
+                '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
+            );
+        } finally {
+            await rm(imageRoot, { recursive: true, force: true });
+        }
+    }, 30_000);
+
+    it('builds and boots the immutable V2.14 entry instead of the V2.13 default entry', async () => {
+        const imageRoot = await mkdtemp(join(
+            tmpdir(),
+            '.replay-job-v214-image-',
+        ));
+        const workspace = join(imageRoot, 'workspace');
+        const outputDirectory = join(workspace, 'replay-job');
+        const outfile = join(outputDirectory, 'job.mjs');
+        const metafile = join(outputDirectory, 'meta.json');
+        const runtimeManifest = join(outputDirectory, 'runtime.json');
+        try {
+            await mkdir(workspace, { mode: 0o700 });
+            const {
+                copyReplayAnalysisV2JobPhysicalDependencyClosure,
+            } = await import('./build-replay-analysis-v2-job.mjs');
+            await copyReplayAnalysisV2JobPhysicalDependencyClosure({
+                sourceWorkspace: process.cwd(),
+                imageWorkspace: workspace,
+            });
+            await execFileAsync(process.execPath, [
+                'scripts/build-replay-analysis-v2-job.mjs',
+                '--outfile', outfile,
+                '--metafile', metafile,
+                '--runtime-manifest', runtimeManifest,
+                '--image-digest', immutableImageDigest,
+                '--evaluation-ai-policy=ai-stage-policy-v2.14',
+            ], {
+                cwd: process.cwd(),
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
+                inputs: Record<string, unknown>;
+            };
+            expect(metadata.inputs).toHaveProperty(
+                'scripts/replay-analysis-v214-job.ts',
+            );
+            const marker = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                '--eval',
+                `import(${JSON.stringify(pathToFileURL(outfile).href)}).then(m => process.stdout.write(m.REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY.aiStage))`,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            expect(marker.stdout).toBe('ai-stage-policy-v2.14');
+
+            const boot = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                outfile,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            }).then(() => {
+                throw new Error('Expected V2.14 replay job boot to fail closed');
+            }).catch(error => error as { code: number; stderr: string });
+            expect(boot.code).toBe(1);
             expect(boot.stderr).toBe(
                 '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
             );

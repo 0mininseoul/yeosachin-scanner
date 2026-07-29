@@ -77,6 +77,15 @@ export const REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS = Object.freeze([
     'scripts/replay-analysis-v2-job-supabase-stub.ts',
     'scripts/replay-analysis-v2-job.ts',
 ]);
+/** V2.14 imports the sealed V2.13 job runtime but has its own direct entry. */
+export const REPLAY_ANALYSIS_V214_JOB_LOCAL_INPUTS = Object.freeze([
+    ...REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+    'scripts/replay-analysis-v214-job.ts',
+]);
+const REPLAY_ANALYSIS_V2_JOB_ENTRYPOINTS = Object.freeze({
+    'ai-stage-policy-v2.13': 'scripts/replay-analysis-v2-job.ts',
+    'ai-stage-policy-v2.14': 'scripts/replay-analysis-v214-job.ts',
+});
 
 const EXTERNAL_PACKAGES = Object.freeze([
     '@google/genai',
@@ -381,13 +390,34 @@ function forbiddenGraph(reason) {
     );
 }
 
-export function auditReplayAnalysisV2JobBuildGraph(metafile) {
+function replayJobLocalInputs(evaluationAiPolicy) {
+    if (evaluationAiPolicy === 'ai-stage-policy-v2.13') {
+        return REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS;
+    }
+    if (evaluationAiPolicy === 'ai-stage-policy-v2.14') {
+        return REPLAY_ANALYSIS_V214_JOB_LOCAL_INPUTS;
+    }
+    throw new Error('ANALYSIS_V2_REPLAY_JOB_BUILD_ENTRY_POLICY_INVALID');
+}
+
+function replayJobEntrypoint(evaluationAiPolicy) {
+    const entrypoint = REPLAY_ANALYSIS_V2_JOB_ENTRYPOINTS[evaluationAiPolicy];
+    if (!entrypoint) {
+        throw new Error('ANALYSIS_V2_REPLAY_JOB_BUILD_ENTRY_POLICY_INVALID');
+    }
+    return entrypoint;
+}
+
+export function auditReplayAnalysisV2JobBuildGraph(
+    metafile,
+    evaluationAiPolicy = 'ai-stage-policy-v2.13',
+) {
     if (!metafile || typeof metafile !== 'object') {
         forbiddenGraph('missing metafile');
     }
 
     const actualInputs = Object.keys(metafile.inputs ?? {}).sort();
-    const expectedInputs = [...REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS].sort();
+    const expectedInputs = [...replayJobLocalInputs(evaluationAiPolicy)].sort();
     if (
         actualInputs.length !== expectedInputs.length
         || actualInputs.some((path, index) => path !== expectedInputs[index])
@@ -1080,6 +1110,7 @@ async function publishImmutableDirectory({
  *   metafile: string;
  *   runtimeManifest: string;
  *   imageDigest: string;
+ *   evaluationAiPolicy?: 'ai-stage-policy-v2.13' | 'ai-stage-policy-v2.14';
  *   buildImpl?: (
  *     options: { write?: boolean; [key: string]: unknown }
  *   ) => Promise<any>;
@@ -1097,6 +1128,7 @@ export async function buildReplayAnalysisV2Job({
     metafile,
     runtimeManifest,
     imageDigest,
+    evaluationAiPolicy = 'ai-stage-policy-v2.13',
     buildImpl = build,
     closeSyncImpl = closeDescriptorSync,
     fstatSyncImpl = fstatDescriptorSync,
@@ -1106,6 +1138,7 @@ export async function buildReplayAnalysisV2Job({
     rmImpl = rm,
     symlinkImpl = symlink,
 }) {
+    const entrypoint = replayJobEntrypoint(evaluationAiPolicy);
     for (const [name, path] of Object.entries({
         outfile,
         metafile,
@@ -1152,7 +1185,7 @@ export async function buildReplayAnalysisV2Job({
 
     const result = await buildImpl({
         entryPoints: [
-            resolve(root, 'scripts/replay-analysis-v2-job.ts'),
+            resolve(root, entrypoint),
         ],
         outfile,
         alias: {
@@ -1165,6 +1198,8 @@ export async function buildReplayAnalysisV2Job({
         define: {
             __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__:
                 JSON.stringify(imageDigest),
+            __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__:
+                JSON.stringify(evaluationAiPolicy),
         },
         metafile: true,
         packages: 'external',
@@ -1174,7 +1209,7 @@ export async function buildReplayAnalysisV2Job({
         write: false,
     });
 
-    auditReplayAnalysisV2JobBuildGraph(result.metafile);
+    auditReplayAnalysisV2JobBuildGraph(result.metafile, evaluationAiPolicy);
     const output = result.outputFiles?.find(
         candidate => resolve(candidate.path) === resolve(outfile),
     );
@@ -1232,6 +1267,20 @@ function literalArgument(name) {
     return value;
 }
 
+function optionalLiteralArgument(name, fallback) {
+    const index = process.argv.indexOf(name);
+    const assignment = process.argv.find(argument => (
+        argument.startsWith(`${name}=`)
+    ));
+    if (index >= 0 && assignment) throw new Error(`Duplicate ${name}`);
+    if (index < 0 && !assignment) return fallback;
+    const value = assignment
+        ? assignment.slice(name.length + 1)
+        : process.argv[index + 1];
+    if (!value || value.startsWith('--')) throw new Error(`Missing ${name}`);
+    return value;
+}
+
 if (
     process.argv[1]
     && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
@@ -1241,5 +1290,9 @@ if (
         metafile: argument('--metafile'),
         runtimeManifest: argument('--runtime-manifest'),
         imageDigest: literalArgument('--image-digest'),
+        evaluationAiPolicy: optionalLiteralArgument(
+            '--evaluation-ai-policy',
+            'ai-stage-policy-v2.13',
+        ),
     });
 }

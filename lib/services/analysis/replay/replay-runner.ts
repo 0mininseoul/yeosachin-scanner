@@ -94,7 +94,7 @@ export interface ReplayAccountProfile {
 export interface ReplayAiRunner {
     triage?(input: ReplayTriageInput): Promise<ReplayInvocation<GenderTriageResult>>;
     feature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
-    /** v2.13-only HIGH-resolution call after the complete v2.12 control settles. */
+    /** Evaluation-only feature shadow call after the complete v2.12 control settles. */
     shadowFeature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
     resolveGender?(input: {

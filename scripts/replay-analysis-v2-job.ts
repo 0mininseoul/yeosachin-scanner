@@ -56,9 +56,14 @@ export const V214_EVALUATION = Object.freeze({
 });
 type FeatureShadowEvaluation = typeof V213_EVALUATION | typeof V214_EVALUATION;
 declare const __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__: string;
+declare const __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__: string;
 const BUILT_IMAGE_DIGEST = typeof __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
     === 'string'
     ? __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
+    : undefined;
+const BUILT_ENTRY_POLICY = typeof __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__
+    === 'string'
+    ? __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__
     : undefined;
 const IMMUTABLE_IMAGE_DIGEST =
     /^[a-z0-9][a-z0-9._-]*(?:[./][a-z0-9][a-z0-9._-]*)+@sha256:[a-f0-9]{64}$/;
@@ -686,7 +691,10 @@ function isDirectExecution(): boolean {
         ).href;
 }
 
-if (isDirectExecution()) {
+if (
+    isDirectExecution()
+    && BUILT_ENTRY_POLICY !== 'ai-stage-policy-v2.14'
+) {
     runReplayAnalysisV2Job().catch(error => {
         const message = error instanceof Error
             && /^ANALYSIS_V2_REPLAY_JOB_[A-Z_]+$/.test(error.message)
