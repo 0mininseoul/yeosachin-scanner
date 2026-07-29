@@ -324,15 +324,24 @@ const profileOutcomeSchema = z.object({
     )
         && value.v29FeatureAdmission !== undefined
         && value.v29FeatureAdmission !== 'eligible';
+    const resolverAppliedClassificationChange = (
+        value.status !== value.baselineClassification
+        && ['unresolved', 'unresolved_stage_conflict'].includes(value.baselineClassification)
+        && ['verified_female', 'verified_non_female'].includes(value.status)
+        && value.classificationSource === 'gender_resolution'
+        && value.genderResolutionStatus === 'ready_applied'
+        && value.genderResolutionOperationKey !== null
+        && value.genderResolutionResultHash !== null
+    );
     if (v29FeatureSkipped && (
-        value.status !== 'unresolved'
+        !(value.status === 'unresolved' || resolverAppliedClassificationChange)
         || value.feature !== null
         || value.featureOperationKey !== null
         || value.featureResultHash !== null
     )) {
         context.addIssue({
             code: 'custom',
-            message: 'A v2.9 pre-feature exclusion must remain an unresolved triage-only outcome.',
+            message: 'A v2.9 pre-feature exclusion must remain triage-only unless resolver provenance applies a terminal classification.',
         });
     }
     const featureRequired = !v29FeatureSkipped && [
