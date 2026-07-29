@@ -28,15 +28,6 @@ const itemCls =
 const INSTAGRAM_DM_APP_URL = 'instagram://direct-inbox';
 const INSTAGRAM_DM_WEB_URL = 'https://www.instagram.com/direct/inbox/';
 
-/* Long enough to read the toast, short enough not to feel stalled. The app
-   switch is instant, so without this pause nothing about the copy is ever
-   seen — the screen simply changes. */
-const DM_OPEN_DELAY_MS = 2000;
-/* If the scheme hand-off is refused the page just stays put, with no event to
-   tell us. Still being visible this long after the attempt is the only signal
-   available, and it costs nothing when the app did open. */
-const DM_HANDOFF_CHECK_MS = 1500;
-
 interface Notice {
     text: string;
     /** Carries its own gesture, for when a delayed navigation was refused. */
@@ -110,11 +101,6 @@ export function ResultActions({
   const [notice, setNotice] = useState<Notice | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const openTimers = useRef<number[]>([]);
-
-  useEffect(() => () => {
-    for (const timer of openTimers.current) window.clearTimeout(timer);
-  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -186,22 +172,16 @@ export function ResultActions({
   /* Instagram exposes no way to prefill a DM or to choose a recipient from the
      outside — `direct-inbox` only opens the inbox. So the link goes to the
      clipboard first and the user pastes it into whichever chat they pick.
-     Nothing blocking may sit between the copy and the scheme navigation: iOS
-     Safari drops custom-scheme navigations that have drifted too far from the
-     originating gesture, and an alert() in between is enough to lose it.
 
-     On a phone only the app scheme runs. The old timer-based web fallback fired
-     even when the app had opened, leaving instagram.com sitting in a tab behind
-     the browser; there is no reliable signal that a scheme handoff succeeded, so
-     the platform decides instead of a guess. */
+     On a phone only the app scheme runs. An earlier timer-based web fallback
+     fired even when the app had opened, leaving instagram.com in a tab behind
+     the browser; there is no reliable signal that a scheme hand-off succeeded,
+     so the platform decides instead of a guess. */
   const shareToInstagramDm = () => {
     /* The clipboard write must not be awaited — it is *started* inside the
        gesture and left to settle on its own, so nothing delays what follows. */
     const write = navigator.clipboard?.writeText(linkToShare);
     setOpen(false);
-    // A second tap restarts the sequence rather than stacking another hand-off.
-    for (const timer of openTimers.current) window.clearTimeout(timer);
-    openTimers.current = [];
     const failed = () => setNotice({ text: '링크를 복사하지 못했어요. 결과 페이지에서 다시 시도해 주세요.' });
     if (write) write.catch(failed);
     else if (!copyTextSync(linkToShare)) failed();
@@ -212,18 +192,19 @@ export function ResultActions({
       return;
     }
 
-    setNotice({ text: '링크를 복사했어요. 잠시 후 인스타그램이 열립니다.' });
-    const openApp = () => { window.location.href = INSTAGRAM_DM_APP_URL; };
-    openTimers.current.push(window.setTimeout(() => {
-      openApp();
-      openTimers.current.push(window.setTimeout(() => {
-        if (document.visibilityState !== 'visible') return;
-        setNotice({
-          text: '링크를 복사했어요. 인스타그램이 열리지 않았다면 눌러 주세요.',
-          action: { label: '인스타그램 열기', run: openApp },
-        });
-      }, DM_HANDOFF_CHECK_MS));
-    }, DM_OPEN_DELAY_MS));
+    /* The hand-off waits for its own tap rather than firing on a timer.
+       A delayed scheme navigation has drifted out of the tap that caused it, so
+       the browser stops and asks whether this site may open another app — and
+       that dialog is a worse thing to meet than one more button. Opening from
+       the button keeps the navigation inside a real gesture, and the notice
+       gets read on the way past instead of being raced. */
+    setNotice({
+      text: '링크를 복사했어요. DM 입력창에 붙여넣어 주세요.',
+      action: {
+        label: '인스타그램 열기',
+        run: () => { window.location.href = INSTAGRAM_DM_APP_URL; },
+      },
+    });
   };
 
   return (
@@ -235,18 +216,22 @@ export function ResultActions({
         && createPortal(
           <div
             role="status"
-            className="fixed inset-x-4 bottom-6 z-50 mx-auto max-w-[420px] border border-line-2 bg-ink-2 px-4 py-3 text-center text-[12.5px] font-semibold text-fg shadow-[0_8px_28px_-8px_rgba(0,0,0,0.85)]"
+            className="toast-rise fixed inset-x-0 bottom-0 z-50 border-t-2 border-blood bg-ink-2 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-4 shadow-[0_-18px_44px_-12px_rgba(0,0,0,0.9)]"
           >
-            {notice.text}
-            {notice.action && (
-              <button
-                type="button"
-                onClick={notice.action.run}
-                className="mt-2.5 block w-full border border-line-2 py-2 text-[12.5px] font-semibold text-fg transition-colors hover:bg-panel"
-              >
-                {notice.action.label}
-              </button>
-            )}
+            <div className="mx-auto flex max-w-[480px] flex-col">
+              <span className="text-[15px] font-bold leading-snug tracking-tight text-fg">
+                {notice.text}
+              </span>
+              {notice.action && (
+                <button
+                  type="button"
+                  onClick={notice.action.run}
+                  className="mt-3.5 w-full bg-blood py-3 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
+                >
+                  {notice.action.label}
+                </button>
+              )}
+            </div>
           </div>,
           document.body,
         )}

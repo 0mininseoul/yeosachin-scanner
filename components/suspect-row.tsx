@@ -4,6 +4,7 @@ import {
   DeepRiskAnalysis,
   GradeRail,
   InstaButton,
+  MaskedHandle,
   RecentMutualBadge,
   RiskTag,
   ThreatBar,
@@ -74,12 +75,10 @@ export function SuspectRow({
               {String(rank).padStart(2, "0")}
             </span>
             {maskHandle ? (
-              <span
-                aria-hidden="true"
-                className="min-w-0 flex-1 select-none truncate text-[15px] font-bold tracking-tight text-fg/90 blur-[5px]"
-              >
-                @{account.instagramId}
-              </span>
+              <MaskedHandle
+                value={account.instagramId}
+                className="flex-1 text-[15px] font-bold tracking-tight text-fg/90"
+              />
             ) : account.instagramUrl ? (
               <a
                 href={account.instagramUrl}

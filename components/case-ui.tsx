@@ -291,6 +291,54 @@ export function Redaction({ className = "", style }: { className?: string; style
  * The tone is our own: Instagram's #DBDBDB would be the brightest thing on the
  * page, louder than the crimson accent.
  */
+/* Masking for third parties on a shared report.
+ *
+ * The people listed here never agreed to appear in something the owner can send
+ * to anyone. But a page of grey placeholders and solid blurs reads as broken
+ * rather than as redacted, so enough is kept to show a real account was found
+ * and nothing more: a face you cannot identify, and the first two characters of
+ * a handle you cannot complete.
+ *
+ * Blur is applied to the rendered image, so the underlying source is still in
+ * the payload — treat this as presentation, not as a privacy boundary. */
+export const MASK_BLUR_PX = 9;
+
+/** Leading characters left legible on a masked handle. */
+const MASK_VISIBLE_CHARS = 2;
+
+export function MaskedHandle({ value, className = "" }: { value: string; className?: string }) {
+  const head = value.slice(0, MASK_VISIBLE_CHARS);
+  const tail = value.slice(MASK_VISIBLE_CHARS);
+  return (
+    <span className={`flex min-w-0 items-baseline ${className}`}>
+      <span className="shrink-0 whitespace-pre">@{head}</span>
+      {tail && (
+        <span
+          aria-hidden="true"
+          className="min-w-0 select-none truncate"
+          style={{ filter: `blur(${MASK_BLUR_PX * 0.55}px)` }}
+        >
+          {tail}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Wraps an avatar so the blur cannot leak past the frame's edge. */
+export function MaskedAvatar({ children }: { children: ReactNode }) {
+  return (
+    <div
+      // Scaled up because a blur samples past its own bounds; without it the
+      // frame gets a translucent rim of whatever sits behind it.
+      className="h-full w-full scale-125"
+      style={{ filter: `blur(${MASK_BLUR_PX}px)` }}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function ProfileFallback({ variant = "person" }: { variant?: "person" | "private" }) {
   return (
     <div className="flex h-full w-full items-center justify-center bg-line">

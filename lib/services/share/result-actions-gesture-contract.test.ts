@@ -37,20 +37,13 @@ describe('share actions keep their user gesture', () => {
         expect(handler).toMatch(/else if \(!copyTextSync/);
     });
 
-    it('holds the toast on screen before handing off to the app', () => {
-        // Opening immediately meant the copy was never witnessed — the screen
-        // just changed. The pause is what makes the notice readable at all.
+    it('opens the app from its own tap, never from a timer', () => {
         const handler = actions.match(/const shareToInstagramDm = [\s\S]*?\n  };/)?.[0];
-        expect(handler).toMatch(/setNotice\([\s\S]*?잠시 후 인스타그램이 열립니다/);
-        expect(handler).toMatch(/setTimeout\([\s\S]*?DM_OPEN_DELAY_MS\)/);
-    });
-
-    it('offers a tappable way out when the delayed hand-off is refused', () => {
-        // A navigation this far from the tap can be blocked, and nothing fires
-        // to say so; still being visible afterwards is the only tell.
-        const handler = actions.match(/const shareToInstagramDm = [\s\S]*?\n  };/)?.[0];
-        expect(handler).toMatch(/document\.visibilityState !== 'visible'/);
-        expect(handler).toMatch(/action: \{ label: '인스타그램 열기'/);
+        // A scheme navigation on a timer has drifted out of the tap that caused
+        // it, and the browser interrupts with "open another app?" — worse to
+        // meet than one more button.
+        expect(handler).not.toMatch(/setTimeout/);
+        expect(handler).toMatch(/action: \{[\s\S]*?label: '인스타그램 열기'/);
     });
 
     it('holds the Kakao item back until the share link exists', () => {

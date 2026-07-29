@@ -4,6 +4,7 @@ import path from 'node:path';
 import { ImageResponse } from 'next/og';
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 import { v2ShareResultService } from '@/lib/services/share/v2-result-share';
 import {
     readAnalysisV2ResultImageObject,
@@ -47,7 +48,7 @@ const paperlogyFont = readFile(
         'app',
         'fonts',
         'paperlogy',
-        'Paperlogy-7Bold.woff2'
+        'Paperlogy-7Bold.woff'
     )
 );
 
@@ -196,20 +197,29 @@ export async function GET(
         }
     }
 
-    const font = await paperlogyFont;
-    const response = new ImageResponse(
-        ogCard(displayName, imageDataUrl),
-        {
-            width: 800,
-            height: 400,
-            fonts: [{
-                name: 'Paperlogy',
-                data: font,
-                weight: 700,
-                style: 'normal',
-            }],
-        }
-    );
+    let response: Response;
+    try {
+        const font = await paperlogyFont;
+        response = new ImageResponse(
+            ogCard(displayName, imageDataUrl),
+            {
+                width: 800,
+                height: 400,
+                fonts: [{
+                    name: 'Paperlogy',
+                    data: font,
+                    weight: 700,
+                    style: 'normal',
+                }],
+            }
+        );
+    } catch {
+        /* The renderer rejects input this route cannot fully predict — a display
+           name is whatever Instagram holds. A chat client showing the generic
+           card beats one showing nothing, which is what a 500 gets you. */
+        console.error('Share OG render failed');
+        return NextResponse.redirect(new URL('/og.png', CANONICAL_APP_ORIGIN), 302);
+    }
     for (const [name, value] of Object.entries(SHARE_IMAGE_CACHE_HEADERS)) {
         response.headers.set(name, value);
     }
