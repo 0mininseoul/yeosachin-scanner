@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import sharp from 'sharp';
 
 const mocks = vi.hoisted(() => ({
     from: vi.fn(),
@@ -15,15 +16,25 @@ vi.mock('@/lib/services/media/result-image-resolver', () => ({
 }));
 
 import { GET } from '@/app/api/share/[token]/image/route';
+import { createV2ShareImagePath } from './v2-result-share';
 
 const token = 'a'.repeat(64);
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
+const privacySecret = 'share-test-secret-'.repeat(3);
+const sourceImage = await sharp({
+    create: {
+        width: 160,
+        height: 160,
+        channels: 3,
+        background: { r: 160, g: 80, b: 40 },
+    },
+}).webp({ quality: 90 }).toBuffer();
 const locator = {
     source: 'r2' as const,
     objectKey: `v1/${'b'.repeat(32)}/female/${'c'.repeat(32)}.webp`,
     sha256: 'd'.repeat(64),
-    byteSize: 4,
+    byteSize: sourceImage.byteLength,
     expiresAt: '2026-08-28T00:00:00.000Z',
 };
 
@@ -46,6 +57,7 @@ function context(rawToken = token) {
 describe('V2 shared result image route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        vi.stubEnv('IMAGE_PROXY_SIGNING_SECRET', privacySecret);
         mocks.from.mockReturnValue(record({
             id: requestId,
             user_id: userId,
@@ -54,14 +66,18 @@ describe('V2 shared result image route', () => {
             share_enabled: true,
         }));
         mocks.resolve.mockResolvedValue(locator);
-        mocks.read.mockResolvedValue(Buffer.from([1, 2, 3, 4]));
+        mocks.read.mockResolvedValue(sourceImage);
     });
 
-    it('reads an exact token-bound result image from private R2', async () => {
+    it('serves an irreversibly downsampled token-bound image from private R2', async () => {
+        const imagePath = createV2ShareImagePath(token, {
+            requestId,
+            kind: 'female',
+            candidateId: 'candidate:one',
+        });
         const response = await GET(
             new Request(
-                `https://example.com/api/share/${token}/image`
-                + '?kind=female&candidateId=candidate%3Aone'
+                `https://example.com${imagePath}`
             ),
             context()
         );
@@ -69,9 +85,12 @@ describe('V2 shared result image route', () => {
         expect(response.status).toBe(200);
         expect(response.headers.get('content-type')).toBe('image/webp');
         expect(response.headers.get('cache-control')).toContain('no-store');
-        expect(await response.arrayBuffer()).toEqual(
-            Uint8Array.from([1, 2, 3, 4]).buffer
-        );
+        const output = Buffer.from(await response.arrayBuffer());
+        const metadata = await sharp(output).metadata();
+        expect(output).not.toEqual(sourceImage);
+        expect(output.byteLength).toBeLessThan(sourceImage.byteLength);
+        expect(metadata.width).toBeLessThanOrEqual(24);
+        expect(metadata.height).toBeLessThanOrEqual(24);
         expect(mocks.resolve).toHaveBeenCalledWith(
             {
                 requestId,
@@ -81,6 +100,19 @@ describe('V2 shared result image route', () => {
             userId
         );
         expect(mocks.read).toHaveBeenCalledWith(locator);
+    });
+
+    it('rejects raw candidate ids in the public image URL', async () => {
+        const response = await GET(
+            new Request(
+                `https://example.com/api/share/${token}/image`
+                + '?kind=female&candidateId=candidate%3Aone'
+            ),
+            context()
+        );
+
+        expect(response.status).toBe(400);
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 
     it('fails closed before storage for inactive and future-pipeline tokens', async () => {

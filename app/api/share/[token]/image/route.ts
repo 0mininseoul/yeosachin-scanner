@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { NextResponse } from 'next/server';
+import sharp from 'sharp';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     readAnalysisV2ResultImageObject,
@@ -8,11 +9,13 @@ import {
 import type {
     AnalysisV2ResultImageLocator,
 } from '@/lib/services/media/image-proxy-token';
+import {
+    openV2SharedImageLocator,
+} from '@/lib/services/share/v2-share-privacy';
 
 export const runtime = 'nodejs';
 
 const shareTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
-const candidateIdSchema = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 const shareRecordSchema = z.object({
     id: z.string().uuid(),
     user_id: z.string().uuid(),
@@ -51,26 +54,26 @@ function placeholder() {
 }
 
 function parseLocator(
-    url: URL
+    url: URL,
+    shareToken: string
 ): Omit<AnalysisV2ResultImageLocator, 'requestId'> | null {
     const keys = [...url.searchParams.keys()];
     if (
         new Set(keys).size !== keys.length
-        || keys.some(key => key !== 'kind' && key !== 'candidateId')
+        || keys.some(key => key !== 'kind' && key !== 'locator')
     ) {
         return null;
     }
     const kind = url.searchParams.get('kind');
-    const rawCandidateId = url.searchParams.get('candidateId');
     if (kind === 'target') {
-        return rawCandidateId === null
+        return url.searchParams.get('locator') === null
             ? { kind: 'target', candidateId: null }
             : null;
     }
-    if (kind !== 'female' && kind !== 'private') return null;
-    const candidateId = candidateIdSchema.safeParse(rawCandidateId);
-    return candidateId.success
-        ? { kind, candidateId: candidateId.data }
+    if (kind !== null) return null;
+    const sealedLocator = url.searchParams.get('locator');
+    return sealedLocator
+        ? openV2SharedImageLocator(shareToken, sealedLocator)
         : null;
 }
 
@@ -79,8 +82,9 @@ export async function GET(
     { params }: { params: Promise<{ token: string }> }
 ) {
     const token = shareTokenSchema.safeParse((await params).token);
-    const locator = parseLocator(new URL(request.url));
-    if (!token.success || !locator) return jsonError(400);
+    if (!token.success) return jsonError(400);
+    const locator = parseLocator(new URL(request.url), token.data);
+    if (!locator) return jsonError(400);
 
     const { data, error } = await supabaseAdmin
         .from('analysis_requests')
@@ -104,12 +108,24 @@ export async function GET(
 
     try {
         const bytes = await readAnalysisV2ResultImageObject(resolved);
-        return new NextResponse(new Uint8Array(bytes), {
+        const downsampled = await sharp(bytes, {
+            failOn: 'error',
+            limitInputPixels: 16_777_216,
+        })
+            .rotate()
+            .resize(24, 24, {
+                fit: 'cover',
+                position: 'centre',
+                withoutEnlargement: true,
+            })
+            .webp({ quality: 42, effort: 4 })
+            .toBuffer();
+        return new NextResponse(new Uint8Array(downsampled), {
             status: 200,
             headers: {
                 ...IMAGE_HEADERS,
                 'Content-Type': 'image/webp',
-                'Content-Length': String(bytes.byteLength),
+                'Content-Length': String(downsampled.byteLength),
             },
         });
     } catch {
