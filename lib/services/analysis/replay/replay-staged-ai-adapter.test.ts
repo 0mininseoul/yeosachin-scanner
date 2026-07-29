@@ -653,7 +653,10 @@ describe('replay staged AI adapter telemetry', () => {
         expect(mocks.genderResolution).not.toHaveBeenCalled();
     });
 
-    it('rethrows an unexpected v2.12 resolver fault through the outer admission boundary', async () => {
+    it.each([
+        'ai-stage-policy-v2.12',
+        'ai-stage-policy-v2.17',
+    ] as const)('rethrows an unexpected strict resolver fault under %s through the outer admission boundary', async policy => {
         mocks.createGenderResolutionResultIdentity.mockReturnValue({
             operationKey: 'resolver:identity',
         });
@@ -661,7 +664,7 @@ describe('replay staged AI adapter telemetry', () => {
             new Error('unexpected resolver logic fault'),
         );
 
-        await expect(createReplayStagedAiAdapter('ai-stage-policy-v2.12')
+        await expect(createReplayStagedAiAdapter(policy)
             .resolveGender?.({
                 ordinal: 1,
                 media: [],

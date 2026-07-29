@@ -37,6 +37,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
 } from '../lib/services/analysis/replay/replay-source-lineage';
 import {
     parseDiagnosticPartialCoverageCliCapability,
@@ -64,11 +65,16 @@ export const V216_EVALUATION = Object.freeze({
     capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     aiStage: 'ai-stage-policy-v2.16' as const,
 });
-type FeatureShadowEvaluation =
+export const V217_EVALUATION = Object.freeze({
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.17' as const,
+});
+type ReplayEvaluation =
     | typeof V213_EVALUATION
     | typeof V214_EVALUATION
     | typeof V215_EVALUATION
-    | typeof V216_EVALUATION;
+    | typeof V216_EVALUATION
+    | typeof V217_EVALUATION;
 declare const __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__: string;
 declare const __ANALYSIS_V2_REPLAY_JOB_ENTRY_POLICY__: string;
 const BUILT_IMAGE_DIGEST = typeof __ANALYSIS_V2_REPLAY_JOB_IMAGE_DIGEST__
@@ -448,7 +454,7 @@ export async function loadReplayAnalysisV2JobArtifacts(
 
 function authenticatedFeatureShadowBundle(
     value: unknown,
-    evaluation: FeatureShadowEvaluation,
+    evaluation: ReplayEvaluation,
 ): AnalysisV2ReplayBundle {
     const candidate = value as AnalysisV2ReplayBundle & { expired?: unknown };
     const { expired, ...withoutExpiry } = candidate;
@@ -484,13 +490,13 @@ interface ReplayAnalysisV2JobDependencies {
     createGcsClient?: (
         config: ReplayAnalysisV2JobConfig,
     ) => ReplayJobGcsClient;
-    createRunner?: (policy: FeatureShadowEvaluation['aiStage']) => unknown;
+    createRunner?: (policy: ReplayEvaluation['aiStage']) => unknown;
     runReplay?: (input: {
         bundle: AnalysisV2ReplayBundle;
         runner: unknown;
         mode: 'paid-ai';
         paidAiOptIn: true;
-        evaluationPolicy: FeatureShadowEvaluation;
+        evaluationPolicy: ReplayEvaluation;
         diagnosticPartialCoverageCapability: object;
         write: (line: string) => void;
     }) => Promise<unknown>;
@@ -610,7 +616,7 @@ function createCleanupCoordinator(
 
 export async function runReplayAnalysisV2Job(
     dependencies: ReplayAnalysisV2JobDependencies = {},
-    evaluation: FeatureShadowEvaluation = V213_EVALUATION,
+    evaluation: ReplayEvaluation = V213_EVALUATION,
 ): Promise<void> {
     const config = validateReplayAnalysisV2JobEnvironment(
         dependencies.env ?? process.env,

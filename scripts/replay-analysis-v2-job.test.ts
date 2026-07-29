@@ -264,6 +264,56 @@ async function actualDiagnosticV216SafeLine(): Promise<string> {
     return JSON.stringify(actual);
 }
 
+async function actualDiagnosticV217SafeLine(): Promise<string> {
+    const actual = JSON.parse(await actualDiagnosticV212SafeLine());
+    actual.evaluation_ai_policy = 'ai-stage-policy-v2.17';
+    actual.replay_ai_policy = 'ai-stage-policy-v2.17';
+    actual.gender_quality.qualityGate = {
+        observedUnknownRate: 0,
+        worstCaseUnknownRate: 1,
+        observedPass: true,
+        worstCasePass: false,
+    };
+    actual.public_name_fusion = {
+        publicAnalyzed: 0,
+        providerOk: true,
+        calibration: {
+            known: 0,
+            predicted: 0,
+            agreed: 0,
+            disagreed: 0,
+            male: { known: 0, predicted: 0, agreed: 0, disagreed: 0 },
+            female: { known: 0, predicted: 0, agreed: 0, disagreed: 0 },
+        },
+        officialNegative: { known: 0, fusionAccepted: 0 },
+        unknown: {
+            eligible: 0,
+            predicted: 0,
+            rescuedMale: 0,
+            rescuedFemale: 0,
+            unresolved: 0,
+        },
+        baseline: { male: 0, female: 0, unknown: 0 },
+        final: { male: 0, female: 0, unknown: 0 },
+        missingPublic: 1,
+        gates: {
+            calibrationVolumePass: false,
+            overallAgreementPass: false,
+            maleVolumePass: false,
+            maleAgreementPass: false,
+            femaleVolumePass: false,
+            femaleAgreementPass: false,
+            officialNegativePass: true,
+            observedUnknownRate: 0,
+            observedUnknownPass: true,
+            worstCaseUnknownRate: 1,
+            worstCaseUnknownPass: false,
+            adoptionPass: false,
+        },
+    };
+    return JSON.stringify(actual);
+}
+
 interface V213TerminalReportFixture {
     diagnostic_partial_coverage_override: {
         retained_profiles: number;
@@ -290,6 +340,14 @@ interface V213TerminalReportFixture {
             finalFemale: number;
             missingPublic: number;
         };
+    };
+}
+
+interface V217TerminalReportFixture {
+    public_name_fusion: {
+        unknown: Record<string, unknown>;
+        final: { unknown: number };
+        gates: { adoptionPass: boolean };
     };
 }
 
@@ -603,6 +661,48 @@ describe('Cloud Run analysis V2 replay job', () => {
         expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.16');
     });
 
+    it('runs the V2.17 job only with its authenticated public name fusion bundle', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+            runV217ReplayAnalysisV2Job,
+        } = await import(
+            './replay-analysis-v217-job'
+        );
+        const v217Bundle = v213Bundle();
+        v217Bundle.capture.evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v217-public-name-visual-fusion-shadow',
+            aiStage: 'ai-stage-policy-v2.17',
+        } as never;
+        const createRunner = vi.fn(() => Object.freeze({}));
+
+        await runV217ReplayAnalysisV2Job({
+            env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
+            bindLocalCleanup: () => async () => undefined,
+            loadArtifacts: vi.fn(async () => ({
+                bundle: { ...v217Bundle, expired: false },
+                cleanup: async () => undefined,
+            })),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            createRunner,
+            runReplay: vi.fn(async input => {
+                expect(input.evaluationPolicy).toEqual(
+                    REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+                );
+                input.write(await actualDiagnosticV217SafeLine());
+            }),
+            installSignalCleanup: vi.fn(() => () => undefined),
+            writeStdout: vi.fn(),
+        });
+
+        expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.17');
+    });
+
     it('accepts the actual v2.12 diagnostic partial-coverage safe-line key', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -874,6 +974,35 @@ describe('Cloud Run analysis V2 replay job', () => {
         )).not.toThrow();
     });
 
+    it('accepts only the strict PII-free V2.17 public name fusion aggregate contract', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const line = await actualDiagnosticV217SafeLine();
+
+        expect(validateReplayAnalysisV2JobTerminalLine(line)).toBe(line);
+        const mutations: Array<(
+            report: V217TerminalReportFixture,
+        ) => void> = [
+            report => {
+                report.public_name_fusion.unknown.username = 'private';
+            },
+            report => {
+                report.public_name_fusion.final.unknown += 1;
+            },
+            report => {
+                report.public_name_fusion.gates.adoptionPass = true;
+            },
+        ];
+        for (const mutate of mutations) {
+            const report = JSON.parse(line) as V217TerminalReportFixture;
+            mutate(report);
+            expect(() => validateReplayAnalysisV2JobTerminalLine(
+                JSON.stringify(report),
+            )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+        }
+    });
+
     it('rejects V2.15 shadow-rescue conservation drift', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -1139,7 +1268,7 @@ describe('Cloud Run analysis V2 replay job', () => {
                     manifest: runtime,
                 }),
             ).resolves.toBeUndefined();
-            expect(Object.keys(metadata.inputs)).toHaveLength(40);
+            expect(Object.keys(metadata.inputs)).toHaveLength(41);
             const graph = JSON.stringify(metadata);
             expect(graph).not.toMatch(
                 /supabase\/admin|supabase-js|result-store|attempt-store|lease-store|apify|(?:^|[/_-])r2(?:[/_.-]|$)|@google-cloud\/tasks|cloud-tasks|analysis-tasks|tasks-client|tasks-store|app\/api/i,
@@ -1533,6 +1662,68 @@ describe('Cloud Run analysis V2 replay job', () => {
             expect(boot.stderr).toBe(
                 '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
             );
+        } finally {
+            await rm(imageRoot, { recursive: true, force: true });
+        }
+    }, 30_000);
+
+    it('builds the immutable V2.17 entry with its pinned common bootstrap export', async () => {
+        const imageRoot = await mkdtemp(join(
+            tmpdir(),
+            '.replay-job-v217-image-',
+        ));
+        const workspace = join(imageRoot, 'workspace');
+        const outputDirectory = join(workspace, 'replay-job');
+        const outfile = join(outputDirectory, 'job.mjs');
+        const metafile = join(outputDirectory, 'meta.json');
+        const runtimeManifest = join(outputDirectory, 'runtime.json');
+        try {
+            await mkdir(workspace, { mode: 0o700 });
+            const {
+                copyReplayAnalysisV2JobPhysicalDependencyClosure,
+            } = await import('./build-replay-analysis-v2-job.mjs');
+            await copyReplayAnalysisV2JobPhysicalDependencyClosure({
+                sourceWorkspace: process.cwd(),
+                imageWorkspace: workspace,
+            });
+            await execFileAsync(process.execPath, [
+                'scripts/build-replay-analysis-v2-job.mjs',
+                '--outfile', outfile,
+                '--metafile', metafile,
+                '--runtime-manifest', runtimeManifest,
+                '--image-digest', immutableImageDigest,
+                '--evaluation-ai-policy=ai-stage-policy-v2.17',
+            ], {
+                cwd: process.cwd(),
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
+                inputs: Record<string, unknown>;
+            };
+            expect(metadata.inputs).toHaveProperty(
+                'scripts/replay-analysis-v217-job.ts',
+            );
+            expect(metadata.inputs).toHaveProperty(
+                'lib/services/analysis/replay/replay-public-name-fusion.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v216-job.ts',
+            );
+            const marker = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                '--eval',
+                `import(${JSON.stringify(pathToFileURL(outfile).href)}).then(m => process.stdout.write(m.REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY.aiStage))`,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            expect(marker.stdout).toBe('ai-stage-policy-v2.17');
+
+            const loaded = await import(
+                `${pathToFileURL(outfile).href}?bootstrap-v217-contract`
+            );
+            expect(Reflect.get(loaded, 'runReplayAnalysisV2Job'))
+                .toBeTypeOf('function');
         } finally {
             await rm(imageRoot, { recursive: true, force: true });
         }

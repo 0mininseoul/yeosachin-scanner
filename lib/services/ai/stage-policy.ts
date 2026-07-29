@@ -81,6 +81,12 @@ export const AI_STAGE_POLICY_V215_VERSION = 'ai-stage-policy-v2.15';
  * object byte-for-byte and changes only replay shadow candidate admission.
  */
 export const AI_STAGE_POLICY_V216_VERSION = 'ai-stage-policy-v2.16';
+/**
+ * v2.17 is an evaluation-only public name/visual fusion shadow. Its complete
+ * provider configuration is the immutable v2.12 control; only replay-side
+ * aggregate fusion diagnostics are added.
+ */
+export const AI_STAGE_POLICY_V217_VERSION = 'ai-stage-policy-v2.17';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
@@ -93,6 +99,7 @@ export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_V214_VERSION,
     AI_STAGE_POLICY_V215_VERSION,
     AI_STAGE_POLICY_V216_VERSION,
+    AI_STAGE_POLICY_V217_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -283,6 +290,10 @@ const AI_STAGE_POLICIES_V216 = Object.freeze({
     ...AI_STAGE_POLICIES_V215,
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V217 = Object.freeze({
+    ...AI_STAGE_POLICIES_V212,
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
@@ -295,6 +306,7 @@ export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_V214_VERSION]: AI_STAGE_POLICIES_V214,
     [AI_STAGE_POLICY_V215_VERSION]: AI_STAGE_POLICIES_V215,
     [AI_STAGE_POLICY_V216_VERSION]: AI_STAGE_POLICIES_V216,
+    [AI_STAGE_POLICY_V217_VERSION]: AI_STAGE_POLICIES_V217,
 });
 
 export type AiStagePolicyCapability =
@@ -306,7 +318,8 @@ export type AiStagePolicyCapability =
     /** Safe v2.8 public-copy contracts, restored for the v2.10 successor only. */
     | 'safePublicPresentationV28'
     | 'genderQualityV211'
-    | 'featureSingleProfileShadowV216';
+    | 'featureSingleProfileShadowV216'
+    | 'publicNameVisualFusionShadowV217';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -394,6 +407,16 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'safePublicPresentationV28',
         'genderQualityV211',
         'featureSingleProfileShadowV216',
+    ]),
+    [AI_STAGE_POLICY_V217_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+        'publicNameVisualFusionShadowV217',
     ]),
 });
 

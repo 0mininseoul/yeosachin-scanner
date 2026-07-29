@@ -10,10 +10,15 @@ import {
     AI_STAGE_POLICY_V214_VERSION,
     AI_STAGE_POLICY_V215_VERSION,
     AI_STAGE_POLICY_V216_VERSION,
+    AI_STAGE_POLICY_V217_VERSION,
     aiStagePolicySupports,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
-import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
+import {
+    createPrivateNameBatchResponseSchema,
+    type PrivateNameAccountInput,
+    type PrivateNameAnalysisResult,
+} from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
@@ -24,6 +29,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -41,6 +47,10 @@ import {
     type DiagnosticPartialCoverageCliCapability,
 } from './diagnostic-partial-coverage-capability';
 import { evaluateReplayGenderQualityGate } from './replay-gender-quality-gate';
+import {
+    evaluatePublicNameVisualFusion,
+    type PublicNameVisualFusionReport,
+} from './replay-public-name-fusion';
 export {
     REPLAY_STAGE_FAILURE_DISPOSITIONS,
 } from './replay-job-report-contract';
@@ -109,7 +119,9 @@ export interface ReplayAiRunner {
     feature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     /** Evaluation-only feature shadow call after the complete v2.12 control settles. */
     shadowFeature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
-    privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
+    privateNames?(input: readonly PrivateNameAccountInput[]): Promise<
+        ReplayInvocation<PrivateNameAnalysisResult[]>
+    >;
     resolveGender?(input: {
         ordinal: number;
         media: readonly ReplayMedia[];
@@ -182,6 +194,8 @@ export interface AnalysisV2AiReplayReport {
         featureAnalysisShadowRescue?: ReplayStageMetrics;
     };
     gender: { male: number; female: number; unknown: number; unknownRate: number };
+    /** v2.17-only, aggregate and deliberately PII-free evaluation shadow. */
+    publicNameFusion?: PublicNameVisualFusionReport;
     resolver: {
         ready: number;
         applied: number;
@@ -477,7 +491,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
@@ -711,6 +726,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                     || report.replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V215_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V216_VERSION
+                    || report.replayAiPolicy === AI_STAGE_POLICY_V217_VERSION
                 )
                     ? { failure_kind: values.failureKind ?? {} }
                     : {}),
@@ -719,6 +735,9 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         gender: report.gender,
         resolver: report.resolver,
         ...(safeGenderQuality ? { gender_quality: safeGenderQuality } : {}),
+        ...(report.publicNameFusion
+            ? { public_name_fusion: report.publicNameFusion }
+            : {}),
     });
 }
 
@@ -817,6 +836,10 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         'featureSingleProfileShadowV216',
     );
+    const publicNameVisualFusionShadowV217 = aiStagePolicySupports(
+        replayAiPolicy,
+        'publicNameVisualFusionShadowV217',
+    );
     const featureShadowPolicy = (
         replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
@@ -827,7 +850,9 @@ export async function runAnalysisV2AiReplay(input: {
         ? AI_STAGE_POLICY_V212_VERSION
         : replayAiPolicy;
     const strictV212ResolverSettlement =
-        replayAiPolicy === AI_STAGE_POLICY_V212_VERSION || Boolean(featureShadowPolicy);
+        replayAiPolicy === AI_STAGE_POLICY_V212_VERSION
+        || replayAiPolicy === AI_STAGE_POLICY_V217_VERSION
+        || Boolean(featureShadowPolicy);
     if (input.mode === 'paid-ai' && input.paidAiOptIn !== true) {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
@@ -836,6 +861,15 @@ export async function runAnalysisV2AiReplay(input: {
         : undefined;
     if (featureShadowPolicy && input.mode === 'paid-ai' && !paidRunner?.shadowFeature) {
         throw new Error(featureShadowError(featureShadowPolicy, 'RUNNER_REQUIRED'));
+    }
+    if (
+        publicNameVisualFusionShadowV217
+        && input.mode === 'paid-ai'
+        && !paidRunner?.privateNames
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_RUNNER_REQUIRED',
+        );
     }
     const cutoffBookkeepingMs = input.resolverCutoffMs ?? 25;
     if (
@@ -867,6 +901,7 @@ export async function runAnalysisV2AiReplay(input: {
         stageNames.map(name => [name, [] as number[]]),
     ) as Record<typeof stageNames[number], number[]>;
     const gender = { male: 0, female: 0, unknown: 0, unknownRate: 0 };
+    let publicNameFusion: PublicNameVisualFusionReport | undefined;
     const genderQuality = genderQualityV211 ? {
         triage: {
             nonOk: 0,
@@ -981,6 +1016,11 @@ export async function runAnalysisV2AiReplay(input: {
                 username: profile.username,
                 ...(profile.fullName ? { fullName: profile.fullName } : {}),
             }));
+        const publicAccounts = publicProfiles.map(profile => ({
+            id: `ordinal:${profile.ordinal}`,
+            username: profile.username,
+            ...(profile.fullName ? { fullName: profile.fullName } : {}),
+        }));
         const policySelectedResolverMedia = (
             profile: typeof publicProfiles[number],
         ) => {
@@ -1051,6 +1091,18 @@ export async function runAnalysisV2AiReplay(input: {
                 collect(stages.privateAccountName, durations.privateAccountName, result);
             })
             : Promise.resolve());
+        let publicNameInvocation:
+            ReplayInvocation<PrivateNameAnalysisResult[]> | undefined;
+        const publicNameTask = publicNameVisualFusionShadowV217
+            ? observeRequiredTask(runner.privateNames!(publicAccounts).then(result => {
+                collect(
+                    stages.privateAccountName,
+                    durations.privateAccountName,
+                    result,
+                );
+                publicNameInvocation = result;
+            }))
+            : Promise.resolve();
 
         const prepared: PreparedPublicReplay[] = [];
         const v29AccountProfile = (
@@ -1358,7 +1410,7 @@ export async function runAnalysisV2AiReplay(input: {
             },
         ));
         try {
-            await Promise.all([privateTask, publicTask]);
+            await Promise.all([privateTask, publicNameTask, publicTask]);
         } catch (error) {
             await abortAndObserveResolvers(launchedResolvers, cutoffBookkeepingMs);
             throw error;
@@ -1507,6 +1559,114 @@ export async function runAnalysisV2AiReplay(input: {
                 }
             }
         }));
+        if (publicNameVisualFusionShadowV217) {
+            const expectedIds = publicAccounts.map(account => account.id);
+            const parsedNames = publicNameInvocation?.outcome === 'ok'
+                ? createPrivateNameBatchResponseSchema(expectedIds).safeParse(
+                    publicNameInvocation.value,
+                )
+                : undefined;
+            const hasProviderFailure = replayStageFailureDispositionEntries(
+                publicNameInvocation?.failureDisposition ?? {},
+            ).some(([disposition, count]) => (
+                disposition !== 'success' && count > 0
+            ));
+            const providerOk = parsedNames?.success === true
+                && !hasProviderFailure;
+            const namesById = new Map(
+                providerOk
+                    ? parsedNames.data.map(result => [result.id, result])
+                    : [],
+            );
+            const baselineByOrdinal = new Map(
+                baselinePublicOutcomes.map(outcome => [
+                    outcome.profile.ordinal,
+                    outcome,
+                ]),
+            );
+            if (baselineByOrdinal.size !== publicProfiles.length) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_CONSERVATION_FAILED',
+                );
+            }
+            publicNameFusion = evaluatePublicNameVisualFusion({
+                candidates: publicProfiles.map(profile => {
+                    const baseline = baselineByOrdinal.get(profile.ordinal);
+                    if (!baseline) {
+                        throw new Error(
+                            'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_CONSERVATION_FAILED',
+                        );
+                    }
+                    const id = `ordinal:${profile.ordinal}`;
+                    return {
+                        id,
+                        baseline: baseline.classification,
+                        ...(providerOk
+                            ? { name: namesById.get(id) }
+                            : {}),
+                        ...(baseline.feature?.outcome === 'ok'
+                            && baseline.feature.value
+                            ? { feature: baseline.feature.value }
+                            : {}),
+                        ...(baseline.triage
+                            ? { triage: baseline.triage }
+                            : {}),
+                    };
+                }),
+                providerOk,
+                missingPublic,
+            });
+            const baselineTotal = publicNameFusion.baseline.male
+                + publicNameFusion.baseline.female
+                + publicNameFusion.baseline.unknown;
+            const finalTotal = publicNameFusion.final.male
+                + publicNameFusion.final.female
+                + publicNameFusion.final.unknown;
+            const calibration = publicNameFusion.calibration;
+            const unknown = publicNameFusion.unknown;
+            if (
+                baselineTotal !== publicProfiles.length
+                || finalTotal !== publicProfiles.length
+                || calibration.known
+                    !== publicNameFusion.baseline.male
+                        + publicNameFusion.baseline.female
+                || calibration.known
+                    !== calibration.male.known + calibration.female.known
+                || calibration.predicted
+                    !== calibration.agreed + calibration.disagreed
+                || calibration.predicted
+                    !== calibration.male.predicted
+                        + calibration.female.predicted
+                || calibration.agreed
+                    !== calibration.male.agreed + calibration.female.agreed
+                || calibration.disagreed
+                    !== calibration.male.disagreed
+                        + calibration.female.disagreed
+                || unknown.predicted
+                    !== unknown.rescuedMale + unknown.rescuedFemale
+                || unknown.predicted > unknown.eligible
+                || unknown.unresolved
+                    !== publicNameFusion.baseline.unknown - unknown.predicted
+                || publicNameFusion.final.male
+                    !== publicNameFusion.baseline.male
+                        + unknown.rescuedMale
+                || publicNameFusion.final.female
+                    !== publicNameFusion.baseline.female
+                        + unknown.rescuedFemale
+                || publicNameFusion.final.unknown !== unknown.unresolved
+                || publicNameFusion.officialNegative.fusionAccepted !== 0
+                || publicNameFusion.missingPublic !== missingPublic
+                || publicNameFusion.publicAnalyzed
+                    !== (providerOk ? publicProfiles.length : 0)
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_CONSERVATION_FAILED',
+                );
+            }
+            gender.male = publicNameFusion.final.male;
+            gender.female = publicNameFusion.final.female;
+            gender.unknown = publicNameFusion.final.unknown;
+        }
         if (featureShadowPolicy && shadowRescue) {
             shadowRescue.baselineMale = gender.male;
             shadowRescue.baselineFemale = gender.female;
@@ -1639,7 +1799,9 @@ export async function runAnalysisV2AiReplay(input: {
             (genderQuality.feature.finalDecision.unresolved ?? 0)
             + (genderQuality.feature.finalDecision.unresolved_stage_conflict ?? 0);
         const headroom = genderQuality.headroom;
-        const baselineUnknown = shadowRescue?.baselineUnknown ?? gender.unknown;
+        const baselineUnknown = shadowRescue?.baselineUnknown
+            ?? publicNameFusion?.baseline.unknown
+            ?? gender.unknown;
         if (
             total !== observedPublic
             || triageOutcomes !== observedPublic
@@ -1786,6 +1948,7 @@ export async function runAnalysisV2AiReplay(input: {
         stages,
         gender,
         resolver,
+        ...(publicNameFusion ? { publicNameFusion } : {}),
         ...(genderQuality ? {
             genderQuality: {
                 ...genderQuality,

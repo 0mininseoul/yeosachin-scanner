@@ -407,12 +407,192 @@ const replayAnalysisV2JobTerminalV215Schema =
 const replayAnalysisV2JobTerminalV216Schema =
     featureShadowTerminalSchema('ai-stage-policy-v2.16');
 
+const publicNameFusionSexCalibration = z.object({
+    known: aggregateCount,
+    predicted: aggregateCount,
+    agreed: aggregateCount,
+    disagreed: aggregateCount,
+}).strict();
+
+const publicNameFusionCounts = z.object({
+    publicAnalyzed: aggregateCount,
+    providerOk: z.boolean(),
+    calibration: publicNameFusionSexCalibration.extend({
+        male: publicNameFusionSexCalibration,
+        female: publicNameFusionSexCalibration,
+    }).strict(),
+    officialNegative: z.object({
+        known: aggregateCount,
+        fusionAccepted: aggregateCount,
+    }).strict(),
+    unknown: z.object({
+        eligible: aggregateCount,
+        predicted: aggregateCount,
+        rescuedMale: aggregateCount,
+        rescuedFemale: aggregateCount,
+        unresolved: aggregateCount,
+    }).strict(),
+    baseline: z.object({
+        male: aggregateCount,
+        female: aggregateCount,
+        unknown: aggregateCount,
+    }).strict(),
+    final: z.object({
+        male: aggregateCount,
+        female: aggregateCount,
+        unknown: aggregateCount,
+    }).strict(),
+    missingPublic: aggregateCount,
+    gates: z.object({
+        calibrationVolumePass: z.boolean(),
+        overallAgreementPass: z.boolean(),
+        maleVolumePass: z.boolean(),
+        maleAgreementPass: z.boolean(),
+        femaleVolumePass: z.boolean(),
+        femaleAgreementPass: z.boolean(),
+        officialNegativePass: z.boolean(),
+        observedUnknownRate: aggregateRate,
+        observedUnknownPass: z.boolean(),
+        worstCaseUnknownRate: aggregateRate,
+        worstCaseUnknownPass: z.boolean(),
+        adoptionPass: z.boolean(),
+    }).strict(),
+}).strict();
+
+const replayAnalysisV2JobTerminalV217Schema =
+    replayAnalysisV2JobTerminalV212Schema.extend({
+        evaluation_ai_policy: z.literal('ai-stage-policy-v2.17'),
+        replay_ai_policy: z.literal('ai-stage-policy-v2.17'),
+        public_name_fusion: publicNameFusionCounts,
+    }).strict().superRefine((report, context) => {
+        const fusion = report.public_name_fusion;
+        const calibration = fusion.calibration;
+        const unknown = fusion.unknown;
+        const observedTotal = fusion.baseline.male
+            + fusion.baseline.female
+            + fusion.baseline.unknown;
+        const finalTotal = fusion.final.male
+            + fusion.final.female
+            + fusion.final.unknown;
+        const coverageMissingPublic =
+            report.diagnostic_partial_coverage_override.source_profiles
+            - report.diagnostic_partial_coverage_override.retained_profiles;
+        const observedUnknownRate = observedTotal === 0
+            ? 0
+            : Number((fusion.final.unknown / observedTotal).toFixed(4));
+        const worstCaseTotal = observedTotal + fusion.missingPublic;
+        const worstCaseUnknown = fusion.final.unknown + fusion.missingPublic;
+        const worstCaseUnknownRate = worstCaseTotal === 0
+            ? 0
+            : Number((worstCaseUnknown / worstCaseTotal).toFixed(4));
+        const calibrationVolumePass = calibration.predicted >= 30;
+        const overallAgreementPass = calibration.predicted > 0
+            && calibration.agreed * 10_000 >= calibration.predicted * 9_500;
+        const maleVolumePass = calibration.male.predicted >= 10;
+        const maleAgreementPass = maleVolumePass
+            && calibration.male.predicted > 0
+            && calibration.male.agreed * 10_000
+                >= calibration.male.predicted * 9_500;
+        const femaleVolumePass = calibration.female.predicted >= 10;
+        const femaleAgreementPass = femaleVolumePass
+            && calibration.female.predicted > 0
+            && calibration.female.agreed * 10_000
+                >= calibration.female.predicted * 9_500;
+        const officialNegativePass =
+            fusion.officialNegative.fusionAccepted === 0;
+        const observedUnknownPass =
+            fusion.final.unknown * 5 <= observedTotal;
+        const worstCaseUnknownPass =
+            worstCaseUnknown * 5 <= worstCaseTotal;
+        const adoptionPass = fusion.providerOk
+            && calibrationVolumePass
+            && overallAgreementPass
+            && maleVolumePass
+            && maleAgreementPass
+            && femaleVolumePass
+            && femaleAgreementPass
+            && officialNegativePass
+            && observedUnknownPass
+            && worstCaseUnknownPass;
+        const valid =
+            fusion.missingPublic === coverageMissingPublic
+            && observedTotal === finalTotal
+            && fusion.publicAnalyzed
+                === (fusion.providerOk ? observedTotal : 0)
+            && calibration.known
+                === fusion.baseline.male + fusion.baseline.female
+            && calibration.known
+                === calibration.male.known + calibration.female.known
+            && calibration.male.known === fusion.baseline.male
+            && calibration.female.known === fusion.baseline.female
+            && calibration.predicted
+                === calibration.agreed + calibration.disagreed
+            && calibration.predicted
+                === calibration.male.predicted
+                    + calibration.female.predicted
+            && calibration.agreed
+                === calibration.male.agreed + calibration.female.agreed
+            && calibration.disagreed
+                === calibration.male.disagreed
+                    + calibration.female.disagreed
+            && calibration.male.predicted
+                === calibration.male.agreed + calibration.male.disagreed
+            && calibration.female.predicted
+                === calibration.female.agreed + calibration.female.disagreed
+            && unknown.predicted
+                === unknown.rescuedMale + unknown.rescuedFemale
+            && unknown.predicted <= unknown.eligible
+            && unknown.eligible <= fusion.baseline.unknown
+            && unknown.unresolved
+                === fusion.baseline.unknown - unknown.predicted
+            && fusion.final.male
+                === fusion.baseline.male + unknown.rescuedMale
+            && fusion.final.female
+                === fusion.baseline.female + unknown.rescuedFemale
+            && fusion.final.unknown === unknown.unresolved
+            && fusion.officialNegative.known <= observedTotal
+            && fusion.officialNegative.fusionAccepted === 0
+            && fusion.final.male === report.gender.male
+            && fusion.final.female === report.gender.female
+            && fusion.final.unknown === report.gender.unknown
+            && report.gender.unknownRate === observedUnknownRate
+            && fusion.gates.calibrationVolumePass
+                === calibrationVolumePass
+            && fusion.gates.overallAgreementPass === overallAgreementPass
+            && fusion.gates.maleVolumePass === maleVolumePass
+            && fusion.gates.maleAgreementPass === maleAgreementPass
+            && fusion.gates.femaleVolumePass === femaleVolumePass
+            && fusion.gates.femaleAgreementPass === femaleAgreementPass
+            && fusion.gates.officialNegativePass === officialNegativePass
+            && fusion.gates.observedUnknownRate === observedUnknownRate
+            && fusion.gates.observedUnknownPass === observedUnknownPass
+            && fusion.gates.worstCaseUnknownRate === worstCaseUnknownRate
+            && fusion.gates.worstCaseUnknownPass === worstCaseUnknownPass
+            && fusion.gates.adoptionPass === adoptionPass
+            && report.gender_quality.qualityGate.observedUnknownRate
+                === observedUnknownRate
+            && report.gender_quality.qualityGate.observedPass
+                === observedUnknownPass
+            && report.gender_quality.qualityGate.worstCaseUnknownRate
+                === worstCaseUnknownRate
+            && report.gender_quality.qualityGate.worstCasePass
+                === worstCaseUnknownPass;
+        if (!valid) {
+            context.addIssue({
+                code: 'custom',
+                message:
+                    'ANALYSIS_V2_REPLAY_V217_NAME_FUSION_CONSERVATION_FAILED',
+            });
+        }
+    });
+
 export const replayAnalysisV2JobTerminalSchema = z.union([
     replayAnalysisV2JobTerminalV212Schema,
     replayAnalysisV2JobTerminalV213Schema,
     replayAnalysisV2JobTerminalV214Schema,
     replayAnalysisV2JobTerminalV215Schema,
     replayAnalysisV2JobTerminalV216Schema,
+    replayAnalysisV2JobTerminalV217Schema,
 ]);
 
 export function replayStageFailureDispositionEntries(

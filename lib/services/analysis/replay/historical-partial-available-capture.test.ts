@@ -9,6 +9,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
 } from './replay-source-lineage';
 
 const lineage = {
@@ -247,6 +248,50 @@ describe('historical partial-available replay capture', () => {
             evaluationPolicy: {
                 capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
                 aiStage: 'ai-stage-policy-v2.16',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.17 public name-visual fusion capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'd'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.17',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.17',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'e'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.17',
             } as never,
             source: {
                 profiles: [],
