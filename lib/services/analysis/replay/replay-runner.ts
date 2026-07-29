@@ -290,7 +290,7 @@ async function awaitResolverCutoffBookkeeping(
     }
 }
 
-function metrics(): ReplayStageMetrics {
+function metrics(includeFailureKind: boolean): ReplayStageMetrics {
     return {
         calls: 0,
         rateLimited: 0,
@@ -299,7 +299,7 @@ function metrics(): ReplayStageMetrics {
         p50LatencyMs: 0,
         p95LatencyMs: 0,
         failureDisposition: {},
-        failureKind: {},
+        ...(includeFailureKind ? { failureKind: {} } : {}),
     };
 }
 
@@ -387,11 +387,12 @@ function collect(stage: ReplayStageMetrics, durations: number[], invocation: Rep
         stage.failureDisposition[disposition] =
             (stage.failureDisposition[disposition] ?? 0) + count;
     }
-    const failureKind = stage.failureKind ?? (stage.failureKind = {});
-    for (const kind of GEMINI_GENERATION_FAILURE_KINDS) {
-        const count = invocation.failureKind?.[kind];
-        if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) continue;
-        failureKind[kind] = (failureKind[kind] ?? 0) + count;
+    if (stage.failureKind) {
+        for (const kind of GEMINI_GENERATION_FAILURE_KINDS) {
+            const count = invocation.failureKind?.[kind];
+            if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) continue;
+            stage.failureKind[kind] = (stage.failureKind[kind] ?? 0) + count;
+        }
     }
     if (invocation.outcome !== 'ok' && recordedFailureEntries.length === 0) {
         stage.failureDisposition[invocation.outcome] =
@@ -413,11 +414,12 @@ function collectCutoffResolver(
         stage.failureDisposition[disposition] =
             (stage.failureDisposition[disposition] ?? 0) + count;
     }
-    const failureKind = stage.failureKind ?? (stage.failureKind = {});
-    for (const kind of GEMINI_GENERATION_FAILURE_KINDS) {
-        const count = tracked.telemetry.failureKind[kind];
-        if (!count) continue;
-        failureKind[kind] = (failureKind[kind] ?? 0) + count;
+    if (stage.failureKind) {
+        for (const kind of GEMINI_GENERATION_FAILURE_KINDS) {
+            const count = tracked.telemetry.failureKind[kind];
+            if (!count) continue;
+            stage.failureKind[kind] = (stage.failureKind[kind] ?? 0) + count;
+        }
     }
     durations.push(...tracked.telemetry.attemptLatenciesMs);
     if (tracked.telemetry.pendingAttemptStartedAt !== undefined) {
@@ -553,7 +555,9 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                 p50_latency_ms: values.p50LatencyMs,
                 p95_latency_ms: values.p95LatencyMs,
                 failure_disposition: values.failureDisposition,
-                failure_kind: values.failureKind ?? {},
+                ...(report.replayAiPolicy === AI_STAGE_POLICY_V212_VERSION
+                    ? { failure_kind: values.failureKind ?? {} }
+                    : {}),
             },
         ])),
         gender: report.gender,
@@ -674,7 +678,10 @@ export async function runAnalysisV2AiReplay(input: {
         : cutoffBookkeepingMs;
     const replayStarted = performance.now();
     const names = ['genderTriage', 'featureAnalysis', 'privateAccountName', 'genderResolution'] as const;
-    const stages = Object.fromEntries(names.map(name => [name, metrics()])) as AnalysisV2AiReplayReport['stages'];
+    const stages = Object.fromEntries(names.map(name => [
+        name,
+        metrics(strictV212ResolverSettlement),
+    ])) as AnalysisV2AiReplayReport['stages'];
     const durations = Object.fromEntries(names.map(name => [name, [] as number[]])) as Record<typeof names[number], number[]>;
     const gender = { male: 0, female: 0, unknown: 0, unknownRate: 0 };
     const genderQuality = genderQualityV211 ? {

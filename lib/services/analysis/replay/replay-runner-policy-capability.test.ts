@@ -248,12 +248,14 @@ describe('replay staged AI runner policy capability', () => {
             source: 'checkpoint',
         }]);
 
+        let serialized = '';
         const report = await runAnalysisV2AiReplay({
             bundle: historicalV210Bundle,
             runner: createReplayStagedAiAdapter('ai-stage-policy-v2.10'),
             mode: 'paid-ai',
             paidAiOptIn: true,
             evaluationPolicy: historicalV210Evaluation,
+            write: line => { serialized = line; },
         });
 
         expect(report).toMatchObject({
@@ -263,6 +265,12 @@ describe('replay staged AI runner policy capability', () => {
         expect(ai.genderTriage).not.toHaveBeenCalled();
         expect(ai.genderTriageMicrobatch).toHaveBeenCalledOnce();
         expect(ai.featureAnalysis).not.toHaveBeenCalled();
+        expect(Object.values(
+            JSON.parse(serialized).stages as Record<string, object>,
+        ).every(
+            (stage: object) => !Object.hasOwn(stage, 'failure_kind'),
+        )).toBe(true);
+        expect(report.stages.genderTriage).not.toHaveProperty('failureKind');
     });
 
     it('admits uncertain triage to feature then launches one late resolver for strict personal unresolved output', async () => {
@@ -325,6 +333,12 @@ describe('replay staged AI runner policy capability', () => {
         expect(serialized).toContain('gender_quality');
         expect(serialized).not.toContain('"public"');
         expect(serialized).not.toContain('"m1"');
+        expect(Object.values(
+            JSON.parse(serialized).stages as Record<string, object>,
+        ).every(
+            (stage: object) => !Object.hasOwn(stage, 'failure_kind'),
+        )).toBe(true);
+        expect(report.stages.genderTriage).not.toHaveProperty('failureKind');
     });
 
     it('serializes a v2.12 MAX_TOKENS resolver rejection as one unknown account', async () => {

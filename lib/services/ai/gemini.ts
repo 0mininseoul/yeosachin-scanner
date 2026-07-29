@@ -830,6 +830,8 @@ export async function analyzeWithGemini<T>(
     const resolvedPolicyVersion = stage
         ? assertSupportedAiStagePolicyVersion(aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION)
         : AI_STAGE_POLICY_VERSION;
+    const replayFailureTaxonomy = statelessReplay
+        && resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION;
     const replayProviderAdmission = Boolean(
         runProviderAttempt
         && statelessReplay
@@ -1038,7 +1040,6 @@ export async function analyzeWithGemini<T>(
                     throw generationError;
                 }
                 const disposition = classifyGeminiGenerationError(generationError);
-                const failureKind = classifyGeminiGenerationFailureKind(generationError);
                 await emitAttemptTelemetry({
                     tokenUsage: null,
                     usageComplete: false,
@@ -1057,7 +1058,10 @@ export async function analyzeWithGemini<T>(
                     attempt: attemptNumber,
                     retryCount: attemptNumber - 1,
                     disposition,
-                    failureKind,
+                    ...(replayFailureTaxonomy ? {
+                        failureKind:
+                            classifyGeminiGenerationFailureKind(generationError),
+                    } : {}),
                     finishReason: null,
                 }, onAttemptTelemetry);
                 throw sanitizeGenerationError(generationError);

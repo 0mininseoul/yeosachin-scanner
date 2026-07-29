@@ -295,6 +295,12 @@ describe('AI-only replay runner', () => {
             replay_ai_policy: 'ai-stage-policy-v2.7',
             full_e2e_evidence: false,
         });
+        expect(Object.values(
+            JSON.parse(lines[0]!).stages as Record<string, object>,
+        ).every(
+            (stage: object) => !Object.hasOwn(stage, 'failure_kind'),
+        )).toBe(true);
+        expect(report.stages.genderTriage).not.toHaveProperty('failureKind');
     });
 
     it('reports authenticated partial v2.10 without weakening non-exact scope labels', async () => {

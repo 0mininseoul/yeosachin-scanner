@@ -111,30 +111,43 @@ describe('analyzeWithGemini generation retry policy', () => {
         vi.restoreAllMocks();
     });
 
-    it('does not retry an ambiguous generation and never exposes the provider error', async () => {
+    it('keeps production v2.12 callback and console telemetry byte-shape compatible', async () => {
         const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-        const attemptTelemetry = vi.fn();
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const audit = stageAuditOptions();
         const providerSecret = 'fetch failed: ECONNRESET api-key=provider-secret';
         mocks.generateContent.mockRejectedValueOnce(new Error(providerSecret));
 
-        const result = analyze(undefined, attemptTelemetry);
+        const result = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.12',
+            ...audit,
+        });
         await expect(result).rejects.toThrow(
             'AI_AMBIGUOUS_GENERATION_ERROR: Gemini generation status is unknown; the request was not retried.'
         );
 
         expect(mocks.generateContent).toHaveBeenCalledTimes(1);
-        expect(attemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
             attempt: 1,
             retryCount: 0,
             disposition: 'ambiguous',
-            failureKind: 'transport',
             tokenUsage: null,
             usageComplete: false,
             estimatedCostUsd: null,
         }));
-        expect(JSON.stringify(attemptTelemetry.mock.calls)).not.toContain(providerSecret);
+        expect(audit.onAttemptTelemetry.mock.calls[0]![0])
+            .not.toHaveProperty('failureKind');
+        const consoleAttempt = consoleLog.mock.calls.find(
+            call => call[0] === 'Gemini SDK attempt telemetry:',
+        );
+        expect(consoleAttempt?.[1]).not.toHaveProperty('failureKind');
+        expect(JSON.stringify(audit.onAttemptTelemetry.mock.calls))
+            .not.toContain(providerSecret);
         expect(consoleError.mock.calls.flat().join(' ')).not.toContain(providerSecret);
         consoleError.mockRestore();
+        consoleLog.mockRestore();
     });
 
     it('does not retry a rate-limit phrase without an explicit 429 status', async () => {
@@ -149,8 +162,8 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).toHaveBeenCalledOnce();
         expect(attemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
             disposition: 'ambiguous',
-            failureKind: 'unknown_sdk',
         }));
+        expect(attemptTelemetry.mock.calls[0]![0]).not.toHaveProperty('failureKind');
     });
 
     it('bounds explicit 429 retries at the configured maximum', async () => {
@@ -174,8 +187,9 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(attemptTelemetry).toHaveBeenCalledTimes(4);
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['rate_limited', 'rate_limited', 'rate_limited', 'rate_limited']);
-        expect(attemptTelemetry.mock.calls.map(call => call[0].failureKind))
-            .toEqual(['http_429', 'http_429', 'http_429', 'http_429']);
+        expect(attemptTelemetry.mock.calls.every(
+            call => !Object.hasOwn(call[0], 'failureKind'),
+        )).toBe(true);
         expect(attemptTelemetry.mock.calls.map(call => call[0].retryCount))
             .toEqual([0, 1, 2, 3]);
     });
@@ -206,9 +220,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         }));
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['rate_limited', 'success']);
-        expect(attemptTelemetry.mock.calls[0]![0]).toMatchObject({
-            failureKind: 'http_429',
-        });
+        expect(attemptTelemetry.mock.calls[0]![0]).not.toHaveProperty('failureKind');
         expect(attemptTelemetry.mock.calls[1]![0]).not.toHaveProperty('failureKind');
     });
 
@@ -224,6 +236,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         const fence = vi.fn(
             <T,>(task: () => Promise<T>): Promise<T> => task(),
         ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
+        const audit = stageAuditOptions();
         const result = analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
             stage: 'genderTriage',
@@ -231,12 +244,18 @@ describe('analyzeWithGemini generation retry policy', () => {
             skipTokenLog: true,
             replayCapability: issueReplayStatelessCapability(),
             runProviderAttempt: fence,
-            ...stageAuditOptions(),
+            ...audit,
         });
         await vi.runAllTimersAsync();
         await expect(result).resolves.toEqual({ value: 'ok' });
         expect(mocks.generateContent).toHaveBeenCalledTimes(2);
         expect(fence).toHaveBeenCalledTimes(2);
+        const failedAttempt = audit.onAttemptTelemetry.mock.calls[0]![0];
+        if (aiStagePolicyVersion === 'ai-stage-policy-v2.12') {
+            expect(failedAttempt).toMatchObject({ failureKind: 'http_429' });
+        } else {
+            expect(failedAttempt).not.toHaveProperty('failureKind');
+        }
         },
     );
 

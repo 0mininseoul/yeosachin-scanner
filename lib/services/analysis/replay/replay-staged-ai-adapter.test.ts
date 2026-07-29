@@ -602,13 +602,15 @@ describe('replay staged AI adapter telemetry', () => {
             new Error('unexpected resolver logic fault'),
         );
 
-        await expect(createReplayStagedAiAdapter('ai-stage-policy-v2.11')
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.11')
             .resolveGender?.({
                 ordinal: 1,
                 media: [],
                 signal: new AbortController().signal,
-            }))
-            .resolves.toMatchObject({ outcome: 'failed' });
+            });
+
+        expect(result).toMatchObject({ outcome: 'failed' });
+        expect(result).not.toHaveProperty('failureKind');
     });
 
 });

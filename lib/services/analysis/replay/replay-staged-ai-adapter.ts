@@ -220,7 +220,9 @@ async function invoke<T>(
             calls: state.calls,
             rateLimited: state.rateLimited,
             failureDisposition: state.failureDisposition,
-            failureKind: state.failureKind,
+            ...(Object.keys(state.failureKind).length
+                ? { failureKind: state.failureKind }
+                : {}),
             attemptLatenciesMs: state.attemptLatenciesMs,
             attempts: state.attempts,
             retries: state.retries,
@@ -233,7 +235,9 @@ async function invoke<T>(
             calls: state.calls,
             rateLimited: state.rateLimited,
             failureDisposition: state.failureDisposition,
-            failureKind: state.failureKind,
+            ...(Object.keys(state.failureKind).length
+                ? { failureKind: state.failureKind }
+                : {}),
             attemptLatenciesMs: state.attemptLatenciesMs,
             attempts: state.attempts || (state.calls ? 1 : 0),
             retries: state.retries,
@@ -447,9 +451,9 @@ export function createReplayStagedAiAdapter(
                         failureDisposition: ownsMetrics
                             ? invocation.failureDisposition
                             : {},
-                        failureKind: ownsMetrics
-                            ? invocation.failureKind
-                            : {},
+                        ...(ownsMetrics && invocation.failureKind
+                            ? { failureKind: invocation.failureKind }
+                            : {}),
                         attemptLatenciesMs: ownsMetrics
                             ? invocation.attemptLatenciesMs
                             : [],
