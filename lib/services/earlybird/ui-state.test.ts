@@ -155,7 +155,7 @@ describe('earlybird analyze UI state', () => {
             referencePriceLabel: '13,900원',
             priceLabel: '6,900원',
             discountLabel: '50%',
-            actionLabel: '얼리버드 사전 구매하기',
+            actionLabel: '지금 분석하기',
         });
         expect(buildEarlybirdPlanPresentation('standard')).toMatchObject({
             referencePriceLabel: '19,900원',
@@ -221,7 +221,10 @@ describe('earlybird analyze UI state', () => {
         expect(source).not.toContain('결제 접수 준비 중');
         expect(source).not.toContain(['정식 출시', ' 예정가'].join(''));
         expect(source).not.toContain(['예약', '금'].join(''));
-        expect(source).toContain('EARLYBIRD_DISCLOSURE_TEXT');
+        // The 24-hour disclosure is gone with the delay it described; the record
+        // is still written, but the page no longer puts a checkbox in the way.
+        expect(source).not.toContain('EARLYBIRD_DISCLOSURE_TEXT');
+        expect(source).not.toContain('24시간');
     });
 
     it('orders the plan card ternary so the sold-out copy branch precedes the not-yet-open branch', () => {
@@ -279,7 +282,6 @@ describe('earlybird analyze UI state', () => {
             reset: vi.fn(),
             clearGirlfriendInstagramId: vi.fn(),
             clearSelectedPlan: vi.fn(),
-            clearDisclosureAccepted: vi.fn(),
             clearWaitlistComplete: vi.fn(),
             replaceAnalyzeRoute: vi.fn(),
             showRefreshError: vi.fn(),
@@ -327,7 +329,6 @@ describe('earlybird analyze UI state', () => {
             reset: vi.fn(),
             clearGirlfriendInstagramId: vi.fn(),
             clearSelectedPlan: vi.fn(),
-            clearDisclosureAccepted: vi.fn(),
             clearWaitlistComplete: vi.fn(),
             replaceAnalyzeRoute: vi.fn(),
             showRefreshError: vi.fn(),
@@ -374,7 +375,6 @@ describe('earlybird analyze UI state', () => {
             reset: vi.fn(),
             clearGirlfriendInstagramId: vi.fn(),
             clearSelectedPlan: vi.fn(),
-            clearDisclosureAccepted: vi.fn(),
             clearWaitlistComplete: vi.fn(),
             replaceAnalyzeRoute: vi.fn(),
             showRefreshError: vi.fn(),

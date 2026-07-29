@@ -1,10 +1,10 @@
 'use client';
 
-import Image from 'next/image';
 import { useEffect, use, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import { ProgressFaces } from '@/components/progress-faces';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
-import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
+import { TopBar, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 import {
     ANALYSIS_PROGRESS_STEPS,
     ANALYSIS_STEP_RECOVERY_DELAY_MS,
@@ -286,6 +286,20 @@ export default function ProgressPage({ params }: PageProps) {
         );
     }
 
+    /* The ring already carries the number, so the words under it name the stage
+       rather than repeating the percentage in prose. */
+    const runningTrack = data.tracks
+        ? V2_TRACK_PRESENTATION.find(({ key }) => data.tracks![key].state === 'running')
+        : undefined;
+    const activeTrackLabel = runningTrack?.label ?? '판독 준비 중';
+    /* done/total of whatever is running: the one count that answers "how much
+       is left" without the reader having to translate a percentage. */
+    const runningCounts = runningTrack ? data.tracks![runningTrack.key] : null;
+    const screenedCount = runningCounts && runningCounts.total > 0 ? runningCounts : null;
+    const latestEventCopy = data.events.length > 0
+        ? analysisV2EventCopy(data.events.at(-1)!.copyCode)
+        : null;
+
     return (
         <div className="min-h-dvh">
             <TopBar
@@ -299,11 +313,15 @@ export default function ProgressPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-block className="mx-auto flex max-w-[460px] flex-col items-center px-5 pt-12">
-                <Eyebrow>판독 진행 중</Eyebrow>
+            <main data-amp-block className="mx-auto flex max-w-[460px] flex-col px-5 pt-4">
+                <Eyebrow className="self-start">판독 진행 중</Eyebrow>
 
-                {/* radar scope focal */}
-                <div className="relative mt-8 h-44 w-44">
+                {/* The scope is the gauge.
+                    It used to sweep decoratively above a separate progress bar,
+                    so the screen spent two blocks saying one thing. The ring now
+                    carries the number it was hovering over, and the sweep keeps
+                    the reading feeling live. */}
+                <div className="relative mt-3.5 h-44 w-44 self-center">
                     <div
                         className="anim-radar absolute inset-0 rounded-full"
                         style={{
@@ -311,176 +329,135 @@ export default function ProgressPage({ params }: PageProps) {
                                 'conic-gradient(from 0deg, transparent 0deg, rgba(228,19,42,0.30) 46deg, transparent 64deg)',
                         }}
                     />
-                    <div className="absolute inset-0 rounded-full border border-line" />
-                    <div className="absolute inset-[22px] rounded-full border border-line" />
-                    <div className="absolute inset-[44px] rounded-full border border-line/70" />
-                    <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-line" />
-                    <div className="absolute top-1/2 left-0 h-px w-full -translate-y-1/2 bg-line" />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                        {data.pipelineVersion === 'v2' && data.activeProfile?.imageUrl ? (
-                            <div className="relative h-12 w-12 overflow-hidden rounded-full border border-blood bg-panel shadow-[0_0_18px_rgba(228,19,42,0.35)]">
-                                <Image
-                                    src={data.activeProfile.imageUrl}
-                                    alt="현재 확인 중인 프로필"
-                                    fill
-                                    sizes="48px"
-                                    unoptimized
-                                    className="object-cover"
-                                />
-                            </div>
-                        ) : (
-                            <BrandMark size={40} className="anim-blink text-blood" />
-                        )}
+                    <div
+                        className="absolute inset-0 rounded-full transition-[background] duration-500"
+                        style={{
+                            background: `conic-gradient(var(--color-blood) 0 ${data.progress}%, var(--color-line) ${data.progress}% 100%)`,
+                            WebkitMask: 'radial-gradient(circle, transparent 0 76px, #000 76px)',
+                            mask: 'radial-gradient(circle, transparent 0 76px, #000 76px)',
+                        }}
+                    />
+                    <div className="absolute inset-[24px] rounded-full border border-line" />
+                    <div className="absolute inset-[48px] rounded-full border border-line/70" />
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                        <span className="num text-[42px] font-black leading-none tracking-tight text-fg">
+                            {data.progress}
+                            <span className="text-[18px] font-bold text-fg-dim">%</span>
+                        </span>
+                        <span className="mt-1.5 text-[11.5px] font-semibold text-fg-dim">
+                            {activeTrackLabel}
+                        </span>
+                        {/* "How long" is the question anyone waiting actually
+                            has, so it stays even though the copy is vague. */}
+                        <span className="mt-1 text-[10.5px] text-fg-mute">
+                            {analysisDurationProgressCopy(data.demo)}
+                        </span>
                     </div>
                 </div>
-                <h1 className="mt-8 text-[22px] font-extrabold tracking-tight text-fg">판독 중…</h1>
-                <p className="mt-2 text-center text-[13px] text-fg-dim" aria-live="polite">
-                    {data.progressStep || '판독을 준비하고 있습니다.'}
+
+                {/* Who is being read right now, and how far in. */}
+                {data.pipelineVersion === 'v2' && (
+                    <ProgressFaces active={data.activeProfile} />
+                )}
+
+                <p className="mt-3.5 text-center text-[12px] leading-relaxed text-fg-dim" aria-live="polite">
+                    {latestEventCopy ?? data.progressStep ?? '판독을 준비하고 있습니다.'}
+                    {screenedCount && (
+                        <span className="num text-fg-mute">
+                            {' · '}{screenedCount.done} / {screenedCount.total}
+                        </span>
+                    )}
                 </p>
 
-                {/* progress bar */}
-                <div className="mt-7 w-full">
-                    <div className="h-1.5 w-full overflow-hidden bg-line">
-                        <div
-                            className="h-full bg-blood transition-[width] duration-500 ease-out"
-                            style={{ width: `${data.progress}%`, boxShadow: '0 0 12px var(--color-blood)' }}
-                        />
-                    </div>
-                    <div className="mt-2 flex justify-between text-[12px] text-fg-mute">
-                        <span className="num font-bold text-blood">{data.progress}%</span>
-                        <span>{analysisDurationProgressCopy(data.demo)}</span>
-                    </div>
-                </div>
-
-                {/* step log */}
-                {data.pipelineVersion === 'v2' && data.tracks ? (
-                    <div className="mt-7 w-full border-t border-line">
-                        {V2_TRACK_PRESENTATION.map(({ key, label }) => {
+                {/* Stage list as rails rather than four competing meters. A
+                    finished stage says so; repeating 100% next to it adds a
+                    number without adding an answer. */}
+                <div className="mt-4 w-full">
+                    {data.pipelineVersion === 'v2' && data.tracks
+                        ? V2_TRACK_PRESENTATION.map(({ key, label }, index) => {
                             const track = data.tracks![key];
-                            const trackProgress = Math.round(track.progressBp / 10) / 10;
                             const isComplete = track.state === 'completed';
                             const isRunning = track.state === 'running';
                             return (
                                 <div
                                     key={key}
-                                    className="border-b border-line px-1 py-3"
+                                    className={`flex items-center gap-3 py-2.5 ${
+                                        index === V2_TRACK_PRESENTATION.length - 1
+                                            ? ''
+                                            : 'border-b border-line'
+                                    }`}
                                 >
-                                    <div className="flex items-center gap-3">
-                                        <span className={`flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
+                                    <span
+                                        aria-hidden="true"
+                                        className={`w-0.5 self-stretch ${
                                             isComplete
-                                                ? 'bg-blood text-white'
-                                                : isRunning
-                                                  ? 'border border-blood text-blood'
-                                                  : 'border border-line-2 text-fg-mute'
-                                        }`}>
-                                            {isComplete ? '✓' : isRunning ? (
-                                                <span className="anim-blink h-1.5 w-1.5 bg-blood" />
-                                            ) : ''}
-                                        </span>
-                                        <span className={`text-[14px] ${
-                                            isRunning || isComplete
-                                                ? 'font-semibold text-fg'
-                                                : 'text-fg-mute'
-                                        }`}>
-                                            {label}
-                                        </span>
-                                        <span className="num ml-auto text-[11px] text-fg-mute">
-                                            {trackProgress}%
-                                        </span>
-                                    </div>
-                                    <div className="ml-8 mt-2 h-1 overflow-hidden bg-line">
-                                        <div
-                                            className="h-full bg-blood transition-[width] duration-500"
-                                            style={{ width: `${trackProgress}%` }}
-                                        />
-                                    </div>
+                                                ? 'bg-blood'
+                                                : isRunning ? 'bg-blood-2' : 'bg-line-2'
+                                        }`}
+                                    />
+                                    <span className={`text-[13.5px] ${
+                                        isComplete || isRunning
+                                            ? 'font-semibold text-fg'
+                                            : 'text-fg-mute'
+                                    }`}>
+                                        {label}
+                                    </span>
+                                    <span className={`num ml-auto text-[11.5px] font-bold ${
+                                        isComplete
+                                            ? 'text-jade'
+                                            : isRunning ? 'text-blood-2' : 'text-fg-mute'
+                                    }`}>
+                                        {isComplete
+                                            ? '완료'
+                                            : isRunning
+                                                ? `${Math.round(track.progressBp / 100)}%`
+                                                : '대기'}
+                                    </span>
                                 </div>
                             );
-                        })}
-                    </div>
-                ) : (
-                    <div className="mt-7 w-full border-t border-line">
-                        {ANALYSIS_PROGRESS_STEPS.map((step, index) => {
+                        })
+                        : ANALYSIS_PROGRESS_STEPS.map((step, index) => {
                             const isComplete = data.progress >= step.threshold;
                             const isCurrent =
-                                data.progress >= (ANALYSIS_PROGRESS_STEPS[index - 1]?.threshold || 0) &&
-                                data.progress < step.threshold;
-
+                                data.progress >= (ANALYSIS_PROGRESS_STEPS[index - 1]?.threshold || 0)
+                                && data.progress < step.threshold;
                             return (
                                 <div
                                     key={step.label}
-                                    className="flex items-center gap-3 border-b border-line px-1 py-3"
+                                    className={`flex items-center gap-3 py-2.5 ${
+                                        index === ANALYSIS_PROGRESS_STEPS.length - 1
+                                            ? ''
+                                            : 'border-b border-line'
+                                    }`}
                                 >
                                     <span
-                                        className={`num flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
-                                            isComplete
-                                                ? 'bg-blood text-white'
-                                                : isCurrent
-                                                  ? 'border border-blood text-blood'
-                                                  : 'border border-line-2 text-fg-mute'
+                                        aria-hidden="true"
+                                        className={`w-0.5 self-stretch ${
+                                            isComplete ? 'bg-blood' : isCurrent ? 'bg-blood-2' : 'bg-line-2'
                                         }`}
-                                    >
-                                        {isComplete ? '✓' : isCurrent ? '' : index + 1}
-                                        {isCurrent && <span className="anim-blink h-1.5 w-1.5 bg-blood" />}
-                                    </span>
-                                    <span
-                                        className={`text-[14px] ${
-                                            isComplete
-                                                ? 'font-medium text-fg'
-                                                : isCurrent
-                                                  ? 'font-semibold text-fg'
-                                                  : 'text-fg-mute'
-                                        }`}
-                                    >
+                                    />
+                                    <span className={`text-[13.5px] ${
+                                        isComplete || isCurrent ? 'font-semibold text-fg' : 'text-fg-mute'
+                                    }`}>
                                         {step.label}
                                     </span>
-                                    <span className="num ml-auto text-[11px] tracking-widest text-fg-mute">
-                                        {step.threshold}%
+                                    <span className={`num ml-auto text-[11.5px] font-bold ${
+                                        isComplete ? 'text-jade' : isCurrent ? 'text-blood-2' : 'text-fg-mute'
+                                    }`}>
+                                        {isComplete ? '완료' : isCurrent ? '진행 중' : '대기'}
                                     </span>
                                 </div>
                             );
                         })}
-                    </div>
-                )}
+                </div>
 
-                {data.pipelineVersion === 'v2' && data.events.length > 0 && (
-                    <div className="mt-5 w-full border-l-2 border-blood pl-3.5" aria-live="polite">
-                        <span className="eyebrow">실시간 판독 로그</span>
-                        <ul className="mt-2.5 space-y-2">
-                            {data.events.slice(-3).reverse().map((event) => (
-                                <li key={event.seq} className="flex items-start gap-2.5 text-[12px] leading-relaxed text-fg-dim">
-                                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 bg-blood" />
-                                    <span>{analysisV2EventCopy(event.copyCode)}</span>
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
-                )}
-
-                {/* background continuity or legacy browser fallback */}
-                {data.backgroundProcessing ? (
-                    <div className="mt-7 w-full border-l-2 border-line-2 pl-3.5">
-                        <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-fg">
-                            <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-fg-dim" />
-                            <span>
-                                이 화면을 나가셔도 판독은 계속됩니다.
-                                <br />
-                                <span className="text-fg-dim">언제든 돌아와 진행 상태를 확인할 수 있습니다.</span>
-                            </span>
-                        </p>
-                    </div>
-                ) : (
-                    <div className="mt-7 w-full border border-blood/35 bg-blood/[0.07] px-4 py-3.5">
-                        <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-blood">
-                            <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-blood" />
-                            <span>
-                                판독이 끝날 때까지 이 페이지를 닫지 마세요.
-                                <br />
-                                <span className="text-fg-dim">페이지를 닫으면 판독이 중단됩니다.</span>
-                            </span>
-                        </p>
-                    </div>
-                )}
+                {/* Last, and quiet: it matters only when someone is deciding
+                    whether they can leave. */}
+                <p className="mt-6 border-l-2 border-line-2 pl-3 text-[11.5px] leading-relaxed text-fg-mute">
+                    {data.backgroundProcessing
+                        ? '이 화면을 나가셔도 판독은 계속됩니다.'
+                        : '판독이 끝날 때까지 이 페이지를 닫지 마세요.'}
+                </p>
             </main>
         </div>
     );

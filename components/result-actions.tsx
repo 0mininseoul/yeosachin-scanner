@@ -304,7 +304,7 @@ export function ResultActions({
                 />
               </svg>
             )}
-            {kakaoAvailable ? (shareUrl ? '카카오톡 공유' : '카카오톡 공유 준비 중…') : '공유'}
+            {kakaoAvailable ? '카카오톡 공유' : '공유'}
           </button>
           <button type="button" role="menuitem" onClick={shareToInstagramDm} className={itemCls}>
             <InstagramMark className="h-3.5 w-3.5 shrink-0" />

@@ -43,6 +43,7 @@ import {
     Eyebrow,
     CaseCard,
     InstaButton,
+    InstagramGlyph,
     PrimaryButton,
     ProfileFallback,
 } from '@/components/case-ui';
@@ -555,6 +556,14 @@ export default function ResultPage({ params }: PageProps) {
      * handled the tap — awaiting a network round trip first loses the gesture and
      * the popup is blocked, which is what pushed iOS onto the OS share sheet. So
      * everything slow happens when the menu opens, one interaction earlier. */
+    /* Minting the link costs four sequential Supabase round trips, so doing it
+       on intent meant the menu opened on "준비 중" and only settled a moment
+       later. It runs once the report is on screen instead: by the time anyone
+       reaches the menu it has long since finished, and the Kakao item is live
+       from the first frame.
+       The trade is that opening a report now enables its share link, so a
+       revoke followed by a revisit re-mints one. Nothing exposes revoke today,
+       and a re-mint issues a *new* token, so an old link stays dead either way. */
     const prepareShare = useCallback(() => {
         if (sharePrepRef.current) return sharePrepRef.current;
         sharePrepRef.current = (async () => {
@@ -593,6 +602,13 @@ export default function ResultPage({ params }: PageProps) {
         })();
         return sharePrepRef.current;
     }, [requestId]);
+
+    // Only once the report exists: a link to a result that failed to load would
+    // be worse than a moment of latency.
+    useEffect(() => {
+        if (!data || data.status !== 'completed') return;
+        void prepareShare();
+    }, [data, prepareShare]);
 
     const handleKakaoShare = async () => {
         if (kakaoShareLoading) return;
@@ -816,9 +832,20 @@ export default function ResultPage({ params }: PageProps) {
                                     </span>
                                     님의 위장 여사친
                                 </h1>
-                                <p className="num mt-1 truncate text-[12px] text-fg-dim">
-                                    @{summary.targetInstagramId}
-                                </p>
+                                {/* The handle already names the account, so it
+                                    carries the link rather than a separate button
+                                    competing with the headline beside it. */}
+                                <a
+                                    href={`https://instagram.com/${summary.targetInstagramId}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="mt-1 inline-flex max-w-full items-center gap-1.5 text-fg-dim transition-colors hover:text-fg"
+                                >
+                                    <InstagramGlyph className="h-3.5 w-3.5 shrink-0" />
+                                    <span className="num truncate text-[12px]">
+                                        @{summary.targetInstagramId}
+                                    </span>
+                                </a>
                             </div>
                         </div>
 
