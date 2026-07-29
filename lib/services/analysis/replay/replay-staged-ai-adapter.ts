@@ -49,6 +49,7 @@ import type {
 import {
     createProGenderSecondLookResultIdentityV219,
     runProGenderSecondLookGenerationV219,
+    v219ReplayPredispatchHardError,
 } from './replay-v219-ai-adapter';
 import {
     createV219ReplayBudget,
@@ -140,6 +141,7 @@ interface InvocationTelemetry {
     failureDisposition: ReplayStageFailureDispositionCounts;
     failureKind: Partial<Record<GeminiGenerationFailureKind, number>>;
     attemptLatenciesMs: number[];
+    v219PredispatchHardError?: Error;
 }
 
 const V212_RESOLVER_CAPACITY_SKIP_CODE =
@@ -243,6 +245,16 @@ function recordTerminal(state: InvocationTelemetry, value: GeminiAttemptTelemetr
     }
 }
 
+function rememberV219PredispatchHardError(
+    state: InvocationTelemetry,
+    error: unknown,
+): void {
+    const hardError = v219ReplayPredispatchHardError(error);
+    if (hardError && !state.v219PredispatchHardError) {
+        state.v219PredispatchHardError = hardError;
+    }
+}
+
 function statelessAudit(
     requestId: string,
     identity: StagedAiAuditContext['resultIdentity'],
@@ -263,10 +275,16 @@ function statelessAudit(
             observer.onAttemptStart?.(telemetry);
         },
         onProviderDispatch: telemetry => {
+            try {
+                observer.onProviderDispatch?.(telemetry);
+            } catch (error) {
+                rememberV219PredispatchHardError(state, error);
+                throw error;
+            }
             recordProviderDispatch(state);
-            observer.onProviderDispatch?.(telemetry);
         },
         onAttemptTelemetry: telemetry => {
+            if (state.v219PredispatchHardError) return;
             recordTerminal(state, telemetry);
             observer.onAttemptTelemetry?.(telemetry);
         },
@@ -304,6 +322,9 @@ async function invoke<T>(
             elapsedMs: Math.round(performance.now() - started),
         };
     } catch (error) {
+        const hardError = state.v219PredispatchHardError
+            ?? v219ReplayPredispatchHardError(error);
+        if (hardError) throw hardError;
         if (!isolateError(error, state)) throw error;
         return {
             outcome: outcome(error, state),
@@ -540,6 +561,7 @@ export function createReplayStagedAiAdapter(
         };
         waiters: Array<{
             resolve(value: ReplayInvocation<GenderTriageResult>): void;
+            reject(error: unknown): void;
         }>;
     };
     const pendingTriage = new Map<string, PendingTriage>();
@@ -558,30 +580,45 @@ export function createReplayStagedAiAdapter(
                 accountId: member.accountId,
                 input: member.value.aiInput,
             }));
-            startLogicalCall('genderTriage');
-            const invocation = await invoke(async state => {
-                const identity =
-                    createGenderTriageMicrobatchResultIdentity(accounts);
-                return genderTriageMicrobatch(
-                    accounts,
-                    statelessAudit(
-                        requestId,
-                        identity,
-                        state,
-                        v219BudgetObserver(
-                            v219Budget,
-                            'genderTriage',
+            const invocation = await (async () => {
+                startLogicalCall('genderTriage');
+                return invoke(async state => {
+                    const identity =
+                        createGenderTriageMicrobatchResultIdentity(
+                            accounts,
+                        );
+                    return genderTriageMicrobatch(
+                        accounts,
+                        statelessAudit(
+                            requestId,
+                            identity,
+                            state,
+                            v219BudgetObserver(
+                                v219Budget,
+                                'genderTriage',
+                            ),
                         ),
-                    ),
-                    {
-                        aiStagePolicyVersion: controlPolicyVersion,
-                        replayCapability,
-                        ...(runTriageProviderAttempt
-                            ? { runProviderAttempt: runTriageProviderAttempt }
-                            : {}),
-                    },
-                );
+                        {
+                            aiStagePolicyVersion: controlPolicyVersion,
+                            replayCapability,
+                            ...(runTriageProviderAttempt
+                                ? {
+                                    runProviderAttempt:
+                                        runTriageProviderAttempt,
+                                }
+                                : {}),
+                        },
+                    );
+                });
+            })().catch(error => {
+                for (const member of batch) {
+                    for (const waiter of member.value.waiters) {
+                        waiter.reject(error);
+                    }
+                }
+                return null;
             });
+            if (!invocation) return;
             const byAccount = new Map(invocation.value?.map(result => [
                 result.accountId,
                 result,
@@ -626,15 +663,18 @@ export function createReplayStagedAiAdapter(
                 : {}),
         };
         const accountId = createGenderTriageMicrobatchAccountId(aiInput);
-        return new Promise<ReplayInvocation<GenderTriageResult>>(resolve => {
+        return new Promise<ReplayInvocation<GenderTriageResult>>((
+            resolve,
+            reject,
+        ) => {
             const existing = pendingTriage.get(accountId);
             if (existing) {
-                existing.waiters.push({ resolve });
+                existing.waiters.push({ resolve, reject });
             } else {
                 pendingTriage.set(accountId, {
                     accountId,
                     aiInput,
-                    waiters: [{ resolve }],
+                    waiters: [{ resolve, reject }],
                 });
             }
             if (!triageFlushScheduled) {
@@ -862,6 +902,10 @@ export function createReplayStagedAiAdapter(
             const audit: PrivateNameAnalysisAudit = {
                 forChunk(identity) {
                     startLogicalCall('privateAccountName');
+                    const budgetObserver = v219BudgetObserver(
+                        v219Budget,
+                        'privateAccountName',
+                    );
                     return {
                         requestId,
                         operationKey: identity.operationKey,
@@ -869,18 +913,25 @@ export function createReplayStagedAiAdapter(
                         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
                         onBeforeAttempt: telemetry => recordStart(state, telemetry),
                         onProviderDispatch: telemetry => {
+                            try {
+                                budgetObserver?.onProviderDispatch(
+                                    telemetry,
+                                );
+                            } catch (error) {
+                                rememberV219PredispatchHardError(
+                                    state,
+                                    error,
+                                );
+                                throw error;
+                            }
                             recordProviderDispatch(state);
-                            v219BudgetObserver(
-                                v219Budget,
-                                'privateAccountName',
-                            )?.onProviderDispatch(telemetry);
                         },
                         onAttemptTelemetry: telemetry => {
+                            if (state.v219PredispatchHardError) return;
                             recordTerminal(state, telemetry);
-                            v219BudgetObserver(
-                                v219Budget,
-                                'privateAccountName',
-                            )?.onAttemptTelemetry(telemetry);
+                            budgetObserver?.onAttemptTelemetry(
+                                telemetry,
+                            );
                         },
                     };
                 },

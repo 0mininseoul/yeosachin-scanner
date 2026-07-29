@@ -32,12 +32,18 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     genderTriageMicrobatch: mocks.genderTriageMicrobatch,
 }));
 
-vi.mock('./replay-v219-ai-adapter', () => ({
-    createProGenderSecondLookResultIdentityV219:
-        mocks.createProGenderSecondLookResultIdentityV219,
-    runProGenderSecondLookGenerationV219:
-        mocks.runProGenderSecondLookGenerationV219,
-}));
+vi.mock('./replay-v219-ai-adapter', async importOriginal => {
+    const actual = await importOriginal<
+        typeof import('./replay-v219-ai-adapter')
+    >();
+    return {
+        ...actual,
+        createProGenderSecondLookResultIdentityV219:
+            mocks.createProGenderSecondLookResultIdentityV219,
+        runProGenderSecondLookGenerationV219:
+            mocks.runProGenderSecondLookGenerationV219,
+    };
+});
 
 import {
     createReplayStagedAiAdapter,
@@ -846,6 +852,257 @@ describe('replay staged AI adapter telemetry', () => {
         expect(lookupReplayStagedAiAdapterPolicy({
             proGenderSecondLook: vi.fn(),
         })).toBeUndefined();
+    });
+
+    it.each([
+        'ANALYSIS_V2_REPLAY_V219_COST_CEILING_EXCEEDED',
+        'ANALYSIS_V2_REPLAY_V219_DISPATCH_CEILING_EXCEEDED',
+        'ANALYSIS_V2_REPLAY_V219_LOCATION_MISMATCH',
+    ])('lets the issued Pro runner hard error %s escape instead of isolating it as an outcome', async hardError => {
+        mocks.createProGenderSecondLookResultIdentityV219.mockReturnValue({
+            operationKey: 'feature-analysis:identity',
+        });
+        mocks.runProGenderSecondLookGenerationV219.mockRejectedValue(
+            new Error(hardError),
+        );
+        const runner = createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.19',
+            { v219TreatmentLogicalCalls: 1 },
+        );
+
+        await expect(runner.proGenderSecondLook!({
+            ordinal: 1,
+            media: [
+                {
+                    selectionId: 'm1',
+                    kind: 'profile',
+                    jpegBase64: '/9j/2Q==',
+                },
+                {
+                    selectionId: 'm2',
+                    kind: 'feed',
+                    jpegBase64: '/9j/2Q==',
+                },
+            ],
+        })).rejects.toThrow(hardError);
+    });
+
+    it('rejects every issued V2.19 triage waiter when a hard error escapes its microbatch', async () => {
+        const accountIds = new Map([
+            ['m1', `account:${'a'.repeat(64)}`],
+            ['m2', `account:${'b'.repeat(64)}`],
+        ]);
+        mocks.createGenderTriageMicrobatchAccountId.mockImplementation(
+            (input: {
+                media: Array<{ selectionId: string }>;
+            }) => accountIds.get(input.media[0]!.selectionId),
+        );
+        mocks.createGenderTriageMicrobatchResultIdentity.mockReturnValue({
+            operationKey: 'gender-triage:batch-identity',
+        });
+        mocks.genderTriageMicrobatch.mockRejectedValue(
+            new Error(
+                'ANALYSIS_V2_REPLAY_V219_LOCATION_MISMATCH',
+            ),
+        );
+        const runner = createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.19',
+            { v219TreatmentLogicalCalls: 0 },
+        );
+
+        await expect(Promise.all([1, 2].map(ordinal => (
+            runner.triage!({
+                ordinal,
+                media: [{
+                    selectionId: `m${ordinal}`,
+                    kind: 'profile',
+                    jpegBase64: '/9j/2Q==',
+                }],
+            })
+        )))).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_V219_LOCATION_MISMATCH',
+        );
+    });
+
+    it('preserves a control-stage dispatch ceiling when generic terminal telemetry follows the rejection', async () => {
+        mocks.createFeatureAnalysisResultIdentity.mockReturnValue({
+            operationKey: 'feature-analysis:identity',
+        });
+        let rejectedTerminalError: unknown;
+        mocks.featureAnalysis.mockImplementation(async (
+            _input: unknown,
+            audit: {
+                onBeforeAttempt(value: {
+                    attempt: number;
+                    retryCount: number;
+                }): void;
+                onProviderDispatch?(value: {
+                    attempt: number;
+                    retryCount: number;
+                }): void;
+                onAttemptTelemetry(value: {
+                    attempt: number;
+                    retryCount: number;
+                    disposition: 'success' | 'rejected';
+                    latencyMs: number;
+                    estimatedCostUsd: number | null;
+                }): void;
+            },
+        ) => {
+            for (let attempt = 1; attempt <= 941; attempt++) {
+                const start = {
+                    attempt,
+                    retryCount: attempt - 1,
+                };
+                audit.onBeforeAttempt(start);
+                try {
+                    audit.onProviderDispatch?.(start);
+                } catch {
+                    try {
+                        audit.onAttemptTelemetry({
+                            ...start,
+                            disposition: 'rejected',
+                            latencyMs: 1,
+                            estimatedCostUsd: null,
+                        });
+                    } catch (error) {
+                        rejectedTerminalError = error;
+                        throw new Error(
+                            'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt result was not durably stored.',
+                        );
+                    }
+                    throw new Error(
+                        'AI_GENERATION_REQUEST_ERROR: Gemini rejected the generation request.',
+                    );
+                }
+                audit.onAttemptTelemetry({
+                    ...start,
+                    disposition: 'success',
+                    latencyMs: 1,
+                    estimatedCostUsd: 0.001,
+                });
+            }
+            throw new Error('PROVIDER_CEILING_NOT_ENFORCED');
+        });
+        const runner = createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.19',
+            { v219TreatmentLogicalCalls: 0 },
+        );
+
+        await expect(runner.feature!({
+            ordinal: 1,
+            bio: null,
+            media: [],
+            captions: [],
+            triage: {} as never,
+        })).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_V219_DISPATCH_CEILING_EXCEEDED',
+        );
+        expect(rejectedTerminalError).toBeUndefined();
+        expect(
+            lookupReplayStagedAiAdapterV219BudgetSnapshot(runner),
+        ).toMatchObject({
+            providerDispatches: 940,
+            stages: {
+                featureAnalysis: {
+                    providerDispatches: 940,
+                    terminalDispatches: 940,
+                },
+            },
+        });
+    });
+
+    it('preserves a chunked control-stage dispatch ceiling across generic terminal telemetry', async () => {
+        let rejectedTerminalError: unknown;
+        mocks.privateNames.mockImplementation(async (
+            _accounts: unknown,
+            _requestId: unknown,
+            audit: {
+                forChunk(identity: {
+                    operationKey: string;
+                    resultIdentity: { operationKey: string };
+                }): {
+                    onBeforeAttempt?(value: {
+                        attempt: number;
+                        retryCount: number;
+                    }): void;
+                    onProviderDispatch?(value: {
+                        attempt: number;
+                        retryCount: number;
+                    }): void;
+                    onAttemptTelemetry?(value: {
+                        attempt: number;
+                        retryCount: number;
+                        disposition: 'success' | 'rejected';
+                        latencyMs: number;
+                        estimatedCostUsd: number | null;
+                    }): void;
+                };
+            },
+        ) => {
+            const sink = audit.forChunk({
+                operationKey: 'private-name:identity',
+                resultIdentity: {
+                    operationKey: 'private-name:identity',
+                },
+            });
+            for (let attempt = 1; attempt <= 21; attempt++) {
+                const start = {
+                    attempt,
+                    retryCount: attempt - 1,
+                };
+                sink.onBeforeAttempt?.(start);
+                try {
+                    sink.onProviderDispatch?.(start);
+                } catch {
+                    try {
+                        sink.onAttemptTelemetry?.({
+                            ...start,
+                            disposition: 'rejected',
+                            latencyMs: 1,
+                            estimatedCostUsd: null,
+                        });
+                    } catch (error) {
+                        rejectedTerminalError = error;
+                        throw new Error(
+                            'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt result was not durably stored.',
+                        );
+                    }
+                    throw new Error(
+                        'AI_GENERATION_REQUEST_ERROR: Gemini rejected the generation request.',
+                    );
+                }
+                sink.onAttemptTelemetry?.({
+                    ...start,
+                    disposition: 'success',
+                    latencyMs: 1,
+                    estimatedCostUsd: 0.001,
+                });
+            }
+            throw new Error('PROVIDER_CEILING_NOT_ENFORCED');
+        });
+        const runner = createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.19',
+            { v219TreatmentLogicalCalls: 0 },
+        );
+
+        await expect(runner.privateNames!([
+            { id: 'ordinal:1', username: 'private' },
+        ])).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_V219_DISPATCH_CEILING_EXCEEDED',
+        );
+        expect(rejectedTerminalError).toBeUndefined();
+        expect(
+            lookupReplayStagedAiAdapterV219BudgetSnapshot(runner),
+        ).toMatchObject({
+            providerDispatches: 20,
+            stages: {
+                privateAccountName: {
+                    providerDispatches: 20,
+                    terminalDispatches: 20,
+                },
+            },
+        });
     });
 
     it('shares one issued budget across v2.19 retries and reserves before dispatch', async () => {

@@ -118,7 +118,9 @@ function assertGlobalProviderLocation(
     }
 }
 
-function predispatchHardError(error: unknown): Error | undefined {
+export function v219ReplayPredispatchHardError(
+    error: unknown,
+): Error | undefined {
     return error instanceof Error
         && V219_PREDISPATCH_HARD_ERRORS.has(error.message)
         ? error
@@ -173,7 +175,7 @@ export async function runProGenderSecondLookGenerationV219(input: {
                             );
                         } catch (error) {
                             rejectedBeforeDispatch =
-                                predispatchHardError(error);
+                                v219ReplayPredispatchHardError(error);
                             throw error;
                         }
                     },
