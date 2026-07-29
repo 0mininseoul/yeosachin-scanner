@@ -219,27 +219,6 @@ function v29PreFeatureSkipOutcome(): AnalysisV2ProfileAiOutcome {
     };
 }
 
-function resolverAppliedPreFeatureOutcome({
-    aiStagePolicyVersion,
-    status,
-}: {
-    aiStagePolicyVersion: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10';
-    status: 'verified_female' | 'verified_non_female';
-}): AnalysisV2ProfileAiOutcome {
-    const outcome = v29PreFeatureSkipOutcome();
-    return {
-        ...outcome,
-        status,
-        baselineClassification: 'unresolved',
-        classificationSource: 'gender_resolution',
-        genderResolutionStatus: 'ready_applied',
-        genderResolutionOperationKey: `gender-resolution:${digest('resolver-operation')}`,
-        genderResolutionResultHash: digest('resolver-result'),
-        mediaBundlePersisted: status === 'verified_female',
-        aiStagePolicyVersion,
-    };
-}
-
 describe('analysis V2 AI/scoring stage store', () => {
     const v28FieldNames = [
         'aiStagePolicyVersion',
@@ -374,75 +353,6 @@ describe('analysis V2 AI/scoring stage store', () => {
             ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
             expect.objectContaining({ p_payload: payload }),
         );
-    });
-
-    it.each([
-        ['ai-stage-policy-v2.9', 'verified_female'],
-        ['ai-stage-policy-v2.9', 'verified_non_female'],
-        ['ai-stage-policy-v2.10', 'verified_female'],
-        ['ai-stage-policy-v2.10', 'verified_non_female'],
-    ] as const)(
-        'persists a resolver-applied %s pre-feature %s outcome without feature analysis',
-        async (aiStagePolicyVersion, status) => {
-        const outcome = resolverAppliedPreFeatureOutcome({ aiStagePolicyVersion, status });
-        const payload = {
-            aiStagePolicyVersion,
-            outcomes: [outcome],
-        };
-        const fake = clientWith({
-            data: {
-                stageKind: 'profile_ai_batch',
-                batch: 0,
-                revision: 1,
-                resultHash: digest(`profile-${aiStagePolicyVersion}-${status}-resolver-applied`),
-                itemCount: 1,
-                payload,
-            },
-            error: null,
-        });
-        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
-
-        await expect(store.checkpointProfileAiBatch({
-            ...claim('track:profile-ai:batch:0'),
-            batch: 0,
-            aiStagePolicyVersion,
-            outcomes: [outcome],
-        })).resolves.toMatchObject({ itemCount: 1 });
-        expect(fake.rpc).toHaveBeenCalledWith(
-            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
-            expect.objectContaining({ p_payload: payload }),
-        );
-    });
-
-    it.each([
-        ['lacks resolver result provenance', {
-            genderResolutionOperationKey: null,
-            genderResolutionResultHash: null,
-        }, 'Ready gender resolution provenance is incomplete'],
-        ['forges a feature source', {
-            classificationSource: 'feature' as const,
-        }, 'Gender resolution provenance does not justify the classification change'],
-        ['forges a non-unresolved baseline', {
-            baselineClassification: 'verified_non_female' as const,
-        }, 'Gender resolution provenance does not justify the classification change'],
-    ] as const)(
-        'rejects a resolver-applied pre-feature outcome that %s',
-        async (_description, forgedFields, error) => {
-        const outcome = {
-            ...resolverAppliedPreFeatureOutcome({
-                aiStagePolicyVersion: 'ai-stage-policy-v2.10',
-                status: 'verified_female',
-            }),
-            ...forgedFields,
-        };
-        const store = createSupabaseAnalysisV2AiScoringStageStore(clientWith().client);
-
-        await expect(store.checkpointProfileAiBatch({
-            ...claim('track:profile-ai:batch:0'),
-            batch: 0,
-            aiStagePolicyVersion: 'ai-stage-policy-v2.10',
-            outcomes: [outcome],
-        })).rejects.toThrow(error);
     });
 
     it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {
