@@ -930,6 +930,24 @@ describe('V2 AI and scoring executors', () => {
         expect(memoryState.outcomes[3]).toMatchObject({
             v29FeatureAdmission: 'unsupported_unknown', feature: null,
         });
+        const publicRows = vi.mocked(deps.resultStore.checkpointFeatureBatch)
+            .mock.calls[0]![0].rows;
+        expect(publicRows[1]).toMatchObject({
+            classification: 'unresolved',
+            featureOperationKey: null,
+            featureResultHash: null,
+            feature: null,
+            preFeaturePolicyVersion: aiStagePolicyVersion,
+            preFeatureAdmission: 'nonpersonal_or_official',
+        });
+        expect(publicRows[3]).toMatchObject({
+            classification: 'unresolved',
+            featureOperationKey: null,
+            featureResultHash: null,
+            feature: null,
+            preFeaturePolicyVersion: aiStagePolicyVersion,
+            preFeatureAdmission: 'unsupported_unknown',
+        });
     });
 
     it('starts feature and eligible resolver in the same turn and applies only a ready resolver', async () => {

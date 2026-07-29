@@ -179,6 +179,10 @@ export interface AnalysisV2ProfileClassificationRow {
         | 'capacity_skipped' | 'terminal_unavailable';
     genderResolutionOperationKey?: string | null;
     genderResolutionResultHash?: string | null;
+    /** Durable v2.9/v2.10 policy fence for an intentional triage-only pre-feature skip. */
+    preFeaturePolicyVersion?: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' | null;
+    /** The non-eligible v2.9 admission that intentionally avoided a feature invocation. */
+    preFeatureAdmission?: 'nonpersonal_or_official' | 'unsupported_unknown' | null;
     feature: AnalysisV2VerifiedFemaleFeatureData | null;
 }
 
@@ -476,6 +480,14 @@ const featureRowSchema = z.object({
     genderResolutionOperationKey:
         operationKeySchema.regex(/^gender-resolution:/).nullable().optional(),
     genderResolutionResultHash: hashSchema.nullable().optional(),
+    preFeaturePolicyVersion: z.enum([
+        'ai-stage-policy-v2.9',
+        'ai-stage-policy-v2.10',
+    ]).nullable().optional(),
+    preFeatureAdmission: z.enum([
+        'nonpersonal_or_official',
+        'unsupported_unknown',
+    ]).nullable().optional(),
     feature: verifiedFemaleFeatureDataSchema.nullable(),
 }).strict().superRefine((value, context) => {
     const genderPair = value.genderOperationKey !== null && value.genderResultHash !== null;
@@ -486,6 +498,17 @@ const featureRowSchema = z.object({
     if ((value.featureOperationKey === null) !== (value.featureResultHash === null)) {
         context.addIssue({ code: 'custom', message: 'Feature operation/result must be paired.' });
     }
+    const hasPreFeaturePolicy = value.preFeaturePolicyVersion !== null
+        && value.preFeaturePolicyVersion !== undefined;
+    const hasPreFeatureAdmission = value.preFeatureAdmission !== null
+        && value.preFeatureAdmission !== undefined;
+    if (hasPreFeaturePolicy !== hasPreFeatureAdmission) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Pre-feature policy and admission must be paired.',
+        });
+    }
+    const preFeatureSkip = hasPreFeaturePolicy && hasPreFeatureAdmission;
     if (
         (value.genderResolutionOperationKey ?? null) === null
         !== ((value.genderResolutionResultHash ?? null) === null)
@@ -493,7 +516,7 @@ const featureRowSchema = z.object({
         context.addIssue({ code: 'custom', message: 'Resolver operation/result must be paired.' });
     }
     if (value.classification === 'unavailable' || value.classification === 'media_unavailable') {
-        if (value.mediaContext || genderPair || featurePair || value.feature) {
+        if (value.mediaContext || genderPair || featurePair || value.feature || preFeatureSkip) {
             context.addIssue({ code: 'custom', message: 'Unavailable profiles cannot contain AI output.' });
         }
         return;
@@ -501,8 +524,24 @@ const featureRowSchema = z.object({
     if (!value.mediaContext || !genderPair) {
         context.addIssue({ code: 'custom', message: 'Analyzed profiles require media and triage.' });
     }
+    if (preFeatureSkip && (
+        value.classification !== 'unresolved'
+        || value.feature !== null
+        || featurePair
+        || value.baselineClassification !== 'unresolved'
+        || value.classificationSource !== 'unknown'
+        || value.genderResolutionStatus !== 'not_eligible'
+        || (value.genderResolutionOperationKey ?? null) !== null
+        || (value.genderResolutionResultHash ?? null) !== null
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Pre-feature admission only permits an unresolved triage-only outcome.',
+        });
+    }
     if (
-        ['verified_female', 'unresolved', 'unresolved_stage_conflict'].includes(value.classification)
+        !preFeatureSkip
+        && ['verified_female', 'unresolved', 'unresolved_stage_conflict'].includes(value.classification)
         && !featurePair
     ) {
         context.addIssue({ code: 'custom', message: 'This classification requires feature analysis.' });

@@ -955,6 +955,16 @@ function publicFeatureRow(
     }
     const classification = outcome.status;
     const posts = analyzedPosts(outcome);
+    const preFeatureAdmission = outcome.v29FeatureAdmission === 'nonpersonal_or_official'
+        || outcome.v29FeatureAdmission === 'unsupported_unknown'
+        ? outcome.v29FeatureAdmission
+        : null;
+    const preFeaturePolicyVersion = (
+        outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
+        || outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+    ) && preFeatureAdmission !== null
+        ? outcome.aiStagePolicyVersion
+        : null;
     return {
         candidateId: outcome.candidateId,
         instagramId: outcome.instagramId,
@@ -979,6 +989,12 @@ function publicFeatureRow(
         genderResolutionStatus: outcome.genderResolutionStatus,
         genderResolutionOperationKey: outcome.genderResolutionOperationKey,
         genderResolutionResultHash: outcome.genderResolutionResultHash,
+        ...(preFeaturePolicyVersion && preFeatureAdmission
+            ? {
+                preFeaturePolicyVersion,
+                preFeatureAdmission,
+            }
+            : {}),
         feature: outcome.status === 'verified_female' && outcome.feature
             ? {
                 appearanceGrade: outcome.feature.features.appearanceGrade as AppearanceGrade,

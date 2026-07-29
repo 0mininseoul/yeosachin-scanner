@@ -30,6 +30,13 @@ const bioContractUrl = new URL(
 const bioContractMigration = existsSync(bioContractUrl)
     ? readFileSync(bioContractUrl, 'utf8')
     : '';
+const preFeatureContractUrl = new URL(
+    '../../../supabase/migrations/20260730120000_allow_v29_prefeature_checkpoint_contract.sql',
+    import.meta.url
+);
+const preFeatureContractMigration = existsSync(preFeatureContractUrl)
+    ? readFileSync(preFeatureContractUrl, 'utf8')
+    : '';
 
 function functionDefinition(source: string, name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -100,6 +107,9 @@ const NON_FEMALE_BUNDLE_ID = `bundle:${'9'.repeat(64)}`;
 
 const bootstrap = `
 CREATE SCHEMA extensions;
+CREATE ROLE anon;
+CREATE ROLE authenticated;
+CREATE ROLE service_role;
 
 CREATE OR REPLACE FUNCTION extensions.digest(p_value BYTEA, p_algorithm TEXT)
 RETURNS BYTEA LANGUAGE sql IMMUTABLE STRICT SET search_path = ''
@@ -108,7 +118,8 @@ AS $$ SELECT p_value; $$;
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
     target_instagram_id TEXT NOT NULL,
-    excluded_instagram_id TEXT
+    excluded_instagram_id TEXT,
+    policy_versions_snapshot JSONB
 );
 CREATE TABLE public.analysis_pipeline_jobs (
     request_id UUID NOT NULL,
@@ -262,6 +273,13 @@ $$;
 
 ${candidateFeatureTable}
 
+ALTER TABLE public.analysis_v2_candidate_feature_rows
+    ADD COLUMN baseline_classification TEXT,
+    ADD COLUMN classification_source TEXT,
+    ADD COLUMN gender_resolution_status TEXT,
+    ADD COLUMN gender_resolution_operation_key TEXT,
+    ADD COLUMN gender_resolution_result_hash TEXT;
+
 ${femaleResultTable}
 `;
 
@@ -269,6 +287,7 @@ interface CandidateOptions {
     includeFemaleBundle?: boolean;
     includeNonFemaleBundle?: boolean;
     includeNonFemaleFeatureCheckpoint?: boolean;
+    policyVersion?: 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10';
 }
 
 function mediaContext(bundleId: string) {
@@ -327,12 +346,20 @@ async function seedJob(input: {
     jobKey: string;
     track: string;
     kind: string;
+    policyVersion?: 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10';
 }): Promise<void> {
     await db.query(
         `INSERT INTO public.analysis_requests (
-            id, target_instagram_id, excluded_instagram_id
-         ) VALUES ($1, 'target.account', NULL)`,
-        [REQUEST_ID]
+            id, target_instagram_id, excluded_instagram_id, policy_versions_snapshot
+         ) VALUES ($1, 'target.account', NULL, $2::JSONB)`,
+        [REQUEST_ID, JSON.stringify(input.policyVersion
+            ? {
+                pipeline: 'v2',
+                risk: 'risk-policy-v2.4',
+                aiStage: input.policyVersion,
+                scheduler: 'ai-scheduler-v1',
+            }
+            : {})]
     );
     await db.query(
         `INSERT INTO public.analysis_pipeline_jobs (
@@ -373,7 +400,12 @@ async function seedCandidateBatch(options: CandidateOptions = {}): Promise<void>
         includeNonFemaleFeatureCheckpoint = true,
     } = options;
     const jobKey = 'track:profile-ai:batch:0';
-    await seedJob({ jobKey, track: 'profile_ai', kind: 'ai' });
+    await seedJob({
+        jobKey,
+        track: 'profile_ai',
+        kind: 'ai',
+        policyVersion: options.policyVersion,
+    });
     await db.query(
         `INSERT INTO public.analysis_v2_dag_batch_topology (
             request_id, topology_kind, batch, item_count, input_hash
@@ -414,13 +446,38 @@ async function seedCandidateBatch(options: CandidateOptions = {}): Promise<void>
     if (includeNonFemaleBundle) await insertMediaBundle(NON_FEMALE_BUNDLE_ID);
 }
 
-async function checkpointCandidates(rows = candidateRows()) {
+async function checkpointCandidates(rows: unknown = candidateRows()) {
     return db.query(
         `SELECT public.checkpoint_analysis_v2_candidate_features(
             $1, 'track:profile-ai:batch:0', $2, $3, 0, 2, $4::JSONB
          )`,
         [REQUEST_ID, CLAIM_TOKEN, JOB_INPUT_HASH, JSON.stringify(rows)]
     );
+}
+
+function preFeatureSkipRows(
+    preFeaturePolicyVersion: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10',
+) {
+    return candidateRows().map((row, index) => ({
+        ...row,
+        classification: 'unresolved',
+        mediaContext: {
+            ...row.mediaContext,
+            featureAnalyzedSelectionIds: [],
+        },
+        featureOperationKey: null,
+        featureResultHash: null,
+        feature: null,
+        baselineClassification: 'unresolved',
+        classificationSource: 'unknown',
+        genderResolutionStatus: 'not_eligible',
+        genderResolutionOperationKey: null,
+        genderResolutionResultHash: null,
+        preFeaturePolicyVersion,
+        preFeatureAdmission: index === 0
+            ? 'nonpersonal_or_official'
+            : 'unsupported_unknown',
+    }));
 }
 
 async function persistFemaleResultFromCandidate(): Promise<void> {
@@ -508,6 +565,31 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
         await db.exec(privateCheckpoint);
         if (correctionMigration) await db.exec(correctionMigration);
         if (bioContractMigration) await db.exec(bioContractMigration);
+        await db.exec(`
+            ALTER FUNCTION public.analysis_v2_checkpoint_candidate_features_complete(
+                UUID, TEXT, UUID, TEXT, INTEGER, INTEGER, JSONB
+            ) RENAME TO analysis_v2_checkpoint_candidate_features_complete_v26;
+
+            CREATE FUNCTION public.analysis_v2_checkpoint_candidate_features_complete(
+                p_request_id UUID,
+                p_job_key TEXT,
+                p_claim_token UUID,
+                p_job_input_hash TEXT,
+                p_batch INTEGER,
+                p_analyzed_count INTEGER,
+                p_rows JSONB
+            )
+            RETURNS JSONB
+            LANGUAGE sql
+            SET search_path = ''
+            AS $$
+                SELECT public.analysis_v2_checkpoint_candidate_features_complete_v26(
+                    p_request_id, p_job_key, p_claim_token, p_job_input_hash,
+                    p_batch, p_analyzed_count, p_rows
+                );
+            $$;
+        `);
+        if (preFeatureContractMigration) await db.exec(preFeatureContractMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -601,6 +683,80 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
         await seedCandidateBatch({ includeNonFemaleFeatureCheckpoint: false });
 
         await expect(checkpointCandidates()).rejects.toThrow(/ANALYSIS_V2_RESULT_NOT_READY/);
+    });
+
+    it.each([
+        'ai-stage-policy-v2.9',
+        'ai-stage-policy-v2.10',
+    ] as const)('checkpoints both durable pre-feature admission reasons for %s without a feature result or media bundle', async policyVersion => {
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+
+        await expect(checkpointCandidates(preFeatureSkipRows(policyVersion))).resolves.toBeDefined();
+
+        await expect(db.query<{
+            terminal_classification: string;
+            feature_operation_key: string | null;
+            feature_result_hash: string | null;
+            pre_feature_policy_version: string;
+            pre_feature_admission: string;
+        }>(`
+            SELECT terminal_classification, feature_operation_key, feature_result_hash,
+                   pre_feature_policy_version, pre_feature_admission
+            FROM public.analysis_v2_candidate_feature_rows
+            WHERE request_id = $1
+            ORDER BY candidate_id
+        `, [REQUEST_ID])).resolves.toMatchObject({ rows: [
+            {
+                terminal_classification: 'unresolved',
+                feature_operation_key: null,
+                feature_result_hash: null,
+                pre_feature_policy_version: policyVersion,
+                pre_feature_admission: 'nonpersonal_or_official',
+            },
+            {
+                terminal_classification: 'unresolved',
+                feature_operation_key: null,
+                feature_result_hash: null,
+                pre_feature_policy_version: policyVersion,
+                pre_feature_admission: 'unsupported_unknown',
+            },
+        ] });
+    });
+
+    it.each([
+        ['legacy', undefined],
+        ['v2.8', 'ai-stage-policy-v2.8' as const],
+        ['eligible v2.9', 'ai-stage-policy-v2.9' as const],
+        ['eligible v2.10', 'ai-stage-policy-v2.10' as const],
+    ])('fails closed when %s omits the allowed pre-feature admission', async (_label, policyVersion) => {
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion,
+        });
+        const rows = preFeatureSkipRows('ai-stage-policy-v2.9').map(row => ({
+            ...row,
+            preFeaturePolicyVersion: null,
+            preFeatureAdmission: null,
+        }));
+
+        await expect(checkpointCandidates(rows)).rejects.toThrow(/ANALYSIS_V2_RESULT_INVALID/);
+    });
+
+    it('rejects a pre-feature admission whose row policy diverges from the request snapshot', async () => {
+        await seedCandidateBatch({
+            includeFemaleBundle: false,
+            includeNonFemaleBundle: false,
+            policyVersion: 'ai-stage-policy-v2.10',
+        });
+
+        await expect(checkpointCandidates(
+            preFeatureSkipRows('ai-stage-policy-v2.9')
+        )).rejects.toThrow(/ANALYSIS_V2_RESULT_INVALID/);
     });
 
     it('accepts a private-name checkpoint when topology and consumer job hashes differ', async () => {

@@ -100,6 +100,30 @@ function terminalRow(
     };
 }
 
+function preFeatureSkipRow(
+    index: number,
+    preFeaturePolicyVersion: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10',
+    preFeatureAdmission: 'nonpersonal_or_official' | 'unsupported_unknown',
+): AnalysisV2ProfileClassificationRow {
+    return {
+        ...terminalRow('unresolved', index),
+        mediaContext: {
+            ...mediaContext(),
+            featureAnalyzedSelectionIds: [],
+        },
+        featureOperationKey: null,
+        featureResultHash: null,
+        feature: null,
+        baselineClassification: 'unresolved',
+        classificationSource: 'unknown',
+        genderResolutionStatus: 'not_eligible',
+        genderResolutionOperationKey: null,
+        genderResolutionResultHash: null,
+        preFeaturePolicyVersion,
+        preFeatureAdmission,
+    } as unknown as AnalysisV2ProfileClassificationRow;
+}
+
 function coverage(count: number) {
     return {
         declared: count,
@@ -191,6 +215,48 @@ describe('analysis V2 result checkpoint store', () => {
         ]);
         expect((params.p_rows as AnalysisV2ProfileClassificationRow[])[0]!.profileImageUrl)
             .toBe(canonicalImageUrl);
+    });
+
+    it('accepts the v2.9/v2.10 pre-feature official and unsupported triage-only rows', async () => {
+        const rows = [
+            preFeatureSkipRow(11, 'ai-stage-policy-v2.9', 'nonpersonal_or_official'),
+            preFeatureSkipRow(12, 'ai-stage-policy-v2.9', 'unsupported_unknown'),
+            preFeatureSkipRow(13, 'ai-stage-policy-v2.10', 'nonpersonal_or_official'),
+            preFeatureSkipRow(14, 'ai-stage-policy-v2.10', 'unsupported_unknown'),
+        ];
+        const fake = rpcClient({
+            data: { ...manifest(), itemCount: rows.length, rowCount: rows.length },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+
+        await expect(store.checkpointFeatureBatch({
+            ...claim(), batch: 0, analyzedCount: rows.length, rows,
+        })).resolves.toMatchObject({ itemCount: rows.length, rowCount: rows.length });
+
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointFeatureRpc,
+            expect.objectContaining({
+                p_rows: expect.arrayContaining([
+                    expect.objectContaining({
+                        classification: 'unresolved',
+                        featureOperationKey: null,
+                        featureResultHash: null,
+                        feature: null,
+                        preFeaturePolicyVersion: 'ai-stage-policy-v2.9',
+                        preFeatureAdmission: 'nonpersonal_or_official',
+                    }),
+                    expect.objectContaining({
+                        classification: 'unresolved',
+                        featureOperationKey: null,
+                        featureResultHash: null,
+                        feature: null,
+                        preFeaturePolicyVersion: 'ai-stage-policy-v2.10',
+                        preFeatureAdmission: 'unsupported_unknown',
+                    }),
+                ]),
+            }),
+        );
     });
 
     it('rejects duplicate candidates, incomplete batches, and malformed terminal payloads', async () => {
