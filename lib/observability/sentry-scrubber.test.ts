@@ -7,6 +7,26 @@ import {
 } from './sentry-scrubber';
 
 describe('Sentry privacy scrubber', () => {
+    it('drops the known external WebKit bridge error from an app URL', () => {
+        const result = scrubSentryEvent({
+            type: undefined,
+            exception: {
+                values: [{
+                    type: 'TypeError',
+                    value: "undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+                    stacktrace: {
+                        frames: [{
+                            filename: 'app:///',
+                            function: 'sendDataToNative',
+                        }],
+                    },
+                }],
+            },
+        });
+
+        expect(result).toBeNull();
+    });
+
     it('removes request/user PII and recursively redacts secrets from events and breadcrumbs', () => {
         const webhook = 'https://discord.com/api/webhooks/123/very-secret';
         const discordChannelUrl = 'https://discord.com/api/v10/channels/1525023310675710092/messages';
