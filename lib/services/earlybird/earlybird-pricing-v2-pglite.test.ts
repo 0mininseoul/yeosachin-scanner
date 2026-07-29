@@ -24,6 +24,12 @@ const pricingV2Migration = migration(
 const checkoutLineageMigration = migration(
     '20260728130000_classify_earlybird_checkout_lineage.sql'
 );
+const sellerReferenceMigration = migration(
+    '20260724123000_add_groble_seller_reference.sql'
+);
+const checkoutReconciliationMigration = migration(
+    '20260730110000_add_earlybird_checkout_reconciliation.sql'
+);
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -311,6 +317,22 @@ async function finalize(
         ]
     );
     return result.rows[0];
+}
+
+async function reconcileNoSale(
+    db: PGlite,
+    orderId: string,
+    providerCheckedAt = '2026-07-29T12:00:00.000Z',
+    reason = 'provider_dashboard_no_sale',
+    confirmed = true
+) {
+    return asService<{ disposition: string; status: string }>(
+        db,
+        `SELECT * FROM public.reconcile_earlybird_checkout_no_sale(
+            $1, $2::TIMESTAMP WITH TIME ZONE, $3, $4
+        )`,
+        [orderId, providerCheckedAt, reason, confirmed]
+    );
 }
 
 afterEach(async () => {
@@ -607,5 +629,118 @@ describe('earlybird pricing v2 database behavior', () => {
             'SELECT status FROM public.earlybird_orders WHERE preflight_id = $1',
             [overSeed.preflightId]
         )).rows[0].status).toBe('payment_failed');
+    }, 30_000);
+
+    it('unblocks a new same-product checkout only after explicit no-sale reconciliation', async () => {
+        const db = await createDatabase(false);
+        const originalPreflight = await seedPreflight(db, 17, 'standard', V1);
+        const original = await checkout(db, originalPreflight, 'standard', V1);
+        await db.exec(pricingV2Migration);
+        await db.exec(checkoutLineageMigration);
+        await db.exec(sellerReferenceMigration);
+        await db.exec(checkoutReconciliationMigration);
+        const retryPreflight = await seedNewerPreflightForUser(
+            db,
+            originalPreflight,
+            18,
+            'standard',
+            V2
+        );
+
+        await expect(checkout(db, retryPreflight, 'standard', V2)).rejects.toThrow(
+            /EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:STALE_PRICING_LINEAGE/
+        );
+        await expect(reconcileNoSale(db, original.order_id, new Date().toISOString()))
+            .resolves.toMatchObject({
+                rows: [{ disposition: 'reconciled', status: 'payment_failed' }],
+            });
+        await expect(checkout(db, retryPreflight, 'standard', V2)).resolves.toMatchObject({
+            created: true,
+        });
+        expect((await db.query<{ count: number }>(
+            `SELECT COUNT(*)::INTEGER AS count
+             FROM public.earlybird_checkout_reconciliations
+             WHERE order_id = $1`,
+            [original.order_id]
+        )).rows[0].count).toBe(1);
+    }, 30_000);
+
+    it('fails closed for paid evidence, stale dashboard checks, and conflicting replay', async () => {
+        const db = await createDatabase(true);
+        const seed = await seedPreflight(db, 19, 'basic', V2);
+        const original = await checkout(db, seed, 'basic', V2);
+        await db.exec(checkoutLineageMigration);
+        await db.exec(sellerReferenceMigration);
+        await db.exec(checkoutReconciliationMigration);
+
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'paid', payment_id = 'payment_evidence', actual_amount_krw = 0,
+                 paid_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [original.order_id]
+        );
+        await expect(reconcileNoSale(db, original.order_id, new Date().toISOString()))
+            .rejects.toThrow(/EARLYBIRD_RECONCILIATION_NOT_ELIGIBLE/);
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'payment_pending', payment_id = NULL,
+                 actual_amount_krw = NULL, paid_at = NULL
+             WHERE id = $1`,
+            [original.order_id]
+        );
+        await expect(reconcileNoSale(
+            db,
+            original.order_id,
+            new Date(Date.now() - 48 * 60 * 60 * 1_000).toISOString()
+        )).rejects.toThrow(/EARLYBIRD_RECONCILIATION_EVIDENCE_INVALID/);
+
+        const checkedAt = new Date().toISOString();
+        await reconcileNoSale(db, original.order_id, checkedAt);
+        await expect(reconcileNoSale(db, original.order_id, checkedAt))
+            .resolves.toMatchObject({
+                rows: [{ disposition: 'already_reconciled', status: 'payment_failed' }],
+            });
+        await expect(reconcileNoSale(
+            db,
+            original.order_id,
+            new Date(Date.now() - 1_000).toISOString()
+        )).rejects.toThrow(/EARLYBIRD_RECONCILIATION_CONFLICT/);
+
+        const archivedCheckedAt = new Date(
+            Date.now() - 48 * 60 * 60 * 1_000
+        ).toISOString();
+        await db.query(
+            `UPDATE public.earlybird_checkout_reconciliations
+             SET provider_checked_at = $2::TIMESTAMP WITH TIME ZONE
+             WHERE order_id = $1`,
+            [original.order_id, archivedCheckedAt]
+        );
+        await expect(reconcileNoSale(db, original.order_id, archivedCheckedAt))
+            .resolves.toMatchObject({
+                rows: [{ disposition: 'already_reconciled', status: 'payment_failed' }],
+            });
+    }, 30_000);
+
+    it('serializes concurrent identical reconciliation attempts into one audit row', async () => {
+        const db = await createDatabase(true);
+        const seed = await seedPreflight(db, 20, 'basic', V2);
+        const original = await checkout(db, seed, 'basic', V2);
+        await db.exec(checkoutLineageMigration);
+        await db.exec(sellerReferenceMigration);
+        await db.exec(checkoutReconciliationMigration);
+        const checkedAt = new Date().toISOString();
+
+        const attempts = await Promise.all([
+            reconcileNoSale(db, original.order_id, checkedAt),
+            reconcileNoSale(db, original.order_id, checkedAt),
+        ]);
+        expect(attempts.map(attempt => attempt.rows[0].disposition).sort()).toEqual([
+            'already_reconciled',
+            'reconciled',
+        ]);
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_checkout_reconciliations'
+        )).rows[0].count).toBe(1);
     }, 30_000);
 });

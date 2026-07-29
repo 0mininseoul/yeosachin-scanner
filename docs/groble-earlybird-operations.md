@@ -161,6 +161,17 @@ ORDER BY query_start;
 - Groble 구매자의 정규화 전화번호와 소문자 이메일은 signed webhook transaction의 전화번호 우선·이메일 fallback 매칭 RPC 입력으로만 일시 처리한다. raw 전화번호·표시 이름은 RPC에 전달하지 않고, 이메일·전화번호·표시 이름을 주문·웹훅 이벤트에 영속 저장하지 않으며 브라우저 응답·Amplitude·Axiom에 전송하지 않는다. 카드 정보와 원본 payload도 저장하지 않는다.
 - 다른 플랜의 최신 사전 점검으로 재시도해도 이전 `payment_pending` 주문을 취소·만료·교체하지 않으며 새 checkout을 만들지 않는다. 기존 주문의 불변 snapshot과 provider 귀속 가능성을 보존한다.
 - Groble 완료 이벤트에는 앱의 주문 식별자가 없으므로, 같은 구매자가 같은 플랜을 새 snapshot으로 다시 열면 이전 주문과 구분할 수 없다. 같은 상품의 `payment_pending` 주문은 `EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE`, 같은 상품의 `payment_id IS NULL`인 `cancelled` 주문은 `EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE` 409으로 차단한다. 두 응답의 `subreason`은 저장된 불변 snapshot만으로 `STALE_PRICING_LINEAGE`(v1) 또는 `SUPERSEDED_LINEAGE`(그 외)로 정해진다. 전자는 상태 페이지에서 기존 결제창을 이어갈 수 있지만 후자는 상태만 확인하며 재시도·재개하지 않는다.
+- 예외적으로 운영자가 Groble 판매 대시보드에서 해당 checkout 이후의 판매가 없음을 직접 확인했을 때만, 확인 시각이 주문 생성 이후이면서 24시간 이내인 경우에 한해 아래 명령으로 단일 미결제 lineage를 `payment_failed`로 종결할 수 있다. 이 명령은 주문·구매자·대상·결제 식별자를 출력하지 않으며, 대시보드 확인 전에는 실행하지 않는다.
+
+  ```bash
+  npm run earlybird:reconcile-no-sale -- \
+    --order-id <order UUID> \
+    --provider-checked-at <ISO-8601 timestamp> \
+    --reason provider_dashboard_no_sale \
+    --confirm-provider-dashboard-no-sale
+  ```
+
+  이 절차는 자동화, cron, webhook, recovery에서 호출하지 않는다. 주문에 결제 ID·실결제액·결제시각·확인된 seller reference·연결된 결과 중 하나라도 있으면 fail closed한다. 다른 시각이나 사유로의 재실행도 거부하며, 동일한 감사 기록에 대한 정확한 재실행만 멱등 처리한다.
 - Basic과 Standard는 각각 독립된 서버 한도 10건과 순번 1~10을 사용한다. 한 플랜의 남은 수량을 다른 플랜으로 옮기지 않는다.
 - 채널 표시 수량과 가격의 정본은 [운영 원가 문서의 Groble 얼리버드 가격](./operations-cost-model.md#groble-얼리버드-가격)과 함께 확인한다.
 - Groble 상품 재고와 서버 inventory를 동시에 유지한다.
