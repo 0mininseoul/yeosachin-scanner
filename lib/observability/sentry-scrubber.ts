@@ -20,6 +20,16 @@ const DISCORD_API_URL = /https?:\/\/(?:canary\.)?discord(?:app)?\.com\/api\/v\d+
 const SENTRY_SERVICE_HOOK_URL = /https?:\/\/[^\s"']+\/api\/webhooks\/sentry\/[^\s/?#"']+(?:\?[^\s"']*)?/giu;
 const INSTAGRAM_URL = /https?:\/\/[^\s"']*(?:instagram\.com|cdninstagram\.com|fbcdn\.net)[^\s"']*/giu;
 
+function isExternalWebKitBridgeError(event: ErrorEvent): boolean {
+    return event.exception?.values?.some(exception =>
+        exception.value?.includes('window.webkit.messageHandlers')
+        && exception.stacktrace?.frames?.some(frame =>
+            frame.filename?.startsWith('app:///')
+            && frame.function === 'sendDataToNative'
+        )
+    ) ?? false;
+}
+
 function scrubString(value: string): string {
     return value
         .replace(DISCORD_WEBHOOK_URL, REDACTED)
@@ -59,6 +69,10 @@ function scrubValue(value: unknown, depth = 0): unknown {
  * cover exception messages and manually-added breadcrumbs as a second line of defense.
  */
 export function scrubSentryEvent(event: ErrorEvent): ErrorEvent | null {
+    // This originates in a native WebView bridge outside the served application.
+    // Drop only the exact bridge signature so it cannot create noisy dev issues.
+    if (isExternalWebKitBridgeError(event)) return null;
+
     const sanitized = scrubValue(event) as ErrorEvent;
     delete sanitized.user;
     delete sanitized.request;
