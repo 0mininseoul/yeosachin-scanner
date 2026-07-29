@@ -1025,6 +1025,8 @@ describe('Cloud Run analysis V2 replay job', () => {
     });
 
     it('preflights the V2.19 source before issuing its exact budgeted runner', async () => {
+        const originalLocation = process.env.GOOGLE_CLOUD_LOCATION;
+        process.env.GOOGLE_CLOUD_LOCATION = 'us-central1';
         const {
             REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
             runV219ReplayAnalysisV2Job,
@@ -1040,32 +1042,43 @@ describe('Cloud Run analysis V2 replay job', () => {
         const preflightV219 = vi.fn(() => ({
             treatment: { staticCohort: 0 },
         }));
-        const createRunner = vi.fn(() => Object.freeze({}));
-
-        await runV219ReplayAnalysisV2Job({
-            env: validEnv(),
-            runtimeImageDigest: immutableImageDigest,
-            bindLocalCleanup: () => async () => undefined,
-            loadArtifacts: vi.fn(async () => ({
-                bundle: { ...v219Bundle, expired: false },
-                cleanup: async () => undefined,
-            })),
-            createGcsClient: () => ({
-                downloadBundle: vi.fn(),
-                createClaim: vi.fn(),
-                createReport: vi.fn(),
-            }),
-            preflightV219: preflightV219 as never,
-            createRunner,
-            runReplay: vi.fn(async input => {
-                expect(input.evaluationPolicy).toEqual(
-                    REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
-                );
-                input.write(await actualDiagnosticV219SafeLine());
-            }),
-            installSignalCleanup: vi.fn(() => () => undefined),
-            writeStdout: vi.fn(),
+        const createRunner = vi.fn(() => {
+            expect(process.env.GOOGLE_CLOUD_LOCATION).toBe('global');
+            return Object.freeze({});
         });
+
+        try {
+            await runV219ReplayAnalysisV2Job({
+                env: validEnv(),
+                runtimeImageDigest: immutableImageDigest,
+                bindLocalCleanup: () => async () => undefined,
+                loadArtifacts: vi.fn(async () => ({
+                    bundle: { ...v219Bundle, expired: false },
+                    cleanup: async () => undefined,
+                })),
+                createGcsClient: () => ({
+                    downloadBundle: vi.fn(),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                }),
+                preflightV219: preflightV219 as never,
+                createRunner,
+                runReplay: vi.fn(async input => {
+                    expect(input.evaluationPolicy).toEqual(
+                        REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+                    );
+                    input.write(await actualDiagnosticV219SafeLine());
+                }),
+                installSignalCleanup: vi.fn(() => () => undefined),
+                writeStdout: vi.fn(),
+            });
+        } finally {
+            if (originalLocation === undefined) {
+                delete process.env.GOOGLE_CLOUD_LOCATION;
+            } else {
+                process.env.GOOGLE_CLOUD_LOCATION = originalLocation;
+            }
+        }
 
         expect(preflightV219).toHaveBeenCalledOnce();
         expect(createRunner).toHaveBeenCalledWith(

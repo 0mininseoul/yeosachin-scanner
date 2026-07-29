@@ -110,6 +110,7 @@ export const REPLAY_ANALYSIS_V218_JOB_LOCAL_INPUTS = Object.freeze([
 /** V2.19 adds an authenticated source-only preflight and its own direct entry. */
 export const REPLAY_ANALYSIS_V219_JOB_LOCAL_INPUTS = Object.freeze([
     ...REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+    'lib/services/analysis/replay/replay-v219-approved-source.ts',
     'lib/services/analysis/replay/replay-v219-preflight.ts',
     'scripts/replay-analysis-v219-job.ts',
 ]);

@@ -1,4 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('./replay-v219-approved-source', async importOriginal => {
+    const actual = await importOriginal<
+        typeof import('./replay-v219-approved-source')
+    >();
+    return {
+        ...actual,
+        V219_APPROVED_REPLAY_SOURCE_MANIFEST: Object.freeze({
+            schema: 'analysis-v2-replay-v219-approved-source-v1',
+            manifestId: 'synthetic-v219-source-test-v1',
+            parentSourceContentSha256:
+                '83ae21a5fd01b4311d1e2981fe199322435d8ed24403042242d2f107a4eeee3a',
+            witnessSourceContentSha256:
+                '83ae21a5fd01b4311d1e2981fe199322435d8ed24403042242d2f107a4eeee3a',
+        }),
+    };
+});
 import {
     createV219SealedSourceTestBundle,
 } from './replay-v219-preflight.test-fixture';
@@ -93,6 +110,22 @@ describe('V2.19 zero-provider preflight', () => {
         missingMedia.profiles[145]!.media.pop();
         expect(() => createV219ReplayPreflightReport(missingMedia))
             .toThrow('ANALYSIS_V2_REPLAY_V219_PREFLIGHT_SOURCE_MISMATCH');
+    });
+
+    it('rejects a same-shape source whose authenticated media content is not the approved immutable source', () => {
+        const forged = structuredClone(
+            createV219SealedSourceTestBundle(),
+        );
+        for (const profile of forged.profiles) {
+            for (const media of profile.media) {
+                media.jpegBase64 = 'ZGVm';
+            }
+        }
+
+        expect(() => createV219ReplayPreflightReport(forged))
+            .toThrow(
+                'ANALYSIS_V2_REPLAY_V219_PREFLIGHT_APPROVED_SOURCE_MISMATCH',
+            );
     });
 
     it('accepts only the authenticated V2.17 parent capture for source-only V2.19 dry preflight', () => {

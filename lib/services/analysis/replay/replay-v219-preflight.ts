@@ -23,6 +23,10 @@ import {
     projectProGenderSecondLookV219,
     selectProGenderSecondLookMediaV219,
 } from './replay-v219-gender-second-look';
+import {
+    V219_APPROVED_REPLAY_SOURCE_MANIFEST,
+    v219ReplaySourceContentMatches,
+} from './replay-v219-approved-source';
 
 const APPROVED_SOURCE_PROFILES = 385;
 const APPROVED_SELECTED_MEDIA = 1_915;
@@ -36,6 +40,8 @@ const sourceMismatch =
     'ANALYSIS_V2_REPLAY_V219_PREFLIGHT_SOURCE_MISMATCH';
 const mediaReferenceMissing =
     'ANALYSIS_V2_REPLAY_V219_PREFLIGHT_MEDIA_REFERENCE_MISSING';
+const approvedSourceMismatch =
+    'ANALYSIS_V2_REPLAY_V219_PREFLIGHT_APPROVED_SOURCE_MISMATCH';
 
 type MediaCountHistogramV219 = Record<
     '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9',
@@ -179,6 +185,15 @@ function assertV212SourceWitness(
     }
 }
 
+function assertApprovedSourceContent(
+    bundle: AnalysisV2ReplayBundle,
+    expectedSha256: string,
+): void {
+    if (!v219ReplaySourceContentMatches(bundle, expectedSha256)) {
+        throw new Error(approvedSourceMismatch);
+    }
+}
+
 function mediaHistogram(): MediaCountHistogramV219 {
     return {
         '2': 0,
@@ -210,6 +225,8 @@ function assertReviewedTreatmentConfiguration(
                 .outputUsdPerMillionUnits / 1_000_000
     ).toFixed(9));
     if (
+        PRO_GENDER_SECOND_LOOK_CONFIG_V219.location !== 'global'
+        ||
         treatment.model
             !== PRO_GENDER_SECOND_LOOK_CONFIG_V219.model
         || treatment.inputUnitsPerDispatch !== expectedInputUnits
@@ -406,6 +423,18 @@ function createV219ReplayPreflightReportForBinding(
         }
         histogram[String(selected.length) as keyof typeof histogram]++;
         staticCohort++;
+    }
+    assertApprovedSourceContent(
+        bundle,
+        V219_APPROVED_REPLAY_SOURCE_MANIFEST
+            .parentSourceContentSha256,
+    );
+    if (sourceBinding === 'v217-parent-with-v212-witness') {
+        assertApprovedSourceContent(
+            witness!,
+            V219_APPROVED_REPLAY_SOURCE_MANIFEST
+                .witnessSourceContentSha256,
+        );
     }
     const budget = deriveV219ReplayBudgetPlan(staticCohort);
     assertReviewedTreatmentConfiguration(budget);

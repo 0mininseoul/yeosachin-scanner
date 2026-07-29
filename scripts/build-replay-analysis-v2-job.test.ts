@@ -359,6 +359,7 @@ describe('stateless replay job build contract', () => {
         expect(REPLAY_ANALYSIS_V219_JOB_LOCAL_INPUTS).toEqual(
             expect.arrayContaining([
                 'lib/services/analysis/replay/replay-v219-ai-adapter.ts',
+                'lib/services/analysis/replay/replay-v219-approved-source.ts',
                 'lib/services/analysis/replay/replay-v219-budget.ts',
                 'lib/services/analysis/replay/replay-v219-gender-second-look.ts',
                 'lib/services/analysis/replay/replay-v219-preflight.ts',

@@ -61,6 +61,7 @@ import {
 } from '../lib/services/analysis/replay/diagnostic-partial-coverage-capability';
 import {
     createV219ReplayPreflightReport,
+    createV219ReplaySourceOnlyPreflightReport,
 } from '../lib/services/analysis/replay/replay-v219-preflight';
 import type {
     runAnalysisV2AiReplay,
@@ -71,6 +72,7 @@ type ReplayCliOptions =
     | { command: 'capture'; historicalOfficialE2E: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'capture'; historicalPartialAvailable: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true; diagnosticPartialCoverageCapability?: DiagnosticPartialCoverageCliCapability }
+    | { command: 'v219-source-only-preflight'; bundlePath: string; keyPath: string; witnessBundlePath: string; witnessKeyPath: string }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -87,6 +89,7 @@ const VALUELESS_FLAGS = new Set([
     '--capture',
     '--cleanup',
     '--run',
+    '--v219-source-only-preflight',
     '--dry-run',
     '--paid-ai',
     '--confirm-paid-ai',
@@ -221,6 +224,40 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     ) {
         throw new Error('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_SCOPE_REQUIRED');
     }
+    if (parsed.has('--v219-source-only-preflight')) {
+        const allowed = new Set([
+            '--v219-source-only-preflight',
+            '--bundle',
+            '--key',
+            '--witness-bundle',
+            '--witness-key',
+        ]);
+        const witnessBundlePath =
+            parsed.get('--witness-bundle')?.trim();
+        const witnessKeyPath = parsed.get('--witness-key')?.trim();
+        if (
+            !witnessBundlePath
+            || !witnessKeyPath
+            || [...parsed.keys()].some(key => !allowed.has(key))
+            || dirname(resolve(witnessBundlePath))
+                !== dirname(resolve(witnessKeyPath))
+            || new Set([
+                resolve(bundlePath),
+                resolve(keyPath),
+                resolve(witnessBundlePath),
+                resolve(witnessKeyPath),
+            ]).size !== 4
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        }
+        return {
+            command: 'v219-source-only-preflight',
+            bundlePath,
+            keyPath,
+            witnessBundlePath,
+            witnessKeyPath,
+        };
+    }
     if (parsed.has('--capture')) {
         const historicalOfficialE2E = parsed.has('--historical-official-e2e');
         const historicalPartialAvailable = parsed.has('--historical-partial-available');
@@ -284,6 +321,9 @@ export async function createPaidReplayRunner(
     } = {},
 ) {
     try {
+        if (replayAiPolicy === AI_STAGE_POLICY_V219_VERSION) {
+            process.env.GOOGLE_CLOUD_LOCATION = 'global';
+        }
         await import('server-only');
         const adapter = await import(
             '../lib/services/analysis/replay/replay-staged-ai-adapter'
@@ -448,6 +488,27 @@ export async function runReplayCli(
     const options = parseReplayCliArgs(args);
     if (options.command === 'cleanup') { await removeReplayArtifacts(options); process.stdout.write(`${JSON.stringify({ status: 'ok', command: 'cleanup', removed: 2 })}\n`); return { exitCode: 0 }; }
     if (options.command === 'capture') { await capture(options); return { exitCode: 0 }; }
+    if (options.command === 'v219-source-only-preflight') {
+        const [parent, witness] = await Promise.all([
+            readAuthenticatedReplayBundle({
+                bundlePath: options.bundlePath,
+                keyPath: options.keyPath,
+            }),
+            readAuthenticatedReplayBundle({
+                bundlePath: options.witnessBundlePath,
+                keyPath: options.witnessKeyPath,
+            }),
+        ]);
+        if (parent.expired || witness.expired) {
+            throw new Error('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
+        }
+        const report = createV219ReplaySourceOnlyPreflightReport(
+            parent.bundle,
+            witness.bundle,
+        );
+        process.stdout.write(`${JSON.stringify(report)}\n`);
+        return { exitCode: 0 };
+    }
     const ownership: Parameters<typeof removeOwnedReplayArtifacts>[0] = {
         bundlePath: options.bundlePath,
         keyPath: options.keyPath,
