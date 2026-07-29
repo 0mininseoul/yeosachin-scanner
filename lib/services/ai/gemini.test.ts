@@ -224,6 +224,53 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(attemptTelemetry.mock.calls[1]![0]).not.toHaveProperty('failureKind');
     });
 
+    it('records provider dispatch only immediately before an SDK generation call', async () => {
+        const providerDispatch = vi.fn();
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.12',
+            skipTokenLog: true,
+            replayCapability: issueReplayStatelessCapability(),
+            admissionDeadlineAtMs: performance.now() + 5_000,
+            ...stageAuditOptions(),
+            onProviderDispatch: providerDispatch,
+        } as never)).resolves.toEqual({ value: 'ok' });
+
+        expect(providerDispatch).toHaveBeenCalledOnce();
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(providerDispatch.mock.invocationCallOrder[0])
+            .toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
+    });
+
+    it('does not record a provider dispatch when the resolver deadline expires after attempt intent', async () => {
+        vi.useFakeTimers();
+        const providerDispatch = vi.fn();
+        const deadlineAtMs = performance.now() + 1;
+        const onBeforeAttempt = vi.fn(async () => {
+            await vi.advanceTimersByTimeAsync(1);
+        });
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.12',
+            skipTokenLog: true,
+            replayCapability: issueReplayStatelessCapability(),
+            admissionDeadlineAtMs: deadlineAtMs,
+            requestId: stageRequestId,
+            onBeforeAttempt,
+            onAttemptTelemetry: vi.fn(),
+            onProviderDispatch: providerDispatch,
+        } as never)).rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+
+        expect(onBeforeAttempt).toHaveBeenCalledOnce();
+        expect(providerDispatch).not.toHaveBeenCalled();
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
+
     it.each(['ai-stage-policy-v2.11', 'ai-stage-policy-v2.12'] as const)(
         'runs a replay provider fence once for each SDK attempt under %s, including a retry',
         async aiStagePolicyVersion => {
@@ -236,6 +283,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         const fence = vi.fn(
             <T,>(task: () => Promise<T>): Promise<T> => task(),
         ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
+        const providerDispatch = vi.fn();
         const audit = stageAuditOptions();
         const result = analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
@@ -244,12 +292,14 @@ describe('analyzeWithGemini generation retry policy', () => {
             skipTokenLog: true,
             replayCapability: issueReplayStatelessCapability(),
             runProviderAttempt: fence,
+            onProviderDispatch: providerDispatch,
             ...audit,
         });
         await vi.runAllTimersAsync();
         await expect(result).resolves.toEqual({ value: 'ok' });
         expect(mocks.generateContent).toHaveBeenCalledTimes(2);
         expect(fence).toHaveBeenCalledTimes(2);
+        expect(providerDispatch).toHaveBeenCalledTimes(2);
         const failedAttempt = audit.onAttemptTelemetry.mock.calls[0]![0];
         if (aiStagePolicyVersion === 'ai-stage-policy-v2.12') {
             expect(failedAttempt).toMatchObject({ failureKind: 'http_429' });

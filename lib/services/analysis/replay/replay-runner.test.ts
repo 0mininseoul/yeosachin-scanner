@@ -1229,9 +1229,11 @@ describe('AI-only replay runner', () => {
                 resolveGender: async ({
                     signal,
                     onAttemptStart,
+                    onProviderDispatch,
                     onAttemptTelemetry,
                 }) => new Promise(resolve => {
                     onAttemptStart?.({ attempt: 1, retryCount: 0 });
+                    onProviderDispatch?.({ attempt: 1, retryCount: 0 });
                     onAttemptTelemetry?.({
                         attempt: 1,
                         retryCount: 0,
@@ -1239,6 +1241,7 @@ describe('AI-only replay runner', () => {
                         latencyMs: 5,
                     });
                     onAttemptStart?.({ attempt: 2, retryCount: 1 });
+                    onProviderDispatch?.({ attempt: 2, retryCount: 1 });
                     signal.addEventListener('abort', () => {
                         aborted = true;
                         setTimeout(() => resolve({
@@ -1294,9 +1297,11 @@ describe('AI-only replay runner', () => {
                 resolveGender: async ({
                     signal,
                     onAttemptStart,
+                    onProviderDispatch,
                     onAttemptTelemetry,
                 }) => new Promise(resolve => {
                     onAttemptStart?.({ attempt: 1, retryCount: 0 });
+                    onProviderDispatch?.({ attempt: 1, retryCount: 0 });
                     onAttemptTelemetry?.({
                         attempt: 1,
                         retryCount: 0,

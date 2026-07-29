@@ -910,7 +910,7 @@ describe('replay staged AI runner policy capability', () => {
         });
     });
 
-    it('cuts off an early resolver and never applies it when feature identifies an official group', async () => {
+    it('keeps a settled capacity result out of resolver capacity totals when feature identifies an official group', async () => {
         ai.genderTriageMicrobatch.mockResolvedValue([{
             accountId: `account:${'b'.repeat(64)}`,
             result: {
@@ -930,15 +930,18 @@ describe('replay staged AI runner policy capability', () => {
             finalGenderDecision: 'unresolved',
             analyzedSelectionIds: ['m1', 'm2'],
         });
-        ai.genderResolution.mockImplementation((
+        ai.genderResolution.mockImplementation(async (
             _input: unknown,
-            _audit: unknown,
-            options: { abortSignal?: AbortSignal },
-        ) => new Promise((_, reject) => {
-            options.abortSignal?.addEventListener('abort', () => {
-                reject(new Error('resolver aborted after official context'));
-            }, { once: true });
-        }));
+            audit: {
+                onBeforeAttempt?: (value: {
+                    attempt: number;
+                    retryCount: number;
+                }) => void;
+            },
+        ) => {
+            audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        });
         const report = await runAnalysisV2AiReplay({
             bundle: {
                 ...historicalV211Bundle,
@@ -966,6 +969,11 @@ describe('replay staged AI runner policy capability', () => {
             feature: { routeTerminal: { completed: 1 } },
             resolver: { earlyAdmission: 1, outcome: { official_excluded: 1 } },
         });
+        expect(report.stages.genderResolution).toMatchObject({
+            calls: 0,
+            failureDisposition: { capacity_skipped: 1 },
+        });
+        expect(report.resolver.capacitySkipped).toBe(0);
     });
 
     it('blocks an official high-female v2.9 account before feature and resolver', async () => {
@@ -1229,6 +1237,7 @@ describe('replay staged AI runner policy capability', () => {
             accounts: Array<{ accountId: string; input: { media: Array<{ selectionId: string }> } }>,
             audit: {
                 onBeforeAttempt(value: { attempt: number; retryCount: number }): void;
+                onProviderDispatch(value: { attempt: number; retryCount: number }): void;
                 onAttemptTelemetry(value: {
                     attempt: number;
                     retryCount: number;
@@ -1238,6 +1247,7 @@ describe('replay staged AI runner policy capability', () => {
             },
         ) => {
             audit.onBeforeAttempt({ attempt: 1, retryCount: 0 });
+            audit.onProviderDispatch({ attempt: 1, retryCount: 0 });
             audit.onAttemptTelemetry({
                 attempt: 1,
                 retryCount: 0,

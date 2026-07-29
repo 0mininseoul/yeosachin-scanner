@@ -87,6 +87,7 @@ export interface ReplayAiRunner {
         media: readonly ReplayMedia[];
         signal: AbortSignal;
         onAttemptStart?: (value: ReplayAttemptStart) => void;
+        onProviderDispatch?: (value: ReplayAttemptStart) => void;
         onAttemptTelemetry?: (value: ReplayAttemptTelemetry) => void;
     }): Promise<ReplayInvocation<GenderResolutionResult>>;
 }
@@ -942,12 +943,14 @@ export async function runAnalysisV2AiReplay(input: {
                     media: resolverMedia,
                     signal: abort.signal,
                     onAttemptStart: value => {
-                        tracked.telemetry.calls++;
                         tracked.telemetry.pendingAttemptStartedAt =
                             performance.now();
                         if (value.retryCount > 0) {
                             tracked.telemetry.retries++;
                         }
+                    },
+                    onProviderDispatch: () => {
+                        tracked.telemetry.calls++;
                     },
                     onAttemptTelemetry: value => {
                         tracked.telemetry.attemptLatenciesMs.push(

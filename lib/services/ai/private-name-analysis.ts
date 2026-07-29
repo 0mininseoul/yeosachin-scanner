@@ -115,6 +115,7 @@ export interface PrivateNameAnalysisAuditSink {
     resultIdentity: AnalysisV2AiResultIdentity;
     prepare(): Promise<AnalysisV2AiPreparedResult<unknown>>;
     onBeforeAttempt(telemetry: GeminiAttemptStartTelemetry): void | Promise<void>;
+    onProviderDispatch?(telemetry: GeminiAttemptStartTelemetry): void;
     onAttemptTelemetry(
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: unknown
@@ -208,6 +209,7 @@ async function analyzePrivateNameChunk(
                             aiStagePolicyVersion: policyVersion,
                             startingAttempt: prepared?.startingAttempt ?? 1,
                             onBeforeAttempt: audit.onBeforeAttempt,
+                            onProviderDispatch: audit.onProviderDispatch,
                             onAttemptTelemetry: audit.onAttemptTelemetry,
                             ...(replayCapability
                                 ? { skipTokenLog: true, replayCapability }

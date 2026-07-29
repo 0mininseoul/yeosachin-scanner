@@ -342,6 +342,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
     /** Reserve a durable, PII-free generation intent before the SDK request starts. */
     onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
+    /** Synchronous replay-only cost boundary immediately before SDK dispatch. */
+    onProviderDispatch?: (telemetry: GeminiAttemptStartTelemetry) => void;
     /** The V2 caller must persist this PII-free event when it is used as the stage audit sink. */
     onAttemptTelemetry?: (
         telemetry: GeminiAttemptTelemetry,
@@ -779,6 +781,7 @@ export async function analyzeWithGemini<T>(
         startingAttempt = 1,
         onTelemetry,
         onBeforeAttempt,
+        onProviderDispatch,
         onAttemptTelemetry,
         runProviderAttempt,
         admissionDeadlineAtMs: requestedAdmissionDeadlineAtMs,
@@ -972,40 +975,44 @@ export async function analyzeWithGemini<T>(
                         )) {
                             throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
                         }
-                        if (stage && requestId && stagePolicy && onBeforeAttempt) {
-                            try {
-                                await onBeforeAttempt({
-                                    requestId,
-                                    modelName,
-                                    location: GOOGLE_CLOUD_LOCATION,
-                                    stage,
-                                    thinkingLevel: resolvedThinkingLevel,
-                                    mediaCount: selectedImages.length,
-                                    mediaResolution: resolvedMediaResolution,
-                                    promptVersion: stagePolicy.promptVersion,
-                                    schemaVersion: stagePolicy.schemaVersion,
-                                    maxOutputTokens: resolvedMaxOutputTokens
-                                        ?? stagePolicy.maxOutputTokens,
-                                    attempt: attemptNumber,
-                                    retryCount: attemptNumber - 1,
-                                    ...(stage === 'genderResolution'
-                                        && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
-                                        ? {
-                                            admissionDeadlineAtMs: resolverAdmissionDeadlineAtMs!,
-                                            ...(abortSignal ? { abortSignal } : {}),
-                                        }
-                                        : {}),
-                                });
-                            } catch (error) {
-                                if (
-                                    error instanceof Error
-                                    && AI_ADMISSION_SIGNAL_CODES.has(error.message)
-                                ) {
-                                    throw error;
+                        let attemptStartTelemetry: GeminiAttemptStartTelemetry | undefined;
+                        if (stage && requestId && stagePolicy && (onBeforeAttempt || onProviderDispatch)) {
+                            attemptStartTelemetry = {
+                                requestId,
+                                modelName,
+                                location: GOOGLE_CLOUD_LOCATION,
+                                stage,
+                                thinkingLevel: resolvedThinkingLevel,
+                                mediaCount: selectedImages.length,
+                                mediaResolution: resolvedMediaResolution,
+                                promptVersion: stagePolicy.promptVersion,
+                                schemaVersion: stagePolicy.schemaVersion,
+                                maxOutputTokens: resolvedMaxOutputTokens
+                                    ?? stagePolicy.maxOutputTokens,
+                                attempt: attemptNumber,
+                                retryCount: attemptNumber - 1,
+                                ...(stage === 'genderResolution'
+                                    && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+                                    ? {
+                                        admissionDeadlineAtMs: resolverAdmissionDeadlineAtMs!,
+                                        ...(abortSignal ? { abortSignal } : {}),
+                                    }
+                                    : {}),
+                            };
+                            if (onBeforeAttempt) {
+                                try {
+                                    await onBeforeAttempt(attemptStartTelemetry);
+                                } catch (error) {
+                                    if (
+                                        error instanceof Error
+                                        && AI_ADMISSION_SIGNAL_CODES.has(error.message)
+                                    ) {
+                                        throw error;
+                                    }
+                                    throw new Error(
+                                        'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
+                                    );
                                 }
-                                throw new Error(
-                                    'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
-                                );
                             }
                         }
                         if (abortSignal?.aborted || (
@@ -1013,6 +1020,9 @@ export async function analyzeWithGemini<T>(
                             && performance.now() >= resolverAdmissionDeadlineAtMs
                         )) {
                             throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                        }
+                        if (attemptStartTelemetry) {
+                            onProviderDispatch?.(attemptStartTelemetry);
                         }
                         return client.models.generateContent({
                             model: modelName,

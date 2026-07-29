@@ -158,9 +158,12 @@ function outcome(error: unknown, telemetry: InvocationTelemetry): ReplayOutcome 
 }
 
 function recordStart(state: InvocationTelemetry, value: GeminiAttemptStartTelemetry): void {
-    state.calls++;
     state.attempts++;
     if (value.retryCount > 0) state.retries++;
+}
+
+function recordProviderDispatch(state: InvocationTelemetry): void {
+    state.calls++;
 }
 
 function recordTerminal(state: InvocationTelemetry, value: GeminiAttemptTelemetry): void {
@@ -182,6 +185,7 @@ function statelessAudit(
     state: InvocationTelemetry,
     observer: {
         onAttemptStart?: (value: GeminiAttemptStartTelemetry) => void;
+        onProviderDispatch?: (value: GeminiAttemptStartTelemetry) => void;
         onAttemptTelemetry?: (value: GeminiAttemptTelemetry) => void;
     } = {},
 ): StagedAiAuditContext {
@@ -193,6 +197,10 @@ function statelessAudit(
         onBeforeAttempt: telemetry => {
             recordStart(state, telemetry);
             observer.onAttemptStart?.(telemetry);
+        },
+        onProviderDispatch: telemetry => {
+            recordProviderDispatch(state);
+            observer.onProviderDispatch?.(telemetry);
         },
         onAttemptTelemetry: telemetry => {
             recordTerminal(state, telemetry);
@@ -559,6 +567,10 @@ export function createReplayStagedAiAdapter(
                             attempt: value.attempt,
                             retryCount: value.retryCount,
                         }),
+                        onProviderDispatch: value => input.onProviderDispatch?.({
+                            attempt: value.attempt,
+                            retryCount: value.retryCount,
+                        }),
                         onAttemptTelemetry: value => input.onAttemptTelemetry?.({
                             attempt: value.attempt,
                             retryCount: value.retryCount,
@@ -595,6 +607,10 @@ export function createReplayStagedAiAdapter(
                 const identity = createGenderResolutionResultIdentity(aiInput, aiStagePolicyVersion);
                 return genderResolution(aiInput, statelessAudit(requestId, identity, state, {
                     onAttemptStart: value => input.onAttemptStart?.({ attempt: value.attempt, retryCount: value.retryCount }),
+                    onProviderDispatch: value => input.onProviderDispatch?.({
+                        attempt: value.attempt,
+                        retryCount: value.retryCount,
+                    }),
                     onAttemptTelemetry: value => input.onAttemptTelemetry?.({
                         attempt: value.attempt,
                         retryCount: value.retryCount,
@@ -615,6 +631,7 @@ export function createReplayStagedAiAdapter(
                         resultIdentity: identity.resultIdentity,
                         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
                         onBeforeAttempt: telemetry => recordStart(state, telemetry),
+                        onProviderDispatch: () => recordProviderDispatch(state),
                         onAttemptTelemetry: telemetry => recordTerminal(state, telemetry),
                     };
                 },

@@ -48,6 +48,10 @@ describe('replay staged AI adapter telemetry', () => {
                         attempt: number;
                         retryCount: number;
                     }): Promise<void> | void;
+                    onProviderDispatch?(value: {
+                        attempt: number;
+                        retryCount: number;
+                    }): Promise<void> | void;
                     onAttemptTelemetry?(value: {
                         attempt: number;
                         retryCount: number;
@@ -63,6 +67,7 @@ describe('replay staged AI adapter telemetry', () => {
                     resultIdentity: { operationKey: `private:${chunk}` },
                 });
                 await sink.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+                await sink.onProviderDispatch?.({ attempt: 1, retryCount: 0 });
                 await sink.onAttemptTelemetry?.({
                     attempt: 1,
                     retryCount: 0,
@@ -70,6 +75,7 @@ describe('replay staged AI adapter telemetry', () => {
                     latencyMs: firstLatency,
                 });
                 await sink.onBeforeAttempt?.({ attempt: 2, retryCount: 1 });
+                await sink.onProviderDispatch?.({ attempt: 2, retryCount: 1 });
                 await sink.onAttemptTelemetry?.({
                     attempt: 2,
                     retryCount: 1,
@@ -296,6 +302,7 @@ describe('replay staged AI adapter telemetry', () => {
             accounts,
             audit: {
                 onBeforeAttempt(value: { attempt: number; retryCount: number }): void;
+                onProviderDispatch(value: { attempt: number; retryCount: number }): void;
                 onAttemptTelemetry(value: {
                     attempt: number;
                     retryCount: number;
@@ -305,6 +312,7 @@ describe('replay staged AI adapter telemetry', () => {
             },
         ) => {
             audit.onBeforeAttempt({ attempt: 1, retryCount: 0 });
+            audit.onProviderDispatch({ attempt: 1, retryCount: 0 });
             audit.onAttemptTelemetry({
                 attempt: 1,
                 retryCount: 0,
@@ -312,6 +320,7 @@ describe('replay staged AI adapter telemetry', () => {
                 latencyMs: 10,
             });
             audit.onBeforeAttempt({ attempt: 2, retryCount: 1 });
+            audit.onProviderDispatch({ attempt: 2, retryCount: 1 });
             audit.onAttemptTelemetry({
                 attempt: 2,
                 retryCount: 1,
@@ -353,6 +362,7 @@ describe('replay staged AI adapter telemetry', () => {
             accounts,
             audit: {
                 onBeforeAttempt(value: { attempt: number; retryCount: number }): void;
+                onProviderDispatch(value: { attempt: number; retryCount: number }): void;
                 onAttemptTelemetry(value: {
                     attempt: number;
                     retryCount: number;
@@ -362,6 +372,7 @@ describe('replay staged AI adapter telemetry', () => {
             },
         ) => {
             audit.onBeforeAttempt({ attempt: 1, retryCount: 0 });
+            audit.onProviderDispatch({ attempt: 1, retryCount: 0 });
             audit.onAttemptTelemetry({
                 attempt: 1,
                 retryCount: 0,
@@ -451,6 +462,9 @@ describe('replay staged AI adapter telemetry', () => {
                 onBeforeAttempt?: (value: {
                     attempt: number; retryCount: number;
                 }) => void;
+                onProviderDispatch?: (value: {
+                    attempt: number; retryCount: number;
+                }) => void;
                 onAttemptTelemetry?: (value: {
                     attempt: number; retryCount: number;
                     disposition: 'ambiguous'; failureKind: 'transport';
@@ -459,6 +473,7 @@ describe('replay staged AI adapter telemetry', () => {
             },
         ) => {
             audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            audit.onProviderDispatch?.({ attempt: 1, retryCount: 0 });
             audit.onAttemptTelemetry?.({
                 attempt: 1,
                 retryCount: 0,
@@ -541,6 +556,10 @@ describe('replay staged AI adapter telemetry', () => {
                     attempt: number;
                     retryCount: number;
                 }) => void;
+                onProviderDispatch?: (value: {
+                    attempt: number;
+                    retryCount: number;
+                }) => void;
                 onAttemptTelemetry?: (value: {
                     attempt: number;
                     retryCount: number;
@@ -550,6 +569,7 @@ describe('replay staged AI adapter telemetry', () => {
             },
         ) => {
             audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            audit.onProviderDispatch?.({ attempt: 1, retryCount: 0 });
             audit.onAttemptTelemetry?.({
                 attempt: 1,
                 retryCount: 0,
@@ -574,6 +594,42 @@ describe('replay staged AI adapter telemetry', () => {
             attempts: 1,
             rateLimited: 1,
             failureDisposition: { rate_limited: 1 },
+        });
+    });
+
+    it('keeps resolver attempt intent without a provider call when capacity wins after intent', async () => {
+        mocks.createGenderResolutionResultIdentity.mockReturnValue({
+            operationKey: 'resolver:identity',
+        });
+        mocks.genderResolution.mockImplementationOnce(async (
+            _input: unknown,
+            audit: {
+                onBeforeAttempt?: (value: {
+                    attempt: number;
+                    retryCount: number;
+                }) => void;
+                onProviderDispatch?: (value: {
+                    attempt: number;
+                    retryCount: number;
+                }) => void;
+            },
+        ) => {
+            audit.onBeforeAttempt?.({ attempt: 1, retryCount: 0 });
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        });
+
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.12')
+            .resolveGender?.({
+                ordinal: 1,
+                media: [],
+                signal: new AbortController().signal,
+            });
+
+        expect(result).toMatchObject({
+            outcome: 'capacity_skipped',
+            calls: 0,
+            attempts: 1,
+            retries: 0,
         });
     });
 

@@ -34,6 +34,7 @@ async function run<T>(
                 ? { admissionDeadlineAtMs: input.admissionDeadlineAtMs }
                 : {}),
             onBeforeAttempt: input.audit.onBeforeAttempt,
+            onProviderDispatch: input.audit.onProviderDispatch,
             onAttemptTelemetry: input.audit.onAttemptTelemetry,
             ...(input.replayCapability
                 ? { skipTokenLog: true, replayCapability: input.replayCapability }

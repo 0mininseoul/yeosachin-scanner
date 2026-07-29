@@ -923,6 +923,8 @@ export interface StagedAiAuditContext {
     prepare(): Promise<AnalysisV2AiPreparedResult<unknown>>;
     /** Must durably reserve the PII-free generation intent before resolving. */
     onBeforeAttempt: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
+    /** Optional stateless replay cost boundary immediately before SDK dispatch. */
+    onProviderDispatch?: (telemetry: GeminiAttemptStartTelemetry) => void;
     /** Must durably persist the PII-free attempt event before resolving. */
     onAttemptTelemetry: (
         telemetry: GeminiAttemptTelemetry,
@@ -964,6 +966,9 @@ function parseAuditContext(
         resultIdentity: context.resultIdentity,
         prepare: context.prepare,
         onBeforeAttempt: context.onBeforeAttempt,
+        ...(context.onProviderDispatch
+            ? { onProviderDispatch: context.onProviderDispatch }
+            : {}),
         onAttemptTelemetry: context.onAttemptTelemetry,
     };
 }
@@ -1798,6 +1803,7 @@ export async function genderTriageMicrobatch(
                 startingAttempt: prepared.startingAttempt,
                 maxImages: GENDER_TRIAGE_V29_MAX_MEDIA_PER_BATCH,
                 onBeforeAttempt: audit.onBeforeAttempt,
+                onProviderDispatch: audit.onProviderDispatch,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
                 ...(options.runProviderAttempt
                     ? { runProviderAttempt: options.runProviderAttempt }
@@ -1903,6 +1909,7 @@ export async function genderTriage(
                 requestId: audit.requestId,
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
+                onProviderDispatch: audit.onProviderDispatch,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
                 ...(options.runProviderAttempt
                     ? { runProviderAttempt: options.runProviderAttempt }
@@ -2043,6 +2050,7 @@ export async function featureAnalysis(
                 requestId: audit.requestId,
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
+                onProviderDispatch: audit.onProviderDispatch,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
                 ...(options.runProviderAttempt
                     ? { runProviderAttempt: options.runProviderAttempt }
@@ -2218,6 +2226,7 @@ export async function partnerSafetyAnalysis(
                     requestId: audit.requestId,
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,
+                    onProviderDispatch: audit.onProviderDispatch,
                     onAttemptTelemetry: audit.onAttemptTelemetry,
                 }
             ));
@@ -2619,6 +2628,7 @@ export async function highRiskNarrative(
                     requestId: audit.requestId,
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,
+                    onProviderDispatch: audit.onProviderDispatch,
                     onAttemptTelemetry: audit.onAttemptTelemetry,
                 }
             ));
