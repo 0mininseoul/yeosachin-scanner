@@ -3,6 +3,7 @@ import {
     mkdir,
     mkdtemp,
     open,
+    opendir,
     readFile,
     readlink,
     readdir,
@@ -21,6 +22,7 @@ import {
     fstatSync as fstatDescriptorSync,
     fsyncSync,
     openSync,
+    type Dir,
     writeFileSync,
 } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
@@ -772,6 +774,96 @@ describe('stateless replay job build contract', () => {
             await expectPhysicalPackageTreeRejection(fixture);
         } finally {
             await rm(fixture.imageRoot, {
+                recursive: true,
+                force: true,
+            });
+        }
+    }, 30_000);
+
+    it('bounds discovery before queueing a synthetic directory with over 100,000 children', async () => {
+        const {
+            verifyReplayAnalysisV2JobPhysicalPackageTree,
+        } = await buildModule();
+        const fixtureRoot = await mkdtemp(join(
+            tmpdir(),
+            'rj-bounded-discovery-',
+        ));
+        const nodeModulesDirectory = join(
+            fixtureRoot,
+            'node_modules',
+        );
+        const packageDirectory = join(
+            nodeModulesDirectory,
+            'zod',
+        );
+        await mkdir(packageDirectory, { recursive: true });
+        let iteratorNextCalls = 0;
+        let maxPending = 0;
+        const syntheticDirectory = {
+            [Symbol.asyncIterator]() {
+                return this;
+            },
+            async next() {
+                iteratorNextCalls += 1;
+                if (iteratorNextCalls > 100_001) {
+                    return {
+                        done: true as const,
+                        value: undefined,
+                    };
+                }
+                return {
+                    done: false as const,
+                    value: {
+                        name: `synthetic-${iteratorNextCalls}`,
+                    },
+                };
+            },
+            async return() {
+                return {
+                    done: true as const,
+                    value: undefined,
+                };
+            },
+        };
+        try {
+            const error =
+                await verifyReplayAnalysisV2JobPhysicalPackageTree({
+                    packageDirectory,
+                    nodeModulesDirectory,
+                    budget: {
+                        bytes: 0,
+                        discovered: 0,
+                        processed: 0,
+                    },
+                    opendirImpl: async path => (
+                        path === packageDirectory
+                            ? syntheticDirectory as unknown as Dir
+                            : opendir(path)
+                    ),
+                    observeTraversal: (state: {
+                        pending: number;
+                        processed: number;
+                        discovered: number;
+                    }) => {
+                        maxPending = Math.max(
+                            maxPending,
+                            state.pending,
+                        );
+                    },
+                }).then(() => undefined, cause => cause);
+
+            expect(error).toMatchObject({
+                message: 'physical closure package tree invalid',
+                cause: {
+                    message: 'package tree entry limit',
+                },
+            });
+            expect(iteratorNextCalls).toBeGreaterThan(0);
+            expect(iteratorNextCalls).toBeLessThanOrEqual(20_001);
+            expect(maxPending).toBeGreaterThan(0);
+            expect(maxPending).toBeLessThanOrEqual(20_000);
+        } finally {
+            await rm(fixtureRoot, {
                 recursive: true,
                 force: true,
             });

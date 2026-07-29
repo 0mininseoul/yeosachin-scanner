@@ -291,10 +291,12 @@ function isStrictDescendant(parent, candidate) {
     );
 }
 
-async function verifyPhysicalPackageTree({
+export async function verifyReplayAnalysisV2JobPhysicalPackageTree({
     packageDirectory,
     nodeModulesDirectory,
     budget,
+    opendirImpl = opendir,
+    observeTraversal,
 }) {
     try {
         const packageRoot = resolve(packageDirectory);
@@ -302,10 +304,27 @@ async function verifyPhysicalPackageTree({
         if (!isStrictDescendant(nodeModulesRoot, packageRoot)) {
             throw new Error('package root escape');
         }
-        const pending = [{
+        const pending = [];
+        const observe = () => observeTraversal?.({
+            pending: pending.length,
+            processed: budget.processed,
+            discovered: budget.discovered,
+        });
+        const enqueue = candidate => {
+            if (
+                budget.discovered
+                >= MAX_PHYSICAL_PACKAGE_TREE_ENTRIES
+            ) {
+                throw new Error('package tree entry limit');
+            }
+            budget.discovered += 1;
+            pending.push(candidate);
+            observe();
+        };
+        enqueue({
             path: packageRoot,
             depth: 0,
-        }];
+        });
         while (pending.length > 0) {
             const current = pending.pop();
             if (
@@ -325,13 +344,8 @@ async function verifyPhysicalPackageTree({
                 throw new Error('package tree escape or depth');
             }
             const entry = await lstat(current.path);
-            budget.entries += 1;
-            if (
-                budget.entries
-                > MAX_PHYSICAL_PACKAGE_TREE_ENTRIES
-            ) {
-                throw new Error('package tree entry limit');
-            }
+            budget.processed += 1;
+            observe();
             if (entry.isFile()) {
                 budget.bytes += entry.size;
                 if (
@@ -345,9 +359,9 @@ async function verifyPhysicalPackageTree({
             if (!entry.isDirectory()) {
                 throw new Error('package tree special entry');
             }
-            const directory = await opendir(current.path);
+            const directory = await opendirImpl(current.path);
             for await (const child of directory) {
-                pending.push({
+                enqueue({
                     path: join(current.path, child.name),
                     depth: current.depth + 1,
                 });
@@ -650,7 +664,8 @@ export async function verifyReplayAnalysisV2JobContainerFilesystem({
             );
         }
         const packageTreeBudget = {
-            entries: 0,
+            discovered: 0,
+            processed: 0,
             bytes: 0,
         };
         for (const entry of provenance.packages) {
@@ -694,7 +709,7 @@ export async function verifyReplayAnalysisV2JobContainerFilesystem({
                     'physical closure provenance mismatch',
                 );
             }
-            await verifyPhysicalPackageTree({
+            await verifyReplayAnalysisV2JobPhysicalPackageTree({
                 packageDirectory,
                 nodeModulesDirectory: nodeModulesPath,
                 budget: packageTreeBudget,
