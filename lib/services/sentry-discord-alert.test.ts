@@ -77,7 +77,7 @@ function internalIntegrationIssue(overrides: Record<string, unknown> = {}) {
                 id: '987654321',
                 title: 'private exception title',
                 permalink: 'https://sentry.io/organizations/acme/issues/987654321/',
-                project: { slug: 'ai-baram-detector' },
+                project: { slug: 'ai-baram-detector-1' },
                 firstSeen: '2026-07-28T00:00:00.000Z',
                 environment: 'production',
                 shortId: 'AI-1234', metadata: { type: 'TypeError', release: 'v1.2.3' },
@@ -131,7 +131,7 @@ describe('Sentry Service Hook Discord bridge', () => {
     });
 
     it('accepts escaped Unicode and noncanonical JSON only when signed as the exact raw body', () => {
-        const body = '{  "data" : { "issue" : { "project" : { "slug" : "ai-baram-detector" }, "id" : "987654321", "firstSeen" : "2026-07-28T00:00:00.000Z", "environment" : "production", "title" : "\\uC548\\uB155" } }, "action" : "created" }';
+        const body = '{  "data" : { "issue" : { "project" : { "slug" : "ai-baram-detector-1" }, "id" : "987654321", "firstSeen" : "2026-07-28T00:00:00.000Z", "environment" : "production", "title" : "\\uC548\\uB155" } }, "action" : "created" }';
         const normalizedSignature = createHmac('sha256', INTERNAL_INTEGRATION_SECRET)
             .update(JSON.stringify(JSON.parse(body)), 'utf8').digest('hex');
         expect(isAuthenticSentryInternalIntegration(signedInternalIntegrationRequest(body), body)).toBe(true);
@@ -140,17 +140,17 @@ describe('Sentry Service Hook Discord bridge', () => {
         )).toBe(false);
     });
 
-    it('accepts only a created production ai-baram-detector issue and uses a stable privacy-safe dedupe key', () => {
+    it('accepts only a created production ai-baram-detector-1 issue and uses a stable privacy-safe dedupe key', () => {
         const accepted = parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue());
         const duplicate = parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
             data: { issue: {
-                id: '987654321', project: { slug: 'ai-baram-detector' },
+                id: '987654321', project: { slug: 'ai-baram-detector-1' },
                 firstSeen: '2026-07-28T00:00:00.000Z', environment: 'production',
                 title: 'different private exception title',
             } },
         }));
         expect(accepted).toMatchObject({
-            projectSlug: 'ai-baram-detector', issueShortId: 'AI-1234',
+            projectSlug: 'ai-baram-detector-1', issueShortId: 'AI-1234',
             errorType: 'TypeError', release: 'v1.2.3',
         });
         expect(duplicate?.dedupeKey).toBe(accepted?.dedupeKey);
@@ -159,7 +159,10 @@ describe('Sentry Service Hook Discord bridge', () => {
             data: { issue: { id: '987654321', project: { slug: 'other-project' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
         }))).toBeNull();
         expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
-            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'staging' } },
+            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'production' } },
+        }))).toBeNull();
+        expect(parseProductionSentryInternalIntegrationIssue(internalIntegrationIssue({
+            data: { issue: { id: '987654321', project: { slug: 'ai-baram-detector-1' }, firstSeen: '2026-07-28T00:00:00Z', environment: 'staging' } },
         }))).toBeNull();
         expect(JSON.stringify(accepted)).not.toContain('person@example.test');
         expect(JSON.stringify(accepted)).not.toContain('private exception title');

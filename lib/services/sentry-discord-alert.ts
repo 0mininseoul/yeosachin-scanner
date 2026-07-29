@@ -278,7 +278,7 @@ export function parseProductionSentryInternalIntegrationIssue(rawBody: string): 
     if (!root || root.action !== 'created' || !issue) return null;
 
     const projectSlug = safeProjectSlug(stringAt(issue, ['project', 'slug']));
-    if (projectSlug !== 'ai-baram-detector' || !isProduction(internalIssueEnvironment(issue))) return null;
+    if (projectSlug !== 'ai-baram-detector-1' || !isProduction(internalIssueEnvironment(issue))) return null;
 
     const issueId = typeof issue.id === 'string' && issue.id.trim() ? issue.id.trim() : null;
     const timestamp = typeof issue.firstSeen === 'string'

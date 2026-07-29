@@ -35,7 +35,7 @@ describe('Sentry Internal Integration Discord route', () => {
     });
 
     it('durably enqueues a valid issue.created alert and immediately dispatches its stable dedupe key', async () => {
-        const alert = { dedupeKey: 'c'.repeat(64), projectSlug: 'ai-baram-detector', occurredAt: new Date(), issueUrl: null };
+        const alert = { dedupeKey: 'c'.repeat(64), projectSlug: 'ai-baram-detector-1', occurredAt: new Date(), issueUrl: null };
         mocks.authentic.mockReturnValue(true);
         mocks.parse.mockReturnValue(alert);
         mocks.enqueue.mockResolvedValue(true);
