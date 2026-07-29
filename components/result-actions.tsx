@@ -223,11 +223,19 @@ export function ResultActions({
                 {notice.text}
               </span>
               {notice.action && (
+                /* Instagram's own gradient and mark rather than the app's
+                   crimson: crimson means danger everywhere else in this report,
+                   and the button is only saying where it goes next. */
                 <button
                   type="button"
                   onClick={notice.action.run}
-                  className="mt-3.5 w-full bg-blood py-3 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
+                  className="mt-3.5 flex w-full items-center justify-center gap-2 py-3 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
+                  style={{
+                    background:
+                      'linear-gradient(95deg, #F58529 0%, #DD2A7B 45%, #8134AF 75%, #515BD4 100%)',
+                  }}
                 >
+                  <InstagramMark className="h-4 w-4 shrink-0" />
                   {notice.action.label}
                 </button>
               )}

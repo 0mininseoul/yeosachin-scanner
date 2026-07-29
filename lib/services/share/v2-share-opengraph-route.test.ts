@@ -99,7 +99,7 @@ describe('V2 dynamic share Open Graph image', () => {
         mocks.read.mockResolvedValue(TINY_WEBP);
     });
 
-    it('renders an 800x400 result-specific card with an inline R2 target image', async () => {
+    it('renders an 800x800 result-specific card with an inline R2 target image', async () => {
         const response = await GET(
             new Request(
                 `https://example.com/api/share/${token}/opengraph-image`
@@ -110,7 +110,7 @@ describe('V2 dynamic share Open Graph image', () => {
         expect(response.status).toBe(200);
         expect(mocks.captures[0]?.options).toMatchObject({
             width: 800,
-            height: 400,
+            height: 800,
             fonts: [{
                 name: 'Paperlogy',
                 weight: 700,
@@ -118,7 +118,7 @@ describe('V2 dynamic share Open Graph image', () => {
             }],
         });
         expect(textOf(mocks.captures[0]?.element)).toContain(
-            '김준호님의 위장 여사친 판독 결과'
+            '김준호님의 위장 여사친을 찾았어요'
         );
         expect(textOf(mocks.captures[0]?.element)).not.toMatch(
             /고위험\s*\d|주의\s*\d|점수\s*\d/u
@@ -148,7 +148,7 @@ describe('V2 dynamic share Open Graph image', () => {
         );
         expect(response.status).toBe(200);
         expect(textOf(mocks.captures[0]?.element)).toContain(
-            '김준호님의 위장 여사친 판독 결과'
+            '김준호님의 위장 여사친을 찾았어요'
         );
         expect(containsImage(mocks.captures[0]?.element)).toBe(false);
     });

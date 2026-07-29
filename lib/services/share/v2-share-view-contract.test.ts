@@ -27,8 +27,11 @@ describe('shared view reads the masked shape', () => {
         const mapper = page.match(/function mapV2SharedResult[\s\S]*?\n\}/)?.[0];
         expect(mapper, 'mapV2SharedResult should be findable').toBeTruthy();
         expect(mapper).toContain('account.handleMasked');
-        expect(mapper).toContain('account.fullNameMasked');
         expect(mapper).toContain('account.accountKey');
+        // Names and bios are dropped outright rather than masked: a row of
+        // bullets is noise, and a bio identifies as readily as a name.
+        expect(mapper).not.toContain('fullNameMasked');
+        expect(mapper).not.toMatch(/bio: account\.bio/);
         // Reading these would silently produce undefined.
         expect(mapper).not.toMatch(/account\.instagramId\b/);
         expect(mapper).not.toMatch(/account\.fullName\b(?!Masked)/);

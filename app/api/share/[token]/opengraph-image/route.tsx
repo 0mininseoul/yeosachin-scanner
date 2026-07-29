@@ -15,7 +15,7 @@ import {
 export const runtime = 'nodejs';
 
 /** Rendered size of the avatar on the card; the source is re-encoded to match. */
-const AVATAR_PX = 220;
+const AVATAR_PX = 300;
 
 const shareTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const shareRecordSchema = z.object({
@@ -63,6 +63,11 @@ function notFound() {
     );
 }
 
+/* Square, because KakaoTalk renders the feed thumbnail square and centre-crops
+   anything wider — a 2:1 card lost its avatar on one edge and its headline on
+   the other. Laying the card out vertically means nothing has to survive a crop. */
+const CARD_PX = 800;
+
 function ogCard(displayName: string, imageDataUrl: string | null) {
     return (
         <div
@@ -70,13 +75,14 @@ function ogCard(displayName: string, imageDataUrl: string | null) {
                 width: '100%',
                 height: '100%',
                 display: 'flex',
+                flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: 48,
-                padding: '56px 64px',
+                gap: 56,
+                padding: '72px 64px',
                 color: '#f7f2ed',
                 background:
-                    'radial-gradient(circle at 20% 20%, #4a181f 0%, #17120f 42%, #0d0b0a 100%)',
+                    'radial-gradient(circle at 50% 22%, #4a181f 0%, #17120f 46%, #0d0b0a 100%)',
                 fontFamily: 'Paperlogy',
             }}
         >
@@ -87,27 +93,27 @@ function ogCard(displayName: string, imageDataUrl: string | null) {
                     width={AVATAR_PX}
                     height={AVATAR_PX}
                     style={{
-                        width: 220,
-                        height: 220,
+                        width: AVATAR_PX,
+                        height: AVATAR_PX,
                         objectFit: 'cover',
-                        borderRadius: 110,
-                        border: '6px solid #ef233c',
-                        boxShadow: '0 20px 64px rgba(0,0,0,.45)',
+                        borderRadius: AVATAR_PX / 2,
+                        border: '8px solid #ef233c',
+                        boxShadow: '0 24px 72px rgba(0,0,0,.5)',
                     }}
                 />
             ) : (
                 <div
                     style={{
-                        width: 220,
-                        height: 220,
+                        width: AVATAR_PX,
+                        height: AVATAR_PX,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        borderRadius: 110,
-                        border: '6px solid #ef233c',
+                        borderRadius: AVATAR_PX / 2,
+                        border: '8px solid #ef233c',
                         color: '#ef233c',
                         background: '#211b18',
-                        fontSize: 86,
+                        fontSize: 120,
                         fontWeight: 800,
                     }}
                 >
@@ -117,32 +123,15 @@ function ogCard(displayName: string, imageDataUrl: string | null) {
             <div
                 style={{
                     display: 'flex',
-                    flexDirection: 'column',
-                    maxWidth: 420,
-                    gap: 16,
+                    maxWidth: 640,
+                    fontSize: 60,
+                    fontWeight: 900,
+                    lineHeight: 1.28,
+                    textAlign: 'center',
+                    wordBreak: 'keep-all',
                 }}
             >
-                <div
-                    style={{
-                        color: '#ef233c',
-                        fontSize: 26,
-                        fontWeight: 800,
-                        letterSpacing: '0.08em',
-                    }}
-                >
-                    AI 바람감지기
-                </div>
-                <div
-                    style={{
-                        display: 'flex',
-                        fontSize: 46,
-                        fontWeight: 900,
-                        lineHeight: 1.2,
-                        wordBreak: 'keep-all',
-                    }}
-                >
-                    {displayName}님의 위장 여사친 판독 결과
-                </div>
+                {displayName}님의 위장 여사친을 찾았어요
             </div>
         </div>
     );
@@ -215,8 +204,8 @@ export async function GET(
         response = new ImageResponse(
             ogCard(displayName, imageDataUrl),
             {
-                width: 800,
-                height: 400,
+                width: CARD_PX,
+                height: CARD_PX,
                 fonts: [{
                     name: 'Paperlogy',
                     data: font,

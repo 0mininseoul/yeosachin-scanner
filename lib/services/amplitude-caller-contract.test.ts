@@ -43,16 +43,21 @@ describe('Amplitude caller privacy contract', () => {
     });
 
     it('tracks result sharing only after the share helper confirms a channel', () => {
-        for (const page of [
-            source('app/result/[requestId]/page.tsx'),
-            source('app/share/[token]/page.tsx'),
-        ]) {
-            expect(page).toMatch(/const shareChannel = await shareResult\(/);
-            expect(page).toMatch(/if \(shareChannel\)[\s\S]*?trackEvent\(EVENTS\.RESULT_SHARED/);
-            // The trailing `(` matters: without it this also matches the Kakao
-            // helper `shareResultToKakao(`, which is a different call site.
-            expect(page).not.toMatch(/trackEvent\(EVENTS\.RESULT_SHARED[\s\S]*?await shareResult\(/);
-        }
+        const page = source('app/result/[requestId]/page.tsx');
+        expect(page).toMatch(/const shareChannel = await shareResult\(/);
+        expect(page).toMatch(/if \(shareChannel\)[\s\S]*?trackEvent\(EVENTS\.RESULT_SHARED/);
+        // The trailing `(` matters: without it this also matches the Kakao
+        // helper `shareResultToKakao(`, which is a different call site.
+        expect(page).not.toMatch(/trackEvent\(EVENTS\.RESULT_SHARED[\s\S]*?await shareResult\(/);
+    });
+
+    it('never emits a share event from the shared view', () => {
+        // The reader of a shared report has nothing to pass on: the view offers
+        // only a link to start a reading of their own, so a share from here
+        // would be an event with no action behind it.
+        const shared = source('app/share/[token]/page.tsx');
+        expect(shared).not.toMatch(/EVENTS\.RESULT_SHARED/);
+        expect(shared).not.toMatch(/shareResult\(/);
     });
 
     it('tracks a Kakao share only once a channel came back', () => {
@@ -72,9 +77,6 @@ describe('Amplitude caller privacy contract', () => {
         // DTO; either way the id comes from the result, never from the token.
         expect(shared).toMatch(
             /trackEvent\(EVENTS\.RESULT_VIEWED, \{[\s\S]*?request_id:\s*display\.requestId/,
-        );
-        expect(shared).toMatch(
-            /if \(shareChannel\)[\s\S]*?trackEvent\(EVENTS\.RESULT_SHARED, \{[\s\S]*?request_id:\s*data\.requestId/,
         );
         const trackingCalls = shared.match(/trackEvent\([\s\S]*?\);/g)?.join('\n') ?? '';
         expect(trackingCalls).not.toMatch(/token\s*:/);

@@ -4,7 +4,6 @@ import { useEffect, useRef, useState, use } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
-import { shareResult } from '@/lib/services/result-share';
 import {
     genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
@@ -15,9 +14,7 @@ import {
     CaseCard,
     MaskedAvatar,
     MaskedHandle,
-    MaskedText,
     ProfileFallback,
-    ghostCls,
     primaryCls,
 } from '@/components/case-ui';
 import { SuspectRow } from '@/components/suspect-row';
@@ -67,11 +64,13 @@ function mapV2SharedResult(result: V2SharedResultPage): ResultData {
         femaleAccounts: result.femaleAccounts.map(account => ({
             accountKey: account.accountKey,
             instagramId: account.handleMasked,
-            fullName: account.fullNameMasked ?? undefined,
+            /* Name and bio are dropped rather than masked. A row of bullets is
+               noise, and a bio names workplaces, schools and other handles —
+               it identifies at least as readily as the name does. */
             profileImage: account.profileImage ?? undefined,
             instagramUrl: '',
             riskGrade: account.riskBand,
-            bio: account.bio || '',
+            bio: '',
             recentMutualRank: account.recentMutualRank !== null && account.recentMutualRank <= 5
                 ? account.recentMutualRank as 1 | 2 | 3 | 4 | 5
                 : undefined,
@@ -82,9 +81,28 @@ function mapV2SharedResult(result: V2SharedResultPage): ResultData {
         privateAccounts: result.privateAccounts.map(account => ({
             accountKey: account.accountKey,
             instagramId: account.handleMasked,
-            fullName: account.fullNameMasked ?? undefined,
             profileImage: account.profileImage ?? undefined,
             instagramUrl: '',
+        })),
+    };
+}
+
+/* Legacy v1 shares still arrive with real names and bios on them. The server
+   cannot be fixed retroactively for those, so the view refuses to carry the
+   fields at all rather than relying on a blur to hide them. */
+function stripLegacyIdentityText(result: ResultData): ResultData {
+    return {
+        ...result,
+        maskedByClient: true,
+        femaleAccounts: result.femaleAccounts.map(account => ({
+            ...account,
+            fullName: undefined,
+            bio: '',
+        })),
+        privateAccounts: result.privateAccounts.map(account => ({
+            ...account,
+            fullName: undefined,
+            bio: undefined,
         })),
     };
 }
@@ -182,7 +200,7 @@ export default function ShareResultPage({ params }: PageProps) {
                     && 'detectedMutuals' in result.summary;
                 const display: ResultData = isV2
                     ? mapV2SharedResult(result as V2SharedResultPage)
-                    : { ...(result as ResultData), maskedByClient: true };
+                    : stripLegacyIdentityText(result as ResultData);
 
                 setData(display);
                 if (!resultViewTrackedRef.current) {
@@ -202,36 +220,6 @@ export default function ShareResultPage({ params }: PageProps) {
 
         fetchResult();
     }, [token]);
-
-    const handleShare = async () => {
-        if (!data) return;
-        const url = window.location.href;
-        const shareData = {
-            title: 'AI 위장 여사친 판독기 분석 결과',
-            text: `${data?.summary.targetInstagramId}님의 인스타 분석 결과를 확인해보세요!`,
-            url: url,
-        };
-
-        const shareChannel = await shareResult({
-            ...(navigator.share
-                ? { share: (payload) => navigator.share(payload) }
-                : {}),
-            ...(navigator.clipboard?.writeText
-                ? { writeText: (text) => navigator.clipboard.writeText(text) }
-                : {}),
-        }, shareData);
-        if (shareChannel) {
-            trackEvent(EVENTS.RESULT_SHARED, {
-                request_id: data.requestId,
-                share_channel: shareChannel,
-            });
-            if (shareChannel === 'clipboard') {
-                alert('링크가 클립보드에 복사되었습니다!');
-            }
-        } else {
-            alert('공유하기에 실패했습니다.');
-        }
-    };
 
     if (loading) {
         return (
@@ -375,13 +363,11 @@ export default function ShareResultPage({ params }: PageProps) {
                                     key={account.accountKey ?? account.instagramId}
                                     account={account}
                                     rank={i + 1}
-                                    avatar={data.maskedByClient ? (
+                                    avatar={
                                         <MaskedAvatar>
                                             <ProfileImage src={account.profileImage} variant="person" />
                                         </MaskedAvatar>
-                                    ) : (
-                                        <ProfileImage src={account.profileImage} variant="person" />
-                                    )}
+                                    }
                                     externalProfileLinks={false}
                                     maskHandle={data.maskedByClient}
                                 />
@@ -403,13 +389,9 @@ export default function ShareResultPage({ params }: PageProps) {
                             {privateAccounts.map((account) => (
                                 <div key={account.accountKey ?? account.instagramId} className="flex items-center gap-3.5 border-b border-line py-3.5">
                                     <div className="relative h-10 w-10 shrink-0 overflow-hidden border border-line bg-panel">
-                                        {data.maskedByClient ? (
-                                            <MaskedAvatar>
-                                                <ProfileImage src={account.profileImage} variant="private" />
-                                            </MaskedAvatar>
-                                        ) : (
+                                        <MaskedAvatar>
                                             <ProfileImage src={account.profileImage} variant="private" />
-                                        )}
+                                        </MaskedAvatar>
                                     </div>
                                     <div className="min-w-0 flex-1">
                                         {/* Masked for the same reason as the public list. */}
@@ -423,35 +405,26 @@ export default function ShareResultPage({ params }: PageProps) {
                                                 @{account.instagramId}
                                             </span>
                                         )}
-                                        {(account.fullName || account.bio) && (
-                                            <p className="mt-0.5 truncate text-[12px] text-fg-dim">
-                                                {account.fullName && (data.maskedByClient
-                                                    ? <MaskedText value={account.fullName} />
-                                                    : <span>{account.fullName}</span>)}
-                                                {account.fullName && account.bio && ' · '}
-                                                {account.bio}
-                                            </p>
-                                        )}
                                     </div>
                                 </div>
                             ))}
                         </div>
                     )}
-                    <p className="mt-3 text-[11px] text-fg-mute">비공개 계정은 이름 텍스트의 여성형 가능성 순이며, 이 추정은 틀릴 수 있어요.</p>
                 </section>
                 )}
 
-                {/* actions */}
-                <div className="mt-9 space-y-2.5">
-                    <button onClick={handleShare} className={ghostCls}>
-                        리포트 공유하기
-                    </button>
+                {/* The reader of a shared report is at the end of the chain —
+                    there is nothing here for them to pass on, so the only action
+                    is the one that starts a reading of their own. */}
+                <div className="mt-9">
                     <Link href="/" className={primaryCls}>
                         나도 판독해보기
                     </Link>
                 </div>
 
-                <p className="mt-5 text-center text-[11px] text-fg-mute">
+                <p className="mt-5 text-center text-[11px] leading-relaxed text-fg-mute">
+                    공유본에는 일부 계정만 표시되며, 계정 정보는 가려져 있어요.
+                    <br />
                     AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 사용해 주세요.
                 </p>
             </main>
