@@ -997,8 +997,29 @@ export function createAnalysisV2MediaArtifactStore(input: {
 
         async persistBundle(value) {
             const fence = assertFence(value);
-            const bytes = serializeAnalysisV2MediaBundle(value.media);
             const artifactKey = analysisV2MediaBundleArtifactKey(value.bundleId);
+            const existing = await registry.load({ ...fence, artifactKey });
+            if (existing) {
+                if (
+                    existing.artifactKind !== 'media_bundle'
+                    || existing.contentType !== 'application/octet-stream'
+                ) {
+                    throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: artifact kind mismatch.');
+                }
+                const existingBytes = await input.objects.read(existing);
+                if (
+                    existingBytes.length !== existing.byteSize
+                    || sha256(existingBytes) !== existing.contentSha256
+                ) {
+                    throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: content mismatch.');
+                }
+                deserializeAnalysisV2MediaBundle(
+                    existingBytes,
+                    value.media.map(item => item.selectionId),
+                );
+                return existing;
+            }
+            const bytes = serializeAnalysisV2MediaBundle(value.media);
             const contentSha256 = sha256(bytes);
             const objectName = analysisV2MediaArtifactObjectName({
                 requestId: fence.requestId,
