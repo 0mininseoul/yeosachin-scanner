@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-AI stage policy V2.11 through V2.17 is evaluation-only. Production policy selection and the
+AI stage policy V2.11 through V2.18 is evaluation-only. Production policy selection and the
 persisted-policy allowlist remain capped at V2.10 until a separately reviewed production rollout
 changes both boundaries. An evaluation result must not be treated as a production deployment,
 full Standard E2E result, SLA proof, or unit-cost evidence.
@@ -60,6 +60,7 @@ useful for relative comparison only, not an end-to-end product SLA or production
 | V2.15 | 32.34% | 505.7s | Larger feature response cap. |
 | V2.16 | 33.62% | 705.5s | Single-profile admission shadow; 32 admitted single-profile candidates yielded 0 rescues. |
 | V2.17 | 32.77% | 314.009s | Name-and-visual fusion shadow; six strict rescues, but quality gates failed. |
+| V2.18 | 31.91% | 320.220s | Aggregate public-gender headroom diagnostic; all study/adoption gates failed. |
 
 ### V2.17 strict result
 
@@ -103,6 +104,64 @@ Stage telemetry for that corrected replay was:
 V2.17 is rejected for production. It missed the 20% unknown objective, overall and male calibration
 gates, and the official-account exclusion gate. Production remains on V2.10. This result is an
 AI-only evaluation; it is not a full Standard E2E, SLA measurement, or product cost sample.
+
+### V2.18 aggregate headroom result
+
+V2.18 reused the same authenticated sealed Standard source without source refresh or media
+substitution. It retained 380 profiles: 235 public, 145 private, and 1,904 media items. Exactly one
+expected execution ran with one task, task attempt zero, no Cloud Run retry, one claim, and one
+strict report. The worker package has no Apify import or credential path, so this evaluation made
+no Instagram or Apify call and could not mutate a production request or user result.
+
+The strict aggregate report was:
+
+| Metric | Result |
+| --- | ---: |
+| Replay wall time | 320.220s |
+| Baseline male / female / unknown | 71 / 82 / 82 |
+| Final male / female / unknown | 76 / 84 / 75 |
+| Observed unknown ratio | 31.91% |
+| Worst-case unknown ratio | 33.33% |
+| Additional rescues required for observed `<=20%` | 28 |
+| Additional rescues required for worst-case `<=20%` | 32 |
+| Unknown name vote, female / male / none | 16 / 23 / 43 |
+| Unknown visual vote, female / male / none | 6 / 7 / 69 |
+| Guarded strong-female-name / eligible | 13 / 4 |
+| Final unknown with resolver media `>=2` | 44 |
+| Final unknown with distinct feed posts `>=2` | 37 |
+| Distinct posts `>=2` and personal/creator context | 20 |
+| Distinct posts `>=2` and uncertain context | 8 |
+
+Known-result restricted calibration predicted 90 of 153 known rows and agreed on 86. Male
+agreement was 42/45 and female agreement was 44/45. Their one-sided 95% Wilson lower bounds were
+84.44% and 90.63%, respectively. The username-only slice made zero predictions, so it provided no
+calibration evidence.
+
+The guarded-female candidate-volume, restricted-female sample, restricted-female precision,
+official-final-rescue, and name-only-further-study gates were all false. Four guarded name-only
+candidates cannot close either the 28-account observed gap or the 32-account worst-case gap.
+Although 37 final-unknown accounts have at least two distinct feed posts, only 20 also have a
+personal/creator context, and V2.18 did not evaluate a new visual model or establish precision for
+an expanded cohort. The raw media count therefore identifies model headroom but does not prove that
+`<=20%` is achievable under the current safe gates. Production remains on V2.10.
+
+Stage telemetry for the single V2.18 execution was:
+
+| Stage | Calls | Mean latency | Retries | Rate limited | Failure / rejection detail |
+| --- | ---: | ---: | ---: | ---: | --- |
+| gender triage | 231 | 2,994ms | 0 | 0 | 0 failures |
+| feature analysis | 175 | 5,136ms | 0 | 0 | 2 response rejected |
+| private-name analysis | 5 | 7,680ms | 0 | 0 | 0 failures |
+| gender resolver | 42 | 9,765ms | 0 | 0 | response rejected 2, capacity 4, ambiguous 1, transport 1, cutoff 1 |
+
+The exact provider-dispatch total was 453. For this source, the replay topology permits at most 710
+logical calls; Gemini permits at most four attempts per logical call, so the pre-execution hard
+dispatch ceiling was 2,840. The strict terminal report intentionally retains no token counts or
+per-attempt cost, and project-level token monitoring was not yet attributable to this execution.
+Actual Gemini USD cost is therefore incomplete and must not be fabricated. At the configured output
+caps and repository pricing, `$1.211904` is only the maximum output-token component for the 453
+observed dispatches; input-token cost is additional and unknown. This is not a complete replay cost,
+full Standard cost, or unit-cost sample.
 
 ## Teardown
 
