@@ -11,12 +11,14 @@ const proxyImageUsages = [
         srcExpression: 'readyPreflight.target.profileImage',
     },
     {
-        name: 'progress active profile',
+        // The progress page hands the active profile to the screened-faces
+        // strip, which is where the signed URL is now rendered.
+        name: 'progress screened faces',
         source: readFileSync(
-            new URL('../../../app/progress/[requestId]/page.tsx', import.meta.url),
+            new URL('../../../components/progress-faces.tsx', import.meta.url),
             'utf8'
         ),
-        srcExpression: 'data.activeProfile.imageUrl',
+        srcExpression: 'src',
     },
 ] as const;
 
