@@ -10,6 +10,21 @@
 - UI의 4–6/5–8/8–12/10–15분 workload band는 계획 band일 뿐 검증된 SLA가 아니다. 94.6분 최신 표본은 이 band 안에 들지 않는다.
 - Basic/Standard의 complete cost는 아직 없다. provider·Gemini 일부 관측과 실제 기능 표본을 전체 원가, p50/p95, 마진 증명으로 쓰지 않는다. 새 유료 E2E는 실행하지 않았다.
 
+### V2.17 AI-only 평가의 비용 경계
+
+V2.17 name-and-visual fusion은 sealed historical Standard source로 평가했다. capture는 source
+385, selected media 1,915, retained profile 380(공개 235, 비공개 145), retained media 1,904였고
+581.209초가 걸렸다. 이 시간은 replay 입력의 capture·normalization이며 Instagram 수집 시간,
+AI stage 시간 또는 UI SLA가 아니다. 새 Apify Actor delta는 0이었다.
+
+첫 실행은 model location 오설정으로 generation 전에 123건이 4xx 거절된 11.29초짜리 config
+실패였고 성공 generation 증거가 없어 품질·원가 표본에서 제외한다. location을 `global`로 고친
+단일 paid replay는 314.009초에 완료됐지만 unknown 32.77%(worst 34.17%)와 calibration 및
+official-account gate를 통과하지 못해 production에서 기각됐다. Production은 V2.10을 유지한다.
+이 실행은 AI-only R&D 평가이므로 full Standard E2E, product SLA, Basic/Standard 건당 원가,
+판매가 또는 마진 근거가 아니다. 단계별 aggregate와 안전한 재현 절차는
+[AI replay 운영 문서](./analysis-v2-ai-replay-operations.md)를 따른다.
+
 아래의 과금 경로와 과거 표본은 당시의 사실을 보존한다. 현재 공개/자동 상태와 모순되는 과거 출시 gate 문구는 역사적 판단 기록이며, 현재 운영 판단으로 사용하지 않는다.
 
 ## 플랜 범위

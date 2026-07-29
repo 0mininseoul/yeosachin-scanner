@@ -55,7 +55,7 @@ bootstrap
 
 Gemini generation은 process-local semaphore가 아니라 DB-global lease가 정본이다. `analysis_v2_gemini_leases`의 8 slot과 fence/lease/cutoff protocol은 모든 revision·instance가 공유하며, slot 부족·격리·deadline 부족은 새 AI 시도로 소비하지 않고 지연 재실행한다. 격리 해제는 DB owner의 사고 근거 절차만 가능하다([`20260724123200_add_analysis_v2_gemini_leases.sql`](../supabase/migrations/20260724123200_add_analysis_v2_gemini_leases.sql), [`lib/services/analysis/v2-gemini-lease-store.ts`](../lib/services/analysis/v2-gemini-lease-store.ts)).
 
-성별은 triage 뒤 evidence가 충분한 후보에만 opportunistic gender-resolution을 한다. 해소할 수 없거나 모순된 evidence는 `unknown`으로 유지한다. 집계 성별 실험은 별도 관측이며 account identifier·이름·bio·caption·URL·prompt·media locator를 보고서에 넣지 않는다([`lib/services/analysis/v2-gender-resolution-quality.ts`](../lib/services/analysis/v2-gender-resolution-quality.ts), [`lib/services/analysis/replay/resolver-experiment-runner.ts`](../lib/services/analysis/replay/resolver-experiment-runner.ts)).
+성별은 triage 뒤 evidence가 충분한 후보에만 opportunistic gender-resolution을 한다. 해소할 수 없거나 모순된 evidence는 `unknown`으로 유지한다. 집계 성별 실험은 별도 관측이며 account identifier·이름·bio·caption·URL·prompt·media locator를 보고서에 넣지 않는다([`lib/services/analysis/v2-gender-resolution-quality.ts`](../lib/services/analysis/v2-gender-resolution-quality.ts), [`lib/services/analysis/replay/resolver-experiment-runner.ts`](../lib/services/analysis/replay/resolver-experiment-runner.ts)). V2.17 name-and-visual fusion의 AI-only strict 평가도 unknown 32.77%(worst 34.17%)와 calibration·official exclusion gate 실패로 production에서 기각됐으며, production은 V2.10을 유지한다. 평가 절차와 aggregate 결과의 정본은 [AI replay 운영 문서](./analysis-v2-ai-replay-operations.md)다.
 
 ## 위험도 v2.5
 

@@ -48,9 +48,9 @@ report, or ambiguous paid invocation is a failed evaluation. Do not use it as a 
 
 ## Observed AI-only evaluations
 
-The timings below include replay capture/normalization and AI work for the same historical source.
-They are useful for relative comparison only, not an end-to-end product SLA or production cost
-model.
+The timings below are AI-only replay wall times for the same historical source. Source capture and
+normalization are tracked separately and are not included in these rows. The measurements are
+useful for relative comparison only, not an end-to-end product SLA or production cost model.
 
 | Evaluation policy | Unknown ratio | Wall time | Notes |
 | --- | ---: | ---: | --- |
@@ -59,10 +59,50 @@ model.
 | V2.14 | 34.04% | 500.5s | Feature-model shadow. |
 | V2.15 | 32.34% | 505.7s | Larger feature response cap. |
 | V2.16 | 33.62% | 705.5s | Single-profile admission shadow; 32 admitted single-profile candidates yielded 0 rescues. |
+| V2.17 | 32.77% | 314.009s | Name-and-visual fusion shadow; six strict rescues, but quality gates failed. |
 
-V2.17 name-and-visual fusion is prepared as a separate evaluation capability. At the time of this
-document revision it has not been executed; add its aggregate result only after the strict report
-and zero-Apify checks pass.
+### V2.17 strict result
+
+The sealed-source capture observed 385 source profiles and 1,915 selected media items. It retained
+380 profiles: 235 public, 145 private, and 1,904 media items. Capture and normalization took
+581.209s. That duration is neither Instagram collection time nor AI analysis time and must not be
+used as a product SLA measurement. Apify Actor delta was zero.
+
+The first execution was a pre-generation configuration failure: its model location was regional
+instead of the required `global` location, so 123 requests were rejected with 4xx responses in
+11.29s. It produced no successful-generation evidence and is not a quality result. The corrected
+single paid replay used the required global location and ran once; no duplicate successful replay
+was started.
+
+The corrected strict report was:
+
+| Metric | Result |
+| --- | ---: |
+| Corrected replay wall time | 314.009s |
+| Baseline male / female / unknown | 70 / 82 / 83 |
+| Final male / female / unknown | 74 / 84 / 77 |
+| Observed unknown ratio | 32.77% |
+| Worst-case unknown ratio | 34.17% |
+| Strict fusion rescues | 6 (male 4, female 2) |
+| Calibration agreement | 96 / 103 (93.2%) |
+| Male calibration agreement | 45 / 51 (88.2%) |
+| Female calibration agreement | 51 / 52 (98.1%) |
+| Known official counterfactuals | 12 |
+| Official fusion attempted / accepted | 1 / 1 |
+| Adoption gate | false |
+
+Stage telemetry for that corrected replay was:
+
+| Stage | Calls | Mean latency | Retries | Rate limited | Failure / rejection detail |
+| --- | ---: | ---: | ---: | ---: | --- |
+| gender triage | 231 | 3,018ms | 0 | 0 | 0 failures |
+| feature analysis | 175 | 5,034ms | 0 | 0 | 1 response rejected |
+| private-name analysis | 5 | 7,279ms | 0 | 0 | 1 response rejected |
+| gender resolver | 39 | 12,613ms | 0 | 0 | ambiguous 2, transport 2, capacity 9, cutoff 1 |
+
+V2.17 is rejected for production. It missed the 20% unknown objective, overall and male calibration
+gates, and the official-account exclusion gate. Production remains on V2.10. This result is an
+AI-only evaluation; it is not a full Standard E2E, SLA measurement, or product cost sample.
 
 ## Teardown
 
@@ -79,7 +119,7 @@ secret deletion is not a substitute for reviewing a failed or ambiguous paid inv
 
 ## Canonical documentation placement
 
-After a V2.17 result is independently reviewed, add a short link from
-[`analysis-v2-production-operations.md`](./analysis-v2-production-operations.md) near the gender
-quality section and from [`operations-cost-model.md`](./operations-cost-model.md) near evaluation
-versus production-cost evidence. Do not update either canonical document until that result exists.
+Current production policy and product cost boundaries remain canonical in
+[`analysis-v2-production-operations.md`](./analysis-v2-production-operations.md) and
+[`operations-cost-model.md`](./operations-cost-model.md). This document is the canonical aggregate
+record for AI-only replay operations and evaluation results.
