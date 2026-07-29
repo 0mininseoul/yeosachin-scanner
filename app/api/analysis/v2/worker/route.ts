@@ -12,6 +12,11 @@ import {
     verifyAnalysisV2TaskAuthorization,
 } from '@/lib/services/analysis/v2-tasks';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
+import {
+    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT,
+    ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER,
+    analysisV2WorkerTaskContractFromHeader,
+} from '@/lib/services/analysis/v2-worker-task-contract';
 import { isAnalysisV2WorkerErrorCode } from '@/lib/services/analysis/v2-worker-error-codes';
 import {
     observeRoute,
@@ -19,8 +24,13 @@ import {
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
 
+// Keep the Vercel build declaration within the Hobby ceiling. Cloud Tasks invokes only the
+// canonical Cloud Run worker, whose independently configured request timeout is 600 seconds.
 export const maxDuration = 300;
-export const ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS = maxDuration * 1_000;
+// Stop paid scheduling 60 seconds before the Cloud Run / Cloud Tasks deadline so the claimed
+// job can checkpoint and release its durable fence before transport expiry.
+export const ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS =
+    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT.handlerWindowMs;
 
 const OBSERVABLE_JOB_KEY_PATTERN = /^(?:coordinator:(?:bootstrap|candidate-screening|finalize|join:(?:primary-evidence|final-score))|track:(?:relationships:collect|target-evidence:collect|profiles:batch:[0-9]+|profile-ai:batch:[0-9]+|private-names:batch:[0-9]+|reverse-likes:collect|partner-safety:batch:0|narratives:batch:0))$/;
 
@@ -72,8 +82,8 @@ async function handlePOST(
     request: Request,
     context: OperationalRequestContext,
 ): Promise<NextResponse> {
-    const handlerDeadlineAtMs =
-        performance.now() + ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS;
+    // Account for authentication and parsing latency inside the task's immutable time budget.
+    const startedAtMs = performance.now();
     let config;
     try {
         config = getAnalysisV2TasksConfig();
@@ -157,9 +167,13 @@ async function handlePOST(
 
     const jobKey = observableJobKey(delivery.jobKey);
     const analysisRequestId = delivery.requestId;
+    const taskContract = analysisV2WorkerTaskContractFromHeader(
+        request.headers.get(ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER),
+    );
     try {
         const outcome = await processAnalysisV2TaskDelivery(delivery, {
-            handlerDeadlineAtMs,
+            handlerDeadlineAtMs: startedAtMs + taskContract.handlerWindowMs,
+            jobLeaseSeconds: taskContract.jobLeaseSeconds,
         });
         if (outcome.status === 'retry') {
             const errorCode = safeErrorCode(

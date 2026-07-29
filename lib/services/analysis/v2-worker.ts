@@ -926,6 +926,7 @@ export async function processAnalysisV2TaskDelivery(
         terminalMediaCleanup?: AnalysisV2TerminalMediaCleanup;
         terminalFailureIntentLoader?: AnalysisV2TerminalFailureIntentLoader;
         handlerDeadlineAtMs?: number;
+        jobLeaseSeconds?: number;
     } = {}
 ): Promise<AnalysisV2WorkerOutcome> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -937,7 +938,7 @@ export async function processAnalysisV2TaskDelivery(
         handlerDeadlineAtMs: dependencies.handlerDeadlineAtMs,
     }));
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
-    const claim = await store.claim(delivery);
+    const claim = await store.claim(delivery, dependencies.jobLeaseSeconds);
     if (!claim) return Object.freeze({ status: 'already_terminal' });
 
     let pendingTerminalFailure: string | null;
