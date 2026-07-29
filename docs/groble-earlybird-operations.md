@@ -172,6 +172,8 @@ ORDER BY query_start;
   ```
 
   이 절차는 자동화, cron, webhook, recovery에서 호출하지 않는다. 주문에 결제 ID·실결제액·결제시각·확인된 seller reference·연결된 결과 중 하나라도 있으면 fail closed한다. 다른 시각이나 사유로의 재실행도 거부하며, 동일한 감사 기록에 대한 정확한 재실행만 멱등 처리한다.
+
+  종결 뒤 도착한 서명된 결제는 새 주문에 자동 귀속하지 않는다. seller reference가 종결 주문을 정확히 가리키면 해당 주문을 `refund_pending`으로 보내고, reference가 없어서 종결 주문과 새 주문을 구분할 수 없거나 reference가 결제 증거와 충돌하면 webhook 감사 행을 `ambiguous_buyer`로 남겨 수동 검토한다. 새 주문의 정확한 seller reference가 확인된 결제만 새 주문의 정상 결제로 처리한다.
 - Basic과 Standard는 각각 독립된 서버 한도 10건과 순번 1~10을 사용한다. 한 플랜의 남은 수량을 다른 플랜으로 옮기지 않는다.
 - 채널 표시 수량과 가격의 정본은 [운영 원가 문서의 Groble 얼리버드 가격](./operations-cost-model.md#groble-얼리버드-가격)과 함께 확인한다.
 - Groble 상품 재고와 서버 inventory를 동시에 유지한다.

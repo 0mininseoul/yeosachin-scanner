@@ -17,12 +17,18 @@ describe('earlybird checkout reconciliation migration contract', () => {
         expect(migration).toContain("provider_dashboard_no_sale");
         expect(migration).toContain('ALTER TABLE public.earlybird_checkout_reconciliations ENABLE ROW LEVEL SECURITY');
         expect(migration).toMatch(
-            /REVOKE ALL ON TABLE public\.earlybird_checkout_reconciliations\s+FROM anon, authenticated/
+            /REVOKE ALL ON TABLE public\.earlybird_checkout_reconciliations\s+FROM PUBLIC, anon, authenticated, service_role/
         );
         expect(migration).toMatch(
-            /GRANT SELECT, INSERT ON TABLE public\.earlybird_checkout_reconciliations\s+TO service_role/
+            /GRANT SELECT ON TABLE public\.earlybird_checkout_reconciliations\s+TO service_role/
         );
         expect(migration).not.toMatch(/GRANT (?:ALL|SELECT|INSERT|UPDATE|DELETE).*earlybird_checkout_reconciliations.*(?:anon|authenticated)/);
+        expect(migration).toContain(
+            'CREATE TRIGGER earlybird_checkout_reconciliations_immutable'
+        );
+        expect(migration).toContain(
+            'EARLYBIRD_RECONCILIATION_AUDIT_IMMUTABLE'
+        );
     });
 
     it('exposes only a service-role reconciliation RPC with bounded evidence', () => {
@@ -45,6 +51,29 @@ describe('earlybird checkout reconciliation migration contract', () => {
         );
         expect(migration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.reconcile_earlybird_checkout_no_sale\([\s\S]*?TO service_role/
+        );
+    });
+
+    it('interposes a private reconciliation-aware finalizer on both payment paths', () => {
+        expect(migration).toContain(
+            'RENAME TO finalize_earlybird_groble_payment_pre_reconciliation'
+        );
+        expect(migration).toContain(
+            'CREATE FUNCTION public.finalize_earlybird_groble_payment_reconciliation_aware'
+        );
+        expect(migration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.finalize_earlybird_groble_payment_pre_reconciliation\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(migration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.finalize_earlybird_groble_payment_reconciliation_aware\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(migration).toContain(
+            'CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment_by_reference'
+        );
+        expect(migration).toContain("'late_cancelled_payment'");
+        expect(migration).toContain("'ambiguous_buyer'");
+        expect(migration).not.toContain(
+            "MESSAGE = 'EARLYBIRD_SELLER_REFERENCE_CONFLICT',\n            ERRCODE = 'P0001'"
         );
     });
 });
