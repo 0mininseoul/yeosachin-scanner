@@ -110,6 +110,23 @@ describe('V2.17 public name and visual fusion', () => {
         })).toEqual({ vote: null, officialOrGroup: false });
     });
 
+    it('fails closed when a high female feature conflicts with a high male triage', () => {
+        expect(publicVisualVote({
+            feature: {
+                ...feature('female', { genderConfidence: 'high' }),
+                finalGenderDecision: 'unresolved_stage_conflict',
+            },
+            triage: triage('male', {
+                assessment: {
+                    inferredGender: 'male',
+                    confidence: 'high',
+                    ownerConsistency: 'same_person',
+                    evidenceSelectionIds: ['media-1'],
+                },
+            }),
+        })).toEqual({ vote: null, officialOrGroup: false });
+    });
+
     it('classifies only exact agreement and conserves calibration, unknown, official, and missing cohorts', () => {
         const candidates = [
             {

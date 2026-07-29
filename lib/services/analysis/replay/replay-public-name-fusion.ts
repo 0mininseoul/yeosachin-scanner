@@ -112,6 +112,12 @@ export function publicVisualVote(input: {
             : undefined;
     const officialOrGroup =
         selected?.accountContext === 'official_group_or_brand';
+    if (
+        input.feature?.finalGenderDecision ===
+            'unresolved_stage_conflict'
+    ) {
+        return { vote: null, officialOrGroup };
+    }
     const personal = selected?.accountContext === 'personal'
         || selected?.accountContext === 'individual_creator';
     const vote = selected?.gender === 'female'
