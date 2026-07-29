@@ -275,6 +275,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         'ai-stage-policy-v2.11',
         'ai-stage-policy-v2.12',
         'ai-stage-policy-v2.13',
+        'ai-stage-policy-v2.16',
     ] as const)(
         'runs a replay provider fence once for each SDK attempt under %s, including a retry',
         async aiStagePolicyVersion => {
@@ -308,6 +309,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         if (
             aiStagePolicyVersion === 'ai-stage-policy-v2.12'
             || aiStagePolicyVersion === 'ai-stage-policy-v2.13'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.16'
         ) {
             expect(failedAttempt).toMatchObject({ failureKind: 'http_429' });
         } else {

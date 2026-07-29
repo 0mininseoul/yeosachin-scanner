@@ -28,6 +28,7 @@ import {
     AI_STAGE_POLICY_V213_VERSION,
     AI_STAGE_POLICY_V214_VERSION,
     AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
     aiStagePolicySupports,
 } from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
@@ -363,6 +364,7 @@ export function createReplayStagedAiAdapter(
         aiStagePolicyVersion === AI_STAGE_POLICY_V213_VERSION
         || aiStagePolicyVersion === AI_STAGE_POLICY_V214_VERSION
         || aiStagePolicyVersion === AI_STAGE_POLICY_V215_VERSION
+        || aiStagePolicyVersion === AI_STAGE_POLICY_V216_VERSION
     ) ? aiStagePolicyVersion : null;
     const controlPolicyVersion = featureShadowPolicy
         ? AI_STAGE_POLICY_V212_VERSION

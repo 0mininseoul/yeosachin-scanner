@@ -197,6 +197,26 @@ describe('analysis V2 replay CLI', () => {
             '--bundle=/tmp/bundle', '--key=/tmp/key',
         ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     });
+    it('seals evaluation-only v2.16 behind its single-profile admission shadow capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.16',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v216-single-profile-admission-shadow',
+                aiStage: 'ai-stage-policy-v2.16',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.16',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
     it('runs the canonical replay command under the React server condition', () => {
         expect(packageJson.scripts['replay:analysis-v2']).toBe(
             'tsx --conditions=react-server --env-file=.env.local scripts/replay-analysis-v2.ts',

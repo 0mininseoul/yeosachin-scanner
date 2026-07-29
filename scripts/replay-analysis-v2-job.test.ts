@@ -239,6 +239,31 @@ async function actualDiagnosticV213SafeLine(): Promise<string> {
     return JSON.stringify(actual);
 }
 
+async function actualDiagnosticV216SafeLine(): Promise<string> {
+    const actual = JSON.parse(await actualDiagnosticV213SafeLine());
+    actual.evaluation_ai_policy = 'ai-stage-policy-v2.16';
+    actual.replay_ai_policy = 'ai-stage-policy-v2.16';
+    const emptyCohort = () => ({
+        eligible: 0,
+        attempted: 0,
+        rescuedMale: 0,
+        rescuedFemale: 0,
+        unresolved: 0,
+        providerNonOk: {
+            rateLimited: 0,
+            retryExhausted: 0,
+            rejected: 0,
+            failed: 0,
+            capacitySkipped: 0,
+        },
+    });
+    actual.gender_quality.shadow_rescue.admissionCohorts = {
+        resolverMediaAtLeast2: emptyCohort(),
+        singleProfileOnly: emptyCohort(),
+    };
+    return JSON.stringify(actual);
+}
+
 interface V213TerminalReportFixture {
     diagnostic_partial_coverage_override: {
         retained_profiles: number;
@@ -536,6 +561,48 @@ describe('Cloud Run analysis V2 replay job', () => {
         expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.15');
     });
 
+    it('runs the V2.16 job only with its authenticated admission shadow bundle', async () => {
+        const {
+            REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+            runV216ReplayAnalysisV2Job,
+        } = await import(
+            './replay-analysis-v216-job'
+        );
+        const v216Bundle = v213Bundle();
+        v216Bundle.capture.evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v216-single-profile-admission-shadow',
+            aiStage: 'ai-stage-policy-v2.16',
+        } as never;
+        const createRunner = vi.fn(() => Object.freeze({}));
+
+        await runV216ReplayAnalysisV2Job({
+            env: validEnv(),
+            runtimeImageDigest: immutableImageDigest,
+            bindLocalCleanup: () => async () => undefined,
+            loadArtifacts: vi.fn(async () => ({
+                bundle: { ...v216Bundle, expired: false },
+                cleanup: async () => undefined,
+            })),
+            createGcsClient: () => ({
+                downloadBundle: vi.fn(),
+                createClaim: vi.fn(),
+                createReport: vi.fn(),
+            }),
+            createRunner,
+            runReplay: vi.fn(async input => {
+                expect(input.evaluationPolicy).toEqual(
+                    REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY,
+                );
+                input.write(await actualDiagnosticV216SafeLine());
+            }),
+            installSignalCleanup: vi.fn(() => () => undefined),
+            writeStdout: vi.fn(),
+        });
+
+        expect(createRunner).toHaveBeenCalledWith('ai-stage-policy-v2.16');
+    });
+
     it('accepts the actual v2.12 diagnostic partial-coverage safe-line key', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -826,6 +893,92 @@ describe('Cloud Run analysis V2 replay job', () => {
         )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
     });
 
+    it('accepts the strict V2.16 admission cohort conservation contract', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV213SafeLine());
+        actual.evaluation_ai_policy = 'ai-stage-policy-v2.16';
+        actual.replay_ai_policy = 'ai-stage-policy-v2.16';
+        actual.gender_quality.shadow_rescue.admissionCohorts = {
+            resolverMediaAtLeast2: {
+                eligible: 0,
+                attempted: 0,
+                rescuedMale: 0,
+                rescuedFemale: 0,
+                unresolved: 0,
+                providerNonOk: {
+                    rateLimited: 0,
+                    retryExhausted: 0,
+                    rejected: 0,
+                    failed: 0,
+                    capacitySkipped: 0,
+                },
+            },
+            singleProfileOnly: {
+                eligible: 0,
+                attempted: 0,
+                rescuedMale: 0,
+                rescuedFemale: 0,
+                unresolved: 0,
+                providerNonOk: {
+                    rateLimited: 0,
+                    retryExhausted: 0,
+                    rejected: 0,
+                    failed: 0,
+                    capacitySkipped: 0,
+                },
+            },
+        };
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).not.toThrow();
+    });
+
+    it('rejects V2.16 admission cohort drift', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(await actualDiagnosticV213SafeLine());
+        actual.evaluation_ai_policy = 'ai-stage-policy-v2.16';
+        actual.replay_ai_policy = 'ai-stage-policy-v2.16';
+        actual.gender_quality.shadow_rescue.admissionCohorts = {
+            resolverMediaAtLeast2: {
+                eligible: 0,
+                attempted: 0,
+                rescuedMale: 0,
+                rescuedFemale: 0,
+                unresolved: 0,
+                providerNonOk: {
+                    rateLimited: 0,
+                    retryExhausted: 0,
+                    rejected: 0,
+                    failed: 0,
+                    capacitySkipped: 0,
+                },
+            },
+            singleProfileOnly: {
+                eligible: 1,
+                attempted: 0,
+                rescuedMale: 0,
+                rescuedFemale: 0,
+                unresolved: 0,
+                providerNonOk: {
+                    rateLimited: 0,
+                    retryExhausted: 0,
+                    rejected: 0,
+                    failed: 0,
+                    capacitySkipped: 0,
+                },
+            },
+        };
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).toThrow('ANALYSIS_V2_REPLAY_JOB_UNSAFE_OUTPUT');
+    });
+
     it('accepts a V2.13 worst-case gate derived from final counts and missing public', async () => {
         const {
             validateReplayAnalysisV2JobTerminalLine,
@@ -957,6 +1110,9 @@ describe('Cloud Run analysis V2 replay job', () => {
             );
             expect(metadata.inputs).not.toHaveProperty(
                 'scripts/replay-analysis-v215-job.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v216-job.ts',
             );
             const runtime = JSON.parse(await readFile(
                 runtimeManifest,
@@ -1252,6 +1408,126 @@ describe('Cloud Run analysis V2 replay job', () => {
                 env: { NODE_ENV: 'test', PATH: process.env.PATH },
             }).then(() => {
                 throw new Error('Expected V2.15 replay job boot to fail closed');
+            }).catch(error => error as { code: number; stderr: string });
+            expect(boot.code).toBe(1);
+            expect(boot.stderr).toBe(
+                '{"status":"failed","errorCode":"ANALYSIS_V2_REPLAY_JOB_TASK_CONFIGURATION_INVALID"}\n',
+            );
+        } finally {
+            await rm(imageRoot, { recursive: true, force: true });
+        }
+    }, 30_000);
+
+    it('builds and invokes the immutable V2.16 common bootstrap entry', async () => {
+        const imageRoot = await mkdtemp(join(
+            tmpdir(),
+            '.replay-job-v216-image-',
+        ));
+        const workspace = join(imageRoot, 'workspace');
+        const outputDirectory = join(workspace, 'replay-job');
+        const outfile = join(outputDirectory, 'job.mjs');
+        const metafile = join(outputDirectory, 'meta.json');
+        const runtimeManifest = join(outputDirectory, 'runtime.json');
+        try {
+            await mkdir(workspace, { mode: 0o700 });
+            const {
+                copyReplayAnalysisV2JobPhysicalDependencyClosure,
+            } = await import('./build-replay-analysis-v2-job.mjs');
+            await copyReplayAnalysisV2JobPhysicalDependencyClosure({
+                sourceWorkspace: process.cwd(),
+                imageWorkspace: workspace,
+            });
+            await execFileAsync(process.execPath, [
+                'scripts/build-replay-analysis-v2-job.mjs',
+                '--outfile', outfile,
+                '--metafile', metafile,
+                '--runtime-manifest', runtimeManifest,
+                '--image-digest', immutableImageDigest,
+                '--evaluation-ai-policy=ai-stage-policy-v2.16',
+            ], {
+                cwd: process.cwd(),
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            const metadata = JSON.parse(await readFile(metafile, 'utf8')) as {
+                inputs: Record<string, unknown>;
+            };
+            expect(metadata.inputs).toHaveProperty(
+                'scripts/replay-analysis-v216-job.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v214-job.ts',
+            );
+            expect(metadata.inputs).not.toHaveProperty(
+                'scripts/replay-analysis-v215-job.ts',
+            );
+            const marker = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                '--eval',
+                `import(${JSON.stringify(pathToFileURL(outfile).href)}).then(m => process.stdout.write(m.REPLAY_ANALYSIS_V2_JOB_ENTRY_POLICY.aiStage))`,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            });
+            expect(marker.stdout).toBe('ai-stage-policy-v2.16');
+
+            const loaded = await import(
+                `${pathToFileURL(outfile).href}?bootstrap-v216-contract`
+            );
+            const runBuiltJob: unknown = Reflect.get(
+                loaded,
+                'runReplayAnalysisV2Job',
+            );
+            expect(runBuiltJob).toBeTypeOf('function');
+            if (typeof runBuiltJob !== 'function') {
+                throw new Error('V2.16 common bootstrap export missing');
+            }
+            const v216Bundle = v213Bundle();
+            v216Bundle.capture.evaluationPolicy = {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v216-single-profile-admission-shadow',
+                aiStage: 'ai-stage-policy-v2.16',
+            } as never;
+            const safe = JSON.parse(await actualDiagnosticV216SafeLine());
+            const createRunner = vi.fn(() => Object.freeze({}));
+            await runBuiltJob({
+                env: validEnv(),
+                runtimeImageDigest: immutableImageDigest,
+                bindLocalCleanup: () => async () => undefined,
+                loadArtifacts: async () => ({
+                    bundle: { ...v216Bundle, expired: false },
+                    cleanup: async () => undefined,
+                }),
+                createGcsClient: () => ({
+                    downloadBundle: vi.fn(),
+                    createClaim: vi.fn(),
+                    createReport: vi.fn(),
+                }),
+                createRunner,
+                runReplay: async (input: {
+                    evaluationPolicy: { aiStage: string };
+                    write(line: string): void;
+                }) => {
+                    expect(input.evaluationPolicy.aiStage).toBe(
+                        'ai-stage-policy-v2.16',
+                    );
+                    input.write(JSON.stringify(safe));
+                },
+                installSignalCleanup: () => () => undefined,
+                writeStdout: vi.fn(),
+            });
+            expect(createRunner).toHaveBeenCalledOnce();
+            expect(createRunner).toHaveBeenCalledWith(
+                'ai-stage-policy-v2.16',
+            );
+
+            const boot = await execFileAsync(process.execPath, [
+                '--conditions=react-server',
+                outfile,
+            ], {
+                cwd: workspace,
+                env: { NODE_ENV: 'test', PATH: process.env.PATH },
+            }).then(() => {
+                throw new Error('Expected V2.16 replay job boot to fail closed');
             }).catch(error => error as { code: number; stderr: string });
             expect(boot.code).toBe(1);
             expect(boot.stderr).toBe(

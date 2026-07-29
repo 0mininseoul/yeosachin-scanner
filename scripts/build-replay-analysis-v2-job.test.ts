@@ -292,7 +292,7 @@ describe('stateless replay job build contract', () => {
         })).toThrow('ANALYSIS_V2_REPLAY_JOB_BUILD_GRAPH_FORBIDDEN');
     });
 
-    it('fails closed for an entry policy outside the sealed V2.13/V2.14/V2.15 allowlist', async () => {
+    it('fails closed for an entry policy outside the sealed V2.13/V2.14/V2.15/V2.16 allowlist', async () => {
         const { buildReplayAnalysisV2Job } = await buildModule();
         const parent = await mkdtemp(join(tmpdir(), 'replay-job-policy-'));
         const outputDirectory = join(parent, 'artifact');
@@ -302,7 +302,7 @@ describe('stateless replay job build contract', () => {
                 metafile: join(outputDirectory, 'meta.json'),
                 runtimeManifest: join(outputDirectory, 'runtime.json'),
                 imageDigest: immutableImageDigest,
-                evaluationAiPolicy: 'ai-stage-policy-v2.16' as never,
+                evaluationAiPolicy: 'ai-stage-policy-v2.17' as never,
                 buildImpl: vi.fn(),
             })).rejects.toThrow(
                 'ANALYSIS_V2_REPLAY_JOB_BUILD_ENTRY_POLICY_INVALID',

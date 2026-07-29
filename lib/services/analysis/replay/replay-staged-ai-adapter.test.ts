@@ -693,6 +693,7 @@ describe('replay staged AI adapter telemetry', () => {
         ['ai-stage-policy-v2.13'],
         ['ai-stage-policy-v2.14'],
         ['ai-stage-policy-v2.15'],
+        ['ai-stage-policy-v2.16'],
     ] as const)('pins %s control feature to v2.12 and its shadow feature to itself', async shadowPolicy => {
         mocks.createFeatureAnalysisResultIdentity.mockReturnValue({
             operationKey: 'feature:identity',

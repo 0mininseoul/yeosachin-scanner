@@ -9,7 +9,9 @@ import {
     AI_STAGE_POLICY_V213_VERSION,
     AI_STAGE_POLICY_V214_VERSION,
     AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
     aiStagePolicySupports,
+    type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
@@ -21,6 +23,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
@@ -54,14 +57,17 @@ function featureShadowError(
     policy:
         | typeof AI_STAGE_POLICY_V213_VERSION
         | typeof AI_STAGE_POLICY_V214_VERSION
-        | typeof AI_STAGE_POLICY_V215_VERSION,
+        | typeof AI_STAGE_POLICY_V215_VERSION
+        | typeof AI_STAGE_POLICY_V216_VERSION,
     suffix: 'RUNNER_REQUIRED' | 'CONSERVATION_FAILED',
 ): string {
     return policy === AI_STAGE_POLICY_V213_VERSION
         ? `ANALYSIS_V2_REPLAY_V213_SHADOW_${suffix}`
         : policy === AI_STAGE_POLICY_V214_VERSION
             ? `ANALYSIS_V2_REPLAY_V214_SHADOW_${suffix}`
-            : `ANALYSIS_V2_REPLAY_V215_SHADOW_${suffix}`;
+            : policy === AI_STAGE_POLICY_V215_VERSION
+                ? `ANALYSIS_V2_REPLAY_V215_SHADOW_${suffix}`
+                : `ANALYSIS_V2_REPLAY_V216_SHADOW_${suffix}`;
 }
 
 export interface ReplayInvocation<T> {
@@ -136,6 +142,21 @@ export interface ReplayAttemptTelemetry extends ReplayAttemptStart {
 }
 export interface ReplayStageMetrics {
     calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: ReplayStageFailureDispositionCounts; failureKind?: Partial<Record<GeminiGenerationFailureKind, number>>;
+}
+export interface ReplayFeatureShadowAdmissionCohortCounts {
+    eligible: number;
+    attempted: number;
+    rescuedMale: number;
+    rescuedFemale: number;
+    unresolved: number;
+    providerNonOk: Record<
+        'rateLimited'
+        | 'retryExhausted'
+        | 'rejected'
+        | 'failed'
+        | 'capacitySkipped',
+        number
+    >;
 }
 export interface AnalysisV2AiReplayReport {
     benchmarkScope: 'ai-only-exact-replay' | 'ai-only-historical-partial-available';
@@ -235,10 +256,55 @@ export interface AnalysisV2AiReplayReport {
             finalFemale: number;
             finalUnknown: number;
             missingPublic: number;
+            admissionCohorts?: {
+                resolverMediaAtLeast2:
+                    ReplayFeatureShadowAdmissionCohortCounts;
+                singleProfileOnly:
+                    ReplayFeatureShadowAdmissionCohortCounts;
+            };
         };
         qualityGate: ReturnType<typeof evaluateReplayGenderQualityGate>;
     };
     totalElapsedMs: number;
+}
+
+export type ReplayFeatureShadowAdmissionCohort =
+    | 'resolver_media_at_least_2'
+    | 'single_profile_only';
+
+export function replayFeatureShadowAdmissionCohort(
+    policy: AiStagePolicyVersion,
+    resolverMedia: readonly { kind: 'profile' | 'feed' }[],
+): ReplayFeatureShadowAdmissionCohort | null {
+    if (resolverMedia.length >= 2) {
+        return 'resolver_media_at_least_2';
+    }
+    if (
+        aiStagePolicySupports(policy, 'featureSingleProfileShadowV216')
+        && resolverMedia.length === 1
+        && resolverMedia[0]?.kind === 'profile'
+    ) {
+        return 'single_profile_only';
+    }
+    return null;
+}
+
+function emptyFeatureShadowAdmissionCohort():
+    ReplayFeatureShadowAdmissionCohortCounts {
+    return {
+        eligible: 0,
+        attempted: 0,
+        rescuedMale: 0,
+        rescuedFemale: 0,
+        unresolved: 0,
+        providerNonOk: {
+            rateLimited: 0,
+            retryExhausted: 0,
+            rejected: 0,
+            failed: 0,
+            capacitySkipped: 0,
+        },
+    };
 }
 
 type ReplayBaselineClassification =
@@ -410,7 +476,8 @@ function assertArtifactCapability(bundle: AnalysisV2ReplayBundle): void {
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY
         || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY
-        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY;
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY
+        || capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY;
     if (
         (bundle.schemaVersion === 1 && partialCapability)
         || (bundle.schemaVersion === 2 && !partialCapability)
@@ -643,6 +710,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                     || report.replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
                     || report.replayAiPolicy === AI_STAGE_POLICY_V215_VERSION
+                    || report.replayAiPolicy === AI_STAGE_POLICY_V216_VERSION
                 )
                     ? { failure_kind: values.failureKind ?? {} }
                     : {}),
@@ -745,10 +813,15 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         'genderQualityV211',
     );
+    const featureSingleProfileShadowV216 = aiStagePolicySupports(
+        replayAiPolicy,
+        'featureSingleProfileShadowV216',
+    );
     const featureShadowPolicy = (
         replayAiPolicy === AI_STAGE_POLICY_V213_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V214_VERSION
         || replayAiPolicy === AI_STAGE_POLICY_V215_VERSION
+        || replayAiPolicy === AI_STAGE_POLICY_V216_VERSION
     ) ? replayAiPolicy : null;
     const controlAiPolicy = featureShadowPolicy
         ? AI_STAGE_POLICY_V212_VERSION
@@ -855,6 +928,14 @@ export async function runAnalysisV2AiReplay(input: {
             finalFemale: 0,
             finalUnknown: 0,
             missingPublic,
+            ...(featureSingleProfileShadowV216 ? {
+                admissionCohorts: {
+                    resolverMediaAtLeast2:
+                        emptyFeatureShadowAdmissionCohort(),
+                    singleProfileOnly:
+                        emptyFeatureShadowAdmissionCohort(),
+                },
+            } : {}),
         } : null;
     const resolver: AnalysisV2AiReplayReport['resolver'] = {
         ready: 0,
@@ -1436,7 +1517,12 @@ export async function runAnalysisV2AiReplay(input: {
                     shadowRescue.officialOrGroupExcluded++;
                     return false;
                 }
-                if (policySelectedResolverMedia(outcome.profile).length < 2) {
+                const admissionCohort =
+                    replayFeatureShadowAdmissionCohort(
+                        featureShadowPolicy,
+                        policySelectedResolverMedia(outcome.profile),
+                    );
+                if (!admissionCohort) {
                     shadowRescue.insufficientMedia++;
                     return false;
                 }
@@ -1445,6 +1531,10 @@ export async function runAnalysisV2AiReplay(input: {
                     return false;
                 }
                 shadowRescue.eligible++;
+                const cohort = admissionCohort === 'single_profile_only'
+                    ? shadowRescue.admissionCohorts?.singleProfileOnly
+                    : shadowRescue.admissionCohorts?.resolverMediaAtLeast2;
+                if (cohort) cohort.eligible++;
                 return true;
             });
             const shadowStage = stages.featureAnalysisShadowRescue;
@@ -1457,6 +1547,16 @@ export async function runAnalysisV2AiReplay(input: {
                 3,
                 async outcome => {
                     shadowRescue.attempted++;
+                    const admissionCohort =
+                        replayFeatureShadowAdmissionCohort(
+                            featureShadowPolicy,
+                            policySelectedResolverMedia(outcome.profile),
+                        );
+                    const cohort = admissionCohort === 'single_profile_only'
+                        ? shadowRescue.admissionCohorts?.singleProfileOnly
+                        : shadowRescue.admissionCohorts
+                            ?.resolverMediaAtLeast2;
+                    if (cohort) cohort.attempted++;
                     const invocation = await runner.shadowFeature!({
                         ordinal: outcome.profile.ordinal,
                         bio: outcome.profile.bio ?? null,
@@ -1481,6 +1581,7 @@ export async function runAnalysisV2AiReplay(input: {
                         && treatment.finalGenderDecision === 'verified_female'
                     ) {
                         shadowRescue.rescuedFemale++;
+                        if (cohort) cohort.rescuedFemale++;
                         gender.female++;
                         gender.unknown--;
                         return;
@@ -1491,12 +1592,14 @@ export async function runAnalysisV2AiReplay(input: {
                             'verified_non_female'
                     ) {
                         shadowRescue.rescuedMale++;
+                        if (cohort) cohort.rescuedMale++;
                         gender.male++;
                         gender.unknown--;
                         return;
                     }
                     if (invocation.outcome === 'ok') {
                         shadowRescue.unresolved++;
+                        if (cohort) cohort.unresolved++;
                         return;
                     }
                     const providerOutcome = {
@@ -1508,6 +1611,7 @@ export async function runAnalysisV2AiReplay(input: {
                     } as const;
                     const key = providerOutcome[invocation.outcome];
                     shadowRescue.providerNonOk[key]++;
+                    if (cohort) cohort.providerNonOk[key]++;
                 },
             );
             shadowRescue.finalMale = gender.male;
@@ -1570,6 +1674,51 @@ export async function runAnalysisV2AiReplay(input: {
             ).reduce((sum, value) => sum + value, 0);
             const shadowCalls =
                 stages.featureAnalysisShadowRescue?.calls ?? 0;
+            const admissionCohorts = shadowRescue.admissionCohorts;
+            const cohortConservationFailed = admissionCohorts
+                ? (() => {
+                    const cohorts = [
+                        admissionCohorts.resolverMediaAtLeast2,
+                        admissionCohorts.singleProfileOnly,
+                    ];
+                    const validCohort = (
+                        cohort: ReplayFeatureShadowAdmissionCohortCounts,
+                    ) => cohort.eligible === cohort.attempted
+                        && cohort.attempted
+                            === cohort.rescuedMale
+                                + cohort.rescuedFemale
+                                + cohort.unresolved
+                                + Object.values(cohort.providerNonOk)
+                                    .reduce((sum, value) => sum + value, 0);
+                    const sum = (
+                        select: (
+                            cohort:
+                                ReplayFeatureShadowAdmissionCohortCounts,
+                        ) => number,
+                    ) => cohorts.reduce(
+                        (total, cohort) => total + select(cohort),
+                        0,
+                    );
+                    return cohorts.some(cohort => !validCohort(cohort))
+                        || sum(cohort => cohort.eligible)
+                            !== shadowRescue.eligible
+                        || sum(cohort => cohort.attempted)
+                            !== shadowRescue.attempted
+                        || sum(cohort => cohort.rescuedMale)
+                            !== shadowRescue.rescuedMale
+                        || sum(cohort => cohort.rescuedFemale)
+                            !== shadowRescue.rescuedFemale
+                        || sum(cohort => cohort.unresolved)
+                            !== shadowRescue.unresolved
+                        || Object.keys(shadowRescue.providerNonOk).some(
+                            key => sum(cohort => cohort.providerNonOk[
+                                key as keyof typeof cohort.providerNonOk
+                            ]) !== shadowRescue.providerNonOk[
+                                key as keyof typeof shadowRescue.providerNonOk
+                            ],
+                        );
+                })()
+                : false;
             if (
                 shadowRescue.baselineMale
                     + shadowRescue.baselineFemale
@@ -1601,6 +1750,7 @@ export async function runAnalysisV2AiReplay(input: {
                 || shadowRescue.finalFemale !== gender.female
                 || shadowRescue.finalUnknown !== gender.unknown
                 || shadowCalls > shadowRescue.attempted * 4
+                || cohortConservationFailed
             ) {
                 throw new Error(
                     featureShadowError(featureShadowPolicy!, 'CONSERVATION_FAILED'),

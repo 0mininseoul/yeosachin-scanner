@@ -237,11 +237,34 @@ const shadowRescueCounts = z.object({
     missingPublic: aggregateCount,
 }).strict();
 
+const shadowAdmissionCohortCounts = z.object({
+    eligible: aggregateCount,
+    attempted: aggregateCount,
+    rescuedMale: aggregateCount,
+    rescuedFemale: aggregateCount,
+    unresolved: aggregateCount,
+    providerNonOk: z.object({
+        rateLimited: aggregateCount,
+        retryExhausted: aggregateCount,
+        rejected: aggregateCount,
+        failed: aggregateCount,
+        capacitySkipped: aggregateCount,
+    }).strict(),
+}).strict();
+
+const shadowRescueV216Counts = shadowRescueCounts.extend({
+    admissionCohorts: z.object({
+        resolverMediaAtLeast2: shadowAdmissionCohortCounts,
+        singleProfileOnly: shadowAdmissionCohortCounts,
+    }).strict(),
+}).strict();
+
 function featureShadowTerminalSchema(
     aiStage:
         | 'ai-stage-policy-v2.13'
         | 'ai-stage-policy-v2.14'
-        | 'ai-stage-policy-v2.15',
+        | 'ai-stage-policy-v2.15'
+        | 'ai-stage-policy-v2.16',
 ) {
     return replayAnalysisV2JobTerminalV212Schema.extend({
         evaluation_ai_policy: z.literal(aiStage),
@@ -251,7 +274,9 @@ function featureShadowTerminalSchema(
         }).strict(),
         gender_quality:
             replayAnalysisV2JobTerminalV212Schema.shape.gender_quality.extend({
-                shadow_rescue: shadowRescueCounts,
+                shadow_rescue: aiStage === 'ai-stage-policy-v2.16'
+                    ? shadowRescueV216Counts
+                    : shadowRescueCounts,
             }).strict(),
     }).strict().superRefine((report, context) => {
         const shadow = report.gender_quality.shadow_rescue;
@@ -270,6 +295,48 @@ function featureShadowTerminalSchema(
         const expectedWorstCaseUnknownRate = worstCaseTotal === 0
             ? 0
             : Number((worstCaseUnknown / worstCaseTotal).toFixed(4));
+        const admissionCohorts = aiStage === 'ai-stage-policy-v2.16'
+            ? (shadow as z.infer<typeof shadowRescueV216Counts>)
+                .admissionCohorts
+            : null;
+        const cohortConservationValid = admissionCohorts
+            ? (() => {
+                const cohorts = [
+                    admissionCohorts.resolverMediaAtLeast2,
+                    admissionCohorts.singleProfileOnly,
+                ];
+                const cohortValid = cohorts.every(cohort => (
+                    cohort.eligible === cohort.attempted
+                    && cohort.attempted
+                        === cohort.rescuedMale
+                            + cohort.rescuedFemale
+                            + cohort.unresolved
+                            + Object.values(cohort.providerNonOk)
+                                .reduce((sum, count) => sum + count, 0)
+                ));
+                const sum = (
+                    select: (cohort: typeof cohorts[number]) => number,
+                ) => cohorts.reduce(
+                    (total, cohort) => total + select(cohort),
+                    0,
+                );
+                return cohortValid
+                    && sum(cohort => cohort.eligible) === shadow.eligible
+                    && sum(cohort => cohort.attempted) === shadow.attempted
+                    && sum(cohort => cohort.rescuedMale)
+                        === shadow.rescuedMale
+                    && sum(cohort => cohort.rescuedFemale)
+                        === shadow.rescuedFemale
+                    && sum(cohort => cohort.unresolved) === shadow.unresolved
+                    && Object.keys(shadow.providerNonOk).every(key => (
+                        sum(cohort => cohort.providerNonOk[
+                            key as keyof typeof cohort.providerNonOk
+                        ]) === shadow.providerNonOk[
+                            key as keyof typeof shadow.providerNonOk
+                        ]
+                    ));
+            })()
+            : true;
         const valid =
             shadow.missingPublic === coverageMissingPublic
             && shadow.baselineMale
@@ -310,7 +377,8 @@ function featureShadowTerminalSchema(
             && report.gender_quality.qualityGate.worstCaseUnknownRate
                 === expectedWorstCaseUnknownRate
             && report.gender_quality.qualityGate.worstCasePass
-                === (worstCaseUnknown * 5 <= worstCaseTotal);
+                === (worstCaseUnknown * 5 <= worstCaseTotal)
+            && cohortConservationValid;
         if (!valid) {
             context.addIssue({
                 code: 'custom',
@@ -319,7 +387,9 @@ function featureShadowTerminalSchema(
                         ? 'ANALYSIS_V2_REPLAY_V213_SHADOW_CONSERVATION_FAILED'
                         : aiStage === 'ai-stage-policy-v2.14'
                             ? 'ANALYSIS_V2_REPLAY_V214_SHADOW_CONSERVATION_FAILED'
-                            : 'ANALYSIS_V2_REPLAY_V215_SHADOW_CONSERVATION_FAILED',
+                            : aiStage === 'ai-stage-policy-v2.15'
+                                ? 'ANALYSIS_V2_REPLAY_V215_SHADOW_CONSERVATION_FAILED'
+                                : 'ANALYSIS_V2_REPLAY_V216_SHADOW_CONSERVATION_FAILED',
             });
         }
     });
@@ -333,12 +403,16 @@ const replayAnalysisV2JobTerminalV214Schema =
 /** V2.15 preserves the same strict PII-free shadow aggregate contract. */
 const replayAnalysisV2JobTerminalV215Schema =
     featureShadowTerminalSchema('ai-stage-policy-v2.15');
+/** V2.16 requires strict admission-cohort partition conservation. */
+const replayAnalysisV2JobTerminalV216Schema =
+    featureShadowTerminalSchema('ai-stage-policy-v2.16');
 
 export const replayAnalysisV2JobTerminalSchema = z.union([
     replayAnalysisV2JobTerminalV212Schema,
     replayAnalysisV2JobTerminalV213Schema,
     replayAnalysisV2JobTerminalV214Schema,
     replayAnalysisV2JobTerminalV215Schema,
+    replayAnalysisV2JobTerminalV216Schema,
 ]);
 
 export function replayStageFailureDispositionEntries(

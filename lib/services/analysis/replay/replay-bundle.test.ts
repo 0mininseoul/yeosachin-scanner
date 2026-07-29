@@ -27,6 +27,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
 } from './replay-source-lineage';
 
 const temporaryPaths: string[] = [];
@@ -354,6 +355,47 @@ describe('analysis V2 replay bundle', () => {
                 },
             } as unknown as AnalysisV2ReplayBundle,
             bundlePath: join(directory, 'cross-v215.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('authenticates v2.16 only with its own sealed partial capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability:
+                        HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.16',
+                },
+            },
+        } as unknown as AnalysisV2ReplayBundle;
+
+        await expect(writeReplayBundle({
+            bundle: value,
+            bundlePath: join(directory, 'partial-v216.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).resolves.toBeDefined();
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability:
+                            HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.16',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-v216.enc'),
             keyPath,
             now: Date.parse('2026-07-27T00:10:00.000Z'),
         })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');

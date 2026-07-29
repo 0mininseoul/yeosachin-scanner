@@ -76,6 +76,11 @@ export const AI_STAGE_POLICY_V214_VERSION = 'ai-stage-policy-v2.14';
  * selection remains pinned no later than v2.10.
  */
 export const AI_STAGE_POLICY_V215_VERSION = 'ai-stage-policy-v2.15';
+/**
+ * v2.16 is an evaluation-only admission shadow. It reuses every v2.15 stage
+ * object byte-for-byte and changes only replay shadow candidate admission.
+ */
+export const AI_STAGE_POLICY_V216_VERSION = 'ai-stage-policy-v2.16';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
@@ -87,6 +92,7 @@ export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_V213_VERSION,
     AI_STAGE_POLICY_V214_VERSION,
     AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -273,6 +279,10 @@ const AI_STAGE_POLICIES_V215 = Object.freeze({
     }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V216 = Object.freeze({
+    ...AI_STAGE_POLICIES_V215,
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
@@ -284,6 +294,7 @@ export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_V213_VERSION]: AI_STAGE_POLICIES_V213,
     [AI_STAGE_POLICY_V214_VERSION]: AI_STAGE_POLICIES_V214,
     [AI_STAGE_POLICY_V215_VERSION]: AI_STAGE_POLICIES_V215,
+    [AI_STAGE_POLICY_V216_VERSION]: AI_STAGE_POLICIES_V216,
 });
 
 export type AiStagePolicyCapability =
@@ -294,7 +305,8 @@ export type AiStagePolicyCapability =
     | 'genderTriageMicrobatchV29'
     /** Safe v2.8 public-copy contracts, restored for the v2.10 successor only. */
     | 'safePublicPresentationV28'
-    | 'genderQualityV211';
+    | 'genderQualityV211'
+    | 'featureSingleProfileShadowV216';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -372,6 +384,16 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'genderTriageMicrobatchV29',
         'safePublicPresentationV28',
         'genderQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V216_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+        'featureSingleProfileShadowV216',
     ]),
 });
 

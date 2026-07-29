@@ -11,6 +11,7 @@ import {
     AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V214_VERSION,
     AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -190,6 +191,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.13',
             'ai-stage-policy-v2.14',
             'ai-stage-policy-v2.15',
+            'ai-stage-policy-v2.16',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -218,6 +220,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.13',
             'ai-stage-policy-v2.14',
             'ai-stage-policy-v2.15',
+            'ai-stage-policy-v2.16',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -273,6 +276,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.13',
             'ai-stage-policy-v2.14',
             'ai-stage-policy-v2.15',
+            'ai-stage-policy-v2.16',
         ]);
         expect(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V210_VERSION])
             .toEqual(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V29_VERSION]);
@@ -519,6 +523,41 @@ describe('V2 AI stage policy', () => {
         expect(v215.featureAnalysis.schemaVersion).toBe(3);
         expect(v215.featureAnalysis.mediaResolution).toBe('MEDIUM');
         expect(v215.featureAnalysis.thinkingLevel).toBe('MEDIUM');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('keeps v2.16 stage bytes identical to v2.15 and marks only shadow admission support', () => {
+        const v215 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V215_VERSION];
+        const v216 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V216_VERSION];
+
+        expect(v216).toBeDefined();
+        expect(v216).toEqual(v215);
+        for (const stage of AI_STAGE_NAMES_V27) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V216_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V215_VERSION, stage));
+        }
+        expect(v216.featureAnalysis).toMatchObject({
+            model: 'gemini-3-flash-preview',
+            maxOutputTokens: 4_096,
+            mediaResolution: 'MEDIUM',
+            thinkingLevel: 'MEDIUM',
+            concurrency: 3,
+            promptVersion: 'feature-analysis-v4',
+            schemaVersion: 3,
+        });
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V215_VERSION,
+            'featureSingleProfileShadowV216',
+        )).toBe(false);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V216_VERSION,
+            'featureSingleProfileShadowV216',
+        )).toBe(true);
         expect(selectAiStagePolicyVersion({
             rolloutMode: 'production',
             narrativeV28RolloutMode: 'production',

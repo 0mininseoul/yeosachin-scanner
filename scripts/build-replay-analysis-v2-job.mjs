@@ -87,10 +87,16 @@ export const REPLAY_ANALYSIS_V215_JOB_LOCAL_INPUTS = Object.freeze([
     ...REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
     'scripts/replay-analysis-v215-job.ts',
 ]);
+/** V2.16 imports the sealed shared runtime but has its own direct entry. */
+export const REPLAY_ANALYSIS_V216_JOB_LOCAL_INPUTS = Object.freeze([
+    ...REPLAY_ANALYSIS_V2_JOB_LOCAL_INPUTS,
+    'scripts/replay-analysis-v216-job.ts',
+]);
 const REPLAY_ANALYSIS_V2_JOB_ENTRYPOINTS = Object.freeze({
     'ai-stage-policy-v2.13': 'scripts/replay-analysis-v2-job.ts',
     'ai-stage-policy-v2.14': 'scripts/replay-analysis-v214-job.ts',
     'ai-stage-policy-v2.15': 'scripts/replay-analysis-v215-job.ts',
+    'ai-stage-policy-v2.16': 'scripts/replay-analysis-v216-job.ts',
 });
 
 const EXTERNAL_PACKAGES = Object.freeze([
@@ -405,6 +411,9 @@ function replayJobLocalInputs(evaluationAiPolicy) {
     }
     if (evaluationAiPolicy === 'ai-stage-policy-v2.15') {
         return REPLAY_ANALYSIS_V215_JOB_LOCAL_INPUTS;
+    }
+    if (evaluationAiPolicy === 'ai-stage-policy-v2.16') {
+        return REPLAY_ANALYSIS_V216_JOB_LOCAL_INPUTS;
     }
     throw new Error('ANALYSIS_V2_REPLAY_JOB_BUILD_ENTRY_POLICY_INVALID');
 }
@@ -1119,7 +1128,7 @@ async function publishImmutableDirectory({
  *   metafile: string;
  *   runtimeManifest: string;
  *   imageDigest: string;
- *   evaluationAiPolicy?: 'ai-stage-policy-v2.13' | 'ai-stage-policy-v2.14' | 'ai-stage-policy-v2.15';
+ *   evaluationAiPolicy?: 'ai-stage-policy-v2.13' | 'ai-stage-policy-v2.14' | 'ai-stage-policy-v2.15' | 'ai-stage-policy-v2.16';
  *   buildImpl?: (
  *     options: { write?: boolean; [key: string]: unknown }
  *   ) => Promise<any>;
