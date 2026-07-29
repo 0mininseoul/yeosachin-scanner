@@ -14,17 +14,19 @@
 
 | URL | 기대 결과 |
 | --- | --- |
-| `https://yeosachin.com/robots.txt` | HTTP 200, Googlebot·OAI-SearchBot이 공개 페이지를 크롤링할 수 있고 sitemap 절대 URL이 있음 |
-| `https://yeosachin.com/sitemap.xml` | HTTP 200, 유효한 XML이며 홈·가이드의 절대 canonical URL이 있음 |
+| `https://yeosachin.com/robots.txt` | HTTP 200, Googlebot·OAI-SearchBot이 공개 경로를 크롤링하도록 허용하고 절대 sitemap URL `https://yeosachin.com/sitemap.xml`을 선언함 |
+| `https://yeosachin.com/sitemap.xml` | HTTP 200, 유효한 XML이며 정확히 공개 canonical URL `https://yeosachin.com/`, `https://yeosachin.com/guide/wijang-yeosachin`, `https://yeosachin.com/terms`, `https://yeosachin.com/privacy`만 포함함 |
 | `https://yeosachin.com/` | HTTP 200, canonical이 `https://yeosachin.com/`이고 `noindex`가 없음 |
 | `https://yeosachin.com/guide/wijang-yeosachin` | HTTP 200, canonical이 `https://yeosachin.com/guide/wijang-yeosachin`이고 `noindex`가 없음 |
+| `https://yeosachin.com/terms` | HTTP 200, canonical이 `https://yeosachin.com/terms`이고 `noindex`가 없음 |
+| `https://yeosachin.com/privacy` | HTTP 200, canonical이 `https://yeosachin.com/privacy`이고 `noindex`가 없음 |
 
 배포 전과 배포 후 각각 다음을 확인한다.
 
 1. `curl -I` 또는 동등한 읽기 전용 검사로 200 응답과 예상하지 않은 리디렉션 여부를 확인한다.
-2. robots 정책이 공개 홈·가이드를 허용하고 비공개/인증 경로를 허용하지 않는지 확인한다.
-3. sitemap의 URL이 모두 `https://yeosachin.com` 절대 URL인지 확인한다.
-4. 홈과 가이드 HTML의 `rel="canonical"`이 위 표의 자기 참조 URL과 일치하는지 확인한다.
+2. robots 정책이 공개 홈·가이드·약관·개인정보 페이지를 허용하고 비공개/인증 경로를 허용하지 않는지 확인한다.
+3. sitemap이 위 표의 공개 HTML 4개만 `https://yeosachin.com` 절대 URL로 포함하는지 확인한다.
+4. 홈·가이드·약관·개인정보 HTML의 `rel="canonical"`이 위 표의 자기 참조 URL과 일치하는지 확인한다.
 
 ## 2. Domain property와 DNS 소유권 확인
 
@@ -95,7 +97,7 @@ OpenAI는 ChatGPT 검색 결과의 발행자 추천 링크에 `utm_source=chatgp
 
 ### 7일
 
-- 배포 후 URL 4개가 계속 200인지 재확인한다.
+- 배포 후 URL 6개가 계속 200인지 재확인한다.
 - sitemap 상태, URL Inspection 색인 상태, 두 canonical을 확인한다.
 - Search generative AI 제어가 노출됐는지와 포함 상태를 확인한다.
 - 일반 Search Performance의 초기 노출과 Amplitude ChatGPT 유입을 기준선으로 기록한다.

@@ -5,6 +5,14 @@ const RUNBOOK_URL = new URL(
     '../../../docs/seo-geo-search-console-runbook.md',
     import.meta.url,
 );
+const REQUIRED_DEPLOYMENT_URLS = [
+    'https://yeosachin.com/robots.txt',
+    'https://yeosachin.com/sitemap.xml',
+    'https://yeosachin.com/',
+    'https://yeosachin.com/guide/wijang-yeosachin',
+    'https://yeosachin.com/terms',
+    'https://yeosachin.com/privacy',
+] as const;
 
 function readRunbook(): string {
     expect(
@@ -27,27 +35,151 @@ function readSection(markdown: string, heading: string): string {
     return lines.slice(start, end).join('\n');
 }
 
+function prerequisiteIssues(section: string): string[] {
+    const body = section.replace(/^##[^\n]*\n?/, '').trim();
+    const issues: string[] = [];
+    if (!body) issues.push('empty');
+    if (
+        !/Search Console[^\n]*(확인|인증|소유권|소유자)[^\n]*(권한|접근)/i.test(body)
+    ) {
+        issues.push('ownership-access');
+    }
+    if (
+        !/(배포|프로덕션)[^\n]*(HTTP|엔드포인트|endpoint)[^\n]*(응답|response)[^\n]*(확인|검사|inspect)/i
+            .test(body)
+    ) {
+        issues.push('deployed-response-inspection');
+    }
+    return issues;
+}
+
+interface DeploymentRow {
+    expected: string;
+    url: string;
+}
+
+function readDeploymentRows(section: string): DeploymentRow[] {
+    const lines = section.split('\n');
+    const header = lines.findIndex(line => /^\|\s*URL\s*\|\s*기대 결과\s*\|$/.test(line));
+    if (
+        header < 0
+        || !/^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|$/.test(lines[header + 1] ?? '')
+    ) {
+        return [];
+    }
+
+    const rows: DeploymentRow[] = [];
+    for (const line of lines.slice(header + 2)) {
+        if (!line.startsWith('|')) break;
+        const cells = line.split('|').slice(1, -1).map(cell => cell.trim());
+        if (cells.length !== 2) continue;
+        rows.push({
+            url: cells[0]?.replace(/^`|`$/g, '') ?? '',
+            expected: cells[1] ?? '',
+        });
+    }
+    return rows;
+}
+
+function deploymentTableIssues(section: string): string[] {
+    const rows = readDeploymentRows(section);
+    const issues: string[] = [];
+
+    if (rows.length !== REQUIRED_DEPLOYMENT_URLS.length) {
+        issues.push('row-count');
+    }
+
+    for (const url of REQUIRED_DEPLOYMENT_URLS) {
+        const matches = rows.filter(row => row.url === url);
+        if (matches.length !== 1) {
+            issues.push(`${url}:row`);
+            continue;
+        }
+
+        const expected = matches[0]?.expected ?? '';
+        if (!expected) issues.push(`${url}:expected`);
+        if (!/(?:HTTP\s*)?200/i.test(expected)) issues.push(`${url}:200`);
+
+        if (url.endsWith('/robots.txt')) {
+            if (!/Googlebot/i.test(expected)) issues.push(`${url}:googlebot`);
+            if (!/OAI-SearchBot/i.test(expected)) issues.push(`${url}:oai-searchbot`);
+            if (!/(공개|public)[^\n]*(허용|크롤링할 수)/i.test(expected)) {
+                issues.push(`${url}:public-crawl-policy`);
+            }
+            if (!expected.includes('https://yeosachin.com/sitemap.xml')) {
+                issues.push(`${url}:absolute-sitemap`);
+            }
+            continue;
+        }
+
+        if (url.endsWith('/sitemap.xml')) {
+            if (!/(유효한[^\n]*XML|XML[^\n]*유효)/i.test(expected)) {
+                issues.push(`${url}:valid-xml`);
+            }
+            if (!/(정확히|exactly)[^\n]*(공개|public)|(공개|public)[^\n]*(정확히|exactly)/i.test(expected)) {
+                issues.push(`${url}:exact-public-urls`);
+            }
+            for (const canonicalUrl of REQUIRED_DEPLOYMENT_URLS.slice(2)) {
+                if (!expected.includes(canonicalUrl)) {
+                    issues.push(`${url}:canonical:${canonicalUrl}`);
+                }
+            }
+            continue;
+        }
+
+        if (!expected.includes(url) || !/canonical/i.test(expected)) {
+            issues.push(`${url}:self-canonical`);
+        }
+        if (!/noindex[^\n]*(없|아님|미설정|제거)/i.test(expected)) {
+            issues.push(`${url}:indexable`);
+        }
+    }
+
+    return issues;
+}
+
 describe('SEO/GEO Search Console operations runbook', () => {
     it('is a Korean runbook with prerequisites and a scoped deployment URL table', () => {
         const runbook = readRunbook();
 
         expect(runbook).toMatch(/^# (?=[^\n]*[가-힣])[^\n]+\n/);
         expect(runbook).toMatch(/^## \d*\.?\s*사전 준비\s*$/m);
+        const prerequisites = readSection(runbook, '## 사전 준비');
+        expect(prerequisiteIssues(prerequisites)).toEqual([]);
+
+        const emptyPrerequisites = '## 사전 준비\n\n';
+        expect(prerequisiteIssues(emptyPrerequisites)).toEqual([
+            'empty',
+            'ownership-access',
+            'deployed-response-inspection',
+        ]);
 
         const deployment = readSection(runbook, '## 1. 배포 전·후 URL 확인');
         expect(deployment).toMatch(
             /^\|\s*URL\s*\|\s*기대 결과\s*\|\n\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|$/m,
         );
-        for (const url of [
-            'https://yeosachin.com/robots.txt',
-            'https://yeosachin.com/sitemap.xml',
-            'https://yeosachin.com/',
-            'https://yeosachin.com/guide/wijang-yeosachin',
-        ]) {
+        for (const url of REQUIRED_DEPLOYMENT_URLS) {
             expect(deployment).toMatch(
                 new RegExp(`^\\|[^\\n]*${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*\\|$`, 'm'),
             );
         }
+        expect(deploymentTableIssues(deployment)).toEqual([]);
+
+        const emptyHomeExpectation = deployment
+            .split('\n')
+            .map(line => line.startsWith('| `https://yeosachin.com/` |')
+                ? '| `https://yeosachin.com/` | |'
+                : line)
+            .join('\n')
+            + '\n\nHTTP 200, canonical은 https://yeosachin.com/이다.';
+        expect(deploymentTableIssues(emptyHomeExpectation)).toEqual(
+            expect.arrayContaining([
+                'https://yeosachin.com/:expected',
+                'https://yeosachin.com/:200',
+                'https://yeosachin.com/:self-canonical',
+                'https://yeosachin.com/:indexable',
+            ]),
+        );
         expect(deployment).toMatch(/배포 전[^\n]*(확인|검사|검증)/);
         expect(deployment).toMatch(/배포 후[^\n]*(확인|검사|검증|실행)/);
     });
