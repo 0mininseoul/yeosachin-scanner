@@ -216,6 +216,7 @@ export interface AnalysisV2AiReplayReport {
             finalMale: number;
             finalFemale: number;
             finalUnknown: number;
+            missingPublic: number;
         };
         qualityGate: ReturnType<typeof evaluateReplayGenderQualityGate>;
     };
@@ -792,6 +793,17 @@ export async function runAnalysisV2AiReplay(input: {
             earlyResolverReadyFeatureFinalKnown: 0,
         },
     } : null;
+    const missingPublic = input.bundle.schemaVersion === 2
+        ? Math.max(
+            0,
+            input.bundle.capture.partial.sourceIdentities.filter(
+                identity => identity.partition === 'public'
+                    || identity.partition === 'fetch_terminal',
+            ).length - input.bundle.profiles.filter(
+                profile => !profile.isPrivate,
+            ).length,
+        )
+        : 0;
     const shadowRescue: NonNullable<
         NonNullable<AnalysisV2AiReplayReport['genderQuality']>['shadowRescue']
     > | null = featureShadowV213 ? {
@@ -816,6 +828,7 @@ export async function runAnalysisV2AiReplay(input: {
             finalMale: 0,
             finalFemale: 0,
             finalUnknown: 0,
+            missingPublic,
         } : null;
     const resolver: AnalysisV2AiReplayReport['resolver'] = {
         ready: 0,
@@ -1603,14 +1616,7 @@ export async function runAnalysisV2AiReplay(input: {
                 ...(shadowRescue ? { shadowRescue } : {}),
                 qualityGate: evaluateReplayGenderQualityGate({
                     ...gender,
-                    missingPublic: input.bundle.schemaVersion === 2
-                        ? Math.max(0, input.bundle.capture.partial.sourceIdentities.filter(
-                            identity => identity.partition === 'public'
-                                || identity.partition === 'fetch_terminal',
-                        ).length - input.bundle.profiles.filter(
-                            profile => !profile.isPrivate,
-                        ).length)
-                        : 0,
+                    missingPublic,
                 }),
             },
         } : {}),

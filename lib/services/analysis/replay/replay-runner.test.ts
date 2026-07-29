@@ -1016,11 +1016,28 @@ describe('AI-only replay runner', () => {
                 },
             };
         });
-        const sourceIdentities = profiles.map(profile => ({
-            ordinal: profile.ordinal,
-            username: profile.username,
-            partition: 'public' as const,
+        const privateProfiles = Array.from({ length: 41 }, (_, index) => ({
+            ...bundle.profiles[1]!,
+            ordinal: index + 9,
+            username: `private_${index + 9}`,
         }));
+        const sourceIdentities = [
+            ...profiles.map(profile => ({
+                ordinal: profile.ordinal,
+                username: profile.username,
+                partition: 'public' as const,
+            })),
+            ...privateProfiles.map(profile => ({
+                ordinal: profile.ordinal,
+                username: profile.username,
+                partition: 'private' as const,
+            })),
+            {
+                ordinal: 50,
+                username: 'sensitive_missing_candidate',
+                partition: 'fetch_terminal' as const,
+            },
+        ];
         const v213Bundle = {
             ...bundle,
             schemaVersion: 2 as const,
@@ -1046,7 +1063,7 @@ describe('AI-only replay runner', () => {
                     mediaUnavailable: [],
                 },
             },
-            profiles,
+            profiles: [...profiles, ...privateProfiles],
         } satisfies AnalysisV2ReplayBundle;
         const featureResult = (
             gender: 'female' | 'male' | 'unknown',
@@ -1244,10 +1261,15 @@ describe('AI-only replay runner', () => {
             finalMale: 1,
             finalFemale: 2,
             finalUnknown: 5,
+            missingPublic: 1,
         });
         expect(report.genderQuality?.headroom.finalUnknownWithResolverMediaAtLeast2)
             .toBe(6);
         expect(report.genderQuality?.qualityGate.observedUnknownRate).toBe(0.625);
+        expect(report.genderQuality?.qualityGate).toMatchObject({
+            worstCaseUnknownRate: 0.6667,
+            worstCasePass: false,
+        });
         const safe = JSON.parse(lines[0]!);
         expect(safe.gender_quality.shadow_rescue)
             .toEqual((report.genderQuality as {

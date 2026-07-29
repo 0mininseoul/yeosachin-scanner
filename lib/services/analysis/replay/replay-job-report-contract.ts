@@ -234,6 +234,7 @@ const shadowRescueCounts = z.object({
     finalMale: aggregateCount,
     finalFemale: aggregateCount,
     finalUnknown: aggregateCount,
+    missingPublic: aggregateCount,
 }).strict();
 
 const replayAnalysisV2JobTerminalV213Schema =
@@ -256,6 +257,11 @@ const replayAnalysisV2JobTerminalV213Schema =
         const expectedUnknownRate = publicCount === 0
             ? 0
             : Number((report.gender.unknown / publicCount).toFixed(4));
+        const worstCaseTotal = publicCount + shadow.missingPublic;
+        const worstCaseUnknown = report.gender.unknown + shadow.missingPublic;
+        const expectedWorstCaseUnknownRate = worstCaseTotal === 0
+            ? 0
+            : Number((worstCaseUnknown / worstCaseTotal).toFixed(4));
         const valid =
             shadow.baselineMale
                 + shadow.baselineFemale
@@ -291,7 +297,11 @@ const replayAnalysisV2JobTerminalV213Schema =
             && report.gender_quality.qualityGate.observedUnknownRate
                 === expectedUnknownRate
             && report.gender_quality.qualityGate.observedPass
-                === (report.gender.unknown * 5 <= publicCount);
+                === (report.gender.unknown * 5 <= publicCount)
+            && report.gender_quality.qualityGate.worstCaseUnknownRate
+                === expectedWorstCaseUnknownRate
+            && report.gender_quality.qualityGate.worstCasePass
+                === (worstCaseUnknown * 5 <= worstCaseTotal);
         if (!valid) {
             context.addIssue({
                 code: 'custom',

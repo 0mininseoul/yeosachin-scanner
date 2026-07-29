@@ -234,6 +234,10 @@ interface V213TerminalReportFixture {
         };
     };
     gender_quality: {
+        qualityGate: {
+            worstCaseUnknownRate: number;
+            worstCasePass: boolean;
+        };
         shadow_rescue: {
             [key: string]: unknown;
             baselineUnknown: number;
@@ -241,6 +245,7 @@ interface V213TerminalReportFixture {
             eligible: number;
             unresolved: number;
             finalFemale: number;
+            missingPublic: number;
         };
     };
 }
@@ -668,6 +673,22 @@ describe('Cloud Run analysis V2 replay job', () => {
         )).not.toThrow();
     });
 
+    it('accepts a V2.13 worst-case gate derived from final counts and missing public', async () => {
+        const {
+            validateReplayAnalysisV2JobTerminalLine,
+        } = await import('./replay-analysis-v2-job');
+        const actual = JSON.parse(
+            await actualDiagnosticV213SafeLine(),
+        ) as V213TerminalReportFixture;
+        actual.gender_quality.shadow_rescue.missingPublic = 1;
+        actual.gender_quality.qualityGate.worstCaseUnknownRate = 1;
+        actual.gender_quality.qualityGate.worstCasePass = false;
+
+        expect(() => validateReplayAnalysisV2JobTerminalLine(
+            JSON.stringify(actual),
+        )).not.toThrow();
+    });
+
     it.each([
         ['baseline conservation', (report: V213TerminalReportFixture) => {
             report.gender_quality.shadow_rescue.baselineUnknown += 1;
@@ -689,6 +710,13 @@ describe('Cloud Run analysis V2 replay job', () => {
         }],
         ['provider dispatch bound', (report: V213TerminalReportFixture) => {
             report.stages.featureAnalysisShadowRescue.calls = 1;
+        }],
+        ['worst-case unknown rate', (report: V213TerminalReportFixture) => {
+            report.gender_quality.qualityGate.worstCaseUnknownRate = 0.5;
+        }],
+        ['worst-case pass', (report: V213TerminalReportFixture) => {
+            report.gender_quality.qualityGate.worstCasePass =
+                !report.gender_quality.qualityGate.worstCasePass;
         }],
         ['nested PII', (report: V213TerminalReportFixture) => {
             report.gender_quality.shadow_rescue.account = 'private-person';
