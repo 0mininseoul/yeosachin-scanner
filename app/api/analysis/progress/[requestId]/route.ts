@@ -5,6 +5,7 @@ import { ANALYSIS_V2_SCHEMA_VERSION, progressReadV1Schema } from '@/lib/contract
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
 import { demoResponseHeaders, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
 
 const requestIdSchema = z.string().uuid();
 const sequenceSchema = z.string().regex(/^\d{1,16}$/).transform(Number)
@@ -63,6 +64,8 @@ export async function GET(
 
         if (demo) {
             if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at) return demoJson({ error: 'Analysis progress not found.' }, 404);
+            const fixture = await loadDemoFixtureForVersion(demo.fixture_version);
+            if (!fixture) return demoJson({ error: 'Demo fixture is unavailable.' }, 503);
             const progress = projectDemoProgress({
                 requestId: demo.id,
                 fixtureVersion: demo.fixture_version,
@@ -71,6 +74,7 @@ export async function GET(
                 now: new Date(),
                 afterSequence: afterSequence.data,
                 eventLimit: eventLimit.data,
+                fixture: fixture.fixture,
             });
             return demoJson({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, ...progress }, 200);
         }

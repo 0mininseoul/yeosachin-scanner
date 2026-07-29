@@ -3,6 +3,7 @@ import {
     encodeResultCursor,
     type ResultListKind,
 } from '@/lib/domain/analysis/result-pagination';
+import { createDemoFixture } from '@/lib/services/demo-analysis/demo-analysis';
 
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
     operationalEmit: vi.fn(),
     observeRoute: vi.fn(),
     demoFindForOwner: vi.fn(),
+    loadFixture: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -26,6 +28,9 @@ vi.mock('@/lib/observability/request', () => ({
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.operationalEmit },
 }));
+vi.mock('@/lib/services/demo-analysis/fixture-store', () => ({
+    loadDemoFixtureForVersion: mocks.loadFixture,
+}));
 
 import { GET } from '@/app/api/analysis/v2/result/[requestId]/route';
 
@@ -34,6 +39,20 @@ const userId = '223e4567-e89b-42d3-a456-426614174000';
 
 function context(id = requestId) {
     return { params: Promise.resolve({ requestId: id }) };
+}
+
+function loadedFixture(version: string) {
+    return {
+        version,
+        target: {
+            username: 'junho_dem',
+            fullName: version === 'synthetic-fixture-v1' ? '준호의 공개 프로필' : '모의 분석용 공개 계정',
+            bio: version === 'synthetic-fixture-v1' ? '사진과 일상을 기록하는 공개 프로필입니다.' : '산책과 사진을 기록하는 데모 프로필입니다.',
+            profileImage: version === 'synthetic-fixture-v1' ? '/demo-avatars/synthetic-blurred-avatar-1-v1.png' : '/demo-avatars/demo-v3-target-000.webp',
+            followersCount: 600, followingCount: 580, isPrivate: false as const,
+        },
+        fixture: { ...createDemoFixture('route-fixture', version as never), version },
+    };
 }
 
 function cursor(list: ResultListKind) {
@@ -110,6 +129,7 @@ describe('analysis V2 owner result route', () => {
             route: '/api/analysis/v2/result/[requestId]',
             method: 'GET',
         }));
+        mocks.loadFixture.mockImplementation(async (version: string) => loadedFixture(version));
     });
 
     it('validates route identifiers safely and keeps malformed production pagination generic', async () => {
@@ -206,6 +226,46 @@ describe('analysis V2 owner result route', () => {
         expect(response.status).toBe(200);
         expect(response.headers.get('x-external-profile-links')).toBe('disabled');
         await expect(response.json()).resolves.toMatchObject({ femaleAccounts: [{ profileImage: '/demo-avatars/synthetic-blurred-avatar-1-v1.png' }] });
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it('renders the exact non-static database fixture payload without production result reads', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        const fixtureVersion = 'operator-editable-fixture-route-v1';
+        const fixture = createDemoFixture('database-route-fixture');
+        fixture.summary.targetFullName = 'DB Fixture Target';
+        mocks.loadFixture.mockResolvedValue({
+            version: fixtureVersion,
+            target: { username: 'junho_dem', fullName: 'DB Fixture Target', bio: 'fixture bio', profileImage: '/demo-avatars/demo-v3-target-000.webp', followersCount: 600, followingCount: 580, isPrivate: false },
+            fixture: { ...fixture, version: fixtureVersion },
+        });
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: fixtureVersion,
+            idempotency_key: 'demo-result-key-db-fixture', duration_seconds: 38,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date(Date.now() - 80_000).toISOString(),
+        });
+
+        const response = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}?pageSize=1`), context());
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({ summary: { targetFullName: 'DB Fixture Target' } });
+        expect(mocks.loadFixture).toHaveBeenCalledWith(fixtureVersion);
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+        vi.unstubAllEnvs();
+    });
+
+    it('returns demo-unavailable without production result reads when a DB fixture cannot load', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.loadFixture.mockResolvedValue(null);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'operator-editable-fixture-route-v1',
+            idempotency_key: 'demo-result-key-no-fixture', duration_seconds: 38,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date(Date.now() - 80_000).toISOString(),
+        });
+        const response = await GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}`), context());
+        expect(response.status).toBe(503);
         expect(mocks.loadPage).not.toHaveBeenCalled();
         vi.unstubAllEnvs();
     });

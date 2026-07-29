@@ -4,12 +4,12 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
-    AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION,
     DEMO_FIXTURE_VERSION,
     LEGACY_DEMO_FIXTURE_VERSION,
     DEMO_TARGET_USERNAME,
     demoDurationSeconds,
 } from './demo-analysis';
+import { loadPublishedDemoFixture } from './fixture-store';
 
 const uuid = z.string().uuid();
 const rowFields = {
@@ -21,27 +21,23 @@ const rowFields = {
     started_at: z.string().datetime({ offset: true }).nullable(),
 } as const;
 
-const rowSchema = z.union([
-    z.object({
-        ...rowFields,
-        fixture_version: z.literal(LEGACY_DEMO_FIXTURE_VERSION),
-        duration_seconds: z.number().int().min(60).max(90),
-    }).passthrough(),
-    z.object({
-        ...rowFields,
-        fixture_version: z.literal(AUTHORIZED_TEXT_DEMO_FIXTURE_VERSION),
-        duration_seconds: z.number().int().min(30).max(45),
-    }).passthrough(),
-    z.object({
-        ...rowFields,
-        fixture_version: z.literal(DEMO_FIXTURE_VERSION),
-        duration_seconds: z.number().int().min(30).max(45),
-    }).passthrough(),
-]);
+const rowSchema = z.object({
+    ...rowFields,
+    // New versions are database-owned names, while these static names remain replay-only.
+    fixture_version: z.string().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    duration_seconds: z.number().int().min(30).max(90),
+}).passthrough().superRefine((value, context) => {
+    if (value.fixture_version === LEGACY_DEMO_FIXTURE_VERSION && (value.duration_seconds < 60 || value.duration_seconds > 90)) {
+        context.addIssue({ code: 'custom', message: 'legacy demo duration is invalid' });
+    }
+    if (value.fixture_version !== LEGACY_DEMO_FIXTURE_VERSION && (value.duration_seconds < 30 || value.duration_seconds > 45)) {
+        context.addIssue({ code: 'custom', message: 'demo duration is invalid' });
+    }
+});
 
 export type DemoAnalysisRun = z.infer<typeof rowSchema>;
 
-export function isCurrentDemoFixtureRun(run: DemoAnalysisRun): run is Extract<DemoAnalysisRun, { fixture_version: typeof DEMO_FIXTURE_VERSION }> {
+export function isCurrentDemoFixtureRun(run: DemoAnalysisRun): boolean {
     return run.fixture_version === DEMO_FIXTURE_VERSION;
 }
 
@@ -52,7 +48,7 @@ function parseRow(value: unknown): DemoAnalysisRun | null {
 
 /** New fixture versions cannot replay a persisted run from an earlier fixture namespace. */
 export function demoFixtureIdempotencyKey(idempotencyKey: string): string {
-    return `fixture-v3-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
+    return `fixture-db-${createHash('sha256').update(idempotencyKey).digest('hex')}`;
 }
 
 export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({
@@ -63,11 +59,15 @@ export const DEMO_ANALYSIS_DATABASE_NAMES = Object.freeze({
 
 export const demoAnalysisStore = {
     async createOrReplay(input: { userId: string; idempotencyKey: string }): Promise<{ run: DemoAnalysisRun; created: boolean } | null> {
+        const fixture = await loadPublishedDemoFixture();
+        if (!fixture?.payload) return null;
         const { data, error } = await supabaseAdmin.rpc(DEMO_ANALYSIS_DATABASE_NAMES.createRpc, {
             p_user_id: input.userId,
             p_target_instagram_id: DEMO_TARGET_USERNAME,
             p_idempotency_key: demoFixtureIdempotencyKey(input.idempotencyKey),
             p_duration_seconds: demoDurationSeconds(),
+            p_fixture_version: fixture.version,
+            p_fixture_payload: fixture.payload,
         });
         if (error || !Array.isArray(data) || data.length !== 1) return null;
         const entry = data[0] as Record<string, unknown>;

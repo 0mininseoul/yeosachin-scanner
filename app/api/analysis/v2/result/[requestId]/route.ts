@@ -9,13 +9,14 @@ import {
 } from '@/lib/domain/analysis/result-pagination';
 import { analysisV2ResultStore } from '@/lib/services/analysis/v2-result-store';
 import { createClient } from '@/lib/supabase/server';
-import { demoResponseHeaders, demoResultPage, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import { demoResponseHeaders, demoResultPageFromFixture, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import {
     observeRoute,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
 
 const requestIdSchema = z.string().uuid();
 const pageSizeSchema = z.string().regex(/^\d{1,2}$/).transform(Number)
@@ -89,9 +90,10 @@ async function handleGET(
             if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
                 return demoJson({ error: 'Analysis result not found.' }, 404);
             }
-            return demoJson(analysisResultPageV1Schema.parse(demoResultPage({
+            const fixture = await loadDemoFixtureForVersion(demo.fixture_version);
+            if (!fixture) return demoJson({ error: 'Demo fixture is unavailable.' }, 503);
+            return demoJson(analysisResultPageV1Schema.parse(demoResultPageFromFixture(fixture.fixture, {
                 requestId: demo.id,
-                fixtureVersion: demo.fixture_version,
                 femaleCursor,
                 privateCursor,
                 pageSize: pageSize.data,

@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { parseSafePublicRiskNarrative } from '../lib/services/analysis/narrative-privacy';
 
 type SourcePublic = {
     kind: 'female';
+    sourceRunId: string;
+    sourceCandidateId: string;
     sort_ordinal: number;
     instagram_id: string;
     full_name: string | null;
@@ -22,6 +25,8 @@ type SourcePublic = {
 
 type SourcePrivate = {
     kind: 'private';
+    sourceRunId: string;
+    sourceCandidateId: string;
     sort_ordinal: number;
     instagram_id: string;
     full_name: string | null;
@@ -50,7 +55,8 @@ WITH grouped AS (
       AND ready_total = 230 AND ready_target = 1 AND ready_female = 84 AND ready_private = 145
 ), source_rows AS (
     SELECT
-        'female'::text AS kind, image.sort_ordinal, result.instagram_id, result.full_name, result.bio,
+        'female'::text AS kind, selected.id::text AS "sourceRunId", image.candidate_locator::text AS "sourceCandidateId",
+        image.sort_ordinal, result.instagram_id, result.full_name, result.bio,
         result.display_score, result.risk_band, result.featured_rank, result.recent_mutual_rank,
         result.analysis_depth, result.one_line_overview, result.narrative_line_one, result.narrative_line_two
     FROM selected
@@ -60,7 +66,8 @@ WITH grouped AS (
         AND result.candidate_id = image.candidate_locator
     UNION ALL
     SELECT
-        'private'::text AS kind, image.sort_ordinal, result.instagram_id, result.full_name, NULL::text,
+        'private'::text AS kind, selected.id::text AS "sourceRunId", image.candidate_locator::text AS "sourceCandidateId",
+        image.sort_ordinal, result.instagram_id, result.full_name, NULL::text,
         NULL::numeric, NULL::text, NULL::smallint, NULL::smallint, NULL::text, NULL::text, NULL::text, NULL::text
     FROM selected
     JOIN public.analysis_v2_result_image_objects image ON image.request_id = selected.id
@@ -78,7 +85,7 @@ function loadRows(): Array<SourcePublic | SourcePrivate> {
         stdio: ['ignore', 'pipe', 'inherit'],
     });
     const parsed = JSON.parse(output) as { rows?: unknown[] };
-    if (!Array.isArray(parsed.rows)) throw new Error('Demo v3 source query did not return rows.');
+    if (!Array.isArray(parsed.rows)) throw new Error('Demo v4 source query did not return rows.');
     return parsed.rows as Array<SourcePublic | SourcePrivate>;
 }
 
@@ -114,8 +121,8 @@ const LATIN_WORD_ALTERNATIVES = ['daily', 'photo', 'walk', 'weekend', 'mood', 'r
 const NAME_SYLLABLES = ['민', '서', '지', '윤', '하', '아', '연', '수', '진', '현'] as const;
 
 // Curated demo-only presentation adjustments are applied after deterministic
-// mutation, so rebuilding the fixture preserves the reviewed v3 cards.
-const DEMO_V3_CURATED_OVERRIDES = {
+// mutation, so rebuilding the fixture preserves the reviewed cards.
+const DEMO_V4_CURATED_OVERRIDES = {
     normalInstagramId: 'bl1ckcherdk_cuu6',
     normalFullName: '이유진',
 } as const;
@@ -169,9 +176,42 @@ function presentationText(value: string | null, seed: string, protectedTerms: re
         .replace(/@/g, '');
 }
 
+function uniqueByImageOrdinal<T extends { sort_ordinal: number }>(rows: readonly T[]): T[] {
+    const seen = new Set<number>();
+    return rows.filter(row => !seen.has(row.sort_ordinal) && seen.add(row.sort_ordinal));
+}
+
+type FixtureIdentity = Readonly<{
+    imageSortOrdinal: number;
+    instagramId: string;
+}>;
+
+export function assertUniqueFixture(fixture: Readonly<{
+    public: readonly FixtureIdentity[];
+    private: readonly FixtureIdentity[];
+}>): void {
+    const cards = [...fixture.public, ...fixture.private];
+    if (new Set(cards.map(row => row.imageSortOrdinal)).size !== cards.length
+        || new Set(cards.map(row => row.instagramId)).size !== cards.length) {
+        throw new Error('The demo fixture repeats a source image or synthetic identifier across public and private cards.');
+    }
+}
+
 function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
-    const publicRows = rows.filter((row): row is SourcePublic => row.kind === 'female').sort((left, right) => left.sort_ordinal - right.sort_ordinal);
-    const privateRows = rows.filter((row): row is SourcePrivate => row.kind === 'private').sort((left, right) => left.sort_ordinal - right.sort_ordinal);
+    const selectedRunIds = new Set(rows.map(row => row.sourceRunId));
+    if (selectedRunIds.size !== 1) {
+        throw new Error('Expected exactly one sealed source selection for the demo v4 fixture.');
+    }
+    const sourceCandidateIds = new Set(rows.map(row => row.sourceCandidateId));
+    if (sourceCandidateIds.size !== rows.length) {
+        throw new Error('The selected demo source contains a duplicate candidate identity.');
+    }
+    const publicRows = uniqueByImageOrdinal(rows
+        .filter((row): row is SourcePublic => row.kind === 'female')
+        .sort((left, right) => left.sort_ordinal - right.sort_ordinal));
+    const privateRows = uniqueByImageOrdinal(rows
+        .filter((row): row is SourcePrivate => row.kind === 'private')
+        .sort((left, right) => left.sort_ordinal - right.sort_ordinal));
     if (publicRows.length !== 84 || privateRows.length !== 145) {
         throw new Error(`Expected exactly 84 public and 145 private source rows, received ${publicRows.length}/${privateRows.length}.`);
     }
@@ -180,7 +220,7 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
     }
     const narrativeSource = publicRows.find(row => row.risk_band === 'high_risk'
         && row.narrative_line_one && row.narrative_line_two);
-    if (!narrativeSource) throw new Error('The selected source has no high-risk narrative for the v3 contract.');
+    if (!narrativeSource) throw new Error('The selected source has no high-risk narrative for the v4 contract.');
     const orderedPublicRows = [narrativeSource, ...publicRows.filter(row => row !== narrativeSource)];
     const highRiskNarrative = [
         presentationText(narrativeSource.narrative_line_one, 'public-narrative-one:0', ['제법', '친절'])!,
@@ -189,8 +229,7 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
     if (!parseSafePublicRiskNarrative(highRiskNarrative)) {
         throw new Error('The deterministically redacted high-risk narrative violated its public contract.');
     }
-    const publicFixture = Array.from({ length: 242 }, (_, index) => {
-        const row = orderedPublicRows[index % orderedPublicRows.length]!;
+    const publicFixture = orderedPublicRows.map((row, index) => {
         const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
         const displayScore = index === 0 ? 8 : index < 3 ? 5 : [3, 2, 1][index % 3]!;
         return {
@@ -210,14 +249,14 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
         };
     });
     const curatedNormalIndex = publicFixture.findIndex(
-        row => row.instagramId === DEMO_V3_CURATED_OVERRIDES.normalInstagramId,
+        row => row.instagramId === DEMO_V4_CURATED_OVERRIDES.normalInstagramId,
     );
     if (curatedNormalIndex < 0) {
-        throw new Error('The reviewed v3 account was not present in the selected fixture.');
+        throw new Error('The reviewed account was not present in the selected fixture.');
     }
     publicFixture[curatedNormalIndex] = {
         ...publicFixture[curatedNormalIndex]!,
-        fullName: DEMO_V3_CURATED_OVERRIDES.normalFullName,
+        fullName: DEMO_V4_CURATED_OVERRIDES.normalFullName,
         displayScore: 3,
         riskBand: 'normal',
         featuredRank: null,
@@ -226,7 +265,7 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
         (row, index) => index !== curatedNormalIndex && row.riskBand === 'normal',
     );
     if (promotedCautionIndex < 0) {
-        throw new Error('No distinct normal v3 account was available to promote to caution.');
+        throw new Error('No distinct normal account was available to promote to caution.');
     }
     publicFixture[promotedCautionIndex] = {
         ...publicFixture[promotedCautionIndex]!,
@@ -240,10 +279,7 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
             instagramId: mutateIdentifier(row.instagram_id, `private-handle:${row.sort_ordinal}`),
             fullName: mutateName(row.full_name, `private-name:${row.sort_ordinal}`),
         }));
-    if (new Set(publicFixture.map(row => row.instagramId)).size !== publicFixture.length
-        || new Set(privateFixture.map(row => row.instagramId)).size !== privateFixture.length) {
-        throw new Error('Deterministic identifier mutation created a collision.');
-    }
+    assertUniqueFixture({ public: publicFixture, private: privateFixture });
     return {
         public: publicFixture,
         private: privateFixture,
@@ -252,10 +288,12 @@ function sourceFixture(rows: Array<SourcePublic | SourcePrivate>) {
 
 async function main() {
     const fixture = sourceFixture(loadRows());
-    const target = path.join(process.cwd(), 'lib/services/demo-analysis/demo-v3-source-fixture.ts');
-    const contents = `/** Generated from the selected sealed source with deterministic 30% text mutation. Do not hand-edit. */\nexport const DEMO_V3_SOURCE_FIXTURE = ${JSON.stringify(fixture, null, 4)} as const;\n`;
+    const target = path.join(process.cwd(), 'lib/services/demo-analysis/demo-v4-source-fixture.ts');
+    const contents = `/** Generated from one selected sealed source with deterministic 30% text mutation. Do not hand-edit. */\nexport const DEMO_V4_SOURCE_FIXTURE = ${JSON.stringify(fixture, null, 4)} as const;\n`;
     await writeFile(target, contents, 'utf8');
-    process.stdout.write(`demo-v3-source-fixture=${fixture.public.length + fixture.private.length}\n`);
+    process.stdout.write(`demo-v4-source-fixture=${fixture.public.length + fixture.private.length}\n`);
 }
 
-void main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    void main();
+}
