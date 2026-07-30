@@ -231,6 +231,16 @@ export function roundedOwnerScore(displayScore: number): number {
     return Math.round(displayScore);
 }
 
+/* The score as a percentage, on the same scale the meter fills to.
+ *
+ * `roundedOwnerScore` and the bar disagreed: a 3.8 printed as 4/10 while the bar
+ * sat at 38%. Both now come off the same ratio, so the number is what the bar
+ * shows rather than a rounding of it. */
+export function ownerScorePercent(displayScore: number): number {
+    if (!Number.isFinite(displayScore)) return 0;
+    return Math.round(Math.min(10, Math.max(0, displayScore)) * 10);
+}
+
 export interface GenderBreakdownSlice {
     count: number;
     percentage: number;

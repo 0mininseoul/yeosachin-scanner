@@ -10,6 +10,7 @@ import {
   SuspectAvatar,
   ThreatBar,
 } from '@/components/case-ui';
+import { ownerScorePercent } from '@/lib/services/analysis/owner-view-presentation';
 import {
   revealVerdicts,
   totalVerdictChars,
@@ -175,9 +176,11 @@ export function LandingSignatureCard() {
         {/* header */}
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <span className="eyebrow">위협 등급 판독</span>
-          <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-[0.14em] text-blood">
+          {/* 'LIVE' claimed a live feed the mockup does not have. The blinking
+              mark alone still reads as work in progress. */}
+          <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-[0.1em] text-blood">
             <span className="anim-blink h-1.5 w-1.5 bg-blood" />
-            LIVE
+            판독 중
           </span>
         </div>
 
@@ -232,7 +235,7 @@ export function LandingSignatureCard() {
                     className="flex-1"
                     fill={reduce ? 'static' : started[i] ? 'run' : 'pending'}
                   />
-                  <span className="num shrink-0 text-[12px] font-bold text-fg">{s.score}/10</span>
+                  <span className="num shrink-0 text-[12px] font-bold text-fg">{ownerScorePercent(s.score)}%</span>
                 </div>
 
                 {/* streaming verdict */}

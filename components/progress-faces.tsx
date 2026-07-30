@@ -10,23 +10,29 @@ import {
 } from '@/lib/services/analysis/progress-faces';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
+const TILE_PX = 84;
+
+// Slow enough to read a face, fast enough that the row is never still.
+const DRIFT_PX_PER_SECOND = 26;
+
 function FaceTile({ face, current }: { face: ScreenedFace; current: boolean }) {
     const [failed, setFailed] = useState(false);
     const src = safeResultImageUrl(face.imageUrl);
     return (
         <div
-            className={`relative h-[58px] w-[58px] shrink-0 overflow-hidden border bg-panel transition-colors ${
+            className={`relative shrink-0 overflow-hidden border bg-panel ${
                 current
-                    ? 'border-blood shadow-[0_0_14px_rgba(228,19,42,0.4)]'
+                    ? 'border-blood shadow-[0_0_16px_-2px_rgba(228,19,42,0.45)]'
                     : 'border-line-2'
             }`}
+            style={{ width: TILE_PX, height: TILE_PX }}
         >
             {src && !failed ? (
                 <Image
                     src={src}
                     alt=""
-                    width={58}
-                    height={58}
+                    width={TILE_PX}
+                    height={TILE_PX}
                     unoptimized
                     className="h-full w-full object-cover"
                     onError={() => setFailed(true)}
@@ -38,15 +44,85 @@ function FaceTile({ face, current }: { face: ScreenedFace; current: boolean }) {
     );
 }
 
-/* The accounts already screened, newest at the right.
+/* Drifts the row sideways forever by wrapping through a doubled copy of itself.
  *
- * The snapshot only ever names the one profile being read right now, so the
- * history is kept here rather than asked for. That also bounds it: the page can
- * forget, the server never has to remember.
+ * A strip that only moved when a face arrived sat still between polls, which is
+ * most of the time. Wrapping keeps it alive without pretending more accounts
+ * exist than have been read — the same faces come back around.
  *
- * Motion is tied to arrivals instead of running on a timer. A strip that drifts
- * on its own is decoration; one that moves when a new face lands is telling the
- * reader something happened.
+ * Yields while a finger is held down, the way the review strip does; scrolling
+ * by hand is a reasonable thing to want and fighting it is not.
+ */
+function useFaceDrift(faceCount: number) {
+    const ref = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const el = ref.current;
+        if (!el || faceCount === 0) return;
+        if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+
+        let frame = 0;
+        let last = 0;
+        let carry = 0;
+        let pressed = false;
+
+        const onPressStart = () => { pressed = true; };
+        const onPressEnd = () => { pressed = false; };
+        const onVisibility = () => { last = 0; };
+
+        const tick = (now: number) => {
+            frame = requestAnimationFrame(tick);
+            if (pressed || document.visibilityState !== 'visible') {
+                last = now;
+                carry = 0;
+                return;
+            }
+            if (last === 0) last = now;
+            carry += ((now - last) / 1000) * DRIFT_PX_PER_SECOND;
+            last = now;
+
+            const whole = Math.floor(carry);
+            if (whole <= 0) return;
+            carry -= whole;
+
+            // The rail holds two copies, so one copy's width is the wrap point.
+            const half = el.scrollWidth / 2;
+            if (half <= 0) return;
+            const next = el.scrollLeft + whole;
+            el.scrollLeft = next >= half ? next - half : next;
+        };
+
+        el.addEventListener('pointerdown', onPressStart, { passive: true });
+        el.addEventListener('touchstart', onPressStart, { passive: true });
+        for (const event of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const) {
+            window.addEventListener(event, onPressEnd, { passive: true });
+        }
+        document.addEventListener('visibilitychange', onVisibility);
+        frame = requestAnimationFrame(tick);
+
+        return () => {
+            cancelAnimationFrame(frame);
+            el.removeEventListener('pointerdown', onPressStart);
+            el.removeEventListener('touchstart', onPressStart);
+            for (const event of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const) {
+                window.removeEventListener(event, onPressEnd);
+            }
+            document.removeEventListener('visibilitychange', onVisibility);
+        };
+    }, [faceCount]);
+
+    return ref;
+}
+
+/* The accounts already screened.
+ *
+ * The snapshot names only the profile being read right now, so the history is
+ * kept here rather than asked for. That also bounds it: the page can forget, the
+ * server never has to remember.
+ *
+ * These are profile pictures. Feed images are not in the progress snapshot at
+ * all, so carrying them would need the server to send them; nothing here assumes
+ * which of the two an entry holds.
  */
 export function ProgressFaces({
     active,
@@ -55,7 +131,6 @@ export function ProgressFaces({
 }) {
     const [faces, setFaces] = useState<readonly ScreenedFace[]>([]);
     const [lastSeen, setLastSeen] = useState<string | null>(null);
-    const railRef = useRef<HTMLDivElement>(null);
 
     /* Adjusted during render rather than in an effect: the list is derived from
        a prop that changes over time, and an effect would paint the old row once
@@ -66,17 +141,11 @@ export function ProgressFaces({
         setFaces(current => appendScreenedFace(current, active));
     }
 
-    useEffect(() => {
-        const rail = railRef.current;
-        if (!rail || faces.length === 0) return;
-        const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-        rail.scrollTo({
-            left: rail.scrollWidth,
-            behavior: reduce ? 'auto' : 'smooth',
-        });
-    }, [faces.length]);
+    const railRef = useFaceDrift(faces.length);
 
     if (faces.length < MIN_SCREENED_FACES_TO_SHOW) return null;
+
+    const newest = faces.at(-1)?.username;
 
     return (
         /* Faded at both edges so the row reads as a window onto something longer
@@ -84,20 +153,21 @@ export function ProgressFaces({
         <div
             className="relative -mx-5 mt-5"
             style={{
-                maskImage: 'linear-gradient(90deg, transparent, #000 34px, #000 calc(100% - 34px), transparent)',
-                WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 34px, #000 calc(100% - 34px), transparent)',
+                maskImage: 'linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent)',
+                WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent)',
             }}
         >
             <div
                 ref={railRef}
                 aria-hidden="true"
-                className="flex gap-2.5 overflow-x-hidden px-5"
+                className="scroll-thin flex gap-2.5 overflow-x-auto px-5"
             >
-                {faces.map((face, index) => (
+                {/* Doubled so the drift can wrap without a seam. */}
+                {[...faces, ...faces].map((face, index) => (
                     <FaceTile
                         key={`${face.username}-${index}`}
                         face={face}
-                        current={index === faces.length - 1}
+                        current={face.username === newest}
                     />
                 ))}
             </div>

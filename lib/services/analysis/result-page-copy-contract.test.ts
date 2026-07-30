@@ -134,11 +134,17 @@ describe('result page pagination copy contract', () => {
         expect(resultPage).toContain('summary.v2.privateMutuals.toLocaleString()');
     });
 
-    it('positions each gender label under its own share of the bar', () => {
-        // Position carries the proportion, which is why the printed percentages
-        // could be dropped; a flat left-aligned legend would lose that.
-        expect(resultPage).toContain('style={{ width: `${row.c.percentage}%` }}');
-        expect(resultPage).toContain('flex min-w-0 justify-center');
+    it('keeps every gender label inside the bar it belongs to', () => {
+        /* Position used to carry the proportion, with each label centred under
+           its own slice. That only holds while every slice can hold a label: at
+           6% 미상 the label ran well past its segment and sat over 여자, so
+           position was contradicting the bar instead of restating it. The three
+           labels are now pinned to the bar's own edges. */
+        expect(resultPage).not.toContain('style={{ width: `${row.c.percentage}%` }}');
+        expect(resultPage).toContain("align: 'justify-start'");
+        expect(resultPage).toContain("align: 'justify-center'");
+        expect(resultPage).toContain("align: 'justify-end'");
+        // The bar still carries the proportion, so no printed percentages.
         expect(resultPage).not.toContain('{row.c.percentage}%</span>');
     });
 

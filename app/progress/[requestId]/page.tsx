@@ -27,7 +27,7 @@ interface PageProps {
 
 const V2_TRACK_PRESENTATION = [
     { key: 'relationshipAi', label: '맞팔·AI 판독' },
-    { key: 'interactions', label: '좋아요·댓글 단서' },
+    { key: 'interactions', label: '위험 단서 수집' },
     { key: 'finalization', label: '위험도·총평 정리' },
 ] as const;
 
@@ -339,21 +339,28 @@ export default function ProgressPage({ params }: PageProps) {
                     />
                     <div className="absolute inset-[24px] rounded-full border border-line" />
                     <div className="absolute inset-[48px] rounded-full border border-line/70" />
+                    {/* Two lines, not three, and the number is whole.
+                        A tenth of a percent is noise at this size, and it made
+                        the digits jitter; three stacked lines also pushed the
+                        block's optical centre below the ring's. */}
                     <div className="absolute inset-0 flex flex-col items-center justify-center">
-                        <span className="num text-[42px] font-black leading-none tracking-tight text-fg">
-                            {data.progress}
-                            <span className="text-[18px] font-bold text-fg-dim">%</span>
+                        <span className="num flex items-baseline text-fg">
+                            <span className="text-[44px] font-black leading-none tracking-[-0.03em]">
+                                {Math.round(data.progress)}
+                            </span>
+                            <span className="ml-0.5 text-[17px] font-bold leading-none text-fg-dim">%</span>
                         </span>
-                        <span className="mt-1.5 text-[11.5px] font-semibold text-fg-dim">
+                        <span className="mt-2 text-[11.5px] font-semibold leading-none text-fg-dim">
                             {activeTrackLabel}
-                        </span>
-                        {/* "How long" is the question anyone waiting actually
-                            has, so it stays even though the copy is vague. */}
-                        <span className="mt-1 text-[10.5px] text-fg-mute">
-                            {analysisDurationProgressCopy(data.demo)}
                         </span>
                     </div>
                 </div>
+
+                {/* "How long" is the question anyone waiting actually has, so it
+                    stays even though the copy is vague. */}
+                <p className="mt-2.5 text-center text-[11px] text-fg-mute">
+                    {analysisDurationProgressCopy(data.demo)}
+                </p>
 
                 {/* Who is being read right now, and how far in. */}
                 {data.pipelineVersion === 'v2' && (
@@ -451,13 +458,22 @@ export default function ProgressPage({ params }: PageProps) {
                         })}
                 </div>
 
-                {/* Last, and quiet: it matters only when someone is deciding
-                    whether they can leave. */}
-                <p className="mt-6 border-l-2 border-line-2 pl-3 text-[11.5px] leading-relaxed text-fg-mute">
-                    {data.backgroundProcessing
-                        ? '이 화면을 나가셔도 판독은 계속됩니다.'
-                        : '판독이 끝날 때까지 이 페이지를 닫지 마세요.'}
-                </p>
+                {/* Not quiet. Waiting several minutes on a screen you believe you
+                    must not leave is the worst version of this page, and a grey
+                    11px line at the bottom was not going to tell anyone
+                    otherwise. */}
+                {data.backgroundProcessing ? (
+                    <p className="mt-6 flex items-center justify-center gap-2 border border-jade/35 bg-jade/[0.07] px-4 py-3 text-[13px] font-bold text-jade">
+                        <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" aria-hidden="true">
+                            <path d="m4.5 12.5 5 5 10-11" stroke="currentColor" strokeWidth="2.2" strokeLinecap="square" />
+                        </svg>
+                        이 화면을 나가셔도 판독은 계속됩니다
+                    </p>
+                ) : (
+                    <p className="mt-6 border border-blood/45 bg-blood/[0.09] px-4 py-3 text-center text-[13px] font-bold text-blood">
+                        판독이 끝날 때까지 이 페이지를 닫지 마세요
+                    </p>
+                )}
             </main>
         </div>
     );
