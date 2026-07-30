@@ -187,20 +187,19 @@ function GenderRatioBreakdown({ gr }: { gr: GenderRatio }) {
                 <div className="h-full bg-line-2" style={{ width: `${gr.unknown.percentage}%` }} />
             </div>
 
-            {/* Each label is centred under its own segment of the bar, so the
-                legend doubles as an axis: position carries the proportion and
-                the bar needs no printed percentages. */}
-            <div className="reveal mt-2 flex w-full" style={{ animationDelay: '1120ms' }}>
+            {/* Three columns pinned to the bar's own edges, not to the segments.
+                Centring each label under its slice only works while every slice
+                is wide enough to hold one: at 6% 미상 the label ran far past its
+                segment and sat over 여자, so position was actively lying. The bar
+                carries the proportion; these are counts, and they stay inside the
+                bar's width where the eye expects to find them. */}
+            <div className="reveal mt-2 flex w-full items-baseline justify-between gap-2" style={{ animationDelay: '1120ms' }}>
                 {[
-                    { label: OWNER_GENDER_LABELS.male, c: gr.male, Icon: Mars, txt: 'text-fg' },
-                    { label: OWNER_GENDER_LABELS.female, c: gr.female, Icon: Venus, txt: 'text-blood-2' },
-                    { label: OWNER_GENDER_LABELS.unknown, c: gr.unknown, Icon: CircleHelp, txt: 'text-fg-dim' },
+                    { label: OWNER_GENDER_LABELS.male, c: gr.male, Icon: Mars, txt: 'text-fg', align: 'justify-start' },
+                    { label: OWNER_GENDER_LABELS.female, c: gr.female, Icon: Venus, txt: 'text-blood-2', align: 'justify-center' },
+                    { label: OWNER_GENDER_LABELS.unknown, c: gr.unknown, Icon: CircleHelp, txt: 'text-fg-dim', align: 'justify-end' },
                 ].map((row) => (
-                    <div
-                        key={row.label}
-                        className="flex min-w-0 justify-center"
-                        style={{ width: `${row.c.percentage}%` }}
-                    >
+                    <div key={row.label} className={`flex min-w-0 flex-1 ${row.align}`}>
                         <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
                             <row.Icon aria-hidden="true"
                                 className={`h-3 w-3 shrink-0 self-center ${row.txt}`}

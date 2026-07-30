@@ -10,7 +10,7 @@ import {
   RiskTag,
   ThreatBar,
 } from "@/components/case-ui";
-import { roundedOwnerScore } from "@/lib/services/analysis/owner-view-presentation";
+import { ownerScorePercent } from "@/lib/services/analysis/owner-view-presentation";
 
 type Grade = "high_risk" | "caution" | "normal";
 
@@ -135,12 +135,14 @@ export function SuspectRow({
           />
           {account.displayScore !== undefined && (
             <span
-              className={`num shrink-0 text-[16px] font-extrabold leading-none tracking-tight ${
-                isHighRisk ? "text-blood-2" : account.riskGrade === "caution" ? "text-amber" : "text-jade"
+              className={`num shrink-0 font-extrabold leading-none tracking-tight ${
+                isHighRisk
+                  ? "text-[21px] text-blood-2"
+                  : account.riskGrade === "caution" ? "text-[16px] text-amber" : "text-[16px] text-jade"
               }`}
             >
-              {roundedOwnerScore(account.displayScore)}
-              <span className="text-[11px] font-semibold text-fg-dim">/10</span>
+              {ownerScorePercent(account.displayScore)}
+              <span className="text-[11px] font-semibold text-fg-dim">%</span>
             </span>
           )}
         </div>
@@ -168,8 +170,23 @@ export function SuspectRow({
   //   Tier 2  1px border + 15px padding      -> content at 16 / W-16
   //   Tier 0  2px rail   + 14px gap, pr-4    -> content at 16 / W-16
   if (isHighRisk) {
+    /* The one account the report exists to name. It used to differ from an
+       ordinary row only by a border colour, so it read as a variant rather than
+       as a finding: a breathing glow and a single sweep on arrival give it the
+       weight the number already claims. */
     return (
-      <CaseCard bracket="var(--color-blood)" className="my-3.5 border-blood/40 px-[15px] py-4">
+      <CaseCard
+        bracket="var(--color-blood)"
+        className="alarm-glow relative my-4 overflow-hidden border-blood/55 px-[15px] py-4"
+      >
+        <span
+          aria-hidden="true"
+          className="alarm-sweep pointer-events-none absolute inset-x-0 top-0 h-14"
+          style={{
+            background:
+              'linear-gradient(180deg, transparent, rgb(var(--glow-rgb) / 0.22), transparent)',
+          }}
+        />
         {body}
       </CaseCard>
     );

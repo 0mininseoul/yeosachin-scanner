@@ -235,6 +235,25 @@ body::before {
 .overture-out { animation: overture-out 1s var(--ease-settle) 1.55s both; }
 .overture-page-in { animation: overture-page-in 0.95s var(--ease-settle) 1.7s both; }
 
+/* High-risk presence. The verdict card used to differ from an ordinary row only
+   by a border colour, so the one account that matters read as a variant rather
+   than as an alarm. The glow breathes slowly — fast enough to catch the eye on
+   the way past, slow enough not to nag while the report is being read. */
+.alarm-glow { animation: alarm-glow 2.6s ease-in-out infinite; }
+@keyframes alarm-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--glow-rgb) / 0), inset 0 0 24px -18px rgb(var(--glow-rgb) / 0.5); }
+  50% { box-shadow: 0 0 22px -6px rgb(var(--glow-rgb) / 0.28), inset 0 0 24px -14px rgb(var(--glow-rgb) / 0.8); }
+}
+
+/* A single pass across the verdict card as it arrives — the sweep the scope
+   makes while reading, landing once on the thing it found. */
+.alarm-sweep { animation: alarm-sweep 1.5s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
+@keyframes alarm-sweep {
+  from { transform: translateY(-100%); opacity: 0; }
+  40% { opacity: 1; }
+  to { transform: translateY(320%); opacity: 0; }
+}
+
 /* Toast. Anchored to the bottom edge with no gap and no border radius, so it
    reads as part of the viewport frame rather than as one more card on a page
    that already has plenty. The crimson top rule is what carries the attention;

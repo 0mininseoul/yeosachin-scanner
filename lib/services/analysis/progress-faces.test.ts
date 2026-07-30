@@ -53,3 +53,20 @@ describe('screened face accumulation', () => {
         expect(appendScreenedFace(seeded, null)).toBe(seeded);
     });
 });
+
+describe('owner score as a percentage', () => {
+    it('reads off the same ratio the meter fills to', async () => {
+        const { ownerScorePercent } = await import('./owner-view-presentation');
+        // 3.8 printed as 4/10 while the bar sat at 38%; both are 38 now.
+        expect(ownerScorePercent(3.8)).toBe(38);
+        expect(ownerScorePercent(9)).toBe(90);
+        expect(ownerScorePercent(10)).toBe(100);
+    });
+
+    it('never leaves the 0-100 range whatever it is handed', async () => {
+        const { ownerScorePercent } = await import('./owner-view-presentation');
+        expect(ownerScorePercent(-4)).toBe(0);
+        expect(ownerScorePercent(42)).toBe(100);
+        expect(ownerScorePercent(Number.NaN)).toBe(0);
+    });
+});
