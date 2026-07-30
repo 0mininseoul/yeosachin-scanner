@@ -22,6 +22,7 @@ import {
     trustedDurationMs,
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
+import { captureExceptionSafely } from '@/lib/observability/sentry-capture';
 
 interface AnalysisProgress {
     id: string;
@@ -42,6 +43,37 @@ function mapV2Status(status: ProgressSnapshotV1['status']): AnalysisProgress['st
     if (status === 'queued') return 'pending';
     if (status === 'upgrade_required') return 'failed';
     return status;
+}
+
+type TeardownErrorReporter = (message?: unknown, ...optionalParams: unknown[]) => void;
+
+function isAbortError(error: unknown): boolean {
+    return typeof error === 'object'
+        && error !== null
+        && 'name' in error
+        && error.name === 'AbortError';
+}
+
+// Supabase can reject channel removal while React is tearing down the page.
+// That cancellation is expected; every other cleanup failure remains observable.
+export function reportAnalysisProgressChannelTeardownError(
+    error: unknown,
+    report: TeardownErrorReporter = console.error,
+): void {
+    if (isAbortError(error)) return;
+    report('Failed to remove analysis progress channel:', error);
+    captureExceptionSafely(error);
+}
+
+export function disposeAnalysisProgressChannel(
+    removeChannel: () => unknown,
+): void {
+    try {
+        void Promise.resolve(removeChannel())
+            .catch(reportAnalysisProgressChannelTeardownError);
+    } catch (error) {
+        reportAnalysisProgressChannelTeardownError(error);
+    }
 }
 
 export function useAnalysisProgress(requestId: string) {
@@ -302,7 +334,7 @@ export function useAnalysisProgress(requestId: string) {
             });
 
         return () => {
-            void supabase.removeChannel(channel);
+            disposeAnalysisProgressChannel(() => supabase.removeChannel(channel));
         };
     }, [currentData?.pipelineVersion, currentData?.status, fetchData, requestId, supabase]);
 
