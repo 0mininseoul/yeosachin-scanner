@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AnalysisV2FreshAdmissionError } from '@/lib/services/analysis/fresh-plan-admission';
 import {
     advanceAdmittedEarlybirdFulfillment,
     createEarlybirdFulfillmentStore,
@@ -14,6 +15,8 @@ const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
 const USER = '323e4567-e89b-42d3-a456-426614174001';
 const CLAIM = '423e4567-e89b-42d3-a456-426614174001'; // gitleaks:allow
 const REQUEST = '523e4567-e89b-42d3-a456-426614174001';
+const REBOUND_PREFLIGHT = '623e4567-e89b-42d3-a456-426614174001';
+const OTHER_ORDER = '723e4567-e89b-42d3-a456-426614174001';
 
 function identity(
     overrides: Partial<EarlybirdFulfillmentIdentity> = {}
@@ -165,6 +168,7 @@ describe('earlybird fulfillment store', () => {
         const emitOperationalEvent = vi.fn();
         const result = await advanceAdmittedEarlybirdFulfillment(identity(), {
             store: fulfillmentStore,
+            rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
             reserveFreshAdmission: vi.fn(async () => ({
                 state: 'pending' as const,
                 shouldEnqueue: true,
@@ -247,6 +251,7 @@ describe('earlybird fulfillment store', () => {
 
         await expect(advanceAdmittedEarlybirdFulfillment(identity(), {
             store: orderStore,
+            rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
             reserveFreshAdmission: vi.fn(async () => ({
                 state: 'ready' as const,
                 generation: 2,
@@ -299,6 +304,7 @@ describe('earlybird fulfillment store', () => {
         const orderStore = store();
         await expect(advanceAdmittedEarlybirdFulfillment(identity(), {
             store: orderStore,
+            rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
             reserveFreshAdmission: vi.fn(async () => ({
                 state: 'blocked' as const,
                 generation: 2,
@@ -372,5 +378,178 @@ describe('earlybird fulfillment store', () => {
         expect(orderStore.autoAdmitEligible).toHaveBeenCalledWith(7);
         expect(orderStore.admit).not.toHaveBeenCalled();
         expect(advance).toHaveBeenCalledWith(identity());
+    });
+
+    it('rebinds an expired paid preflight during recovery and drives the replacement', async () => {
+        const orderStore = store();
+        const rebindExpiredPaidPreflight = vi.fn(async () => REBOUND_PREFLIGHT);
+        const dispatchAnalysisJob = vi.fn(async () => 'enqueued' as const);
+        const emitOperationalEvent = vi.fn();
+        const reserveFreshAdmission = vi.fn(async (
+            _client: unknown,
+            input: { preflightId: string }
+        ) => {
+            if (input.preflightId !== REBOUND_PREFLIGHT) {
+                throw new AnalysisV2FreshAdmissionError(
+                    'ANALYSIS_V2_PREFLIGHT_EXPIRED'
+                );
+            }
+            return {
+                state: 'ready' as const,
+                generation: 1,
+                selectedPlanAllowed: true,
+                admissionToken: CLAIM,
+                snapshot: {
+                    followersCount: 120,
+                    followingCount: 140,
+                    capacityRequiredPlanId: 'basic' as const,
+                    requiredPlanId: 'basic' as const,
+                    selectedPlanId: 'basic' as const,
+                    plans: [],
+                    pricingVersion: 'deferred',
+                    refreshedAt: '2026-07-31T00:00:00.000Z',
+                },
+            };
+        });
+
+        await expect(recoverEarlybirdFulfillments({
+            store: orderStore,
+            advance: row => advanceAdmittedEarlybirdFulfillment(row, {
+                store: orderStore,
+                rebindExpiredPaidPreflight,
+                reserveFreshAdmission,
+                enqueueFreshAdmission: vi.fn(),
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch: vi.fn(),
+                dispatchAnalysisJob,
+                emitOperationalEvent,
+            }),
+            automaticFulfillmentEnabled: false,
+        })).resolves.toMatchObject({
+            scanned: 1,
+            advanced: 1,
+            failed: 0,
+        });
+
+        expect(rebindExpiredPaidPreflight).toHaveBeenCalledWith(ORDER);
+        expect(reserveFreshAdmission).toHaveBeenCalledTimes(2);
+        expect(reserveFreshAdmission.mock.calls[0][1]).toMatchObject({
+            preflightId: PREFLIGHT,
+        });
+        expect(reserveFreshAdmission.mock.calls[1][1]).toMatchObject({
+            preflightId: REBOUND_PREFLIGHT,
+        });
+        expect(dispatchAnalysisJob).toHaveBeenCalledWith(
+            REQUEST,
+            'coordinator:bootstrap'
+        );
+        expect(emitOperationalEvent).toHaveBeenCalledWith({
+            event: 'earlybird.paid_preflight_rebound',
+            severity: 'warn',
+            fields: {
+                user_id: USER,
+                preflight_id: REBOUND_PREFLIGHT,
+                order_id: ORDER,
+                plan_id: 'basic',
+                operation: 'fresh_admission',
+                disposition: 'retry',
+            },
+        });
+        // The replacement preflight, not the retired one, is what the queued
+        // analysis is reported against.
+        expect(emitOperationalEvent).toHaveBeenCalledWith(
+            expect.objectContaining({
+                event: 'analysis_v2.request_queued',
+                fields: expect.objectContaining({
+                    preflight_id: REBOUND_PREFLIGHT,
+                }),
+            })
+        );
+    });
+
+    it('keeps draining the sweep when one row cannot be rebound', async () => {
+        const strandedIdentity = identity({ orderId: OTHER_ORDER });
+        const orderStore = store({
+            listRecoverable: vi.fn(async () => [strandedIdentity, identity()]),
+        });
+        const rebindExpiredPaidPreflight = vi.fn(async (orderId: string) => {
+            if (orderId === OTHER_ORDER) {
+                throw new Error('EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR');
+            }
+            return PREFLIGHT;
+        });
+        const reserveFreshAdmission = vi.fn(async () => {
+            throw new AnalysisV2FreshAdmissionError(
+                'ANALYSIS_V2_PREFLIGHT_EXPIRED'
+            );
+        });
+
+        await expect(recoverEarlybirdFulfillments({
+            store: orderStore,
+            advance: row => advanceAdmittedEarlybirdFulfillment(row, {
+                store: orderStore,
+                rebindExpiredPaidPreflight,
+                reserveFreshAdmission: row.orderId === OTHER_ORDER
+                    ? reserveFreshAdmission
+                    : vi.fn(async () => ({
+                        state: 'pending' as const,
+                        shouldEnqueue: false,
+                        generation: 1,
+                        dispatchGeneration: 0,
+                        dispatchToken: null,
+                    })),
+                enqueueFreshAdmission: vi.fn(),
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch: vi.fn(),
+                dispatchAnalysisJob: vi.fn(),
+            }),
+            concurrency: 1,
+            automaticFulfillmentEnabled: false,
+        })).resolves.toMatchObject({
+            scanned: 2,
+            advanced: 1,
+            failed: 1,
+        });
+
+        expect(rebindExpiredPaidPreflight).toHaveBeenCalledWith(OTHER_ORDER);
+        expect(rebindExpiredPaidPreflight).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces the original expiry, not the rebind refusal, when nothing is rebound', async () => {
+        const orderStore = store();
+        await expect(advanceAdmittedEarlybirdFulfillment(identity(), {
+            store: orderStore,
+            // The database returns the preflight the order already points at
+            // whenever it refuses to rebind, including past the retry cap.
+            rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
+            reserveFreshAdmission: vi.fn(async () => {
+                throw new AnalysisV2FreshAdmissionError(
+                    'ANALYSIS_V2_PREFLIGHT_EXPIRED'
+                );
+            }),
+            enqueueFreshAdmission: vi.fn(),
+            markFreshAdmissionDispatched: vi.fn(),
+            releaseFreshAdmissionDispatch: vi.fn(),
+            dispatchAnalysisJob: vi.fn(),
+        })).rejects.toThrow('ANALYSIS_V2_PREFLIGHT_EXPIRED');
+        expect(orderStore.claim).not.toHaveBeenCalled();
+    });
+
+    it('does not rebind an admission that failed for any other reason', async () => {
+        const rebindExpiredPaidPreflight = vi.fn(async () => REBOUND_PREFLIGHT);
+        await expect(advanceAdmittedEarlybirdFulfillment(identity(), {
+            store: store(),
+            rebindExpiredPaidPreflight,
+            reserveFreshAdmission: vi.fn(async () => {
+                throw new AnalysisV2FreshAdmissionError(
+                    'ANALYSIS_V2_PREFLIGHT_NOT_FOUND'
+                );
+            }),
+            enqueueFreshAdmission: vi.fn(),
+            markFreshAdmissionDispatched: vi.fn(),
+            releaseFreshAdmissionDispatch: vi.fn(),
+            dispatchAnalysisJob: vi.fn(),
+        })).rejects.toThrow('ANALYSIS_V2_PREFLIGHT_NOT_FOUND');
+        expect(rebindExpiredPaidPreflight).not.toHaveBeenCalled();
     });
 });

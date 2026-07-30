@@ -78,6 +78,7 @@ export const OPERATIONAL_EVENT_NAMES = [
     'preflight.exclusion_decided',
     'earlybird.checkout_created',
     'earlybird.checkout_failed',
+    'earlybird.paid_preflight_rebound',
     'earlybird.waitlist_created',
     'earlybird.waitlist_failed',
     'groble.webhook_received',
