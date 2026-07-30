@@ -816,11 +816,11 @@ const DISCLOSURE_ACCEPTED = true;
                                         <div className="mt-4 border border-line bg-ink-2 px-4 py-3" aria-live="polite">
                                             <p className="eyebrow">예상 소요 시간</p>
                                             <p className="mt-1 text-[15px] font-bold text-fg">
-                                                {analyticsEligible ? '완료 시간 측정 중' : '약 5분'}
+                                                {analyticsEligible ? '약 5~10분' : '약 5분'}
                                             </p>
                                             <p className="mt-1 text-[11px] leading-relaxed text-fg-mute">
                                                 {analyticsEligible
-                                                    ? '계정 규모와 수집 상황에 따라 달라집니다. 정확한 완료 시간은 현재 측정 중이에요.'
+                                                    ? '계정 규모와 수집 상황에 따라 달라질 수 있습니다.'
                                                     : '정확한 완료 시간은 계정 규모와 수집 상황에 따라 달라질 수 있습니다.'}
                                             </p>
                                         </div>
