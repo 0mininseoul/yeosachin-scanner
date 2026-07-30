@@ -132,6 +132,18 @@ export interface AnalysisV2ProviderRunAdapterBinding {
     checkpoint: ProviderRunCheckpoint;
 }
 
+/**
+ * A cost-neutral row that reuses a run a predecessor request already paid for. It is a real
+ * ledger row for the current request, so it acts as this operation's reservation and as the
+ * succeeded run the collection executors require.
+ */
+export interface AdoptedAnalysisV2ProviderRun extends StoredAnalysisV2ProviderRun {
+    status: 'succeeded';
+    runId: string;
+    actualUsageUsd: 0;
+    adoptedFromRequestId: string;
+}
+
 export interface AnalysisV2ProviderRunStore {
     reserve(input: AnalysisV2ProviderRunReservationInput):
         Promise<AnalysisV2ProviderRunReservation>;
@@ -162,6 +174,13 @@ export interface AnalysisV2ProviderRunStore {
     }): Promise<AnalysisV2ActiveProviderRunBatch>;
     settleForCleanup(input: AnalysisV2ProviderRunCleanupTerminalInput):
         Promise<StoredAnalysisV2ProviderRun>;
+    /**
+     * Reuses a recorded predecessor request's succeeded run for this exact operation instead of
+     * buying it again. Resolves to null whenever adoption is not authorized, in which case the
+     * caller reserves and starts a fresh paid run as before.
+     */
+    adoptPredecessorRun(input: AnalysisV2ProviderRunReservationInput):
+        Promise<AdoptedAnalysisV2ProviderRun | null>;
     bindAdapterCheckpoint(input: AnalysisV2ProviderRunReservationInput):
         Promise<AnalysisV2ProviderRunAdapterBinding>;
 }
@@ -193,6 +212,7 @@ export const ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     loadCleanupIntentRpc: 'load_analysis_v2_provider_run_cleanup_intent',
     listActiveCleanupRpc: 'list_analysis_v2_active_provider_runs_for_cleanup',
     settleCleanupRpc: 'settle_analysis_v2_provider_run_for_cleanup',
+    adoptPredecessorRpc: 'adopt_analysis_v2_predecessor_provider_run',
 });
 
 export class AnalysisV2ProviderRunFenceError extends Error {
@@ -406,6 +426,38 @@ function parseStoredRun(data: unknown, operation: string): StoredAnalysisV2Provi
         runStartedAt,
         terminalizedAt,
         usageReconciledAt,
+    };
+}
+
+/**
+ * An adopted row must be terminal, succeeded, and provably free. Anything else would let a real
+ * Apify charge be attributed to two ledger rows, so it is rejected here as well as by the
+ * database CHECK.
+ */
+function parseAdoptedRun(data: unknown): AdoptedAnalysisV2ProviderRun {
+    const run = parseStoredRun(data, 'provider run adoption');
+    const adoptedFromRequestId = requiredUuid(
+        rpcObject(data, 'provider run adoption').adoptedFromRequestId,
+        'adopted request id'
+    );
+    if (
+        run.status !== 'succeeded'
+        || run.runId === null
+        || run.actualUsageUsd !== 0
+        || run.usageReconciledAt === null
+        || run.terminalizedAt === null
+        || adoptedFromRequestId === run.requestId
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid adopted provider run.'
+        );
+    }
+    return {
+        ...run,
+        status: 'succeeded',
+        runId: run.runId,
+        actualUsageUsd: 0,
+        adoptedFromRequestId,
     };
 }
 
@@ -1015,11 +1067,39 @@ export function createAnalysisV2ProviderRunStore(
             return stored;
         },
 
+        async adoptPredecessorRun(input) {
+            validateClaimedIdentity(input);
+            const provider = canonicalProviderIdentity(input);
+            const expected = { ...input, ...provider };
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.adoptPredecessorRpc,
+                {
+                    p_request_id: input.requestId.toLowerCase(),
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken.toLowerCase(),
+                    p_operation_key: input.operationKey,
+                    p_input_hash: input.inputHash,
+                    p_logical_provider: provider.logicalProvider,
+                    p_actor_id: provider.actorId,
+                    p_credential_slot: provider.credentialSlot,
+                    p_max_charge_usd: provider.maxChargeUsd,
+                    p_reservation_token: randomUUID(),
+                }
+            );
+            if (error) throwRpcError(error, 'provider run adoption');
+            if (data === null) return null;
+            const adopted = parseAdoptedRun(data);
+            assertStoredIdentity(adopted, expected);
+            return adopted;
+        },
+
         async bindAdapterCheckpoint(input) {
             validateClaimedIdentity(input);
             const expectedProvider = canonicalProviderIdentity(input);
             const expected = { ...input, ...expectedProvider };
-            const loaded = await load(input);
+            // A missing row is the only moment this operation would spend money, so it is also
+            // the only moment worth asking whether a recorded predecessor already paid for it.
+            const loaded = await load(input) ?? await store.adoptPredecessorRun(expected);
             let reserved: StoredAnalysisV2ProviderRun | null = null;
             if (loaded !== null) {
                 const replay = await store.reserve(expected);

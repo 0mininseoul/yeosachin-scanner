@@ -196,7 +196,9 @@ describe('analysis V2 provider run store', () => {
 
     it('exposes the selected provider identity before a new Actor start', async () => {
         const { rpc, client } = clientWithRpc();
-        rpc.mockResolvedValueOnce({ data: null, error: null });
+        rpc
+            .mockResolvedValueOnce({ data: null, error: null })
+            .mockResolvedValueOnce({ data: null, error: null });
         const store = createAnalysisV2ProviderRunStore(client);
 
         const binding = await store.bindAdapterCheckpoint({
@@ -212,7 +214,10 @@ describe('analysis V2 provider run store', () => {
             maxChargeUsd: 0.40205,
         });
         expect(binding.checkpoint.onBeforeRunStart).toEqual(expect.any(Function));
-        expect(rpc).toHaveBeenCalledTimes(1);
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.adoptPredecessorRpc,
+        ]);
     });
 
     it('rejects a created reservation that does not echo the proposed token', async () => {
@@ -230,6 +235,7 @@ describe('analysis V2 provider run store', () => {
         const { rpc, client } = clientWithRpc();
         rpc
             .mockResolvedValueOnce({ data: null, error: null })
+            .mockResolvedValueOnce({ data: null, error: null })
             .mockResolvedValueOnce({
                 data: reservationResponse(false, storedRow('starting')),
                 error: null,
@@ -243,12 +249,13 @@ describe('analysis V2 provider run store', () => {
             credentialSlot: 'primary',
             maxChargeUsd: 0.40205,
         })).rejects.toBeInstanceOf(AnalysisV2ProviderRunAlreadyReservedError);
-        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc).toHaveBeenCalledTimes(3);
     });
 
     it('connects a new reservation, run checkpoint, and terminal fence to adapter callbacks', async () => {
         const { rpc, client } = clientWithRpc();
         rpc
+            .mockResolvedValueOnce({ data: null, error: null })
             .mockResolvedValueOnce({ data: null, error: null })
             .mockImplementationOnce((_name, params) => createdReservationFromParams(params))
             .mockImplementationOnce((_name, params) => Promise.resolve({
@@ -296,17 +303,18 @@ describe('analysis V2 provider run store', () => {
 
         expect(rpc.mock.calls.map(([name]) => name)).toEqual([
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.adoptPredecessorRpc,
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc,
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc,
         ]);
-        expect(rpc.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
+        expect(rpc.mock.calls[3]?.[1]).toEqual(expect.objectContaining({
             p_reservation_token: expect.stringMatching(
                 /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
             ),
             p_run_id: runId,
         }));
-        expect(rpc.mock.calls[3]?.[1]).toEqual(expect.objectContaining({
+        expect(rpc.mock.calls[4]?.[1]).toEqual(expect.objectContaining({
             p_claim_token: claimToken,
             p_status: 'succeeded',
             p_actual_usage_usd: 0.401,
@@ -316,6 +324,7 @@ describe('analysis V2 provider run store', () => {
     it('persists a definite start rejection against the exact reservation fence', async () => {
         const { rpc, client } = clientWithRpc();
         rpc
+            .mockResolvedValueOnce({ data: null, error: null })
             .mockResolvedValueOnce({ data: null, error: null })
             .mockImplementationOnce((_name, params) => createdReservationFromParams(params))
             .mockImplementationOnce((_name, params) => Promise.resolve({
@@ -344,10 +353,11 @@ describe('analysis V2 provider run store', () => {
 
         expect(rpc.mock.calls.map(([name]) => name)).toEqual([
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.adoptPredecessorRpc,
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
         ]);
-        expect(rpc.mock.calls[2]?.[1]).toEqual({
+        expect(rpc.mock.calls[3]?.[1]).toEqual({
             p_request_id: requestId,
             p_job_key: jobKey,
             p_claim_token: claimToken,
