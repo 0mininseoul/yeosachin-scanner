@@ -26,7 +26,6 @@ import {
 import { reportLandingLead } from '@/lib/services/landing-lead';
 import { useAuth } from '@/hooks/useAuth';
 import { LoginModal } from '@/components/login-modal';
-import { EarlybirdStatusBanner } from '@/components/earlybird-status-banner';
 import {
   TopBar,
   BrandMark,
@@ -175,8 +174,6 @@ export default function LandingPage() {
           )
         }
       />
-      <EarlybirdStatusBanner enabled={!!user} />
-
       <main className="mx-auto max-w-[460px] px-5">
         {/* ---------- HERO ---------- */}
         <section className="pb-14 pt-7">

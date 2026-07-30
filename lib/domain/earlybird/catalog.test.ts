@@ -38,9 +38,9 @@ describe('earlybird presale catalog', () => {
     });
 
     it('keeps the exact disclosure and version that must be persisted', () => {
-        expect(EARLYBIRD_DISCLOSURE_VERSION).toBe('earlybird-24h-v1');
+        expect(EARLYBIRD_DISCLOSURE_VERSION).toBe('earlybird-auto-start-v2');
         expect(EARLYBIRD_DISCLOSURE_TEXT).toBe(
-            '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.'
+            '결제 확인 후 판독이 자동으로 시작됩니다.'
         );
     });
 

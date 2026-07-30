@@ -33,6 +33,9 @@ const discountedLateCancelledMigration = migration(
 const checkoutReconciliationMigration = migration(
     '20260730110000_add_earlybird_checkout_reconciliation.sql'
 );
+const autoStartCheckoutMigration = migration(
+    '20260730160000_open_earlybird_auto_fulfillment_checkout.sql'
+);
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -94,6 +97,8 @@ const V2 = 'earlybird-2026-07-v2';
 const DISCLOSURE_VERSION = 'earlybird-24h-v1';
 const DISCLOSURE_TEXT =
     '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.';
+const AUTO_START_DISCLOSURE_VERSION = 'earlybird-auto-start-v2';
+const AUTO_START_DISCLOSURE_TEXT = '결제 확인 후 판독이 자동으로 시작됩니다.';
 const BASIC_PRODUCT_ID = 'basic_product-01';
 const STANDARD_PRODUCT_ID = 'standard_product-01';
 const databases: PGlite[] = [];
@@ -174,6 +179,13 @@ async function createReconciliationDatabase(): Promise<PGlite> {
     await db.exec(pricingV2Migration);
     await db.exec(checkoutLineageMigration);
     await db.exec(checkoutReconciliationMigration);
+    return db;
+}
+
+async function createAutoStartCheckoutDatabase(): Promise<PGlite> {
+    const db = await createDatabase(true);
+    await db.exec(checkoutLineageMigration);
+    await db.exec(autoStartCheckoutMigration);
     return db;
 }
 
@@ -282,7 +294,11 @@ async function checkout(
     seed: Seed,
     planId: PaidPlanId,
     version: typeof V1 | typeof V2,
-    expectedAmount = amount(planId, version)
+    expectedAmount = amount(planId, version),
+    disclosure: { version: string; text: string } = {
+        version: DISCLOSURE_VERSION,
+        text: DISCLOSURE_TEXT,
+    }
 ): Promise<CheckoutRow> {
     const result = await asService<CheckoutRow>(
         db,
@@ -297,8 +313,8 @@ async function checkout(
             productId(planId),
             expectedAmount,
             version,
-            DISCLOSURE_VERSION,
-            DISCLOSURE_TEXT,
+            disclosure.version,
+            disclosure.text,
         ]
     );
     return result.rows[0];
@@ -426,6 +442,141 @@ afterEach(async () => {
 });
 
 describe('earlybird pricing v2 database behavior', () => {
+    it('keeps a terminal paid/manual-review order immutable while a fresh same-target preflight can checkout', async () => {
+        const db = await createAutoStartCheckoutDatabase();
+        const originalPreflight = await seedPreflight(db, 101, 'basic', V2);
+        const original = await checkout(
+            db,
+            originalPreflight,
+            'basic',
+            V2,
+            undefined,
+            {
+                version: AUTO_START_DISCLOSURE_VERSION,
+                text: AUTO_START_DISCLOSURE_TEXT,
+            }
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'paid', payment_id = 'confirmed_payment_101',
+                 actual_amount_krw = 0, paid_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [original.order_id]
+        );
+        await db.exec(`
+            CREATE TABLE public.earlybird_fulfillments (
+                order_id UUID PRIMARY KEY REFERENCES public.earlybird_orders(id),
+                status TEXT NOT NULL
+            );
+        `);
+        await db.query(
+            `INSERT INTO public.earlybird_fulfillments (order_id, status)
+             VALUES ($1, 'manual_review')`,
+            [original.order_id]
+        );
+
+        const freshPreflight = await seedNewerPreflightForUser(
+            db,
+            originalPreflight,
+            102,
+            'basic',
+            V2
+        );
+        const fresh = await checkout(
+            db,
+            freshPreflight,
+            'basic',
+            V2,
+            undefined,
+            {
+                version: AUTO_START_DISCLOSURE_VERSION,
+                text: AUTO_START_DISCLOSURE_TEXT,
+            }
+        );
+
+        expect(fresh).toMatchObject({ created: true });
+        expect((await db.query<{
+            id: string;
+            status: string;
+            payment_id: string | null;
+            actual_amount_krw: number | null;
+        }>(
+            `SELECT id, status, payment_id, actual_amount_krw
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0]).toEqual({
+            id: original.order_id,
+            status: 'paid',
+            payment_id: 'confirmed_payment_101',
+            actual_amount_krw: 0,
+        });
+        expect((await db.query<{ count: number }>(
+            `SELECT COUNT(*)::INTEGER AS count
+             FROM public.earlybird_fulfillments
+             WHERE order_id = $1 AND status = 'manual_review'`,
+            [original.order_id]
+        )).rows[0].count).toBe(1);
+    }, 30_000);
+
+    it('rejects a mixed disclosure version/text pair before creating an order', async () => {
+        const db = await createAutoStartCheckoutDatabase();
+        const preflight = await seedPreflight(db, 103, 'basic', V2);
+
+        await expect(checkout(
+            db,
+            preflight,
+            'basic',
+            V2,
+            undefined,
+            {
+                version: AUTO_START_DISCLOSURE_VERSION,
+                text: DISCLOSURE_TEXT,
+            }
+        )).rejects.toThrow(/EARLYBIRD_CONSENT_INVALID/);
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_orders'
+        )).rows[0].count).toBe(0);
+    }, 30_000);
+
+    it('rejects a fresh legacy 24-hour checkout after the automatic-start rollout', async () => {
+        const db = await createAutoStartCheckoutDatabase();
+        const preflight = await seedPreflight(db, 104, 'basic', V2);
+
+        await expect(checkout(db, preflight, 'basic', V2)).rejects.toThrow(
+            /EARLYBIRD_CONSENT_INVALID/
+        );
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.earlybird_orders'
+        )).rows[0].count).toBe(0);
+    }, 30_000);
+
+    it('allows an exact pending legacy order replay without rewriting its disclosure', async () => {
+        const db = await createDatabase(true);
+        await db.exec(checkoutLineageMigration);
+        const preflight = await seedPreflight(db, 105, 'basic', V2);
+        const original = await checkout(db, preflight, 'basic', V2);
+        const before = (await db.query<{
+            disclosure_version: string;
+            disclosure_text: string;
+            status: string;
+        }>(
+            `SELECT disclosure_version, disclosure_text, status
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0];
+
+        await db.exec(autoStartCheckoutMigration);
+        await expect(checkout(db, preflight, 'basic', V2)).resolves.toEqual({
+            order_id: original.order_id,
+            created: false,
+        });
+        expect((await db.query<typeof before>(
+            `SELECT disclosure_version, disclosure_text, status
+             FROM public.earlybird_orders WHERE id = $1`,
+            [original.order_id]
+        )).rows[0]).toEqual(before);
+    }, 30_000);
+
     it('atomically stores the exact v2 snapshot amount for Basic and Standard', async () => {
         const db = await createDatabase(true);
         const basic = await seedPreflight(db, 1, 'basic', V2);

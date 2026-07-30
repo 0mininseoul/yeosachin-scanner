@@ -291,7 +291,7 @@ describe('earlybird checkout and waitlist routes', () => {
             p_expected_product_id: 'basic_product-01',
             p_expected_amount_krw: 6_900,
             p_pricing_version: 'earlybird-2026-07-v2',
-            p_disclosure_version: 'earlybird-24h-v1',
+            p_disclosure_version: 'earlybird-auto-start-v2',
         }));
         expect(mocks.rpc).toHaveBeenCalledWith(
             'issue_earlybird_groble_seller_reference',
