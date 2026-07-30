@@ -219,6 +219,17 @@ function v29PreFeatureSkipOutcome(): AnalysisV2ProfileAiOutcome {
     };
 }
 
+function v29FeatureCompletedResolverOutcome(): AnalysisV2ProfileAiOutcome {
+    const outcome = v28ProfileOutcome();
+    return {
+        ...outcome,
+        aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+        // This is the resolver-eligible ambiguity that PR #191 completes
+        // through feature analysis. It is not a pre-feature skip.
+        v29FeatureAdmission: 'unsupported_unknown',
+    };
+}
+
 describe('analysis V2 AI/scoring stage store', () => {
     const v28FieldNames = [
         'aiStagePolicyVersion',
@@ -336,6 +347,37 @@ describe('analysis V2 AI/scoring stage store', () => {
                 batch: 0,
                 revision: 1,
                 resultHash: digest('profile-v29-skipped'),
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9',
+            outcomes: [outcome],
+        })).resolves.toMatchObject({ itemCount: 1 });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({ p_payload: payload }),
+        );
+    });
+
+    it('accepts a v2.9 resolver outcome that completed feature analysis after an unsupported initial admission', async () => {
+        const outcome = v29FeatureCompletedResolverOutcome();
+        const payload = {
+            aiStagePolicyVersion: 'ai-stage-policy-v2.9' as const,
+            outcomes: [outcome],
+        };
+        const fake = clientWith({
+            data: {
+                stageKind: 'profile_ai_batch',
+                batch: 0,
+                revision: 1,
+                resultHash: digest('profile-v29-resolver-feature'),
                 itemCount: 1,
                 payload,
             },

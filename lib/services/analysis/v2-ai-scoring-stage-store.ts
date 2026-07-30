@@ -318,12 +318,20 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Analyzed outcome is incomplete.' });
     }
+    // A v2.9/v2.10 admission value is routing provenance, not by itself proof
+    // that feature analysis was skipped. Resolver-eligible ambiguous personal
+    // candidates run feature analysis concurrently and retain that routing
+    // value. Only a row with no feature provenance is a true pre-feature
+    // checkpoint.
     const v29FeatureSkipped = (
         value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
         || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
     )
         && value.v29FeatureAdmission !== undefined
-        && value.v29FeatureAdmission !== 'eligible';
+        && value.v29FeatureAdmission !== 'eligible'
+        && value.feature === null
+        && value.featureOperationKey === null
+        && value.featureResultHash === null;
     if (v29FeatureSkipped && (
         value.status !== 'unresolved'
         || value.feature !== null
