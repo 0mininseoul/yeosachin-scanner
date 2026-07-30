@@ -33,6 +33,22 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     const [checkoutRecoveryPending, setCheckoutRecoveryPending] = useState(false);
     const [checkoutRecoveryError, setCheckoutRecoveryError] = useState<string | null>(null);
     const checkoutRecoveryGuardRef = useRef({ inFlight: false });
+    const isAutomaticFulfillmentBridge = !order.requiresSupport && (
+        order.systemStatus === 'paid'
+        || order.systemStatus === 'analysis_in_progress'
+        || (order.systemStatus === 'completed' && Boolean(order.resultUrl))
+    );
+
+    useEffect(() => {
+        if (!isAutomaticFulfillmentBridge) return;
+        const nextUrl = order.resultUrl ?? order.progressUrl;
+        if (nextUrl) {
+            router.replace(nextUrl);
+            return;
+        }
+        const timer = window.setTimeout(() => router.refresh(), 1_500);
+        return () => window.clearTimeout(timer);
+    }, [isAutomaticFulfillmentBridge, order.progressUrl, order.resultUrl, router]);
 
     useEffect(() => {
         if (!notifyModalOpen) return;
@@ -79,6 +95,36 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             }
         );
     };
+
+    if (order.requiresSupport) {
+        return (
+            <CaseCard className="mt-8 p-7 text-center" bracket="var(--color-amber)">
+                <Eyebrow className="justify-center">결제 확인</Eyebrow>
+                <h1 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">
+                    판독 상태를 확인하고 있어요
+                </h1>
+                <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                    확인이 끝나는 대로 가입하신 이메일로 안내해드릴게요.
+                </p>
+            </CaseCard>
+        );
+    }
+
+    if (isAutomaticFulfillmentBridge) {
+        return (
+            <div role="status">
+                <CaseCard className="mt-8 p-7 text-center">
+                    <Eyebrow className="justify-center">결제 확인</Eyebrow>
+                    <h1 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">
+                        판독을 자동으로 시작하고 있어요
+                    </h1>
+                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                        잠시만 기다리면 진행 화면으로 이어집니다.
+                    </p>
+                </CaseCard>
+            </div>
+        );
+    }
 
     return (
         <>

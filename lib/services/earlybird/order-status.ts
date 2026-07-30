@@ -36,6 +36,17 @@ const resultRowSchema = z.object({
     status: z.literal('completed'),
 });
 
+const fulfillmentStatusRowSchema = z.object({
+    status: z.enum([
+        'awaiting_operator',
+        'admission_pending',
+        'analysis_in_progress',
+        'completed',
+        'retryable_failure',
+        'manual_review',
+    ]),
+});
+
 const DISPLAY_STATUS: Readonly<Record<EarlybirdOrderSystemStatus, string>> = {
     payment_pending: '결제 확인',
     payment_failed: '결제 확인 실패',
@@ -62,6 +73,8 @@ export interface EarlybirdOrderStatusDto {
     planSequence: number | null;
     systemStatus: EarlybirdOrderSystemStatus;
     displayStatus: string;
+    requiresSupport: boolean;
+    progressUrl: string | null;
     resultUrl: string | null;
 }
 
@@ -94,6 +107,30 @@ export async function loadLatestEarlybirdOrder(
     }
     const order = parsed.data;
 
+    let requiresSupport = false;
+    if (order.status === 'paid' || order.status === 'analysis_in_progress') {
+        const fulfillment = await supabaseAdmin
+            .from('earlybird_fulfillments')
+            .select('status')
+            .eq('order_id', order.id)
+            .maybeSingle();
+        // A fulfillment-state lookup must never leave a paid customer in an
+        // infinite return-page refresh. The fallback is deliberately generic:
+        // no internal failure state reaches the owner-facing DTO.
+        if (fulfillment.error) {
+            requiresSupport = true;
+        } else {
+            requiresSupport = fulfillmentStatusRowSchema.safeParse(
+                fulfillment.data
+            ).data?.status === 'manual_review';
+        }
+    }
+
+    const progressUrl = !requiresSupport
+        && order.status === 'analysis_in_progress'
+        && order.result_request_id
+        ? `/progress/${encodeURIComponent(order.result_request_id)}`
+        : null;
     let resultUrl: string | null = null;
     if (order.status === 'completed' && order.result_request_id) {
         const result = await supabaseAdmin
@@ -122,6 +159,8 @@ export async function loadLatestEarlybirdOrder(
         planSequence: order.plan_sequence,
         systemStatus: order.status,
         displayStatus: DISPLAY_STATUS[order.status],
+        requiresSupport,
+        progressUrl,
         resultUrl,
     });
 }

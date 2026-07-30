@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     from: vi.fn(),
     orderQuery: null as ReturnType<typeof queryBuilder> | null,
     resultQuery: null as ReturnType<typeof queryBuilder> | null,
+    fulfillmentQuery: null as ReturnType<typeof queryBuilder> | null,
 }));
 
 function queryBuilder(data: unknown) {
@@ -58,12 +59,18 @@ function orderRow(overrides: Record<string, unknown> = {}) {
     };
 }
 
-function installQueries(order: unknown, result: unknown = null) {
+function installQueries(
+    order: unknown,
+    result: unknown = null,
+    fulfillment: unknown = null
+) {
     mocks.orderQuery = queryBuilder(order);
     mocks.resultQuery = queryBuilder(result);
+    mocks.fulfillmentQuery = queryBuilder(fulfillment);
     mocks.from.mockImplementation((table: string) => {
         if (table === 'earlybird_orders') return mocks.orderQuery;
         if (table === 'analysis_requests') return mocks.resultQuery;
+        if (table === 'earlybird_fulfillments') return mocks.fulfillmentQuery;
         throw new Error(`unexpected table: ${table}`);
     });
 }
@@ -118,6 +125,8 @@ describe('earlybird owner order status route', () => {
                 planSequence: 3,
                 systemStatus: 'paid',
                 displayStatus: '판독 대기',
+                requiresSupport: false,
+                progressUrl: null,
                 resultUrl: null,
             },
         });
@@ -188,6 +197,8 @@ describe('earlybird owner order status route', () => {
         await expect(response.json()).resolves.toMatchObject({
             order: {
                 displayStatus: '결과 전달 완료',
+                requiresSupport: false,
+                progressUrl: null,
                 resultUrl: `/result/${RESULT_ID}`,
             },
         });
@@ -199,6 +210,39 @@ describe('earlybird owner order status route', () => {
         }), null);
         const blocked = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
         await expect(blocked.json()).resolves.toMatchObject({ order: { resultUrl: null } });
+    });
+
+    it('returns an owner-scoped progress path only while automatic analysis is in progress', async () => {
+        installQueries(orderRow({
+            status: 'analysis_in_progress',
+            result_request_id: RESULT_ID,
+        }));
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                progressUrl: `/progress/${RESULT_ID}`,
+                resultUrl: null,
+            },
+        });
+    });
+
+    it('returns only a generic support fallback for manual-review fulfillment', async () => {
+        installQueries(orderRow({
+            status: 'analysis_in_progress',
+            result_request_id: RESULT_ID,
+        }), null, { status: 'manual_review' });
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        const body = await response.json();
+        expect(body).toMatchObject({
+            order: {
+                requiresSupport: true,
+                progressUrl: null,
+                resultUrl: null,
+            },
+        });
+        expect(JSON.stringify(body)).not.toContain('manual_review');
     });
 
     it('restores the same server order after refresh and protects the status page path', async () => {

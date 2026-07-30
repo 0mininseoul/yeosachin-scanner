@@ -41,6 +41,9 @@ export class EarlybirdCheckoutRecoveryError extends Error {
 }
 
 const LEGACY_EARLYBIRD_PRICING_VERSION = 'earlybird-2026-07-v1';
+const LEGACY_EARLYBIRD_DISCLOSURE_VERSION = 'earlybird-24h-v1';
+const LEGACY_EARLYBIRD_DISCLOSURE_TEXT =
+    '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.';
 const LEGACY_EARLYBIRD_AMOUNTS = Object.freeze({
     basic: 14_900,
     standard: 19_900,
@@ -57,6 +60,19 @@ function recoverableAmount(
         return EARLYBIRD_PLAN_CATALOG[planId].earlybirdAmountKrw;
     }
     return null;
+}
+
+function isRecoverableDisclosure(record: {
+    disclosureVersion: string;
+    disclosureText: string;
+}): boolean {
+    return (
+        record.disclosureVersion === EARLYBIRD_DISCLOSURE_VERSION
+        && record.disclosureText === EARLYBIRD_DISCLOSURE_TEXT
+    ) || (
+        record.disclosureVersion === LEGACY_EARLYBIRD_DISCLOSURE_VERSION
+        && record.disclosureText === LEGACY_EARLYBIRD_DISCLOSURE_TEXT
+    );
 }
 
 export interface CurrentEarlybirdCheckoutPhone {
@@ -160,8 +176,7 @@ export async function recoverEarlybirdCheckout(input: {
             !== input.currentPhone.normalizedPhone
         || record.expectedBuyerPhoneVerificationSource
             !== input.currentPhone.verificationSource
-        || record.disclosureVersion !== EARLYBIRD_DISCLOSURE_VERSION
-        || record.disclosureText !== EARLYBIRD_DISCLOSURE_TEXT
+        || !isRecoverableDisclosure(record)
         || !record.disclosureAcceptedAt
         || !record.sellerReference
         || record.paymentId !== null
