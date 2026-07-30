@@ -221,10 +221,15 @@ describe('earlybird analyze UI state', () => {
         expect(source).not.toContain('결제 접수 준비 중');
         expect(source).not.toContain(['정식 출시', ' 예정가'].join(''));
         expect(source).not.toContain(['예약', '금'].join(''));
-        // The 24-hour disclosure is gone with the delay it described; the record
-        // is still written, but the page no longer puts a checkbox in the way.
-        expect(source).not.toContain('EARLYBIRD_DISCLOSURE_TEXT');
+        /* The 24-hour delay is gone, and with it the checkbox that made anyone
+           accept it. The sentence recorded against the order is still shown —
+           storing a statement nobody is shown is its own problem — but as
+           information, so no input and no blocking modal may come back. */
+        expect(source).toContain('EARLYBIRD_DISCLOSURE_TEXT');
         expect(source).not.toContain('24시간');
+        expect(source).not.toContain('disclosureAccepted}');
+        expect(source).not.toContain('setDisclosureAccepted');
+        expect(source).not.toContain('disclosureModalOpen');
     });
 
     it('orders the plan card ternary so the sold-out copy branch precedes the not-yet-open branch', () => {

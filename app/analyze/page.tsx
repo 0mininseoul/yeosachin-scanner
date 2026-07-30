@@ -11,6 +11,7 @@ import {
 } from '@/hooks/useHydrationSafePlanQuery';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import {
+    EARLYBIRD_DISCLOSURE_TEXT,
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
 import {
@@ -823,6 +824,18 @@ const DISCLOSURE_ACCEPTED = true;
                                                     ? '계정 규모와 수집 상황에 따라 달라질 수 있습니다.'
                                                     : '정확한 완료 시간은 계정 규모와 수집 상황에 따라 달라질 수 있습니다.'}
                                             </p>
+                                            {/* The sentence recorded against the
+                                                order, shown where the order is
+                                                placed. It states what happens
+                                                rather than asking anyone to
+                                                accept a condition, so it carries
+                                                no checkbox — the 24-hour delay
+                                                that needed one is gone. */}
+                                            {isPaidEarlybirdPlanId(effectiveSelectedCard.planId) && (
+                                                <p className="mt-2.5 border-t border-line pt-2.5 text-[11.5px] leading-relaxed text-fg-dim">
+                                                    {EARLYBIRD_DISCLOSURE_TEXT}
+                                                </p>
+                                            )}
                                         </div>
                                     )}
 
