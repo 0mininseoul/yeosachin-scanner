@@ -1,10 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import {
-    EARLYBIRD_DISCLOSURE_TEXT,
-    EARLYBIRD_DISCLOSURE_VERSION,
-} from '@/lib/domain/earlybird/catalog';
 
 // 아래 두 상수는 createDatabaseBeforePhoneMigration() 스냅샷(할인/딜리버리-윈도우
 // 마이그레이션이 적용되기 전, phone 마이그레이션 롤아웃 도중의 create_earlybird_checkout)
@@ -14,6 +10,12 @@ const LEGACY_DISCLOSURE_VERSION = 'earlybird-48h-v1';
 const LEGACY_PRICING_VERSION = 'earlybird-2026-07-v1';
 const LEGACY_DISCLOSURE_TEXT =
     '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 48시간 이내 판독 결과를 제공합니다.';
+// This suite deliberately ends at the historical 24-hour rollout, before the
+// later automatic-fulfillment migration. Fresh fixtures here must therefore
+// use the disclosure that the loaded database function required at that time.
+const DELIVERY_WINDOW_DISCLOSURE_VERSION = 'earlybird-24h-v1';
+const DELIVERY_WINDOW_DISCLOSURE_TEXT =
+    '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.';
 
 const presaleMigration = readFileSync(
     new URL(
@@ -382,8 +384,8 @@ async function createCheckout(
             planId === 'basic' ? BASIC_PRODUCT_ID : STANDARD_PRODUCT_ID,
             planId === 'basic' ? 14_900 : 19_900,
             LEGACY_PRICING_VERSION,
-            EARLYBIRD_DISCLOSURE_VERSION,
-            EARLYBIRD_DISCLOSURE_TEXT,
+            DELIVERY_WINDOW_DISCLOSURE_VERSION,
+            DELIVERY_WINDOW_DISCLOSURE_TEXT,
         ]
     );
     return result.rows[0];
@@ -1347,8 +1349,8 @@ describe('Groble phone checkout and finalizer behavior', () => {
                     seed.preflightId,
                     LEGACY_PRICING_VERSION,
                     BASIC_PRODUCT_ID,
-                    EARLYBIRD_DISCLOSURE_VERSION,
-                    EARLYBIRD_DISCLOSURE_TEXT,
+                    DELIVERY_WINDOW_DISCLOSURE_VERSION,
+                    DELIVERY_WINDOW_DISCLOSURE_TEXT,
                     seed.phone,
                 ]
             )).rejects.toThrow(/earlybird_orders_buyer_match_snapshot_check/);
@@ -2387,8 +2389,8 @@ describe('Groble phone checkout and finalizer behavior', () => {
                     seed.preflightId,
                     BASIC_PRODUCT_ID,
                     LEGACY_PRICING_VERSION,
-                    EARLYBIRD_DISCLOSURE_VERSION,
-                    EARLYBIRD_DISCLOSURE_TEXT,
+                    DELIVERY_WINDOW_DISCLOSURE_VERSION,
+                    DELIVERY_WINDOW_DISCLOSURE_TEXT,
                 ]
             )).rejects.toThrow(/permission denied/i);
             await expect(db.query(
@@ -2652,8 +2654,8 @@ describe('Groble phone normalizer service-role execute', () => {
                     preflightId,
                     BASIC_PRODUCT_ID,
                     LEGACY_PRICING_VERSION,
-                    EARLYBIRD_DISCLOSURE_VERSION,
-                    EARLYBIRD_DISCLOSURE_TEXT,
+                    DELIVERY_WINDOW_DISCLOSURE_VERSION,
+                    DELIVERY_WINDOW_DISCLOSURE_TEXT,
                 ]
             )).rejects.toThrow(/CHECKOUT_PHONE_REQUIRED/);
         } finally {
