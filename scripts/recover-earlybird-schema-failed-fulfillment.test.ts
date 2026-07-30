@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import {
     parseEarlybirdSchemaFailureRecoveryCliArgs,
@@ -5,8 +6,51 @@ import {
 } from './recover-earlybird-schema-failed-fulfillment';
 
 const ORDER = '123e4567-e89b-42d3-a456-426614174001';
+const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
+async function invokeDirectCli(args: readonly string[]) {
+    return new Promise<{
+        exitCode: number | null;
+        stdout: string;
+        stderr: string;
+    }>((resolve, reject) => {
+        const child = spawn(npmCommand, [
+            'run',
+            '--silent',
+            'earlybird:recover-schema-failed',
+            '--',
+            ...args,
+        ], {
+            cwd: process.cwd(),
+            env: {
+                ...process.env,
+                SUPABASE_URL: '',
+                SUPABASE_SERVICE_ROLE_KEY: '',
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', chunk => { stdout += chunk; });
+        child.stderr.on('data', chunk => { stderr += chunk; });
+        child.once('error', reject);
+        child.once('close', exitCode => resolve({ exitCode, stdout, stderr }));
+    });
+}
 
 describe('earlybird schema-failure recovery operator CLI', () => {
+    it('runs the npm/tsx entrypoint without a local env file and reports invalid input without calling production services', async () => {
+        const result = await invokeDirectCli([]);
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toBe(`${JSON.stringify({
+            status: 'failed',
+            errorCode: 'EARLYBIRD_SCHEMA_FAILURE_RECOVERY_FAILED',
+        })}\n`);
+    });
+
     it('requires one order UUID and the exact schema-failure confirmation flag', () => {
         expect(parseEarlybirdSchemaFailureRecoveryCliArgs([
             '--order-id',
