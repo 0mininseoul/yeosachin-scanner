@@ -39,11 +39,19 @@ const expiredPaidPreflightRebindMigration = readFileSync(
     ),
     'utf8'
 );
+const schemaFailedFulfillmentRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730170000_recover_schema_failed_earlybird_fulfillment.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
 const ORDER = '323e4567-e89b-42d3-a456-426614174001';
 const CLAIM = '423e4567-e89b-42d3-a456-426614174001'; // gitleaks:allow
+const FAILED_REQUEST = '523e4567-e89b-42d3-a456-426614174001';
 
 const catalog = {
     basic: {
@@ -164,6 +172,8 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 target_instagram_id TEXT NOT NULL,
                 target_gender TEXT NOT NULL,
                 status TEXT NOT NULL,
+                error_message TEXT,
+                completed_at TIMESTAMP WITH TIME ZONE,
                 progress INTEGER NOT NULL,
                 progress_step TEXT,
                 current_step TEXT,
@@ -298,6 +308,10 @@ describe('operator-approved earlybird fulfillment migration', () => {
             CREATE TABLE public.earlybird_waitlist (
                 preflight_id UUID NOT NULL REFERENCES public.analysis_preflights(id)
             );
+            CREATE TABLE public.analysis_v2_failure_receipts (
+                request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id),
+                error_code TEXT NOT NULL
+            );
 
             CREATE FUNCTION public.analysis_v2_valid_launch_snapshot(JSONB)
             RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
@@ -316,15 +330,18 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(automaticFulfillmentMigration);
         await db.exec(scrubbedPreflightMigration);
         await db.exec(expiredPaidPreflightRebindMigration);
+        await db.exec(schemaFailedFulfillmentRecoveryMigration);
     });
 
     beforeEach(async () => {
         await db.exec(`
-            TRUNCATE public.earlybird_fulfillments,
+            TRUNCATE public.earlybird_schema_failure_recoveries,
+                public.earlybird_fulfillments,
                 public.analysis_pipeline_jobs,
                 public.analysis_preflight_provider_runs,
                 public.earlybird_waitlist,
                 public.earlybird_orders,
+                public.analysis_v2_failure_receipts,
                 public.analysis_requests,
                 public.analysis_preflights,
                 public.users;
@@ -890,5 +907,181 @@ describe('operator-approved earlybird fulfillment migration', () => {
             'SELECT status FROM public.earlybird_orders WHERE id = $1',
             [ORDER]
         )).rows[0].status).toBe('refund_pending');
+    });
+
+    it('rebinds only the recorded schema-stage failure into one fresh paid execution', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                progress, pipeline_version, preflight_id, error_message,
+                completed_at
+            ) VALUES (
+                $1, $2, 'sample.account', 'male', 'failed', 100, 'v2', $3,
+                'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+                pg_catalog.clock_timestamp()
+            )`,
+            [FAILED_REQUEST, USER, PREFLIGHT]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+             VALUES ($1, 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR')`,
+            [FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'consumed', consumed_request_id = $2,
+                 consumed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [PREFLIGHT, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'analysis_in_progress', result_request_id = $2
+             WHERE id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review', request_id = $2, attempt_count = 1,
+                 operator_admitted_at = pg_catalog.clock_timestamp(),
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+
+        const recovered = await asService<{
+            order_id: string;
+            fulfillment_status: string;
+            preflight_id: string;
+        }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+        expect(recovered.rows).toEqual([expect.objectContaining({
+            order_id: ORDER,
+            fulfillment_status: 'admission_pending',
+            preflight_id: expect.not.stringMatching(new RegExp(`^${PREFLIGHT}$`)),
+        })]);
+
+        const recoveryPreflightId = recovered.rows[0].preflight_id;
+        expect((await db.query<{
+            status: string;
+            result_request_id: string | null;
+            preflight_id: string;
+        }>(
+            `SELECT status, result_request_id, preflight_id
+             FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'paid',
+            result_request_id: null,
+            preflight_id: recoveryPreflightId,
+        });
+        expect((await db.query<{
+            status: string;
+            request_id: string | null;
+            manual_review_at: string | null;
+            attempt_count: number;
+        }>(
+            `SELECT status, request_id, manual_review_at, attempt_count
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toMatchObject({
+            status: 'admission_pending',
+            request_id: null,
+            manual_review_at: null,
+            attempt_count: 0,
+        });
+        expect((await db.query<{
+            status: string;
+            error_message: string;
+        }>(
+            `SELECT status, error_message FROM public.analysis_requests
+             WHERE id = $1`,
+            [FAILED_REQUEST]
+        )).rows[0]).toEqual({
+            status: 'failed',
+            error_message: 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+        });
+        expect((await db.query<{
+            failed_request_id: string;
+            recovery_preflight_id: string;
+            prior_attempt_count: number;
+        }>(
+            `SELECT failed_request_id, recovery_preflight_id, prior_attempt_count
+             FROM public.earlybird_schema_failure_recoveries WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            failed_request_id: FAILED_REQUEST,
+            recovery_preflight_id: recoveryPreflightId,
+            prior_attempt_count: 1,
+        });
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).resolves.toMatchObject({ rows: [expect.objectContaining({
+            preflight_id: recoveryPreflightId,
+        })] });
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(1);
+    });
+
+    it('refuses every manual-review failure other than the recorded schema-stage error', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                progress, pipeline_version, preflight_id, error_message,
+                completed_at
+            ) VALUES (
+                $1, $2, 'sample.account', 'male', 'failed', 100, 'v2', $3,
+                'ANALYSIS_V2_OTHER_FAILURE', pg_catalog.clock_timestamp()
+            )`,
+            [FAILED_REQUEST, USER, PREFLIGHT]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+             VALUES ($1, 'ANALYSIS_V2_OTHER_FAILURE')`,
+            [FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'consumed', consumed_request_id = $2,
+                 consumed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [PREFLIGHT, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'analysis_in_progress', result_request_id = $2
+             WHERE id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review', request_id = $2, attempt_count = 1,
+                 operator_admitted_at = pg_catalog.clock_timestamp(),
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(0);
+        expect((await db.query<{ status: string; result_request_id: string | null }>(
+            `SELECT status, result_request_id FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'analysis_in_progress',
+            result_request_id: FAILED_REQUEST,
+        });
     });
 });

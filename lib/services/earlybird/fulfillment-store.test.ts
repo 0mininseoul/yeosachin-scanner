@@ -55,6 +55,11 @@ function store(
             initialJobKey: 'coordinator:bootstrap' as const,
         })),
         markManualReview: vi.fn(async () => 'manual_review' as const),
+        recoverSchemaFailed: vi.fn(async () => ({
+            orderId: ORDER,
+            status: 'admission_pending' as const,
+            preflightId: PREFLIGHT,
+        })),
         reconcile: vi.fn(async () => ({
             scanned: 0,
             completed: 0,
