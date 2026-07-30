@@ -77,7 +77,11 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
 }
 
 export function analysisDurationProgressCopy(isDemo: boolean): string {
-    return isDemo ? '약 5분' : '완료 시간 측정 중';
+    /* '완료 시간 측정 중' was held here while calibration was pending, but
+       nothing ever measures and writes back, so it never resolved — readers
+       watched it for the whole run. A range is a claim we cannot yet back with
+       measured data; an estimate that never arrives is worse. */
+    return isDemo ? '약 5분' : '약 5~10분';
 }
 
 export const OWNER_RESULT_PAGE_SIZE = 50;

@@ -7,12 +7,16 @@ function source(relativePath: string): string {
 }
 
 describe('analysis duration UI calibration contract', () => {
-    it('keeps the real analyze estimate honest while calibration is incomplete', () => {
+    it('states a range rather than promising a measurement that never lands', () => {
         const analyze = source('app/analyze/page.tsx');
 
         expect(analyze).toContain('<p className="eyebrow">예상 소요 시간</p>');
-        expect(analyze).toContain("{analyticsEligible ? '완료 시간 측정 중' : '약 5분'}");
-        expect(analyze).toContain('계정 규모와 수집 상황에 따라 달라집니다. 정확한 완료 시간은 현재 측정 중이에요.');
+        /* '완료 시간 측정 중' was held while calibration was pending. Nothing
+           measures and writes back, so it never resolved and readers watched it
+           for the whole run. The range is broad on purpose: it is not measured,
+           and the per-preflight estimate machinery stays out. */
+        expect(analyze).toContain("{analyticsEligible ? '약 5~10분' : '약 5분'}");
+        expect(analyze).not.toContain('측정 중');
         expect(analyze).not.toContain('analysisDurationRangeLabel');
         expect(analyze).not.toContain('estimatePreflightAnalysisDuration');
         expect(analyze).not.toContain('preflightDurationEstimate');
@@ -36,6 +40,6 @@ describe('analysis duration UI calibration contract', () => {
         const analyze = source('app/analyze/page.tsx');
         expect(analyze).toContain('정확한 완료 시간은 계정 규모와 수집 상황에 따라 달라질 수 있습니다.');
         expect(analysisDurationProgressCopy(true)).toBe('약 5분');
-        expect(analysisDurationProgressCopy(false)).toBe('완료 시간 측정 중');
+        expect(analysisDurationProgressCopy(false)).toBe('약 5~10분');
     });
 });
