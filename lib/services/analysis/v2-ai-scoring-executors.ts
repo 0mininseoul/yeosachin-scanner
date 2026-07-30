@@ -955,8 +955,18 @@ function publicFeatureRow(
     }
     const classification = outcome.status;
     const posts = analyzedPosts(outcome);
-    const preFeatureAdmission = outcome.v29FeatureAdmission === 'nonpersonal_or_official'
-        || outcome.v29FeatureAdmission === 'unsupported_unknown'
+    // The v2.9/v2.10 admission marker records an actual triage-only stop,
+    // rather than the earlier routing decision. A resolver-eligible candidate
+    // may carry a non-eligible initial admission but still complete feature
+    // analysis concurrently; tagging that completed row as pre-feature makes
+    // it invalid by design in the result checkpoint contract.
+    const preFeatureAdmission = outcome.feature === null
+        && outcome.featureOperationKey === null
+        && outcome.featureResultHash === null
+        && (
+            outcome.v29FeatureAdmission === 'nonpersonal_or_official'
+            || outcome.v29FeatureAdmission === 'unsupported_unknown'
+        )
         ? outcome.v29FeatureAdmission
         : null;
     const preFeaturePolicyVersion = (

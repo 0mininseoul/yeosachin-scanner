@@ -1231,6 +1231,11 @@ describe('V2 AI and scoring executors', () => {
                 ? expect.objectContaining({ appearanceGrade: 4 })
                 : null,
         });
+        // The initial V2.9/V2.10 admission remains useful in the internal
+        // outcome, but this row completed feature analysis. It must not be
+        // serialized as a triage-only pre-feature checkpoint.
+        expect(resultRows[0]).not.toHaveProperty('preFeaturePolicyVersion');
+        expect(resultRows[0]).not.toHaveProperty('preFeatureAdmission');
         expect(cutoff).not.toHaveBeenCalled();
     });
 
