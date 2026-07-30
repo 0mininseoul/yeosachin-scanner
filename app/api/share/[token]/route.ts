@@ -151,7 +151,6 @@ export async function GET(
                 suspect_instagram_id,
                 suspect_profile_image,
                 suspect_full_name,
-                bio,
                 risk_grade,
                 risk_analysis
             `)
@@ -210,7 +209,11 @@ export async function GET(
                 profileImage: createImageProxyPath(result.suspect_profile_image),
                 instagramUrl: `https://instagram.com/${instagramId}`,
                 riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
-                bio: result.bio || '',
+                /* Anyone holding the link can call this route, so the bio never
+                   leaves the database: it names workplaces, schools and other
+                   handles, and identifies at least as readily as the name does.
+                   The share view already discarded it, so it was shipped as JSON
+                   to readers and rendered for no one. */
                 recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
                 ...toResultInteractionSummary(result),
             };
