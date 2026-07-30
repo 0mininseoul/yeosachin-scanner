@@ -45,6 +45,11 @@ const requestRowSchema = z.object({
     created: z.boolean(),
     initial_job_key: z.literal('coordinator:bootstrap').nullable(),
 }).strict();
+const schemaFailureRecoveryRowSchema = z.object({
+    order_id: uuidSchema,
+    fulfillment_status: fulfillmentStatusSchema,
+    preflight_id: uuidSchema,
+}).strict();
 const reconcileRowSchema = z.object({
     scanned: z.number().int().nonnegative().max(500),
     completed: z.number().int().nonnegative().max(500),
@@ -105,6 +110,12 @@ export type EarlybirdFulfillmentRequest = Readonly<{
     initialJobKey: 'coordinator:bootstrap' | null;
 }>;
 
+export type EarlybirdSchemaFailureRecovery = Readonly<{
+    orderId: string;
+    status: EarlybirdFulfillmentStatus;
+    preflightId: string;
+}>;
+
 export type EarlybirdFulfillmentReconciliation = Readonly<{
     scanned: number;
     completed: number;
@@ -124,6 +135,9 @@ export interface EarlybirdFulfillmentStore {
         orderId: string,
         code: EarlybirdFulfillmentManualReviewCode
     ): Promise<'manual_review'>;
+    recoverSchemaFailed(
+        orderId: string
+    ): Promise<EarlybirdSchemaFailureRecovery>;
     reconcile(limit: number): Promise<EarlybirdFulfillmentReconciliation>;
 }
 
@@ -353,6 +367,22 @@ export function createEarlybirdFulfillmentStore(
             );
             if (error || data !== 'manual_review') persistenceError();
             return 'manual_review';
+        },
+
+        async recoverSchemaFailed(orderId) {
+            const parsedOrderId = validatedOrderId(orderId);
+            const { data, error } = await dependencies.rpc(
+                'recover_earlybird_schema_failed_fulfillment',
+                { p_order_id: parsedOrderId }
+            );
+            if (error) persistenceError();
+            const row = oneRow(data, schemaFailureRecoveryRowSchema);
+            if (row.order_id !== parsedOrderId) persistenceError();
+            return Object.freeze({
+                orderId: row.order_id,
+                status: row.fulfillment_status,
+                preflightId: row.preflight_id,
+            });
         },
 
         async reconcile(limit) {
@@ -665,6 +695,15 @@ export async function admitAndAdvanceEarlybirdFulfillment(
 ): Promise<EarlybirdFulfillmentAdvanceResult> {
     const admitted = await dependencies.store.admit(orderId);
     return advanceAdmittedEarlybirdFulfillment(admitted, dependencies);
+}
+
+export async function recoverAndAdvanceEarlybirdSchemaFailedFulfillment(
+    orderId: string,
+    dependencies: EarlybirdFulfillmentAdvanceDependencies =
+        defaultAdvanceDependencies()
+): Promise<EarlybirdFulfillmentAdvanceResult> {
+    await dependencies.store.recoverSchemaFailed(orderId);
+    return admitAndAdvanceEarlybirdFulfillment(orderId, dependencies);
 }
 
 export type EarlybirdFulfillmentRecoverySummary = Readonly<{
