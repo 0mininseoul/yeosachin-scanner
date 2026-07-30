@@ -429,6 +429,13 @@ export type EarlybirdFulfillmentAdvanceResult = Readonly<{
 
 export interface EarlybirdFulfillmentAdvanceDependencies {
     store: EarlybirdFulfillmentStore;
+    /**
+     * Moves a paid order off a preflight that outlived its immutable
+     * thirty-minute TTL and onto a fresh one, returning the preflight the order
+     * points at afterwards. Returns the current preflight id unchanged when the
+     * order is not in a shape the database is willing to rebind.
+     */
+    rebindExpiredPaidPreflight(orderId: string): Promise<string>;
     reserveFreshAdmission(
         client: AnalysisV2FreshAdmissionRpcClient,
         input: {
@@ -471,9 +478,32 @@ export interface EarlybirdFulfillmentAdvanceDependencies {
     emitOperationalEvent?: (event: OperationalEvent) => void;
 }
 
+export async function rebindExpiredPaidEarlybirdPreflight(
+    orderId: string,
+    client: EarlybirdFulfillmentRpcClient = supabaseAdmin
+): Promise<string> {
+    const parsedOrderId = uuidSchema.safeParse(orderId);
+    if (!parsedOrderId.success) {
+        throw new EarlybirdFulfillmentError(
+            'EARLYBIRD_FULFILLMENT_INPUT_INVALID'
+        );
+    }
+    const { data, error } = await client.rpc(
+        'rebind_expired_paid_earlybird_preflight',
+        { p_order_id: parsedOrderId.data }
+    );
+    if (error) persistenceError();
+    const parsed = uuidSchema.safeParse(data);
+    if (!parsed.success) persistenceError();
+    return parsed.data;
+}
+
 function defaultAdvanceDependencies(): EarlybirdFulfillmentAdvanceDependencies {
     return {
         store: earlybirdFulfillmentStore,
+        rebindExpiredPaidPreflight: orderId => (
+            rebindExpiredPaidEarlybirdPreflight(orderId)
+        ),
         reserveFreshAdmission: (client, input) => (
             reserveAnalysisV2FreshAdmission(client, input)
         ),
@@ -499,6 +529,17 @@ function defaultAdvanceDependencies(): EarlybirdFulfillmentAdvanceDependencies {
         ),
         emitOperationalEvent: event => operationalLogger.emit(event),
     };
+}
+
+/**
+ * `reserve_analysis_v2_preflight_admission` raises this the moment a preflight
+ * outlives its immutable thirty-minute TTL. Matched structurally rather than by
+ * class so an injected reservation double signals it the same way.
+ */
+function isPreflightExpiredError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    return (error as { code?: unknown }).code === 'ANALYSIS_V2_PREFLIGHT_EXPIRED'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_EXPIRED';
 }
 
 function result(
@@ -550,24 +591,85 @@ export async function advanceAdmittedEarlybirdFulfillment(
         );
     }
 
-    const admission = await dependencies.reserveFreshAdmission(
-        supabaseAdmin,
-        {
-            preflightId: identity.preflightId,
-            userId: identity.userId,
-            selectedPlanId: identity.planId,
-            entitlementJtiHash: earlybirdFulfillmentAdmissionHash(
+    const admissionInput = (preflightId: string) => ({
+        preflightId,
+        userId: identity.userId,
+        selectedPlanId: identity.planId,
+        entitlementJtiHash: earlybirdFulfillmentAdmissionHash(
+            identity.orderId
+        ),
+    });
+
+    // Recovery reaches an already-admitted paid order through `listRecoverable`,
+    // which never passes back through the `awaiting_operator` admission sweep
+    // where rebinding already runs. A paid order whose preflight expired before
+    // its analysis started therefore only ever surfaces here, as a reservation
+    // that raises `ANALYSIS_V2_PREFLIGHT_EXPIRED` on every sweep forever.
+    let activePreflightId = identity.preflightId;
+    let admission: AnalysisV2FreshAdmissionReservation;
+    try {
+        admission = await dependencies.reserveFreshAdmission(
+            supabaseAdmin,
+            admissionInput(activePreflightId)
+        );
+    } catch (error) {
+        if (!isPreflightExpiredError(error)) throw error;
+        // Rebinding is best effort. When the database refuses, caps, or fails
+        // outright, the original expiry stands and only this row counts as
+        // failed, exactly as it did before — the rest of the sweep drains.
+        let rebound: string | null = null;
+        try {
+            rebound = await dependencies.rebindExpiredPaidPreflight(
                 identity.orderId
-            ),
+            );
+        } catch {
+            rebound = null;
         }
-    );
+        if (rebound === null || rebound === activePreflightId) {
+            // The strand is now permanent for this order: it has hit the rebind
+            // cap, the database refused, or the call failed. Rethrowing alone
+            // reports only the expiry, which is the symptom every sweep already
+            // logs — say that rebinding is what gave up, or an operator chasing
+            // a paid order has no way to tell the two apart.
+            emitOperationalEvent({
+                event: 'earlybird.paid_preflight_rebound',
+                severity: 'warn',
+                fields: {
+                    user_id: identity.userId,
+                    preflight_id: activePreflightId,
+                    order_id: identity.orderId,
+                    plan_id: identity.planId,
+                    operation: 'fresh_admission',
+                    disposition: 'failure',
+                },
+            });
+            throw error;
+        }
+        activePreflightId = rebound;
+        emitOperationalEvent({
+            event: 'earlybird.paid_preflight_rebound',
+            severity: 'warn',
+            fields: {
+                user_id: identity.userId,
+                preflight_id: activePreflightId,
+                order_id: identity.orderId,
+                plan_id: identity.planId,
+                operation: 'fresh_admission',
+                disposition: 'retry',
+            },
+        });
+        admission = await dependencies.reserveFreshAdmission(
+            supabaseAdmin,
+            admissionInput(activePreflightId)
+        );
+    }
     if (admission.state === 'pending') {
         if (
             admission.shouldEnqueue
             && admission.dispatchToken
         ) {
             const dispatchInput = {
-                preflightId: identity.preflightId,
+                preflightId: activePreflightId,
                 userId: identity.userId,
                 generation: admission.generation,
                 dispatchGeneration: admission.dispatchGeneration,
@@ -575,7 +677,7 @@ export async function advanceAdmittedEarlybirdFulfillment(
             };
             try {
                 await dependencies.enqueueFreshAdmission(
-                    identity.preflightId,
+                    activePreflightId,
                     admission.generation,
                     admission.dispatchGeneration,
                     admission.dispatchToken
@@ -589,7 +691,7 @@ export async function advanceAdmittedEarlybirdFulfillment(
                     severity: 'info',
                     fields: {
                         user_id: identity.userId,
-                        preflight_id: identity.preflightId,
+                        preflight_id: activePreflightId,
                         order_id: identity.orderId,
                         plan_id: identity.planId,
                         operation: 'fresh_admission',
@@ -671,7 +773,7 @@ export async function advanceAdmittedEarlybirdFulfillment(
         severity: 'info',
         fields: {
             user_id: identity.userId,
-            preflight_id: identity.preflightId,
+            preflight_id: activePreflightId,
             order_id: identity.orderId,
             analysis_request_id: request.requestId,
             job_key: request.initialJobKey,

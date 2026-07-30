@@ -46,6 +46,13 @@ const expiredPaidPreflightRebindMigration = readFileSync(
     ),
     'utf8'
 );
+const repairedPaidPreflightRebindMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731000000_repair_paid_preflight_rebind.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const schemaFailedFulfillmentRecoveryMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260730170000_recover_schema_failed_earlybird_fulfillment.sql',
@@ -199,6 +206,56 @@ async function admit(): Promise<FulfillmentIdentity> {
         'SELECT * FROM public.admit_earlybird_fulfillment($1)',
         [ORDER]
     )).rows[0];
+}
+
+async function rebind(): Promise<string> {
+    return (await asService<{ rebind_expired_paid_earlybird_preflight: string }>(
+        'SELECT public.rebind_expired_paid_earlybird_preflight($1)',
+        [ORDER]
+    )).rows[0].rebind_expired_paid_earlybird_preflight;
+}
+
+async function boundPreflightId(): Promise<string> {
+    return (await db.query<{ preflight_id: string }>(
+        'SELECT preflight_id FROM public.earlybird_orders WHERE id = $1',
+        [ORDER]
+    )).rows[0].preflight_id;
+}
+
+type PreflightRow = {
+    id: string;
+    idempotency_key: string;
+    status: string;
+};
+
+async function preflightsByAge(): Promise<PreflightRow[]> {
+    return (await db.query<PreflightRow>(
+        `SELECT id, idempotency_key, status
+         FROM public.analysis_preflights
+         ORDER BY created_at, id`
+    )).rows;
+}
+
+/**
+ * Pushes the preflight the order currently points at past its immutable TTL
+ * while leaving its status alone. The live casualty was still `ready` when it
+ * expired, which is exactly what makes the replacement collide with
+ * idx_analysis_preflights_one_active_per_user.
+ */
+async function expireBoundPreflight(minutesAgo = 90): Promise<string> {
+    const bound = await boundPreflightId();
+    const createdAt = new Date(
+        Date.now() - (minutesAgo + 30) * 60_000
+    ).toISOString();
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET created_at = $2::TIMESTAMPTZ,
+             ready_at = $2::TIMESTAMPTZ,
+             expires_at = $2::TIMESTAMPTZ + INTERVAL '30 minutes'
+         WHERE id = $1`,
+        [bound, createdAt]
+    );
+    return bound;
 }
 
 async function makeAdmissionReady(): Promise<void> {
@@ -424,6 +481,14 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 ADD CONSTRAINT analysis_preflights_ttl_check CHECK (
                     expires_at = created_at + INTERVAL '30 minutes'
                 );
+            -- Both live uniqueness guarantees. Recovery mints replacement
+            -- preflights for a user who already has one, so without these the
+            -- fixture cannot reproduce the collisions that strand paid orders.
+            CREATE UNIQUE INDEX idx_analysis_preflights_user_idempotency
+                ON public.analysis_preflights(user_id, idempotency_key);
+            CREATE UNIQUE INDEX idx_analysis_preflights_one_active_per_user
+                ON public.analysis_preflights(user_id)
+                WHERE status IN ('pending', 'processing', 'ready');
             ALTER TABLE public.analysis_requests
                 ADD CONSTRAINT analysis_requests_preflight_fk
                 FOREIGN KEY (preflight_id)
@@ -509,6 +574,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(automaticFulfillmentMigration);
         await db.exec(scrubbedPreflightMigration);
         await db.exec(expiredPaidPreflightRebindMigration);
+        await db.exec(repairedPaidPreflightRebindMigration);
         await db.exec(schemaFailedFulfillmentRecoveryMigration);
         await db.exec(approvedEntitlementRecoveryMigration);
         await db.exec(canonicalTargetSchemaFailureRecoveryMigration);
@@ -759,6 +825,170 @@ describe('operator-approved earlybird fulfillment migration', () => {
         )).rows[0].count).toBe(1);
     });
 
+    it('reproduces both preflight uniqueness guarantees the rebind must satisfy', async () => {
+        const indexes = await db.query<{ indexdef: string }>(
+            `SELECT indexdef FROM pg_catalog.pg_indexes
+             WHERE schemaname = 'public'
+               AND tablename = 'analysis_preflights'
+               AND indexname = ANY($1::TEXT[])
+             ORDER BY indexname`,
+            [[
+                'idx_analysis_preflights_one_active_per_user',
+                'idx_analysis_preflights_user_idempotency',
+            ]]
+        );
+        expect(indexes.rows.map(row => row.indexdef)).toEqual([
+            expect.stringMatching(
+                /CREATE UNIQUE INDEX .*one_active_per_user.*\(user_id\)[\s\S]*WHERE/
+            ),
+            expect.stringMatching(
+                /CREATE UNIQUE INDEX .*user_idempotency.*\(user_id, idempotency_key\)/
+            ),
+        ]);
+
+        // Both collisions really fire in this fixture, so a rebind that avoids
+        // them is proving something.
+        const clone = (id: string, key: string, status: string) => db.query(
+            `INSERT INTO public.analysis_preflights(
+                id, user_id, idempotency_key, target_instagram_id,
+                target_followers_count, target_following_count,
+                target_is_private, exclusion_decision, status, access_mode,
+                launch_status_snapshot, plan_catalog_snapshot,
+                plan_cards_snapshot, pricing_version, pricing_snapshot,
+                policy_versions_snapshot, capacity_required_plan_id,
+                required_plan_id, created_at, ready_at, expires_at
+            )
+            SELECT $2, user_id, $3, target_instagram_id,
+                target_followers_count, target_following_count,
+                target_is_private, exclusion_decision, $4, access_mode,
+                launch_status_snapshot, plan_catalog_snapshot,
+                plan_cards_snapshot, pricing_version, pricing_snapshot,
+                policy_versions_snapshot, capacity_required_plan_id,
+                required_plan_id, created_at, ready_at, expires_at
+            FROM public.analysis_preflights WHERE id = $1`,
+            [PREFLIGHT, id, key, status]
+        );
+
+        await expect(clone(
+            '133e4567-e89b-42d3-a456-426614174001', 'a-distinct-key', 'ready'
+        )).rejects.toThrow(/idx_analysis_preflights_one_active_per_user/);
+        await expect(clone(
+            '143e4567-e89b-42d3-a456-426614174001', 'test-preflight-key', 'expired'
+        )).rejects.toThrow(/idx_analysis_preflights_user_idempotency/);
+    });
+
+    it('retires the outgoing preflight and rebinds a paid order that outlived its TTL', async () => {
+        await expireBoundPreflight();
+        expect((await preflightsByAge()).map(row => row.status)).toEqual([
+            'ready',
+        ]);
+
+        const rebound = await rebind();
+
+        expect(rebound).not.toBe(PREFLIGHT);
+        expect(await boundPreflightId()).toBe(rebound);
+        expect(await preflightsByAge()).toEqual([
+            {
+                id: PREFLIGHT,
+                idempotency_key: 'test-preflight-key',
+                status: 'expired',
+            },
+            {
+                id: rebound,
+                idempotency_key: `earlybird.fulfillment.${ORDER.replace(/-/g, '')}`,
+                status: 'ready',
+            },
+        ]);
+    });
+
+    it('rebinds a second time once the replacement itself outlives its TTL', async () => {
+        await expireBoundPreflight();
+        const first = await rebind();
+        expect(first).not.toBe(PREFLIGHT);
+
+        await expireBoundPreflight();
+        const second = await rebind();
+
+        expect(second).not.toBe(first);
+        expect(await boundPreflightId()).toBe(second);
+        const orderHex = ORDER.replace(/-/g, '');
+        expect(await preflightsByAge()).toEqual([
+            {
+                id: PREFLIGHT,
+                idempotency_key: 'test-preflight-key',
+                status: 'expired',
+            },
+            {
+                id: first,
+                idempotency_key: `earlybird.fulfillment.${orderHex}`,
+                status: 'expired',
+            },
+            {
+                id: second,
+                idempotency_key: `earlybird.fulfillment.${orderHex}.r1`,
+                status: 'ready',
+            },
+        ]);
+    });
+
+    it('refuses to rebind a preflight that is still inside its TTL', async () => {
+        expect(await rebind()).toBe(PREFLIGHT);
+        expect(await preflightsByAge()).toEqual([
+            expect.objectContaining({ id: PREFLIGHT, status: 'ready' }),
+        ]);
+        expect(await boundPreflightId()).toBe(PREFLIGHT);
+    });
+
+    it('refuses to rebind an expired preflight that a request already consumed', async () => {
+        await expireBoundPreflight();
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                progress, pipeline_version, preflight_id
+            ) VALUES ($1, $2, 'sample.account', 'male', 'failed', 100, 'v2', $3)`,
+            [FAILED_REQUEST, USER, PREFLIGHT]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'consumed', consumed_request_id = $2,
+                 consumed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [PREFLIGHT, FAILED_REQUEST]
+        );
+
+        await expect(rebind()).rejects.toThrow(
+            'EARLYBIRD_FULFILLMENT_SNAPSHOT_CONFLICT'
+        );
+        expect(await preflightsByAge()).toEqual([
+            expect.objectContaining({ id: PREFLIGHT, status: 'consumed' }),
+        ]);
+        expect(await boundPreflightId()).toBe(PREFLIGHT);
+    });
+
+    it('stops minting replacements once the order exhausts its rebind cap', async () => {
+        const minted: string[] = [];
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            await expireBoundPreflight();
+            minted.push(await rebind());
+        }
+        expect(new Set(minted).size).toBe(10);
+
+        const exhausted = await expireBoundPreflight();
+
+        // The eleventh attempt keeps the preflight the order already holds
+        // instead of minting, and leaves it exactly as it found it.
+        expect(await rebind()).toBe(exhausted);
+        expect(await boundPreflightId()).toBe(exhausted);
+        const rows = await preflightsByAge();
+        expect(rows).toHaveLength(11);
+        expect(rows[rows.length - 1]).toEqual({
+            id: exhausted,
+            idempotency_key: `earlybird.fulfillment.${ORDER.replace(/-/g, '')}.r9`,
+            status: 'ready',
+        });
+        expect(rows.filter(row => row.status === 'ready')).toHaveLength(1);
+    });
+
     it('leaves a scrubbed checkout preflight waiting when the retained admission snapshot is not eligible', async () => {
         const insufficientCards = {
             ...cards,
@@ -855,10 +1085,21 @@ describe('operator-approved earlybird fulfillment migration', () => {
             '823e4567-e89b-42d3-a456-426614174001',
             '923e4567-e89b-42d3-a456-426614174001',
         ];
+        // Each competing order belongs to its own buyer. One user can only ever
+        // hold one active preflight, so cloning them onto a single user would
+        // describe a state idx_analysis_preflights_one_active_per_user forbids.
+        const invalidUsers = [
+            'a23e4567-e89b-42d3-a456-426614174001',
+            'b23e4567-e89b-42d3-a456-426614174001',
+        ];
         for (let index = 0; index < invalidPreflights.length; index += 1) {
             await db.query(
+                'INSERT INTO public.users(id) VALUES ($1)',
+                [invalidUsers[index]]
+            );
+            await db.query(
                 `INSERT INTO public.analysis_preflights(
-                    id, user_id, target_instagram_id,
+                    id, user_id, idempotency_key, target_instagram_id,
                     target_followers_count, target_following_count,
                     target_is_private, exclusion_decision, status, access_mode,
                     launch_status_snapshot, plan_catalog_snapshot,
@@ -866,7 +1107,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
                     policy_versions_snapshot, capacity_required_plan_id,
                     required_plan_id, created_at, ready_at, expires_at, admission_status
                 )
-                SELECT $2, user_id, target_instagram_id || $3,
+                SELECT $2, $4, 'test-preflight-key' || $3, target_instagram_id || $3,
                     target_followers_count, target_following_count,
                     target_is_private, exclusion_decision, status, 'test',
                     launch_status_snapshot, plan_catalog_snapshot,
@@ -874,7 +1115,12 @@ describe('operator-approved earlybird fulfillment migration', () => {
                     policy_versions_snapshot, capacity_required_plan_id,
                     required_plan_id, created_at, ready_at, expires_at, admission_status
                 FROM public.analysis_preflights WHERE id = $1`,
-                [PREFLIGHT, invalidPreflights[index], `-invalid-${index}`]
+                [
+                    PREFLIGHT,
+                    invalidPreflights[index],
+                    `-invalid-${index}`,
+                    invalidUsers[index],
+                ]
             );
             await db.query(
                 `INSERT INTO public.earlybird_orders(
@@ -885,14 +1131,20 @@ describe('operator-approved earlybird fulfillment migration', () => {
                     payment_id, actual_groble_product_id, actual_amount_krw,
                     seller_reference_confirmed_at
                 )
-                SELECT $2, user_id, $3, target_instagram_id || $4,
+                SELECT $2, $5, $3, target_instagram_id || $4,
                     target_followers_count, target_following_count,
                     exclusion_decision, plan_id, status,
                     expected_groble_product_id, expected_amount_krw,
                     payment_id || $4, actual_groble_product_id,
                     actual_amount_krw, seller_reference_confirmed_at
                 FROM public.earlybird_orders WHERE id = $1`,
-                [ORDER, invalidOrders[index], invalidPreflights[index], `-invalid-${index}`]
+                [
+                    ORDER,
+                    invalidOrders[index],
+                    invalidPreflights[index],
+                    `-invalid-${index}`,
+                    invalidUsers[index],
+                ]
             );
         }
         await db.query(
