@@ -46,6 +46,13 @@ const schemaFailedFulfillmentRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const approvedEntitlementRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730180000_preserve_schema_recovery_approved_entitlement.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -85,6 +92,34 @@ const cards = {
         ...catalog.plus,
         selectionState: 'unavailable',
         unavailableReason: 'launch_gate',
+    },
+};
+const standardCapacityCatalog = {
+    basic: catalog.basic,
+    standard: {
+        ...catalog.standard,
+        launchStatus: 'test_only',
+    },
+    plus: {
+        ...catalog.plus,
+        launchStatus: 'production',
+    },
+};
+const approvedStandardCards = {
+    basic: {
+        ...catalog.basic,
+        selectionState: 'unavailable',
+        unavailableReason: 'below_required_plan',
+    },
+    standard: {
+        ...catalog.standard,
+        selectionState: 'required',
+        unavailableReason: null,
+    },
+    plus: {
+        ...standardCapacityCatalog.plus,
+        selectionState: 'available_upgrade',
+        unavailableReason: null,
     },
 };
 
@@ -331,6 +366,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(scrubbedPreflightMigration);
         await db.exec(expiredPaidPreflightRebindMigration);
         await db.exec(schemaFailedFulfillmentRecoveryMigration);
+        await db.exec(approvedEntitlementRecoveryMigration);
     });
 
     beforeEach(async () => {
@@ -1082,6 +1118,92 @@ describe('operator-approved earlybird fulfillment migration', () => {
         )).rows[0]).toEqual({
             status: 'analysis_in_progress',
             result_request_id: FAILED_REQUEST,
+        });
+    });
+
+    it('preserves the immutable approved Standard entitlement when recomputation would demand Plus', async () => {
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 500, target_following_count = 500,
+                 capacity_required_plan_id = 'standard', required_plan_id = 'standard',
+                 launch_status_snapshot = $2::JSONB,
+                 plan_catalog_snapshot = $3::JSONB,
+                 plan_cards_snapshot = $4::JSONB
+             WHERE id = $1`,
+            [
+                PREFLIGHT,
+                JSON.stringify({
+                    basic: 'production', standard: 'test_only', plus: 'production',
+                }),
+                JSON.stringify(standardCapacityCatalog),
+                JSON.stringify(approvedStandardCards),
+            ]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard', target_followers_count = 500,
+                 target_following_count = 500
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                progress, pipeline_version, preflight_id, error_message,
+                completed_at
+            ) VALUES (
+                $1, $2, 'sample.account', 'male', 'failed', 100, 'v2', $3,
+                'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+                pg_catalog.clock_timestamp()
+            )`,
+            [FAILED_REQUEST, USER, PREFLIGHT]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+             VALUES ($1, 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR')`,
+            [FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'consumed', consumed_request_id = $2,
+                 consumed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [PREFLIGHT, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'analysis_in_progress', result_request_id = $2
+             WHERE id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review', request_id = $2, attempt_count = 1,
+                 operator_admitted_at = pg_catalog.clock_timestamp(),
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+
+        const recovered = await asService<{
+            preflight_id: string;
+        }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+        const recoveredPreflightId = recovered.rows[0].preflight_id;
+        expect((await db.query<{
+            capacity_required_plan_id: string;
+            required_plan_id: string;
+            plan_cards_snapshot: typeof approvedStandardCards;
+        }>(
+            `SELECT capacity_required_plan_id, required_plan_id, plan_cards_snapshot
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recoveredPreflightId]
+        )).rows[0]).toEqual({
+            capacity_required_plan_id: 'standard',
+            required_plan_id: 'standard',
+            plan_cards_snapshot: approvedStandardCards,
         });
     });
 });
