@@ -1,10 +1,12 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { GROBLE_SELLER_REFERENCE_PATTERN } from '@/lib/services/earlybird/seller-reference';
 
 const FIVE_MINUTES_SECONDS = 300;
 const HEX_SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+// Groble treats this as an opaque merchant field. It must not be constrained
+// to this application's `ord.<hex>` checkout reference at the wire boundary.
+const GROBLE_VENDOR_SELLER_REFERENCE_PATTERN = /^[A-Za-z0-9-_.:=~]{1,128}$/;
 
 const boundedIdentifier = z.string().trim().min(1).max(256);
 const eventIdentifier = z.string().min(1).max(256).refine(
@@ -16,12 +18,6 @@ const isoTimestamp = z.string().regex(ISO_TIMESTAMP_PATTERN).refine(
     'Invalid timestamp.'
 );
 
-function acceptsGroblePaymentInputMode(eventId: string, inputMode: string): boolean {
-    return inputMode === 'PAYMENT_WINDOW'
-        || (eventId.startsWith('evt_test_')
-            && (inputMode === 'NORMAL' || inputMode === 'SIMPLE'));
-}
-
 const paymentCompletedSchema = z.object({
     id: eventIdentifier,
     type: z.literal('payment.completed'),
@@ -30,7 +26,9 @@ const paymentCompletedSchema = z.object({
     data: z.object({
         object: z.object({
             merchantUid: boundedIdentifier,
-            sellerReference: z.string().regex(GROBLE_SELLER_REFERENCE_PATTERN).optional(),
+            sellerReference: z.string()
+                .regex(GROBLE_VENDOR_SELLER_REFERENCE_PATTERN)
+                .optional(),
             buyer: z.object({
                 email: z.string().trim().email().max(320),
                 phoneNumber: z.string().trim().min(1).max(64).optional(),
@@ -49,10 +47,7 @@ const paymentCompletedSchema = z.object({
             }),
         }),
     }),
-}).refine(
-    event => acceptsGroblePaymentInputMode(event.id, event.data.object.content.inputMode),
-    { path: ['data', 'object', 'content', 'inputMode'] }
-);
+});
 
 const paymentCancelRequestedSchema = z.object({
     id: eventIdentifier,
@@ -77,10 +72,7 @@ const paymentCancelRequestedSchema = z.object({
             }),
         }),
     }),
-}).refine(
-    event => acceptsGroblePaymentInputMode(event.id, event.data.object.content.inputMode),
-    { path: ['data', 'object', 'content', 'inputMode'] }
-);
+});
 
 const eventEnvelopeSchema = z.object({
     id: eventIdentifier,

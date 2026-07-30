@@ -159,7 +159,7 @@ describe('Groble payment.completed parser', () => {
         });
     });
 
-    it('projects a valid opaque seller reference', () => {
+    it('projects a valid internal seller reference', () => {
         const event = paymentPayload({ sellerReference: VALID_SELLER_REFERENCE });
 
         expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
@@ -167,13 +167,21 @@ describe('Groble payment.completed parser', () => {
         });
     });
 
+    it('projects an opaque Groble seller reference without treating it as an internal reference', () => {
+        const event = paymentPayload({ sellerReference: 'usr_sample_42' });
+
+        expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
+            sellerReference: 'usr_sample_42',
+        });
+    });
+
     it.each([
         '',
-        'ord.0123456789abcdef',
-        'ord.0123456789ABCDEF0123456789ABCDEF',
+        'contains space',
+        `vendor-${'x'.repeat(123)}`,
         'buyer@example.com',
         123,
-    ])('rejects a present malformed seller reference %#', sellerReference => {
+    ])('rejects a present seller reference outside Groble\'s vendor contract %#', sellerReference => {
         const event = paymentPayload({ sellerReference });
 
         expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
@@ -252,7 +260,7 @@ describe('Groble payment.completed parser', () => {
     });
 
     it.each(['NORMAL', 'SIMPLE'])(
-        'accepts %s input mode for a synthetic test event',
+        'accepts documented %s input mode for a signed event',
         inputMode => {
             const event = paymentPayload({
                 content: { ...paymentPayload().data.object.content, inputMode },
@@ -265,19 +273,21 @@ describe('Groble payment.completed parser', () => {
     );
 
     it.each(['NORMAL', 'SIMPLE'])(
-        'rejects %s input mode for a non-test event',
+        'accepts documented %s input mode for a non-test event',
         inputMode => {
             const event = paymentPayload({
                 content: { ...paymentPayload().data.object.content, inputMode },
             });
             event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
 
-            expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(event))).toThrow();
+            expect(parseGroblePaymentCompletedEvent(JSON.stringify(event))).toMatchObject({
+                eventId: event.id,
+            });
         }
     );
 
     it.each(WHITESPACE_TEST_EVENT_IDS)(
-        'rejects a NORMAL test event ID with %s whitespace',
+        'rejects a NORMAL event ID with %s whitespace',
         (_, eventId) => {
             const event = paymentPayload({
                 content: { ...paymentPayload().data.object.content, inputMode: 'NORMAL' },
@@ -357,7 +367,7 @@ describe('Groble payment.cancel_requested parser', () => {
     });
 
     it.each(['NORMAL', 'SIMPLE'])(
-        'accepts %s input mode for a synthetic test event',
+        'accepts documented %s input mode for a signed event',
         inputMode => {
             const event = cancelRequestedPayload({
                 content: { ...paymentPayload().data.object.content, inputMode },
@@ -370,19 +380,21 @@ describe('Groble payment.cancel_requested parser', () => {
     );
 
     it.each(['NORMAL', 'SIMPLE'])(
-        'rejects %s input mode for a non-test event',
+        'accepts documented %s input mode for a non-test event',
         inputMode => {
             const event = cancelRequestedPayload({
                 content: { ...paymentPayload().data.object.content, inputMode },
             });
             event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
 
-            expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
+            expect(parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toMatchObject({
+                eventId: event.id,
+            });
         }
     );
 
     it.each(WHITESPACE_TEST_EVENT_IDS)(
-        'rejects a SIMPLE test event ID with %s whitespace',
+        'rejects a SIMPLE event ID with %s whitespace',
         (_, eventId) => {
             const event = cancelRequestedPayload({
                 content: { ...paymentPayload().data.object.content, inputMode: 'SIMPLE' },

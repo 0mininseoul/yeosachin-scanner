@@ -380,13 +380,35 @@ describe('signed Groble webhook route', () => {
         expect(await response.text()).not.toContain(SELLER_REFERENCE);
     });
 
-    it('rejects a present malformed reference without legacy fallback', async () => {
+    it('uses the contact finalizer for Groble\'s official NORMAL test payload reference', async () => {
+        const vendorReference = 'usr_sample_42';
         const response = await POST(request(JSON.stringify(payload({
-            sellerReference: 'buyer@example.com',
+            sellerReference: vendorReference,
+            content: {
+                ...payload().data.object.content,
+                inputMode: 'NORMAL',
+            },
         }))));
 
-        expect(response.status).toBe(400);
-        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment',
+            expect.objectContaining({
+                p_event_id: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+                p_product_id: 'basic_product-01',
+                p_amount_krw: 14_900,
+            })
+        );
+        expect(mocks.rpc).not.toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment_by_reference',
+            expect.anything()
+        );
+        const observedOutput = JSON.stringify({
+            rpc: mocks.rpc.mock.calls,
+            logs: mocks.emit.mock.calls,
+            response: await response.text(),
+        });
+        expect(observedOutput).not.toContain(vendorReference);
     });
 
     it.each([
