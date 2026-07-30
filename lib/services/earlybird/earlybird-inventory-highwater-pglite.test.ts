@@ -12,6 +12,10 @@ const migration = readFileSync(
 
 const PAID_ORDER = '123e4567-e89b-42d3-a456-426614174001';
 const PENDING_ORDER = '123e4567-e89b-42d3-a456-426614174002';
+// PGlite/WASM startup shares the bounded CI worker pool with other migration
+// contracts. The assertions are fast, but a fresh database can exceed the
+// default five seconds while that pool is under load.
+const PGLITE_CI_TIMEOUT_MS = 20_000;
 const databases: PGlite[] = [];
 
 async function createDatabase(): Promise<PGlite> {
@@ -121,7 +125,7 @@ describe('earlybird inventory sequence high-water migration', () => {
             'SELECT plan_sequence FROM public.earlybird_orders WHERE id = $1',
             [PENDING_ORDER]
         )).rows).toEqual([{ plan_sequence: 2 }]);
-    });
+    }, PGLITE_CI_TIMEOUT_MS);
 
     it('preserves a counter that is already higher than allocated sequences', async () => {
         const db = await createDatabase();
@@ -141,7 +145,7 @@ describe('earlybird inventory sequence high-water migration', () => {
              FROM public.earlybird_plan_inventory
              WHERE plan_id = 'standard'`
         )).rows).toEqual([{ sold_count: 4 }]);
-    });
+    }, PGLITE_CI_TIMEOUT_MS);
 
     it('fails closed when an allocated sequence exceeds the inventory limit', async () => {
         const db = await createDatabase();
@@ -166,7 +170,7 @@ describe('earlybird inventory sequence high-water migration', () => {
              FROM public.earlybird_plan_inventory
              WHERE plan_id = 'standard'`
         )).rows).toEqual([{ sold_count: 0 }]);
-    });
+    }, PGLITE_CI_TIMEOUT_MS);
 
     it('keeps the inventory allocation lock in the migration contract', () => {
         expect(migration).toContain(
