@@ -74,6 +74,13 @@ const scrubbedTargetSchemaFailureRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const transientJobExhaustionRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730230000_recover_transient_job_exhaustion_fulfillment.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -269,7 +276,14 @@ async function applyTerminalPiiScrub(requestId: string): Promise<void> {
     );
 }
 
-async function seedSchemaFailedManualReview(requestTarget: string): Promise<void> {
+const SCHEMA_FAILURE = 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR';
+
+async function seedSchemaFailedManualReview(
+    requestTarget: string,
+    failure: { requestError?: string; receiptError?: string } = {}
+): Promise<void> {
+    const requestError = failure.requestError ?? SCHEMA_FAILURE;
+    const receiptError = failure.receiptError ?? requestError;
     await db.query(
         `INSERT INTO public.analysis_requests(
             id, user_id, target_instagram_id, target_gender, status,
@@ -277,15 +291,15 @@ async function seedSchemaFailedManualReview(requestTarget: string): Promise<void
             completed_at
         ) VALUES (
             $1, $2, $3, 'male', 'failed', 100, 'v2', $4,
-            'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+            $5,
             pg_catalog.clock_timestamp()
         )`,
-        [FAILED_REQUEST, USER, requestTarget, PREFLIGHT]
+        [FAILED_REQUEST, USER, requestTarget, PREFLIGHT, requestError]
     );
     await db.query(
         `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
-         VALUES ($1, 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR')`,
-        [FAILED_REQUEST]
+         VALUES ($1, $2)`,
+        [FAILED_REQUEST, receiptError]
     );
     await db.query(
         `UPDATE public.analysis_preflights
@@ -499,6 +513,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(approvedEntitlementRecoveryMigration);
         await db.exec(canonicalTargetSchemaFailureRecoveryMigration);
         await db.exec(scrubbedTargetSchemaFailureRecoveryMigration);
+        await db.exec(transientJobExhaustionRecoveryMigration);
     });
 
     beforeEach(async () => {
@@ -1207,6 +1222,85 @@ describe('operator-approved earlybird fulfillment migration', () => {
             order_id: ORDER,
             fulfillment_status: 'admission_pending',
         })] });
+    });
+
+    it('recovers a paid order whose analysis exhausted its job attempts', async () => {
+        // JOB_ATTEMPTS_EXHAUSTED means the pipeline ran out of retries -- e.g. AI capacity
+        // starvation. Once capacity is restored the paid analysis must be retryable.
+        await seedSchemaFailedManualReview('sample.account', {
+            requestError: 'JOB_ATTEMPTS_EXHAUSTED',
+        });
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).resolves.toMatchObject({ rows: [expect.objectContaining({
+            order_id: ORDER,
+            fulfillment_status: 'admission_pending',
+        })] });
+    });
+
+    it('recovers an attempt-exhausted request whose target was scrubbed on failure', async () => {
+        await seedSchemaFailedManualReview(canonicalScrubToken(FAILED_REQUEST), {
+            requestError: 'JOB_ATTEMPTS_EXHAUSTED',
+        });
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).resolves.toMatchObject({ rows: [expect.objectContaining({
+            fulfillment_status: 'admission_pending',
+        })] });
+    });
+
+    it('refuses to recover an attempt-exhausted request on a schema-failure receipt', async () => {
+        // Widening the accepted set must never let one failure reason borrow another's receipt.
+        await seedSchemaFailedManualReview('sample.account', {
+            requestError: 'JOB_ATTEMPTS_EXHAUSTED',
+            receiptError: 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+        });
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+    });
+
+    it('refuses to recover a schema-failed request on an attempt-exhausted receipt', async () => {
+        await seedSchemaFailedManualReview('sample.account', {
+            requestError: 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+            receiptError: 'JOB_ATTEMPTS_EXHAUSTED',
+        });
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+    });
+
+    it('still refuses target-quality failures that must stay in manual review', async () => {
+        // These say the target itself could not be analysed, so a blind retry would
+        // burn the customer's payment again on the same dead end.
+        await seedSchemaFailedManualReview('sample.account');
+        for (const code of [
+            'SCRAPING_INCOMPLETE_ERROR',
+            'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE',
+            'SCRAPING_PROVIDER_QUOTA_ERROR',
+        ]) {
+            await db.query(
+                'UPDATE public.analysis_requests SET error_message = $2 WHERE id = $1',
+                [FAILED_REQUEST, code]
+            );
+            await db.query(
+                'UPDATE public.analysis_v2_failure_receipts SET error_code = $2 WHERE request_id = $1',
+                [FAILED_REQUEST, code]
+            );
+
+            await expect(asService(
+                'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+                [ORDER]
+            )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+        }
     });
 
     it('refuses a schema-failed request whose target is not canonically equivalent to the paid order', async () => {
