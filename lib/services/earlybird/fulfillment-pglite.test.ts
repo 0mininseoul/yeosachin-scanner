@@ -32,6 +32,13 @@ const scrubbedPreflightMigration = readFileSync(
     ),
     'utf8'
 );
+const expiredPaidPreflightRebindMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730150000_rebind_expired_paid_earlybird_preflights.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -183,6 +190,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
             CREATE TABLE public.analysis_preflights (
                 id UUID PRIMARY KEY,
                 user_id UUID NOT NULL REFERENCES public.users(id),
+                idempotency_key TEXT NOT NULL DEFAULT 'test-preflight-key',
                 target_instagram_id TEXT NOT NULL,
                 target_followers_count INTEGER,
                 target_following_count INTEGER,
@@ -240,6 +248,10 @@ describe('operator-approved earlybird fulfillment migration', () => {
                         AND error_code IS NULL
                     )
                     OR status NOT IN ('ready', 'consumed')
+                );
+            ALTER TABLE public.analysis_preflights
+                ADD CONSTRAINT analysis_preflights_ttl_check CHECK (
+                    expires_at = created_at + INTERVAL '30 minutes'
                 );
             ALTER TABLE public.analysis_requests
                 ADD CONSTRAINT analysis_requests_preflight_fk
@@ -303,6 +315,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(migration);
         await db.exec(automaticFulfillmentMigration);
         await db.exec(scrubbedPreflightMigration);
+        await db.exec(expiredPaidPreflightRebindMigration);
     });
 
     beforeEach(async () => {
@@ -325,16 +338,17 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 launch_status_snapshot, plan_catalog_snapshot,
                 plan_cards_snapshot, pricing_version, pricing_snapshot,
                 policy_versions_snapshot, capacity_required_plan_id,
-                required_plan_id, ready_at, expires_at, admission_status
+                required_plan_id, created_at, ready_at, expires_at, admission_status
             ) VALUES (
                 $1, $2, 'sample.account', 120, 140, FALSE, 'skip',
-                'expired', 'production',
+                'ready', 'production',
                 '{"basic":"production","standard":"production","plus":"test_only"}',
                 $3::JSONB, $4::JSONB, 'deferred',
                 '{"basic":{"status":"deferred"},"standard":{"status":"deferred"},"plus":{"status":"deferred"}}',
                 '{"pipeline":"v2","risk":"v1","aiStage":"v1"}',
-                'basic', 'basic', pg_catalog.clock_timestamp() - INTERVAL '1 day',
-                pg_catalog.clock_timestamp() - INTERVAL '1 hour', 'idle'
+                'basic', 'basic', TIMESTAMPTZ '2030-01-01 00:00:00+00',
+                TIMESTAMPTZ '2030-01-01 00:00:00+00',
+                TIMESTAMPTZ '2030-01-01 00:30:00+00', 'idle'
             )`,
             [PREFLIGHT, USER, JSON.stringify(catalog), JSON.stringify(cards)]
         );
@@ -408,7 +422,10 @@ describe('operator-approved earlybird fulfillment migration', () => {
                  admission_target_following_count = 140,
                  admission_capacity_required_plan_id = 'basic',
                  admission_required_plan_id = 'basic',
-                 admission_plan_cards_snapshot = $2::JSONB
+                 admission_plan_cards_snapshot = $2::JSONB,
+                 status = 'expired',
+                 created_at = TIMESTAMPTZ '2026-07-01 00:00:00+00',
+                 expires_at = TIMESTAMPTZ '2026-07-01 00:30:00+00'
              WHERE id = $1`,
             [PREFLIGHT, JSON.stringify(cards)]
         );
@@ -430,11 +447,14 @@ describe('operator-approved earlybird fulfillment migration', () => {
             required_plan_id: string;
             plan_cards_snapshot: typeof cards;
         }>(
-            `SELECT status, target_followers_count, target_following_count,
-                    target_is_private, capacity_required_plan_id,
-                    required_plan_id, plan_cards_snapshot
-             FROM public.analysis_preflights WHERE id = $1`,
-            [PREFLIGHT]
+            `SELECT preflight.status, preflight.target_followers_count, preflight.target_following_count,
+                    preflight.target_is_private, preflight.capacity_required_plan_id,
+                    preflight.required_plan_id, preflight.plan_cards_snapshot
+             FROM public.analysis_preflights AS preflight
+             JOIN public.earlybird_orders AS earlybird_order
+               ON earlybird_order.preflight_id = preflight.id
+             WHERE earlybird_order.id = $1`,
+            [ORDER]
         )).rows[0]).toEqual({
             status: 'ready',
             target_followers_count: 120,
@@ -454,7 +474,10 @@ describe('operator-approved earlybird fulfillment migration', () => {
                  target_is_private = NULL,
                  capacity_required_plan_id = NULL,
                  required_plan_id = NULL,
-                 plan_cards_snapshot = NULL
+                 plan_cards_snapshot = NULL,
+                 status = 'expired',
+                 created_at = TIMESTAMPTZ '2026-07-01 00:00:00+00',
+                 expires_at = TIMESTAMPTZ '2026-07-01 00:30:00+00'
              WHERE id = $1`,
             [PREFLIGHT]
         );
@@ -473,16 +496,67 @@ describe('operator-approved earlybird fulfillment migration', () => {
             required_plan_id: string;
             plan_cards_snapshot: typeof cards;
         }>(
-            `SELECT status, capacity_required_plan_id, required_plan_id,
-                    plan_cards_snapshot
-             FROM public.analysis_preflights WHERE id = $1`,
-            [PREFLIGHT]
+            `SELECT preflight.status, preflight.capacity_required_plan_id, preflight.required_plan_id,
+                    preflight.plan_cards_snapshot
+             FROM public.analysis_preflights AS preflight
+             JOIN public.earlybird_orders AS earlybird_order
+               ON earlybird_order.preflight_id = preflight.id
+             WHERE earlybird_order.id = $1`,
+            [ORDER]
         )).rows[0]).toEqual({
             status: 'ready',
             capacity_required_plan_id: 'basic',
             required_plan_id: 'basic',
             plan_cards_snapshot: cards,
         });
+        expect((await db.query<{ count: number }>(
+            'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_preflights'
+        )).rows[0].count).toBe(2);
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.analysis_preflights WHERE id = $1',
+            [PREFLIGHT]
+        )).rows[0]).toEqual({ status: 'expired' });
+    });
+
+    it('never rebinds an unconfirmed or non-admissible lifecycle', async () => {
+        const blockedOrderStatuses = [
+            'payment_pending', 'cancelled', 'refund_pending',
+            'analysis_in_progress', 'completed',
+        ];
+        for (const status of blockedOrderStatuses) {
+            await db.query(
+                `UPDATE public.earlybird_orders SET status = $2 WHERE id = $1`,
+                [ORDER, status]
+            );
+            const rebound = await asService<{ rebind_expired_paid_earlybird_preflight: string }>(
+                'SELECT public.rebind_expired_paid_earlybird_preflight($1)',
+                [ORDER]
+            );
+            expect(rebound.rows[0].rebind_expired_paid_earlybird_preflight).toBe(PREFLIGHT);
+            expect((await db.query<{ count: number }>(
+                'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_preflights'
+            )).rows[0].count).toBe(1);
+        }
+        await db.query(
+            `UPDATE public.earlybird_orders SET status = 'paid' WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review',
+                 operator_admitted_at = pg_catalog.clock_timestamp(),
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER]
+        );
+        const terminal = await asService<{ rebind_expired_paid_earlybird_preflight: string }>(
+            'SELECT public.rebind_expired_paid_earlybird_preflight($1)',
+            [ORDER]
+        );
+        expect(terminal.rows[0].rebind_expired_paid_earlybird_preflight).toBe(PREFLIGHT);
+        expect((await db.query<{ count: number }>(
+            'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_preflights'
+        )).rows[0].count).toBe(1);
     });
 
     it('leaves a scrubbed checkout preflight waiting when the retained admission snapshot is not eligible', async () => {
@@ -503,14 +577,19 @@ describe('operator-approved earlybird fulfillment migration', () => {
                  plan_cards_snapshot = NULL,
                  admission_capacity_required_plan_id = 'basic',
                  admission_required_plan_id = 'basic',
-                 admission_plan_cards_snapshot = $2::JSONB
+                 admission_plan_cards_snapshot = $2::JSONB,
+                 status = 'expired',
+                 created_at = TIMESTAMPTZ '2026-07-01 00:00:00+00',
+                 expires_at = TIMESTAMPTZ '2026-07-01 00:30:00+00'
              WHERE id = $1`,
             [PREFLIGHT, JSON.stringify(insufficientCards)]
         );
 
         await expect(asService(
             'SELECT * FROM public.auto_admit_eligible_earlybird_fulfillments(20)'
-        )).resolves.toMatchObject({ rows: [] });
+        )).resolves.toMatchObject({ rows: [expect.objectContaining({
+            fulfillment_status: 'admission_pending',
+        })] });
         expect((await db.query<{
             status: string;
             plan_cards_snapshot: unknown;
@@ -526,7 +605,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
             `SELECT status FROM public.earlybird_fulfillments
              WHERE order_id = $1`,
             [ORDER]
-        )).rows[0]).toEqual({ status: 'awaiting_operator' });
+        )).rows[0]).toEqual({ status: 'admission_pending' });
     });
 
     it('retains a paid checkout preflight payload through later expiry cleanup', async () => {
@@ -544,7 +623,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
              FROM public.analysis_preflights WHERE id = $1`,
             [PREFLIGHT]
         )).rows[0]).toMatchObject({
-            status: 'expired',
+            status: 'ready',
             target_instagram_id: 'sample.account',
             plan_cards_snapshot: cards,
             pii_scrubbed_at: null,
@@ -585,7 +664,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
                     launch_status_snapshot, plan_catalog_snapshot,
                     plan_cards_snapshot, pricing_version, pricing_snapshot,
                     policy_versions_snapshot, capacity_required_plan_id,
-                    required_plan_id, ready_at, expires_at, admission_status
+                    required_plan_id, created_at, ready_at, expires_at, admission_status
                 )
                 SELECT $2, user_id, target_instagram_id || $3,
                     target_followers_count, target_following_count,
@@ -593,7 +672,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
                     launch_status_snapshot, plan_catalog_snapshot,
                     plan_cards_snapshot, pricing_version, pricing_snapshot,
                     policy_versions_snapshot, capacity_required_plan_id,
-                    required_plan_id, ready_at, expires_at, admission_status
+                    required_plan_id, created_at, ready_at, expires_at, admission_status
                 FROM public.analysis_preflights WHERE id = $1`,
                 [PREFLIGHT, invalidPreflights[index], `-invalid-${index}`]
             );
