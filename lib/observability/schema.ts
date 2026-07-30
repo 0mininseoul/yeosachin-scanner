@@ -76,6 +76,7 @@ export const OPERATIONAL_EVENT_NAMES = [
     'preflight.completed',
     'preflight.failed',
     'preflight.exclusion_decided',
+    'earlybird.advance_failed',
     'earlybird.checkout_created',
     'earlybird.checkout_failed',
     'earlybird.paid_preflight_rebound',

@@ -326,6 +326,63 @@ describe('earlybird fulfillment store', () => {
         expect(orderStore.claim).not.toHaveBeenCalled();
     });
 
+    it('names the failure when an advance throws instead of only counting it', async () => {
+        // A swallowed advance used to surface as nothing but a non-zero `failed`,
+        // which the recovery route turns into a bare 500. A paid order then retries
+        // for hours with no signal saying why.
+        const orderStore = {
+            listRecoverable: vi.fn().mockResolvedValue([identity()]),
+            reconcile: vi.fn().mockResolvedValue({ completed: 0, manualReview: 0 }),
+            autoAdmitEligible: vi.fn().mockResolvedValue([]),
+        } as unknown as EarlybirdFulfillmentStore;
+        const emitOperationalEvent = vi.fn();
+        const failure = Object.assign(
+            new Error('EARLYBIRD_FULFILLMENT_SNAPSHOT_CONFLICT'),
+            { code: 'EARLYBIRD_FULFILLMENT_SNAPSHOT_CONFLICT' }
+        );
+
+        await expect(recoverEarlybirdFulfillments({
+            store: orderStore,
+            advance: vi.fn().mockRejectedValue(failure),
+            automaticFulfillmentEnabled: false,
+            emitOperationalEvent,
+        })).resolves.toMatchObject({ scanned: 1, advanced: 0, failed: 1 });
+
+        expect(emitOperationalEvent).toHaveBeenCalledWith(
+            expect.objectContaining({
+                event: 'earlybird.advance_failed',
+                severity: 'error',
+                fields: expect.objectContaining({
+                    order_id: ORDER,
+                    error_code: 'EARLYBIRD_FULFILLMENT_SNAPSHOT_CONFLICT',
+                    disposition: 'failure',
+                }),
+            })
+        );
+    });
+
+    it('still names a failure that carries no error code', async () => {
+        const orderStore = {
+            listRecoverable: vi.fn().mockResolvedValue([identity()]),
+            reconcile: vi.fn().mockResolvedValue({ completed: 0, manualReview: 0 }),
+            autoAdmitEligible: vi.fn().mockResolvedValue([]),
+        } as unknown as EarlybirdFulfillmentStore;
+        const emitOperationalEvent = vi.fn();
+
+        await recoverEarlybirdFulfillments({
+            store: orderStore,
+            advance: vi.fn().mockRejectedValue(new Error('boom')),
+            automaticFulfillmentEnabled: false,
+            emitOperationalEvent,
+        });
+
+        expect(emitOperationalEvent).toHaveBeenCalledWith(
+            expect.objectContaining({
+                fields: expect.objectContaining({ error_code: 'boom' }),
+            })
+        );
+    });
+
     it('recovery reconciles and advances admitted rows without calling operator admission', async () => {
         const orderStore = store();
         const advance = vi.fn(async () => ({

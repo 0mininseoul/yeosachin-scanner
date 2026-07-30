@@ -815,6 +815,24 @@ export type EarlybirdFulfillmentRecoverySummary = Readonly<{
     failed: number;
 }>;
 
+/**
+ * Postgres errors surface their `P0001` message as `code`; application errors
+ * carry the contract name on `code` too. Fall back to the message so a failure
+ * is never reported as an unnamed one.
+ */
+function extractOperationalErrorCode(error: unknown): string {
+    if (typeof error === 'object' && error !== null) {
+        const candidate = error as { code?: unknown; message?: unknown };
+        if (typeof candidate.code === 'string' && candidate.code.length > 0) {
+            return candidate.code;
+        }
+        if (typeof candidate.message === 'string' && candidate.message.length > 0) {
+            return candidate.message;
+        }
+    }
+    return 'UNKNOWN';
+}
+
 export async function recoverEarlybirdFulfillments(
     dependencies: {
         store?: EarlybirdFulfillmentStore;
@@ -824,8 +842,11 @@ export async function recoverEarlybirdFulfillments(
         ) => Promise<EarlybirdFulfillmentAdvanceResult>;
         limit?: number;
         concurrency?: number;
+        emitOperationalEvent?: (event: OperationalEvent) => void;
     } = {}
 ): Promise<EarlybirdFulfillmentRecoverySummary> {
+    const emitRecoveryEvent = dependencies.emitOperationalEvent
+        ?? (event => operationalLogger.emit(event));
     const fulfillmentStore = dependencies.store
         ?? earlybirdFulfillmentStore;
     const limit = dependencies.limit ?? 20;
@@ -869,8 +890,29 @@ export async function recoverEarlybirdFulfillments(
             try {
                 await advance(row);
                 advanced += 1;
-            } catch {
+            } catch (error) {
                 failed += 1;
+                // This counter is the only thing a swallowed advance used to
+                // produce: the sweep returns a non-zero `failed`, the recovery
+                // route turns that into a 500, and the reason never reaches a
+                // log. A paid order can then retry for hours while every
+                // signal says only "something failed". Name the failure.
+                emitRecoveryEvent({
+                    event: 'earlybird.advance_failed',
+                    severity: 'error',
+                    fields: {
+                        order_id: row.orderId,
+                        user_id: row.userId,
+                        plan_id: row.planId,
+                        preflight_id: row.preflightId,
+                        operation: 'fresh_admission',
+                        disposition: 'failure',
+                        error_name: error instanceof Error
+                            ? error.name
+                            : typeof error,
+                        error_code: extractOperationalErrorCode(error),
+                    },
+                });
             }
         }
     };
