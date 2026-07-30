@@ -18,6 +18,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const freshAdmissionMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260714030000_add_analysis_v2_fresh_admission_gate.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const automaticFulfillmentMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260728120000_add_earlybird_automatic_fulfillment.sql',
@@ -46,12 +53,22 @@ const schemaFailedFulfillmentRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const approvedEntitlementRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730180000_preserve_schema_recovery_approved_entitlement.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
 const ORDER = '323e4567-e89b-42d3-a456-426614174001';
 const CLAIM = '423e4567-e89b-42d3-a456-426614174001'; // gitleaks:allow
 const FAILED_REQUEST = '523e4567-e89b-42d3-a456-426614174001';
+const ADMISSION_TOKEN = '623e4567-e89b-42d3-a456-426614174001';
+const DISPATCH_TOKEN = '723e4567-e89b-42d3-a456-426614174001';
+const ADMISSION_CLAIM = '823e4567-e89b-42d3-a456-426614174001';
 
 const catalog = {
     basic: {
@@ -85,6 +102,45 @@ const cards = {
         ...catalog.plus,
         selectionState: 'unavailable',
         unavailableReason: 'launch_gate',
+    },
+};
+const standardCapacityCatalog = {
+    basic: catalog.basic,
+    standard: {
+        ...catalog.standard,
+        launchStatus: 'test_only',
+    },
+    plus: {
+        ...catalog.plus,
+        launchStatus: 'production',
+    },
+};
+const approvedStandardCards = {
+    basic: {
+        ...catalog.basic,
+        selectionState: 'unavailable',
+        unavailableReason: 'below_required_plan',
+    },
+    standard: {
+        ...catalog.standard,
+        selectionState: 'required',
+        unavailableReason: null,
+    },
+    plus: {
+        ...standardCapacityCatalog.plus,
+        selectionState: 'available_upgrade',
+        unavailableReason: null,
+    },
+};
+const mismatchedRequiredCards = {
+    ...cards,
+    basic: {
+        ...cards.basic,
+        selectionState: 'available_upgrade',
+    },
+    standard: {
+        ...cards.standard,
+        selectionState: 'required',
     },
 };
 
@@ -226,16 +282,6 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 pii_scrubbed_at TIMESTAMP WITH TIME ZONE,
                 lease_token UUID,
                 lease_expires_at TIMESTAMP WITH TIME ZONE,
-                admission_status TEXT,
-                admission_selected_plan_id TEXT,
-                admission_entitlement_jti_hash TEXT,
-                admission_token UUID,
-                admission_refreshed_at TIMESTAMP WITH TIME ZONE,
-                admission_target_followers_count INTEGER,
-                admission_target_following_count INTEGER,
-                admission_capacity_required_plan_id TEXT,
-                admission_required_plan_id TEXT,
-                admission_plan_cards_snapshot JSONB,
                 target_full_name TEXT,
                 target_bio TEXT,
                 target_profile_image_url TEXT,
@@ -325,12 +371,31 @@ describe('operator-approved earlybird fulfillment migration', () => {
             RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
             CREATE FUNCTION public.analysis_v2_valid_scope_snapshot(JSONB)
             RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
+            CREATE FUNCTION public.consume_analysis_v2_test_entitlement(
+                UUID, UUID, TEXT, TEXT
+            )
+            RETURNS TABLE(
+                request_id UUID,
+                created BOOLEAN,
+                initial_job_key TEXT,
+                request_status TEXT,
+                background_processing BOOLEAN
+            )
+            LANGUAGE sql AS $$
+                SELECT NULL::UUID, NULL::BOOLEAN, NULL::TEXT, NULL::TEXT, NULL::BOOLEAN
+                WHERE FALSE
+            $$;
         `);
+        await db.exec(freshAdmissionMigration);
+        await db.exec(
+            'ALTER TABLE public.analysis_preflights DROP CONSTRAINT analysis_preflights_admission_payload_check'
+        );
         await db.exec(migration);
         await db.exec(automaticFulfillmentMigration);
         await db.exec(scrubbedPreflightMigration);
         await db.exec(expiredPaidPreflightRebindMigration);
         await db.exec(schemaFailedFulfillmentRecoveryMigration);
+        await db.exec(approvedEntitlementRecoveryMigration);
     });
 
     beforeEach(async () => {
@@ -1082,6 +1147,211 @@ describe('operator-approved earlybird fulfillment migration', () => {
         )).rows[0]).toEqual({
             status: 'analysis_in_progress',
             result_request_id: FAILED_REQUEST,
+        });
+    });
+
+    it('rejects a recovery whose immutable required card does not match its required plan', async () => {
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET plan_cards_snapshot = $2::JSONB
+             WHERE id = $1`,
+            [PREFLIGHT, JSON.stringify(mismatchedRequiredCards)]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                progress, pipeline_version, preflight_id, error_message,
+                completed_at
+            ) VALUES (
+                $1, $2, 'sample.account', 'male', 'failed', 100, 'v2', $3,
+                'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+                pg_catalog.clock_timestamp()
+            )`,
+            [FAILED_REQUEST, USER, PREFLIGHT]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+             VALUES ($1, 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR')`,
+            [FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'consumed', consumed_request_id = $2,
+                 consumed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [PREFLIGHT, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'analysis_in_progress', result_request_id = $2
+             WHERE id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review', request_id = $2,
+                 operator_admitted_at = pg_catalog.clock_timestamp(),
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_SNAPSHOT_CONFLICT/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(0);
+    });
+
+    it('preserves the immutable approved Standard entitlement when recomputation would demand Plus', async () => {
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 500, target_following_count = 500,
+                 capacity_required_plan_id = 'standard', required_plan_id = 'standard',
+                 launch_status_snapshot = $2::JSONB,
+                 plan_catalog_snapshot = $3::JSONB,
+                 plan_cards_snapshot = $4::JSONB
+             WHERE id = $1`,
+            [
+                PREFLIGHT,
+                JSON.stringify({
+                    basic: 'production', standard: 'test_only', plus: 'production',
+                }),
+                JSON.stringify(standardCapacityCatalog),
+                JSON.stringify(approvedStandardCards),
+            ]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard', target_followers_count = 500,
+                 target_following_count = 500
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                progress, pipeline_version, preflight_id, error_message,
+                completed_at
+            ) VALUES (
+                $1, $2, 'sample.account', 'male', 'failed', 100, 'v2', $3,
+                'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+                pg_catalog.clock_timestamp()
+            )`,
+            [FAILED_REQUEST, USER, PREFLIGHT]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+             VALUES ($1, 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR')`,
+            [FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'consumed', consumed_request_id = $2,
+                 consumed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [PREFLIGHT, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'analysis_in_progress', result_request_id = $2
+             WHERE id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review', request_id = $2, attempt_count = 1,
+                 operator_admitted_at = pg_catalog.clock_timestamp(),
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER, FAILED_REQUEST]
+        );
+
+        const recovered = await asService<{
+            preflight_id: string;
+        }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+        const recoveredPreflightId = recovered.rows[0].preflight_id;
+        expect((await db.query<{
+            capacity_required_plan_id: string;
+            required_plan_id: string;
+            plan_cards_snapshot: typeof approvedStandardCards;
+        }>(
+            `SELECT capacity_required_plan_id, required_plan_id, plan_cards_snapshot
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recoveredPreflightId]
+        )).rows[0]).toEqual({
+            capacity_required_plan_id: 'standard',
+            required_plan_id: 'standard',
+            plan_cards_snapshot: approvedStandardCards,
+        });
+
+        const reserved = await asService<{
+            admission_generation: number;
+            dispatch_generation: number;
+            dispatch_token: string;
+        }>(
+            `SELECT * FROM public.reserve_analysis_v2_preflight_admission(
+                $1, $2, 'standard', $3, $4, $5
+            )`,
+            [
+                recoveredPreflightId,
+                USER,
+                admissionHash(),
+                ADMISSION_TOKEN,
+                DISPATCH_TOKEN,
+            ]
+        );
+        const reservation = reserved.rows[0];
+        await expect(asService(
+            `SELECT * FROM public.claim_analysis_v2_preflight_admission(
+                $1, $2, $3, $4, $5, 300
+            )`,
+            [
+                recoveredPreflightId,
+                reservation.admission_generation,
+                reservation.dispatch_generation,
+                reservation.dispatch_token,
+                ADMISSION_CLAIM,
+            ]
+        )).resolves.toMatchObject({
+            rows: [expect.objectContaining({
+                claimed: true,
+                admission_status: 'processing',
+            })],
+        });
+        await expect(asService<{
+            admission_status: string;
+            admission_error_code: string | null;
+        }>(
+            `SELECT * FROM public.complete_analysis_v2_preflight_admission(
+                $1, $2, $3, 'sample.account', 500, 500, FALSE
+            )`,
+            [
+                recoveredPreflightId,
+                reservation.admission_generation,
+                ADMISSION_CLAIM,
+            ]
+        )).resolves.toMatchObject({
+            rows: [{ admission_status: 'ready', admission_error_code: null }],
+        });
+        expect((await db.query<{
+            admission_status: string;
+            admission_required_plan_id: string;
+            admission_plan_cards_snapshot: typeof approvedStandardCards;
+        }>(
+            `SELECT admission_status, admission_required_plan_id, admission_plan_cards_snapshot
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recoveredPreflightId]
+        )).rows[0]).toEqual({
+            admission_status: 'ready',
+            admission_required_plan_id: 'standard',
+            admission_plan_cards_snapshot: approvedStandardCards,
         });
     });
 });
