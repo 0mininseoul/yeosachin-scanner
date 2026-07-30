@@ -14,6 +14,11 @@ import {
     earlybirdStatusEventKey,
     paymentConfirmationEventKey,
 } from '@/lib/services/earlybird/analytics-state';
+import {
+    scheduleEarlybirdStatusSnapshotRefresh,
+    shouldAutomaticallyRedirectEarlybirdStatus,
+    shouldRefreshEarlybirdStatusSnapshot,
+} from '@/lib/services/earlybird/payment-pending-status-refresh';
 import { recoverPendingEarlybirdCheckout } from '@/lib/services/earlybird/ui-state';
 import { formatKstDateTime } from '@/lib/services/date-time-presentation';
 
@@ -33,11 +38,10 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     const [checkoutRecoveryPending, setCheckoutRecoveryPending] = useState(false);
     const [checkoutRecoveryError, setCheckoutRecoveryError] = useState<string | null>(null);
     const checkoutRecoveryGuardRef = useRef({ inFlight: false });
-    const isAutomaticFulfillmentBridge = !order.requiresSupport && (
-        order.systemStatus === 'paid'
-        || order.systemStatus === 'analysis_in_progress'
-        || (order.systemStatus === 'completed' && Boolean(order.resultUrl))
-    );
+    const shouldRefreshPaymentPendingStatus =
+        shouldRefreshEarlybirdStatusSnapshot(order);
+    const isAutomaticFulfillmentBridge =
+        shouldAutomaticallyRedirectEarlybirdStatus(order);
 
     useEffect(() => {
         if (!isAutomaticFulfillmentBridge) return;
@@ -49,6 +53,11 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
         const timer = window.setTimeout(() => router.refresh(), 1_500);
         return () => window.clearTimeout(timer);
     }, [isAutomaticFulfillmentBridge, order.progressUrl, order.resultUrl, router]);
+
+    useEffect(() => {
+        if (!shouldRefreshPaymentPendingStatus) return;
+        return scheduleEarlybirdStatusSnapshotRefresh(() => router.refresh());
+    }, [router, shouldRefreshPaymentPendingStatus]);
 
     useEffect(() => {
         if (!notifyModalOpen) return;
