@@ -8,6 +8,7 @@ import {
 } from '@/lib/services/groble/config';
 import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
+import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
 import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
@@ -258,11 +259,14 @@ async function handlePOST(
                 p_amount_krw: payment.amountKrw,
                 p_paid_at: payment.paidAt,
             };
-            persistence = payment.sellerReference
+            const internalSellerReference = parseGrobleSellerReference(
+                payment.sellerReference
+            );
+            persistence = internalSellerReference
                 ? await supabaseAdmin.rpc(
                     'finalize_earlybird_groble_payment_by_reference',
                     {
-                        p_seller_reference: payment.sellerReference,
+                        p_seller_reference: internalSellerReference,
                         ...params,
                     }
                 )
