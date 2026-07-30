@@ -60,6 +60,13 @@ const approvedEntitlementRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const canonicalTargetSchemaFailureRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730190000_recover_schema_failed_fulfillment_canonical_target.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -207,6 +214,47 @@ async function claim() {
         )`,
         [ORDER, CLAIM]
     )).rows[0];
+}
+
+async function seedSchemaFailedManualReview(requestTarget: string): Promise<void> {
+    await db.query(
+        `INSERT INTO public.analysis_requests(
+            id, user_id, target_instagram_id, target_gender, status,
+            progress, pipeline_version, preflight_id, error_message,
+            completed_at
+        ) VALUES (
+            $1, $2, $3, 'male', 'failed', 100, 'v2', $4,
+            'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
+            pg_catalog.clock_timestamp()
+        )`,
+        [FAILED_REQUEST, USER, requestTarget, PREFLIGHT]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+         VALUES ($1, 'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR')`,
+        [FAILED_REQUEST]
+    );
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET status = 'consumed', consumed_request_id = $2,
+             consumed_at = pg_catalog.clock_timestamp()
+         WHERE id = $1`,
+        [PREFLIGHT, FAILED_REQUEST]
+    );
+    await db.query(
+        `UPDATE public.earlybird_orders
+         SET status = 'analysis_in_progress', result_request_id = $2
+         WHERE id = $1`,
+        [ORDER, FAILED_REQUEST]
+    );
+    await db.query(
+        `UPDATE public.earlybird_fulfillments
+         SET status = 'manual_review', request_id = $2, attempt_count = 1,
+             operator_admitted_at = pg_catalog.clock_timestamp(),
+             manual_review_at = pg_catalog.clock_timestamp()
+         WHERE order_id = $1`,
+        [ORDER, FAILED_REQUEST]
+    );
 }
 
 describe('operator-approved earlybird fulfillment migration', () => {
@@ -396,6 +444,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(expiredPaidPreflightRebindMigration);
         await db.exec(schemaFailedFulfillmentRecoveryMigration);
         await db.exec(approvedEntitlementRecoveryMigration);
+        await db.exec(canonicalTargetSchemaFailureRecoveryMigration);
     });
 
     beforeEach(async () => {
@@ -1092,6 +1141,40 @@ describe('operator-approved earlybird fulfillment migration', () => {
             `SELECT pg_catalog.count(*)::INTEGER AS count
              FROM public.earlybird_schema_failure_recoveries`
         )).rows[0].count).toBe(1);
+    });
+
+    it('recovers only a legacy request target that is canonically equivalent to the paid order target', async () => {
+        await seedSchemaFailedManualReview(' @SAMPLE.ACCOUNT ');
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).resolves.toMatchObject({ rows: [expect.objectContaining({
+            order_id: ORDER,
+            fulfillment_status: 'admission_pending',
+        })] });
+    });
+
+    it('refuses a schema-failed request whose target is not canonically equivalent to the paid order', async () => {
+        await seedSchemaFailedManualReview('different.account');
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(0);
+    });
+
+    it('refuses malformed legacy handle decoration instead of normalizing arbitrary input', async () => {
+        await seedSchemaFailedManualReview('@@sample.account');
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
     });
 
     it('refuses every manual-review failure other than the recorded schema-stage error', async () => {
