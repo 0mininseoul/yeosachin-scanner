@@ -194,8 +194,31 @@ export function LandingSignatureCard() {
           {SUSPECTS.map((s, i) => {
             const reveal = reveals[i];
             const rowDone = reveal.complete;
+            const isHigh = s.grade === 'high_risk';
             return (
-              <motion.li key={s.rank} variants={rowV} className="px-4 py-4">
+              /* The high-risk row wears the alarm the report uses, but stays a
+                 row: the mockup is already a bracketed card, and nesting a
+                 second one inside would spend the brand's loudest device twice
+                 on one screen. A rail, a tint and the glow carry it instead. */
+              <motion.li
+                key={s.rank}
+                variants={rowV}
+                className={`relative px-4 py-4 ${
+                  isHigh ? 'alarm-glow border-l-2 border-l-blood bg-blood/[0.06]' : ''
+                }`}
+              >
+                {isHigh && rowDone && !reduce && (
+                  /* Held until this row's verdict has finished typing, so the
+                     sweep lands on a finding rather than racing it. */
+                  <span
+                    aria-hidden="true"
+                    className="alarm-sweep pointer-events-none absolute inset-x-0 top-0 h-12"
+                    style={{
+                      background:
+                        'linear-gradient(180deg, transparent, rgb(var(--glow-rgb) / 0.22), transparent)',
+                    }}
+                  />
+                )}
                 {/* meta */}
                 <div className="flex items-center gap-3">
                   <SuspectAvatar src={s.avatar} />
@@ -235,7 +258,11 @@ export function LandingSignatureCard() {
                     className="flex-1"
                     fill={reduce ? 'static' : started[i] ? 'run' : 'pending'}
                   />
-                  <span className="num shrink-0 text-[12px] font-bold text-fg">{ownerScorePercent(s.score)}%</span>
+                  <span className={`num shrink-0 font-bold ${
+                    isHigh ? 'text-[17px] font-extrabold text-blood-2' : 'text-[12px] text-fg'
+                  }`}>
+                    {ownerScorePercent(s.score)}%
+                  </span>
                 </div>
 
                 {/* streaming verdict */}
