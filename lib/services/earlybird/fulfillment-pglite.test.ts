@@ -67,6 +67,13 @@ const canonicalTargetSchemaFailureRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const scrubbedTargetSchemaFailureRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730200000_admit_scrubbed_target_in_schema_failure_recovery.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -214,6 +221,52 @@ async function claim() {
         )`,
         [ORDER, CLAIM]
     )).rows[0];
+}
+
+/**
+ * The exact token `analysis_v2_scrub_terminal_request_pii` writes over
+ * `analysis_requests.target_instagram_id` on terminal failure.
+ */
+function canonicalScrubToken(requestId: string): string {
+    return `retained.${requestId.replace(/-/g, '').slice(0, 20)}`;
+}
+
+/**
+ * Replays `analysis_v2_scrub_terminal_request_pii` verbatim. Production runs this on every
+ * terminal V2 failure, so it scrubs the consumed preflight as well as the request. Copying
+ * the statements rather than hand-writing the end state keeps this fixture from drifting
+ * away from the function whose output recovery actually has to survive.
+ */
+async function applyTerminalPiiScrub(requestId: string): Promise<void> {
+    await db.query(
+        `UPDATE public.analysis_preflights AS preflight
+         SET target_instagram_id = 'retained.'
+                 || pg_catalog.substr(
+                     pg_catalog.replace(preflight.id::TEXT, '-', ''), 1, 20
+                 ),
+             target_full_name = NULL,
+             target_bio = NULL,
+             target_profile_image_url = NULL,
+             exclusion_decision = 'skip',
+             excluded_instagram_id = NULL,
+             pii_scrubbed_at = COALESCE(preflight.pii_scrubbed_at, $2),
+             updated_at = $2
+         WHERE preflight.consumed_request_id = $1
+           AND preflight.status = 'consumed'`,
+        [requestId, new Date().toISOString()]
+    );
+    await db.query(
+        `UPDATE public.analysis_requests AS analysis_request
+         SET target_instagram_id = 'retained.'
+                 || pg_catalog.substr(
+                     pg_catalog.replace(analysis_request.id::TEXT, '-', ''), 1, 20
+                 ),
+             exclusion_decision_snapshot = 'skip',
+             excluded_instagram_id = NULL
+         WHERE analysis_request.id = $1
+           AND analysis_request.pipeline_version = 'v2'`,
+        [requestId]
+    );
 }
 
 async function seedSchemaFailedManualReview(requestTarget: string): Promise<void> {
@@ -445,6 +498,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(schemaFailedFulfillmentRecoveryMigration);
         await db.exec(approvedEntitlementRecoveryMigration);
         await db.exec(canonicalTargetSchemaFailureRecoveryMigration);
+        await db.exec(scrubbedTargetSchemaFailureRecoveryMigration);
     });
 
     beforeEach(async () => {
@@ -1175,6 +1229,182 @@ describe('operator-approved earlybird fulfillment migration', () => {
             'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
             [ORDER]
         )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+    });
+
+    it('recovers a schema-failed request whose target is its own canonical scrub token', async () => {
+        const token = canonicalScrubToken(FAILED_REQUEST);
+        expect(token).toBe('retained.523e4567e89b42d3a456');
+        // The pre-existing handle guard must keep admitting the 29-character token.
+        expect(token).toMatch(/^@?[a-z0-9._]{1,30}$/);
+        await seedSchemaFailedManualReview(token);
+
+        const recovered = await asService<{
+            order_id: string;
+            fulfillment_status: string;
+            preflight_id: string;
+        }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+        expect(recovered.rows).toEqual([expect.objectContaining({
+            order_id: ORDER,
+            fulfillment_status: 'admission_pending',
+        })]);
+        expect((await db.query<{
+            failed_request_id: string;
+            recovery_preflight_id: string;
+        }>(
+            `SELECT failed_request_id, recovery_preflight_id
+             FROM public.earlybird_schema_failure_recoveries WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            failed_request_id: FAILED_REQUEST,
+            recovery_preflight_id: recovered.rows[0].preflight_id,
+        });
+        // The recovery preflight is rebuilt from the paid order, never from the token.
+        expect((await db.query<{ target_instagram_id: string }>(
+            'SELECT target_instagram_id FROM public.analysis_preflights WHERE id = $1',
+            [recovered.rows[0].preflight_id]
+        )).rows[0].target_instagram_id).toBe('sample.account');
+    });
+
+    it('recovers the production state where the consumed preflight is scrubbed too', async () => {
+        // Both stuck production orders sit in exactly this state: the terminal-failure scrub
+        // rewrote the request AND its consumed preflight. Nothing may be read back from the
+        // scrubbed preflight that the paid order is the authority for.
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET exclusion_decision = 'exclude', excluded_instagram_id = 'ex.partner'
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await seedSchemaFailedManualReview('sample.account');
+        await applyTerminalPiiScrub(FAILED_REQUEST);
+
+        // Prove the fixture really is the scrubbed shape before recovery runs.
+        expect((await db.query<{
+            target_instagram_id: string;
+            status: string;
+            exclusion_decision: string | null;
+            excluded_instagram_id: string | null;
+            scrubbed: boolean;
+        }>(
+            `SELECT target_instagram_id, status, exclusion_decision, excluded_instagram_id,
+                    (pii_scrubbed_at IS NOT NULL) AS scrubbed
+             FROM public.analysis_preflights WHERE id = $1`,
+            [PREFLIGHT]
+        )).rows[0]).toEqual({
+            target_instagram_id: canonicalScrubToken(PREFLIGHT),
+            status: 'consumed',
+            exclusion_decision: 'skip',
+            excluded_instagram_id: null,
+            scrubbed: true,
+        });
+        expect((await db.query<{ target_instagram_id: string }>(
+            'SELECT target_instagram_id FROM public.analysis_requests WHERE id = $1',
+            [FAILED_REQUEST]
+        )).rows[0].target_instagram_id).toBe(canonicalScrubToken(FAILED_REQUEST));
+
+        const recovered = await asService<{
+            order_id: string;
+            fulfillment_status: string;
+            preflight_id: string;
+        }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+        expect(recovered.rows).toEqual([expect.objectContaining({
+            order_id: ORDER,
+            fulfillment_status: 'admission_pending',
+        })]);
+
+        // The replacement preflight is rebuilt from the ORDER, never inherited from the
+        // scrubbed predecessor: real handle, order-owned exclusion, and no scrub stamp.
+        expect((await db.query<{
+            target_instagram_id: string;
+            exclusion_decision: string | null;
+            excluded_instagram_id: string | null;
+            status: string;
+            access_mode: string;
+            user_id: string;
+            target_followers_count: number;
+            target_following_count: number;
+            scrubbed: boolean;
+        }>(
+            `SELECT target_instagram_id, exclusion_decision, excluded_instagram_id, status,
+                    access_mode, user_id, target_followers_count, target_following_count,
+                    (pii_scrubbed_at IS NOT NULL) AS scrubbed
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recovered.rows[0].preflight_id]
+        )).rows[0]).toEqual({
+            target_instagram_id: 'sample.account',
+            exclusion_decision: 'exclude',
+            excluded_instagram_id: 'ex.partner',
+            status: 'ready',
+            access_mode: 'production',
+            user_id: USER,
+            target_followers_count: 120,
+            target_following_count: 140,
+            scrubbed: false,
+        });
+
+        // The scrubbed predecessor is left exactly as the scrub left it.
+        expect((await db.query<{
+            target_instagram_id: string;
+            status: string;
+            excluded_instagram_id: string | null;
+        }>(
+            `SELECT target_instagram_id, status, excluded_instagram_id
+             FROM public.analysis_preflights WHERE id = $1`,
+            [PREFLIGHT]
+        )).rows[0]).toEqual({
+            target_instagram_id: canonicalScrubToken(PREFLIGHT),
+            status: 'consumed',
+            excluded_instagram_id: null,
+        });
+    });
+
+    it('refuses a scrub token minted from any request other than the failed one', async () => {
+        await seedSchemaFailedManualReview(canonicalScrubToken(ADMISSION_TOKEN));
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(0);
+    });
+
+    it.each([
+        ['truncated', canonicalScrubToken(FAILED_REQUEST).slice(0, -1)],
+        ['extended', `${canonicalScrubToken(FAILED_REQUEST)}4`],
+        ['decorated', `@${canonicalScrubToken(FAILED_REQUEST)}`],
+    ])('refuses the %s imitation of the failed request scrub token', async (_, imitation) => {
+        await seedSchemaFailedManualReview(imitation);
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(0);
+    });
+
+    it('still refuses a genuinely different target once scrub tokens are admitted', async () => {
+        await seedSchemaFailedManualReview('another.account');
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_INELIGIBLE/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(0);
     });
 
     it('refuses every manual-review failure other than the recorded schema-stage error', async () => {
