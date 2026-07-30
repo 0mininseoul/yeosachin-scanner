@@ -31,6 +31,11 @@ export ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES="${PREFLIGHT_TASKS_MAX_CONCURREN
 export ANALYSIS_TASKS_IAM_SCOPE="queue"
 export ANALYSIS_TASKS_EXACT_IAM="true"
 export ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL"
-export ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS="none"
+# The worker runtime enqueues onto this queue itself: a paid order's fresh-admission
+# dispatch is created from inside the worker, not by the Vercel enqueuer. Declaring
+# "none" here contradicted that, and --reconcile-iam faithfully applied the wrong
+# declaration -- stripping the runtime's enqueuer binding and stranding every paid
+# order at admission until the binding was restored by hand.
+export ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS="enqueue-view"
 
 exec bash "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"

@@ -1280,7 +1280,11 @@ case "$command_line" in
         printf '%s\n' '{"version":1,"bindings":[{"role":"roles/cloudtasks.enqueuer","members":["serviceAccount:runtime-user@test-project.iam.gserviceaccount.com","serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]},{"role":"roles/cloudtasks.viewer","members":["serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]}]}'
       fi
     elif [[ "$command_line" == *" analysis-preflight "* ]]; then
-      printf '%s\n' '{"version":1,"bindings":[{"role":"roles/cloudtasks.enqueuer","members":["serviceAccount:runtime-user@test-project.iam.gserviceaccount.com"]}]}'
+      # The worker runtime enqueues its own fresh-admission dispatches here, so this
+      # queue carries the same runtime grants the V2 pipeline queue does. This fixture
+      # used to omit them, which let the "none" declaration look correct in tests while
+      # reconciliation stripped the binding in production.
+      printf '%s\n' '{"version":1,"bindings":[{"role":"roles/cloudtasks.enqueuer","members":["serviceAccount:runtime-user@test-project.iam.gserviceaccount.com","serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]},{"role":"roles/cloudtasks.viewer","members":["serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]}]}'
     elif [[ "$command_line" == *" analysis-pipeline "* ]]; then
       printf '%s\n' '{"version":1,"bindings":[{"role":"roles/cloudtasks.enqueuer","members":["serviceAccount:legacy-runtime@test-project.iam.gserviceaccount.com"]}]}'
     else
