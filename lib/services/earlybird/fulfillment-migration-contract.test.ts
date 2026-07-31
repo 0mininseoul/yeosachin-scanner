@@ -285,5 +285,29 @@ describe('earlybird fulfillment outbox migration contract', () => {
         expect(scrubbedFreshnessRecoveryMigration).not.toMatch(
             /active_request[\s\S]{0,200}FOR UPDATE/
         );
+        const userHint = scrubbedFreshnessRecoveryMigration.indexOf(
+            'SELECT earlybird_order.user_id INTO v_user_id_hint'
+        );
+        const userLock = scrubbedFreshnessRecoveryMigration.indexOf(
+            'FROM public.users AS recovery_user'
+        );
+        const orderLock = scrubbedFreshnessRecoveryMigration.indexOf(
+            'SELECT earlybird_order.* INTO v_order'
+        );
+        const fulfillmentLock = scrubbedFreshnessRecoveryMigration.indexOf(
+            'SELECT fulfillment.* INTO v_fulfillment'
+        );
+        const preflightLock = scrubbedFreshnessRecoveryMigration.indexOf(
+            'SELECT preflight.* INTO v_old'
+        );
+        expect(userHint).toBeGreaterThanOrEqual(0);
+        expect(userLock).toBeGreaterThan(userHint);
+        expect(orderLock).toBeGreaterThan(userLock);
+        expect(fulfillmentLock).toBeGreaterThan(orderLock);
+        expect(preflightLock).toBeGreaterThan(fulfillmentLock);
+        expect(scrubbedFreshnessRecoveryMigration).toContain('FOR KEY SHARE');
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_order.user_id IS DISTINCT FROM v_user_id_hint'
+        );
     });
 });

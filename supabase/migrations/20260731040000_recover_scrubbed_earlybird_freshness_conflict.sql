@@ -238,12 +238,32 @@ DECLARE
     v_order_cards JSONB := '{}'::JSONB;
     v_order_capacity_rank INTEGER;
     v_order_required_rank INTEGER;
+    v_user_id_hint UUID;
 BEGIN
     IF p_order_id IS NULL OR p_expected_manual_review_at IS NULL THEN
         RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_INVALID', ERRCODE = 'P0001';
     END IF;
 
-    -- Global order is identical to fulfillment runtime and rebind:
+    -- create_or_replay holds users FOR UPDATE before touching preflights. Take a
+    -- compatible user FK lock before any order/preflight lock so its insert can
+    -- never form user -> preflight / preflight -> user. The first order read is
+    -- only a hint; the locked order must prove that the immutable FK still
+    -- names the same user.
+    SELECT earlybird_order.user_id INTO v_user_id_hint
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.id = p_order_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_NOT_FOUND', ERRCODE = 'P0001';
+    END IF;
+    PERFORM 1
+    FROM public.users AS recovery_user
+    WHERE recovery_user.id = v_user_id_hint
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+
+    -- After the user lock, preserve the fulfillment/rebind order:
     -- order -> fulfillment -> preflight. Active requests remain an unlocked read.
     SELECT earlybird_order.* INTO v_order
     FROM public.earlybird_orders AS earlybird_order
@@ -251,6 +271,9 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_NOT_FOUND', ERRCODE = 'P0001';
+    END IF;
+    IF v_order.user_id IS DISTINCT FROM v_user_id_hint THEN
+        RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT', ERRCODE = 'P0001';
     END IF;
     SELECT fulfillment.* INTO v_fulfillment
     FROM public.earlybird_fulfillments AS fulfillment

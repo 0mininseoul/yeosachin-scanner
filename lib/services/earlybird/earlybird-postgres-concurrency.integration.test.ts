@@ -459,6 +459,104 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
         }
     );
 
+    it('serializes user-first create and recovery prefixes without a FK deadlock', async () => {
+        const seed = await seedNativeCheckout(
+            pool,
+            300,
+            'native-user-preflight-order@example.com'
+        );
+        const order = await pool.query<{ id: string }>(
+            `INSERT INTO public.earlybird_orders(
+                user_id, preflight_id, target_instagram_id,
+                target_followers_count, target_following_count,
+                exclusion_decision, plan_id, pricing_version,
+                expected_amount_krw, expected_groble_product_id,
+                disclosure_version, disclosure_text, disclosure_accepted_at
+             ) VALUES (
+                $1, $2, 'native_lock_300', 300, 100, 'skip', 'basic',
+                $3, 14900, 'basic_product-01', 'earlybird-48h-v1',
+                'lock-order-only', pg_catalog.clock_timestamp()
+             )
+             RETURNING id`,
+            [seed.userId, seed.preflightId, LEGACY_PRICING_VERSION]
+        );
+        const orderId = order.rows[0].id;
+        const createClient = await pool.connect();
+        const recoveryClient = await pool.connect();
+        const recoveryApplication = 'earlybird-user-first-scrubbed-recovery';
+        try {
+            await createClient.query('BEGIN');
+            await createClient.query("SET LOCAL statement_timeout = '10s'");
+            await createClient.query(
+                'SELECT 1 FROM public.users WHERE id = $1 FOR UPDATE',
+                [seed.userId]
+            );
+
+            await recoveryClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [recoveryApplication]
+            );
+            const recoveryPromise = (async () => {
+                await recoveryClient.query('BEGIN');
+                await recoveryClient.query("SET LOCAL statement_timeout = '10s'");
+                const hint = await recoveryClient.query<{ user_id: string }>(
+                    `SELECT user_id
+                     FROM public.earlybird_orders
+                     WHERE id = $1`,
+                    [orderId]
+                );
+                await recoveryClient.query(
+                    'SELECT 1 FROM public.users WHERE id = $1 FOR KEY SHARE',
+                    [hint.rows[0].user_id]
+                );
+                const lockedOrder = await recoveryClient.query<{
+                    user_id: string;
+                    preflight_id: string;
+                }>(
+                    `SELECT user_id, preflight_id
+                     FROM public.earlybird_orders
+                     WHERE id = $1
+                     FOR UPDATE`,
+                    [orderId]
+                );
+                if (lockedOrder.rows[0].user_id !== hint.rows[0].user_id) {
+                    throw new Error('locked order user changed after the hint');
+                }
+                await recoveryClient.query(
+                    `SELECT 1
+                     FROM public.analysis_preflights
+                     WHERE id = $1
+                     FOR UPDATE`,
+                    [lockedOrder.rows[0].preflight_id]
+                );
+                await recoveryClient.query('COMMIT');
+                return lockedOrder.rows[0];
+            })();
+
+            expect(await waitForLockWait(pool, recoveryApplication)).toBe(true);
+            await createClient.query(
+                `SELECT 1
+                 FROM public.analysis_preflights
+                 WHERE id = $1
+                 FOR UPDATE`,
+                [seed.preflightId]
+            );
+            await createClient.query('COMMIT');
+
+            await expect(recoveryPromise).resolves.toMatchObject({
+                user_id: seed.userId,
+                preflight_id: seed.preflightId,
+            });
+        } catch (error) {
+            await createClient.query('ROLLBACK').catch(() => undefined);
+            await recoveryClient.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            createClient.release();
+            recoveryClient.release();
+        }
+    }, 15_000);
+
     it('waits for checkout user lock and observes the newly committed order', async () => {
         const index = 301;
         const userId = uuid('1', index);
