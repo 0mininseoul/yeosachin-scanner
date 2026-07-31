@@ -109,8 +109,20 @@ describe('automatic earlybird fulfillment migration contract', () => {
         expect(admission).toContain(
             "v_admitted.fulfillment_status = 'admission_pending'"
         );
-        expect(admission).not.toContain('FOR UPDATE');
-        expect(admission).not.toContain('SKIP LOCKED');
+        const candidateCursor = admission.slice(
+            admission.indexOf('FOR v_candidate IN'),
+            admission.indexOf('LOOP', admission.indexOf('FOR v_candidate IN'))
+        );
+        expect(candidateCursor).not.toContain('FOR UPDATE');
+        expect(candidateCursor).not.toContain('SKIP LOCKED');
+        expect(admission).toContain('FROM public.users AS admission_user');
+        expect(admission).toContain('FOR KEY SHARE');
+        expect(admission).toContain(
+            'v_locked_user_id IS DISTINCT FROM v_user_id_hint'
+        );
+        expect(admission).toContain(
+            "v_locked_fulfillment_status <> 'awaiting_operator'"
+        );
         expect(lockOrderMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.auto_admit_eligible_earlybird_fulfillments\(INTEGER\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
         );

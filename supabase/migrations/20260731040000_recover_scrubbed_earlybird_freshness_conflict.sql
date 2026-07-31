@@ -467,6 +467,9 @@ AS $$
 DECLARE
     v_candidate RECORD;
     v_admitted RECORD;
+    v_user_id_hint UUID;
+    v_locked_user_id UUID;
+    v_locked_fulfillment_status TEXT;
 BEGIN
     IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
         RAISE EXCEPTION USING
@@ -512,6 +515,39 @@ BEGIN
         ORDER BY fulfillment.created_at, fulfillment.order_id
         LIMIT p_limit
     LOOP
+        -- Claim only the state transition, in the same order as shared rebind.
+        -- The candidate snapshot may be duplicated across sweep transactions;
+        -- this locked recheck ensures only the awaiting_operator winner calls
+        -- admit and therefore only that winner can return an admitted row.
+        SELECT earlybird_order.user_id INTO v_user_id_hint
+        FROM public.earlybird_orders AS earlybird_order
+        WHERE earlybird_order.id = v_candidate.order_id;
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+        PERFORM 1
+        FROM public.users AS admission_user
+        WHERE admission_user.id = v_user_id_hint
+        FOR KEY SHARE;
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+        SELECT earlybird_order.user_id INTO v_locked_user_id
+        FROM public.earlybird_orders AS earlybird_order
+        WHERE earlybird_order.id = v_candidate.order_id
+        FOR UPDATE;
+        IF NOT FOUND OR v_locked_user_id IS DISTINCT FROM v_user_id_hint THEN
+            CONTINUE;
+        END IF;
+        SELECT fulfillment.status INTO v_locked_fulfillment_status
+        FROM public.earlybird_fulfillments AS fulfillment
+        WHERE fulfillment.order_id = v_candidate.order_id
+        FOR UPDATE;
+        IF NOT FOUND
+           OR v_locked_fulfillment_status <> 'awaiting_operator' THEN
+            CONTINUE;
+        END IF;
+
         BEGIN
             SELECT * INTO v_admitted
             FROM public.admit_earlybird_fulfillment(v_candidate.order_id);

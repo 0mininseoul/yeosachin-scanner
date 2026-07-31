@@ -39,14 +39,35 @@ const scrubbedRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const fulfillmentOutboxMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260724123300_add_earlybird_fulfillment_outbox.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const rebindIntroductionMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260730150000_rebind_expired_paid_earlybird_preflights.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
+function functionSql(source: string, marker: string): string {
+    const start = source.indexOf(marker);
+    const name = marker.slice(marker.indexOf('public.') + 7, marker.indexOf('('));
+    if (start < 0) throw new Error(`missing ${name} replacement`);
+    const end = source.indexOf('\n$$;', start);
+    if (end < 0) throw new Error(`unterminated ${name} replacement`);
+    return source.slice(start, end + 4);
+}
 
 function replacementFunctionSql(name: string): string {
-    const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
-    const start = scrubbedRecoveryMigration.indexOf(marker);
-    if (start < 0) throw new Error(`missing ${name} replacement`);
-    const end = scrubbedRecoveryMigration.indexOf('\n$$;', start);
-    if (end < 0) throw new Error(`unterminated ${name} replacement`);
-    return scrubbedRecoveryMigration.slice(start, end + 4);
+    return functionSql(
+        scrubbedRecoveryMigration,
+        `CREATE OR REPLACE FUNCTION public.${name}(`
+    );
 }
 
 const createPreflightSql = replacementFunctionSql(
@@ -57,6 +78,14 @@ const rebindPreflightSql = replacementFunctionSql(
 );
 const autoAdmitSql = replacementFunctionSql(
     'auto_admit_eligible_earlybird_fulfillments'
+);
+const productionAdmitCoreSql = functionSql(
+    fulfillmentOutboxMigration,
+    'CREATE FUNCTION public.admit_earlybird_fulfillment('
+);
+const productionAdmitWrapperSql = functionSql(
+    rebindIntroductionMigration,
+    'CREATE FUNCTION public.admit_earlybird_fulfillment(p_order_id UUID)'
 );
 
 const bootstrap = `
@@ -394,7 +423,17 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
             CREATE TABLE public.earlybird_fulfillments(
                 order_id UUID PRIMARY KEY REFERENCES public.earlybird_orders(id),
                 status TEXT NOT NULL,
+                request_id UUID,
+                operator_admitted_at TIMESTAMP WITH TIME ZONE,
+                lease_token UUID,
+                lease_expires_at TIMESTAMP WITH TIME ZONE,
+                next_attempt_at TIMESTAMP WITH TIME ZONE,
+                last_error_code TEXT,
+                last_error_at TIMESTAMP WITH TIME ZONE,
+                manual_review_at TIMESTAMP WITH TIME ZONE,
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    DEFAULT pg_catalog.clock_timestamp(),
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL
                     DEFAULT pg_catalog.clock_timestamp()
             );
             CREATE FUNCTION public.analysis_v2_valid_launch_snapshot(JSONB)
@@ -410,42 +449,12 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
         `);
         await pool.query(createPreflightSql);
         await pool.query(rebindPreflightSql);
+        await pool.query(productionAdmitCoreSql);
         await pool.query(`
-            CREATE FUNCTION public.admit_earlybird_fulfillment(p_order_id UUID)
-            RETURNS TABLE(
-                order_id UUID,
-                fulfillment_status TEXT,
-                preflight_id UUID,
-                user_id UUID,
-                plan_id TEXT,
-                request_id UUID
-            )
-            LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-            DECLARE
-                v_rebound UUID;
-                v_order public.earlybird_orders%ROWTYPE;
-            BEGIN
-                v_rebound := public.rebind_expired_paid_earlybird_preflight(
-                    p_order_id
-                );
-                SELECT earlybird_order.* INTO v_order
-                FROM public.earlybird_orders AS earlybird_order
-                WHERE earlybird_order.id = p_order_id
-                FOR UPDATE;
-                UPDATE public.earlybird_fulfillments AS fulfillment
-                SET status = 'admission_pending'
-                WHERE fulfillment.order_id = p_order_id
-                  AND fulfillment.status = 'awaiting_operator';
-                IF NOT FOUND THEN
-                    RAISE EXCEPTION USING
-                        MESSAGE = 'EARLYBIRD_FULFILLMENT_STATE_INVALID',
-                        ERRCODE = 'P0001';
-                END IF;
-                RETURN QUERY SELECT p_order_id, 'admission_pending'::TEXT,
-                    v_rebound, v_order.user_id, v_order.plan_id, NULL::UUID;
-            END;
-            $$;
+            ALTER FUNCTION public.admit_earlybird_fulfillment(UUID)
+                RENAME TO admit_earlybird_fulfillment_core_20260730140000
         `);
+        await pool.query(productionAdmitWrapperSql);
         await pool.query(autoAdmitSql);
     }, 30_000);
 
