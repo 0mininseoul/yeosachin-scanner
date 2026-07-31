@@ -151,6 +151,13 @@ const adoptionPolicyFailureRearmMigration = readFileSync(
     ),
     'utf8'
 );
+const adoptionPolicyRearmGenerationMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731110000_advance_zero_spend_rearm_preflight_generation.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -1096,6 +1103,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(pendingDispatchProviderRunAdoptionMigration);
         await db.exec(providerRunResolverShapeMigration);
         await db.exec(adoptionPolicyFailureRearmMigration);
+        await db.exec(adoptionPolicyRearmGenerationMigration);
     });
 
     beforeEach(async () => {
@@ -2688,7 +2696,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         )).rejects.toThrow('ANALYSIS_V2_PROVIDER_RUN_ADOPTION_FENCE_MISMATCH');
     });
 
-    it('rearms the exact zero-spend r1 failure to r2 and cross-adopts without a new run', async () => {
+    it('rearms request r1 on consumed preflight r4 to r5 and cross-adopts without a new run', async () => {
         const requestKey = await seedRecoveredRequestCollision();
         const jobKey = 'track:relationships:collect';
         const actorId =
@@ -2732,6 +2740,13 @@ describe('operator-approved earlybird fulfillment migration', () => {
              )`,
             [ORDER, CLAIM, firstLease.lease_fence]
         )).rows[0];
+        const preflightFamilyKey =
+            `earlybird.fulfillment.${ORDER.replace(/-/g, '')}`;
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2 WHERE id = $1`,
+            [PREFLIGHT, `${preflightFamilyKey}.r4`]
+        );
         await db.query(
             `UPDATE public.analysis_pipeline_jobs
              SET status = 'completed', attempt_count = 1
@@ -2779,6 +2794,60 @@ describe('operator-approved earlybird fulfillment migration', () => {
              WHERE order_id = $3`,
             [r1.request_id, manualReviewAt, ORDER]
         );
+        for (const invalidKey of [
+            `${preflightFamilyKey}.r9`,
+            preflightFamilyKey,
+            `${preflightFamilyKey}.r10`,
+        ]) {
+            await db.query(
+                `UPDATE public.analysis_preflights
+                 SET idempotency_key = $2 WHERE id = $1`,
+                [PREFLIGHT, invalidKey]
+            );
+            await expect(asService(
+                `SELECT * FROM public.rearm_earlybird_zero_spend_adoption_policy_failure(
+                    $1, $2, $3::TIMESTAMPTZ
+                 )`,
+                [ORDER, r1.request_id, manualReviewAt]
+            )).rejects.toThrow(
+                'EARLYBIRD_ADOPTION_POLICY_FAILURE_REARM_INELIGIBLE'
+            );
+            expect((await db.query<{ count: number }>(
+                `SELECT pg_catalog.count(*)::INTEGER AS count
+                 FROM public.earlybird_adoption_policy_failure_rearms`
+            )).rows[0].count).toBe(0);
+        }
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2 WHERE id = $1`,
+            [PREFLIGHT, `${preflightFamilyKey}.r4`]
+        );
+        const recoveryKey = (await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_preflights WHERE id = $1`,
+            [RECOVERY_PREFLIGHT]
+        )).rows[0].idempotency_key;
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2 WHERE id = $1`,
+            [RECOVERY_PREFLIGHT, `${preflightFamilyKey}.r5`]
+        );
+        await expect(asService(
+            `SELECT * FROM public.rearm_earlybird_zero_spend_adoption_policy_failure(
+                $1, $2, $3::TIMESTAMPTZ
+             )`,
+            [ORDER, r1.request_id, manualReviewAt]
+        )).rejects.toThrow(
+            'EARLYBIRD_ADOPTION_POLICY_FAILURE_REARM_INELIGIBLE'
+        );
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_adoption_policy_failure_rearms`
+        )).rows[0].count).toBe(0);
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2 WHERE id = $1`,
+            [RECOVERY_PREFLIGHT, recoveryKey]
+        );
         const rearmed = (await asService<{
             preflight_id: string;
             fulfillment_status: string;
@@ -2789,6 +2858,10 @@ describe('operator-approved earlybird fulfillment migration', () => {
             [ORDER, r1.request_id, manualReviewAt]
         )).rows[0];
         expect(rearmed.fulfillment_status).toBe('admission_pending');
+        expect((await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_preflights WHERE id = $1`,
+            [rearmed.preflight_id]
+        )).rows[0].idempotency_key).toBe(`${preflightFamilyKey}.r5`);
         expect((await asService(
             `SELECT * FROM public.rearm_earlybird_zero_spend_adoption_policy_failure(
                 $1, $2, $3::TIMESTAMPTZ
