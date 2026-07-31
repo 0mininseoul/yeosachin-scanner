@@ -1,6 +1,6 @@
 # Progress Candidate Media Design
 
-**Date:** 2026-08-01  
+**Date:** 2026-08-01
 **Status:** Design approved; implementation and production rollout pending
 
 ## Goal
