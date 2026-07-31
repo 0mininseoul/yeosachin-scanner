@@ -539,6 +539,7 @@ export const progressSnapshotV1Schema = z.object({
             .regex(/\*/, 'Active profile username must be masked.'),
         imageUrl: boundedImageUrlSchema,
         feedImageUrls: progressFeedImageUrlsSchema.optional(),
+        candidateKey: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     }).strict().nullable(),
     etaRange: z.object({
         lowSeconds: z.number().int().nonnegative().max(3_600),

@@ -15,6 +15,7 @@ const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
 const claimToken = '323e4567-e89b-42d3-a456-426614174000';
 const inputHash = 'a'.repeat(64);
+const candidateKey = 'b'.repeat(64);
 
 function input(
     overrides: Partial<AnalysisV2ProgressCheckpointInput> = {}
@@ -125,6 +126,8 @@ function client(data: unknown, error: { code?: string; message?: string } | null
 describe('V2 progress persistence adapter', () => {
     it('masks raw usernames before they can enter a public snapshot', () => {
         expect(maskAnalysisV2ProgressUsername('Candidate.Name')).toBe('c************e');
+        expect(maskAnalysisV2ProgressUsername('  @CANDIDATE.NAME  '))
+            .toBe('c************e');
         expect(maskAnalysisV2ProgressUsername('ab')).toBe('a*');
         expect(maskAnalysisV2ProgressUsername('x')).toBe('*');
         expect(() => maskAnalysisV2ProgressUsername('bad handle')).toThrow('invalid username');
@@ -172,6 +175,7 @@ describe('V2 progress persistence adapter', () => {
             startedAt: '2026-07-14T02:00:00.000Z',
             totalCount: 30,
             maskedUsername: 'c************e',
+            candidateKey,
             imageUrl: '/api/image-proxy?token=profile',
             feedImageUrls: [
                 '/api/image-proxy?token=feed-1',
@@ -189,6 +193,7 @@ describe('V2 progress persistence adapter', () => {
                 p_started_at: '2026-07-14T02:00:00.000Z',
                 p_total_count: 30,
                 p_masked_username: 'c************e',
+                p_candidate_key: candidateKey,
                 p_image_url: '/api/image-proxy?token=profile',
                 p_feed_image_urls: [
                     '/api/image-proxy?token=feed-1',
@@ -211,10 +216,15 @@ describe('V2 progress persistence adapter', () => {
             startedAt: '2026-07-14T02:00:00.000Z',
             totalCount: 30,
             maskedUsername: 'c************e',
+            candidateKey,
             imageUrl: null,
             feedImageUrls: [] as string[],
         };
 
+        await expect(store.heartbeatActiveProfile!({
+            ...heartbeat,
+            candidateKey: 'B'.repeat(64),
+        })).rejects.toThrow();
         await expect(store.heartbeatActiveProfile!({
             ...heartbeat,
             feedImageUrls: ['https://raw.example/feed.jpg'],

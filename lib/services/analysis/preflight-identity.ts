@@ -1,9 +1,12 @@
 import { createHmac } from 'node:crypto';
+import { canonicalizeAnalysisV2ProgressUsername } from './progress-username';
 
 export const PREFLIGHT_IDENTITY_HMAC_SECRET_ENV =
     'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET';
 
 const HMAC_DOMAIN = 'yeosachin:analysis-v2:preflight-target:v1\0';
+const PROGRESS_CANDIDATE_HMAC_DOMAIN =
+    'yeosachin:analysis-v2:progress-candidate:v1\0';
 const MINIMUM_HMAC_KEY_BYTES = 32;
 const BASE64_SECRET_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
@@ -54,6 +57,29 @@ export function preflightTargetInputHash(
     const canonicalUsername = username.trim().toLowerCase();
     return createHmac('sha256', key)
         .update(HMAC_DOMAIN, 'utf8')
+        .update(canonicalUsername, 'utf8')
+        .digest('hex');
+}
+
+/** Stable opaque identity for correlating one candidate across progress heartbeats. */
+export function analysisV2ProgressCandidateKey(
+    requestId: string,
+    username: string,
+    env: Record<string, string | undefined> = process.env
+): string {
+    const value = env[PREFLIGHT_IDENTITY_HMAC_SECRET_ENV];
+    if (!value) {
+        throw new Error(
+            'PREFLIGHT_TASKS_CONFIG_ERROR: preflight identity HMAC secret is required.'
+        );
+    }
+    const key = decodeSecret(value);
+    const canonicalRequestId = requestId.trim().toLowerCase();
+    const canonicalUsername = canonicalizeAnalysisV2ProgressUsername(username);
+    return createHmac('sha256', key)
+        .update(PROGRESS_CANDIDATE_HMAC_DOMAIN, 'utf8')
+        .update(canonicalRequestId, 'utf8')
+        .update('\0', 'utf8')
         .update(canonicalUsername, 'utf8')
         .digest('hex');
 }

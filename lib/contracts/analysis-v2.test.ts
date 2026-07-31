@@ -399,6 +399,29 @@ describe('analysis V2 public contracts', () => {
             },
         };
         expect(progressSnapshotV1Schema.safeParse(activeProfileWithMedia).success).toBe(true);
+        const activeProfileWithCandidateKey = {
+            ...activeProfileWithMedia,
+            activeProfile: {
+                ...activeProfileWithMedia.activeProfile,
+                candidateKey: 'b'.repeat(64),
+            },
+        };
+        expect(progressSnapshotV1Schema.safeParse(activeProfileWithCandidateKey).success)
+            .toBe(true);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithCandidateKey,
+            activeProfile: {
+                ...activeProfileWithCandidateKey.activeProfile,
+                candidateKey: 'B'.repeat(64),
+            },
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithCandidateKey,
+            activeProfile: {
+                ...activeProfileWithCandidateKey.activeProfile,
+                candidateKey: 'b'.repeat(63),
+            },
+        }).success).toBe(false);
         expect(progressSnapshotV1Schema.safeParse({
             ...activeProfileWithMedia,
             activeProfile: {

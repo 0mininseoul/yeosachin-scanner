@@ -16,6 +16,7 @@ import {
 import type { AnalysisV2StageId } from './v2-worker';
 import type { AnalysisV2ProgressCandidateMediaPreview } from './progress-candidate-media';
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
+import { analysisV2ProgressCandidateKey } from './preflight-identity';
 
 const TARGET_LATENCY_SECONDS = 300;
 
@@ -43,6 +44,7 @@ export interface AnalysisV2ProgressReporter {
 }
 
 type ImageProxySigner = (rawUrl: string | undefined) => string | undefined;
+type CandidateKeyDeriver = (requestId: string, rawUsername: string) => string;
 
 const EMPTY_HEARTBEAT_MEDIA = Object.freeze({
     imageUrl: null as string | null,
@@ -166,9 +168,12 @@ export function createAnalysisV2ProgressReporter(input: {
     store?: AnalysisV2ProgressStore;
     reloadState?: (requestId: string) => Promise<AnalysisV2DagState | null>;
     imageProxySigner?: ImageProxySigner;
+    candidateKeyDeriver?: CandidateKeyDeriver;
 } = {}): AnalysisV2ProgressReporter {
     const store = input.store ?? analysisV2ProgressStore;
     const imageProxySigner = input.imageProxySigner ?? createImageProxyPath;
+    const candidateKeyDeriver = input.candidateKeyDeriver
+        ?? analysisV2ProgressCandidateKey;
 
     async function checkpointWithConflictRecovery(
         report: AnalysisV2ProgressReportInput,
@@ -202,6 +207,16 @@ export function createAnalysisV2ProgressReporter(input: {
             } catch {
                 media = EMPTY_HEARTBEAT_MEDIA;
             }
+            let candidateKey: string | undefined;
+            try {
+                const derived = candidateKeyDeriver(claim.requestId, username);
+                if (!/^[0-9a-f]{64}$/.test(derived)) {
+                    throw new Error('Invalid progress candidate key.');
+                }
+                candidateKey = derived;
+            } catch {
+                candidateKey = undefined;
+            }
             return store.heartbeatActiveProfile({
                 requestId: claim.requestId,
                 jobKey: claim.jobKey,
@@ -212,6 +227,7 @@ export function createAnalysisV2ProgressReporter(input: {
                 maskedUsername: maskAnalysisV2ProgressUsername(username),
                 imageUrl: media.imageUrl,
                 feedImageUrls: media.feedImageUrls,
+                ...(candidateKey ? { candidateKey } : {}),
             });
         },
 
