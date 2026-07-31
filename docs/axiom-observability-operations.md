@@ -61,14 +61,15 @@ Vercel 런타임에서는 같은 allowlist로 정제된 이벤트를 구조화 c
 
 Vercel lifecycle 이벤트는 Axiom에 보관한다. Cloud Run preflight worker는 Axiom transport가 없을 때 allowlist를 통과한 JSON 한 줄을 stdout으로 기록하며, Cloud Logging이 이를 구조화 로그로 수집한다. 따라서 worker의 terminal 이벤트는 Axiom 전송이 없는 배포에서는 Cloud Logging에서 조사한다.
 
-Cloud Logging Logs Explorer에서 worker terminal 이벤트만 안전하게 확인하려면 다음 필터를 사용하고, 결과는 `_time`·`jsonPayload.event`·`jsonPayload.disposition`·`jsonPayload.error_code`·`jsonPayload.attempt`만으로 판독한다. 전체 payload를 내보내거나 내부 식별자를 티켓·채팅에 복사하지 않는다.
+Cloud Logging Logs Explorer에서 worker terminal 이벤트만 안전하게 확인하려면 다음 필터를 사용하고, 결과는 `timestamp`·`jsonPayload.event`·`jsonPayload.disposition`·`jsonPayload.error_code`·`jsonPayload.attempt`만으로 판독한다. 전체 payload를 내보내거나 내부 식별자를 티켓·채팅에 복사하지 않는다.
 
 ```text
 resource.type="cloud_run_revision"
+resource.labels.service_name="analysis-worker"
 jsonPayload.event=~"^preflight\.(completed|failed)$"
 ```
 
-Cloud Tasks 재시도로 terminal 이벤트는 attempt 단위 at-least-once로 전달될 수 있다. 집계·장애 조사에서는 `preflight_id + event + attempt`를 dedupe 키로 사용하고, 같은 키의 반복 로그를 별도 terminal 전환으로 세지 않는다.
+Cloud Tasks 재시도로 terminal 이벤트는 attempt 단위 at-least-once로 전달될 수 있다. `preflight_id`·`event`·`attempt`가 모두 있을 때만 `preflight_id + event + attempt`를 dedupe 키로 사용한다. 완료 이벤트처럼 `attempt`가 없거나 pre-parse/config/auth reject처럼 correlation field가 없는 경우에는 `event`와 사용 가능한 correlation field 및 제한된 시간 창으로만 조사하며, 이 로그는 영속 exactly-once를 보장하지 않는다.
 
 ## 4. Preview 대표 검증
 
