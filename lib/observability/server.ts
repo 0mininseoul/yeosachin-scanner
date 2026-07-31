@@ -151,6 +151,31 @@ function vercelRuntimeTransport(): OperationalTransport | undefined {
     };
 }
 
+/**
+ * Cloud Run carries neither the Vercel marker nor Axiom credentials, so without this
+ * sink every worker event is discarded and production incidents leave no trace.
+ * The runtime collects one JSON object per line from stdout into a structured entry.
+ */
+function stdoutFallbackTransport(): OperationalTransport {
+    return {
+        log(level, message, fields) {
+            const line = JSON.stringify({ event: message, ...fields });
+            if (level === 'error') {
+                console.error(line);
+                return;
+            }
+            if (level === 'warn') {
+                console.warn(line);
+                return;
+            }
+            console.info(line);
+        },
+        async flush() {
+            // console writes are synchronous; no buffered transport to drain.
+        },
+    };
+}
+
 function combineRuntimeTransports(
     transports: readonly OperationalTransport[],
 ): OperationalTransport | undefined {
@@ -200,7 +225,7 @@ async function createAxiomRuntimeTransport(
     }
 }
 
-function runtimeTransport(): OperationalTransport | undefined {
+function runtimeTransport(): OperationalTransport {
     const token = process.env.AXIOM_TOKEN?.trim();
     const dataset = process.env.AXIOM_DATASET?.trim();
     const orgId = process.env.AXIOM_ORG_ID?.trim();
@@ -233,7 +258,7 @@ function runtimeTransport(): OperationalTransport | undefined {
         });
     }
 
-    return combineRuntimeTransports(transports);
+    return combineRuntimeTransports(transports) ?? stdoutFallbackTransport();
 }
 
 let singletonLogger: OperationalLogger | undefined;
@@ -243,7 +268,8 @@ function lazyOperationalLogger(): OperationalLogger {
     try {
         singletonLogger = createOperationalLogger(runtimeTransport());
     } catch {
-        singletonLogger = createOperationalLogger();
+        // Even a broken runtime lookup must not put the process back into silence.
+        singletonLogger = createOperationalLogger(stdoutFallbackTransport());
     }
     return singletonLogger;
 }
