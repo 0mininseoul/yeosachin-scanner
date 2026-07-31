@@ -5,6 +5,7 @@ import {
     type AnalysisV2SchedulerOperationStore,
     type AnalysisV2SchedulerTask,
 } from './v2-ai-scheduler-runtime';
+import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
 
 function operationStore<T = string>(
     states = new Map<string, 'claimed' | 'ready'>(),
@@ -441,5 +442,42 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         await expect(promise).resolves.toMatchObject({
             completed: [{ key: 'a' }, { key: 'b' }],
         });
+    });
+
+    it('isolates a terminal-unavailable fallback from healthy sibling operations', async () => {
+        const healthy = task('healthy', 'genderTriage', 0);
+        const unavailable = {
+            ...task('unavailable', 'featureAnalysis', 1),
+            terminalFallback: vi.fn(async () => {
+                throw new AnalysisV2AiTerminalUnavailableError();
+            }),
+        };
+        const result = await runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: [healthy, unavailable],
+            operationStore: {
+                claim: vi.fn(async ({ key }) => key === 'unavailable'
+                    ? {
+                        decision: 'execute' as const,
+                        claimToken: 'terminal-claim',
+                        terminalUnavailable: true,
+                    }
+                    : {
+                        decision: 'execute' as const,
+                        claimToken: 'healthy-claim',
+                    }),
+                commitReady: vi.fn(),
+            },
+            handlerDeadlineAtMs: 1_000_000,
+            nowMs: () => 0,
+        });
+
+        expect(result).toMatchObject({
+            status: 'completed',
+            completed: [{ key: 'healthy', value: 'healthy' }],
+            terminalUnavailableKeys: ['unavailable'],
+        });
+        expect(unavailable.run).not.toHaveBeenCalled();
+        expect(unavailable.terminalFallback).toHaveBeenCalledOnce();
     });
 });

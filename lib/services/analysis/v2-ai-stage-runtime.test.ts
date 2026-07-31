@@ -450,6 +450,7 @@ describe('durable V2 AI stage runtime', () => {
                 completed,
                 remainingKeys: [],
                 recoveryPendingKeys: [],
+                terminalUnavailableKeys: [],
                 continuationDelayMs: 1_000,
             };
         });
@@ -503,6 +504,42 @@ describe('durable V2 AI stage runtime', () => {
         expect(first.operationKey).not.toBe(second.operationKey);
     });
 
+    it('rejects only the scheduler plan reported as terminal unavailable', async () => {
+        const runScheduler = vi.fn(async (
+            options: AnalysisV2SchedulerRuntimeOptions<unknown>,
+        ) => ({
+            status: 'completed' as const,
+            completed: [],
+            remainingKeys: [],
+            recoveryPendingKeys: [],
+            terminalUnavailableKeys: options.tasks.map(task => task.key),
+            continuationDelayMs: 1_000,
+        }));
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            runScheduler: runScheduler as typeof import('./v2-ai-scheduler-runtime')
+                .runAnalysisV2FairAiScheduler,
+            createSchedulerOperationStore: vi.fn(() => ({
+                claim: vi.fn(),
+                commitReady: vi.fn(),
+            })) as typeof import('./v2-ai-scheduler-operation-store')
+                .createAnalysisV2SchedulerOperationStore,
+        });
+        const scheduledFence = {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V28_VERSION,
+            schedulerCapability: 'scheduler-v1' as const,
+            handlerDeadlineAtMs: performance.now() + 300_000,
+        };
+
+        await expect(runtime.gender({
+            media: [{
+                selectionId: 'profile:terminal',
+                kind: 'profile',
+                normalizedJpegBase64: '/9j/2Q==',
+            }],
+        }, scheduledFence)).rejects.toThrow('ANALYSIS_V2_AI_TERMINAL_UNAVAILABLE');
+    });
+
     it('keeps v2.10 on the v2.9 microbatch scheduler path while binding its own immutable policy', async () => {
         const runGenderMicrobatch = vi.fn(async (
             accounts: readonly { accountId: string; input: GenderTriageInput }[],
@@ -531,6 +568,7 @@ describe('durable V2 AI stage runtime', () => {
             }))),
             remainingKeys: [],
             recoveryPendingKeys: [],
+            terminalUnavailableKeys: [],
             continuationDelayMs: 1_000,
         }));
         const runtime = createDurableAnalysisV2AiStageRuntime({
@@ -615,6 +653,7 @@ describe('durable V2 AI stage runtime', () => {
                     completed,
                     remainingKeys: [],
                     recoveryPendingKeys: [],
+                    terminalUnavailableKeys: [],
                     continuationDelayMs: 1_000,
                 };
             }) as never,
@@ -697,6 +736,7 @@ describe('durable V2 AI stage runtime', () => {
                     completed,
                     remainingKeys: [],
                     recoveryPendingKeys: [],
+                    terminalUnavailableKeys: [],
                     continuationDelayMs: 1_000,
                 };
             }) as never,
