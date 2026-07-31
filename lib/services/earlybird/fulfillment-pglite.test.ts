@@ -130,6 +130,13 @@ const fullyScrubbedProviderRunAdoptionMigration = readFileSync(
     ),
     'utf8'
 );
+const pendingDispatchProviderRunAdoptionMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731080000_allow_pending_dispatch_recovery_adoption.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -536,6 +543,54 @@ async function fullyScrubRecoveryAdmissionAndDriftCurrent(): Promise<void> {
              admission_last_error_code = NULL
          WHERE id = $1`,
         [RECOVERY_PREFLIGHT]
+    );
+    await makeAdmissionReady();
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET target_followers_count = 180,
+             target_following_count = 190,
+             admission_target_followers_count = 180,
+             admission_target_following_count = 190
+         WHERE id = $1`,
+        [PREFLIGHT]
+    );
+}
+
+async function pendingDispatchRecoveryAdmissionAndDriftCurrent(): Promise<void> {
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET admission_status = 'pending',
+             admission_selected_plan_id = 'basic',
+             admission_entitlement_jti_hash = encode(
+                 extensions.digest(
+                     convert_to(
+                         'earlybird-fulfillment-admission-v1' || chr(10) || lower($2),
+                         'UTF8'
+                     ),
+                     'sha256'
+                 ),
+                 'hex'
+             ),
+             admission_token = $3,
+             admission_requested_at = pii_scrubbed_at - INTERVAL '3 minutes',
+             admission_refreshed_at = NULL,
+             admission_claim_token = NULL,
+             admission_lease_expires_at = NULL,
+             admission_dispatch_state = 'enqueued',
+             admission_dispatch_generation = 1,
+             admission_dispatch_token = $4,
+             admission_dispatch_reserved_at = pii_scrubbed_at - INTERVAL '2 minutes',
+             admission_dispatched_at = pii_scrubbed_at - INTERVAL '1 minute',
+             admission_error_code = NULL,
+             admission_target_followers_count = NULL,
+             admission_target_following_count = NULL,
+             admission_capacity_required_plan_id = NULL,
+             admission_required_plan_id = NULL,
+             admission_plan_cards_snapshot = NULL,
+             admission_failure_count = 0,
+             admission_last_error_code = NULL
+         WHERE id = $1`,
+        [RECOVERY_PREFLIGHT, ORDER, ADMISSION_TOKEN, DISPATCH_TOKEN]
     );
     await makeAdmissionReady();
     await db.query(
@@ -1006,6 +1061,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         `);
         await db.exec(providerRunAdoptionMigration);
         await db.exec(fullyScrubbedProviderRunAdoptionMigration);
+        await db.exec(pendingDispatchProviderRunAdoptionMigration);
     });
 
     beforeEach(async () => {
@@ -2344,6 +2400,169 @@ describe('operator-approved earlybird fulfillment migration', () => {
             `SELECT pg_catalog.count(*)::INTEGER AS count
              FROM public.analysis_v2_recovery_provider_run_adoptions`
         )).rows[0].count).toBe(1);
+    });
+
+    it('adopts an exact pending/enqueued recovery tombstone', async () => {
+        const requestKey = await seedRecoveredRequestCollision();
+        const operationKey = `relationship-followers:${'4'.repeat(64)}`;
+        const inputHash = '5'.repeat(64);
+        const sourceJobKey = 'coordinator:bootstrap';
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id, job_key, track, kind, input_hash,
+                required_job_keys, status
+             ) VALUES ($1, $2, 'coordinator', 'bootstrap', $3, '{}', 'completed')`,
+            [FAILED_REQUEST, sourceJobKey, '6'.repeat(64)]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id,
+                actual_usage_usd, run_started_at, terminalized_at,
+                usage_reconciled_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, 'apify',
+                'apify/relationship-scraper', 'secondary', 1.25,
+                'succeeded', 'HybridRun1234', 0.42,
+                clock_timestamp() - INTERVAL '10 minutes',
+                clock_timestamp() - INTERVAL '9 minutes',
+                clock_timestamp() - INTERVAL '8 minutes'
+             )`,
+            [FAILED_REQUEST, sourceJobKey, operationKey, inputHash, CLAIM, ADMISSION_CLAIM]
+        );
+        await admit();
+        await pendingDispatchRecoveryAdmissionAndDriftCurrent();
+        expect((await db.query<{ ready: boolean }>(
+            `SELECT public.earlybird_provider_run_adoption_ready($1, $2, $3) AS ready`,
+            [ORDER, FAILED_REQUEST, PREFLIGHT]
+        )).rows[0].ready).toBe(true);
+        const lease = await claim();
+        const created = (await asService<{ request_id: string }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+             )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).rows[0];
+        expect((await db.query<{ idempotency_key: string }>(
+            'SELECT idempotency_key FROM public.analysis_requests WHERE id = $1',
+            [created.request_id]
+        )).rows[0].idempotency_key).toBe(`${requestKey}.r1`);
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET status = 'processing', lease_token = $3,
+                 lease_expires_at = clock_timestamp() + INTERVAL '5 minutes'
+             WHERE request_id = $1 AND job_key = $2`,
+            [created.request_id, sourceJobKey, DISPATCH_TOKEN]
+        );
+        await expect(asService(
+            `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                $1, $2, $3, $4, $5, 'apify',
+                'apify/relationship-scraper', 'secondary', 1.25
+             )`,
+            [created.request_id, sourceJobKey, DISPATCH_TOKEN, operationKey, inputHash]
+        )).resolves.toMatchObject({ rows: [{
+            resolve_analysis_v2_recovery_provider_run: expect.objectContaining({
+                runId: 'HybridRun1234',
+            }),
+        }] });
+    });
+
+    it.each([
+        [
+            'status',
+            `UPDATE public.analysis_preflights
+             SET admission_status = 'processing',
+                 admission_claim_token = $2,
+                 admission_lease_expires_at = clock_timestamp() + INTERVAL '1 minute'
+             WHERE id = $1`,
+            [RECOVERY_PREFLIGHT, CLAIM] as unknown[],
+        ],
+        [
+            'selected plan',
+            `UPDATE public.analysis_preflights
+             SET admission_selected_plan_id = 'standard'
+             WHERE id = $1`,
+            [RECOVERY_PREFLIGHT] as unknown[],
+        ],
+        [
+            'entitlement hash',
+            `UPDATE public.analysis_preflights
+             SET admission_entitlement_jti_hash = $2
+             WHERE id = $1`,
+            [RECOVERY_PREFLIGHT, '0'.repeat(64)] as unknown[],
+        ],
+        [
+            'dispatch state',
+            `UPDATE public.analysis_preflights
+             SET admission_dispatch_state = 'reserved',
+                 admission_dispatched_at = NULL
+             WHERE id = $1`,
+            [RECOVERY_PREFLIGHT] as unknown[],
+        ],
+    ])('rejects pending/enqueued hybrid %s drift', async (_field, mutation, params) => {
+        await seedRecoveredRequestCollision();
+        await admit();
+        await pendingDispatchRecoveryAdmissionAndDriftCurrent();
+        await db.query(mutation, params);
+        expect((await db.query<{ ready: boolean }>(
+            `SELECT public.earlybird_provider_run_adoption_ready($1, $2, $3) AS ready`,
+            [ORDER, FAILED_REQUEST, PREFLIGHT]
+        )).rows[0].ready).toBe(false);
+        expect((await db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count FROM public.analysis_requests
+             WHERE idempotency_key LIKE 'earlybird:%r%'`
+        )).rows[0].count).toBe(0);
+    });
+
+    it('rejects pending/enqueued hybrid timestamp-order drift at the row constraint', async () => {
+        await seedRecoveredRequestCollision();
+        await admit();
+        await pendingDispatchRecoveryAdmissionAndDriftCurrent();
+        await expect(db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_dispatch_reserved_at =
+                    admission_dispatched_at + INTERVAL '1 second'
+             WHERE id = $1`,
+            [RECOVERY_PREFLIGHT]
+        )).rejects.toThrow(/analysis_preflights_admission_time_check/);
+    });
+
+    it.each([
+        ['token', 'admission_token = NULL'],
+        ['requested time', 'admission_requested_at = NULL'],
+        ['unexpected refresh', 'admission_refreshed_at = clock_timestamp()'],
+    ])('rejects pending/enqueued hybrid missing %s in readiness', async (
+        _field,
+        assignment
+    ) => {
+        await seedRecoveredRequestCollision();
+        await admit();
+        await pendingDispatchRecoveryAdmissionAndDriftCurrent();
+        await db.query(
+            `UPDATE public.analysis_preflights SET ${assignment} WHERE id = $1`,
+            [RECOVERY_PREFLIGHT]
+        );
+        expect((await db.query<{ ready: boolean }>(
+            `SELECT public.earlybird_provider_run_adoption_ready($1, $2, $3) AS ready`,
+            [ORDER, FAILED_REQUEST, PREFLIGHT]
+        )).rows[0].ready).toBe(false);
+    });
+
+    it.each([
+        ['dispatch token', 'admission_dispatch_token = NULL'],
+        ['dispatch time', 'admission_dispatched_at = NULL'],
+    ])('rejects pending/enqueued hybrid missing %s at the row constraint', async (
+        _field,
+        assignment
+    ) => {
+        await seedRecoveredRequestCollision();
+        await admit();
+        await pendingDispatchRecoveryAdmissionAndDriftCurrent();
+        await expect(db.query(
+            `UPDATE public.analysis_preflights SET ${assignment} WHERE id = $1`,
+            [RECOVERY_PREFLIGHT]
+        )).rejects.toThrow(/analysis_preflights_admission_/);
     });
 
     it.each([
