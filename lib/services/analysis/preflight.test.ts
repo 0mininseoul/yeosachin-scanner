@@ -793,17 +793,25 @@ describe('preflight worker domain', () => {
         const runs = providerRunStore();
         const failure = new Error('transient self-hosted failure');
         const fallback = vi.fn();
+        const observer = vi.fn();
         await expect(processPreflight(preflightId, {
             store,
             getProfile: vi.fn(async () => { throw failure; }),
             getFallbackProfile: fallback,
             providerRunStore: runs,
+            observer,
         })).resolves.toBe('blocked');
         expect(fallback).not.toHaveBeenCalled();
         expect(runs.reserve).not.toHaveBeenCalled();
         expect(store.releaseClaim).not.toHaveBeenCalled();
         expect(store.finalizeReady).not.toHaveBeenCalled();
         expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'ANALYSIS_FAILED');
+        expect(observer).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'completed',
+            outcome: 'blocked',
+            errorCode: 'ANALYSIS_FAILED',
+            failureCategory: 'unknown',
+        }));
     });
 
     it('falls back exactly once for a self-hosted 429 and persists the paid run', async () => {
@@ -1073,6 +1081,36 @@ describe('preflight worker domain', () => {
         expect(fallback).not.toHaveBeenCalled();
         expect(runs.reserve).not.toHaveBeenCalled();
         expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'ANALYSIS_FAILED');
+    });
+
+    it.each([
+        ['starting', 'provider'],
+        ['rejected', 'provider'],
+        ['failed', 'provider'],
+        ['aborted', 'provider'],
+        ['timed_out', 'timeout'],
+    ] as const)('reports a replayed %s provider run as a safe %s terminal cause', async (
+        status,
+        failureCategory,
+    ) => {
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun(status));
+        const observer = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store: workerStore(),
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(),
+            providerRunStore: runs,
+            observer,
+        })).resolves.toBe('blocked');
+
+        expect(observer).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'completed',
+            outcome: 'blocked',
+            errorCode: 'ANALYSIS_FAILED',
+            failureCategory,
+        }));
     });
 });
 

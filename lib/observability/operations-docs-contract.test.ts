@@ -91,7 +91,12 @@ describe('analytics and observability disclosure contract', () => {
         }
         expect(operations).toContain('Yeosachin Operational Health');
         expect(operations).toContain('3개 모니터');
-        expect(operations).toContain('environment == "production"');
+        expect(operations).toContain('fields.environment == "production"');
+        expect(operations).toContain('fields.event in (');
+        expect(operations).toContain('fields.user_id');
+        expect(operations).toContain('fields.preflight_id');
+        expect(operations).not.toMatch(/^\| where environment ==/m);
+        expect(operations).not.toMatch(/^\| where event (?:==|in)/m);
         expect(operations).toMatch(/notifier[^\n]*(없|미구성)[^\n]*(비활성|disabled)/i);
         expect(operations).toMatch(/토큰 회전/);
         expect(operations).toMatch(/즉시[^\n]*(ingest|인제스트)[^\n]*(중단|차단)/i);
