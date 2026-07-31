@@ -22,6 +22,13 @@ const capacitySafeCountDriftMigration = readFileSync(
     ),
     'utf8'
 );
+const scrubbedFreshnessRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731040000_recover_scrubbed_earlybird_freshness_conflict.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
     const start = migration.indexOf(`CREATE FUNCTION public.${name}(`);
@@ -223,6 +230,48 @@ describe('earlybird fulfillment outbox migration contract', () => {
         );
         expect(capacitySafeCountDriftMigration).toContain(
             "v_preflight.target_followers_count > (v_selected_card->'relationshipCapacity'->>'followers')::INTEGER"
+        );
+    });
+
+    it('preserves linked expiry evidence and narrowly recovers canonical scrubbed tombstones', () => {
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_or_replay_analysis_v2_preflight('
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /SET status = 'expired',[\s\S]*?lease_token = NULL,[\s\S]*?AND EXISTS \([\s\S]*?earlybird_order\.status IN \([\s\S]*?'payment_pending'[\s\S]*?'completed'/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /pii_scrubbed_at = v_now,[\s\S]*?AND NOT EXISTS \([\s\S]*?earlybird_order\.preflight_id = preflight\.id/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'CREATE FUNCTION public.recover_scrubbed_earlybird_freshness_snapshot_conflict('
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            "v_old.target_instagram_id IS DISTINCT FROM ("
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            "v_old.admission_status <> 'ready'"
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_old.admission_plan_cards_snapshot IS DISTINCT FROM v_cards'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_rebound_id := public.rebind_expired_paid_earlybird_preflight(p_order_id)'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_rebound_id = v_old.id'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            "v_new.admission_status NOT IN ('idle', 'pending')"
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.recover_scrubbed_earlybird_freshness_snapshot_conflict\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.recover_scrubbed_earlybird_freshness_snapshot_conflict\([\s\S]*?TO service_role;/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).not.toMatch(
+            /active_request[\s\S]{0,200}FOR UPDATE/
         );
     });
 });
