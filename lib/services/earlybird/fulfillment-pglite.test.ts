@@ -95,6 +95,13 @@ const freshnessRaceMigration = readFileSync(
     ),
     'utf8'
 );
+const capacitySafeCountDriftMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731030000_allow_capacity_safe_earlybird_admission_count_drift.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -274,6 +281,10 @@ async function makeAdmissionReady(): Promise<void> {
              admission_entitlement_jti_hash = $2,
              admission_token = '523e4567-e89b-42d3-a456-426614174001',
              admission_refreshed_at = pg_catalog.clock_timestamp(),
+             admission_target_followers_count = 120,
+             admission_target_following_count = 140,
+             admission_capacity_required_plan_id = 'basic',
+             admission_required_plan_id = 'basic',
              admission_plan_cards_snapshot = $3::JSONB
          WHERE id = $1`,
         [PREFLIGHT, admissionHash(), JSON.stringify(cards)]
@@ -612,6 +623,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(scrubbedTargetSchemaFailureRecoveryMigration);
         await db.exec(transientJobExhaustionRecoveryMigration);
         await db.exec(freshnessRaceMigration);
+        await db.exec(capacitySafeCountDriftMigration);
     });
 
     beforeEach(async () => {
@@ -1484,7 +1496,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         ['target', "UPDATE public.analysis_preflights SET target_instagram_id = 'other.account' WHERE id = $1", 'SNAPSHOT_CONFLICT'],
         ['exclusion', "UPDATE public.analysis_preflights SET exclusion_decision = 'exclude', excluded_instagram_id = 'other.account' WHERE id = $1", 'SNAPSHOT_CONFLICT'],
         ['payment', 'UPDATE public.earlybird_orders SET actual_amount_krw = expected_amount_krw + 1 WHERE preflight_id = $1', 'SNAPSHOT_CONFLICT'],
-        ['card', "UPDATE public.analysis_preflights SET plan_cards_snapshot = jsonb_set(plan_cards_snapshot, '{basic,launchStatus}', '\"test_only\"') WHERE id = $1", 'PLAN_NOT_ALLOWED'],
+        ['card', "UPDATE public.analysis_preflights SET plan_cards_snapshot = jsonb_set(plan_cards_snapshot, '{basic,launchStatus}', '\"test_only\"'), admission_plan_cards_snapshot = jsonb_set(admission_plan_cards_snapshot, '{basic,launchStatus}', '\"test_only\"') WHERE id = $1", 'PLAN_NOT_ALLOWED'],
     ])('keeps a changed %s invariant in manual review instead of reopening it', async (
         _name,
         mutation,
@@ -1536,6 +1548,83 @@ describe('operator-approved earlybird fulfillment migration', () => {
             manual_review_at: manualReviewAt,
             last_error_code: 'SNAPSHOT_CONFLICT',
         });
+    });
+
+    it('accepts only capacity-safe profile-count drift in a legacy freshness recovery', async () => {
+        const manualReviewAt = await seedLegacyStaleSnapshotConflict();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 200, target_following_count = 220,
+                 admission_target_followers_count = 200,
+                 admission_target_following_count = 220
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+        await expect(asService<{
+            fulfillment_status: string;
+        }>(
+            `SELECT * FROM public.recover_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'retryable_failure',
+        }] });
+    });
+
+    it('creates for capacity-safe refreshed profile-count drift without changing the paid order', async () => {
+        await admit();
+        await makeAdmissionReady();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 200, target_following_count = 220,
+                 admission_target_followers_count = 200,
+                 admission_target_following_count = 220
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+        const lease = await claim();
+        await expect(asService<{
+            fulfillment_status: string;
+        }>(
+            'SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)',
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'analysis_in_progress',
+        }] });
+        expect((await db.query<{
+            target_followers_count: number;
+            target_following_count: number;
+        }>(
+            `SELECT target_followers_count, target_following_count
+             FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            target_followers_count: 120,
+            target_following_count: 140,
+        });
+    });
+
+    it('keeps an unwitnessed profile-count mutation in manual review', async () => {
+        await admit();
+        await makeAdmissionReady();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 200, target_following_count = 220
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+        const lease = await claim();
+        await expect(asService<{ fulfillment_status: string }>(
+            'SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)',
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'manual_review',
+        }] });
+        expect((await db.query<{ last_error_code: string }>(
+            'SELECT last_error_code FROM public.earlybird_fulfillments WHERE order_id = $1',
+            [ORDER]
+        )).rows[0].last_error_code).toBe('SNAPSHOT_CONFLICT');
     });
 
     it('recovers one legacy stale snapshot conflict with a manual-review CAS', async () => {
