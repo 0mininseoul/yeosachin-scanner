@@ -1,5 +1,6 @@
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import { AI_GEMINI_SDK_TIMEOUT_MS } from '@/lib/services/ai/stage-policy';
+import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
 
 export const ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS = 15_000;
 
@@ -102,6 +103,7 @@ export type AnalysisV2SchedulerRunResult<T> = Readonly<{
     completed: readonly Readonly<{ key: string; stage: AnalysisV2SchedulerStage; value: T }>[];
     remainingKeys: readonly string[];
     recoveryPendingKeys: readonly string[];
+    terminalUnavailableKeys: readonly string[];
     continuationDelayMs: number;
 }>;
 
@@ -369,6 +371,7 @@ export async function runAnalysisV2FairAiScheduler<T>(
     }>>();
     const remaining = new Set(input.tasks.map(task => task.key));
     const recoveryPending = new Set<string>();
+    const terminalUnavailable = new Set<string>();
     let nextNotBeforeAtMs = Number.POSITIVE_INFINITY;
     input.tasks.forEach(task => queues.get(task.stage)!.push(task));
 
@@ -457,6 +460,14 @@ export async function runAnalysisV2FairAiScheduler<T>(
                     remaining.delete(task.key);
                 })
                 .catch(async error => {
+                    if (
+                        claim.terminalUnavailable
+                        && error instanceof AnalysisV2AiTerminalUnavailableError
+                    ) {
+                        terminalUnavailable.add(task.key);
+                        remaining.delete(task.key);
+                        return;
+                    }
                     const reason = schedulerAdmissionReason(error);
                     if (reason && input.operationStore.defer) {
                         const notBeforeAtMs = await input.operationStore.defer({
@@ -526,6 +537,9 @@ export async function runAnalysisV2FairAiScheduler<T>(
             .map(task => task.key)),
         recoveryPendingKeys: Object.freeze(input.tasks
             .filter(task => recoveryPending.has(task.key))
+            .map(task => task.key)),
+        terminalUnavailableKeys: Object.freeze(input.tasks
+            .filter(task => terminalUnavailable.has(task.key))
             .map(task => task.key)),
         continuationDelayMs: Number.isFinite(nextNotBeforeAtMs)
             ? Math.min(300_000, Math.max(1_000, nextNotBeforeAtMs - nowMs()))

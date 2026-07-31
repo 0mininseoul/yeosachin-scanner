@@ -48,6 +48,7 @@ import {
     type PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
+import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
 import {
     AnalysisV2AiResultRecoveredCutoffError,
     AnalysisV2AiResultRecoveryPendingError,
@@ -362,9 +363,12 @@ function createSchedulerMicrobatch(
             });
             const completed = new Map(result.completed.map(item => [item.key, item.value]));
             const recoveryPending = new Set(result.recoveryPendingKeys);
+            const terminalUnavailable = new Set(result.terminalUnavailableKeys);
             for (const plan of plans) {
                 if (completed.has(plan.key)) {
                     plan.resolve(plan.schema.parse(completed.get(plan.key)));
+                } else if (terminalUnavailable.has(plan.key)) {
+                    plan.reject(new AnalysisV2AiTerminalUnavailableError());
                 } else {
                     plan.reject(new AnalysisV2SchedulerContinuationError(
                         recoveryPending.has(plan.key)
