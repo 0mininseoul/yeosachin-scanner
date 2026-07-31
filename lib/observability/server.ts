@@ -158,17 +158,9 @@ function vercelRuntimeTransport(): OperationalTransport | undefined {
  */
 function stdoutFallbackTransport(): OperationalTransport {
     return {
-        log(level, message, fields) {
+        log(_level, message, fields) {
             const line = JSON.stringify({ event: message, ...fields });
-            if (level === 'error') {
-                console.error(line);
-                return;
-            }
-            if (level === 'warn') {
-                console.warn(line);
-                return;
-            }
-            console.info(line);
+            console.log(line);
         },
         async flush() {
             // console writes are synchronous; no buffered transport to drain.
@@ -236,6 +228,7 @@ function runtimeTransport(): OperationalTransport {
     if (token && dataset && orgId) {
         let loadedTransport: Promise<OperationalTransport | undefined> | undefined;
         const pendingLogs = new Set<Promise<void>>();
+        const fallback = stdoutFallbackTransport();
         const load = () => {
             loadedTransport ??= createAxiomRuntimeTransport({ token, dataset, orgId });
             return loadedTransport;
@@ -244,7 +237,13 @@ function runtimeTransport(): OperationalTransport {
         transports.push({
             log(level, message, fields) {
                 const pending = load()
-                    .then(transport => transport?.log(level, message, fields))
+                    .then(transport => {
+                        if (transport) {
+                            transport.log(level, message, fields);
+                            return;
+                        }
+                        fallback.log(level, message, fields);
+                    })
                     .then(() => undefined)
                     .catch(() => undefined);
                 pendingLogs.add(pending);
