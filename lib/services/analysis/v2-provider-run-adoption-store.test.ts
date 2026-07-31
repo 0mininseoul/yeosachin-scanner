@@ -65,6 +65,22 @@ describe('fail closed', () => {
         ).resolves.toBeNull();
         expect(rpc).toHaveBeenCalledOnce();
     });
+
+    it('maps a recovery-lineage source miss without opening the fallback', async () => {
+        const rpc = vi.fn().mockResolvedValue({
+            data: null,
+            error: {
+                message: 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_SOURCE_UNAVAILABLE',
+            },
+        });
+        const fallback = vi.fn();
+        await expect(bindAdoptedProviderRunOrFallback({
+            adoptionStore: createAnalysisV2ProviderRunAdoptionStore({ rpc }),
+            identity,
+            fallback,
+        })).rejects.toThrow('ADOPTION_DATASET_UNAVAILABLE');
+        expect(fallback).not.toHaveBeenCalled();
+    });
 });
 
 it('prefers adoption and never reserves, while a miss uses the normal durable path', async () => {
