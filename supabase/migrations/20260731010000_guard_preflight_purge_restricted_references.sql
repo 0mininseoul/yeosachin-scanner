@@ -1,5 +1,5 @@
 -- Retention deletes a preflight tombstone only when nothing still points at it,
--- but the deletable fence only knew three of the four ON DELETE RESTRICT
+-- but the deletable fence only knew two of the four ON DELETE RESTRICT
 -- references. A schema failure recovery receipt and a replay capture
 -- authorization both pin their preflight, so every scheduled purge aborted on a
 -- foreign key violation and no expired preflight was ever collected. Fence both
