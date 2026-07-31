@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
+import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const candidateSource = readFileSync(
@@ -37,6 +39,13 @@ const preFeatureContractUrl = new URL(
 const preFeatureContractMigration = existsSync(preFeatureContractUrl)
     ? readFileSync(preFeatureContractUrl, 'utf8')
     : '';
+const microbatchLineageMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731140000_accept_gender_microbatch_candidate_lineage.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(source: string, name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -102,18 +111,53 @@ const FEMALE_FEATURE_OPERATION = `feature-analysis:${'4'.repeat(64)}`;
 const NON_FEMALE_GENDER_OPERATION = `gender-triage:${'5'.repeat(64)}`;
 const NON_FEMALE_FEATURE_OPERATION = `feature-analysis:${'6'.repeat(64)}`;
 const PRIVATE_OPERATION = `private-account-name:${'7'.repeat(64)}`;
+const GENDER_MICROBATCH_OPERATION = `gender-triage:${'a'.repeat(64)}`;
 const FEMALE_BUNDLE_ID = `bundle:${'8'.repeat(64)}`;
 const NON_FEMALE_BUNDLE_ID = `bundle:${'9'.repeat(64)}`;
+
+function aiContentHash(value: unknown): string {
+    const canonicalJson = (item: unknown): string => {
+        if (item === null || typeof item !== 'object') return JSON.stringify(item);
+        if (Array.isArray(item)) return `[${item.map(canonicalJson).join(',')}]`;
+        const record = item as Record<string, unknown>;
+        return `{${Object.keys(record).sort().map(key => (
+            `${JSON.stringify(key)}:${canonicalJson(record[key])}`
+        )).join(',')}}`;
+    };
+    const canonical = canonicalJson(value);
+    return createHash('sha256')
+        .update(`analysis-v2-ai-result-content:v1\0${canonical}`, 'utf8')
+        .digest('hex');
+}
+
+function genderResult(assessment: {
+    inferredGender: 'female' | 'male' | 'unknown';
+    confidence: 'low' | 'medium' | 'high';
+    ownerConsistency: 'same_person' | 'mixed_or_unclear';
+    evidenceSelectionIds: string[];
+}) {
+    const excluded = assessment.inferredGender === 'male'
+        && assessment.confidence === 'high'
+        && assessment.ownerConsistency === 'same_person';
+    return {
+        assessment,
+        routingDecision: excluded
+            ? 'exclude_high_confidence_male'
+            : 'route_to_feature_analysis',
+        routingReason: excluded
+            ? 'high_confidence_same_owner_male'
+            : 'conserve_female_recall',
+        analyzedSelectionIds: ['selection-1'],
+        v29AccountContext: 'personal',
+    };
+}
 
 const bootstrap = `
 CREATE SCHEMA extensions;
 CREATE ROLE anon;
 CREATE ROLE authenticated;
 CREATE ROLE service_role;
-
-CREATE OR REPLACE FUNCTION extensions.digest(p_value BYTEA, p_algorithm TEXT)
-RETURNS BYTEA LANGUAGE sql IMMUTABLE STRICT SET search_path = ''
-AS $$ SELECT p_value; $$;
+CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
 
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
@@ -169,6 +213,14 @@ CREATE TABLE public.analysis_v2_ai_attempts (
     operation_key TEXT NOT NULL,
     stage TEXT NOT NULL,
     status TEXT NOT NULL
+);
+CREATE TABLE public.analysis_v2_scheduler_operations (
+    request_id UUID NOT NULL,
+    job_key TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result_json JSONB
 );
 CREATE TABLE public.analysis_v2_media_artifacts (
     request_id UUID NOT NULL,
@@ -578,7 +630,7 @@ async function checkpointPrivate(input: {
 
 describe('analysis V2 checkpoint contract correction PGlite migration', () => {
     beforeAll(async () => {
-        db = await PGlite.create();
+        db = await PGlite.create({ extensions: { pgcrypto } });
         await db.exec(bootstrap);
         await db.exec(candidateCheckpoint);
         await db.exec(candidateCheckpointEntrypoint);
@@ -610,6 +662,7 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
             $$;
         `);
         if (preFeatureContractMigration) await db.exec(preFeatureContractMigration);
+        await db.exec(microbatchLineageMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -623,6 +676,7 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
                 public.analysis_v2_media_artifacts,
                 public.analysis_v2_ai_result_checkpoints,
                 public.analysis_v2_ai_attempts,
+                public.analysis_v2_scheduler_operations,
                 public.analysis_v2_mutual_rows,
                 public.analysis_v2_dag_batch_results,
                 public.analysis_v2_dag_batch_topology,
@@ -645,6 +699,140 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
             [REQUEST_ID]
         );
         await expect(checkpointCandidates()).rejects.toThrow(/ANALYSIS_V2_RESULT_NOT_READY/);
+    });
+
+    it.each(['checkpoint', 'safe_fallback'] as const)(
+        'accepts per-candidate gender hashes from a ready %s microbatch envelope',
+        async source => {
+            const preFeature = source === 'safe_fallback';
+            await seedCandidateBatch(preFeature ? {
+                includeFemaleBundle: false,
+                includeNonFemaleBundle: false,
+                policyVersion: 'ai-stage-policy-v2.9',
+            } : {});
+            const assessments: Array<Parameters<typeof genderResult>[0]> = [
+                {
+                    inferredGender: 'female', confidence: 'high',
+                    ownerConsistency: 'same_person', evidenceSelectionIds: ['selection-1'],
+                },
+                {
+                    inferredGender: 'male', confidence: 'high',
+                    ownerConsistency: 'same_person', evidenceSelectionIds: ['selection-1'],
+                },
+            ];
+            const baseRows = preFeature
+                ? preFeatureSkipRows('ai-stage-policy-v2.9')
+                : candidateRows();
+            const rows = baseRows.map((row, index) => ({
+                ...row,
+                genderOperationKey: GENDER_MICROBATCH_OPERATION,
+                genderResultHash: aiContentHash(assessments[index]),
+            }));
+            await db.query(
+                `DELETE FROM public.analysis_v2_ai_result_checkpoints
+                 WHERE request_id = $1 AND stage = 'genderTriage'`,
+                [REQUEST_ID]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_scheduler_operations (
+                    request_id, job_key, operation_key, stage, status, result_json
+                 ) VALUES ($1, 'track:profile-ai:batch:0', $2, 'genderTriage',
+                    'ready', $3::JSONB)`,
+                [REQUEST_ID, GENDER_MICROBATCH_OPERATION, JSON.stringify({
+                    operationKey: GENDER_MICROBATCH_OPERATION,
+                    results: assessments.map((assessment, index) => ({
+                        accountId: `account:${String(index + 1).repeat(64)}`,
+                        result: genderResult(assessment),
+                        source,
+                    })),
+                })]
+            );
+
+            await expect(checkpointCandidates(rows)).resolves.toBeDefined();
+        }
+    );
+
+    it('rejects a candidate hash absent from the matching ready gender microbatch', async () => {
+        await seedCandidateBatch();
+        const assessment: Parameters<typeof genderResult>[0] = {
+            inferredGender: 'female', confidence: 'high',
+            ownerConsistency: 'same_person', evidenceSelectionIds: ['selection-1'],
+        };
+        const rows = candidateRows().map(row => ({
+            ...row,
+            genderOperationKey: GENDER_MICROBATCH_OPERATION,
+            genderResultHash: aiContentHash({
+                inferredGender: 'unknown', confidence: 'low',
+                ownerConsistency: 'mixed_or_unclear', evidenceSelectionIds: [],
+            }),
+        }));
+        await db.query(
+            `DELETE FROM public.analysis_v2_ai_result_checkpoints
+             WHERE request_id = $1 AND stage = 'genderTriage'`,
+            [REQUEST_ID]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_scheduler_operations (
+                request_id, job_key, operation_key, stage, status, result_json
+             ) VALUES ($1, 'track:profile-ai:batch:0', $2, 'genderTriage',
+                'ready', $3::JSONB)`,
+            [REQUEST_ID, GENDER_MICROBATCH_OPERATION, JSON.stringify({
+                operationKey: GENDER_MICROBATCH_OPERATION,
+                results: [{
+                    accountId: `account:${'1'.repeat(64)}`,
+                    result: genderResult(assessment),
+                    source: 'checkpoint',
+                }],
+            })]
+        );
+
+        await expect(checkpointCandidates(rows)).rejects.toThrow(
+            /ANALYSIS_V2_RESULT_NOT_READY/
+        );
+        await expectNoCandidateCheckpointArtifacts();
+    });
+
+    it.each([
+        ['missing', undefined],
+        ['mismatched', `gender-triage:${'b'.repeat(64)}`],
+    ] as const)('rejects a %s root operationKey in the gender microbatch envelope', async (
+        _case,
+        rootOperationKey,
+    ) => {
+        await seedCandidateBatch();
+        const assessment: Parameters<typeof genderResult>[0] = {
+            inferredGender: 'female', confidence: 'high',
+            ownerConsistency: 'same_person', evidenceSelectionIds: ['selection-1'],
+        };
+        const rows = candidateRows().map(row => ({
+            ...row,
+            genderOperationKey: GENDER_MICROBATCH_OPERATION,
+            genderResultHash: aiContentHash(assessment),
+        }));
+        await db.query(
+            `DELETE FROM public.analysis_v2_ai_result_checkpoints
+             WHERE request_id = $1 AND stage = 'genderTriage'`,
+            [REQUEST_ID]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_scheduler_operations (
+                request_id, job_key, operation_key, stage, status, result_json
+             ) VALUES ($1, 'track:profile-ai:batch:0', $2, 'genderTriage',
+                'ready', $3::JSONB)`,
+            [REQUEST_ID, GENDER_MICROBATCH_OPERATION, JSON.stringify({
+                operationKey: rootOperationKey,
+                results: [{
+                    accountId: `account:${'1'.repeat(64)}`,
+                    result: genderResult(assessment),
+                    source: 'checkpoint',
+                }],
+            })]
+        );
+
+        await expect(checkpointCandidates(rows)).rejects.toThrow(
+            /ANALYSIS_V2_RESULT_NOT_READY/
+        );
+        await expectNoCandidateCheckpointArtifacts();
     });
 
     it.each([
