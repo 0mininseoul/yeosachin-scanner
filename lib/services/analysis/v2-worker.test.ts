@@ -917,6 +917,65 @@ describe('analysis V2 durable DAG worker', () => {
         );
     });
 
+    it('accepts one profile-AI preview callback without adding a heartbeat', async () => {
+        const relationshipState: AnalysisV2DagState = {
+            ...baseState(), relationships: relationshipManifest(),
+        };
+        const profileFetchJob = buildAnalysisV2DagPlan(requestId, relationshipState).jobs
+            .find(job => job.jobKey === 'track:profiles:batch:0');
+        if (!profileFetchJob) throw new Error('Missing profile fetch fixture job');
+        const initial: AnalysisV2DagState = {
+            ...relationshipState,
+            profileFetchBatches: [{
+                batch: 0, itemCount: 30, producerInputHash: profileFetchJob.inputHash,
+                revision: 1, resultHash: digest('profile-fetch-preview'),
+            }],
+        };
+        const profileAiClaim = claimFor(initial, 'track:profile-ai:batch:0');
+        const profileAiManifest = {
+            batch: 0, itemCount: 30, producerInputHash: profileAiClaim.inputHash,
+            revision: 1, resultHash: digest('profile-ai-preview'),
+        };
+        const persisted: AnalysisV2DagState = {
+            ...initial, profileAiBatches: [profileAiManifest],
+        };
+        const progress = progressReporter();
+        progress.heartbeat = vi.fn(async () => true);
+        const executor: NonNullable<AnalysisV2StageExecutorRegistry['profile_ai']> =
+            vi.fn(async context => {
+                await context.reportActiveProfile?.('Candidate.One', {
+                    profilePicUrl: 'https://cdn.example/candidate.jpg',
+                    feedImageUrls: ['https://cdn.example/post.jpg'],
+                });
+                return {
+                    checkpoint: { kind: 'profile_ai_batch' as const, manifest: profileAiManifest },
+                };
+            });
+
+        await executeAnalysisV2DagJob(profileAiClaim, {
+            stateStore: stateStore(initial, {
+                checkpointManifest: vi.fn(async () => persisted),
+                load: vi.fn()
+                    .mockResolvedValueOnce(initial)
+                    .mockResolvedValue(persisted),
+            }),
+            executors: { profile_ai: executor },
+            progressReporter: progress,
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+            },
+        });
+
+        expect(executor).toHaveBeenCalledOnce();
+        expect(progress.heartbeat).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            claim: profileAiClaim,
+            stage: 'profile_ai',
+            username: 'Candidate.One',
+            totalCount: 30,
+        }));
+    });
+
     it('does not advance canonical progress when durable manifest persistence fails', async () => {
         const initial: AnalysisV2DagState = {
             ...baseState(),

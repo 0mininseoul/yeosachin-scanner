@@ -47,6 +47,7 @@ import {
 import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
+import type { AnalysisV2ProgressCandidateMediaPreview } from './progress-candidate-media';
 import { analysisV2ResultStore } from './v2-result-store';
 import { assertSupportedAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
@@ -147,7 +148,10 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | 'risk-policy-v2.5' | null;
     handlerDeadlineAtMs?: number;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
-    reportActiveProfile?: (username: string) => Promise<void>;
+    reportActiveProfile?: (
+        username: string,
+        preview?: AnalysisV2ProgressCandidateMediaPreview
+    ) => Promise<void>;
 }
 
 export type AnalysisV2StageExecutor<S extends AnalysisV2StageId> = (
@@ -614,7 +618,9 @@ export async function executeAnalysisV2DagJob(
         riskPolicyVersion,
         handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
-            reportActiveProfile: async (username: string) => {
+            reportActiveProfile: async (username: string, preview) => {
+                // The durable progress-media contract is introduced by the next stage.
+                void preview;
                 const startedAtMs = Math.max(
                     Date.now(),
                     lastActiveProfileStartedAtMs + 1
