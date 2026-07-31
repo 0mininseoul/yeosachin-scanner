@@ -32,6 +32,29 @@ const phoneMigrations = [
     new URL(`../../../supabase/migrations/${file}`, import.meta.url),
     'utf8'
 ));
+const scrubbedRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731040000_recover_scrubbed_earlybird_freshness_conflict.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
+function replacementFunctionSql(name: string): string {
+    const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
+    const start = scrubbedRecoveryMigration.indexOf(marker);
+    if (start < 0) throw new Error(`missing ${name} replacement`);
+    const end = scrubbedRecoveryMigration.indexOf('\n$$;', start);
+    if (end < 0) throw new Error(`unterminated ${name} replacement`);
+    return scrubbedRecoveryMigration.slice(start, end + 4);
+}
+
+const createPreflightSql = replacementFunctionSql(
+    'create_or_replay_analysis_v2_preflight'
+);
+const rebindPreflightSql = replacementFunctionSql(
+    'rebind_expired_paid_earlybird_preflight'
+);
 
 const bootstrap = `
 DROP SCHEMA IF EXISTS public CASCADE;
@@ -336,6 +359,52 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
         for (const migration of phoneMigrations) {
             await pool.query(migration);
         }
+        await pool.query(`
+            ALTER TABLE public.users
+                ADD COLUMN analysis_count INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN is_paid_user BOOLEAN NOT NULL DEFAULT FALSE;
+            ALTER TABLE public.analysis_preflights
+                ALTER COLUMN plan_cards_snapshot DROP NOT NULL,
+                ALTER COLUMN target_followers_count DROP NOT NULL,
+                ALTER COLUMN target_following_count DROP NOT NULL,
+                ALTER COLUMN required_plan_id DROP NOT NULL,
+                ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT 'legacy-preflight',
+                ADD COLUMN launch_status_snapshot JSONB,
+                ADD COLUMN plan_catalog_snapshot JSONB,
+                ADD COLUMN policy_versions_snapshot JSONB,
+                ADD COLUMN target_is_private BOOLEAN,
+                ADD COLUMN capacity_required_plan_id TEXT,
+                ADD COLUMN consumed_request_id UUID,
+                ADD COLUMN error_code TEXT,
+                ADD COLUMN blocked_at TIMESTAMP WITH TIME ZONE,
+                ADD COLUMN ready_at TIMESTAMP WITH TIME ZONE,
+                ADD COLUMN lease_token UUID,
+                ADD COLUMN lease_expires_at TIMESTAMP WITH TIME ZONE,
+                ADD COLUMN pii_scrubbed_at TIMESTAMP WITH TIME ZONE,
+                ADD COLUMN target_full_name TEXT,
+                ADD COLUMN target_bio TEXT,
+                ADD COLUMN target_profile_image_url TEXT,
+                ADD COLUMN updated_at TIMESTAMP WITH TIME ZONE
+                    NOT NULL DEFAULT pg_catalog.clock_timestamp();
+            ALTER TABLE public.earlybird_orders
+                ADD COLUMN seller_reference_confirmed_at TIMESTAMP WITH TIME ZONE;
+            CREATE TABLE public.earlybird_fulfillments(
+                order_id UUID PRIMARY KEY REFERENCES public.earlybird_orders(id),
+                status TEXT NOT NULL
+            );
+            CREATE FUNCTION public.analysis_v2_valid_launch_snapshot(JSONB)
+            RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
+            CREATE FUNCTION public.analysis_v2_valid_plan_catalog_snapshot(JSONB)
+            RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
+            CREATE FUNCTION public.analysis_v2_valid_plan_cards_snapshot(JSONB)
+            RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
+            CREATE FUNCTION public.analysis_v2_valid_pricing_snapshot(JSONB)
+            RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
+            CREATE FUNCTION public.analysis_v2_valid_policy_versions_snapshot(JSONB)
+            RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
+        `);
+        await pool.query(createPreflightSql);
+        await pool.query(rebindPreflightSql);
     }, 30_000);
 
     beforeEach(async () => {
@@ -459,7 +528,7 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
         }
     );
 
-    it('serializes user-first create and recovery prefixes without a FK deadlock', async () => {
+    it('serializes direct shared rebind against create/replay without a FK deadlock', async () => {
         const seed = await seedNativeCheckout(
             pool,
             300,
@@ -481,79 +550,138 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
             [seed.userId, seed.preflightId, LEGACY_PRICING_VERSION]
         );
         const orderId = order.rows[0].id;
+        const launchSnapshot = {
+            basic: 'production',
+            standard: 'production',
+            plus: 'test_only',
+        };
+        const catalogSnapshot = {
+            basic: {
+                launchStatus: 'production',
+                relationshipCapacity: { followers: 400, following: 400 },
+                detailedMutualLimit: 300,
+            },
+            standard: {
+                launchStatus: 'production',
+                relationshipCapacity: { followers: 800, following: 800 },
+                detailedMutualLimit: 600,
+            },
+            plus: {
+                launchStatus: 'test_only',
+                relationshipCapacity: { followers: 1200, following: 1200 },
+                detailedMutualLimit: 900,
+            },
+        };
+        const policySnapshot = { pipeline: 'v2', risk: 'v1', aiStage: 'v1' };
+        const replayKey = 'native-rebind-race-key';
+        await pool.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2,
+                 launch_status_snapshot = $3::JSONB,
+                 plan_catalog_snapshot = $4::JSONB,
+                 policy_versions_snapshot = $5::JSONB,
+                 target_is_private = FALSE,
+                 capacity_required_plan_id = 'basic',
+                 created_at = pg_catalog.clock_timestamp() - INTERVAL '31 minutes',
+                 expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 minute',
+                 ready_at = pg_catalog.clock_timestamp() - INTERVAL '31 minutes'
+             WHERE id = $1`,
+            [
+                seed.preflightId,
+                replayKey,
+                JSON.stringify(launchSnapshot),
+                JSON.stringify(catalogSnapshot),
+                JSON.stringify(policySnapshot),
+            ]
+        );
+        await pool.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'paid',
+                 payment_id = 'native-rebind-race-payment',
+                 actual_groble_product_id = expected_groble_product_id,
+                 actual_amount_krw = expected_amount_krw,
+                 paid_at = pg_catalog.clock_timestamp(),
+                 seller_reference_confirmed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [orderId]
+        );
+        await pool.query(
+            `INSERT INTO public.earlybird_fulfillments(order_id, status)
+             VALUES ($1, 'awaiting_operator')`,
+            [orderId]
+        );
+
+        const blockerClient = await pool.connect();
         const createClient = await pool.connect();
-        const recoveryClient = await pool.connect();
-        const recoveryApplication = 'earlybird-user-first-scrubbed-recovery';
+        const rebindClient = await pool.connect();
+        const createApplication = 'earlybird-direct-create-replay';
+        const rebindApplication = 'earlybird-direct-shared-rebind';
         try {
-            await createClient.query('BEGIN');
-            await createClient.query("SET LOCAL statement_timeout = '10s'");
-            await createClient.query(
-                'SELECT 1 FROM public.users WHERE id = $1 FOR UPDATE',
-                [seed.userId]
-            );
-
-            await recoveryClient.query(
-                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
-                [recoveryApplication]
-            );
-            const recoveryPromise = (async () => {
-                await recoveryClient.query('BEGIN');
-                await recoveryClient.query("SET LOCAL statement_timeout = '10s'");
-                const hint = await recoveryClient.query<{ user_id: string }>(
-                    `SELECT user_id
-                     FROM public.earlybird_orders
-                     WHERE id = $1`,
-                    [orderId]
-                );
-                await recoveryClient.query(
-                    'SELECT 1 FROM public.users WHERE id = $1 FOR KEY SHARE',
-                    [hint.rows[0].user_id]
-                );
-                const lockedOrder = await recoveryClient.query<{
-                    user_id: string;
-                    preflight_id: string;
-                }>(
-                    `SELECT user_id, preflight_id
-                     FROM public.earlybird_orders
-                     WHERE id = $1
-                     FOR UPDATE`,
-                    [orderId]
-                );
-                if (lockedOrder.rows[0].user_id !== hint.rows[0].user_id) {
-                    throw new Error('locked order user changed after the hint');
-                }
-                await recoveryClient.query(
-                    `SELECT 1
-                     FROM public.analysis_preflights
-                     WHERE id = $1
-                     FOR UPDATE`,
-                    [lockedOrder.rows[0].preflight_id]
-                );
-                await recoveryClient.query('COMMIT');
-                return lockedOrder.rows[0];
-            })();
-
-            expect(await waitForLockWait(pool, recoveryApplication)).toBe(true);
-            await createClient.query(
-                `SELECT 1
-                 FROM public.analysis_preflights
-                 WHERE id = $1
-                 FOR UPDATE`,
+            await blockerClient.query('BEGIN');
+            await blockerClient.query(
+                `SELECT 1 FROM public.analysis_preflights
+                 WHERE id = $1 FOR UPDATE`,
                 [seed.preflightId]
             );
-            await createClient.query('COMMIT');
 
-            await expect(recoveryPromise).resolves.toMatchObject({
-                user_id: seed.userId,
+            await createClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [createApplication]
+            );
+            const createPromise = runServiceQuery<{
+                preflight_id: string;
+                preflight_status: string;
+            }>(
+                createClient,
+                `SELECT * FROM public.create_or_replay_analysis_v2_preflight(
+                    $1, $2, 'kakao', 'native_lock_300', $3, 'production',
+                    $4::JSONB, $5::JSONB, $6, $7::JSONB, $8::JSONB
+                )`,
+                [
+                    seed.userId,
+                    seed.email,
+                    replayKey,
+                    JSON.stringify(launchSnapshot),
+                    JSON.stringify(catalogSnapshot),
+                    LEGACY_PRICING_VERSION,
+                    JSON.stringify(pricingSnapshot),
+                    JSON.stringify(policySnapshot),
+                ]
+            );
+            expect(await waitForLockWait(pool, createApplication)).toBe(true);
+
+            await rebindClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [rebindApplication]
+            );
+            const rebindPromise = runServiceQuery<{ rebound_id: string }>(
+                rebindClient,
+                `SELECT public.rebind_expired_paid_earlybird_preflight($1)
+                    AS rebound_id`,
+                [orderId]
+            );
+            expect(await waitForLockWait(pool, rebindApplication)).toBe(true);
+
+            await blockerClient.query('COMMIT');
+            await expect(createPromise).resolves.toMatchObject({
                 preflight_id: seed.preflightId,
+                preflight_status: 'expired',
             });
+            const rebound = await rebindPromise;
+            expect(rebound.rebound_id).not.toBe(seed.preflightId);
+            expect((await pool.query<{ preflight_id: string }>(
+                'SELECT preflight_id FROM public.earlybird_orders WHERE id = $1',
+                [orderId]
+            )).rows[0].preflight_id).toBe(rebound.rebound_id);
         } catch (error) {
+            await blockerClient.query('ROLLBACK').catch(() => undefined);
             await createClient.query('ROLLBACK').catch(() => undefined);
-            await recoveryClient.query('ROLLBACK').catch(() => undefined);
+            await rebindClient.query('ROLLBACK').catch(() => undefined);
             throw error;
         } finally {
+            blockerClient.release();
             createClient.release();
-            recoveryClient.release();
+            rebindClient.release();
         }
     }, 15_000);
 
