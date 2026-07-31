@@ -28,9 +28,20 @@ import {
     AnalysisV2AiResultRateLimitExhaustedError,
     AnalysisV2AiTerminalUnavailableError,
 } from './v2-ai-fallback-policy';
+import {
+    analysisV2AiResultIdentitiesEqual,
+    createAnalysisV2AiResultIdentity,
+} from './v2-ai-result-identity';
 import { z } from 'zod';
 
 export { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-fallback-policy';
+export {
+    analysisV2AiResultIdentitiesEqual,
+    createAnalysisV2AiMediaSnapshotHash,
+    createAnalysisV2AiMediaSnapshotHashFromParts,
+    createAnalysisV2AiResultIdentity,
+    createAnalysisV2AiResultInputHash,
+} from './v2-ai-result-identity';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -74,15 +85,6 @@ const GLOBAL_CACHE_STAGES: ReadonlySet<AnalysisV2AiResultStage> = new Set([
     'genderTriage',
     'featureAnalysis',
 ]);
-
-const OPERATION_PREFIX_BY_STAGE: Readonly<Record<AnalysisV2AiResultStage, string>> = {
-    genderTriage: 'gender-triage',
-    genderResolution: 'gender-resolution',
-    featureAnalysis: 'feature-analysis',
-    highRiskNarrative: 'high-risk-narrative',
-    privateAccountName: 'private-account-name',
-    partnerSafety: 'partner-safety',
-};
 
 const stageSchema = z.enum(ANALYSIS_V2_AI_RESULT_STAGES);
 const cacheScopeSchema = z.enum(ANALYSIS_V2_AI_RESULT_CACHE_SCOPES);
@@ -256,6 +258,13 @@ export interface AnalysisV2AiResultIdentityMaterial {
 export interface AnalysisV2AiResultIdentity extends AnalysisV2AiResultIdentityMaterial {
     cacheKey: string;
     operationKey: string;
+}
+
+export interface AnalysisV2AiIdentityMediaPart {
+    selectionId: string;
+    kind: 'profile' | 'feed' | 'contact_sheet';
+    normalizedJpegBase64: string;
+    postId?: string | null;
 }
 
 export interface AnalysisV2AiResultTokenUsage {
@@ -443,97 +452,8 @@ function sha256(domain: string, material: string): string {
         .digest('hex');
 }
 
-/** Hashes canonical model input without retaining prompts, usernames, captions, or evidence. */
-export function createAnalysisV2AiResultInputHash(canonicalInput: string): string {
-    return sha256('analysis-v2-ai-result-input:v1', canonicalInput);
-}
-
-/** Hashes the ordered, normalized media selection without retaining URLs or image bytes. */
-export function createAnalysisV2AiMediaSnapshotHash(canonicalSnapshot: string): string {
-    return sha256('analysis-v2-ai-media-snapshot:v1', canonicalSnapshot);
-}
-
-export interface AnalysisV2AiIdentityMediaPart {
-    selectionId: string;
-    kind: 'profile' | 'feed' | 'contact_sheet';
-    normalizedJpegBase64: string;
-    postId?: string | null;
-}
-
-/** Hashes actual ordered normalized media bytes plus the selection manifest without retaining it. */
-export function createAnalysisV2AiMediaSnapshotHashFromParts(
-    media: readonly AnalysisV2AiIdentityMediaPart[]
-): string {
-    const manifest = media.map((item, index) => {
-        if (
-            typeof item.selectionId !== 'string'
-            || item.selectionId.length < 1
-            || item.selectionId.length > 240
-            || typeof item.normalizedJpegBase64 !== 'string'
-            || item.normalizedJpegBase64.length < 4
-        ) {
-            throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid identity media.');
-        }
-        const contentHash = createHash('sha256')
-            .update('analysis-v2-ai-normalized-media-content:v1\0', 'utf8')
-            .update(item.normalizedJpegBase64, 'utf8')
-            .digest('hex');
-        return {
-            index,
-            selectionId: item.selectionId,
-            kind: item.kind,
-            postId: item.postId ?? null,
-            contentHash,
-        };
-    });
-    return createAnalysisV2AiMediaSnapshotHash(JSON.stringify(manifest));
-}
-
 export function createAnalysisV2AiResultContentHash(canonicalResultJson: string): string {
     return sha256('analysis-v2-ai-result-content:v1', canonicalResultJson);
-}
-
-function parseIdentityMaterial(
-    value: AnalysisV2AiResultIdentityMaterial
-): AnalysisV2AiResultIdentityMaterial {
-    const parsed = identityMaterialSchema.safeParse(value);
-    if (!parsed.success) {
-        throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid result identity.');
-    }
-    return parsed.data;
-}
-
-function canonicalCacheIdentity(identity: AnalysisV2AiResultIdentityMaterial): string {
-    return [
-        'analysis-v2-ai-result-cache:v1',
-        identity.stage,
-        identity.modelName,
-        identity.thinkingLevel ?? '-',
-        identity.mediaResolution ?? '-',
-        identity.promptVersion,
-        String(identity.schemaVersion),
-        String(identity.maxOutputTokens),
-        identity.inputHash,
-        identity.mediaSnapshotHash,
-    ].join('\n');
-}
-
-/**
- * Produces the exact policy/input/media identity shared by request checkpoints and cache rows.
- * Only the digest is suitable for persistence; raw hash material must remain in memory.
- */
-export function createAnalysisV2AiResultIdentity(
-    value: AnalysisV2AiResultIdentityMaterial
-): AnalysisV2AiResultIdentity {
-    const identity = parseIdentityMaterial(value);
-    const cacheKey = createHash('sha256')
-        .update(canonicalCacheIdentity(identity), 'utf8')
-        .digest('hex');
-    return {
-        ...identity,
-        cacheKey,
-        operationKey: `${OPERATION_PREFIX_BY_STAGE[identity.stage]}:${cacheKey}`,
-    };
 }
 
 function assertComputedIdentity(value: AnalysisV2AiResultIdentity): AnalysisV2AiResultIdentity {
@@ -694,24 +614,6 @@ function sameTokenUsage(
         && left.completionTokens === right.completionTokens
         && left.totalTokens === right.totalTokens
         && left.thinkingTokens === right.thinkingTokens;
-}
-
-export function analysisV2AiResultIdentitiesEqual(
-    checkpoint: AnalysisV2AiResultIdentity,
-    expected: AnalysisV2AiResultIdentity
-): boolean {
-    return checkpoint.operationKey === expected.operationKey
-        && checkpoint.cacheKey === expected.cacheKey
-        && checkpoint.stage === expected.stage
-        && checkpoint.modelName === expected.modelName
-        && checkpoint.thinkingLevel === expected.thinkingLevel
-        && checkpoint.mediaResolution === expected.mediaResolution
-        && checkpoint.promptVersion === expected.promptVersion
-        && checkpoint.schemaVersion === expected.schemaVersion
-        && checkpoint.maxOutputTokens === expected.maxOutputTokens
-        && checkpoint.inputHash === expected.inputHash
-        && checkpoint.mediaSnapshotHash === expected.mediaSnapshotHash
-        && checkpoint.cacheScope === expected.cacheScope;
 }
 
 function parseCheckpoint<T>(
@@ -1276,6 +1178,16 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: unexpected attempt reservation.'
                 );
             }
+            const resolverAdmissionExpired = () => (
+                telemetry.abortSignal?.aborted === true
+                || (
+                    telemetry.admissionDeadlineAtMs !== undefined
+                    && performance.now() >= telemetry.admissionDeadlineAtMs
+                )
+            );
+            if (resolverAdmissionExpired()) {
+                throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            }
             const setup = (async () => {
                 const lease = await leaseStore.acquire({
                     requestId: request.data.requestId,
@@ -1285,9 +1197,16 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     attempt: telemetry.attempt,
                     handlerDeadlineAtMs,
                     aiStagePolicyVersion,
+                    ...(telemetry.admissionDeadlineAtMs !== undefined
+                        ? { admissionDeadlineAtMs: telemetry.admissionDeadlineAtMs }
+                        : {}),
+                    ...(telemetry.abortSignal ? { abortSignal: telemetry.abortSignal } : {}),
                 });
                 let reservation: AnalysisV2AiAttemptReservation;
                 try {
+                    if (resolverAdmissionExpired()) {
+                        throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                    }
                     reservation = await attemptStore.reserve({
                         requestId: request.data.requestId,
                         jobKey: request.data.jobKey,

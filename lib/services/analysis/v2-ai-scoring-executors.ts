@@ -89,7 +89,12 @@ import {
     type AnalysisV2OfficialExclusionReason,
 } from './v2-official-account-screening';
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
+import {
+    v211FeatureAdmission,
+    v211FeatureResolverExcluded,
+} from './v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
+import { v211LateGenderResolverEligible } from './v2-v211-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
 import { selectAnalysisV2ProgressCandidateMedia } from './progress-candidate-media';
 import {
@@ -1490,11 +1495,17 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
+                    const genderQualityV211 = policySupports(
+                        aiFence.aiStagePolicyVersion,
+                        'genderQualityV211',
+                    );
                     const v29Admission = policySupports(
                         aiFence.aiStagePolicyVersion,
                         'genderTriageMicrobatchV29',
                     )
-                        ? v29FeatureAdmission(gender.result, profile)
+                        ? genderQualityV211
+                            ? v211FeatureAdmission(gender.result, profile)
+                            : v29FeatureAdmission(gender.result, profile)
                         : null;
                     const triageAttempted = new Set(policy.triage.selectionIds);
                     const featureRemainder = policy.feature.media.filter(media => (
@@ -1556,9 +1567,18 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             aiFence.aiStagePolicyVersion,
                             'genderTriageMicrobatchV29',
                         )
-                            ? selectAnalysisV2GenderResolverMedia(normalized.media)
+                            ? selectAnalysisV2GenderResolverMedia(
+                                normalized.media,
+                                assertSupportedAiStagePolicyVersion(
+                                    aiFence.aiStagePolicyVersion,
+                                ),
+                            )
                             : normalized.media;
-                    const resolverEligible = genderResolutionEnabled && (
+                    const resolverEligible = genderResolutionEnabled
+                        && !(
+                            genderQualityV211
+                            && v29Admission === 'nonpersonal_or_official'
+                        ) && (
                         policySupports(
                             aiFence.aiStagePolicyVersion,
                             'genderTriageMicrobatchV29',
@@ -1573,7 +1593,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 && triageAssessment.ownerConsistency === 'same_person'
                             )
                     );
-                    const resolverHandle = resolverEligible
+                    let resolverHandle = resolverEligible
                         ? dependencies.ai.startGenderResolution({
                             media: resolverMedia,
                         }, aiFence)
@@ -1581,36 +1601,131 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     if (resolverHandle) {
                         startedResolverHandles.push(resolverHandle);
                     }
+                    // V2.11+ replay policies deliberately preserve their original
+                    // pre-feature admission topology. Production V2.9/V2.10
+                    // retain a featureless terminal only when no resolver was
+                    // admitted; an admitted resolver instead runs beside feature
+                    // analysis so its final classification has feature provenance.
                     if (
                         v29Admission !== null
                         && v29Admission !== 'eligible'
-                        && !resolverHandle
+                        && (genderQualityV211 || !resolverHandle)
                     ) {
+                        if (!resolverHandle) {
+                            return {
+                                candidateId,
+                                instagramId: normalizeUsername(item.username),
+                                status: 'unresolved' as const,
+                                unavailableReason: null,
+                                profile: item.profile,
+                                triage: gender.result,
+                                feature: null,
+                                normalizedSelectionIds: normalized.media.map(
+                                    row => row.selectionId
+                                ),
+                                mediaCoverage: normalized.coverage,
+                                captions,
+                                genderOperationKey: gender.operationKey,
+                                genderResultHash: gender.resultHash,
+                                featureOperationKey: null,
+                                featureResultHash: null,
+                                baselineClassification: 'unresolved' as const,
+                                classificationSource: 'unknown' as const,
+                                genderResolutionStatus: 'not_eligible' as const,
+                                genderResolutionOperationKey: null,
+                                genderResolutionResultHash: null,
+                                mediaBundlePersisted: false,
+                                aiStagePolicyVersion: inputQualityPolicyVersion,
+                                v29FeatureAdmission: v29Admission,
+                            };
+                        }
                         return {
-                            candidateId,
-                            instagramId: normalizeUsername(item.username),
-                            status: 'unresolved' as const,
-                            unavailableReason: null,
-                            profile: item.profile,
-                            triage: gender.result,
-                            feature: null,
-                            normalizedSelectionIds: normalized.media.map(
-                                row => row.selectionId
-                            ),
-                            mediaCoverage: normalized.coverage,
-                            captions,
-                            genderOperationKey: gender.operationKey,
-                            genderResultHash: gender.resultHash,
-                            featureOperationKey: null,
-                            featureResultHash: null,
-                            baselineClassification: 'unresolved' as const,
-                            classificationSource: 'unknown' as const,
-                            genderResolutionStatus: 'not_eligible' as const,
-                            genderResolutionOperationKey: null,
-                            genderResolutionResultHash: null,
-                            mediaBundlePersisted: false,
-                            aiStagePolicyVersion: inputQualityPolicyVersion,
-                            v29FeatureAdmission: v29Admission,
+                            kind: 'resolver_pending',
+                            resolverHandle,
+                            finalize: async settledResolverState => {
+                                const readyResolver =
+                                    settledResolverState?.status === 'ready'
+                                        ? settledResolverState.value
+                                        : null;
+                                const reconciliation = applyGenderResolution({
+                                    aiStagePolicyVersion: inputQualityPolicyVersion,
+                                    baselineClassification: 'unresolved',
+                                    baselineSource: 'unknown',
+                                    triage: gender.result.assessment,
+                                    feature: null,
+                                    resolver: readyResolver?.result ?? null,
+                                });
+                                const status = reconciliation.finalClassification;
+                                const genderResolutionStatus =
+                                    settledResolverState?.status === 'ready'
+                                        ? reconciliation.resolverApplied
+                                            ? 'ready_applied' as const
+                                            : 'ready_inconclusive' as const
+                                        : settledResolverState?.status === 'capacity_skipped'
+                                            ? 'capacity_skipped' as const
+                                            : settledResolverState?.status
+                                                === 'terminal_unavailable'
+                                                ? 'terminal_unavailable' as const
+                                                : 'cutoff' as const;
+                                let mediaBundlePersisted = false;
+                                if (status === 'verified_female' && readyResolver) {
+                                    const resolverMedia =
+                                        readyResolver.result.analyzedSelectionIds.map(
+                                            selectionId => {
+                                                const bytes = normalized.bytes.get(selectionId);
+                                                if (!bytes) {
+                                                    throw new Error(
+                                                        'ANALYSIS_V2_MEDIA_SELECTION_DRIFT'
+                                                    );
+                                                }
+                                                return { selectionId, normalizedJpeg: bytes };
+                                            },
+                                        );
+                                    await dependencies.mediaStore.persistBundle({
+                                        requestId: context.claim.requestId,
+                                        jobKey: context.claim.jobKey,
+                                        claimToken: context.claim.claimToken,
+                                        bundleId: analysisV2CandidateBundleId(candidateId),
+                                        media: resolverMedia,
+                                    });
+                                    mediaBundlePersisted = true;
+                                }
+                                return {
+                                    candidateId,
+                                    instagramId: normalizeUsername(item.username),
+                                    status,
+                                    unavailableReason: null,
+                                    profile,
+                                    triage: gender.result,
+                                    feature: null,
+                                    normalizedSelectionIds: normalized.media.map(
+                                        row => row.selectionId
+                                    ),
+                                    mediaCoverage: normalized.coverage,
+                                    captions,
+                                    genderOperationKey: gender.operationKey,
+                                    genderResultHash: gender.resultHash,
+                                    featureOperationKey: null,
+                                    featureResultHash: null,
+                                    baselineClassification: 'unresolved' as const,
+                                    classificationSource: reconciliation.classificationSource,
+                                    genderResolutionStatus,
+                                    genderResolutionOperationKey:
+                                        readyResolver?.operationKey ?? null,
+                                    genderResolutionResultHash:
+                                        readyResolver?.resultHash ?? null,
+                                    mediaBundlePersisted,
+                                    aiStagePolicyVersion: inputQualityPolicyVersion,
+                                    v29FeatureAdmission: v29Admission,
+                                    ...(selectionProvenance
+                                        ? {
+                                            mediaSelectionProvenance: selectionProvenance,
+                                            inputQualityPolicy:
+                                                'input-quality-v2.8' as const,
+                                        }
+                                        : {}),
+                                };
+                            },
                         };
                     }
                     const featureTask = dependencies.ai.features({
@@ -1695,6 +1810,31 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 ? 'corroborated_official' as const
                                 : 'uncorroborated_official' as const
                         : undefined;
+                    const resolverExcludedByFeatureOfficial = genderQualityV211
+                        && v211FeatureResolverExcluded(modelAccountContext);
+                    if (resolverExcludedByFeatureOfficial && resolverHandle) {
+                        // The resolver is opportunistic. Feature's explicit collective
+                        // context wins immediately: cutoff aborts the SDK call and fences
+                        // its durable intent before any result can be reconciled.
+                        await settleOptionalGenderResolution(resolverHandle);
+                        resolverHandle = null;
+                    }
+                    const lateResolverEligible = genderQualityV211
+                        && resolverHandle === null
+                        && !resolverExcludedByFeatureOfficial
+                        && genderResolutionEnabled
+                        && v211LateGenderResolverEligible(
+                            gender.result,
+                            modelAccountContext,
+                            baselineClassification,
+                            resolverMedia.length,
+                        );
+                    if (lateResolverEligible) {
+                        resolverHandle = dependencies.ai.startGenderResolution({
+                            media: resolverMedia,
+                        }, aiFence);
+                        startedResolverHandles.push(resolverHandle);
+                    }
                     const couldResolveFemale = resolverHandle !== null
                         && (
                             baselineClassification === 'unresolved'
@@ -1738,6 +1878,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                     ? settledResolverState.value
                                     : null;
                             const reconciliation = applyGenderResolution({
+                                aiStagePolicyVersion: inputQualityPolicyVersion,
                                 baselineClassification,
                                 baselineSource: baselineClassification === 'verified_female'
                                     || baselineClassification === 'verified_non_female'

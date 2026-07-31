@@ -15,6 +15,9 @@ import {
     type StrongUncertainResolverExperimentBundle,
 } from './resolver-experiment-artifact';
 import { isStrongUncertainResolverExperimentAdapter } from './resolver-experiment-ai-adapter';
+import {
+    replayStageFailureDispositionEntries,
+} from './replay-job-report-contract';
 
 export const STRONG_UNCERTAIN_RESOLVER_CONFIG = Object.freeze({
     model: 'gemini-3-flash-preview',
@@ -179,7 +182,9 @@ function collectResolverTelemetry(
     );
     if (attemptLatencies?.length) durations.push(...attemptLatencies);
     else if (calls > 0) durations.push(Math.max(0, invocation.elapsedMs));
-    const recordedFailures = Object.entries(invocation.failureDisposition ?? {})
+    const recordedFailures = replayStageFailureDispositionEntries(
+        invocation.failureDisposition ?? {},
+    )
         .filter(([, count]) => Number.isInteger(count) && count > 0);
     for (const [disposition, count] of recordedFailures) {
         stage.failureDisposition[disposition] =

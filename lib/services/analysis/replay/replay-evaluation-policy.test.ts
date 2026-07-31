@@ -2,6 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     replayEvaluationPolicySchema,
     resolveReplayAiStagePolicyVersion,
@@ -25,6 +33,43 @@ const historicalPartialV210Evaluation = {
     capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
     aiStage: 'ai-stage-policy-v2.10' as const,
 } satisfies ReplayEvaluationPolicy;
+const historicalPartialV211Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.11' as const,
+} satisfies ReplayEvaluationPolicy;
+const historicalPartialV212Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.12' as const,
+} satisfies ReplayEvaluationPolicy;
+const historicalPartialV213Evaluation = {
+    capability:
+        'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow',
+    aiStage: 'ai-stage-policy-v2.13',
+} as const;
+const historicalPartialV214Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.14',
+} as const;
+const historicalPartialV215Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.15',
+} as const;
+const historicalPartialV216Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.16',
+} as const;
+const historicalPartialV217Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.17',
+} as const;
+const historicalPartialV218Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.18',
+} as const;
+const historicalPartialV219Evaluation = {
+    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.19',
+} as const;
 const standard = (aiStage: 'ai-stage-policy-v2.7' | 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9') => ({
     selectedPlanId: 'standard' as const,
     policyVersions: {
@@ -86,6 +131,212 @@ describe('replay cross-policy evaluation capability', () => {
         expect(replayEvaluationPolicySchema.safeParse({
             capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29',
             aiStage: 'ai-stage-policy-v2.10',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.11 only behind its distinct gender-quality capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+        expect(resolveReplayAiStagePolicyVersion(historical, historicalPartialV211Evaluation))
+            .toBe('ai-stage-policy-v2.11');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.10',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.12 only behind its own non-exact capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+        expect(resolveReplayAiStagePolicyVersion(historical, historicalPartialV212Evaluation))
+            .toBe('ai-stage-policy-v2.12');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.12',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.13 only behind its own feature shadow capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV213Evaluation as never,
+        )).toBe('ai-stage-policy-v2.13');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.13',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: historicalPartialV213Evaluation.capability,
+            aiStage: 'ai-stage-policy-v2.12',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.14 only behind its own feature-model shadow capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV214Evaluation as never,
+        )).toBe('ai-stage-policy-v2.14');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.13',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: historicalPartialV213Evaluation.capability,
+            aiStage: 'ai-stage-policy-v2.14',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.15 only behind its own feature output-cap shadow capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV215Evaluation as never,
+        )).toBe('ai-stage-policy-v2.15');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.14',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.15',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.16 only behind its single-profile admission shadow capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV216Evaluation as never,
+        )).toBe('ai-stage-policy-v2.16');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.15',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.16',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.17 only behind its public name-visual fusion shadow capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV217Evaluation as never,
+        )).toBe('ai-stage-policy-v2.17');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.16',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.17',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.18 only behind its public-gender headroom diagnostic capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV218Evaluation as never,
+        )).toBe('ai-stage-policy-v2.18');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.17',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.18',
+        }).success).toBe(false);
+    });
+
+    it('admits v2.19 only behind its Pro gender second-look capability', () => {
+        const historical = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.3' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+            },
+        } satisfies ReplaySourceLineage;
+
+        expect(resolveReplayAiStagePolicyVersion(
+            historical,
+            historicalPartialV219Evaluation as never,
+        )).toBe('ai-stage-policy-v2.19');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.18',
+        }).success).toBe(false);
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.19',
         }).success).toBe(false);
     });
 

@@ -34,6 +34,13 @@ const STANDARD_MODEL_PRICING: Record<string, ModelPricing> = {
         nonGlobalInputUsdPerMillionTokens: 0.5,
         nonGlobalOutputUsdPerMillionTokens: 3,
     },
+    'gemini-3.1-pro-preview': {
+        canonicalModelName: 'gemini-3.1-pro-preview',
+        globalInputUsdPerMillionTokens: 2,
+        globalOutputUsdPerMillionTokens: 12,
+        nonGlobalInputUsdPerMillionTokens: 2,
+        nonGlobalOutputUsdPerMillionTokens: 12,
+    },
 };
 
 export interface GeminiCostTokenUsage {

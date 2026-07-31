@@ -2,6 +2,11 @@
 
 이 런북은 명시적으로 승인된 `0_min._.00` Standard E2E 한 건에만 적용한다. Plus는 아직 준비 중이므로 이 실행에 선택하거나 비용 상한 계산에 사용하지 않는다. 베타·얼리 액세스·일반 운영 요청의 credential 전략을 정의하지 않는다.
 
+> **역사적 canary 범위.** 이 문서의 sharding, `primary:3`, `senary` 및 teardown 절차는
+> 2026-07 승인 canary의 재현·감사 기록이다. 현재 production의 normal selected slot은
+> `secondary`이며, 이 문서를 현재 운영 slot 전환 지침으로 사용하지 않는다. 새 production
+> 변경은 현행 운영 runbook과 reviewed deploy path로만 수행한다.
+
 ## 불변 조건
 
 1. 정상 공개 preflight/얼리버드 intake는 계획된 실행 전 상태인 `ANALYSIS_V2_ADMISSION_ENABLED=true`를 유지한다. 이 gate는 공개 preflight만 만들며 분석 요청을 자동 생성하지 않는다. 유효한 서명 admission은 정확히 허용된 owner/target의 해당 요청만 `test_entitlement`로 선택하고, 다른 요청을 승인할 수 없다. 잘못된 header는 production으로 통과시키지 않고 거절한다.
@@ -52,7 +57,7 @@ slot을 즉석에서 alias하거나 일부 operation만 시작하지 않고 E2E 
 ```dotenv
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false
 ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET=0_min._.00
-ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID=974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd
+ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID=<AUTHORIZED_TEST_OWNER_USER_ID>
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT=senary
 ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=senary
 ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary
@@ -105,7 +110,9 @@ intake와 worker의 모든 runtime에서 유지한다.
 7. sharding을 `false`로 유지한 채 selected `senary` same-named exact numeric secret과 additional `quinary`, `tertiary` same-named exact numeric refs를 staging 배치한다. `latest`를 사용하지 않고 설치 뒤 effective config와 Vercel/Cloud Run deployed SHA를 다시 확인한다.
 8. 관계 수집은 `senary`와 `quinary`에 각각 한 방향만 배정되고, target profile과 profile fallback/repair는 `senary`, target liker는 `senary`, target comment는 `tertiary`, candidate liker는 `quinary`이며, 어떤 단일 operation도 여러 account를 쓰지 않는지 확인한다.
 9. 정상 공개 preflight/얼리버드 intake는 staging 전체에서 `ANALYSIS_V2_ADMISSION_ENABLED=true`이고 normal no-header 요청은 `production`에 남는지 확인한다. paid webhook은 `awaiting_operator`까지만 만들고 outbox/operator approval 전에는 분석 요청이나 task를 자동 생성하지 않아야 한다. 별도의 signed `test_entitlement`는 exact owner/target 한 건만 허용해야 한다. 예상 밖 ordinary preflight 또는 work가 관측되면 시작을 중단하고 그 작업이 terminal/empty가 된 뒤 empty-work gate를 처음부터 다시 실행한다.
-10. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
+10. In the browser session, confirm the authenticated owner matches the separately protected
+   authorized owner record. Do not copy its email or UUID into this runbook, command output,
+   screenshots, or evidence notes.
 11. Confirm the preflight target is exactly `0_min._.00`, the selected plan is exactly Standard and eligible, and the girlfriend exclusion decision is explicit. Do not substitute Plus.
 12. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
 13. Confirm Cloud Run has no traffic-tagged revision and exactly one revision receives 100% traffic. The deploy script rejects even a zero-percent tagged revision while Gemini concurrency remains process-local.
@@ -295,7 +302,7 @@ paid account instead of rotating free accounts.
 
 ## Success checks
 
-1. The request row's `user_id` equals the verified UUID for `ym1113@kakao.com`.
+1. The request row's `user_id` equals the separately protected verified owner UUID.
 2. Followers and following have distinct persisted provider-run slots and pass completeness gates independently.
 3. Every fallback, liker, and comment run uses the slot required by the persisted operation map.
 4. The request reaches `completed`; failed or incomplete relationship coverage is not presented as a complete result.
@@ -303,9 +310,10 @@ paid account instead of rotating free accounts.
 6. Record total duration, stage durations, provider usage, Gemini usage, and any fallback reason without recording credentials or private payloads.
 7. When fresh admission produced a schema-v1 attested target profile run, confirm target evidence replayed that run ID without a second profile Actor or `analysis_v2_provider_runs` row. Attribute its cost only to the preflight. If no attested descriptor exists, confirm the existing bound profile fallback was used instead.
 
-## Teardown
+## Historical canary teardown (`primary:3`)
 
-teardown의 최종 selected baseline은 exact `primary:3`이다.
+이 절의 최종 selected baseline `primary:3`은 위 역사적 canary의 teardown 기록이다. 현재
+production selected slot을 의미하거나 변경하지 않는다.
 
 1. teardown에서 `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false`를 Vercel intake와 Cloud Run worker를 포함해 이 값을 설정한 모든 runtime에 적용하고 effective 설정을 확인한다.
 2. 먼저 prune flag 없이 일반 deploy로 normal selected slot을 `ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary`, numeric version을 `ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3`으로 복원한다. `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false`와 canonical `NEXT_PUBLIC_SUPABASE_URL=https://<20-lowercase-project-ref>.supabase.co`를 runtime manifest에도 유지한다. 이 단계는 `tertiary`, `quinary`, `senary` ref를 제거하지 않고 복구용으로 보존해야 한다.
@@ -374,7 +382,7 @@ bash scripts/deploy-analysis-v2-worker.sh --check \
 
 ## 2026-07-16 canary evidence
 
-Request `392edd9d-1999-4a44-9dc1-3a479a3ceb10` used the authenticated owner and exact target
+Request `<HISTORICAL_2026-07-16_REQUEST_ID>` used the authenticated owner and exact target
 specified above. Preflight declared 469 followers and 635 following and selected Standard. The
 analysis did not complete:
 
@@ -444,8 +452,8 @@ will accept logged-out requests, and a successful single egress probe is not pro
 
 ## 2026-07-17 Standard canary evidence (failed)
 
-Preflight `3d6759a9-948c-4de1-be7a-d02aa72ed8fd` created Standard request
-`b27bc417-5e45-41b1-aad3-af733fdbb954` for the exact target `0_min._.00`. The request failed and
+Preflight `<HISTORICAL_2026-07-17_PREFLIGHT_ID>` created Standard request
+`<HISTORICAL_2026-07-17_REQUEST_ID>` for the exact target `0_min._.00`. The request failed and
 does not satisfy the success checks in this runbook.
 
 - Wall time was exactly `1,308,289ms` (`21m48.289s`): queue `978ms` and processing

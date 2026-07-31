@@ -33,6 +33,9 @@ import type {
     ReplayOutcome,
     ReplayTriageInput,
 } from './replay-runner';
+import type {
+    ReplayStageFailureDispositionCounts,
+} from './replay-job-report-contract';
 
 const experimentRunnerBrand = Symbol('strong-uncertain-resolver-runner');
 const issuedExperimentRunners = new WeakSet<object>();
@@ -44,7 +47,7 @@ type InvocationState = {
     retries: number;
     attempts: number;
     rateLimited: number;
-    failureDisposition: Record<string, number>;
+    failureDisposition: ReplayStageFailureDispositionCounts;
     attemptLatenciesMs: number[];
 };
 
@@ -57,9 +60,11 @@ function normalized(media: readonly ReplayMedia[]) {
     }));
 }
 function recordStart(state: InvocationState, value: GeminiAttemptStartTelemetry) {
-    state.calls++;
     state.attempts++;
     if (value.retryCount > 0) state.retries++;
+}
+function recordProviderDispatch(state: InvocationState) {
+    state.calls++;
 }
 function recordTerminal(state: InvocationState, value: GeminiAttemptTelemetry) {
     state.attemptLatenciesMs.push(Math.max(0, value.latencyMs));
@@ -80,6 +85,7 @@ function audit(
         resultIdentity: identity,
         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
         onBeforeAttempt: value => recordStart(state, value),
+        onProviderDispatch: () => recordProviderDispatch(state),
         onAttemptTelemetry: value => recordTerminal(state, value),
     };
 }
@@ -123,6 +129,7 @@ async function resolveGender(
             startingAttempt: 1,
             abortSignal: signal,
             onBeforeAttempt: context.onBeforeAttempt,
+            onProviderDispatch: context.onProviderDispatch,
             onAttemptTelemetry: context.onAttemptTelemetry,
             skipTokenLog: true,
             replayCapability,
@@ -291,7 +298,9 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
                 input.signal,
             );
         }, error =>
-            isGeminiRateLimitError(error)
+            (error instanceof Error
+                && error.message === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED')
+            || isGeminiRateLimitError(error)
             || isRecoverableGeminiResponseError(error)
             || isAmbiguousGeminiGenerationError(error)),
     };

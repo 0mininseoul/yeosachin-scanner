@@ -1,12 +1,12 @@
 # Final Automatic Analysis Launch Readiness Implementation Plan
 
-> **현재 상태 스냅샷 (2026-07-28):** 이 파일의 나머지는 당시 launch readiness checklist라는 역사적 계획이다. checkbox를 현재 상태로 다시 해석하거나 미충족 gate를 체크하지 않는다. 현재 운영 정본은 [Analysis V2 프로덕션 운영 정본](../../analysis-v2-production-operations.md)이다.
+> **현재 상태 스냅샷 (2026-07-29):** 이 파일의 나머지는 당시 launch readiness checklist라는 역사적 계획이다. checkbox를 현재 상태로 다시 해석하거나 미충족 gate를 체크하지 않는다. 현재 운영 정본은 [Analysis V2 프로덕션 운영 정본](../../analysis-v2-production-operations.md)이며, AI-only 평가 이력은 [AI replay 운영 문서](../../analysis-v2-ai-replay-operations.md)에 있다.
 
 **구현됨:** v2.10 tone, aggregate gender experiment, risk v2.5, checkout safe failure와 automatic open, microbatch v2.9, owner-controlled sharing/revocation이 구현·배포되었다.
 
 **소유자 waived/deferred:** repeat stability와 실제 결제 경로의 재검증은 launch 이후로 deferred되었다.
 
-**검증 공백(미해결):** unknown `<=20%`는 아직 미달이다. 최신 full E2E는 v2.9/v2.10 이전의 표본이며, 최신 94.6분은 표시 workload band 안에 들지 않는다. complete Basic/Standard cost도 없다. 이 공백은 이력 checklist의 해당 gate를 충족한 것으로 표시하지 않는다.
+**검증 공백(미해결):** unknown `<=20%`는 아직 미달이다. V2.17 AI-only 평가는 observed 32.77%(worst 34.17%)와 calibration·official exclusion gate 실패로 production에서 기각됐고 production은 V2.10을 유지한다. 최신 full E2E는 v2.9/v2.10 이전의 표본이며, 최신 94.6분은 표시 workload band 안에 들지 않는다. complete Basic/Standard cost도 없다. 이 공백은 이력 checklist의 해당 gate를 충족한 것으로 표시하지 않는다.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

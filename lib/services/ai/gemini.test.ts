@@ -48,6 +48,7 @@ import {
 } from './analysis-response-schemas';
 import { deepRiskNarrativeResponseSchema } from './deep-risk-analysis';
 import { createPrivateNameBatchResponseSchema } from './private-name-analysis';
+import { issueReplayStatelessCapability } from './replay-stateless-capability';
 
 const responseSchema = z.object({ value: z.string() }).strict();
 const stageRequestId = '11111111-1111-4111-8111-111111111111';
@@ -110,19 +111,25 @@ describe('analyzeWithGemini generation retry policy', () => {
         vi.restoreAllMocks();
     });
 
-    it('does not retry an ambiguous generation and never exposes the provider error', async () => {
+    it('keeps production v2.12 callback and console telemetry byte-shape compatible', async () => {
         const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-        const attemptTelemetry = vi.fn();
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const audit = stageAuditOptions();
         const providerSecret = 'fetch failed: ECONNRESET api-key=provider-secret';
         mocks.generateContent.mockRejectedValueOnce(new Error(providerSecret));
 
-        const result = analyze(undefined, attemptTelemetry);
+        const result = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.12',
+            ...audit,
+        });
         await expect(result).rejects.toThrow(
             'AI_AMBIGUOUS_GENERATION_ERROR: Gemini generation status is unknown; the request was not retried.'
         );
 
         expect(mocks.generateContent).toHaveBeenCalledTimes(1);
-        expect(attemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
             attempt: 1,
             retryCount: 0,
             disposition: 'ambiguous',
@@ -130,9 +137,17 @@ describe('analyzeWithGemini generation retry policy', () => {
             usageComplete: false,
             estimatedCostUsd: null,
         }));
-        expect(JSON.stringify(attemptTelemetry.mock.calls)).not.toContain(providerSecret);
+        expect(audit.onAttemptTelemetry.mock.calls[0]![0])
+            .not.toHaveProperty('failureKind');
+        const consoleAttempt = consoleLog.mock.calls.find(
+            call => call[0] === 'Gemini SDK attempt telemetry:',
+        );
+        expect(consoleAttempt?.[1]).not.toHaveProperty('failureKind');
+        expect(JSON.stringify(audit.onAttemptTelemetry.mock.calls))
+            .not.toContain(providerSecret);
         expect(consoleError.mock.calls.flat().join(' ')).not.toContain(providerSecret);
         consoleError.mockRestore();
+        consoleLog.mockRestore();
     });
 
     it('does not retry a rate-limit phrase without an explicit 429 status', async () => {
@@ -148,6 +163,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(attemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({
             disposition: 'ambiguous',
         }));
+        expect(attemptTelemetry.mock.calls[0]![0]).not.toHaveProperty('failureKind');
     });
 
     it('bounds explicit 429 retries at the configured maximum', async () => {
@@ -171,6 +187,9 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(attemptTelemetry).toHaveBeenCalledTimes(4);
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['rate_limited', 'rate_limited', 'rate_limited', 'rate_limited']);
+        expect(attemptTelemetry.mock.calls.every(
+            call => !Object.hasOwn(call[0], 'failureKind'),
+        )).toBe(true);
         expect(attemptTelemetry.mock.calls.map(call => call[0].retryCount))
             .toEqual([0, 1, 2, 3]);
     });
@@ -201,7 +220,107 @@ describe('analyzeWithGemini generation retry policy', () => {
         }));
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['rate_limited', 'success']);
+        expect(attemptTelemetry.mock.calls[0]![0]).not.toHaveProperty('failureKind');
+        expect(attemptTelemetry.mock.calls[1]![0]).not.toHaveProperty('failureKind');
     });
+
+    it('records provider dispatch only immediately before an SDK generation call', async () => {
+        const providerDispatch = vi.fn();
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.12',
+            skipTokenLog: true,
+            replayCapability: issueReplayStatelessCapability(),
+            admissionDeadlineAtMs: performance.now() + 5_000,
+            ...stageAuditOptions(),
+            onProviderDispatch: providerDispatch,
+        } as never)).resolves.toEqual({ value: 'ok' });
+
+        expect(providerDispatch).toHaveBeenCalledOnce();
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(providerDispatch.mock.invocationCallOrder[0])
+            .toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
+    });
+
+    it('does not record a provider dispatch when the resolver deadline expires after attempt intent', async () => {
+        vi.useFakeTimers();
+        const providerDispatch = vi.fn();
+        const deadlineAtMs = performance.now() + 1;
+        const onBeforeAttempt = vi.fn(async () => {
+            await vi.advanceTimersByTimeAsync(1);
+        });
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.12',
+            skipTokenLog: true,
+            replayCapability: issueReplayStatelessCapability(),
+            admissionDeadlineAtMs: deadlineAtMs,
+            requestId: stageRequestId,
+            onBeforeAttempt,
+            onAttemptTelemetry: vi.fn(),
+            onProviderDispatch: providerDispatch,
+        } as never)).rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+
+        expect(onBeforeAttempt).toHaveBeenCalledOnce();
+        expect(providerDispatch).not.toHaveBeenCalled();
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        'ai-stage-policy-v2.11',
+        'ai-stage-policy-v2.12',
+        'ai-stage-policy-v2.13',
+        'ai-stage-policy-v2.16',
+        'ai-stage-policy-v2.17',
+        'ai-stage-policy-v2.18',
+    ] as const)(
+        'runs a replay provider fence once for each SDK attempt under %s, including a retry',
+        async aiStagePolicyVersion => {
+        vi.useFakeTimers();
+        vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        mocks.generateContent
+            .mockRejectedValueOnce(Object.assign(new Error('rate limited'), { status: 429 }))
+            .mockResolvedValueOnce(successfulResponse());
+        const fence = vi.fn(
+            <T,>(task: () => Promise<T>): Promise<T> => task(),
+        ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
+        const providerDispatch = vi.fn();
+        const audit = stageAuditOptions();
+        const result = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: aiStagePolicyVersion as never,
+            skipTokenLog: true,
+            replayCapability: issueReplayStatelessCapability(),
+            runProviderAttempt: fence,
+            onProviderDispatch: providerDispatch,
+            ...audit,
+        });
+        await vi.runAllTimersAsync();
+        await expect(result).resolves.toEqual({ value: 'ok' });
+        expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+        expect(fence).toHaveBeenCalledTimes(2);
+        expect(providerDispatch).toHaveBeenCalledTimes(2);
+        const failedAttempt = audit.onAttemptTelemetry.mock.calls[0]![0];
+        if (
+            aiStagePolicyVersion === 'ai-stage-policy-v2.12'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.13'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.16'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.17'
+            || aiStagePolicyVersion === 'ai-stage-policy-v2.18'
+        ) {
+            expect(failedAttempt).toMatchObject({ failureKind: 'http_429' });
+        } else {
+            expect(failedAttempt).not.toHaveProperty('failureKind');
+        }
+        },
+    );
 
     it('logs known usage and attempt telemetry before rejecting an empty response', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -242,6 +361,7 @@ describe('analyzeWithGemini generation retry policy', () => {
                 thinkingTokens: 0,
             },
         }));
+        expect(attemptTelemetry.mock.calls[0]![0]).not.toHaveProperty('failureKind');
     });
 
     it('does not retry schema-invalid responses', async () => {
@@ -532,6 +652,41 @@ describe('analyzeWithGemini stage request policy', () => {
         }
     );
 
+    it('maps the v2.15 feature output cap into the generated SDK request', async () => {
+        const images = Array.from(
+            { length: 12 },
+            (_, index) => `image-${index}`,
+        );
+
+        await analyzeWithGemini('sensitive prompt', images, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.15',
+            ...stageAuditOptions(),
+        });
+
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        const request = mocks.generateContent.mock.calls[0][0];
+        expect(request).toMatchObject({
+            model: 'gemini-3-flash-preview',
+            config: {
+                maxOutputTokens: 4_096,
+                mediaResolution: 'medium',
+                thinkingConfig: { thinkingLevel: 'medium' },
+                responseMimeType: 'application/json',
+                responseJsonSchema: {
+                    type: 'object',
+                    properties: { value: { type: 'string' } },
+                    required: ['value'],
+                    additionalProperties: false,
+                },
+            },
+        });
+        expect(request.contents[0].parts.filter(
+            (part: { inlineData?: unknown }) => part.inlineData,
+        )).toHaveLength(11);
+    });
+
     it('admits only the bounded v2.9 two-account gender microbatch media override', async () => {
         const images = Array.from({ length: 11 }, (_, index) => `image-${index}`);
         await analyzeWithGemini('prompt', images, {
@@ -686,6 +841,38 @@ describe('analyzeWithGemini stage request policy', () => {
             skipTokenLog: true,
             statelessReplay: true,
         } as never)).rejects.toThrow('cannot skip durable token logging');
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
+
+    it('rejects non-replay and invalid-policy provider fences before an SDK call', async () => {
+        mocks.generateContent.mockResolvedValue(successfulResponse());
+        const identityFence = vi.fn(
+            <T,>(task: () => Promise<T>): Promise<T> => task(),
+        ) as unknown as <T>(task: () => Promise<T>) => Promise<T>;
+        const replayCapability = issueReplayStatelessCapability();
+        const calls = [
+            analyzeWithGemini('prompt', undefined, {
+                schema: responseSchema,
+                stage: 'genderTriage',
+                aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+                runProviderAttempt: identityFence,
+                ...stageAuditOptions(),
+            }),
+            analyzeWithGemini('prompt', undefined, {
+                schema: responseSchema,
+                stage: 'genderTriage',
+                aiStagePolicyVersion: 'ai-stage-policy-v2.10',
+                skipTokenLog: true,
+                replayCapability,
+                runProviderAttempt: identityFence,
+                ...stageAuditOptions(),
+            }),
+        ];
+
+        await expect(Promise.all(calls)).rejects.toThrow(
+            'Gemini provider attempt fence is restricted to stateless replay v2.11 gender-quality stages',
+        );
+        expect(identityFence).not.toHaveBeenCalled();
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
@@ -883,6 +1070,30 @@ describe('analyzeWithGemini process concurrency', () => {
         };
     }
 
+    function replayProviderFence(limit: number) {
+        let active = 0;
+        const waiters: Array<() => void> = [];
+        return async function run<T>(task: () => Promise<T>): Promise<T> {
+            const execute = async () => {
+                try {
+                    return await task();
+                } finally {
+                    active--;
+                    waiters.shift()?.();
+                }
+            };
+            if (active < limit && waiters.length === 0) {
+                active++;
+                return execute();
+            }
+            await new Promise<void>(resolve => waiters.push(() => {
+                active++;
+                resolve();
+            }));
+            return execute();
+        };
+    }
+
     it('caps all process-shared generations at eight', async () => {
         const deferred = deferredGenerations();
         const calls = Array.from({ length: 12 }, () => analyzeWithGemini('prompt', undefined, {
@@ -973,6 +1184,129 @@ describe('analyzeWithGemini process concurrency', () => {
             expect(deferred.maximumActive()).toBe(concurrency);
         },
     );
+
+    it('queues injected v2.11 provider attempts before local stage admission', async () => {
+        const deferred = deferredGenerations();
+        const runShared = replayProviderFence(8);
+        const runTriage = replayProviderFence(6);
+        const replayCapability = issueReplayStatelessCapability();
+        const runProviderAttempt = <T,>(task: () => Promise<T>) => (
+            runTriage(() => runShared(task))
+        );
+        const calls = Array.from({ length: 7 }, () => analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            skipTokenLog: true,
+            replayCapability,
+            runProviderAttempt,
+            ...stageAuditOptions(),
+        }));
+        const settled = Promise.allSettled(calls);
+
+        try {
+            await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(6));
+            deferred.releases.splice(0).forEach(release => release());
+            await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(7));
+        } finally {
+            deferred.releases.splice(0).forEach(release => release());
+            await settled;
+        }
+
+        expect(await settled).toEqual(Array.from({ length: 7 }, () => (
+            expect.objectContaining({ status: 'fulfilled' })
+        )));
+    });
+
+    it('settles mixed v2.11 replay fences without inner capacity rejection or duplicate SDK calls', async () => {
+        type ReplayStage = 'genderTriage' | 'featureAnalysis' | 'privateAccountName';
+        const makeTasks = (stage: ReplayStage, count: number) => Array.from(
+            { length: count },
+            (_, index) => ({ stage, id: `${stage}-${index + 1}` }),
+        );
+        const tasks = [
+            ...makeTasks('genderTriage', 7),
+            ...makeTasks('featureAnalysis', 4),
+            ...makeTasks('privateAccountName', 3),
+        ];
+        const maxByStage: Record<ReplayStage, number> = {
+            genderTriage: 0,
+            featureAnalysis: 0,
+            privateAccountName: 0,
+        };
+        const activeByStage: Record<ReplayStage, number> = {
+            genderTriage: 0,
+            featureAnalysis: 0,
+            privateAccountName: 0,
+        };
+        const terminalCounts = new Map(tasks.map(task => [task.id, 0]));
+        const providerCalls = new Map(tasks.map(task => [task.id, 0]));
+        const releases: Array<() => void> = [];
+        let active = 0;
+        let maximumActive = 0;
+        mocks.generateContent.mockImplementation(request => new Promise(resolve => {
+            const prompt = (request as {
+                contents: Array<{ parts: Array<{ text?: string }> }>;
+            }).contents[0]!.parts[0]!.text!;
+            const [stage, id] = prompt.split('/') as [ReplayStage, string];
+            active++;
+            maximumActive = Math.max(maximumActive, active);
+            activeByStage[stage]++;
+            maxByStage[stage] = Math.max(maxByStage[stage], activeByStage[stage]);
+            providerCalls.set(id, providerCalls.get(id)! + 1);
+            releases.push(() => {
+                active--;
+                activeByStage[stage]--;
+                resolve(successfulResponse());
+            });
+        }));
+
+        const runShared = replayProviderFence(8);
+        const runTriage = replayProviderFence(6);
+        const runFeature = replayProviderFence(3);
+        const runPrivate = replayProviderFence(2);
+        const runProviderAttemptByStage = {
+            genderTriage: <T,>(task: () => Promise<T>) => runTriage(() => runShared(task)),
+            featureAnalysis: <T,>(task: () => Promise<T>) => runFeature(() => runShared(task)),
+            privateAccountName: <T,>(task: () => Promise<T>) => runPrivate(() => runShared(task)),
+        };
+        const replayCapability = issueReplayStatelessCapability();
+        const calls = tasks.map(task => analyzeWithGemini(`${task.stage}/${task.id}`, undefined, {
+            schema: responseSchema,
+            stage: task.stage,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            skipTokenLog: true,
+            replayCapability,
+            runProviderAttempt: runProviderAttemptByStage[task.stage],
+            requestId: stageRequestId,
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(() => {
+                terminalCounts.set(task.id, terminalCounts.get(task.id)! + 1);
+            }),
+        }));
+
+        let released = 0;
+        while (released < tasks.length) {
+            await vi.waitFor(() => expect(releases.length).toBeGreaterThan(0));
+            const batch = releases.splice(0);
+            released += batch.length;
+            batch.forEach(release => release());
+        }
+
+        await expect(Promise.all(calls)).resolves.toEqual(
+            Array.from({ length: tasks.length }, () => ({ value: 'ok' })),
+        );
+        expect(maximumActive).toBe(8);
+        expect(maxByStage.genderTriage).toBe(6);
+        expect(maxByStage.featureAnalysis).toBeLessThanOrEqual(3);
+        expect(maxByStage.privateAccountName).toBeLessThanOrEqual(2);
+        expect([...providerCalls.values()]).toEqual(
+            Array.from({ length: tasks.length }, () => 1),
+        );
+        expect([...terminalCounts.values()]).toEqual(
+            Array.from({ length: tasks.length }, () => 1),
+        );
+    });
 
     it('never queues a resolver when either bounded slot is unavailable', async () => {
         const deferred = deferredGenerations();

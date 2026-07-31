@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import { captureHistoricalPartialAvailableReplayBundle, partialAvailableSafeReport } from './historical-partial-available-capture';
+import {
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+} from './replay-source-lineage';
 
 const lineage = {
     selectedPlanId: 'standard' as const,
@@ -37,6 +49,353 @@ function publicProfile(username: string, posts = 1) {
 }
 
 describe('historical partial-available replay capture', () => {
+    it('seals the exact v2.11 gender-quality evaluation capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '2'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11',
+        });
+    });
+
+    it('rejects the v2.11 official E2E capability from non-exact capture', async () => {
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '3'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('seals only the exact v2.12 partial capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '4'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.12',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.12',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '6'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.12',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '5'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.12',
+            },
+            source: {
+                profiles: [],
+                evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.13 shadow-rescue partial capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '7'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.13',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.13',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '8'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.13',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.15 output-cap shadow capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '9'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.15',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.15',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'a'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.15',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.16 single-profile admission capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'b'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.16',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.16',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'c'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.16',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.17 public name-visual fusion capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'd'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.17',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.17',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'e'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.17',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.18 public-gender headroom capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: 'f'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.18',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.18',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '0'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.18',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
+    it('recaptures only the exact v2.19 Pro gender second-look capability', async () => {
+        const result = await captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '1'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.19',
+            },
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(result.bundle.capture.evaluationPolicy).toEqual({
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.19',
+        });
+        await expect(captureHistoricalPartialAvailableReplayBundle({
+            requestFingerprint: '2'.repeat(64),
+            sourceLineage: lineage,
+            evaluationPolicy: {
+                capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.19',
+            } as never,
+            source: {
+                profiles: [],
+                evidence: {
+                    relationship: [],
+                    targetInteractions: [],
+                    reverseInteractions: [],
+                },
+            },
+            normalizeMedia: async () =>
+                Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
+    });
+
     it('seals a v2.10 evaluation into the same non-exact no-substitution scope', async () => {
         const result = await captureHistoricalPartialAvailableReplayBundle({
             requestFingerprint: '0'.repeat(64),

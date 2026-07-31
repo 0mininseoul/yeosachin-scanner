@@ -16,6 +16,7 @@ import {
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
@@ -1065,6 +1066,132 @@ describe('V2 AI and scoring executors', () => {
             genderResolutionResultHash: resolverResultHash,
         });
         expect(cutoff).not.toHaveBeenCalled();
+    });
+
+    it('does not start a v2.11 resolver when profile signals already corroborate a collective account', async () => {
+        const memoryState = memory();
+        const account = profile('black.cherry.club', {
+            fullName: 'Black Cherry Club',
+            bio: 'Single [콜드브루] Out now',
+        });
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{ username: account.username, status: 'success' as const, profile: account }],
+                })),
+            },
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0],
+        ) => ({
+            result: {
+                ...triage(input.media.map(row => row.selectionId)),
+                v29AccountContext: 'personal' as const,
+            },
+            operationKey: `gender-triage:${digest('v211-pre-feature-official')}`,
+            resultHash: digest('v211-pre-feature-official'),
+            source: 'checkpoint' as const,
+        }));
+        const base = state();
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{ batch: 0, itemCount: 1, inputHash: digest('v211-official-topology') }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1,
+                        producerInputHash: digest('v211-official-producer'), revision: 1,
+                        resultHash: digest('v211-official-result'),
+                    }],
+                }),
+            }),
+        );
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        expect(memoryState.outcomes[0]).toMatchObject({
+            status: 'unresolved',
+            v29FeatureAdmission: 'nonpersonal_or_official',
+            genderResolutionStatus: 'not_eligible',
+        });
+    });
+
+    it('cuts off and discards a v2.11 early resolver when feature returns official group context', async () => {
+        const memoryState = memory();
+        const account = profile('feature.official');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{ username: account.username, status: 'success' as const, profile: account }],
+                })),
+            },
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0],
+        ) => ({
+            result: {
+                ...triage(input.media.map(row => row.selectionId)),
+                v29AccountContext: 'personal' as const,
+            },
+            operationKey: `gender-triage:${digest('v211-feature-official')}`,
+            resultHash: digest('v211-feature-official'),
+            source: 'checkpoint' as const,
+        }));
+        const cutoff = vi.fn(async () => { resolverState = { status: 'cutoff' }; });
+        let resolverState: ReturnType<
+            ReturnType<AnalysisV2AiStageRuntime['startGenderResolution']>['peek']
+        > = { status: 'pending' };
+        deps.ai.startGenderResolution = vi.fn(() => ({
+            operationKey: `gender-resolution:${digest('v211-feature-official')}`,
+            completion: Promise.resolve(),
+            peek: () => resolverState,
+            cutoff,
+        }));
+        deps.ai.features = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['features']>[0],
+        ) => {
+            const result = feature(input.media.map(row => row.selectionId), 'unresolved');
+            result.features.accountContext = 'official_group_or_brand';
+            return {
+                result,
+                operationKey: `feature-analysis:${digest('v211-feature-official')}`,
+                resultHash: digest('v211-feature-official-result'),
+                source: 'checkpoint' as const,
+            };
+        });
+        const base = state();
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        profileBatches: [{ batch: 0, itemCount: 1, inputHash: digest('v211-late-official-topology') }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1,
+                        producerInputHash: digest('v211-late-official-producer'), revision: 1,
+                        resultHash: digest('v211-late-official-result'),
+                    }],
+                }),
+            }),
+        );
+        expect(deps.ai.startGenderResolution).toHaveBeenCalledOnce();
+        expect(cutoff).toHaveBeenCalledOnce();
+        expect(memoryState.outcomes[0]).toMatchObject({
+            status: 'unresolved',
+            classificationSource: 'unknown',
+            genderResolutionStatus: 'not_eligible',
+            genderResolutionOperationKey: null,
+        });
     });
 
     it.each([

@@ -1,4 +1,9 @@
 import { mkdtemp, chmod, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
+import {
+    closeSync as closeDescriptorSync,
+    renameSync,
+    writeFileSync,
+} from 'node:fs';
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +22,16 @@ import {
 } from './replay-bundle';
 import { installReplayArtifactSignalCleanup } from './replay-artifact-lifecycle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
+import {
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+} from './replay-source-lineage';
 
 const temporaryPaths: string[] = [];
 
@@ -171,6 +186,345 @@ describe('analysis V2 replay bundle', () => {
                 },
             },
         });
+    });
+
+    it('authenticates the exact v2.11 gender-quality capability in a sealed schema-v2 bundle', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        const bundlePath = join(directory, 'partial-v211.enc');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.11',
+                },
+            },
+        } as AnalysisV2ReplayBundle;
+
+        await writeReplayBundle({
+            bundle: value,
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+        await expect(readAuthenticatedReplayBundle({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:20:00.000Z'),
+        })).resolves.toMatchObject({
+            bundle: {
+                schemaVersion: 2,
+                capture: {
+                    evaluationPolicy: {
+                        capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.11',
+                    },
+                },
+            },
+        });
+    });
+
+    it('authenticates v2.12 only with its own sealed partial capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        const bundlePath = join(directory, 'partial-v212.enc');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.12',
+                },
+            },
+        } as AnalysisV2ReplayBundle;
+
+        await writeReplayBundle({
+            bundle: value,
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        });
+        await expect(readAuthenticatedReplayBundle({
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:20:00.000Z'),
+        })).resolves.toMatchObject({
+            bundle: {
+                capture: {
+                    evaluationPolicy: {
+                        capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.12',
+                    },
+                },
+            },
+        });
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.12',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-policy.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('authenticates v2.13 only with its own sealed partial capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability:
+                        'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow',
+                    aiStage: 'ai-stage-policy-v2.13',
+                },
+            },
+        } as unknown as AnalysisV2ReplayBundle;
+
+        await expect(writeReplayBundle({
+            bundle: value,
+            bundlePath: join(directory, 'partial-v213.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).resolves.toBeDefined();
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.13',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-v213.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('authenticates v2.15 only with its own sealed partial capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability:
+                        HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.15',
+                },
+            },
+        } as unknown as AnalysisV2ReplayBundle;
+
+        await expect(writeReplayBundle({
+            bundle: value,
+            bundlePath: join(directory, 'partial-v215.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).resolves.toBeDefined();
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability:
+                            HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.15',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-v215.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('authenticates v2.16 only with its own sealed partial capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability:
+                        HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.16',
+                },
+            },
+        } as unknown as AnalysisV2ReplayBundle;
+
+        await expect(writeReplayBundle({
+            bundle: value,
+            bundlePath: join(directory, 'partial-v216.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).resolves.toBeDefined();
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability:
+                            HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.16',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-v216.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('authenticates v2.17 only with its own sealed public name-fusion capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability:
+                        HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.17',
+                },
+            },
+        } as unknown as AnalysisV2ReplayBundle;
+
+        await expect(writeReplayBundle({
+            bundle: value,
+            bundlePath: join(directory, 'partial-v217.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).resolves.toBeDefined();
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability:
+                            HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.17',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-v217.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('authenticates v2.18 only with its own sealed public-gender headroom capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability:
+                        HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.18',
+                },
+            },
+        } as unknown as AnalysisV2ReplayBundle;
+
+        await expect(writeReplayBundle({
+            bundle: value,
+            bundlePath: join(directory, 'partial-v218.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).resolves.toBeDefined();
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability:
+                            HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.18',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-v218.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
+    });
+
+    it('authenticates v2.19 only with its own sealed Pro gender second-look capability', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'key.key');
+        await createReplayKeyFile(keyPath);
+        const value = {
+            ...partialBundle(),
+            capture: {
+                ...partialBundle().capture,
+                evaluationPolicy: {
+                    capability:
+                        HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+                    aiStage: 'ai-stage-policy-v2.19',
+                },
+            },
+        } as unknown as AnalysisV2ReplayBundle;
+
+        await expect(writeReplayBundle({
+            bundle: value,
+            bundlePath: join(directory, 'partial-v219.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).resolves.toBeDefined();
+        await expect(writeReplayBundle({
+            bundle: {
+                ...value,
+                capture: {
+                    ...value.capture,
+                    evaluationPolicy: {
+                        capability:
+                            HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+                        aiStage: 'ai-stage-policy-v2.19',
+                    },
+                },
+            } as unknown as AnalysisV2ReplayBundle,
+            bundlePath: join(directory, 'cross-v219.enc'),
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_BUNDLE_INVALID');
     });
 
     it('rejects cross-version capabilities again while reading authenticated plaintext', async () => {
@@ -407,6 +761,53 @@ describe('analysis V2 replay bundle', () => {
         await expect(stat(keyPath)).rejects.toThrow();
     });
 
+    it('closes exactly once and leaves only an empty artifact when fstat fails', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'partial-fstat.key');
+        const closeSync = vi.fn((descriptor: number) => {
+            closeDescriptorSync(descriptor);
+        });
+
+        await expect(createReplayKeyFile(keyPath, {
+            fstatSync: () => {
+                throw new Error('injected fstat failure');
+            },
+            closeSync,
+        })).rejects.toThrow('injected fstat failure');
+
+        expect(closeSync).toHaveBeenCalledOnce();
+        await expect(stat(keyPath)).resolves.toMatchObject({
+            size: 0,
+        });
+    });
+
+    it('preserves a replacement installed by the fstat-failure close hook', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'partial-fstat-race.key');
+        const ownedEmptyPath = join(directory, 'owned-empty.key');
+        const closeSync = vi.fn((descriptor: number) => {
+            closeDescriptorSync(descriptor);
+            renameSync(keyPath, ownedEmptyPath);
+            writeFileSync(keyPath, 'replacement', { mode: 0o600 });
+        });
+
+        await expect(createReplayKeyFile(keyPath, {
+            fstatSync: () => {
+                throw new Error('injected fstat failure');
+            },
+            closeSync,
+        })).rejects.toThrow('injected fstat failure');
+
+        expect(closeSync).toHaveBeenCalledOnce();
+        await expect(readFile(keyPath, 'utf8'))
+            .resolves.toBe('replacement');
+        await expect(stat(ownedEmptyPath)).resolves.toMatchObject({
+            size: 0,
+        });
+    });
+
     it('cleans an active partial creation when the signal lifecycle runs', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
         temporaryPaths.push(directory);
@@ -415,7 +816,7 @@ describe('analysis V2 replay bundle', () => {
         const handlers = new Map<string, () => void>();
         const exit = vi.fn();
         const processLike = {
-            once: vi.fn((signal: string, handler: () => void) => {
+            on: vi.fn((signal: string, handler: () => void) => {
                 handlers.set(signal, handler);
                 return processLike;
             }),
@@ -446,6 +847,49 @@ describe('analysis V2 replay bundle', () => {
         await expect(writing).rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_INTERRUPTED');
         await expect(stat(keyPath)).rejects.toThrow();
         uninstall();
+    });
+
+    it('registers bundle inode ownership before a signal can clean bundle and key', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-'));
+        temporaryPaths.push(directory);
+        const keyPath = join(directory, 'signal-bundle.key');
+        const bundlePath = join(directory, 'signal-bundle.enc');
+        const ownedKey = await createReplayKeyFile(keyPath);
+        const scope = createReplayArtifactCreationScope();
+        let signalCleanup: Promise<void> | undefined;
+        const afterOwnershipRegistration = vi.fn(() => {
+            signalCleanup = (async () => {
+                await scope.cleanupActive();
+                await removeOwnedReplayArtifacts({
+                    bundlePath,
+                    keyPath,
+                    ownedKey,
+                });
+            })();
+        });
+
+        const writing = writeReplayBundle({
+            bundle: bundle(),
+            bundlePath,
+            keyPath,
+            now: Date.parse('2026-07-27T00:10:00.000Z'),
+            artifactWrite: {
+                scope,
+                afterOwnershipRegistration,
+            },
+        });
+        const interrupted = expect(writing).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_ARTIFACT_CREATION_INTERRUPTED',
+        );
+
+        await vi.waitFor(() => {
+            expect(afterOwnershipRegistration).toHaveBeenCalledOnce();
+            expect(signalCleanup).toBeDefined();
+        });
+        await signalCleanup!;
+        await interrupted;
+        await expect(stat(bundlePath)).rejects.toThrow();
+        await expect(stat(keyPath)).rejects.toThrow();
     });
 
     it('does not delete a raced bundle when exclusive creation returns EEXIST', async () => {

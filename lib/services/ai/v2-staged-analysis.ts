@@ -322,6 +322,19 @@ export const genderResolutionResultSchema = z.object({
 export type GenderResolutionInput = z.input<typeof genderResolutionInputSchema>;
 export type GenderResolutionResult = z.infer<typeof genderResolutionResultSchema>;
 
+function genderResolutionFeedLimit(policyVersion: AiStagePolicyVersion): number {
+    return getAiStagePolicy(policyVersion, 'genderResolution').feedImageLimit;
+}
+
+function genderResolutionResultSchemaFor(policyVersion: AiStagePolicyVersion) {
+    return aiStagePolicySupports(policyVersion, 'genderQualityV211')
+        ? z.object({
+            assessment: genderResolutionModelResponseSchema,
+            analyzedSelectionIds: z.array(selectionIdSchema).max(MAX_FEATURE_MEDIA),
+        }).strict()
+        : genderResolutionResultSchema;
+}
+
 const safeOverviewSchema = z.string()
     .transform(value => sanitizePublicRiskNarrativeLine(value) ?? '')
     .pipe(z.string()
@@ -910,6 +923,8 @@ export interface StagedAiAuditContext {
     prepare(): Promise<AnalysisV2AiPreparedResult<unknown>>;
     /** Must durably reserve the PII-free generation intent before resolving. */
     onBeforeAttempt: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
+    /** Optional stateless replay cost boundary immediately before SDK dispatch. */
+    onProviderDispatch?: (telemetry: GeminiAttemptStartTelemetry) => void;
     /** Must durably persist the PII-free attempt event before resolving. */
     onAttemptTelemetry: (
         telemetry: GeminiAttemptTelemetry,
@@ -951,6 +966,9 @@ function parseAuditContext(
         resultIdentity: context.resultIdentity,
         prepare: context.prepare,
         onBeforeAttempt: context.onBeforeAttempt,
+        ...(context.onProviderDispatch
+            ? { onProviderDispatch: context.onProviderDispatch }
+            : {}),
         onAttemptTelemetry: context.onAttemptTelemetry,
     };
 }
@@ -1384,11 +1402,16 @@ function genderTriagePrompt(
 
 export function genderResolutionCheckpointAssessment(
     rawInput: GenderResolutionInput,
-    rawAssessment: GenderResolutionResult['assessment']
+    rawAssessment: GenderResolutionResult['assessment'],
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_LATEST_VERSION,
 ): z.infer<typeof genderResolutionModelResponseSchema> {
     const input = genderResolutionInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = projectGenderResolutionMedia(media);
+    const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(
+        media,
+        genderResolutionFeedLimit(policyVersion),
+        aiStagePolicySupports(policyVersion, 'genderQualityV211'),
+    );
     const assessment = genderResolutionModelResponseSchema.parse(rawAssessment);
     const evidenceSelectionIds = assessment.evidenceSelectionIds.map(selectionId => {
         const opaqueId = projection.opaqueByOriginalId.get(selectionId);
@@ -1746,6 +1769,8 @@ export async function genderTriageMicrobatch(
     options: {
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
+        /** Replay-only provider fence, evaluated once for every SDK attempt/retry. */
+        runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>;
     } = {},
 ): Promise<readonly GenderTriageMicrobatchResult[]> {
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_V29_VERSION;
@@ -1778,7 +1803,11 @@ export async function genderTriageMicrobatch(
                 startingAttempt: prepared.startingAttempt,
                 maxImages: GENDER_TRIAGE_V29_MAX_MEDIA_PER_BATCH,
                 onBeforeAttempt: audit.onBeforeAttempt,
+                onProviderDispatch: audit.onProviderDispatch,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...(options.runProviderAttempt
+                    ? { runProviderAttempt: options.runProviderAttempt }
+                    : {}),
                 ...(options.replayCapability
                     ? { skipTokenLog: true, replayCapability: options.replayCapability }
                     : {}),
@@ -1815,8 +1844,12 @@ export function createGenderResolutionResultIdentity(
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_LATEST_VERSION,
 ): AnalysisV2AiResultIdentity {
     const input = genderResolutionInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = projectGenderResolutionMedia(media);
+    const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(
+        media,
+        genderResolutionFeedLimit(policyVersion),
+        aiStagePolicySupports(policyVersion, 'genderQualityV211'),
+    );
     return stagedResultIdentity(
         'genderResolution',
         projection.prompt,
@@ -1847,6 +1880,8 @@ export async function genderTriage(
     options: {
         aiStagePolicyVersion?: AiStagePolicyVersion;
         replayCapability?: ReplayStatelessCapability;
+        /** Replay-only provider fence, evaluated once for every SDK attempt/retry. */
+        runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>;
     } = {},
 ): Promise<GenderTriageResult> {
     const input = genderTriageInputSchema.parse(rawInput);
@@ -1874,7 +1909,11 @@ export async function genderTriage(
                 requestId: audit.requestId,
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
+                onProviderDispatch: audit.onProviderDispatch,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...(options.runProviderAttempt
+                    ? { runProviderAttempt: options.runProviderAttempt }
+                    : {}),
                 ...(options.replayCapability
                     ? { skipTokenLog: true, replayCapability: options.replayCapability }
                     : {}),
@@ -1896,6 +1935,7 @@ export async function genderResolution(
     rawAuditContext: StagedAiAuditContext,
     options: {
         abortSignal?: AbortSignal;
+        admissionDeadlineAtMs?: number;
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
     } = {},
@@ -1915,14 +1955,19 @@ async function prepareGenderResolutionGeneration(
     rawAuditContext: StagedAiAuditContext,
     options: {
         abortSignal?: AbortSignal;
+        admissionDeadlineAtMs?: number;
         replayCapability?: ReplayStatelessCapability;
         aiStagePolicyVersion?: AiStagePolicyVersion;
     },
 ) {
-    const input = genderResolutionInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
-    const projection = projectGenderResolutionMedia(media);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_LATEST_VERSION;
+    const input = genderResolutionInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, genderResolutionFeedLimit(policyVersion));
+    const projection = projectGenderResolutionMedia(
+        media,
+        genderResolutionFeedLimit(policyVersion),
+        aiStagePolicySupports(policyVersion, 'genderQualityV211'),
+    );
     const prompt = projection.prompt;
     const identity = stagedResultIdentity(
         'genderResolution', prompt, media, 'request', policyVersion,
@@ -1945,7 +1990,7 @@ async function prepareGenderResolutionGeneration(
             }
         ),
     });
-      return genderResolutionResultSchema.parse({
+      return genderResolutionResultSchemaFor(policyVersion).parse({
         assessment,
         analyzedSelectionIds: media.map(item => item.selectionId),
       });
@@ -1960,6 +2005,7 @@ async function prepareGenderResolutionGeneration(
             audit,
             startingAttempt: prepared.startingAttempt,
             abortSignal: options.abortSignal,
+            admissionDeadlineAtMs: options.admissionDeadlineAtMs,
             replayCapability: options.replayCapability,
         } satisfies PreparedGenderResolutionGeneration<
             z.infer<typeof genderResolutionModelResponseSchema>
@@ -1975,6 +2021,8 @@ export async function featureAnalysis(
     options: {
         aiStagePolicyVersion?: AiStagePolicyVersion;
         replayCapability?: ReplayStatelessCapability;
+        /** Replay-only provider fence, evaluated once for every SDK attempt/retry. */
+        runProviderAttempt?: <T>(task: () => Promise<T>) => Promise<T>;
     } = {},
 ): Promise<FeatureAnalysisResult> {
     const input = featureAnalysisInputSchema.parse(rawInput);
@@ -2002,7 +2050,11 @@ export async function featureAnalysis(
                 requestId: audit.requestId,
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
+                onProviderDispatch: audit.onProviderDispatch,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...(options.runProviderAttempt
+                    ? { runProviderAttempt: options.runProviderAttempt }
+                    : {}),
                 ...(options.replayCapability
                     ? { skipTokenLog: true, replayCapability: options.replayCapability }
                     : {}),
@@ -2174,6 +2226,7 @@ export async function partnerSafetyAnalysis(
                     requestId: audit.requestId,
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,
+                    onProviderDispatch: audit.onProviderDispatch,
                     onAttemptTelemetry: audit.onAttemptTelemetry,
                 }
             ));
@@ -2575,6 +2628,7 @@ export async function highRiskNarrative(
                     requestId: audit.requestId,
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,
+                    onProviderDispatch: audit.onProviderDispatch,
                     onAttemptTelemetry: audit.onAttemptTelemetry,
                 }
             ));

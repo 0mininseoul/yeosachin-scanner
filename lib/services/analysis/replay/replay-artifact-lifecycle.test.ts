@@ -10,7 +10,7 @@ describe('replay artifact signal lifecycle', () => {
         const cleanup = vi.fn(async () => undefined);
         const exit = vi.fn();
         const processLike = {
-            once: vi.fn((name: string, handler: () => void) => {
+            on: vi.fn((name: string, handler: () => void) => {
                 handlers.set(name, handler);
                 return processLike;
             }),
@@ -31,5 +31,50 @@ describe('replay artifact signal lifecycle', () => {
         expect(processLike.off).toHaveBeenCalledWith('SIGINT', expect.any(Function));
         expect(processLike.off).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
         uninstall();
+    });
+
+    it('keeps both handlers installed and ignores a second signal until cleanup finishes', async () => {
+        const handlers = new Map<string, () => void>();
+        let finishCleanup: (() => void) | undefined;
+        const cleanup = vi.fn(() => new Promise<void>(resolve => {
+            finishCleanup = resolve;
+        }));
+        const exit = vi.fn();
+        const processLike = {
+            on: vi.fn((name: string, handler: () => void) => {
+                handlers.set(name, handler);
+                return processLike;
+            }),
+            off: vi.fn((name: string) => {
+                handlers.delete(name);
+                return processLike;
+            }),
+            exit,
+        };
+        installReplayArtifactSignalCleanup({
+            cleanup,
+            processLike,
+        });
+
+        handlers.get('SIGTERM')?.();
+        expect(cleanup).toHaveBeenCalledOnce();
+        expect(processLike.off).not.toHaveBeenCalled();
+        expect(exit).not.toHaveBeenCalled();
+
+        handlers.get('SIGTERM')?.();
+        expect(cleanup).toHaveBeenCalledOnce();
+        expect(processLike.off).not.toHaveBeenCalled();
+        expect(exit).not.toHaveBeenCalled();
+
+        finishCleanup?.();
+        await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(143));
+        expect(processLike.off).toHaveBeenCalledWith(
+            'SIGINT',
+            expect.any(Function),
+        );
+        expect(processLike.off).toHaveBeenCalledWith(
+            'SIGTERM',
+            expect.any(Function),
+        );
     });
 });

@@ -44,6 +44,27 @@ describe('analysis V2 gender resolver media policy', () => {
         ]);
     });
 
+    it('uses up to eight feed views only for the v2.11 quality evaluation', () => {
+        const media: Media[] = [
+            { selectionId: 'profile', kind: 'profile' },
+            { selectionId: 'p1:first', kind: 'feed', postId: 'p1' },
+            { selectionId: 'p2:first', kind: 'feed', postId: 'p2' },
+            { selectionId: 'p3:first', kind: 'feed', postId: 'p3' },
+            { selectionId: 'p4:first', kind: 'feed', postId: 'p4' },
+            { selectionId: 'p5:first', kind: 'feed', postId: 'p5' },
+            { selectionId: 'p6:first', kind: 'feed', postId: 'p6' },
+            { selectionId: 'p1:middle', kind: 'feed', postId: 'p1' },
+            { selectionId: 'p2:middle', kind: 'feed', postId: 'p2' },
+        ];
+
+        expect(ids(selectAnalysisV2GenderResolverMedia(media, 'ai-stage-policy-v2.11')))
+            .toEqual([
+                'profile', 'p1:first', 'p2:first', 'p1:middle', 'p2:middle',
+                'p3:first', 'p4:first', 'p5:first', 'p6:first',
+            ]);
+        expect(ids(selectAnalysisV2GenderResolverMedia(media))).toHaveLength(5);
+    });
+
     it('selects identical IDs from production-normalized and replay media shapes', () => {
         const lineage: Media[] = [
             { selectionId: 'profile', kind: 'profile' },

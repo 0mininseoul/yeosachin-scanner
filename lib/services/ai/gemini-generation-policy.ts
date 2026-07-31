@@ -3,6 +3,18 @@ export type GeminiGenerationErrorDisposition =
     | 'ambiguous'
     | 'rejected';
 
+export const GEMINI_GENERATION_FAILURE_KINDS = [
+    'http_408',
+    'http_429',
+    'http_4xx',
+    'http_5xx',
+    'transport',
+    'unknown_sdk',
+] as const;
+
+export type GeminiGenerationFailureKind =
+    typeof GEMINI_GENERATION_FAILURE_KINDS[number];
+
 export const AI_AMBIGUOUS_GENERATION_ERROR_PREFIX =
     'AI_AMBIGUOUS_GENERATION_ERROR:';
 export const AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX =
@@ -74,6 +86,21 @@ function readMessages(error: unknown, depth = 0): string[] {
         ...(typeof candidate.message === 'string' ? [candidate.message] : []),
         ...readMessages(candidate.cause, depth + 1),
     ];
+}
+
+export function classifyGeminiGenerationFailureKind(
+    error: unknown,
+): GeminiGenerationFailureKind {
+    const status = readStatus(error);
+    if (status === 408) return 'http_408';
+    if (status === 429) return 'http_429';
+    if (status !== null && status >= 400 && status < 500) return 'http_4xx';
+    if (status !== null && status >= 500 && status < 600) return 'http_5xx';
+    const messages = readMessages(error);
+    if (messages.some(message => (
+        AMBIGUOUS_TRANSPORT_PATTERNS.some(pattern => pattern.test(message))
+    ))) return 'transport';
+    return 'unknown_sdk';
 }
 
 /**

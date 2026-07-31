@@ -26,9 +26,20 @@ import {
     AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
     AI_RATE_LIMIT_ERROR_PREFIX,
     classifyGeminiGenerationError,
+    classifyGeminiGenerationFailureKind,
+    type GeminiGenerationFailureKind,
 } from './gemini-generation-policy';
 import {
     AI_STAGE_POLICY_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
+    AI_STAGE_POLICY_V213_VERSION,
+    AI_STAGE_POLICY_V214_VERSION,
+    AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
+    AI_STAGE_POLICY_V217_VERSION,
+    AI_STAGE_POLICY_V218_VERSION,
+    AI_STAGE_POLICY_V219_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
     AI_GEMINI_SDK_TIMEOUT_MS,
     aiStagePolicySupports,
@@ -46,6 +57,7 @@ import {
 } from './replay-stateless-capability';
 
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
+const V211_RESOLVER_ADMISSION_GRACE_MS = 5_000;
 
 let genAI: GoogleGenAI | null = null;
 let extendedTelemetrySupported: boolean | null = null;
@@ -74,6 +86,16 @@ class AsyncSemaphore {
             released = true;
             this.release();
         };
+    }
+
+    async tryAcquireWithin(deadlineAtMs: number, signal?: AbortSignal): Promise<(() => void) | null> {
+        while (performance.now() < deadlineAtMs) {
+            if (signal?.aborted) return null;
+            const release = this.tryAcquire();
+            if (release) return release;
+            await new Promise<void>(resolve => setTimeout(resolve, 10));
+        }
+        return null;
     }
 
     private acquire(): Promise<void> {
@@ -126,14 +148,41 @@ function getStageGenerationSemaphore(
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
     policyVersion: AiStagePolicyVersion,
-    task: () => Promise<T>
+    task: () => Promise<T>,
+    abortSignal?: AbortSignal,
+    admissionDeadlineAtMs?: number,
+    externallyAdmitted: boolean = false,
 ): Promise<T> {
+    if (externallyAdmitted) {
+        return task();
+    }
+
     if (!stage) {
         return generationLimiterState.shared.run(task);
     }
 
     const stageSemaphore = getStageGenerationSemaphore(policyVersion, stage);
     if (stage === 'genderResolution') {
+        if (aiStagePolicySupports(policyVersion, 'genderQualityV211')) {
+            const deadlineAtMs = admissionDeadlineAtMs
+                ?? performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS;
+            while (performance.now() < deadlineAtMs && !abortSignal?.aborted) {
+                const releaseStage = await stageSemaphore.tryAcquireWithin(deadlineAtMs, abortSignal);
+                if (!releaseStage) break;
+                const releaseShared = generationLimiterState.shared.tryAcquire();
+                if (releaseShared) {
+                    try {
+                        return await task();
+                    } finally {
+                        releaseShared();
+                        releaseStage();
+                    }
+                }
+                releaseStage();
+                await new Promise<void>(resolve => setTimeout(resolve, 10));
+            }
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        }
         const releaseStage = stageSemaphore.tryAcquire();
         if (!releaseStage) {
             throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
@@ -257,6 +306,7 @@ export interface GeminiAttemptTelemetry extends GeminiRequestTelemetry {
     attempt: number;
     retryCount: number;
     disposition: GeminiAttemptDisposition;
+    failureKind?: GeminiGenerationFailureKind;
     finishReason: string | null;
     responseRejection?: GeminiResponseValidationDiagnostics;
 }
@@ -274,6 +324,8 @@ export interface GeminiAttemptStartTelemetry {
     maxOutputTokens: number;
     attempt: number;
     retryCount: number;
+    admissionDeadlineAtMs?: number;
+    abortSignal?: AbortSignal;
 }
 
 export interface AnalyzeWithGeminiOptions<T> {
@@ -297,11 +349,17 @@ export interface AnalyzeWithGeminiOptions<T> {
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
     /** Reserve a durable, PII-free generation intent before the SDK request starts. */
     onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
+    /** Synchronous replay-only cost boundary immediately before SDK dispatch. */
+    onProviderDispatch?: (telemetry: GeminiAttemptStartTelemetry) => void;
     /** The V2 caller must persist this PII-free event when it is used as the stage audit sink. */
     onAttemptTelemetry?: (
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: T
     ) => void | Promise<void>;
+    /** Stateless v2.11 replay-only outer admission fence, once for every provider attempt/retry. */
+    runProviderAttempt?: <R>(task: () => Promise<R>) => Promise<R>;
+    /** Absolute v2.11 resolver admission budget; retries must not reset it. */
+    admissionDeadlineAtMs?: number;
 }
 
 interface TokenLogMetadata {
@@ -730,7 +788,10 @@ export async function analyzeWithGemini<T>(
         startingAttempt = 1,
         onTelemetry,
         onBeforeAttempt,
+        onProviderDispatch,
         onAttemptTelemetry,
+        runProviderAttempt,
+        admissionDeadlineAtMs: requestedAdmissionDeadlineAtMs,
         schema,
     } = options;
     if (stage !== undefined && !isAiStageName(stage)) {
@@ -779,6 +840,43 @@ export async function analyzeWithGemini<T>(
     const resolvedPolicyVersion = stage
         ? assertSupportedAiStagePolicyVersion(aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION)
         : AI_STAGE_POLICY_VERSION;
+    const replayFailureTaxonomy = statelessReplay
+        && (
+            resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V213_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V214_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V215_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V216_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V217_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V218_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V219_VERSION
+        );
+    const replayProviderAdmission = Boolean(
+        runProviderAttempt
+        && statelessReplay
+        && (
+            resolvedPolicyVersion === AI_STAGE_POLICY_V211_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V213_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V214_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V215_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V216_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V217_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V218_VERSION
+            || resolvedPolicyVersion === AI_STAGE_POLICY_V219_VERSION
+        )
+        && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+        && (
+            stage === 'genderTriage'
+            || stage === 'featureAnalysis'
+            || stage === 'privateAccountName'
+        )
+    );
+    if (runProviderAttempt && !replayProviderAdmission) {
+        throw new Error(
+            'Gemini provider attempt fence is restricted to stateless replay v2.11 gender-quality stages'
+        );
+    }
     const stagePolicy = stage ? getAiStagePolicy(resolvedPolicyVersion, stage) : null;
     if (maxImages !== undefined && (
         !Number.isSafeInteger(maxImages)
@@ -810,6 +908,11 @@ export async function analyzeWithGemini<T>(
     const selectedImages = images?.slice(0, maxImages ?? policyMaxImages) ?? [];
     const responseJsonSchema = zodToGeminiResponseJsonSchema(schema);
     const analysisStartedAt = performance.now();
+    const resolverAdmissionDeadlineAtMs = stage === 'genderResolution'
+        && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+        ? requestedAdmissionDeadlineAtMs
+            ?? performance.now() + V211_RESOLVER_ADMISSION_GRACE_MS
+        : undefined;
 
     console.log('Gemini analysis started:', {
         stage: stage ?? null,
@@ -824,12 +927,24 @@ export async function analyzeWithGemini<T>(
         attemptNumber++
     ) {
         try {
+            if (abortSignal?.aborted || (
+                resolverAdmissionDeadlineAtMs !== undefined
+                && performance.now() >= resolverAdmissionDeadlineAtMs
+            )) {
+                throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            }
             if (attemptNumber > startingAttempt) {
                 const delay = getRetryDelay(attemptNumber - 2);
                 console.log(
                     `Retry attempt ${attemptNumber - 1}/${RETRY_CONFIG.maxRetries} after ${delay}ms`
                 );
                 await sleep(delay);
+                if (abortSignal?.aborted || (
+                    resolverAdmissionDeadlineAtMs !== undefined
+                    && performance.now() >= resolverAdmissionDeadlineAtMs
+                )) {
+                    throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                }
             }
 
             const client = getGenAIClient();
@@ -872,48 +987,79 @@ export async function analyzeWithGemini<T>(
                         }
                         : {}),
                 };
-                response = await runWithGenerationSlot(
+                const dispatchGeneration = () => runWithGenerationSlot(
                     stage ?? null,
                     resolvedPolicyVersion,
                     async () => {
                         attemptStartedAt = performance.now();
-                        if (stage && requestId && stagePolicy && onBeforeAttempt) {
-                            try {
-                                await onBeforeAttempt({
-                                    requestId,
-                                    modelName,
-                                    location: GOOGLE_CLOUD_LOCATION,
-                                    stage,
-                                    thinkingLevel: resolvedThinkingLevel,
-                                    mediaCount: selectedImages.length,
-                                    mediaResolution: resolvedMediaResolution,
-                                    promptVersion: stagePolicy.promptVersion,
-                                    schemaVersion: stagePolicy.schemaVersion,
-                                    maxOutputTokens: resolvedMaxOutputTokens
-                                        ?? stagePolicy.maxOutputTokens,
-                                    attempt: attemptNumber,
-                                    retryCount: attemptNumber - 1,
-                                });
-                            } catch (error) {
-                                if (
-                                    error instanceof Error
-                                    && AI_ADMISSION_SIGNAL_CODES.has(error.message)
-                                ) {
-                                    throw error;
+                        if (abortSignal?.aborted || (
+                            resolverAdmissionDeadlineAtMs !== undefined
+                            && performance.now() >= resolverAdmissionDeadlineAtMs
+                        )) {
+                            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                        }
+                        let attemptStartTelemetry: GeminiAttemptStartTelemetry | undefined;
+                        if (stage && requestId && stagePolicy && (onBeforeAttempt || onProviderDispatch)) {
+                            attemptStartTelemetry = {
+                                requestId,
+                                modelName,
+                                location: GOOGLE_CLOUD_LOCATION,
+                                stage,
+                                thinkingLevel: resolvedThinkingLevel,
+                                mediaCount: selectedImages.length,
+                                mediaResolution: resolvedMediaResolution,
+                                promptVersion: stagePolicy.promptVersion,
+                                schemaVersion: stagePolicy.schemaVersion,
+                                maxOutputTokens: resolvedMaxOutputTokens
+                                    ?? stagePolicy.maxOutputTokens,
+                                attempt: attemptNumber,
+                                retryCount: attemptNumber - 1,
+                                ...(stage === 'genderResolution'
+                                    && aiStagePolicySupports(resolvedPolicyVersion, 'genderQualityV211')
+                                    ? {
+                                        admissionDeadlineAtMs: resolverAdmissionDeadlineAtMs!,
+                                        ...(abortSignal ? { abortSignal } : {}),
+                                    }
+                                    : {}),
+                            };
+                            if (onBeforeAttempt) {
+                                try {
+                                    await onBeforeAttempt(attemptStartTelemetry);
+                                } catch (error) {
+                                    if (
+                                        error instanceof Error
+                                        && AI_ADMISSION_SIGNAL_CODES.has(error.message)
+                                    ) {
+                                        throw error;
+                                    }
+                                    throw new Error(
+                                        'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
+                                    );
                                 }
-                                throw new Error(
-                                    'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
-                                );
                             }
                         }
-
+                        if (abortSignal?.aborted || (
+                            resolverAdmissionDeadlineAtMs !== undefined
+                            && performance.now() >= resolverAdmissionDeadlineAtMs
+                        )) {
+                            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+                        }
+                        if (attemptStartTelemetry) {
+                            onProviderDispatch?.(attemptStartTelemetry);
+                        }
                         return client.models.generateContent({
                             model: modelName,
                             contents: [{ role: 'user', parts }],
                             config,
                         });
-                    }
+                    },
+                    abortSignal,
+                    resolverAdmissionDeadlineAtMs,
+                    replayProviderAdmission,
                 );
+                response = replayProviderAdmission && runProviderAttempt
+                    ? await runProviderAttempt(dispatchGeneration)
+                    : await dispatchGeneration();
             } catch (generationError) {
                 if (
                     generationError instanceof Error
@@ -945,6 +1091,10 @@ export async function analyzeWithGemini<T>(
                     attempt: attemptNumber,
                     retryCount: attemptNumber - 1,
                     disposition,
+                    ...(replayFailureTaxonomy ? {
+                        failureKind:
+                            classifyGeminiGenerationFailureKind(generationError),
+                    } : {}),
                     finishReason: null,
                 }, onAttemptTelemetry);
                 throw sanitizeGenerationError(generationError);

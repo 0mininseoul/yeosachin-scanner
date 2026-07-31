@@ -5,6 +5,15 @@ import { createClient } from '@supabase/supabase-js';
 import { createAnalysisV2SelectedMediaNormalizer } from '../lib/services/ai/image-preprocessing';
 import {
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
+    AI_STAGE_POLICY_V213_VERSION,
+    AI_STAGE_POLICY_V214_VERSION,
+    AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
+    AI_STAGE_POLICY_V217_VERSION,
+    AI_STAGE_POLICY_V218_VERSION,
+    AI_STAGE_POLICY_V219_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
 } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
@@ -23,8 +32,19 @@ import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } fro
 import {
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+    HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+    HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
@@ -39,12 +59,20 @@ import {
     parseDiagnosticPartialCoverageCliCapability,
     type DiagnosticPartialCoverageCliCapability,
 } from '../lib/services/analysis/replay/diagnostic-partial-coverage-capability';
+import {
+    createV219ReplayPreflightReport,
+    createV219ReplaySourceOnlyPreflightReport,
+} from '../lib/services/analysis/replay/replay-v219-preflight';
+import type {
+    runAnalysisV2AiReplay,
+} from '../lib/services/analysis/replay/replay-runner';
 
 type ReplayCliOptions =
     | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: false }
     | { command: 'capture'; historicalOfficialE2E: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'capture'; historicalPartialAvailable: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true; diagnosticPartialCoverageCapability?: DiagnosticPartialCoverageCliCapability }
+    | { command: 'v219-source-only-preflight'; bundlePath: string; keyPath: string; witnessBundlePath: string; witnessKeyPath: string }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -61,6 +89,7 @@ const VALUELESS_FLAGS = new Set([
     '--capture',
     '--cleanup',
     '--run',
+    '--v219-source-only-preflight',
     '--dry-run',
     '--paid-ai',
     '--confirm-paid-ai',
@@ -82,6 +111,72 @@ function evaluationPolicy(value: string | undefined, historicalOfficialE2E = fal
         return {
             capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
             aiStage: AI_STAGE_POLICY_V210_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V211_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V211_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V211_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V211_VERSION && historicalOfficialE2E) {
+        return {
+            capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V211_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V211_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V212_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V212_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V212_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V212_VERSION && historicalOfficialE2E) {
+        return {
+            capability: HISTORICAL_OFFICIAL_E2E_REPLAY_V212_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V212_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V213_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V213_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V213_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V214_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V214_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V214_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V215_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V215_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V215_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V216_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V216_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V216_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V217_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V217_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V217_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V218_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V218_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V218_VERSION,
+        };
+    }
+    if (value === AI_STAGE_POLICY_V219_VERSION && historicalPartialAvailable) {
+        return {
+            capability: HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V219_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V219_VERSION,
         };
     }
     if (value !== AI_STAGE_POLICY_V29_VERSION) {
@@ -128,6 +223,40 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
         )
     ) {
         throw new Error('ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_SCOPE_REQUIRED');
+    }
+    if (parsed.has('--v219-source-only-preflight')) {
+        const allowed = new Set([
+            '--v219-source-only-preflight',
+            '--bundle',
+            '--key',
+            '--witness-bundle',
+            '--witness-key',
+        ]);
+        const witnessBundlePath =
+            parsed.get('--witness-bundle')?.trim();
+        const witnessKeyPath = parsed.get('--witness-key')?.trim();
+        if (
+            !witnessBundlePath
+            || !witnessKeyPath
+            || [...parsed.keys()].some(key => !allowed.has(key))
+            || dirname(resolve(witnessBundlePath))
+                !== dirname(resolve(witnessKeyPath))
+            || new Set([
+                resolve(bundlePath),
+                resolve(keyPath),
+                resolve(witnessBundlePath),
+                resolve(witnessKeyPath),
+            ]).size !== 4
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        }
+        return {
+            command: 'v219-source-only-preflight',
+            bundlePath,
+            keyPath,
+            witnessBundlePath,
+            witnessKeyPath,
+        };
     }
     if (parsed.has('--capture')) {
         const historicalOfficialE2E = parsed.has('--historical-official-e2e');
@@ -187,12 +316,22 @@ const SERVER_ONLY_RUNTIME_MESSAGE =
 
 export async function createPaidReplayRunner(
     replayAiPolicy: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
+    options: {
+        v219TreatmentLogicalCalls?: number;
+    } = {},
 ) {
     try {
+        if (replayAiPolicy === AI_STAGE_POLICY_V219_VERSION) {
+            process.env.GOOGLE_CLOUD_LOCATION = 'global';
+        }
+        await import('server-only');
         const adapter = await import(
             '../lib/services/analysis/replay/replay-staged-ai-adapter'
         );
-        return adapter.createReplayStagedAiAdapter(replayAiPolicy);
+        return adapter.createReplayStagedAiAdapter(
+            replayAiPolicy,
+            options,
+        );
     } catch (error) {
         if (error instanceof Error && error.message === SERVER_ONLY_RUNTIME_MESSAGE) {
             throw new Error('ANALYSIS_V2_REPLAY_SERVER_RUNTIME_REQUIRED');
@@ -342,11 +481,34 @@ export async function runReplayCli(
     args: readonly string[],
     dependencies: {
         beforeOwnedArtifactRemoval?: () => Promise<void>;
+        createPaidRunner?: typeof createPaidReplayRunner;
+        runReplay?: typeof runAnalysisV2AiReplay;
     } = {},
 ): Promise<{ exitCode: 0 | 1 }> {
     const options = parseReplayCliArgs(args);
     if (options.command === 'cleanup') { await removeReplayArtifacts(options); process.stdout.write(`${JSON.stringify({ status: 'ok', command: 'cleanup', removed: 2 })}\n`); return { exitCode: 0 }; }
     if (options.command === 'capture') { await capture(options); return { exitCode: 0 }; }
+    if (options.command === 'v219-source-only-preflight') {
+        const [parent, witness] = await Promise.all([
+            readAuthenticatedReplayBundle({
+                bundlePath: options.bundlePath,
+                keyPath: options.keyPath,
+            }),
+            readAuthenticatedReplayBundle({
+                bundlePath: options.witnessBundlePath,
+                keyPath: options.witnessKeyPath,
+            }),
+        ]);
+        if (parent.expired || witness.expired) {
+            throw new Error('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
+        }
+        const report = createV219ReplaySourceOnlyPreflightReport(
+            parent.bundle,
+            witness.bundle,
+        );
+        process.stdout.write(`${JSON.stringify(report)}\n`);
+        return { exitCode: 0 };
+    }
     const ownership: Parameters<typeof removeOwnedReplayArtifacts>[0] = {
         bundlePath: options.bundlePath,
         keyPath: options.keyPath,
@@ -372,15 +534,45 @@ export async function runReplayCli(
         if (partialArtifact !== Boolean(options.historicalPartialAvailable)) {
             throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_SCOPE_MISMATCH');
         }
+        if (
+            options.mode === 'dry-run'
+            && options.evaluationPolicy?.aiStage
+                === AI_STAGE_POLICY_V219_VERSION
+        ) {
+            const v219DryPreflight =
+                createV219ReplayPreflightReport(
+                    authenticated.bundle,
+                );
+            process.stdout.write(
+                `${JSON.stringify(v219DryPreflight)}\n`,
+            );
+            return { exitCode: 0 };
+        }
         const replayAiPolicy = resolveReplayAiStagePolicyVersion(
             authenticated.bundle.capture.sourceLineage,
             options.evaluationPolicy,
         );
+        const v219Preflight = replayAiPolicy
+            === AI_STAGE_POLICY_V219_VERSION
+            ? createV219ReplayPreflightReport(authenticated.bundle)
+            : undefined;
+        const createRunner =
+            dependencies.createPaidRunner ?? createPaidReplayRunner;
         const runner = options.mode === 'paid-ai'
-            ? await createPaidReplayRunner(replayAiPolicy)
+            ? (
+                v219Preflight
+                    ? await createRunner(replayAiPolicy, {
+                        v219TreatmentLogicalCalls:
+                            v219Preflight.treatment.staticCohort,
+                    })
+                    : await createRunner(replayAiPolicy)
+            )
             : {};
-        const { runAnalysisV2AiReplay } = await import('../lib/services/analysis/replay/replay-runner');
-        await runAnalysisV2AiReplay({
+        const executeReplay = dependencies.runReplay
+            ?? (await import(
+                '../lib/services/analysis/replay/replay-runner'
+            )).runAnalysisV2AiReplay;
+        await executeReplay({
             bundle: authenticated.bundle,
             runner,
             mode: options.mode,

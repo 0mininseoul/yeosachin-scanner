@@ -138,6 +138,7 @@ describe('dedicated resolver experiment AI adapter', () => {
     it('coalesces duplicate account identities and resolves every waiter with metrics once', async () => {
         mocks.batch.mockImplementation(async (accounts, context) => {
             await context.onBeforeAttempt({ retryCount: 0 });
+            context.onProviderDispatch({ retryCount: 0 });
             return invocationResult(accounts);
         });
         const runner = createStrongUncertainResolverExperimentAdapter();
@@ -216,6 +217,38 @@ describe('dedicated resolver experiment AI adapter', () => {
             maxOutputTokens: 2048,
             skipTokenLog: true,
             replayCapability: expect.any(Object),
+        });
+    });
+
+    it('counts a resolver call only when the provider dispatch boundary is reached', async () => {
+        mocks.analyze.mockImplementationOnce(async (_prompt, _media, options) => {
+            await options.onBeforeAttempt({ retryCount: 0 });
+            options.onProviderDispatch({ retryCount: 0 });
+            return {
+                inferredGender: 'unknown', confidence: 'low',
+                ownerConsistency: 'not_visible', evidenceSelectionIds: [],
+            };
+        });
+        const result = await createStrongUncertainResolverExperimentAdapter().resolveGender!({
+            ordinal: 1, media: [], signal: new AbortController().signal,
+        });
+
+        expect(result).toMatchObject({
+            outcome: 'ok', calls: 1, attempts: 1, retries: 0,
+        });
+    });
+
+    it('keeps resolver calls at zero when capacity ends after attempt intent', async () => {
+        mocks.analyze.mockImplementationOnce(async (_prompt, _media, options) => {
+            await options.onBeforeAttempt({ retryCount: 0 });
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        });
+        const result = await createStrongUncertainResolverExperimentAdapter().resolveGender!({
+            ordinal: 1, media: [], signal: new AbortController().signal,
+        });
+
+        expect(result).toMatchObject({
+            outcome: 'capacity_skipped', calls: 0, attempts: 1, retries: 0,
         });
     });
 
@@ -419,6 +452,7 @@ describe('dedicated resolver experiment AI adapter', () => {
         mocks.analyze
             .mockImplementationOnce(async (_prompt, _media, options) => {
                 await options.onBeforeAttempt({ retryCount: 0 });
+                options.onProviderDispatch({ retryCount: 0 });
                 await options.onAttemptTelemetry({
                     latencyMs: 1, disposition: 'response_rejected',
                 });
@@ -428,6 +462,7 @@ describe('dedicated resolver experiment AI adapter', () => {
             })
             .mockImplementationOnce(async (_prompt, _media, options) => {
                 await options.onBeforeAttempt({ retryCount: 0 });
+                options.onProviderDispatch({ retryCount: 0 });
                 await options.onAttemptTelemetry({
                     latencyMs: 1, disposition: 'ambiguous',
                 });
@@ -480,6 +515,7 @@ describe('dedicated resolver experiment AI adapter', () => {
     it('charges an ambiguous generation once without retrying it', async () => {
         mocks.analyze.mockImplementationOnce(async (_prompt, _media, options) => {
             await options.onBeforeAttempt({ retryCount: 0 });
+            options.onProviderDispatch({ retryCount: 0 });
             await options.onAttemptTelemetry({
                 latencyMs: 1, disposition: 'ambiguous',
             });
@@ -517,10 +553,12 @@ describe('dedicated resolver experiment AI adapter', () => {
         })));
         mocks.analyze.mockImplementationOnce(async (_prompt, _media, options) => {
             await options.onBeforeAttempt({ retryCount: 0 });
+            options.onProviderDispatch({ retryCount: 0 });
             await options.onAttemptTelemetry({
                 latencyMs: 10, disposition: 'rate_limited',
             });
             await options.onBeforeAttempt({ retryCount: 1 });
+            options.onProviderDispatch({ retryCount: 1 });
             await options.onAttemptTelemetry({
                 latencyMs: 30, disposition: 'success',
             });

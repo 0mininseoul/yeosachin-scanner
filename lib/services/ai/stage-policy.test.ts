@@ -7,6 +7,14 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
+    AI_STAGE_POLICY_V214_VERSION,
+    AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
+    AI_STAGE_POLICY_V217_VERSION,
+    AI_STAGE_POLICY_V218_VERSION,
+    AI_STAGE_POLICY_V219_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -181,6 +189,15 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.8',
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
+            'ai-stage-policy-v2.11',
+            'ai-stage-policy-v2.12',
+            'ai-stage-policy-v2.13',
+            'ai-stage-policy-v2.14',
+            'ai-stage-policy-v2.15',
+            'ai-stage-policy-v2.16',
+            'ai-stage-policy-v2.17',
+            'ai-stage-policy-v2.18',
+            'ai-stage-policy-v2.19',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -204,6 +221,15 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.8',
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
+            'ai-stage-policy-v2.11',
+            'ai-stage-policy-v2.12',
+            'ai-stage-policy-v2.13',
+            'ai-stage-policy-v2.14',
+            'ai-stage-policy-v2.15',
+            'ai-stage-policy-v2.16',
+            'ai-stage-policy-v2.17',
+            'ai-stage-policy-v2.18',
+            'ai-stage-policy-v2.19',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -254,6 +280,15 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.8',
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
+            'ai-stage-policy-v2.11',
+            'ai-stage-policy-v2.12',
+            'ai-stage-policy-v2.13',
+            'ai-stage-policy-v2.14',
+            'ai-stage-policy-v2.15',
+            'ai-stage-policy-v2.16',
+            'ai-stage-policy-v2.17',
+            'ai-stage-policy-v2.18',
+            'ai-stage-policy-v2.19',
         ]);
         expect(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V210_VERSION])
             .toEqual(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V29_VERSION]);
@@ -371,5 +406,269 @@ describe('V2 AI stage policy', () => {
             rolloutMode: 'unexpected',
             accessMode: 'production',
         })).toBe('ai-stage-policy-v2.6');
+    });
+
+    it('keeps v2.11 evaluation-only and upgrades only its resolver fidelity', () => {
+        expect(AI_STAGE_POLICY_V211_VERSION).toBe('ai-stage-policy-v2.11');
+        expect(getAiStagePolicy('ai-stage-policy-v2.11', 'genderResolution')).toEqual({
+            model: 'gemini-3-flash-preview',
+            thinkingLevel: 'HIGH',
+            mediaResolution: 'HIGH',
+            profileImageLimit: 1,
+            feedImageLimit: 8,
+            maxOutputTokens: 1_024,
+            concurrency: 2,
+            promptVersion: 'gender-resolution-v2',
+            schemaVersion: 1,
+        });
+        expect(aiStagePolicySupports('ai-stage-policy-v2.11', 'genderQualityV211'))
+            .toBe(true);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('keeps v2.11 immutable while giving v2.12 resolver output headroom only', () => {
+        const v212 = AI_STAGE_POLICY_V212_VERSION;
+        expect(getAiStagePolicy('ai-stage-policy-v2.11', 'genderResolution').maxOutputTokens)
+            .toBe(1_024);
+        expect(getAiStagePolicy(v212, 'genderResolution').maxOutputTokens)
+            .toBe(2_048);
+        expect({
+            ...AI_STAGE_POLICY_REGISTRY[v212].genderResolution,
+            maxOutputTokens: undefined,
+        }).toEqual({
+            ...AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.11'].genderResolution,
+            maxOutputTokens: undefined,
+        });
+        for (const stage of AI_STAGE_NAMES) {
+            expect(getAiStagePolicy(v212, stage))
+                .toBe(getAiStagePolicy('ai-stage-policy-v2.11', stage));
+        }
+        expect(aiStagePolicySupports(v212, 'genderQualityV211'))
+            .toBe(true);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('adds evaluation-only v2.13 by changing only feature media resolution', () => {
+        const v212 = AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.12'];
+        const v213 = AI_STAGE_POLICY_REGISTRY[
+            'ai-stage-policy-v2.13' as keyof typeof AI_STAGE_POLICY_REGISTRY
+        ];
+
+        expect(v213).toBeDefined();
+        for (const stage of AI_STAGE_NAMES_V27) {
+            if (stage === 'featureAnalysis') continue;
+            expect(getAiStagePolicy('ai-stage-policy-v2.13' as never, stage))
+                .toBe(getAiStagePolicy('ai-stage-policy-v2.12', stage));
+        }
+        expect(v213?.featureAnalysis).toEqual({
+            ...v212.featureAnalysis,
+            mediaResolution: 'HIGH',
+        });
+        expect(v213?.featureAnalysis).not.toBe(v212.featureAnalysis);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('adds evaluation-only v2.14 by changing only the feature model from its v2.12 control', () => {
+        const v212 = AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.12'];
+        const v214 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V214_VERSION];
+
+        for (const stage of AI_STAGE_NAMES_V27) {
+            if (stage === 'featureAnalysis') continue;
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V214_VERSION, stage))
+                .toBe(getAiStagePolicy('ai-stage-policy-v2.12', stage));
+        }
+        expect(v214.featureAnalysis).toEqual({
+            ...v212.featureAnalysis,
+            model: 'gemini-3-flash-preview',
+        });
+        expect(v214.featureAnalysis).not.toBe(v212.featureAnalysis);
+        expect(v214.featureAnalysis.mediaResolution).toBe('MEDIUM');
+        expect(v214.featureAnalysis.thinkingLevel).toBe('MEDIUM');
+        expect(v214.featureAnalysis.promptVersion).toBe(v212.featureAnalysis.promptVersion);
+        expect(v214.featureAnalysis.schemaVersion).toBe(3);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('adds evaluation-only v2.15 by changing only the V2.14 feature output cap', () => {
+        const v214 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V214_VERSION];
+        const v215 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V215_VERSION];
+
+        expect(v215).toBeDefined();
+        for (const stage of AI_STAGE_NAMES_V27) {
+            if (stage === 'featureAnalysis') continue;
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V215_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V214_VERSION, stage));
+        }
+        expect(v215.featureAnalysis).toEqual({
+            ...v214.featureAnalysis,
+            maxOutputTokens: 4_096,
+        });
+        expect({
+            ...v215.featureAnalysis,
+            maxOutputTokens: undefined,
+        }).toEqual({
+            ...v214.featureAnalysis,
+            maxOutputTokens: undefined,
+        });
+        expect(v215.featureAnalysis.model).toBe('gemini-3-flash-preview');
+        expect(v215.featureAnalysis.promptVersion).toBe('feature-analysis-v4');
+        expect(v215.featureAnalysis.schemaVersion).toBe(3);
+        expect(v215.featureAnalysis.mediaResolution).toBe('MEDIUM');
+        expect(v215.featureAnalysis.thinkingLevel).toBe('MEDIUM');
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('keeps v2.16 stage bytes identical to v2.15 and marks only shadow admission support', () => {
+        const v215 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V215_VERSION];
+        const v216 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V216_VERSION];
+
+        expect(v216).toBeDefined();
+        expect(v216).toEqual(v215);
+        for (const stage of AI_STAGE_NAMES_V27) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V216_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V215_VERSION, stage));
+        }
+        expect(v216.featureAnalysis).toMatchObject({
+            model: 'gemini-3-flash-preview',
+            maxOutputTokens: 4_096,
+            mediaResolution: 'MEDIUM',
+            thinkingLevel: 'MEDIUM',
+            concurrency: 3,
+            promptVersion: 'feature-analysis-v4',
+            schemaVersion: 3,
+        });
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V215_VERSION,
+            'featureSingleProfileShadowV216',
+        )).toBe(false);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V216_VERSION,
+            'featureSingleProfileShadowV216',
+        )).toBe(true);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('keeps v2.17 stage bytes identical to v2.12 and adds only public name-visual fusion support', () => {
+        const v212 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V212_VERSION];
+        const v217 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V217_VERSION];
+
+        expect(v217).toBeDefined();
+        expect(v217).toEqual(v212);
+        for (const stage of AI_STAGE_NAMES_V27) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V217_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V212_VERSION, stage));
+        }
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V217_VERSION,
+            'genderQualityV211',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V217_VERSION,
+            'publicNameVisualFusionShadowV217',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V217_VERSION,
+            'featureSingleProfileShadowV216',
+        )).toBe(false);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('keeps v2.18 stage bytes identical to v2.12 and adds only aggregate public-gender headroom support', () => {
+        const v212 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V212_VERSION];
+        const v218 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V218_VERSION];
+
+        expect(v218).toBeDefined();
+        expect(v218).toEqual(v212);
+        for (const stage of AI_STAGE_NAMES_V27) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V218_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V212_VERSION, stage));
+        }
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V218_VERSION,
+            'publicNameVisualFusionShadowV217',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V218_VERSION,
+            'publicGenderHeadroomDiagnosticV218',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V217_VERSION,
+            'publicGenderHeadroomDiagnosticV218',
+        )).toBe(false);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
+    });
+
+    it('keeps v2.19 control stage bytes identical to v2.18 and adds only replay Pro second-look support', () => {
+        const v218 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V218_VERSION];
+        const v219 = AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V219_VERSION];
+
+        expect(v219).toBeDefined();
+        expect(v219).toEqual(v218);
+        for (const stage of AI_STAGE_NAMES_V27) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V219_VERSION, stage))
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V218_VERSION, stage));
+        }
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V219_VERSION,
+            'publicNameVisualFusionShadowV217',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V219_VERSION,
+            'publicGenderHeadroomDiagnosticV218',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V219_VERSION,
+            'proGenderSecondLookShadowV219',
+        )).toBe(true);
+        expect(aiStagePolicySupports(
+            AI_STAGE_POLICY_V218_VERSION,
+            'proGenderSecondLookShadowV219',
+        )).toBe(false);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe('ai-stage-policy-v2.10');
     });
 });

@@ -48,12 +48,71 @@ export const AI_STAGE_POLICY_V29_VERSION = 'ai-stage-policy-v2.9';
  * semantics. Historical v2.9 requests deliberately remain on their original bytes.
  */
 export const AI_STAGE_POLICY_V210_VERSION = 'ai-stage-policy-v2.10';
+/**
+ * v2.11 is an evaluation-only gender-quality policy. It is intentionally not selectable by
+ * production rollout; its bytes exist solely for authenticated replay evaluation.
+ */
+export const AI_STAGE_POLICY_V211_VERSION = 'ai-stage-policy-v2.11';
+/**
+ * v2.12 is an evaluation-only v2.11 successor. It preserves v2.11 exactly
+ * except for additional resolver output headroom during authenticated replay.
+ */
+export const AI_STAGE_POLICY_V212_VERSION = 'ai-stage-policy-v2.12';
+/**
+ * v2.13 is an evaluation-only v2.12 shadow-rescue policy. Its sole model-input
+ * change is HIGH media resolution for feature analysis; production rollout
+ * selection remains pinned no later than v2.10.
+ */
+export const AI_STAGE_POLICY_V213_VERSION = 'ai-stage-policy-v2.13';
+/**
+ * v2.14 is an evaluation-only v2.12 shadow-rescue policy. Its sole model-input
+ * change is Gemini 3 Flash Preview for feature analysis; production rollout
+ * selection remains pinned no later than v2.10.
+ */
+export const AI_STAGE_POLICY_V214_VERSION = 'ai-stage-policy-v2.14';
+/**
+ * v2.15 is an evaluation-only v2.14 shadow-rescue policy. Its sole model-output
+ * change is additional feature-analysis output headroom; production rollout
+ * selection remains pinned no later than v2.10.
+ */
+export const AI_STAGE_POLICY_V215_VERSION = 'ai-stage-policy-v2.15';
+/**
+ * v2.16 is an evaluation-only admission shadow. It reuses every v2.15 stage
+ * object byte-for-byte and changes only replay shadow candidate admission.
+ */
+export const AI_STAGE_POLICY_V216_VERSION = 'ai-stage-policy-v2.16';
+/**
+ * v2.17 is an evaluation-only public name/visual fusion shadow. Its complete
+ * provider configuration is the immutable v2.12 control; only replay-side
+ * aggregate fusion diagnostics are added.
+ */
+export const AI_STAGE_POLICY_V217_VERSION = 'ai-stage-policy-v2.17';
+/**
+ * v2.18 is an evaluation-only aggregate headroom diagnostic. Provider bytes
+ * remain the immutable v2.12 control.
+ */
+export const AI_STAGE_POLICY_V218_VERSION = 'ai-stage-policy-v2.18';
+/**
+ * v2.19 is an evaluation-only Pro gender second-look shadow. Its complete
+ * control provider configuration remains the immutable v2.18/v2.12 control;
+ * the Pro treatment exists only in the authenticated replay adapter.
+ */
+export const AI_STAGE_POLICY_V219_VERSION = 'ai-stage-policy-v2.19';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
+    AI_STAGE_POLICY_V213_VERSION,
+    AI_STAGE_POLICY_V214_VERSION,
+    AI_STAGE_POLICY_V215_VERSION,
+    AI_STAGE_POLICY_V216_VERSION,
+    AI_STAGE_POLICY_V217_VERSION,
+    AI_STAGE_POLICY_V218_VERSION,
+    AI_STAGE_POLICY_V219_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -196,12 +255,81 @@ const AI_STAGE_POLICIES_V210 = Object.freeze({
     ...AI_STAGE_POLICIES_V29,
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V211 = Object.freeze({
+    ...AI_STAGE_POLICIES_V210,
+    genderResolution: Object.freeze({
+        ...AI_STAGE_POLICIES_V210.genderResolution,
+        thinkingLevel: 'HIGH',
+        mediaResolution: 'HIGH',
+        feedImageLimit: 8,
+        maxOutputTokens: 1_024,
+        promptVersion: 'gender-resolution-v2',
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V212 = Object.freeze({
+    ...AI_STAGE_POLICIES_V211,
+    genderResolution: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.genderResolution,
+        maxOutputTokens: 2_048,
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V213 = Object.freeze({
+    ...AI_STAGE_POLICIES_V212,
+    featureAnalysis: Object.freeze({
+        ...AI_STAGE_POLICIES_V212.featureAnalysis,
+        mediaResolution: 'HIGH',
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V214 = Object.freeze({
+    ...AI_STAGE_POLICIES_V212,
+    featureAnalysis: Object.freeze({
+        ...AI_STAGE_POLICIES_V212.featureAnalysis,
+        model: 'gemini-3-flash-preview',
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V215 = Object.freeze({
+    ...AI_STAGE_POLICIES_V214,
+    featureAnalysis: Object.freeze({
+        ...AI_STAGE_POLICIES_V214.featureAnalysis,
+        maxOutputTokens: 4_096,
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V216 = Object.freeze({
+    ...AI_STAGE_POLICIES_V215,
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V217 = Object.freeze({
+    ...AI_STAGE_POLICIES_V212,
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V218 = Object.freeze({
+    ...AI_STAGE_POLICIES_V212,
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+const AI_STAGE_POLICIES_V219 = Object.freeze({
+    ...AI_STAGE_POLICIES_V218,
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
     [AI_STAGE_POLICY_V28_VERSION]: AI_STAGE_POLICIES_V28,
     [AI_STAGE_POLICY_V29_VERSION]: AI_STAGE_POLICIES_V29,
     [AI_STAGE_POLICY_V210_VERSION]: AI_STAGE_POLICIES_V210,
+    [AI_STAGE_POLICY_V211_VERSION]: AI_STAGE_POLICIES_V211,
+    [AI_STAGE_POLICY_V212_VERSION]: AI_STAGE_POLICIES_V212,
+    [AI_STAGE_POLICY_V213_VERSION]: AI_STAGE_POLICIES_V213,
+    [AI_STAGE_POLICY_V214_VERSION]: AI_STAGE_POLICIES_V214,
+    [AI_STAGE_POLICY_V215_VERSION]: AI_STAGE_POLICIES_V215,
+    [AI_STAGE_POLICY_V216_VERSION]: AI_STAGE_POLICIES_V216,
+    [AI_STAGE_POLICY_V217_VERSION]: AI_STAGE_POLICIES_V217,
+    [AI_STAGE_POLICY_V218_VERSION]: AI_STAGE_POLICIES_V218,
+    [AI_STAGE_POLICY_V219_VERSION]: AI_STAGE_POLICIES_V219,
 });
 
 export type AiStagePolicyCapability =
@@ -211,7 +339,12 @@ export type AiStagePolicyCapability =
     | 'inputQualityV28'
     | 'genderTriageMicrobatchV29'
     /** Safe v2.8 public-copy contracts, restored for the v2.10 successor only. */
-    | 'safePublicPresentationV28';
+    | 'safePublicPresentationV28'
+    | 'genderQualityV211'
+    | 'featureSingleProfileShadowV216'
+    | 'publicNameVisualFusionShadowV217'
+    | 'publicGenderHeadroomDiagnosticV218'
+    | 'proGenderSecondLookShadowV219';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -244,6 +377,94 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'inputQualityV28',
         'genderTriageMicrobatchV29',
         'safePublicPresentationV28',
+    ]),
+    [AI_STAGE_POLICY_V211_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V212_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V213_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V214_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V215_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V216_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+        'featureSingleProfileShadowV216',
+    ]),
+    [AI_STAGE_POLICY_V217_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+        'publicNameVisualFusionShadowV217',
+    ]),
+    [AI_STAGE_POLICY_V218_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+        'publicNameVisualFusionShadowV217',
+        'publicGenderHeadroomDiagnosticV218',
+    ]),
+    [AI_STAGE_POLICY_V219_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderQualityV211',
+        'publicNameVisualFusionShadowV217',
+        'publicGenderHeadroomDiagnosticV218',
+        'proGenderSecondLookShadowV219',
     ]),
 });
 

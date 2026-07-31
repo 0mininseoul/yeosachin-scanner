@@ -1,6 +1,6 @@
 # V2 운영 비용 모델
 
-기준일: 2026-07-28. 현재 backend 운영 상태의 정본은 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이다. 이 문서는 **과금 단위·측정값·미측정 경계**만 정리한다. 자동 분석 공개 입장은 소유자 결정으로 이미 열려 있으나, 이는 원가 완전성 또는 시간 SLA의 증명이 아니다. Actor 콘솔 가격, 과거 V1 canary, 환경변수의 예산 상한을 V2 실측 원가로 대체해서는 안 된다.
+기준일: 2026-07-30. 현재 backend 운영 상태의 정본은 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이다. 이 문서는 **과금 단위·측정값·미측정 경계**만 정리한다. 자동 분석 공개 입장은 소유자 결정으로 이미 열려 있으나, 이는 원가 완전성 또는 시간 SLA의 증명이 아니다. Actor 콘솔 가격, 과거 V1 canary, 환경변수의 예산 상한을 V2 실측 원가로 대체해서는 안 된다.
 
 ## 현재 의사결정 및 측정 상태
 
@@ -9,6 +9,36 @@
 - 비교 baseline은 공개 240명, M/F/U 62/69/109(unknown 45.4%), 121.9분이다. unknown 목표 `<=20%`는 아직 충족하지 못했다.
 - UI의 4–6/5–8/8–12/10–15분 workload band는 계획 band일 뿐 검증된 SLA가 아니다. 94.6분 최신 표본은 이 band 안에 들지 않는다.
 - Basic/Standard의 complete cost는 아직 없다. provider·Gemini 일부 관측과 실제 기능 표본을 전체 원가, p50/p95, 마진 증명으로 쓰지 않는다. 새 유료 E2E는 실행하지 않았다.
+
+### V2.17–V2.18 AI-only 평가의 비용 경계
+
+V2.17 name-and-visual fusion은 sealed historical Standard source로 평가했다. capture는 source
+385, selected media 1,915, retained profile 380(공개 235, 비공개 145), retained media 1,904였고
+581.209초가 걸렸다. 이 시간은 replay 입력의 capture·normalization이며 Instagram 수집 시간,
+AI stage 시간 또는 UI SLA가 아니다. 새 Apify Actor delta는 0이었다.
+
+첫 실행은 model location 오설정으로 generation 전에 123건이 4xx 거절된 11.29초짜리 config
+실패였고 성공 generation 증거가 없어 품질·원가 표본에서 제외한다. location을 `global`로 고친
+단일 paid replay는 314.009초에 완료됐지만 unknown 32.77%(worst 34.17%)와 calibration 및
+official-account gate를 통과하지 못해 production에서 기각됐다. Production은 V2.10을 유지한다.
+이 실행은 AI-only R&D 평가이므로 full Standard E2E, product SLA, Basic/Standard 건당 원가,
+판매가 또는 마진 근거가 아니다. 단계별 aggregate와 안전한 재현 절차는
+[AI replay 운영 문서](./analysis-v2-ai-replay-operations.md)를 따른다.
+
+같은 authenticated sealed source를 재사용한 단일 V2.18 aggregate headroom replay는
+320.220초에 끝났다. Cloud Run task 1개가 attempt 0에서 성공했고 retry는 없었다. Gemini
+provider dispatch는 triage 231, feature 175, private-name 5, resolver 42로 합계 453건이며 모든
+stage의 429와 retry는 0이었다. 이 source의 replay topology는 logical call 최대 710건,
+logical call당 최대 4 attempts이므로 실행 전 hard dispatch ceiling은 2,840건이었다. 새
+Instagram/Apify 호출과 production request/result 쓰기는 구조적으로 0건이었다.
+
+V2.18 terminal report는 token usage와 per-attempt cost를 보존하지 않으며, 실행 직후
+project-level monitoring token series도 이 execution에 귀속할 수 있는 형태로 관측되지 않았다.
+따라서 실제 Gemini USD 비용은 `costComplete=false`다. 453건의 실제 dispatch와 각 stage의
+configured max output, repository pricing을 적용한 `$1.211904`는 output-token component의
+최대치일 뿐이다. input-token 비용은 추가이며 미측정이므로 이를 총비용이나 actual cost로
+기록하지 않는다. V2.18의 31.91% observed unknown, 33.33% worst-case unknown과 모두 false인
+headroom gates도 production 채택, full Standard 원가, 판매가 또는 마진 근거가 아니다.
 
 아래의 과금 경로와 과거 표본은 당시의 사실을 보존한다. 현재 공개/자동 상태와 모순되는 과거 출시 gate 문구는 역사적 판단 기록이며, 현재 운영 판단으로 사용하지 않는다.
 

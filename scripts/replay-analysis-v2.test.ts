@@ -2,7 +2,30 @@ import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock(
+    '../lib/services/analysis/replay/replay-v219-approved-source',
+    async importOriginal => {
+        const actual = await importOriginal<
+            typeof import(
+                '../lib/services/analysis/replay/replay-v219-approved-source'
+            )
+        >();
+        return {
+            ...actual,
+            V219_APPROVED_REPLAY_SOURCE_MANIFEST: Object.freeze({
+                schema:
+                    'analysis-v2-replay-v219-approved-source-v1',
+                manifestId: 'synthetic-v219-source-test-v1',
+                parentSourceContentSha256:
+                    '83ae21a5fd01b4311d1e2981fe199322435d8ed24403042242d2f107a4eeee3a',
+                witnessSourceContentSha256:
+                    '83ae21a5fd01b4311d1e2981fe199322435d8ed24403042242d2f107a4eeee3a',
+            }),
+        };
+    },
+);
 import {
     createReplayKeyFile,
     writeReplayBundle,
@@ -10,6 +33,9 @@ import {
 } from '../lib/services/analysis/replay/replay-bundle';
 import { parseReplayCliArgs, runReplayCli } from './replay-analysis-v2';
 import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/replay/historical-partial-available-artifact';
+import {
+    createV219SealedSourceTestBundle,
+} from '../lib/services/analysis/replay/replay-v219-preflight.test-fixture';
 import packageJson from '../package.json';
 
 const temporaryPaths: string[] = [];
@@ -94,7 +120,349 @@ async function partialArtifacts(now: number) {
     return { bundlePath, keyPath };
 }
 
+async function v219Artifacts(now: number) {
+    const directory = await mkdtemp(join(
+        tmpdir(),
+        'analysis-v2-replay-v219-cli-',
+    ));
+    temporaryPaths.push(directory);
+    const bundlePath = join(directory, 'bundle.enc');
+    const keyPath = join(directory, 'bundle.key');
+    await createReplayKeyFile(keyPath);
+    await writeReplayBundle({
+        bundle: createV219SealedSourceTestBundle(now),
+        bundlePath,
+        keyPath,
+        now,
+    });
+    return { bundlePath, keyPath };
+}
+
+async function v219SourceOnlyArtifacts(now: number) {
+    const parentDirectory = await mkdtemp(join(
+        tmpdir(),
+        'analysis-v2-replay-v219-parent-cli-',
+    ));
+    const witnessDirectory = await mkdtemp(join(
+        tmpdir(),
+        'analysis-v2-replay-v219-witness-cli-',
+    ));
+    temporaryPaths.push(parentDirectory, witnessDirectory);
+    const parentBundlePath = join(parentDirectory, 'input.enc');
+    const parentKeyPath = join(parentDirectory, 'input.key');
+    const witnessBundlePath = join(witnessDirectory, 'input.enc');
+    const witnessKeyPath = join(witnessDirectory, 'input.key');
+    const parent = createV219SealedSourceTestBundle(now);
+    const witness = structuredClone(parent);
+    parent.capture.evaluationPolicy = {
+        capability:
+            'historical-partial-available-standard-v27-risk-v23-to-ai-v217-public-name-visual-fusion-shadow',
+        aiStage: 'ai-stage-policy-v2.17',
+    } as never;
+    witness.capture.evaluationPolicy = {
+        capability:
+            'historical-partial-available-standard-v27-risk-v23-to-ai-v212-gender-quality',
+        aiStage: 'ai-stage-policy-v2.12',
+    } as never;
+    await Promise.all([
+        createReplayKeyFile(parentKeyPath),
+        createReplayKeyFile(witnessKeyPath),
+    ]);
+    await Promise.all([
+        writeReplayBundle({
+            bundle: parent,
+            bundlePath: parentBundlePath,
+            keyPath: parentKeyPath,
+            now,
+        }),
+        writeReplayBundle({
+            bundle: witness,
+            bundlePath: witnessBundlePath,
+            keyPath: witnessKeyPath,
+            now,
+        }),
+    ]);
+    return {
+        parentBundlePath,
+        parentKeyPath,
+        witnessBundlePath,
+        witnessKeyPath,
+    };
+}
+
 describe('analysis V2 replay CLI', () => {
+    it('parses a read-only V2.19 source preflight with independent V2.17 parent and V2.12 witness artifacts', () => {
+        expect(parseReplayCliArgs([
+            '--v219-source-only-preflight',
+            '--bundle=/private/v217/input.enc',
+            '--key=/private/v217/input.key',
+            '--witness-bundle=/private/v212/input.enc',
+            '--witness-key=/private/v212/input.key',
+        ])).toEqual({
+            command: 'v219-source-only-preflight',
+            bundlePath: '/private/v217/input.enc',
+            keyPath: '/private/v217/input.key',
+            witnessBundlePath: '/private/v212/input.enc',
+            witnessKeyPath: '/private/v212/input.key',
+        });
+    });
+
+    it('authenticates both retained artifacts and emits only the V2.19 source-only preflight without deleting or entering replay', async () => {
+        const artifacts = await v219SourceOnlyArtifacts(Date.now());
+        const output: string[] = [];
+        const original = process.stdout.write;
+        const createPaidRunner = vi.fn(() => {
+            throw new Error('PAID_RUNNER_CONSTRUCTED');
+        });
+        const runReplay = vi.fn(() => {
+            throw new Error('REPLAY_EXECUTION_ENTERED');
+        });
+        const beforeOwnedArtifactRemoval = vi.fn();
+        process.stdout.write = ((line: string) => {
+            output.push(line);
+            return true;
+        }) as typeof process.stdout.write;
+        try {
+            await runReplayCli([
+                '--v219-source-only-preflight',
+                `--bundle=${artifacts.parentBundlePath}`,
+                `--key=${artifacts.parentKeyPath}`,
+                `--witness-bundle=${artifacts.witnessBundlePath}`,
+                `--witness-key=${artifacts.witnessKeyPath}`,
+            ], {
+                createPaidRunner,
+                runReplay,
+                beforeOwnedArtifactRemoval,
+            });
+        } finally {
+            process.stdout.write = original;
+        }
+
+        expect(JSON.parse(output.join(''))).toMatchObject({
+            schema: 'analysis-v2-replay-v219-preflight-v1',
+            sourceBinding: 'v217-parent-with-v212-witness',
+            sourceWitness: {
+                aiPolicy: 'ai-stage-policy-v2.12',
+                identityAgreement: true,
+            },
+            externalEffects: {
+                geminiClientsConstructed: 0,
+                providerDispatches: 0,
+                apifyClientsConstructed: 0,
+                instagramTransportsConstructed: 0,
+                productionStoresConstructed: 0,
+                resultWritersConstructed: 0,
+                cloudRunExecutionsCreated: 0,
+            },
+        });
+        expect(createPaidRunner).not.toHaveBeenCalled();
+        expect(runReplay).not.toHaveBeenCalled();
+        expect(beforeOwnedArtifactRemoval).not.toHaveBeenCalled();
+        await expect(stat(artifacts.parentBundlePath)).resolves
+            .toMatchObject({ isFile: expect.any(Function) });
+        await expect(stat(artifacts.parentKeyPath)).resolves
+            .toMatchObject({ isFile: expect.any(Function) });
+        await expect(stat(artifacts.witnessBundlePath)).resolves
+            .toMatchObject({ isFile: expect.any(Function) });
+        await expect(stat(artifacts.witnessKeyPath)).resolves
+            .toMatchObject({ isFile: expect.any(Function) });
+    });
+
+    it('seals v2.11 gender-quality replay behind its historical partial capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.11',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v211-gender-quality',
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+        });
+    });
+    it('seals v2.12 behind distinct official and partial evaluation capabilities', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.12',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v212-gender-quality',
+                aiStage: 'ai-stage-policy-v2.12',
+            },
+        });
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.12',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v212-gender-quality',
+                aiStage: 'ai-stage-policy-v2.12',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--evaluation-ai-policy=ai-stage-policy-v2.12',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.13 behind its partial shadow capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.13',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v213-feature-high-resolution-shadow',
+                aiStage: 'ai-stage-policy-v2.13',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.13',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.14 behind its own partial feature-model shadow capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.14',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v214-feature-model-shadow',
+                aiStage: 'ai-stage-policy-v2.14',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.14',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.15 behind its own partial output-cap shadow capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.15',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v215-feature-output-cap-shadow',
+                aiStage: 'ai-stage-policy-v2.15',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.15',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.16 behind its single-profile admission shadow capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.16',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v216-single-profile-admission-shadow',
+                aiStage: 'ai-stage-policy-v2.16',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.16',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.17 behind its public name-visual fusion shadow capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.17',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v217-public-name-visual-fusion-shadow',
+                aiStage: 'ai-stage-policy-v2.17',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.17',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.18 behind its public-gender headroom diagnostic capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.18',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v218-public-gender-headroom-diagnostic',
+                aiStage: 'ai-stage-policy-v2.18',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.18',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
+    it('seals evaluation-only v2.19 behind its Pro second-look partial capability', () => {
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-partial-available',
+            '--evaluation-ai-policy=ai-stage-policy-v2.19',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v219-pro-gender-second-look-shadow',
+                aiStage: 'ai-stage-policy-v2.19',
+            },
+        });
+        expect(parseReplayCliArgs([
+            '--capture',
+            '--historical-partial-available',
+            '--request-id=00000000-0000-4000-8000-000000000000',
+            '--evaluation-ai-policy=ai-stage-policy-v2.19',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toMatchObject({
+            evaluationPolicy: {
+                capability:
+                    'historical-partial-available-standard-v27-risk-v23-to-ai-v219-pro-gender-second-look-shadow',
+                aiStage: 'ai-stage-policy-v2.19',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai',
+            '--historical-official-e2e',
+            '--evaluation-ai-policy=ai-stage-policy-v2.19',
+            '--bundle=/tmp/bundle', '--key=/tmp/key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
+    });
     it('runs the canonical replay command under the React server condition', () => {
         expect(packageJson.scripts['replay:analysis-v2']).toBe(
             'tsx --conditions=react-server --env-file=.env.local scripts/replay-analysis-v2.ts',
@@ -118,6 +486,35 @@ describe('analysis V2 replay CLI', () => {
         expect(JSON.parse(result.stdout)).toEqual({
             frozen: true,
             stages: ['feature', 'privateNames', 'resolveGender', 'triage'],
+        });
+        expect(result.stderr).toBe('');
+    });
+
+    it('pins global before importing the V2.19 paid adapter even when the CLI ambient location is regional', () => {
+        const result = spawnSync(
+            process.execPath,
+            [
+                '--conditions=react-server',
+                '--import',
+                'tsx',
+                '--eval',
+                "import('./scripts/replay-analysis-v2.ts').then(async m => { const create = m.createPaidReplayRunner ?? m.default?.createPaidReplayRunner; if (typeof create !== 'function') throw new Error('ANALYSIS_V2_REPLAY_MODULE_EXPORT_MISSING'); const runner = await create('ai-stage-policy-v2.19', { v219TreatmentLogicalCalls: 0 }); process.stdout.write(JSON.stringify({ frozen: Object.isFrozen(runner), location: process.env.GOOGLE_CLOUD_LOCATION })); })",
+            ],
+            {
+                cwd: process.cwd(),
+                encoding: 'utf8',
+                timeout: 10_000,
+                env: {
+                    ...process.env,
+                    GOOGLE_CLOUD_LOCATION: 'us-central1',
+                },
+            },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({
+            frozen: true,
+            location: 'global',
         });
         expect(result.stderr).toBe('');
     });
@@ -346,6 +743,58 @@ describe('analysis V2 replay CLI', () => {
         });
         await expect(stat(partial.bundlePath)).rejects.toMatchObject({ code: 'ENOENT' });
         await expect(stat(partial.keyPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('runs V2.19 dry preflight without constructing a paid runner or entering replay execution', async () => {
+        const artifacts = await v219Artifacts(Date.now());
+        const output: string[] = [];
+        const original = process.stdout.write;
+        const createPaidRunner = () => {
+            throw new Error('PAID_RUNNER_CONSTRUCTED');
+        };
+        const runReplay = () => {
+            throw new Error('REPLAY_EXECUTION_ENTERED');
+        };
+        process.stdout.write = ((line: string) => {
+            output.push(line);
+            return true;
+        }) as typeof process.stdout.write;
+        try {
+            await runReplayCli([
+                '--run',
+                '--dry-run',
+                '--historical-partial-available',
+                '--evaluation-ai-policy=ai-stage-policy-v2.19',
+                `--bundle=${artifacts.bundlePath}`,
+                `--key=${artifacts.keyPath}`,
+            ], {
+                createPaidRunner,
+                runReplay,
+            });
+        } finally {
+            process.stdout.write = original;
+        }
+
+        expect(JSON.parse(output.join(''))).toMatchObject({
+            schema: 'analysis-v2-replay-v219-preflight-v1',
+            treatment: { staticCohort: 235 },
+            budget: {
+                totalLogicalCalls: 945,
+                totalProviderDispatches: 3_780,
+                costCeilingUsd: 121.1792,
+            },
+            externalEffects: {
+                geminiClientsConstructed: 0,
+                providerDispatches: 0,
+                apifyClientsConstructed: 0,
+                instagramTransportsConstructed: 0,
+                productionStoresConstructed: 0,
+                resultWritersConstructed: 0,
+                cloudRunExecutionsCreated: 0,
+            },
+        });
+        await expect(stat(artifacts.bundlePath)).rejects.toThrow();
+        await expect(stat(artifacts.keyPath)).rejects.toThrow();
     });
 
     it('parses an exact capture selector and artifact paths', () => {
