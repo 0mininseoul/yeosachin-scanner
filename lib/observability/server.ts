@@ -228,7 +228,7 @@ function runtimeTransport(): OperationalTransport {
     if (token && dataset && orgId) {
         let loadedTransport: Promise<OperationalTransport | undefined> | undefined;
         const pendingLogs = new Set<Promise<void>>();
-        const fallback = stdoutFallbackTransport();
+        const fallback = vercel ? undefined : stdoutFallbackTransport();
         const load = () => {
             loadedTransport ??= createAxiomRuntimeTransport({ token, dataset, orgId });
             return loadedTransport;
@@ -242,7 +242,7 @@ function runtimeTransport(): OperationalTransport {
                             transport.log(level, message, fields);
                             return;
                         }
-                        fallback.log(level, message, fields);
+                        fallback?.log(level, message, fields);
                     })
                     .then(() => undefined)
                     .catch(() => undefined);

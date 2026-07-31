@@ -600,6 +600,27 @@ describe('operational stdout fallback transport', () => {
         expect(consoleInfo.mock.calls[0]).toHaveLength(2);
     });
 
+    it('does not add stdout fallback when Vercel is configured and Axiom initialization fails', async () => {
+        process.env.VERCEL = '1';
+        process.env.AXIOM_TOKEN = 'runtime-token';
+        process.env.AXIOM_DATASET = 'yeosachin-logs';
+        process.env.AXIOM_ORG_ID = 'aa-example';
+        axiomMocks.axiomConstructor.mockImplementationOnce(() => {
+            throw new Error('constructor failed');
+        });
+        const consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({ event: 'http.route_completed', severity: 'info' });
+        await flushOperationalLogs();
+
+        expect(consoleInfo).toHaveBeenCalledTimes(1);
+        expect(consoleInfo.mock.calls[0]).toHaveLength(2);
+        expect(consoleLog).not.toHaveBeenCalled();
+    });
+
     it('stays out of the way when the Axiom transport is configured', async () => {
         process.env.AXIOM_TOKEN = 'runtime-token';
         process.env.AXIOM_DATASET = 'yeosachin-logs';
