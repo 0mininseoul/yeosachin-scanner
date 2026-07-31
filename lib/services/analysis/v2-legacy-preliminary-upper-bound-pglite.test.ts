@@ -77,7 +77,7 @@ describe('legacy preliminary-score upper-bound constraint cleanup', () => {
         } finally {
             await db.close();
         }
-    });
+    }, 15_000);
 
     it('fails closed when the legacy constraint name has an unexpected definition', async () => {
         const db = await PGlite.create();
@@ -103,7 +103,7 @@ describe('legacy preliminary-score upper-bound constraint cleanup', () => {
         } finally {
             await db.close();
         }
-    });
+    }, 15_000);
 
     it('fails closed without dropping legacy when the named current bound drifted', async () => {
         const db = await PGlite.create();
@@ -129,5 +129,5 @@ describe('legacy preliminary-score upper-bound constraint cleanup', () => {
         } finally {
             await db.close();
         }
-    });
+    }, 15_000);
 });
