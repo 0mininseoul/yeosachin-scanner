@@ -15,6 +15,13 @@ const freshnessRaceMigration = readFileSync(
     ),
     'utf8'
 );
+const capacitySafeCountDriftMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731030000_allow_capacity_safe_earlybird_admission_count_drift.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
     const start = migration.indexOf(`CREATE FUNCTION public.${name}(`);
@@ -192,6 +199,30 @@ describe('earlybird fulfillment outbox migration contract', () => {
         );
         expect(freshnessRaceMigration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.recover_earlybird_freshness_snapshot_conflict\([\s\S]*?TO service_role;/
+        );
+    });
+
+    it('permits only fresh-admission-witnessed count drift that remains inside the paid card capacity', () => {
+        expect(capacitySafeCountDriftMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_or_replay_earlybird_fulfillment_request('
+        );
+        expect(capacitySafeCountDriftMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.recover_earlybird_freshness_snapshot_conflict('
+        );
+        expect(capacitySafeCountDriftMigration).toContain(
+            'v_preflight.admission_target_followers_count IS DISTINCT FROM v_preflight.target_followers_count'
+        );
+        expect(capacitySafeCountDriftMigration).toContain(
+            'v_preflight.admission_target_following_count IS DISTINCT FROM v_preflight.target_following_count'
+        );
+        expect(capacitySafeCountDriftMigration).toContain(
+            'v_preflight.admission_plan_cards_snapshot IS DISTINCT FROM v_preflight.plan_cards_snapshot'
+        );
+        expect(capacitySafeCountDriftMigration).toContain(
+            "v_order.target_followers_count > (v_selected_card->'relationshipCapacity'->>'followers')::INTEGER"
+        );
+        expect(capacitySafeCountDriftMigration).toContain(
+            "v_preflight.target_followers_count > (v_selected_card->'relationshipCapacity'->>'followers')::INTEGER"
         );
     });
 });
