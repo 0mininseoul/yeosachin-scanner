@@ -22,6 +22,13 @@ const capacitySafeCountDriftMigration = readFileSync(
     ),
     'utf8'
 );
+const scrubbedFreshnessRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731040000_recover_scrubbed_earlybird_freshness_conflict.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
     const start = migration.indexOf(`CREATE FUNCTION public.${name}(`);
@@ -29,6 +36,20 @@ function functionDefinition(name: string): string {
     const end = migration.indexOf('\n$$;', start);
     expect(end, `${name} must have a bounded body`).toBeGreaterThan(start);
     return migration.slice(start, end);
+}
+
+function scrubbedRecoveryFunctionDefinition(name: string): string {
+    const markers = [
+        `CREATE FUNCTION public.${name}(`,
+        `CREATE OR REPLACE FUNCTION public.${name}(`,
+    ];
+    const start = Math.max(...markers.map(marker =>
+        scrubbedFreshnessRecoveryMigration.indexOf(marker)
+    ));
+    expect(start, `${name} must exist in scrubbed recovery`).toBeGreaterThanOrEqual(0);
+    const end = scrubbedFreshnessRecoveryMigration.indexOf('\n$$;', start);
+    expect(end, `${name} must have a bounded body`).toBeGreaterThan(start);
+    return scrubbedFreshnessRecoveryMigration.slice(start, end);
 }
 
 describe('earlybird fulfillment outbox migration contract', () => {
@@ -223,6 +244,121 @@ describe('earlybird fulfillment outbox migration contract', () => {
         );
         expect(capacitySafeCountDriftMigration).toContain(
             "v_preflight.target_followers_count > (v_selected_card->'relationshipCapacity'->>'followers')::INTEGER"
+        );
+    });
+
+    it('preserves linked expiry evidence and narrowly recovers canonical scrubbed tombstones', () => {
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_or_replay_analysis_v2_preflight('
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /SET status = 'expired',[\s\S]*?lease_token = NULL,[\s\S]*?AND EXISTS \([\s\S]*?earlybird_order\.status IN \([\s\S]*?'payment_pending'[\s\S]*?'completed'/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /pii_scrubbed_at = v_now,[\s\S]*?AND NOT EXISTS \([\s\S]*?earlybird_order\.preflight_id = preflight\.id/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'CREATE FUNCTION public.recover_scrubbed_earlybird_freshness_snapshot_conflict('
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            "v_old.target_instagram_id IS DISTINCT FROM ("
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            "v_old.admission_status <> 'ready'"
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_old.admission_plan_cards_snapshot IS DISTINCT FROM v_cards'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_order.target_followers_count'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_order_cards JSONB'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_new.capacity_required_plan_id IS DISTINCT FROM v_order_capacity_plan'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_new.plan_cards_snapshot IS DISTINCT FROM v_order_cards'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_rebound_id := public.rebind_expired_paid_earlybird_preflight(p_order_id)'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_rebound_id = v_old.id'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            "v_new.admission_status NOT IN ('idle', 'pending')"
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.recover_scrubbed_earlybird_freshness_snapshot_conflict\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.recover_scrubbed_earlybird_freshness_snapshot_conflict\([\s\S]*?TO service_role;/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).not.toMatch(
+            /active_request[\s\S]{0,200}FOR UPDATE/
+        );
+        const recovery = scrubbedRecoveryFunctionDefinition(
+            'recover_scrubbed_earlybird_freshness_snapshot_conflict'
+        );
+        const userHint = recovery.indexOf(
+            'SELECT earlybird_order.user_id INTO v_user_id_hint'
+        );
+        const userLock = recovery.indexOf(
+            'FROM public.users AS recovery_user'
+        );
+        const orderLock = recovery.indexOf(
+            'SELECT earlybird_order.* INTO v_order'
+        );
+        const fulfillmentLock = recovery.indexOf(
+            'SELECT fulfillment.* INTO v_fulfillment'
+        );
+        const preflightLock = recovery.indexOf(
+            'SELECT preflight.* INTO v_old'
+        );
+        expect(userHint).toBeGreaterThanOrEqual(0);
+        expect(userLock).toBeGreaterThan(userHint);
+        expect(orderLock).toBeGreaterThan(userLock);
+        expect(fulfillmentLock).toBeGreaterThan(orderLock);
+        expect(preflightLock).toBeGreaterThan(fulfillmentLock);
+        expect(recovery).toContain('FOR KEY SHARE');
+        expect(recovery).toContain(
+            'v_order.user_id IS DISTINCT FROM v_user_id_hint'
+        );
+
+        const sharedRebind = scrubbedRecoveryFunctionDefinition(
+            'rebind_expired_paid_earlybird_preflight'
+        );
+        const sharedUserHint = sharedRebind.indexOf(
+            'SELECT earlybird_order.user_id INTO v_user_id_hint'
+        );
+        const sharedUserLock = sharedRebind.indexOf(
+            'FROM public.users AS rebind_user'
+        );
+        const sharedOrderLock = sharedRebind.indexOf(
+            'SELECT earlybird_order.* INTO v_order'
+        );
+        const sharedFulfillmentLock = sharedRebind.indexOf(
+            'SELECT fulfillment.* INTO v_fulfillment'
+        );
+        const sharedPreflightLock = sharedRebind.indexOf(
+            'SELECT preflight.* INTO v_preflight'
+        );
+        expect(sharedUserHint).toBeGreaterThanOrEqual(0);
+        expect(sharedUserLock).toBeGreaterThan(sharedUserHint);
+        expect(sharedOrderLock).toBeGreaterThan(sharedUserLock);
+        expect(sharedFulfillmentLock).toBeGreaterThan(sharedOrderLock);
+        expect(sharedPreflightLock).toBeGreaterThan(sharedFulfillmentLock);
+        expect(sharedRebind).toContain('c_max_generations CONSTANT INTEGER := 10');
+        expect(sharedRebind).toContain("v_generation_prefix := v_base_key || '.r'");
+        expect(sharedRebind).toContain('v_generation >= c_max_generations');
+        expect(sharedRebind).toContain('v_order.user_id IS DISTINCT FROM v_user_id_hint');
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.rebind_expired_paid_earlybird_preflight\(UUID\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.rebind_expired_paid_earlybird_preflight\(UUID\)[\s\S]*?TO service_role;/
         );
     });
 });

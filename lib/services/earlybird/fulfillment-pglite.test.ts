@@ -102,6 +102,13 @@ const capacitySafeCountDriftMigration = readFileSync(
     ),
     'utf8'
 );
+const scrubbedFreshnessRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731040000_recover_scrubbed_earlybird_freshness_conflict.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -112,6 +119,8 @@ const ADMISSION_TOKEN = '623e4567-e89b-42d3-a456-426614174001';
 const DISPATCH_TOKEN = '723e4567-e89b-42d3-a456-426614174001';
 const ADMISSION_CLAIM = '823e4567-e89b-42d3-a456-426614174001';
 const ACTIVE_REQUEST = '923e4567-e89b-42d3-a456-426614174001';
+const UNLINKED_USER = 'a23e4567-e89b-42d3-a456-426614174001';
+const UNLINKED_PREFLIGHT = 'b23e4567-e89b-42d3-a456-426614174001';
 
 const catalog = {
     basic: {
@@ -184,6 +193,23 @@ const mismatchedRequiredCards = {
     standard: {
         ...cards.standard,
         selectionState: 'required',
+    },
+};
+const standardRequiredCards = {
+    basic: {
+        ...catalog.basic,
+        selectionState: 'unavailable',
+        unavailableReason: 'below_required_plan',
+    },
+    standard: {
+        ...catalog.standard,
+        selectionState: 'required',
+        unavailableReason: null,
+    },
+    plus: {
+        ...catalog.plus,
+        selectionState: 'unavailable',
+        unavailableReason: 'launch_gate',
     },
 };
 
@@ -314,6 +340,30 @@ async function seedLegacyStaleSnapshotConflict(): Promise<string> {
     )).rows[0].manual_review_at;
 }
 
+async function seedScrubbedStaleSnapshotConflict(): Promise<string> {
+    const manualReviewAt = await seedLegacyStaleSnapshotConflict();
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET status = 'expired',
+             target_instagram_id = 'retained.'
+                || pg_catalog.substr(pg_catalog.replace(id::TEXT, '-', ''), 1, 20),
+             target_full_name = NULL, target_bio = NULL,
+             target_profile_image_url = NULL,
+             target_followers_count = NULL, target_following_count = NULL,
+             target_is_private = NULL, capacity_required_plan_id = NULL,
+             required_plan_id = NULL, plan_cards_snapshot = NULL,
+             error_code = NULL, blocked_at = NULL, ready_at = NULL,
+             exclusion_decision = 'skip', excluded_instagram_id = NULL,
+             lease_token = NULL, lease_expires_at = NULL,
+             pii_scrubbed_at = pg_catalog.clock_timestamp(),
+             created_at = TIMESTAMPTZ '2020-01-01 00:00:00+00',
+             expires_at = TIMESTAMPTZ '2020-01-01 00:30:00+00'
+         WHERE id = $1`,
+        [PREFLIGHT]
+    );
+    return manualReviewAt;
+}
+
 async function claim() {
     return (await asService<{
         claimed: boolean;
@@ -434,7 +484,11 @@ describe('operator-approved earlybird fulfillment migration', () => {
             CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
 
             CREATE TABLE public.users (
-                id UUID PRIMARY KEY
+                id UUID PRIMARY KEY,
+                email TEXT,
+                provider TEXT,
+                analysis_count INTEGER NOT NULL DEFAULT 0,
+                is_paid_user BOOLEAN NOT NULL DEFAULT FALSE
             );
             CREATE TABLE public.analysis_requests (
                 id UUID PRIMARY KEY,
@@ -624,6 +678,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(transientJobExhaustionRecoveryMigration);
         await db.exec(freshnessRaceMigration);
         await db.exec(capacitySafeCountDriftMigration);
+        await db.exec(scrubbedFreshnessRecoveryMigration);
     });
 
     beforeEach(async () => {
@@ -1712,6 +1767,370 @@ describe('operator-approved earlybird fulfillment migration', () => {
             )`,
             [ORDER, manualReviewAt]
         )).rejects.toThrow(/EARLYBIRD_FRESHNESS_RECOVERY_STATE_INVALID/);
+    });
+
+    it('retires linked expiry evidence without scrubbing it and fully scrubs only unlinked expiry', async () => {
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET created_at = TIMESTAMPTZ '2020-01-01 00:00:00+00',
+                 ready_at = TIMESTAMPTZ '2020-01-01 00:00:00+00',
+                 expires_at = TIMESTAMPTZ '2020-01-01 00:30:00+00'
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+        const created = (await asService<{
+            preflight_id: string;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_analysis_v2_preflight(
+                $1, 'owner@example.com', 'email', 'fresh.account',
+                'fresh-linked-key-0001', 'production',
+                $2::JSONB, $3::JSONB, 'deferred', $4::JSONB, $5::JSONB
+            )`,
+            [
+                USER,
+                JSON.stringify({
+                    basic: 'production',
+                    standard: 'production',
+                    plus: 'test_only',
+                }),
+                JSON.stringify(catalog),
+                JSON.stringify({
+                    basic: { status: 'deferred' },
+                    standard: { status: 'deferred' },
+                    plus: { status: 'deferred' },
+                }),
+                JSON.stringify({ pipeline: 'v2', risk: 'v1', aiStage: 'v1' }),
+            ]
+        )).rows[0];
+        expect(created.created).toBe(true);
+        expect(created.preflight_id).not.toBe(PREFLIGHT);
+        expect((await db.query<{
+            status: string;
+            target_instagram_id: string;
+            target_followers_count: number;
+            plan_cards_snapshot: object;
+            pii_scrubbed_at: string | null;
+        }>(
+            `SELECT status, target_instagram_id, target_followers_count,
+                    plan_cards_snapshot, pii_scrubbed_at
+             FROM public.analysis_preflights WHERE id = $1`,
+            [PREFLIGHT]
+        )).rows[0]).toEqual({
+            status: 'expired',
+            target_instagram_id: 'sample.account',
+            target_followers_count: 120,
+            plan_cards_snapshot: cards,
+            pii_scrubbed_at: null,
+        });
+
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [UNLINKED_USER]);
+        await db.query(
+            `INSERT INTO public.analysis_preflights(
+                id, user_id, idempotency_key, target_instagram_id, status,
+                exclusion_decision, access_mode, launch_status_snapshot,
+                plan_catalog_snapshot, pricing_version, pricing_snapshot,
+                policy_versions_snapshot, created_at, updated_at, expires_at
+             ) VALUES (
+                $1, $2, 'expired-unlinked-key', 'unlinked.account', 'pending',
+                'pending', 'production', $3::JSONB, $4::JSONB, 'deferred',
+                $5::JSONB, $6::JSONB, TIMESTAMPTZ '2020-01-01 00:00:00+00',
+                TIMESTAMPTZ '2020-01-01 00:00:00+00',
+                TIMESTAMPTZ '2020-01-01 00:30:00+00'
+             )`,
+            [
+                UNLINKED_PREFLIGHT,
+                UNLINKED_USER,
+                JSON.stringify({
+                    basic: 'production',
+                    standard: 'production',
+                    plus: 'test_only',
+                }),
+                JSON.stringify(catalog),
+                JSON.stringify({
+                    basic: { status: 'deferred' },
+                    standard: { status: 'deferred' },
+                    plus: { status: 'deferred' },
+                }),
+                JSON.stringify({ pipeline: 'v2', risk: 'v1', aiStage: 'v1' }),
+            ]
+        );
+        await asService(
+            `SELECT * FROM public.create_or_replay_analysis_v2_preflight(
+                $1, 'unlinked@example.com', 'email', 'next.account',
+                'fresh-unlinked-key-01', 'production',
+                $2::JSONB, $3::JSONB, 'deferred', $4::JSONB, $5::JSONB
+            )`,
+            [
+                UNLINKED_USER,
+                JSON.stringify({
+                    basic: 'production',
+                    standard: 'production',
+                    plus: 'test_only',
+                }),
+                JSON.stringify(catalog),
+                JSON.stringify({
+                    basic: { status: 'deferred' },
+                    standard: { status: 'deferred' },
+                    plus: { status: 'deferred' },
+                }),
+                JSON.stringify({ pipeline: 'v2', risk: 'v1', aiStage: 'v1' }),
+            ]
+        );
+        expect((await db.query<{
+            status: string;
+            target_instagram_id: string;
+            target_followers_count: number | null;
+            plan_cards_snapshot: object | null;
+            pii_scrubbed_at: string | null;
+        }>(
+            `SELECT status, target_instagram_id, target_followers_count,
+                    plan_cards_snapshot, pii_scrubbed_at
+             FROM public.analysis_preflights WHERE id = $1`,
+            [UNLINKED_PREFLIGHT]
+        )).rows[0]).toEqual({
+            status: 'expired',
+            target_instagram_id: 'retained.b23e4567e89b42d3a456',
+            target_followers_count: null,
+            plan_cards_snapshot: null,
+            pii_scrubbed_at: expect.any(Date),
+        });
+    });
+
+    it('atomically rebinds the exact scrubbed freshness tombstone once', async () => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        const recovered = (await asService<{
+            fulfillment_status: string;
+            preflight_id: string;
+        }>(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rows[0];
+        expect(recovered).toMatchObject({
+            fulfillment_status: 'retryable_failure',
+        });
+        expect(recovered.preflight_id).not.toBe(PREFLIGHT);
+        expect(await boundPreflightId()).toBe(recovered.preflight_id);
+        expect((await db.query<{
+            status: string;
+            target_instagram_id: string;
+            admission_status: string;
+            admission_refreshed_at: string | null;
+            consumed_request_id: string | null;
+        }>(
+            `SELECT status, target_instagram_id, admission_status,
+                    admission_refreshed_at, consumed_request_id
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recovered.preflight_id]
+        )).rows[0]).toEqual({
+            status: 'ready',
+            target_instagram_id: 'sample.account',
+            admission_status: 'idle',
+            admission_refreshed_at: null,
+            consumed_request_id: null,
+        });
+        await expect(asService(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rejects.toThrow(/EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_STATE_INVALID/);
+    });
+
+    it('rebinds witnessed cross-tier drift using order-count canonical primary cards', async () => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard',
+                 expected_groble_product_id = 'standard-product',
+                 actual_groble_product_id = 'standard-product',
+                 expected_amount_krw = 29900,
+                 actual_amount_krw = 29900
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_selected_plan_id = 'standard',
+                 admission_target_followers_count = 500,
+                 admission_target_following_count = 500,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $2::JSONB
+             WHERE id = $1`,
+            [PREFLIGHT, JSON.stringify(standardRequiredCards)]
+        );
+        const recovered = (await asService<{ preflight_id: string }>(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rows[0];
+        expect((await db.query<{
+            capacity_required_plan_id: string;
+            required_plan_id: string;
+            plan_cards_snapshot: object;
+        }>(
+            `SELECT capacity_required_plan_id, required_plan_id,
+                    plan_cards_snapshot
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recovered.preflight_id]
+        )).rows[0]).toEqual({
+            capacity_required_plan_id: 'basic',
+            required_plan_id: 'basic',
+            plan_cards_snapshot: cards,
+        });
+    });
+
+    it('rejects a cross-tier witness whose retained canonical cards were altered', async () => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard',
+                 expected_groble_product_id = 'standard-product',
+                 actual_groble_product_id = 'standard-product'
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_selected_plan_id = 'standard',
+                 admission_target_followers_count = 500,
+                 admission_target_following_count = 500,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $2::JSONB
+             WHERE id = $1`,
+            [PREFLIGHT, JSON.stringify(cards)]
+        );
+        await expect(asService(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rejects.toThrow(/EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT/);
+        expect(await boundPreflightId()).toBe(PREFLIGHT);
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_fulfillments WHERE order_id = $1',
+            [ORDER]
+        )).rows[0].status).toBe('manual_review');
+    });
+
+    it.each([
+        ['payment evidence', 'UPDATE public.earlybird_orders SET actual_amount_krw = expected_amount_krw + 1 WHERE id = $1', ORDER],
+        ['tombstone target', "UPDATE public.analysis_preflights SET target_instagram_id = 'retained.notcanonical' WHERE id = $1", PREFLIGHT],
+        ['admission evidence', "UPDATE public.analysis_preflights SET admission_required_plan_id = 'standard' WHERE id = $1", PREFLIGHT],
+        ['capacity', 'UPDATE public.analysis_preflights SET admission_target_followers_count = 401 WHERE id = $1', PREFLIGHT],
+    ])('rolls back scrubbed recovery when %s changed', async (
+        _name,
+        mutation,
+        mutationId
+    ) => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        await db.query(mutation, [mutationId]);
+        await expect(asService(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rejects.toThrow(/EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT/);
+        expect((await db.query<{ status: string; preflight_id: string }>(
+            `SELECT fulfillment.status, earlybird_order.preflight_id
+             FROM public.earlybird_fulfillments AS fulfillment
+             JOIN public.earlybird_orders AS earlybird_order
+               ON earlybird_order.id = fulfillment.order_id
+             WHERE fulfillment.order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'manual_review',
+            preflight_id: PREFLIGHT,
+        });
+    });
+
+    it('rejects active work and stale CAS without mutating the scrubbed order', async () => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                progress, pipeline_version
+             ) VALUES ($1, $2, 'other.account', 'male', 'pending', 0, 'v2')`,
+            [ACTIVE_REQUEST, USER]
+        );
+        await expect(asService(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rejects.toThrow(/ACTIVE_REQUEST_CONFLICT/);
+        await db.query('DELETE FROM public.analysis_requests WHERE id = $1', [
+            ACTIVE_REQUEST,
+        ]);
+        await expect(asService(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, TIMESTAMPTZ '2020-01-01 00:00:00+00'
+            )`,
+            [ORDER]
+        )).rejects.toThrow(/CAS_MISMATCH/);
+        expect(await boundPreflightId()).toBe(PREFLIGHT);
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_fulfillments WHERE order_id = $1',
+            [ORDER]
+        )).rows[0].status).toBe('manual_review');
+    });
+
+    it('rolls back the retryable transition when the capped rebind refuses', async () => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        for (let generation = 0; generation < 10; generation += 1) {
+            const suffix = generation === 0 ? '' : `.r${generation}`;
+            await db.query(
+                `INSERT INTO public.analysis_preflights(
+                    id, user_id, idempotency_key, target_instagram_id, status,
+                    exclusion_decision, access_mode, launch_status_snapshot,
+                    plan_catalog_snapshot, pricing_version, pricing_snapshot,
+                    policy_versions_snapshot, created_at, updated_at, expires_at
+                 ) VALUES (
+                    extensions.gen_random_uuid(), $1, $2, 'retired.account',
+                    'expired', 'skip', 'production', $3::JSONB, $4::JSONB,
+                    'deferred', $5::JSONB, $6::JSONB,
+                    TIMESTAMPTZ '2020-01-01 00:00:00+00',
+                    TIMESTAMPTZ '2020-01-01 00:00:00+00',
+                    TIMESTAMPTZ '2020-01-01 00:30:00+00'
+                 )`,
+                [
+                    USER,
+                    `earlybird.fulfillment.${ORDER.replaceAll('-', '')}${suffix}`,
+                    JSON.stringify({
+                        basic: 'production',
+                        standard: 'production',
+                        plus: 'test_only',
+                    }),
+                    JSON.stringify(catalog),
+                    JSON.stringify({
+                        basic: { status: 'deferred' },
+                        standard: { status: 'deferred' },
+                        plus: { status: 'deferred' },
+                    }),
+                    JSON.stringify({ pipeline: 'v2', risk: 'v1', aiStage: 'v1' }),
+                ]
+            );
+        }
+        await expect(asService(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rejects.toThrow(/REBIND_REFUSED/);
+        expect(await boundPreflightId()).toBe(PREFLIGHT);
+        expect((await db.query<{ status: string; manual_review_at: string }>(
+            `SELECT status, manual_review_at
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'manual_review',
+            manual_review_at: manualReviewAt,
+        });
     });
 
     it('recovers expired claims and reconciles completed requests without admitting others', async () => {
