@@ -159,15 +159,32 @@ interface PreflightProcessObservationBase {
     followingCount?: number;
 }
 
+type PreflightBusinessBlockedCode = Exclude<AnalysisV2ErrorCode, 'ANALYSIS_FAILED'>;
+
 export type PreflightProcessObservation =
     | (PreflightProcessObservationBase & {
         type: 'profile_collected';
     })
     | (PreflightProcessObservationBase & {
         type: 'completed';
-        outcome: 'ready' | 'blocked';
-        requiredPlan?: PlanId;
-        errorCode?: AnalysisV2ErrorCode;
+        outcome: 'ready';
+        requiredPlan: PlanId;
+        errorCode?: never;
+        failureCategory?: never;
+    })
+    | (PreflightProcessObservationBase & {
+        type: 'completed';
+        outcome: 'blocked';
+        requiredPlan?: never;
+        errorCode: PreflightBusinessBlockedCode;
+        failureCategory?: never;
+    })
+    | (PreflightProcessObservationBase & {
+        type: 'completed';
+        outcome: 'blocked';
+        requiredPlan?: never;
+        errorCode: 'ANALYSIS_FAILED';
+        failureCategory: PreflightWorkerFailureClassification['category'];
     })
     | (PreflightProcessObservationBase & {
         type: 'failed';
@@ -917,7 +934,7 @@ export function buildReadyPreflightSnapshot(
     profile: InstagramProfile,
     accessMode: PlanAccessMode,
     catalogSnapshot: PreflightCatalogSnapshot = currentPreflightCatalogSnapshot()
-): ReadyPreflightSnapshot | AnalysisV2ErrorCode {
+): ReadyPreflightSnapshot | PreflightBusinessBlockedCode {
     assertProfileCounts(profile);
     const username = profile.username.toLowerCase();
     if (!isInstagramUsername(username)) return 'TARGET_UNSUPPORTED';
@@ -1152,6 +1169,9 @@ export async function processPreflight(
                     outcome: 'blocked',
                     ...baseObservation,
                     errorCode: 'ANALYSIS_FAILED',
+                    failureCategory: existingRun.status === 'timed_out'
+                        ? 'timeout'
+                        : 'provider',
                 });
                 return 'blocked';
             }
@@ -1261,6 +1281,7 @@ export async function processPreflight(
                     ...baseObservation,
                     ...profileObservation,
                     errorCode: 'ANALYSIS_FAILED',
+                    failureCategory: failure.category,
                 });
                 return 'blocked';
             } catch (blockError) {
