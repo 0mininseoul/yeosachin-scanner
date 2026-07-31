@@ -233,6 +233,11 @@ DECLARE
     v_state TEXT;
     v_reason TEXT;
     v_selected_card JSONB;
+    v_order_capacity_plan TEXT;
+    v_order_required_plan TEXT;
+    v_order_cards JSONB := '{}'::JSONB;
+    v_order_capacity_rank INTEGER;
+    v_order_required_rank INTEGER;
 BEGIN
     IF p_order_id IS NULL OR p_expected_manual_review_at IS NULL THEN
         RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_INVALID', ERRCODE = 'P0001';
@@ -413,6 +418,62 @@ BEGIN
             > (v_selected_card->'relationshipCapacity'->>'following')::INTEGER THEN
         RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT', ERRCODE = 'P0001';
     END IF;
+
+    -- Rebind intentionally reconstructs the primary ready snapshot from the
+    -- immutable paid-order counts. Those can be in a lower capacity tier than
+    -- a later, witnessed admission refresh while both still fit the selected
+    -- paid plan. Recompute that distinct canonical set for postconditions.
+    FOREACH v_plan_id IN ARRAY ARRAY['basic', 'standard', 'plus'] LOOP
+        v_plan_rank := CASE v_plan_id WHEN 'basic' THEN 1 WHEN 'standard' THEN 2 ELSE 3 END;
+        v_catalog_plan := v_old.plan_catalog_snapshot->v_plan_id;
+        IF v_order_capacity_rank IS NULL
+           AND v_order.target_followers_count
+                <= (v_catalog_plan->'relationshipCapacity'->>'followers')::INTEGER
+           AND v_order.target_following_count
+                <= (v_catalog_plan->'relationshipCapacity'->>'following')::INTEGER THEN
+            v_order_capacity_rank := v_plan_rank;
+            v_order_capacity_plan := v_plan_id;
+        END IF;
+    END LOOP;
+    FOREACH v_plan_id IN ARRAY ARRAY['basic', 'standard', 'plus'] LOOP
+        v_plan_rank := CASE v_plan_id WHEN 'basic' THEN 1 WHEN 'standard' THEN 2 ELSE 3 END;
+        IF v_order_required_rank IS NULL
+           AND v_plan_rank >= v_order_capacity_rank
+           AND v_old.launch_status_snapshot->>v_plan_id = 'production' THEN
+            v_order_required_rank := v_plan_rank;
+            v_order_required_plan := v_plan_id;
+        END IF;
+    END LOOP;
+    IF v_order_capacity_rank IS NULL OR v_order_required_rank IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+    FOREACH v_plan_id IN ARRAY ARRAY['basic', 'standard', 'plus'] LOOP
+        v_plan_rank := CASE v_plan_id WHEN 'basic' THEN 1 WHEN 'standard' THEN 2 ELSE 3 END;
+        v_catalog_plan := v_old.plan_catalog_snapshot->v_plan_id;
+        v_launch_status := v_old.launch_status_snapshot->>v_plan_id;
+        IF v_plan_rank < v_order_capacity_rank THEN
+            v_state := 'unavailable'; v_reason := 'below_required_plan';
+        ELSIF v_launch_status <> 'production' THEN
+            v_state := 'unavailable'; v_reason := 'launch_gate';
+        ELSIF v_plan_id = v_order_required_plan THEN
+            v_state := 'required'; v_reason := NULL;
+        ELSE
+            v_state := 'available_upgrade'; v_reason := NULL;
+        END IF;
+        v_order_cards := v_order_cards || pg_catalog.jsonb_build_object(
+            v_plan_id,
+            pg_catalog.jsonb_build_object(
+                'launchStatus', v_launch_status,
+                'relationshipCapacity', v_catalog_plan->'relationshipCapacity',
+                'detailedMutualLimit', v_catalog_plan->'detailedMutualLimit',
+                'selectionState', v_state,
+                'unavailableReason', v_reason
+            )
+        );
+    END LOOP;
+    IF NOT public.analysis_v2_valid_plan_cards_snapshot(v_order_cards) THEN
+        RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT', ERRCODE = 'P0001';
+    END IF;
     IF EXISTS (
         SELECT 1
         FROM public.analysis_requests AS active_request
@@ -468,9 +529,9 @@ BEGIN
        OR NOT public.analysis_v2_valid_plan_cards_snapshot(v_new.plan_cards_snapshot)
        OR NOT public.analysis_v2_valid_pricing_snapshot(v_new.pricing_snapshot)
        OR NOT public.analysis_v2_valid_policy_versions_snapshot(v_new.policy_versions_snapshot)
-       OR v_new.capacity_required_plan_id IS DISTINCT FROM v_capacity_plan
-       OR v_new.required_plan_id IS DISTINCT FROM v_required_plan
-       OR v_new.plan_cards_snapshot IS DISTINCT FROM v_cards
+       OR v_new.capacity_required_plan_id IS DISTINCT FROM v_order_capacity_plan
+       OR v_new.required_plan_id IS DISTINCT FROM v_order_required_plan
+       OR v_new.plan_cards_snapshot IS DISTINCT FROM v_order_cards
        OR v_new.admission_status NOT IN ('idle', 'pending')
        OR v_new.admission_selected_plan_id IS NOT NULL
        OR v_new.admission_refreshed_at IS NOT NULL

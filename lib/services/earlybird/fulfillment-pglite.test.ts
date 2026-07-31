@@ -195,6 +195,23 @@ const mismatchedRequiredCards = {
         selectionState: 'required',
     },
 };
+const standardRequiredCards = {
+    basic: {
+        ...catalog.basic,
+        selectionState: 'unavailable',
+        unavailableReason: 'below_required_plan',
+    },
+    standard: {
+        ...catalog.standard,
+        selectionState: 'required',
+        unavailableReason: null,
+    },
+    plus: {
+        ...catalog.plus,
+        selectionState: 'unavailable',
+        unavailableReason: 'launch_gate',
+    },
+};
 
 type FulfillmentIdentity = {
     order_id: string;
@@ -1920,6 +1937,85 @@ describe('operator-approved earlybird fulfillment migration', () => {
             )`,
             [ORDER, manualReviewAt]
         )).rejects.toThrow(/EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_STATE_INVALID/);
+    });
+
+    it('rebinds witnessed cross-tier drift using order-count canonical primary cards', async () => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard',
+                 expected_groble_product_id = 'standard-product',
+                 actual_groble_product_id = 'standard-product',
+                 expected_amount_krw = 29900,
+                 actual_amount_krw = 29900
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_selected_plan_id = 'standard',
+                 admission_target_followers_count = 500,
+                 admission_target_following_count = 500,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $2::JSONB
+             WHERE id = $1`,
+            [PREFLIGHT, JSON.stringify(standardRequiredCards)]
+        );
+        const recovered = (await asService<{ preflight_id: string }>(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rows[0];
+        expect((await db.query<{
+            capacity_required_plan_id: string;
+            required_plan_id: string;
+            plan_cards_snapshot: object;
+        }>(
+            `SELECT capacity_required_plan_id, required_plan_id,
+                    plan_cards_snapshot
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recovered.preflight_id]
+        )).rows[0]).toEqual({
+            capacity_required_plan_id: 'basic',
+            required_plan_id: 'basic',
+            plan_cards_snapshot: cards,
+        });
+    });
+
+    it('rejects a cross-tier witness whose retained canonical cards were altered', async () => {
+        const manualReviewAt = await seedScrubbedStaleSnapshotConflict();
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard',
+                 expected_groble_product_id = 'standard-product',
+                 actual_groble_product_id = 'standard-product'
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_selected_plan_id = 'standard',
+                 admission_target_followers_count = 500,
+                 admission_target_following_count = 500,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $2::JSONB
+             WHERE id = $1`,
+            [PREFLIGHT, JSON.stringify(cards)]
+        );
+        await expect(asService(
+            `SELECT * FROM public.recover_scrubbed_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rejects.toThrow(/EARLYBIRD_SCRUBBED_FRESHNESS_RECOVERY_SNAPSHOT_CONFLICT/);
+        expect(await boundPreflightId()).toBe(PREFLIGHT);
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_fulfillments WHERE order_id = $1',
+            [ORDER]
+        )).rows[0].status).toBe('manual_review');
     });
 
     it.each([

@@ -256,6 +256,18 @@ describe('earlybird fulfillment outbox migration contract', () => {
             'v_old.admission_plan_cards_snapshot IS DISTINCT FROM v_cards'
         );
         expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_order.target_followers_count'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_order_cards JSONB'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_new.capacity_required_plan_id IS DISTINCT FROM v_order_capacity_plan'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
+            'v_new.plan_cards_snapshot IS DISTINCT FROM v_order_cards'
+        );
+        expect(scrubbedFreshnessRecoveryMigration).toContain(
             'v_rebound_id := public.rebind_expired_paid_earlybird_preflight(p_order_id)'
         );
         expect(scrubbedFreshnessRecoveryMigration).toContain(
