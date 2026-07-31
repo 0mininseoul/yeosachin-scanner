@@ -39,9 +39,9 @@ const scrubbedRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
-const fulfillmentOutboxMigration = readFileSync(
+const rehydratingAdmissionMigration = readFileSync(
     new URL(
-        '../../../supabase/migrations/20260724123300_add_earlybird_fulfillment_outbox.sql',
+        '../../../supabase/migrations/20260730140000_rehydrate_earlybird_paid_preflight_snapshot.sql',
         import.meta.url
     ),
     'utf8'
@@ -80,8 +80,8 @@ const autoAdmitSql = replacementFunctionSql(
     'auto_admit_eligible_earlybird_fulfillments'
 );
 const productionAdmitCoreSql = functionSql(
-    fulfillmentOutboxMigration,
-    'CREATE FUNCTION public.admit_earlybird_fulfillment('
+    rehydratingAdmissionMigration,
+    'CREATE OR REPLACE FUNCTION public.admit_earlybird_fulfillment('
 );
 const productionAdmitWrapperSql = functionSql(
     rebindIntroductionMigration,
@@ -406,6 +406,9 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 ADD COLUMN policy_versions_snapshot JSONB,
                 ADD COLUMN target_is_private BOOLEAN,
                 ADD COLUMN capacity_required_plan_id TEXT,
+                ADD COLUMN admission_capacity_required_plan_id TEXT,
+                ADD COLUMN admission_required_plan_id TEXT,
+                ADD COLUMN admission_plan_cards_snapshot JSONB,
                 ADD COLUMN consumed_request_id UUID,
                 ADD COLUMN error_code TEXT,
                 ADD COLUMN blocked_at TIMESTAMP WITH TIME ZONE,
