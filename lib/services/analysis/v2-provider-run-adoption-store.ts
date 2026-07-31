@@ -81,6 +81,12 @@ export function createAnalysisV2ProviderRunAdoptionStore(
                 if (error.message === 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_FENCE_MISMATCH') {
                     throw new Error(error.message);
                 }
+                if (
+                    error.message
+                    === 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_SOURCE_UNAVAILABLE'
+                ) {
+                    throw new Error('ADOPTION_DATASET_UNAVAILABLE');
+                }
                 throw new Error(
                     `ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR: resolve failed (${safeCode(error.code)}).`
                 );
