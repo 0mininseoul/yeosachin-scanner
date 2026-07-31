@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ProfileAttemptResult } from '@/lib/services/instagram/providers/types';
+import type {
+    ProfileAttemptResult,
+    ScrapeRequestOptions,
+} from '@/lib/services/instagram/providers/types';
 import type {
     ApifyPostComment,
     ApifyPostLiker,
@@ -19,6 +22,7 @@ import type {
     AnalysisV2ProviderRunStore,
     StoredAnalysisV2ProviderRun,
 } from './v2-provider-run-store';
+import type { AnalysisV2ProviderRunAdoptionStore } from './v2-provider-run-adoption-store';
 import type { AnalysisV2TargetProfileReuseStore } from './v2-target-profile-reuse';
 import {
     AnalysisV2CollectionContextFenceError,
@@ -491,6 +495,116 @@ function reusableTargetProfileRunStore(
 }
 
 describe('analysis V2 concrete collection executors', () => {
+    function adoptedRelationshipStore() {
+        const resolve = vi.fn(async (input: AnalysisV2ProviderRunReservationInput) => ({
+            sourceRequestId: '8df77338-2672-4ef2-93fe-13a0683ec9b4',
+            sourceJobKey: input.jobKey,
+            operationKey: input.operationKey,
+            inputHash: input.inputHash,
+            logicalProvider: input.logicalProvider,
+            actorId: input.actorId,
+            credentialSlot: input.credentialSlot,
+            maxChargeUsd: input.maxChargeUsd,
+            runId: `adopted${input.operationKey.slice(-8)}`,
+            actualUsageUsd: 0.1,
+            usageReconciledAt: capturedAt,
+        }));
+        return {
+            resolve,
+            value: { resolve } as AnalysisV2ProviderRunAdoptionStore,
+        };
+    }
+
+    it('resumes sufficient adopted relationship Datasets at the current declared count', async () => {
+        const adoption = adoptedRelationshipStore();
+        const providers = providerStore();
+        const rows = [
+            { username: 'alice', isPrivate: false, isVerified: false },
+            { username: 'bob', isPrivate: false, isVerified: false },
+        ];
+        const getter = vi.fn(async (
+            _username: string,
+            _limit?: number,
+            options?: ScrapeRequestOptions
+        ) => {
+            expect(options?.expectedResultCount).toBe(2);
+            expect(options?.providerRun?.resumeRunId).toMatch(/^adopted/);
+            return rows;
+        });
+        const checkpointRelationshipSide = vi.fn(async (input) => ({
+            side: input.side,
+            sourceStatus: input.source.status,
+            revision: 1,
+            declaredCount: input.declaredCount,
+            collectedCount: input.rows.length,
+            coverageBps: 10_000,
+            inputHash: input.source.inputHash,
+            resultHash,
+        }));
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            providerRunAdoptionStore: adoption.value,
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 2,
+                    publicCount: 2,
+                    privateCount: 0,
+                    detailedPublicCount: 2,
+                    unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: ['alice', 'bob'],
+                    privateMutualUsernames: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await expect(executor(stageContext('relationships', state()))).resolves.toBeDefined();
+        expect(adoption.resolve).toHaveBeenCalledTimes(2);
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails closed without a paid fallback when an adopted Dataset is insufficient', async () => {
+        const adoption = adoptedRelationshipStore();
+        const providers = providerStore();
+        const getter = vi.fn(async (
+            _username: string,
+            _limit?: number,
+            options?: ScrapeRequestOptions
+        ) => {
+            expect(options?.providerRun?.resumeRunId).toMatch(/^adopted/);
+            throw new Error(
+                'SCRAPING_INCOMPLETE_ERROR: adopted Dataset is below current expected count.'
+            );
+        });
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            providerRunAdoptionStore: adoption.value,
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(),
+                freezeRelationships: vi.fn(),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toThrow('ADOPTION_DATASET_UNAVAILABLE');
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
     it('collects both exact preflight relationship sides concurrently and builds frozen topology', async () => {
         const starts: string[] = [];
         let release: (() => void) | undefined;
