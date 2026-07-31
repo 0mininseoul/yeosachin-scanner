@@ -1,56 +1,157 @@
 import { describe, expect, it } from 'vitest';
 import {
-    appendScreenedFace,
-    MAX_SCREENED_FACES,
-    type ScreenedFace,
+    appendScreenedCandidate,
+    MAX_SCREENED_CANDIDATES,
+    type ScreenedCandidate,
 } from './progress-faces';
 
-function face(n: number): ScreenedFace {
-    return { username: `u${n}***`, imageUrl: `/api/image-proxy?token=${n}` };
+function candidate(n: number): ScreenedCandidate {
+    return {
+        username: `u${n}***`,
+        imageUrl: `/api/image-proxy?token=${n}`,
+        feedImageUrls: [],
+    };
 }
 
-describe('screened face accumulation', () => {
-    it('appends a newly active profile', () => {
-        const next = appendScreenedFace([], { maskedUsername: 'a***', imageUrl: '/x' });
-        expect(next).toEqual([{ username: 'a***', imageUrl: '/x' }]);
+describe('screened candidate accumulation', () => {
+    it('adds an active candidate as one profile-plus-feed bundle', () => {
+        const next = appendScreenedCandidate([], {
+            maskedUsername: 'a***',
+            imageUrl: '/profile',
+            feedImageUrls: ['/feed-1', '/feed-2'],
+        });
+        expect(next).toEqual([{
+            username: 'a***',
+            imageUrl: '/profile',
+            feedImageUrls: ['/feed-1', '/feed-2'],
+        }]);
     });
 
-    it('ignores the same profile repeated by successive polls', () => {
-        const first = appendScreenedFace([], { maskedUsername: 'a***', imageUrl: '/x' });
-        const second = appendScreenedFace(first, { maskedUsername: 'a***', imageUrl: '/x' });
+    it('is a no-op for an exact repeated heartbeat', () => {
+        const active = {
+            maskedUsername: 'a***',
+            imageUrl: '/profile',
+            feedImageUrls: ['/feed-1'],
+        };
+        const first = appendScreenedCandidate([], active);
+        const second = appendScreenedCandidate(first, active);
         // Identity, not just equality: the caller uses it to skip a re-render.
         expect(second).toBe(first);
     });
 
-    it('keeps a profile that comes back around after another', () => {
-        let list = appendScreenedFace([], { maskedUsername: 'a***', imageUrl: '/x' });
-        list = appendScreenedFace(list, { maskedUsername: 'b***', imageUrl: '/y' });
-        list = appendScreenedFace(list, { maskedUsername: 'a***', imageUrl: '/x' });
+    it('updates the adjacent username when a later heartbeat has richer media', () => {
+        const usernameOnly = appendScreenedCandidate([], {
+            maskedUsername: 'a***',
+            imageUrl: null,
+        });
+        const richPreview = appendScreenedCandidate(usernameOnly, {
+            maskedUsername: 'a***',
+            imageUrl: '/profile',
+            feedImageUrls: ['/feed-1', '/feed-2', '/feed-3'],
+        });
+
+        expect(richPreview).toEqual([{
+            username: 'a***',
+            imageUrl: '/profile',
+            feedImageUrls: ['/feed-1', '/feed-2', '/feed-3'],
+        }]);
+    });
+
+    it('preserves a rich adjacent bundle when a retry falls back to username-only', () => {
+        const richPreview = appendScreenedCandidate([], {
+            maskedUsername: 'a***',
+            imageUrl: '/profile',
+            feedImageUrls: ['/feed-1', '/feed-2', '/feed-3'],
+        });
+        const usernameOnly = appendScreenedCandidate(richPreview, {
+            maskedUsername: 'a***',
+            imageUrl: null,
+        });
+
+        expect(usernameOnly).toBe(richPreview);
+    });
+
+    it('preserves a rich adjacent bundle when a retry has fewer feed images', () => {
+        const richPreview = appendScreenedCandidate([], {
+            maskedUsername: 'a***',
+            imageUrl: '/profile',
+            feedImageUrls: ['/feed-1', '/feed-2', '/feed-3'],
+        });
+        const partialRetry = appendScreenedCandidate(richPreview, {
+            maskedUsername: 'a***',
+            imageUrl: '/profile-refreshed',
+            feedImageUrls: ['/feed-refreshed'],
+        });
+
+        expect(partialRetry).toBe(richPreview);
+    });
+
+    it('updates refreshed profile and feed media when neither dimension regresses', () => {
+        const first = appendScreenedCandidate([], {
+            maskedUsername: 'a***',
+            imageUrl: '/profile-v1',
+            feedImageUrls: ['/feed-v1-1', '/feed-v1-2'],
+        });
+        const refreshed = appendScreenedCandidate(first, {
+            maskedUsername: 'a***',
+            imageUrl: '/profile-v2',
+            feedImageUrls: ['/feed-v2-1', '/feed-v2-2'],
+        });
+
+        expect(refreshed).not.toBe(first);
+        expect(refreshed).toEqual([{
+            username: 'a***',
+            imageUrl: '/profile-v2',
+            feedImageUrls: ['/feed-v2-1', '/feed-v2-2'],
+        }]);
+    });
+
+    it('keeps a candidate that comes back around after another', () => {
+        let list = appendScreenedCandidate([], { maskedUsername: 'a***', imageUrl: '/x' });
+        list = appendScreenedCandidate(list, { maskedUsername: 'b***', imageUrl: '/y' });
+        list = appendScreenedCandidate(list, { maskedUsername: 'a***', imageUrl: '/x' });
         // Dropping this would put the row out of step with the screened count.
         expect(list.map(f => f.username)).toEqual(['a***', 'b***', 'a***']);
     });
 
     it('holds at the cap by dropping the oldest', () => {
-        let list: readonly ScreenedFace[] = [];
-        for (let n = 0; n < MAX_SCREENED_FACES + 5; n += 1) {
-            list = appendScreenedFace(list, {
-                maskedUsername: face(n).username,
-                imageUrl: face(n).imageUrl,
+        let list: readonly ScreenedCandidate[] = [];
+        for (let n = 0; n < MAX_SCREENED_CANDIDATES + 5; n += 1) {
+            list = appendScreenedCandidate(list, {
+                maskedUsername: candidate(n).username,
+                imageUrl: candidate(n).imageUrl,
             });
         }
-        expect(list).toHaveLength(MAX_SCREENED_FACES);
+        expect(list).toHaveLength(MAX_SCREENED_CANDIDATES);
         expect(list.at(0)?.username).toBe('u5***');
-        expect(list.at(-1)?.username).toBe(`u${MAX_SCREENED_FACES + 4}***`);
+        expect(list.at(-1)?.username).toBe(`u${MAX_SCREENED_CANDIDATES + 4}***`);
     });
 
-    it('ignores a profile with no image rather than showing a hole', () => {
-        const list = appendScreenedFace([], { maskedUsername: 'a***', imageUrl: null });
-        expect(list).toEqual([]);
+    it('keeps a profile fallback before feed images when the profile image is absent', () => {
+        const list = appendScreenedCandidate([], {
+            maskedUsername: 'a***',
+            imageUrl: null,
+            feedImageUrls: ['/feed-1', '/feed-2', '/feed-3', '/feed-4'],
+        });
+        expect(list).toEqual([{
+            username: 'a***',
+            imageUrl: null,
+            feedImageUrls: ['/feed-1', '/feed-2', '/feed-3'],
+        }]);
     });
 
     it('ignores an absent active profile', () => {
-        const seeded = appendScreenedFace([], { maskedUsername: 'a***', imageUrl: '/x' });
-        expect(appendScreenedFace(seeded, null)).toBe(seeded);
+        const seeded = appendScreenedCandidate([], { maskedUsername: 'a***', imageUrl: '/x' });
+        expect(appendScreenedCandidate(seeded, null)).toBe(seeded);
+    });
+
+    it('keeps a no-media candidate so the renderer can use its profile fallback', () => {
+        const list = appendScreenedCandidate([], { maskedUsername: 'a***', imageUrl: null });
+        expect(list).toEqual([{
+            username: 'a***',
+            imageUrl: null,
+            feedImageUrls: [],
+        }]);
     });
 });
 
