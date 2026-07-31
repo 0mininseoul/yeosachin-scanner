@@ -95,6 +95,17 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toContain('fields.event in (');
         expect(operations).toContain('fields.user_id');
         expect(operations).toContain('fields.preflight_id');
+        expect(operations).toMatch(/Vercel lifecycle[^\n]*Axiom/);
+        expect(operations).toMatch(/Cloud Run preflight worker[^\n]*Axiom transport[^\n]*stdout[^\n]*Cloud Logging/);
+        expect(operations).toContain('resource.type="cloud_run_revision"');
+        expect(operations).toContain('resource.labels.service_name="analysis-worker"');
+        expect(operations).toContain('timestamp');
+        expect(operations).toContain('jsonPayload.event=~"^preflight\\.(completed|failed)$"');
+        expect(operations).toMatch(/attempt[^\n]*at-least-once/);
+        expect(operations).toMatch(/preflight_id[^\n]*event[^\n]*attempt[^\n]*(모두|있을 때)/);
+        expect(operations).toContain('preflight_id + event + attempt');
+        expect(operations).toMatch(/correlation field[^\n]*제한된 시간 창/);
+        expect(operations).toMatch(/영속 exactly-once[^\n]*(보장하지|보장하지 않는다)/);
         expect(operations).not.toMatch(/^\| where environment ==/m);
         expect(operations).not.toMatch(/^\| where event (?:==|in)/m);
         expect(operations).toMatch(/notifier[^\n]*(없|미구성)[^\n]*(비활성|disabled)/i);
