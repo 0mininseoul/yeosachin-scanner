@@ -58,6 +58,11 @@ import {
     type StoredAnalysisV2ProviderRun,
 } from './v2-provider-run-store';
 import {
+    analysisV2ProviderRunAdoptionStore,
+    bindAdoptedProviderRunOrFallback,
+    type AnalysisV2ProviderRunAdoptionStore,
+} from './v2-provider-run-adoption-store';
+import {
     analysisV2CollectionRequestContextStore,
     type AnalysisV2CollectionJobClaim,
     type AnalysisV2CollectionRequestContext,
@@ -97,6 +102,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     evidenceStore?: AnalysisV2EvidenceStore;
     profileCheckpointStore?: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    providerRunAdoptionStore?: AnalysisV2ProviderRunAdoptionStore;
     targetProfileReuseStore?: AnalysisV2TargetProfileReuseStore;
     getFollowers?: RelationshipGetter;
     getFollowing?: RelationshipGetter;
@@ -111,6 +117,7 @@ interface ResolvedDependencies {
     evidenceStore: AnalysisV2EvidenceStore;
     profileCheckpointStore: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore: AnalysisV2ProviderRunStore;
+    providerRunAdoptionStore: AnalysisV2ProviderRunAdoptionStore | null;
     targetProfileReuseStore: AnalysisV2TargetProfileReuseStore;
     getFollowers: RelationshipGetter;
     getFollowing: RelationshipGetter;
@@ -127,6 +134,8 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         profileCheckpointStore:
             input.profileCheckpointStore ?? analysisV2ProfileFetchCheckpointStore,
         providerRunStore: input.providerRunStore ?? analysisV2ProviderRunStore,
+        providerRunAdoptionStore: input.providerRunAdoptionStore
+            ?? (input.providerRunStore ? null : analysisV2ProviderRunAdoptionStore),
         targetProfileReuseStore:
             input.targetProfileReuseStore ?? analysisV2TargetProfileReuseStore,
         getFollowers: input.getFollowers ?? getFollowers,
@@ -305,7 +314,7 @@ async function bindApifyRun(input: {
     actorId: string;
     maxChargeUsd: number;
 }) {
-    return input.dependencies.providerRunStore.bindAdapterCheckpoint({
+    const identity = {
         requestId: input.claim.requestId,
         jobKey: input.claim.jobKey,
         claimToken: input.claim.claimToken,
@@ -320,7 +329,20 @@ async function bindApifyRun(input: {
             env: input.dependencies.env,
         }),
         maxChargeUsd: input.maxChargeUsd,
+    } as const;
+    const binding = await bindAdoptedProviderRunOrFallback({
+        adoptionStore: input.dependencies.providerRunAdoptionStore,
+        identity,
+        fallback: () => input.dependencies.providerRunStore.bindAdapterCheckpoint(identity),
     });
+    if (binding.adopted) {
+        return {
+            stored: null,
+            checkpoint: binding.checkpoint,
+            evidenceRun: binding.adopted,
+        };
+    }
+    return { ...binding.fallback, evidenceRun: null };
 }
 
 async function requireSucceededRun(
@@ -370,6 +392,10 @@ function relationshipIncompleteReplacementIdentity(canonicalInput: string): stri
 function isRelationshipIncompleteError(error: unknown): error is Error {
     return error instanceof Error
         && error.message.startsWith('SCRAPING_INCOMPLETE_ERROR:');
+}
+
+function adoptionDatasetUnavailable(cause: unknown): Error {
+    return new Error('ADOPTION_DATASET_UNAVAILABLE', { cause });
 }
 
 function isReconciledSucceededRun(
@@ -437,18 +463,27 @@ export function createAnalysisV2RelationshipsExecutor(
                     actorId: APIFY_RELATIONSHIP_ACTOR_ID,
                     maxChargeUsd: relationshipMaximumCharge(declaredCount, dependencies.env),
                 });
-                const rows = await getter(request.targetUsername, declaredCount, {
-                    provider: 'apify',
-                    fallback: false,
-                    expectedResultCount: declaredCount,
-                    requestId: claim.requestId,
-                    providerRun: { ...binding.checkpoint, startCancellationSignal },
-                });
-                const run = await requireSucceededRun(dependencies.providerRunStore, {
-                    requestId: claim.requestId,
-                    jobKey: claim.jobKey,
-                    operationKey,
-                });
+                let rows: InstagramFollower[];
+                try {
+                    rows = await getter(request.targetUsername, declaredCount, {
+                        provider: 'apify',
+                        fallback: false,
+                        expectedResultCount: declaredCount,
+                        requestId: claim.requestId,
+                        providerRun: { ...binding.checkpoint, startCancellationSignal },
+                    });
+                } catch (error) {
+                    if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
+                    throw error;
+                }
+                const run = binding.evidenceRun ?? await requireSucceededRun(
+                    dependencies.providerRunStore,
+                    {
+                        requestId: claim.requestId,
+                        jobKey: claim.jobKey,
+                        operationKey,
+                    }
+                );
                 return { inputHash, operationKey, rows, run };
             };
 
@@ -603,6 +638,7 @@ async function durableProfiles(input: {
     ) return resume;
 
     const mutableProviderRun: ProviderRunCheckpoint = {};
+    let adoptedFallback = false;
     const bindFallback = async (unresolved: readonly string[]) => {
         if (unresolved.length === 0) return;
         if (claim.jobKey === 'track:target-evidence:collect') {
@@ -644,11 +680,13 @@ async function durableProfiles(input: {
             maxChargeUsd: profileMaximumCharge(unresolved.length, dependencies.env),
         });
         Object.assign(mutableProviderRun, binding.checkpoint);
+        adoptedFallback = binding.evidenceRun !== null;
     };
 
     if (resume) await bindFallback(resume.frozenUnresolvedUsernames);
 
-    await dependencies.getProfilesBatchV2(usernames, {
+    try {
+        await dependencies.getProfilesBatchV2(usernames, {
         requestId: claim.requestId,
         onProfileStart,
         providerRun: mutableProviderRun,
@@ -673,7 +711,11 @@ async function durableProfiles(input: {
                 results: checkpointAttemptResults(snapshot.results),
             });
         },
-    });
+        });
+    } catch (error) {
+        if (adoptedFallback) throw adoptionDatasetUnavailable(error);
+        throw error;
+    }
 
     const stored = await dependencies.profileCheckpointStore.load(identity);
     if (!stored) throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_MISSING');
@@ -731,12 +773,18 @@ async function repairProfileBatch(input: {
     // The adapter throws on a RESTRICTED-pin failure or a still-pending run, so the checkpoint
     // write below is reached only with a durable, terminal outcome set — never sealing a barrier
     // as synthetic failures.
-    const outcomes = await dependencies.runProfileRepair({
-        usernames: repairUsernames,
-        credentialSlot,
-        providerRunCheckpoint: mutableProviderRun,
-        env: dependencies.env,
-    });
+    let outcomes: Awaited<ReturnType<typeof dependencies.runProfileRepair>>;
+    try {
+        outcomes = await dependencies.runProfileRepair({
+            usernames: repairUsernames,
+            credentialSlot,
+            providerRunCheckpoint: mutableProviderRun,
+            env: dependencies.env,
+        });
+    } catch (error) {
+        if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
+        throw error;
+    }
     return dependencies.profileCheckpointStore.checkpointRepair({
         ...identity,
         results: checkpointAttemptResults(outcomes),
@@ -862,22 +910,32 @@ async function collectedTargetSource(input: {
             input.dependencies.env
         ),
     });
-    const rows = input.kind === 'likers'
-        ? await input.dependencies.interactionAdapter.getPostLikers(
-            postUrls,
-            limitPerPost,
-            interactionContext(binding.checkpoint, input.startCancellationSignal)
-        )
-        : await input.dependencies.interactionAdapter.getPostComments(
-            postUrls,
-            limitPerPost,
-            interactionContext(binding.checkpoint, input.startCancellationSignal)
-        );
-    const run = await requireSucceededRun(input.dependencies.providerRunStore, {
-        requestId: input.claim.requestId,
-        jobKey: input.claim.jobKey,
-        operationKey,
-    });
+    let rows: Awaited<ReturnType<ApifyInteractionAdapter['getPostLikers']>>
+        | Awaited<ReturnType<ApifyInteractionAdapter['getPostComments']>>;
+    try {
+        rows = input.kind === 'likers'
+            ? await input.dependencies.interactionAdapter.getPostLikers(
+                postUrls,
+                limitPerPost,
+                interactionContext(binding.checkpoint, input.startCancellationSignal)
+            )
+            : await input.dependencies.interactionAdapter.getPostComments(
+                postUrls,
+                limitPerPost,
+                interactionContext(binding.checkpoint, input.startCancellationSignal)
+            );
+    } catch (error) {
+        if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
+        throw error;
+    }
+    const run = binding.evidenceRun ?? await requireSucceededRun(
+        input.dependencies.providerRunStore,
+        {
+            requestId: input.claim.requestId,
+            jobKey: input.claim.jobKey,
+            operationKey,
+        }
+    );
     return { rows, run, operationKey, inputHash };
 }
 

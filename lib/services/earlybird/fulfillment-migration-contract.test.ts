@@ -29,6 +29,13 @@ const scrubbedFreshnessRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const recoveredRequestGenerationMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731050000_bound_recovered_earlybird_request_generation.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
     const start = migration.indexOf(`CREATE FUNCTION public.${name}(`);
@@ -359,6 +366,51 @@ describe('earlybird fulfillment outbox migration contract', () => {
         );
         expect(scrubbedFreshnessRecoveryMigration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.rebind_expired_paid_earlybird_preflight\(UUID\)[\s\S]*?TO service_role;/
+        );
+    });
+
+    it('bounds recovered request generations behind exact lineage and provider adoption', () => {
+        expect(recoveredRequestGenerationMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_or_replay_earlybird_fulfillment_request('
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            'c_max_request_generations CONSTANT INTEGER := 10'
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            'public.earlybird_schema_failure_recoveries'
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            'recovery.failed_request_id = v_conflicting_request.id'
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            'v_recovery_preflight.id'
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            "v_rebind_preflight_base_key := 'earlybird.fulfillment.'"
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            "last_error_code = 'PROVIDER_RUN_ADOPTION_REQUIRED'"
+        );
+        expect(recoveredRequestGenerationMigration).toMatch(
+            /FROM public\.analysis_v2_provider_runs AS provider_run\s+WHERE provider_run\.request_id = v_conflicting_request\.id\s+\) AND NOT public\.earlybird_provider_run_adoption_ready/
+        );
+        expect(recoveredRequestGenerationMigration).not.toMatch(
+            /provider_run\.request_id = v_conflicting_request\.id\s+AND provider_run\.status/
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            'public.earlybird_provider_run_adoption_ready('
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            "last_error_code = 'REQUEST_IDEMPOTENCY_EXHAUSTED'"
+        );
+        expect(recoveredRequestGenerationMigration).toContain(
+            'v_request_idempotency_key'
+        );
+        expect(recoveredRequestGenerationMigration).not.toMatch(
+            /UPDATE public\.analysis_requests AS analysis_request[\s\S]*?status\s*=/
+        );
+        expect(recoveredRequestGenerationMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.earlybird_provider_run_adoption_ready\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
         );
     });
 });

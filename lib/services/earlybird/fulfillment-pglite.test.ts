@@ -109,6 +109,20 @@ const scrubbedFreshnessRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const recoveredRequestGenerationMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731050000_bound_recovered_earlybird_request_generation.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const providerRunAdoptionMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731060000_adopt_recovery_provider_runs.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -121,6 +135,7 @@ const ADMISSION_CLAIM = '823e4567-e89b-42d3-a456-426614174001';
 const ACTIVE_REQUEST = '923e4567-e89b-42d3-a456-426614174001';
 const UNLINKED_USER = 'a23e4567-e89b-42d3-a456-426614174001';
 const UNLINKED_PREFLIGHT = 'b23e4567-e89b-42d3-a456-426614174001';
+const RECOVERY_PREFLIGHT = 'c23e4567-e89b-42d3-a456-426614174001';
 
 const catalog = {
     basic: {
@@ -387,6 +402,109 @@ function canonicalScrubToken(requestId: string): string {
     return `retained.${requestId.replace(/-/g, '').slice(0, 20)}`;
 }
 
+async function seedRecoveredRequestCollision(): Promise<string> {
+    const requestKey = `earlybird:${ORDER}`;
+    const preflightKey = `earlybird.fulfillment.${ORDER.replace(/-/g, '')}.r1`;
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET idempotency_key = $2
+         WHERE id = $1`,
+        [PREFLIGHT, preflightKey]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_preflights(
+            id, user_id, idempotency_key, target_instagram_id,
+            target_followers_count, target_following_count, target_is_private,
+            exclusion_decision, excluded_instagram_id, status, access_mode,
+            launch_status_snapshot, plan_catalog_snapshot, plan_cards_snapshot,
+            pricing_version, pricing_snapshot, policy_versions_snapshot,
+            capacity_required_plan_id, required_plan_id,
+            admission_status, admission_selected_plan_id,
+            admission_entitlement_jti_hash, admission_token,
+            admission_refreshed_at, admission_target_followers_count,
+            admission_target_following_count,
+            admission_capacity_required_plan_id, admission_required_plan_id,
+            admission_plan_cards_snapshot,
+            created_at, updated_at, expires_at, ready_at, pii_scrubbed_at
+         )
+         SELECT $2, user_id, $3, $4,
+            NULL, NULL, NULL,
+            'skip', NULL, 'expired', access_mode,
+            launch_status_snapshot, plan_catalog_snapshot, NULL,
+            pricing_version, pricing_snapshot, policy_versions_snapshot,
+            NULL, NULL,
+            'ready', 'basic', $5, $6,
+            pg_catalog.clock_timestamp() - INTERVAL '2 hours',
+            target_followers_count, target_following_count,
+            capacity_required_plan_id, required_plan_id, plan_cards_snapshot,
+            pg_catalog.clock_timestamp() - INTERVAL '2 hours',
+            pg_catalog.clock_timestamp() - INTERVAL '90 minutes',
+            pg_catalog.clock_timestamp() - INTERVAL '90 minutes',
+            NULL,
+            pg_catalog.clock_timestamp() - INTERVAL '80 minutes'
+         FROM public.analysis_preflights
+         WHERE id = $1`,
+        [
+            PREFLIGHT,
+            RECOVERY_PREFLIGHT,
+            `earlybird.schema-recovery.${ORDER.replace(/-/g, '')}`,
+            canonicalScrubToken(RECOVERY_PREFLIGHT),
+            admissionHash(),
+            ADMISSION_TOKEN,
+        ]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_requests(
+            id, user_id, target_instagram_id, target_gender, status,
+            error_message, progress, idempotency_key, pipeline_version
+         ) VALUES (
+            $1, $2, $3, 'male', 'failed',
+            'JOB_ATTEMPTS_EXHAUSTED', 100, $4, 'v2'
+         )`,
+        [FAILED_REQUEST, USER, canonicalScrubToken(FAILED_REQUEST), requestKey]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+         VALUES ($1, 'JOB_ATTEMPTS_EXHAUSTED')`,
+        [FAILED_REQUEST]
+    );
+    await db.query(
+        `INSERT INTO public.earlybird_schema_failure_recoveries(
+            order_id, failed_request_id, recovery_preflight_id,
+            prior_attempt_count
+         ) VALUES ($1, $2, $3, 4)`,
+        [ORDER, FAILED_REQUEST, RECOVERY_PREFLIGHT]
+    );
+    return requestKey;
+}
+
+async function seedDirectRecoveredRequestCollision(): Promise<string> {
+    const requestKey = `earlybird:${ORDER}`;
+    await db.query(
+        `INSERT INTO public.analysis_requests(
+            id, user_id, target_instagram_id, target_gender, status,
+            error_message, progress, idempotency_key, pipeline_version
+         ) VALUES (
+            $1, $2, $3, 'male', 'failed',
+            'JOB_ATTEMPTS_EXHAUSTED', 100, $4, 'v2'
+         )`,
+        [FAILED_REQUEST, USER, canonicalScrubToken(FAILED_REQUEST), requestKey]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+         VALUES ($1, 'JOB_ATTEMPTS_EXHAUSTED')`,
+        [FAILED_REQUEST]
+    );
+    await db.query(
+        `INSERT INTO public.earlybird_schema_failure_recoveries(
+            order_id, failed_request_id, recovery_preflight_id,
+            prior_attempt_count
+         ) VALUES ($1, $2, $3, 4)`,
+        [ORDER, FAILED_REQUEST, PREFLIGHT]
+    );
+    return requestKey;
+}
+
 /**
  * Replays `analysis_v2_scrub_terminal_request_pii` verbatim. Production runs this on every
  * terminal V2 failure, so it scrubs the consumed preflight as well as the request. Copying
@@ -521,6 +639,9 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 analysis_scope_snapshot JSONB,
                 policy_versions_snapshot JSONB
             );
+            CREATE UNIQUE INDEX idx_analysis_requests_user_idempotency
+                ON public.analysis_requests(user_id, idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
             CREATE TABLE public.analysis_preflights (
                 id UUID PRIMARY KEY,
                 user_id UUID NOT NULL REFERENCES public.users(id),
@@ -619,7 +740,39 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 batch INTEGER,
                 input_hash TEXT NOT NULL,
                 required_job_keys TEXT[] NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                lease_token UUID,
+                lease_expires_at TIMESTAMP WITH TIME ZONE,
                 PRIMARY KEY(request_id, job_key)
+            );
+            CREATE FUNCTION public.analysis_v2_valid_provider_operation_key(TEXT)
+            RETURNS BOOLEAN LANGUAGE sql IMMUTABLE STRICT AS $$
+                SELECT $1 ~ '^(relationship-followers|target-likers|target-comments):[0-9a-f]{64}$'
+            $$;
+            CREATE TABLE public.analysis_v2_provider_runs (
+                request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
+                job_key TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                job_claim_token UUID NOT NULL,
+                reservation_token UUID NOT NULL,
+                logical_provider TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                credential_slot TEXT NOT NULL,
+                max_charge_usd NUMERIC NOT NULL,
+                status TEXT NOT NULL,
+                run_id TEXT,
+                actual_usage_usd NUMERIC,
+                reserved_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    DEFAULT pg_catalog.clock_timestamp(),
+                run_started_at TIMESTAMP WITH TIME ZONE,
+                terminalized_at TIMESTAMP WITH TIME ZONE,
+                usage_reconciled_at TIMESTAMP WITH TIME ZONE,
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    DEFAULT pg_catalog.clock_timestamp(),
+                PRIMARY KEY(request_id, job_key, operation_key),
+                FOREIGN KEY(request_id, job_key)
+                    REFERENCES public.analysis_pipeline_jobs(request_id, job_key)
             );
             CREATE TABLE public.analysis_preflight_provider_runs (
                 preflight_id UUID NOT NULL REFERENCES public.analysis_preflights(id),
@@ -634,6 +787,107 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id),
                 error_code TEXT NOT NULL
             );
+
+            CREATE FUNCTION public.checkpoint_analysis_v2_relationship_side(
+                p_request_id UUID,
+                p_job_key TEXT,
+                p_claim_token UUID,
+                p_side TEXT,
+                p_input_hash TEXT,
+                p_declared_count INTEGER,
+                p_source_status TEXT,
+                p_provider TEXT,
+                p_provider_run_id TEXT,
+                p_provider_operation_key TEXT,
+                p_excluded_username TEXT,
+                p_rows JSONB
+            )
+            RETURNS BOOLEAN
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = ''
+            AS $$
+            DECLARE
+                v_provider_run public.analysis_v2_provider_runs%ROWTYPE;
+            BEGIN
+                SELECT provider_run.*
+                INTO v_provider_run
+                FROM public.analysis_v2_provider_runs AS provider_run
+                WHERE provider_run.request_id = p_request_id
+                  AND provider_run.job_key = p_job_key
+                  AND provider_run.operation_key = p_provider_operation_key
+                FOR UPDATE;
+                IF NOT FOUND
+                   OR v_provider_run.job_claim_token IS DISTINCT FROM p_claim_token
+                   OR v_provider_run.logical_provider IS DISTINCT FROM p_provider
+                   OR v_provider_run.input_hash IS DISTINCT FROM p_input_hash
+                   OR v_provider_run.run_id IS DISTINCT FROM p_provider_run_id
+                   OR v_provider_run.status <> 'succeeded' THEN
+                    RETURN FALSE;
+                END IF;
+                RETURN TRUE;
+            END;
+            $$;
+
+            CREATE FUNCTION public.checkpoint_analysis_v2_target_evidence(
+                p_request_id UUID,
+                p_job_key TEXT,
+                p_claim_token UUID,
+                p_target_username TEXT,
+                p_target_profile_input_hash TEXT,
+                p_target_profile_provider TEXT,
+                p_target_profile_run_id TEXT,
+                p_target_profile_operation_key TEXT,
+                p_liker_source JSONB,
+                p_comment_source JSONB,
+                p_rows JSONB
+            )
+            RETURNS BOOLEAN
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = ''
+            AS $$
+            DECLARE
+                v_liker_provider_run public.analysis_v2_provider_runs%ROWTYPE;
+                v_comment_provider_run public.analysis_v2_provider_runs%ROWTYPE;
+            BEGIN
+                SELECT provider_run.*
+                INTO v_liker_provider_run
+                FROM public.analysis_v2_provider_runs AS provider_run
+                WHERE provider_run.request_id = p_request_id
+                  AND provider_run.job_key = p_job_key
+                  AND provider_run.operation_key = p_liker_source->>'provider_operation_key'
+                FOR UPDATE;
+                IF NOT FOUND
+                   OR v_liker_provider_run.job_claim_token IS DISTINCT FROM p_claim_token
+                   OR v_liker_provider_run.input_hash IS DISTINCT FROM p_liker_source->>'input_hash'
+                   OR v_liker_provider_run.logical_provider IS DISTINCT FROM p_liker_source->>'provider'
+                   OR v_liker_provider_run.run_id IS DISTINCT FROM p_liker_source->>'provider_run_id'
+                   OR v_liker_provider_run.credential_slot IS DISTINCT FROM
+                        p_liker_source->>'provider_credential_slot'
+                   OR v_liker_provider_run.status <> 'succeeded' THEN
+                    RETURN FALSE;
+                END IF;
+                SELECT provider_run.*
+                INTO v_comment_provider_run
+                FROM public.analysis_v2_provider_runs AS provider_run
+                WHERE provider_run.request_id = p_request_id
+                  AND provider_run.job_key = p_job_key
+                  AND provider_run.operation_key = p_comment_source->>'provider_operation_key'
+                FOR UPDATE;
+                IF NOT FOUND
+                   OR v_comment_provider_run.job_claim_token IS DISTINCT FROM p_claim_token
+                   OR v_comment_provider_run.input_hash IS DISTINCT FROM p_comment_source->>'input_hash'
+                   OR v_comment_provider_run.logical_provider IS DISTINCT FROM p_comment_source->>'provider'
+                   OR v_comment_provider_run.run_id IS DISTINCT FROM p_comment_source->>'provider_run_id'
+                   OR v_comment_provider_run.credential_slot IS DISTINCT FROM
+                        p_comment_source->>'provider_credential_slot'
+                   OR v_comment_provider_run.status <> 'succeeded' THEN
+                    RETURN FALSE;
+                END IF;
+                RETURN TRUE;
+            END;
+            $$;
 
             CREATE FUNCTION public.analysis_v2_valid_launch_snapshot(JSONB)
             RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
@@ -679,12 +933,42 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(freshnessRaceMigration);
         await db.exec(capacitySafeCountDriftMigration);
         await db.exec(scrubbedFreshnessRecoveryMigration);
+        await db.exec(recoveredRequestGenerationMigration);
+        // pg_get_functiondef preserves the fixture body's TypeScript indentation.
+        // Normalize it to the production definitions' indentation so the real
+        // 06000 fail-closed DO rewrite must match and execute verbatim.
+        await db.exec(`
+            DO $fixture$
+            DECLARE
+                v_definition TEXT;
+            BEGIN
+                v_definition := pg_catalog.pg_get_functiondef(
+                    'public.checkpoint_analysis_v2_relationship_side(uuid,text,uuid,text,text,integer,text,text,text,text,text,jsonb)'::pg_catalog.regprocedure
+                );
+                v_definition := pg_catalog.regexp_replace(
+                    v_definition, '(?m)^ {12}', '', 'g'
+                );
+                EXECUTE v_definition;
+
+                v_definition := pg_catalog.pg_get_functiondef(
+                    'public.checkpoint_analysis_v2_target_evidence(uuid,text,uuid,text,text,text,text,text,jsonb,jsonb,jsonb)'::pg_catalog.regprocedure
+                );
+                v_definition := pg_catalog.regexp_replace(
+                    v_definition, '(?m)^ {8}', '', 'g'
+                );
+                EXECUTE v_definition;
+            END;
+            $fixture$;
+        `);
+        await db.exec(providerRunAdoptionMigration);
     });
 
     beforeEach(async () => {
         await db.exec(`
-            TRUNCATE public.earlybird_schema_failure_recoveries,
+            TRUNCATE public.analysis_v2_recovery_provider_run_adoptions,
+                public.earlybird_schema_failure_recoveries,
                 public.earlybird_fulfillments,
+                public.analysis_v2_provider_runs,
                 public.analysis_pipeline_jobs,
                 public.analysis_preflight_provider_runs,
                 public.earlybird_waitlist,
@@ -1361,6 +1645,510 @@ describe('operator-approved earlybird fulfillment migration', () => {
             count: 1,
             access_mode: 'production',
             user_id: USER,
+        });
+    });
+
+    it('uses one bounded generation after an exact failed recovery request collision', async () => {
+        const baseKey = await seedRecoveredRequestCollision();
+
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        const first = (await asService<{
+            request_id: string;
+            fulfillment_status: string;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+            )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).rows[0];
+        expect(first).toMatchObject({
+            fulfillment_status: 'analysis_in_progress',
+            created: true,
+        });
+        expect((await db.query<{
+            id: string;
+            idempotency_key: string;
+            status: string;
+            target_instagram_id: string;
+        }>(
+            `SELECT id, idempotency_key, status, target_instagram_id
+             FROM public.analysis_requests
+             ORDER BY idempotency_key`
+        )).rows).toEqual([
+            {
+                id: FAILED_REQUEST,
+                idempotency_key: baseKey,
+                status: 'failed',
+                target_instagram_id: canonicalScrubToken(FAILED_REQUEST),
+            },
+            {
+                id: first.request_id,
+                idempotency_key: `${baseKey}.r1`,
+                status: 'pending',
+                target_instagram_id: 'sample.account',
+            },
+        ]);
+
+        await expect(asService<{
+            request_id: string;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+            )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            request_id: first.request_id,
+            created: false,
+        }] });
+    });
+
+    it('also opens r1 while the current preflight is the exact recorded recovery preflight', async () => {
+        const baseKey = await seedDirectRecoveredRequestCollision();
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        const created = (await asService<{
+            request_id: string;
+            fulfillment_status: string;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+             )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).rows[0];
+        expect(created).toMatchObject({
+            fulfillment_status: 'analysis_in_progress',
+            created: true,
+        });
+        expect((await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_requests WHERE id = $1`,
+            [created.request_id]
+        )).rows[0].idempotency_key).toBe(`${baseKey}.r1`);
+    });
+
+    it.each([
+        [
+            'missing receipt',
+            `DELETE FROM public.analysis_v2_failure_receipts
+             WHERE request_id = $1`,
+        ],
+        [
+            'non-failed source',
+            `UPDATE public.analysis_requests SET status = 'completed'
+             WHERE id = $1`,
+        ],
+        [
+            'non-v2 source',
+            `UPDATE public.analysis_requests SET pipeline_version = 'v1'
+             WHERE id = $1`,
+        ],
+    ])('refuses a recovered key collision with %s', async (
+        _case,
+        mutation
+    ) => {
+        await seedRecoveredRequestCollision();
+        await db.query(mutation, [FAILED_REQUEST]);
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        await expect(asService<{ fulfillment_status: string }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+             )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'manual_review',
+        }] });
+        expect((await db.query<{ last_error_code: string }>(
+            `SELECT last_error_code
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0].last_error_code).toBe('REQUEST_CONFLICT');
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_requests`
+        )).rows[0].count).toBe(1);
+    });
+
+    it.each([
+        {
+            shape: 'failed-only',
+            status: 'failed',
+            runId: 'FailedRun1234',
+            actualUsageUsd: 0.2,
+            usageReconciledAt: new Date().toISOString(),
+        },
+        {
+            shape: 'starting',
+            status: 'starting',
+            runId: null,
+            actualUsageUsd: null,
+            usageReconciledAt: null,
+        },
+        {
+            shape: 'unreconciled succeeded',
+            status: 'succeeded',
+            runId: 'UnreconciledRun1234',
+            actualUsageUsd: null,
+            usageReconciledAt: null,
+        },
+    ])('fails closed before creating a generation for a $shape recovery provider run', async ({
+        status,
+        runId,
+        actualUsageUsd,
+        usageReconciledAt,
+    }) => {
+        await seedRecoveredRequestCollision();
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id, job_key, track, kind, input_hash, required_job_keys
+             ) VALUES (
+                $1, 'coordinator:bootstrap', 'coordinator', 'bootstrap',
+                $2, '{}'::TEXT[]
+             )`,
+            [FAILED_REQUEST, 'a'.repeat(64)]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id,
+                actual_usage_usd, usage_reconciled_at
+             ) VALUES (
+                $1, 'coordinator:bootstrap', $2, $3, $4, $5,
+                'apify', 'apify/relationship-scraper', 'secondary',
+                1.25, $6, $7, $8, $9
+             )`,
+            [
+                FAILED_REQUEST,
+                `relationship-followers:${'b'.repeat(64)}`,
+                'c'.repeat(64),
+                CLAIM,
+                ADMISSION_CLAIM,
+                status,
+                runId,
+                actualUsageUsd,
+                usageReconciledAt,
+            ]
+        );
+
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        await expect(asService<{
+            fulfillment_status: string;
+            request_id: string | null;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+            )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'manual_review',
+            request_id: null,
+            created: false,
+        }] });
+        expect((await db.query<{
+            status: string;
+            last_error_code: string;
+            request_id: string | null;
+        }>(
+            `SELECT status, last_error_code, request_id
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'manual_review',
+            last_error_code: 'PROVIDER_RUN_ADOPTION_REQUIRED',
+            request_id: null,
+        });
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_requests`
+        )).rows[0].count).toBe(1);
+    });
+
+    it('creates r1 and adopts one reconciled source run through the live claim and evidence writers', async () => {
+        const requestKey = await seedRecoveredRequestCollision();
+        const operationKey = `relationship-followers:${'d'.repeat(64)}`;
+        const inputHash = 'e'.repeat(64);
+        const sourceRunId = 'RecoveredRun1234';
+        const sourceJobKey = 'coordinator:bootstrap';
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id, job_key, track, kind, input_hash,
+                required_job_keys, status
+             ) VALUES (
+                $1, $2, 'coordinator', 'bootstrap', $3,
+                '{}'::TEXT[], 'completed'
+             )`,
+            [FAILED_REQUEST, sourceJobKey, 'f'.repeat(64)]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id,
+                actual_usage_usd, run_started_at, terminalized_at,
+                usage_reconciled_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, 'apify',
+                'apify/relationship-scraper', 'secondary', 1.25,
+                'succeeded', $7, 0.42,
+                pg_catalog.clock_timestamp() - INTERVAL '10 minutes',
+                pg_catalog.clock_timestamp() - INTERVAL '9 minutes',
+                pg_catalog.clock_timestamp() - INTERVAL '8 minutes'
+             )`,
+            [
+                FAILED_REQUEST,
+                sourceJobKey,
+                operationKey,
+                inputHash,
+                CLAIM,
+                ADMISSION_CLAIM,
+                sourceRunId,
+            ]
+        );
+
+        expect((await db.query<{ ready: boolean }>(
+            `SELECT public.earlybird_provider_run_adoption_ready(
+                $1, $2, $3
+             ) AS ready`,
+            [ORDER, FAILED_REQUEST, PREFLIGHT]
+        )).rows[0].ready).toBe(true);
+        expect((await db.query<{
+            target_instagram_id: string;
+            followers_scrubbed: boolean;
+            pii_scrubbed: boolean;
+        }>(
+            `SELECT target_instagram_id,
+                    target_followers_count IS NULL AS followers_scrubbed,
+                    pii_scrubbed_at >= expires_at AS pii_scrubbed
+             FROM public.analysis_preflights WHERE id = $1`,
+            [RECOVERY_PREFLIGHT]
+        )).rows[0]).toEqual({
+            target_instagram_id: canonicalScrubToken(RECOVERY_PREFLIGHT),
+            followers_scrubbed: true,
+            pii_scrubbed: true,
+        });
+
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        const created = (await asService<{
+            request_id: string;
+            fulfillment_status: string;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+            )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).rows[0];
+        expect(created).toMatchObject({
+            fulfillment_status: 'analysis_in_progress',
+            created: true,
+        });
+        expect((await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_requests WHERE id = $1`,
+            [created.request_id]
+        )).rows[0].idempotency_key).toBe(`${requestKey}.r1`);
+
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET status = 'processing', lease_token = $3,
+                 lease_expires_at = pg_catalog.clock_timestamp() + INTERVAL '5 minutes'
+             WHERE request_id = $1 AND job_key = $2`,
+            [created.request_id, sourceJobKey, DISPATCH_TOKEN]
+        );
+        const resolveArgs = [
+            created.request_id,
+            sourceJobKey,
+            DISPATCH_TOKEN,
+            operationKey,
+            inputHash,
+            'apify',
+            'apify/relationship-scraper',
+            'secondary',
+            1.25,
+        ];
+        const adopted = (await asService<{ adopted: Record<string, unknown> }>(
+            `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                $1, $2, $3, $4, $5, $6, $7, $8, $9
+             ) AS adopted`,
+            resolveArgs
+        )).rows[0].adopted;
+        expect(adopted).toMatchObject({
+            sourceRequestId: FAILED_REQUEST,
+            sourceJobKey,
+            operationKey,
+            inputHash,
+            runId: sourceRunId,
+            actualUsageUsd: 0.42,
+        });
+        await expect(asService(
+            `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                $1, $2, $3, $4, $5, $6, $7, $8, $9
+             )`,
+            resolveArgs
+        )).resolves.toMatchObject({ rows: [{
+            resolve_analysis_v2_recovery_provider_run: adopted,
+        }] });
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_v2_recovery_provider_run_adoptions`
+        )).rows[0].count).toBe(1);
+
+        await expect(asService<{ adopted: Record<string, unknown> | null }>(
+            `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                $1, $2, $3, $4, $5, $6, $7, $8, $9
+             ) AS adopted`,
+            resolveArgs.map((value, index) => index === 4 ? '0'.repeat(64) : value)
+        )).resolves.toMatchObject({ rows: [{ adopted: null }] });
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_v2_recovery_provider_run_adoptions`
+        )).rows[0].count).toBe(1);
+
+        const source = {
+            input_hash: inputHash,
+            provider: 'apify',
+            provider_run_id: sourceRunId,
+            provider_operation_key: operationKey,
+            provider_credential_slot: 'secondary',
+        };
+        await expect(asService<{ accepted: boolean }>(
+            `SELECT public.checkpoint_analysis_v2_relationship_side(
+                $1, $2, $3, 'followers', $4, 120, 'collected',
+                'apify', $5, $6, NULL, '[]'::JSONB
+             ) AS accepted`,
+            [
+                created.request_id,
+                sourceJobKey,
+                DISPATCH_TOKEN,
+                inputHash,
+                sourceRunId,
+                operationKey,
+            ]
+        )).resolves.toMatchObject({ rows: [{ accepted: true }] });
+        await expect(asService<{ accepted: boolean }>(
+            `SELECT public.checkpoint_analysis_v2_target_evidence(
+                $1, $2, $3, 'sample.account', $4, 'apify', $5, $6,
+                $7::JSONB, $7::JSONB, '[]'::JSONB
+             ) AS accepted`,
+            [
+                created.request_id,
+                sourceJobKey,
+                DISPATCH_TOKEN,
+                inputHash,
+                sourceRunId,
+                operationKey,
+                JSON.stringify(source),
+            ]
+        )).resolves.toMatchObject({ rows: [{ accepted: true }] });
+        await expect(asService<{ accepted: boolean }>(
+            `SELECT public.checkpoint_analysis_v2_relationship_side(
+                $1, $2, $3, 'followers', $4, 120, 'collected',
+                'apify', 'ForeignRun1234', $5, NULL, '[]'::JSONB
+             ) AS accepted`,
+            [
+                created.request_id,
+                sourceJobKey,
+                DISPATCH_TOKEN,
+                inputHash,
+                operationKey,
+            ]
+        )).resolves.toMatchObject({ rows: [{ accepted: false }] });
+        await expect(db.query(
+            `UPDATE public.analysis_v2_recovery_provider_run_adoptions
+             SET source_run_id = 'ForeignRun1234'
+             WHERE request_id = $1`,
+            [created.request_id]
+        )).rejects.toThrow(/ANALYSIS_V2_PROVIDER_RUN_ADOPTION_IMMUTABLE/);
+    });
+
+    it('refuses an unproven recovery descendant instead of opening the suffix namespace', async () => {
+        await seedRecoveredRequestCollision();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = 'unrelated.ready.preflight'
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        await expect(asService<{ fulfillment_status: string }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+            )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'manual_review',
+        }] });
+        expect((await db.query<{ last_error_code: string }>(
+            `SELECT last_error_code
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0].last_error_code).toBe('REQUEST_CONFLICT');
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_requests`
+        )).rows[0].count).toBe(1);
+    });
+
+    it('stops before request generation ten without mutating the failed source', async () => {
+        const baseKey = await seedRecoveredRequestCollision();
+        await db.query(
+            `INSERT INTO public.analysis_requests(
+                id, user_id, target_instagram_id, target_gender, status,
+                error_message, progress, idempotency_key, pipeline_version
+             )
+             SELECT extensions.gen_random_uuid(), $1, 'retained.capped',
+                'male', 'failed', 'JOB_ATTEMPTS_EXHAUSTED', 100,
+                $2 || '.r' || generation::TEXT, 'v2'
+             FROM pg_catalog.generate_series(1, 9) AS generation`,
+            [USER, baseKey]
+        );
+
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        await expect(asService<{ fulfillment_status: string }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+            )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'manual_review',
+        }] });
+        expect((await db.query<{
+            last_error_code: string;
+            request_id: string | null;
+        }>(
+            `SELECT last_error_code, request_id
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            last_error_code: 'REQUEST_IDEMPOTENCY_EXHAUSTED',
+            request_id: null,
+        });
+        expect((await db.query<{
+            status: string;
+            target_instagram_id: string;
+        }>(
+            `SELECT status, target_instagram_id
+             FROM public.analysis_requests WHERE id = $1`,
+            [FAILED_REQUEST]
+        )).rows[0]).toEqual({
+            status: 'failed',
+            target_instagram_id: canonicalScrubToken(FAILED_REQUEST),
         });
     });
 
