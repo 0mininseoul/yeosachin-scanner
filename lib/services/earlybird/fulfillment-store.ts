@@ -744,6 +744,18 @@ export async function advanceAdmittedEarlybirdFulfillment(
         ...claim,
         orderId: identity.orderId,
     });
+    // The database may see the two-minute admission freshness boundary pass
+    // between the successful reservation above and this leased create. That is
+    // a retryable race, not an evidence conflict: wait for the next admission
+    // refresh without dispatching or converting the paid order to manual review.
+    if (request.status === 'retryable_failure') {
+        return result(
+            identity.orderId,
+            'retryable_failure',
+            null,
+            'wait_for_fresh_admission'
+        );
+    }
     if (
         request.status === 'manual_review'
         || !request.requestId

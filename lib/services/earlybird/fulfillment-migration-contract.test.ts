@@ -8,6 +8,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const freshnessRaceMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731020000_fix_earlybird_fulfillment_admission_freshness_race.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
     const start = migration.indexOf(`CREATE FUNCTION public.${name}(`);
@@ -131,5 +138,60 @@ describe('earlybird fulfillment outbox migration contract', () => {
                 + 'TO service_role;'
             ));
         }
+    });
+
+    it('replaces create with a stale-only retry seam and protects the one-shot recovery RPC', () => {
+        expect(freshnessRaceMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_or_replay_earlybird_fulfillment_request('
+        );
+        expect(freshnessRaceMigration).toContain(
+            "last_error_code = 'ADMISSION_FRESHNESS_EXPIRED'"
+        );
+        expect(freshnessRaceMigration).toContain(
+            "'retryable_failure'::TEXT"
+        );
+        expect(freshnessRaceMigration).toContain(
+            "v_preflight.admission_refreshed_at IS NOT NULL"
+        );
+        expect(freshnessRaceMigration).toContain(
+            "v_preflight.admission_refreshed_at < v_now - INTERVAL '2 minutes'"
+        );
+        expect(freshnessRaceMigration).toContain(
+            'CREATE FUNCTION public.recover_earlybird_freshness_snapshot_conflict('
+        );
+        expect(freshnessRaceMigration).toContain(
+            'p_expected_manual_review_at TIMESTAMP WITH TIME ZONE'
+        );
+        expect(freshnessRaceMigration).toContain(
+            "EARLYBIRD_FRESHNESS_RECOVERY_CAS_MISMATCH"
+        );
+        expect(freshnessRaceMigration).toContain(
+            'CREATE FUNCTION public.earlybird_fulfillment_clock()'
+        );
+        expect(freshnessRaceMigration).toContain('SECURITY INVOKER');
+        expect(freshnessRaceMigration).toContain(
+            'SELECT pg_catalog.clock_timestamp()'
+        );
+        expect(freshnessRaceMigration).toContain(
+            'v_now TIMESTAMP WITH TIME ZONE := public.earlybird_fulfillment_clock();'
+        );
+        expect(freshnessRaceMigration).toContain(
+            "EARLYBIRD_FRESHNESS_RECOVERY_ACTIVE_REQUEST_CONFLICT"
+        );
+        expect(freshnessRaceMigration).toContain(
+            "active_request.status IN ('pending', 'processing')"
+        );
+        expect(freshnessRaceMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.earlybird_fulfillment_clock\(\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(freshnessRaceMigration).not.toContain(
+            'GRANT EXECUTE ON FUNCTION public.earlybird_fulfillment_clock()'
+        );
+        expect(freshnessRaceMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.recover_earlybird_freshness_snapshot_conflict\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(freshnessRaceMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.recover_earlybird_freshness_snapshot_conflict\([\s\S]*?TO service_role;/
+        );
     });
 });
