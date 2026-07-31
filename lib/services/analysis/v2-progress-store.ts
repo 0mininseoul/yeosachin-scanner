@@ -15,6 +15,7 @@ import {
     type ProgressTrackId,
 } from '@/lib/domain/analysis/progress-policy';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { canonicalizeAnalysisV2ProgressUsername } from './progress-username';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -92,6 +93,22 @@ const activeProfileInputSchema = z.object({
         .nullable(),
 }).strict();
 
+const imageProxyPathSchema = z.string()
+    .trim()
+    .min(1)
+    .max(2_048)
+    .refine(value => value.startsWith('/api/image-proxy?'));
+const heartbeatFeedImageUrlsSchema = z.array(imageProxyPathSchema)
+    .max(3)
+    .superRefine((value, context) => {
+        if (new Set(value).size !== value.length) {
+            context.addIssue({
+                code: 'custom',
+                message: 'Heartbeat feed image URLs must be unique.',
+            });
+        }
+    });
+
 const activeProfileHeartbeatInputSchema = z.object({
     requestId: z.string().regex(UUID_PATTERN),
     jobKey: z.string().regex(JOB_KEY_PATTERN),
@@ -106,6 +123,8 @@ const activeProfileHeartbeatInputSchema = z.object({
         .max(2_048)
         .refine(value => value.startsWith('/api/image-proxy?'))
         .nullable(),
+    feedImageUrls: heartbeatFeedImageUrlsSchema,
+    candidateKey: z.string().regex(SHA256_PATTERN).optional(),
 }).strict();
 
 const etaInputSchema = z.object({
@@ -309,6 +328,8 @@ export interface AnalysisV2ProgressStore {
         totalCount: number;
         maskedUsername: string;
         imageUrl: string | null;
+        feedImageUrls: string[];
+        candidateKey?: string;
     }): Promise<boolean>;
     loadForOwner(input: {
         requestId: string;
@@ -341,11 +362,7 @@ function maskCharacters(value: string): string {
 
 /** Converts a raw handle to a bounded public progress label before persistence. */
 export function maskAnalysisV2ProgressUsername(rawUsername: string): string {
-    const normalized = rawUsername.trim().replace(/^@/, '').toLowerCase();
-    if (!/^[a-z0-9._]{1,30}$/.test(normalized)) {
-        throw new Error('ANALYSIS_V2_PROGRESS_VALIDATION_ERROR: invalid username.');
-    }
-    return maskCharacters(normalized);
+    return maskCharacters(canonicalizeAnalysisV2ProgressUsername(rawUsername));
 }
 
 function snapshotFingerprint(input: z.infer<typeof checkpointInputSchema>): string {
@@ -480,6 +497,8 @@ export function createAnalysisV2ProgressStore(
                     p_total_count: input.totalCount,
                     p_masked_username: input.maskedUsername,
                     p_image_url: input.imageUrl,
+                    p_feed_image_urls: input.feedImageUrls,
+                    p_candidate_key: input.candidateKey ?? null,
                 }
             );
             if (error) throwRpcError(error, 'active profile heartbeat');

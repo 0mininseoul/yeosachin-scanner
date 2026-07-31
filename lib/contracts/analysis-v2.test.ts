@@ -387,6 +387,74 @@ describe('analysis V2 public contracts', () => {
         expect(progressSnapshotV1Schema.safeParse(snapshot).success).toBe(false);
         delete (snapshot as { comments?: string[] }).comments;
         expect(progressSnapshotV1Schema.safeParse(snapshot).success).toBe(true);
+        const activeProfileWithMedia = {
+            ...snapshot,
+            activeProfile: {
+                maskedUsername: 'a***e',
+                imageUrl: '/api/image-proxy?token=profile',
+                feedImageUrls: [
+                    '/api/image-proxy?token=feed-1',
+                    '/api/image-proxy?token=feed-2',
+                ],
+            },
+        };
+        expect(progressSnapshotV1Schema.safeParse(activeProfileWithMedia).success).toBe(true);
+        const activeProfileWithCandidateKey = {
+            ...activeProfileWithMedia,
+            activeProfile: {
+                ...activeProfileWithMedia.activeProfile,
+                candidateKey: 'b'.repeat(64),
+            },
+        };
+        expect(progressSnapshotV1Schema.safeParse(activeProfileWithCandidateKey).success)
+            .toBe(true);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithCandidateKey,
+            activeProfile: {
+                ...activeProfileWithCandidateKey.activeProfile,
+                candidateKey: 'B'.repeat(64),
+            },
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithCandidateKey,
+            activeProfile: {
+                ...activeProfileWithCandidateKey.activeProfile,
+                candidateKey: 'b'.repeat(63),
+            },
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithMedia,
+            activeProfile: {
+                ...activeProfileWithMedia.activeProfile,
+                feedImageUrls: ['https://raw.example/feed.jpg'],
+            },
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithMedia,
+            activeProfile: {
+                ...activeProfileWithMedia.activeProfile,
+                feedImageUrls: Array.from({ length: 4 }, (_, index) => (
+                    `/api/image-proxy?token=feed-${index}`
+                )),
+            },
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithMedia,
+            activeProfile: {
+                ...activeProfileWithMedia.activeProfile,
+                feedImageUrls: [
+                    '/api/image-proxy?token=duplicate',
+                    '/api/image-proxy?token=duplicate',
+                ],
+            },
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithMedia,
+            activeProfile: {
+                ...activeProfileWithMedia.activeProfile,
+                rawUrl: 'https://raw.example/profile.jpg',
+            },
+        }).success).toBe(false);
         expect(progressSnapshotV1Schema.safeParse({
             ...snapshot,
             backgroundProcessing: false,

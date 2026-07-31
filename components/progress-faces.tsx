@@ -4,9 +4,15 @@ import Image from 'next/image';
 import { useEffect, useRef, useState } from 'react';
 import { ProfileFallback } from '@/components/case-ui';
 import {
-    appendScreenedFace,
-    MIN_SCREENED_FACES_TO_SHOW,
-    type ScreenedFace,
+    activeCandidateMediaKey,
+    appendScreenedCandidate,
+    candidateCopyKey,
+    candidateTileKey,
+    MIN_SCREENED_CANDIDATES_TO_SHOW,
+    nextDriftOffset,
+    progressCopyDistance,
+    type ActiveCandidateMedia,
+    type ScreenedCandidate,
 } from '@/lib/services/analysis/progress-faces';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
@@ -15,9 +21,8 @@ const TILE_PX = 84;
 // Slow enough to read a face, fast enough that the row is never still.
 const DRIFT_PX_PER_SECOND = 26;
 
-function FaceTile({ face, current }: { face: ScreenedFace; current: boolean }) {
+function FaceTile({ src, current }: { src: string | undefined; current: boolean }) {
     const [failed, setFailed] = useState(false);
-    const src = safeResultImageUrl(face.imageUrl);
     return (
         <div
             className={`relative shrink-0 overflow-hidden border bg-panel ${
@@ -34,6 +39,7 @@ function FaceTile({ face, current }: { face: ScreenedFace; current: boolean }) {
                     width={TILE_PX}
                     height={TILE_PX}
                     unoptimized
+                    loading="lazy"
                     className="h-full w-full object-cover"
                     onError={() => setFailed(true)}
                 />
@@ -44,7 +50,36 @@ function FaceTile({ face, current }: { face: ScreenedFace; current: boolean }) {
     );
 }
 
-/* Drifts the row sideways forever by wrapping through a doubled copy of itself.
+function CandidateMedia({
+    candidate,
+    copyIndex,
+    current,
+}: {
+    candidate: ScreenedCandidate;
+    copyIndex: number;
+    current: boolean;
+}) {
+    const images: readonly (string | undefined)[] = [
+        candidate.imageUrl ?? undefined,
+        ...candidate.feedImageUrls,
+    ];
+    return (
+        <div className="flex shrink-0 gap-2.5">
+            {images.map((imageUrl, index) => {
+                const src = safeResultImageUrl(imageUrl);
+                return (
+                    <FaceTile
+                        key={candidateTileKey(candidate.occurrence, copyIndex, index, src)}
+                        src={src}
+                        current={current && index === 0}
+                    />
+                );
+            })}
+        </div>
+    );
+}
+
+/* Drifts the row sideways forever by wrapping through three copies of itself.
  *
  * A strip that only moved when a face arrived sat still between polls, which is
  * most of the time. Wrapping keeps it alive without pretending more accounts
@@ -60,6 +95,8 @@ function useFaceDrift(faceCount: number) {
         const el = ref.current;
         if (!el || faceCount === 0) return;
         if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+        const copyElements = el.querySelectorAll<HTMLElement>('[data-progress-copy]');
+        if (copyElements.length < 2) return;
 
         let frame = 0;
         let last = 0;
@@ -85,11 +122,11 @@ function useFaceDrift(faceCount: number) {
             if (whole <= 0) return;
             carry -= whole;
 
-            // The rail holds two copies, so one copy's width is the wrap point.
-            const half = el.scrollWidth / 2;
-            if (half <= 0) return;
-            const next = el.scrollLeft + whole;
-            el.scrollLeft = next >= half ? next - half : next;
+            const copyDistance = progressCopyDistance(
+                copyElements[0].offsetLeft,
+                copyElements[1].offsetLeft,
+            );
+            el.scrollLeft = nextDriftOffset(el.scrollLeft, whole, copyDistance);
         };
 
         el.addEventListener('pointerdown', onPressStart, { passive: true });
@@ -120,32 +157,31 @@ function useFaceDrift(faceCount: number) {
  * kept here rather than asked for. That also bounds it: the page can forget, the
  * server never has to remember.
  *
- * These are profile pictures. Feed images are not in the progress snapshot at
- * all, so carrying them would need the server to send them; nothing here assumes
- * which of the two an entry holds.
+ * Each candidate is one grouped bundle: profile first, then up to three feeds.
  */
 export function ProgressFaces({
     active,
 }: {
-    active: { maskedUsername: string; imageUrl: string | null } | null;
+    active: ActiveCandidateMedia | null;
 }) {
-    const [faces, setFaces] = useState<readonly ScreenedFace[]>([]);
-    const [lastSeen, setLastSeen] = useState<string | null>(null);
+    const [candidates, setCandidates] = useState<readonly ScreenedCandidate[]>([]);
+    const [lastSnapshotKey, setLastSnapshotKey] = useState<string | null>(null);
+    const snapshotKey = active ? activeCandidateMediaKey(active) : null;
 
     /* Adjusted during render rather than in an effect: the list is derived from
        a prop that changes over time, and an effect would paint the old row once
-       before correcting it. The same profile is reported by every poll while it
-       is being read, so the guard is on the username. */
-    if (active?.imageUrl && active.maskedUsername !== lastSeen) {
-        setLastSeen(active.maskedUsername);
-        setFaces(current => appendScreenedFace(current, active));
+       before correcting it. The stable snapshot key makes repeated heartbeats a
+       no-op while allowing the same candidate to be enriched with feed media. */
+    if (active && snapshotKey !== lastSnapshotKey) {
+        setLastSnapshotKey(snapshotKey);
+        setCandidates(current => appendScreenedCandidate(current, active));
     }
 
-    const railRef = useFaceDrift(faces.length);
+    const railRef = useFaceDrift(candidates.length);
 
-    if (faces.length < MIN_SCREENED_FACES_TO_SHOW) return null;
+    if (candidates.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
 
-    const newest = faces.at(-1)?.username;
+    const newestOccurrence = candidates.at(-1)?.occurrence;
 
     return (
         /* Faded at both edges so the row reads as a window onto something longer
@@ -162,13 +198,22 @@ export function ProgressFaces({
                 aria-hidden="true"
                 className="scroll-thin flex gap-2.5 overflow-x-auto px-5"
             >
-                {/* Doubled so the drift can wrap without a seam. */}
-                {[...faces, ...faces].map((face, index) => (
-                    <FaceTile
-                        key={`${face.username}-${index}`}
-                        face={face}
-                        current={face.username === newest}
-                    />
+                {/* Three explicit copies cover the viewport while one wraps. */}
+                {Array.from({ length: 3 }, (_, copyIndex) => (
+                    <div
+                        key={`copy-${copyIndex}`}
+                        data-progress-copy
+                        className="flex shrink-0 gap-2.5"
+                    >
+                        {candidates.map(candidate => (
+                            <CandidateMedia
+                                key={candidateCopyKey(candidate.occurrence, copyIndex)}
+                                candidate={candidate}
+                                copyIndex={copyIndex}
+                                current={candidate.occurrence === newestOccurrence}
+                            />
+                        ))}
+                    </div>
                 ))}
             </div>
         </div>

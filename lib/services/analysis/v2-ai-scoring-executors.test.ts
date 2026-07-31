@@ -31,6 +31,8 @@ import {
     type AnalysisV2ResultSupabaseClient,
 } from './v2-result-store';
 import type { AnalysisV2StageExecutorContext, AnalysisV2StageId } from './v2-worker';
+import type { AnalysisV2ProgressCandidateMediaPreview } from './progress-candidate-media';
+import * as progressCandidateMedia from './progress-candidate-media';
 import {
     AnalysisV2GenderResolutionCutoffPersistenceError,
     type AnalysisV2AiStageRuntime,
@@ -151,7 +153,10 @@ function context<S extends AnalysisV2StageId>(
         jobKey?: string;
         batch?: number | null;
         state?: AnalysisV2DagState;
-        reportActiveProfile?: (username: string) => Promise<void>;
+        reportActiveProfile?: (
+            username: string,
+            preview?: AnalysisV2ProgressCandidateMediaPreview
+        ) => Promise<void>;
         aiStagePolicyVersion?: string;
         riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
     } = {}
@@ -2167,7 +2172,7 @@ describe('V2 AI and scoring executors', () => {
         expect(memoryState.outcomes).toEqual([]);
     });
 
-    it('reports each real profile AI task start without exposing media URLs', async () => {
+    it('reports each real profile AI task start with its already-loaded bounded media preview', async () => {
         const memoryState = memory();
         const reportActiveProfile = vi.fn(async () => undefined);
         const account = profile('woman.parallel');
@@ -2210,8 +2215,139 @@ describe('V2 AI and scoring executors', () => {
             })
         );
 
-        expect(reportActiveProfile).toHaveBeenCalledExactlyOnceWith('woman.parallel');
-        expect(JSON.stringify(reportActiveProfile.mock.calls)).not.toContain('cdninstagram');
+        expect(deps.profileBatches.loadExactBatch).toHaveBeenCalledOnce();
+        expect(deps.ai.gender).toHaveBeenCalledOnce();
+        expect(reportActiveProfile).toHaveBeenCalledExactlyOnceWith('woman.parallel', {
+            profilePicUrl: 'https://cdninstagram.com/woman.parallel/profile.jpg',
+            feedImageUrls: [
+                'https://cdninstagram.com/woman.parallel/post-0.jpg',
+                'https://cdninstagram.com/woman.parallel/post-1.jpg',
+            ],
+        });
+    });
+
+    it('reports a private checkpoint once without deriving or exposing preview media', async () => {
+        const memoryState = memory();
+        const reportActiveProfile = vi.fn(async () => undefined);
+        const account = { ...profile('private.preview'), isPrivate: true };
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['private.preview'],
+                    results: [{
+                        username: 'private.preview', status: 'success' as const, profile: account,
+                    }],
+                })),
+            },
+        });
+        const selectPreview = vi.spyOn(
+            progressCandidateMedia,
+            'selectAnalysisV2ProgressCandidateMedia',
+        );
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0', batch: 0, reportActiveProfile,
+                state: state({
+                    relationships: {
+                        ...state().relationships!,
+                        detectedMutualCount: 1, publicCount: 1, detailedSelectedPublicCount: 1,
+                        profileBatches: [{ batch: 0, itemCount: 1, inputHash: digest('private-preview') }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1, producerInputHash: digest('private-preview-producer'),
+                        revision: 1, resultHash: digest('private-preview-result'),
+                    }],
+                }),
+            })
+        );
+
+        expect(deps.profileBatches.loadExactBatch).toHaveBeenCalledOnce();
+        expect(selectPreview).not.toHaveBeenCalled();
+        expect(deps.normalizeMedia).not.toHaveBeenCalled();
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(reportActiveProfile).toHaveBeenCalledOnce();
+        expect(reportActiveProfile.mock.calls[0]).toEqual(['private.preview']);
+    });
+
+    it('reports an unavailable checkpoint once without selector, media, or AI work', async () => {
+        const memoryState = memory();
+        const reportActiveProfile = vi.fn(async () => undefined);
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['unavailable.preview'],
+                    results: [{ username: 'unavailable.preview', status: 'unavailable' as const }],
+                })),
+            },
+        });
+        const selectPreview = vi.spyOn(
+            progressCandidateMedia,
+            'selectAnalysisV2ProgressCandidateMedia',
+        );
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0', batch: 0, reportActiveProfile,
+                state: state({
+                    relationships: {
+                        ...state().relationships!,
+                        detectedMutualCount: 1, publicCount: 1, detailedSelectedPublicCount: 1,
+                        profileBatches: [{ batch: 0, itemCount: 1, inputHash: digest('unavailable-preview') }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1, producerInputHash: digest('unavailable-preview-producer'),
+                        revision: 1, resultHash: digest('unavailable-preview-result'),
+                    }],
+                }),
+            })
+        );
+
+        expect(deps.profileBatches.loadExactBatch).toHaveBeenCalledOnce();
+        expect(selectPreview).not.toHaveBeenCalled();
+        expect(deps.normalizeMedia).not.toHaveBeenCalled();
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(reportActiveProfile).toHaveBeenCalledOnce();
+        expect(reportActiveProfile.mock.calls[0]).toEqual(['unavailable.preview']);
+    });
+
+    it('continues candidate analysis when progress-media derivation unexpectedly fails', async () => {
+        const memoryState = memory();
+        const reportActiveProfile = vi.fn(async () => undefined);
+        const account = profile('media.failure');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: ['media.failure'],
+                    results: [{
+                        username: 'media.failure', status: 'success' as const, profile: account,
+                    }],
+                })),
+            },
+        });
+        vi.spyOn(progressCandidateMedia, 'selectAnalysisV2ProgressCandidateMedia')
+            .mockImplementationOnce(() => { throw new Error('PREVIEW_DERIVATION_FAILED'); });
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0', batch: 0, reportActiveProfile,
+                state: state({
+                    relationships: {
+                        ...state().relationships!,
+                        detectedMutualCount: 1, publicCount: 1, detailedSelectedPublicCount: 1,
+                        profileBatches: [{ batch: 0, itemCount: 1, inputHash: digest('preview-fail') }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0, itemCount: 1, producerInputHash: digest('preview-fail-producer'),
+                        revision: 1, resultHash: digest('preview-fail-result'),
+                    }],
+                }),
+            })
+        );
+
+        expect(deps.profileBatches.loadExactBatch).toHaveBeenCalledOnce();
+        expect(deps.ai.gender).toHaveBeenCalledOnce();
+        expect(reportActiveProfile).toHaveBeenCalledExactlyOnceWith('media.failure', undefined);
     });
 
     it('drains in-flight Gemini work before surfacing the first bounded worker failure', async () => {

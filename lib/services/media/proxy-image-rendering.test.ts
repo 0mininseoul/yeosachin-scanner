@@ -35,4 +35,18 @@ describe('signed image proxy rendering contract', () => {
             expect(matchingTags[0]).toMatch(/\bunoptimized(?:\s|\/>)/);
         }
     );
+
+    it('renders grouped progress media through the safe local-image gate with lazy images', () => {
+        const source = proxyImageUsages[1].source;
+
+        expect(source).toContain('feedImageUrls');
+        expect(source).toContain('safeResultImageUrl(imageUrl)');
+        expect(source).toMatch(/<Image\b[\s\S]*?\bloading="lazy"[\s\S]*?\/>/);
+        expect(source).not.toMatch(/<Image\b[\s\S]*?src=\{imageUrl\}/);
+        expect(source).not.toContain('.candidateKey');
+        expect(source).toContain('data-progress-copy');
+        expect(source).toContain('Array.from({ length: 3');
+        expect(source).toContain('copyElements[1].offsetLeft');
+        expect(source).toContain('copyElements[0].offsetLeft');
+    });
 });

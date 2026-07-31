@@ -91,6 +91,7 @@ import {
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
+import { selectAnalysisV2ProgressCandidateMedia } from './progress-candidate-media';
 import {
     AnalysisV2TransientMediaPreparationError,
     isAnalysisV2PartialMediaCoverageAllowed,
@@ -1347,7 +1348,22 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     results,
                     profileConcurrency,
                     async (item): Promise<AnalysisV2PreparedProfileAiOutcome> => {
-                        await context.reportActiveProfile?.(item.username);
+                        let preview;
+                        if (
+                            item.status === 'success'
+                            && item.profile
+                            && !item.profile.isPrivate
+                        ) {
+                            try {
+                                preview = selectAnalysisV2ProgressCandidateMedia(item.profile);
+                            } catch {
+                                // Progress presentation must never affect candidate analysis.
+                                preview = undefined;
+                            }
+                            await context.reportActiveProfile?.(item.username, preview);
+                        } else {
+                            await context.reportActiveProfile?.(item.username);
+                        }
                     const candidateId = analysisV2CandidateId(item.username);
                     if (item.status !== 'success' || !item.profile || item.profile.isPrivate) {
                         return {
