@@ -55,6 +55,9 @@ const createPreflightSql = replacementFunctionSql(
 const rebindPreflightSql = replacementFunctionSql(
     'rebind_expired_paid_earlybird_preflight'
 );
+const autoAdmitSql = replacementFunctionSql(
+    'auto_admit_eligible_earlybird_fulfillments'
+);
 
 const bootstrap = `
 DROP SCHEMA IF EXISTS public CASCADE;
@@ -390,7 +393,9 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
                 ADD COLUMN seller_reference_confirmed_at TIMESTAMP WITH TIME ZONE;
             CREATE TABLE public.earlybird_fulfillments(
                 order_id UUID PRIMARY KEY REFERENCES public.earlybird_orders(id),
-                status TEXT NOT NULL
+                status TEXT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    DEFAULT pg_catalog.clock_timestamp()
             );
             CREATE FUNCTION public.analysis_v2_valid_launch_snapshot(JSONB)
             RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT TRUE $$;
@@ -405,6 +410,43 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
         `);
         await pool.query(createPreflightSql);
         await pool.query(rebindPreflightSql);
+        await pool.query(`
+            CREATE FUNCTION public.admit_earlybird_fulfillment(p_order_id UUID)
+            RETURNS TABLE(
+                order_id UUID,
+                fulfillment_status TEXT,
+                preflight_id UUID,
+                user_id UUID,
+                plan_id TEXT,
+                request_id UUID
+            )
+            LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+            DECLARE
+                v_rebound UUID;
+                v_order public.earlybird_orders%ROWTYPE;
+            BEGIN
+                v_rebound := public.rebind_expired_paid_earlybird_preflight(
+                    p_order_id
+                );
+                SELECT earlybird_order.* INTO v_order
+                FROM public.earlybird_orders AS earlybird_order
+                WHERE earlybird_order.id = p_order_id
+                FOR UPDATE;
+                UPDATE public.earlybird_fulfillments AS fulfillment
+                SET status = 'admission_pending'
+                WHERE fulfillment.order_id = p_order_id
+                  AND fulfillment.status = 'awaiting_operator';
+                IF NOT FOUND THEN
+                    RAISE EXCEPTION USING
+                        MESSAGE = 'EARLYBIRD_FULFILLMENT_STATE_INVALID',
+                        ERRCODE = 'P0001';
+                END IF;
+                RETURN QUERY SELECT p_order_id, 'admission_pending'::TEXT,
+                    v_rebound, v_order.user_id, v_order.plan_id, NULL::UUID;
+            END;
+            $$;
+        `);
+        await pool.query(autoAdmitSql);
     }, 30_000);
 
     beforeEach(async () => {
@@ -682,6 +724,189 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
             blockerClient.release();
             createClient.release();
             rebindClient.release();
+        }
+    }, 15_000);
+
+    it('serializes actual auto-admit against create/replay without a FK deadlock', async () => {
+        const seed = await seedNativeCheckout(
+            pool,
+            300,
+            'native-auto-rebind-order@example.com'
+        );
+        const order = await pool.query<{ id: string }>(
+            `INSERT INTO public.earlybird_orders(
+                user_id, preflight_id, target_instagram_id,
+                target_followers_count, target_following_count,
+                exclusion_decision, plan_id, pricing_version,
+                expected_amount_krw, expected_groble_product_id,
+                disclosure_version, disclosure_text, disclosure_accepted_at
+             ) VALUES (
+                $1, $2, 'native_lock_300', 300, 100, 'skip', 'basic',
+                $3, 14900, 'basic_product-01', 'earlybird-48h-v1',
+                'auto-lock-order-only', pg_catalog.clock_timestamp()
+             )
+             RETURNING id`,
+            [seed.userId, seed.preflightId, LEGACY_PRICING_VERSION]
+        );
+        const orderId = order.rows[0].id;
+        const launchSnapshot = {
+            basic: 'production',
+            standard: 'production',
+            plus: 'test_only',
+        };
+        const catalogSnapshot = {
+            basic: {
+                launchStatus: 'production',
+                relationshipCapacity: { followers: 400, following: 400 },
+                detailedMutualLimit: 300,
+            },
+            standard: {
+                launchStatus: 'production',
+                relationshipCapacity: { followers: 800, following: 800 },
+                detailedMutualLimit: 600,
+            },
+            plus: {
+                launchStatus: 'test_only',
+                relationshipCapacity: { followers: 1200, following: 1200 },
+                detailedMutualLimit: 900,
+            },
+        };
+        const policySnapshot = { pipeline: 'v2', risk: 'v1', aiStage: 'v1' };
+        const replayKey = 'native-auto-rebind-race-key';
+        await pool.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2,
+                 launch_status_snapshot = $3::JSONB,
+                 plan_catalog_snapshot = $4::JSONB,
+                 policy_versions_snapshot = $5::JSONB,
+                 target_is_private = FALSE,
+                 capacity_required_plan_id = 'basic',
+                 created_at = pg_catalog.clock_timestamp() - INTERVAL '31 minutes',
+                 expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 minute',
+                 ready_at = pg_catalog.clock_timestamp() - INTERVAL '31 minutes'
+             WHERE id = $1`,
+            [
+                seed.preflightId,
+                replayKey,
+                JSON.stringify(launchSnapshot),
+                JSON.stringify(catalogSnapshot),
+                JSON.stringify(policySnapshot),
+            ]
+        );
+        await pool.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'paid',
+                 payment_id = 'native-auto-rebind-payment',
+                 actual_groble_product_id = expected_groble_product_id,
+                 actual_amount_krw = expected_amount_krw,
+                 paid_at = pg_catalog.clock_timestamp(),
+                 seller_reference_confirmed_at = pg_catalog.clock_timestamp()
+             WHERE id = $1`,
+            [orderId]
+        );
+        await pool.query(
+            `INSERT INTO public.earlybird_fulfillments(order_id, status)
+             VALUES ($1, 'awaiting_operator')`,
+            [orderId]
+        );
+
+        const blockerClient = await pool.connect();
+        const autoClient = await pool.connect();
+        const duplicateAutoClient = await pool.connect();
+        const createClient = await pool.connect();
+        const autoApplication = 'earlybird-actual-auto-admit';
+        const duplicateAutoApplication = 'earlybird-duplicate-auto-admit';
+        const createApplication = 'earlybird-create-behind-auto';
+        try {
+            await blockerClient.query('BEGIN');
+            await blockerClient.query(
+                `SELECT 1 FROM public.analysis_preflights
+                 WHERE id = $1 FOR UPDATE`,
+                [seed.preflightId]
+            );
+
+            await autoClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [autoApplication]
+            );
+            const autoPromise = runServiceQuery<{
+                order_id: string;
+                fulfillment_status: string;
+                preflight_id: string;
+            }>(
+                autoClient,
+                'SELECT * FROM public.auto_admit_eligible_earlybird_fulfillments(20)'
+            );
+            expect(await waitForLockWait(pool, autoApplication)).toBe(true);
+
+            await duplicateAutoClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [duplicateAutoApplication]
+            );
+            const duplicateAutoPromise = runServiceQuery<{
+                order_id: string;
+                fulfillment_status: string;
+            }>(
+                duplicateAutoClient,
+                'SELECT * FROM public.auto_admit_eligible_earlybird_fulfillments(20)'
+            );
+            expect(await waitForLockWait(pool, duplicateAutoApplication)).toBe(true);
+
+            await createClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [createApplication]
+            );
+            const createPromise = runServiceQuery<{
+                preflight_id: string;
+                preflight_status: string;
+            }>(
+                createClient,
+                `SELECT * FROM public.create_or_replay_analysis_v2_preflight(
+                    $1, $2, 'kakao', 'native_lock_300', $3, 'production',
+                    $4::JSONB, $5::JSONB, $6, $7::JSONB, $8::JSONB
+                )`,
+                [
+                    seed.userId,
+                    seed.email,
+                    replayKey,
+                    JSON.stringify(launchSnapshot),
+                    JSON.stringify(catalogSnapshot),
+                    LEGACY_PRICING_VERSION,
+                    JSON.stringify(pricingSnapshot),
+                    JSON.stringify(policySnapshot),
+                ]
+            );
+            expect(await waitForLockWait(pool, createApplication)).toBe(true);
+
+            await blockerClient.query('COMMIT');
+            const admitted = await autoPromise;
+            expect(admitted).toMatchObject({
+                order_id: orderId,
+                fulfillment_status: 'admission_pending',
+            });
+            expect(admitted.preflight_id).not.toBe(seed.preflightId);
+            await expect(duplicateAutoPromise).resolves.toBeUndefined();
+            await expect(createPromise).resolves.toMatchObject({
+                preflight_id: seed.preflightId,
+                preflight_status: 'expired',
+            });
+            expect((await pool.query<{ count: number }>(
+                `SELECT pg_catalog.count(*)::INTEGER AS count
+                 FROM public.analysis_preflights
+                 WHERE status = 'ready' AND user_id = $1`,
+                [seed.userId]
+            )).rows[0].count).toBe(1);
+        } catch (error) {
+            await blockerClient.query('ROLLBACK').catch(() => undefined);
+            await autoClient.query('ROLLBACK').catch(() => undefined);
+            await duplicateAutoClient.query('ROLLBACK').catch(() => undefined);
+            await createClient.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            blockerClient.release();
+            autoClient.release();
+            duplicateAutoClient.release();
+            createClient.release();
         }
     }, 15_000);
 
