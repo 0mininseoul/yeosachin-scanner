@@ -1,6 +1,20 @@
 -- A fresh-admission reservation and the leased request creation are separate
 -- transactions.  Crossing the two-minute lower bound between them is a
 -- retriable timing race, not an immutable snapshot conflict.
+--
+-- Production cannot inject time: this unprivileged, argument-free wrapper
+-- always returns the wall clock. PGlite replaces only its local definition
+-- after applying this migration to verify exact `<` and `>` edges.
+CREATE FUNCTION public.earlybird_fulfillment_clock()
+RETURNS TIMESTAMP WITH TIME ZONE
+LANGUAGE sql
+VOLATILE
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+    SELECT pg_catalog.clock_timestamp()
+$$;
+
 CREATE OR REPLACE FUNCTION public.create_or_replay_earlybird_fulfillment_request(
     p_order_id UUID,
     p_lease_token UUID,
@@ -18,7 +32,7 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_now TIMESTAMP WITH TIME ZONE := public.earlybird_fulfillment_clock();
     v_initial_job_key CONSTANT TEXT := 'coordinator:bootstrap';
     v_fulfillment public.earlybird_fulfillments%ROWTYPE;
     v_order public.earlybird_orders%ROWTYPE;
@@ -116,6 +130,8 @@ BEGIN
        OR v_preflight.status <> 'ready'
        OR v_preflight.access_mode <> 'production'
        OR v_preflight.target_instagram_id IS DISTINCT FROM v_order.target_instagram_id
+       OR v_preflight.target_followers_count IS DISTINCT FROM v_order.target_followers_count
+       OR v_preflight.target_following_count IS DISTINCT FROM v_order.target_following_count
        OR v_preflight.exclusion_decision IS DISTINCT FROM v_order.exclusion_decision
        OR v_preflight.excluded_instagram_id IS DISTINCT FROM v_order.excluded_instagram_id
        OR v_preflight.admission_status <> 'ready'
@@ -258,7 +274,7 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_now TIMESTAMP WITH TIME ZONE := public.earlybird_fulfillment_clock();
     v_order public.earlybird_orders%ROWTYPE;
     v_fulfillment public.earlybird_fulfillments%ROWTYPE;
     v_preflight public.analysis_preflights%ROWTYPE;
@@ -301,6 +317,8 @@ BEGIN
        -- do not make expiry itself a permanent recovery blocker.
        OR v_preflight.status NOT IN ('ready', 'expired') OR v_preflight.access_mode <> 'production'
        OR v_preflight.target_instagram_id IS DISTINCT FROM v_order.target_instagram_id
+       OR v_preflight.target_followers_count IS DISTINCT FROM v_order.target_followers_count
+       OR v_preflight.target_following_count IS DISTINCT FROM v_order.target_following_count
        OR v_preflight.exclusion_decision IS DISTINCT FROM v_order.exclusion_decision
        OR v_preflight.excluded_instagram_id IS DISTINCT FROM v_order.excluded_instagram_id
        OR v_preflight.admission_status <> 'ready'
@@ -329,6 +347,15 @@ BEGIN
     IF v_preflight.admission_refreshed_at >= v_now - INTERVAL '2 minutes' THEN
         RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_FRESHNESS_RECOVERY_NOT_EXPIRED', ERRCODE = 'P0001';
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.analysis_requests AS active_request
+        WHERE active_request.user_id = v_order.user_id
+          AND active_request.status IN ('pending', 'processing')
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_FRESHNESS_RECOVERY_ACTIVE_REQUEST_CONFLICT',
+            ERRCODE = 'P0001';
+    END IF;
     UPDATE public.earlybird_fulfillments AS fulfillment
     SET status = 'retryable_failure', lease_token = NULL, lease_expires_at = NULL,
         next_attempt_at = v_now, last_error_code = 'ADMISSION_FRESHNESS_EXPIRED',
@@ -342,6 +369,8 @@ REVOKE ALL ON FUNCTION public.create_or_replay_earlybird_fulfillment_request(UUI
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.create_or_replay_earlybird_fulfillment_request(UUID, UUID, BIGINT)
     TO service_role;
+REVOKE ALL ON FUNCTION public.earlybird_fulfillment_clock()
+    FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.recover_earlybird_freshness_snapshot_conflict(UUID, TIMESTAMP WITH TIME ZONE)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.recover_earlybird_freshness_snapshot_conflict(UUID, TIMESTAMP WITH TIME ZONE)

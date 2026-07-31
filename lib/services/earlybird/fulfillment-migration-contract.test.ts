@@ -165,6 +165,28 @@ describe('earlybird fulfillment outbox migration contract', () => {
         expect(freshnessRaceMigration).toContain(
             "EARLYBIRD_FRESHNESS_RECOVERY_CAS_MISMATCH"
         );
+        expect(freshnessRaceMigration).toContain(
+            'CREATE FUNCTION public.earlybird_fulfillment_clock()'
+        );
+        expect(freshnessRaceMigration).toContain('SECURITY INVOKER');
+        expect(freshnessRaceMigration).toContain(
+            'SELECT pg_catalog.clock_timestamp()'
+        );
+        expect(freshnessRaceMigration).toContain(
+            'v_now TIMESTAMP WITH TIME ZONE := public.earlybird_fulfillment_clock();'
+        );
+        expect(freshnessRaceMigration).toContain(
+            "EARLYBIRD_FRESHNESS_RECOVERY_ACTIVE_REQUEST_CONFLICT"
+        );
+        expect(freshnessRaceMigration).toContain(
+            "active_request.status IN ('pending', 'processing')"
+        );
+        expect(freshnessRaceMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.earlybird_fulfillment_clock\(\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(freshnessRaceMigration).not.toContain(
+            'GRANT EXECUTE ON FUNCTION public.earlybird_fulfillment_clock()'
+        );
         expect(freshnessRaceMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.recover_earlybird_freshness_snapshot_conflict\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
         );
