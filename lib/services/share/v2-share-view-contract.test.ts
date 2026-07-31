@@ -69,6 +69,7 @@ describe('the shared schema refuses to carry identities', () => {
             // strict() is what stops a future owner-side field riding along.
             expect(row).toMatch(/\.strict\(\);$/);
         }
+        expect(female).not.toMatch(/\bbio\b/);
     });
 
     it('no longer derives itself from the owner page schema', () => {

@@ -118,7 +118,6 @@ const sharedFemaleResultRowSchema = z.object({
     handleMasked: maskedHandleSchema,
     fullNameMasked: maskedFullNameSchema,
     profileImage: sharedAccountImageSchema,
-    bio: femaleResultRowV1Schema.shape.bio,
     displayScore: femaleResultRowV1Schema.shape.displayScore,
     riskBand: femaleResultRowV1Schema.shape.riskBand,
     featuredRank: femaleResultRowV1Schema.shape.featuredRank,
@@ -204,20 +203,22 @@ function sharedFemaleRow(
     row: AnalysisResultPageV1['femaleAccounts'][number],
     shareToken: string
 ) {
-    const {
-        instagramId,
-        fullName,
-        ...allowed
-    } = row;
     return {
         accountKey: createV2SharedAccountKey(
             shareToken,
             'female',
-            instagramId
+            row.instagramId
         ),
-        handleMasked: maskSharedHandle(instagramId),
-        fullNameMasked: maskSharedFullName(fullName),
-        ...allowed,
+        handleMasked: maskSharedHandle(row.instagramId),
+        fullNameMasked: maskSharedFullName(row.fullName),
+        profileImage: row.profileImage,
+        displayScore: row.displayScore,
+        riskBand: row.riskBand,
+        featuredRank: row.featuredRank,
+        recentMutualRank: row.recentMutualRank,
+        analysisDepth: row.analysisDepth,
+        oneLineOverview: row.oneLineOverview,
+        highRiskNarrative: row.highRiskNarrative,
     };
 }
 
