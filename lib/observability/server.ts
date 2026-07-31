@@ -151,6 +151,23 @@ function vercelRuntimeTransport(): OperationalTransport | undefined {
     };
 }
 
+/**
+ * Cloud Run carries neither the Vercel marker nor Axiom credentials, so without this
+ * sink every worker event is discarded and production incidents leave no trace.
+ * The runtime collects one JSON object per line from stdout into a structured entry.
+ */
+function stdoutFallbackTransport(): OperationalTransport {
+    return {
+        log(_level, message, fields) {
+            const line = JSON.stringify({ event: message, ...fields });
+            console.log(line);
+        },
+        async flush() {
+            // console writes are synchronous; no buffered transport to drain.
+        },
+    };
+}
+
 function combineRuntimeTransports(
     transports: readonly OperationalTransport[],
 ): OperationalTransport | undefined {
@@ -200,7 +217,7 @@ async function createAxiomRuntimeTransport(
     }
 }
 
-function runtimeTransport(): OperationalTransport | undefined {
+function runtimeTransport(): OperationalTransport {
     const token = process.env.AXIOM_TOKEN?.trim();
     const dataset = process.env.AXIOM_DATASET?.trim();
     const orgId = process.env.AXIOM_ORG_ID?.trim();
@@ -211,6 +228,7 @@ function runtimeTransport(): OperationalTransport | undefined {
     if (token && dataset && orgId) {
         let loadedTransport: Promise<OperationalTransport | undefined> | undefined;
         const pendingLogs = new Set<Promise<void>>();
+        const fallback = vercel ? undefined : stdoutFallbackTransport();
         const load = () => {
             loadedTransport ??= createAxiomRuntimeTransport({ token, dataset, orgId });
             return loadedTransport;
@@ -219,7 +237,13 @@ function runtimeTransport(): OperationalTransport | undefined {
         transports.push({
             log(level, message, fields) {
                 const pending = load()
-                    .then(transport => transport?.log(level, message, fields))
+                    .then(transport => {
+                        if (transport) {
+                            transport.log(level, message, fields);
+                            return;
+                        }
+                        fallback?.log(level, message, fields);
+                    })
                     .then(() => undefined)
                     .catch(() => undefined);
                 pendingLogs.add(pending);
@@ -233,7 +257,7 @@ function runtimeTransport(): OperationalTransport | undefined {
         });
     }
 
-    return combineRuntimeTransports(transports);
+    return combineRuntimeTransports(transports) ?? stdoutFallbackTransport();
 }
 
 let singletonLogger: OperationalLogger | undefined;
@@ -243,7 +267,8 @@ function lazyOperationalLogger(): OperationalLogger {
     try {
         singletonLogger = createOperationalLogger(runtimeTransport());
     } catch {
-        singletonLogger = createOperationalLogger();
+        // Even a broken runtime lookup must not put the process back into silence.
+        singletonLogger = createOperationalLogger(stdoutFallbackTransport());
     }
     return singletonLogger;
 }

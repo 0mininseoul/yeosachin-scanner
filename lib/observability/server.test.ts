@@ -521,3 +521,162 @@ describe('operationalLogger runtime transport', () => {
         await expect(flushOperationalLogs()).resolves.toBeUndefined();
     });
 });
+
+describe('operational stdout fallback transport', () => {
+    it('writes one sanitized JSON line per event when no other transport is configured', async () => {
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({
+            event: 'analysis_v2.fresh_admission_enqueued',
+            severity: 'info',
+            fields: {
+                analysis_request_id: '123e4567-e89b-42d3-a456-426614174002',
+                target_instagram_id: 'Target.Account',
+                queue_name: 'analysis-v2',
+                disposition: 'enqueued',
+                email: 'buyer@example.com',
+                payload: { token: 'secret' },
+            },
+        });
+        await expect(flushOperationalLogs()).resolves.toBeUndefined();
+
+        expect(consoleLog).toHaveBeenCalledTimes(1);
+        const [line, ...unstructuredArguments] = consoleLog.mock.calls[0] ?? [];
+        expect(unstructuredArguments).toHaveLength(0);
+        expect(JSON.parse(line as string)).toEqual(expect.objectContaining({
+            schema_version: 1,
+            service: 'yeosachin-web',
+            event: 'analysis_v2.fresh_admission_enqueued',
+            severity: 'info',
+            analysis_request_id: '123e4567-e89b-42d3-a456-426614174002',
+            target_instagram_id: 'target.account',
+            queue_name: 'analysis-v2',
+            disposition: 'enqueued',
+        }));
+        expect(line).not.toContain('buyer@example.com');
+        expect(line).not.toContain('payload');
+        expect(line).not.toContain('secret');
+        expect(line).not.toContain('Target.Account');
+    });
+
+    it('writes every severity as a JSON line to stdout', async () => {
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger } = await import('./server');
+
+        operationalLogger.emit({ event: 'http.route_failed', severity: 'error' });
+        operationalLogger.emit({ event: 'scraper.fallback_selected', severity: 'warn' });
+        operationalLogger.emit({ event: 'http.route_completed', severity: 'info' });
+        operationalLogger.emit({ event: 'next.request_error', severity: 'debug' });
+
+        expect(consoleError).not.toHaveBeenCalled();
+        expect(consoleWarn).not.toHaveBeenCalled();
+        expect(consoleLog).toHaveBeenCalledTimes(4);
+        expect(JSON.parse(consoleLog.mock.calls[0]?.[0] as string)).toEqual(
+            expect.objectContaining({ event: 'http.route_failed', severity: 'error' }),
+        );
+        expect(JSON.parse(consoleLog.mock.calls[1]?.[0] as string)).toEqual(
+            expect.objectContaining({ event: 'scraper.fallback_selected', severity: 'warn' }),
+        );
+        expect(JSON.parse(consoleLog.mock.calls[3]?.[0] as string)).toEqual(
+            expect.objectContaining({ event: 'next.request_error', severity: 'debug' }),
+        );
+    });
+
+    it('stays out of the way when the Vercel transport is configured', async () => {
+        process.env.VERCEL = '1';
+        const consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({ event: 'analysis_v2.request_queued', severity: 'info' });
+        await flushOperationalLogs();
+
+        expect(consoleInfo).toHaveBeenCalledTimes(1);
+        expect(consoleInfo.mock.calls[0]).toHaveLength(2);
+    });
+
+    it('does not add stdout fallback when Vercel is configured and Axiom initialization fails', async () => {
+        process.env.VERCEL = '1';
+        process.env.AXIOM_TOKEN = 'runtime-token';
+        process.env.AXIOM_DATASET = 'yeosachin-logs';
+        process.env.AXIOM_ORG_ID = 'aa-example';
+        axiomMocks.axiomConstructor.mockImplementationOnce(() => {
+            throw new Error('constructor failed');
+        });
+        const consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({ event: 'http.route_completed', severity: 'info' });
+        await flushOperationalLogs();
+
+        expect(consoleInfo).toHaveBeenCalledTimes(1);
+        expect(consoleInfo.mock.calls[0]).toHaveLength(2);
+        expect(consoleLog).not.toHaveBeenCalled();
+    });
+
+    it('stays out of the way when the Axiom transport is configured', async () => {
+        process.env.AXIOM_TOKEN = 'runtime-token';
+        process.env.AXIOM_DATASET = 'yeosachin-logs';
+        process.env.AXIOM_ORG_ID = 'aa-example';
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({ event: 'http.route_completed', severity: 'info' });
+        await flushOperationalLogs();
+
+        expect(axiomMocks.loggerLog).toHaveBeenCalledTimes(1);
+        expect(consoleLog).not.toHaveBeenCalled();
+    });
+
+    it('falls back to one sanitized stdout line when Axiom initialization yields no transport', async () => {
+        process.env.AXIOM_TOKEN = 'runtime-token';
+        process.env.AXIOM_DATASET = 'yeosachin-logs';
+        process.env.AXIOM_ORG_ID = 'aa-example';
+        axiomMocks.axiomConstructor.mockImplementationOnce(() => {
+            throw new Error('constructor failed');
+        });
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({
+            event: 'http.route_failed',
+            severity: 'error',
+            fields: { email: 'buyer@example.com' },
+        });
+        await flushOperationalLogs();
+
+        expect(axiomMocks.loggerLog).not.toHaveBeenCalled();
+        expect(consoleLog).toHaveBeenCalledTimes(1);
+        const [line, ...unstructuredArguments] = consoleLog.mock.calls[0] ?? [];
+        expect(unstructuredArguments).toHaveLength(0);
+        expect(JSON.parse(line as string)).toEqual(expect.objectContaining({
+            event: 'http.route_failed',
+            severity: 'error',
+        }));
+        expect(line).not.toContain('buyer@example.com');
+    });
+
+    it('keeps the caller unaffected when the console write itself throws', async () => {
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {
+            throw new Error('stdout is closed');
+        });
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        expect(() => operationalLogger.emit({
+            event: 'http.route_failed',
+            severity: 'error',
+        })).not.toThrow();
+        expect(consoleLog).toHaveBeenCalledTimes(1);
+        await expect(flushOperationalLogs()).resolves.toBeUndefined();
+    });
+});
