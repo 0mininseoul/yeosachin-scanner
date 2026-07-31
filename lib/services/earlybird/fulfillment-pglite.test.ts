@@ -158,6 +158,13 @@ const adoptionPolicyRearmGenerationMigration = readFileSync(
     ),
     'utf8'
 );
+const adoptedEvidenceProviderCompositeMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731120000_populate_adopted_evidence_provider_composites.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -920,10 +927,14 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 request_id UUID NOT NULL REFERENCES public.analysis_requests(id)
             );
             CREATE TABLE public.analysis_v2_relationship_sides (
-                request_id UUID NOT NULL REFERENCES public.analysis_requests(id)
+                request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
+                provider_credential_slot TEXT,
+                provider_operation_key TEXT
             );
             CREATE TABLE public.analysis_v2_target_evidence_manifests (
-                request_id UUID NOT NULL REFERENCES public.analysis_requests(id)
+                request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
+                liker_credential_slot TEXT,
+                comment_credential_slot TEXT
             );
 
             CREATE FUNCTION public.checkpoint_analysis_v2_relationship_side(
@@ -963,7 +974,13 @@ describe('operator-approved earlybird fulfillment migration', () => {
                    OR v_provider_run.status <> 'succeeded' THEN
                     RETURN FALSE;
                 END IF;
-                RETURN TRUE;
+                INSERT INTO public.analysis_v2_relationship_sides(
+                    request_id, provider_credential_slot, provider_operation_key
+                ) VALUES (
+                    p_request_id, v_provider_run.credential_slot,
+                    p_provider_operation_key
+                );
+                RETURN v_provider_run.credential_slot = 'secondary';
             END;
             $$;
 
@@ -989,6 +1006,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 v_liker_provider_run public.analysis_v2_provider_runs%ROWTYPE;
                 v_comment_provider_run public.analysis_v2_provider_runs%ROWTYPE;
             BEGIN
+                IF COALESCE(p_liker_source->>'status', 'collected') = 'collected' THEN
                 SELECT provider_run.*
                 INTO v_liker_provider_run
                 FROM public.analysis_v2_provider_runs AS provider_run
@@ -1006,6 +1024,8 @@ describe('operator-approved earlybird fulfillment migration', () => {
                    OR v_liker_provider_run.status <> 'succeeded' THEN
                     RETURN FALSE;
                 END IF;
+                END IF;
+                IF COALESCE(p_comment_source->>'status', 'collected') = 'collected' THEN
                 SELECT provider_run.*
                 INTO v_comment_provider_run
                 FROM public.analysis_v2_provider_runs AS provider_run
@@ -1023,7 +1043,22 @@ describe('operator-approved earlybird fulfillment migration', () => {
                    OR v_comment_provider_run.status <> 'succeeded' THEN
                     RETURN FALSE;
                 END IF;
-                RETURN TRUE;
+                END IF;
+                INSERT INTO public.analysis_v2_target_evidence_manifests(
+                    request_id, liker_credential_slot, comment_credential_slot
+                ) VALUES (
+                    p_request_id, v_liker_provider_run.credential_slot,
+                    v_comment_provider_run.credential_slot
+                );
+                RETURN (
+                    COALESCE(p_liker_source->>'status', 'collected') <> 'collected'
+                    OR v_liker_provider_run.credential_slot
+                        = p_liker_source->>'provider_credential_slot'
+                ) AND (
+                    COALESCE(p_comment_source->>'status', 'collected') <> 'collected'
+                    OR v_comment_provider_run.credential_slot
+                        = p_comment_source->>'provider_credential_slot'
+                );
             END;
             $$;
 
@@ -1104,6 +1139,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(providerRunResolverShapeMigration);
         await db.exec(adoptionPolicyFailureRearmMigration);
         await db.exec(adoptionPolicyRearmGenerationMigration);
+        await db.exec(adoptedEvidenceProviderCompositeMigration);
     });
 
     beforeEach(async () => {
@@ -2528,6 +2564,11 @@ describe('operator-approved earlybird fulfillment migration', () => {
         )).rows[0];
         const actorId =
             'scraping_solutions/instagram-scraper-followers-following-no-cookies';
+        const targetJobKey = 'track:target-evidence:collect';
+        const likerOperationKey = `target-likers:${'1'.repeat(64)}`;
+        const commentOperationKey = `target-comments:${'2'.repeat(64)}`;
+        const likerInputHash = '3'.repeat(64);
+        const commentInputHash = '4'.repeat(64);
         await db.query(
             `INSERT INTO public.analysis_pipeline_jobs(
                 request_id, job_key, track, kind, input_hash,
@@ -2557,6 +2598,29 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 CLAIM,
                 ADMISSION_CLAIM,
                 actorId,
+            ]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id, job_key, track, kind, input_hash,
+                required_job_keys, status
+             ) VALUES ($1, $2, 'target_evidence', 'collection', $3, '{}', 'completed')`,
+            [FAILED_REQUEST, targetJobKey, '5'.repeat(64)]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id,
+                actual_usage_usd, usage_reconciled_at
+             ) VALUES
+             ($1, $2, $3, $4, $5, $6, 'apify', 'target-liker-actor',
+              'secondary', 0.2, 'succeeded', 'TargetLikerRun1', 0.1, clock_timestamp()),
+             ($1, $2, $7, $8, $5, $6, 'apify', 'target-comment-actor',
+              'secondary', 0.2, 'succeeded', 'TargetCommentRun1', 0.1, clock_timestamp())`,
+            [
+                FAILED_REQUEST, targetJobKey, likerOperationKey, likerInputHash,
+                CLAIM, ADMISSION_CLAIM, commentOperationKey, commentInputHash,
             ]
         );
         await admit();
@@ -2679,6 +2743,219 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 destination.operation_key,
             ]
         )).rows[0].accepted).toBe(true);
+        expect((await db.query<{
+            provider_credential_slot: string;
+            provider_operation_key: string;
+        }>(
+            `SELECT provider_credential_slot, provider_operation_key
+             FROM public.analysis_v2_relationship_sides
+             WHERE request_id = $1`,
+            [created.request_id]
+        )).rows[0]).toEqual({
+            provider_credential_slot: 'secondary',
+            provider_operation_key: destination.operation_key,
+        });
+        const internalLoaderSql =
+            `SELECT public.analysis_v2_load_provider_evidence_source(
+                $1, $2, $3, $4, $5, 'apify', 'CountDriftRun1', 'secondary'
+             )`;
+        const internalLoaderArgs = [
+            created.request_id, sourceJobKey, DISPATCH_TOKEN,
+            destination.operation_key, destination.input_hash,
+        ];
+        await expect(asService(
+            internalLoaderSql, internalLoaderArgs
+        )).rejects.toThrow(/permission denied/i);
+        for (const role of ['anon', 'authenticated'] as const) {
+            await db.exec(`SET ROLE ${role}`);
+            try {
+                await expect(db.query(
+                    internalLoaderSql, internalLoaderArgs
+                )).rejects.toThrow(/permission denied/i);
+            } finally {
+                await db.exec('RESET ROLE');
+            }
+        }
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, 'apify', $7, 'secondary',
+                0.153, 'succeeded', 'AmbiguousDirect1'
+             )`,
+            [
+                created.request_id, sourceJobKey, destination.operation_key,
+                destination.input_hash, DISPATCH_TOKEN, ADMISSION_CLAIM, actorId,
+            ]
+        );
+        await expect(asService(
+            `SELECT public.checkpoint_analysis_v2_relationship_side(
+                $1, $2, $3, 'followers', $4, 180, 'collected',
+                'apify', 'AmbiguousDirect1', $5, NULL, '[]'::JSONB
+             )`,
+            [
+                created.request_id, sourceJobKey, DISPATCH_TOKEN,
+                destination.input_hash, destination.operation_key,
+            ]
+        )).rejects.toThrow('ANALYSIS_V2_PROVIDER_EVIDENCE_SOURCE_INVALID');
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_v2_relationship_sides
+             WHERE request_id = $1`,
+            [created.request_id]
+        )).rows[0].count).toBe(1);
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id, job_key, track, kind, input_hash,
+                required_job_keys, status, lease_token, lease_expires_at
+             ) VALUES (
+                $1, $2, 'target_evidence', 'collection', $3, '{}',
+                'processing', $4, clock_timestamp() + INTERVAL '5 minutes'
+             )`,
+            [created.request_id, targetJobKey, '6'.repeat(64), DISPATCH_TOKEN]
+        );
+        for (const source of [
+            [likerOperationKey, likerInputHash, 'target-liker-actor'],
+            [commentOperationKey, commentInputHash, 'target-comment-actor'],
+        ]) {
+            await asService(
+                `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                    $1, $2, $3, $4, $5, 'apify', $6, 'secondary', 0.2
+                 )`,
+                [
+                    created.request_id, targetJobKey, DISPATCH_TOKEN,
+                    source[0], source[1], source[2],
+                ]
+            );
+        }
+        const likerSource = {
+            input_hash: likerInputHash,
+            provider: 'apify',
+            provider_run_id: 'TargetLikerRun1',
+            provider_operation_key: likerOperationKey,
+            provider_credential_slot: 'secondary',
+        };
+        const commentSource = {
+            input_hash: commentInputHash,
+            provider: 'apify',
+            provider_run_id: 'TargetCommentRun1',
+            provider_operation_key: commentOperationKey,
+            provider_credential_slot: 'secondary',
+        };
+        const checkpointTarget = async (
+            liker: Record<string, unknown>,
+            comment: Record<string, unknown> = commentSource
+        ): Promise<boolean> => (await asService<{ accepted: boolean }>(
+            `SELECT public.checkpoint_analysis_v2_target_evidence(
+                $1, $2, $3, 'sample.account', $4, 'apify',
+                'TargetProfileRun1', $5, $6::JSONB, $7::JSONB, '[]'::JSONB
+             ) AS accepted`,
+            [
+                created.request_id, targetJobKey, DISPATCH_TOKEN,
+                '7'.repeat(64), `target-profile:${'8'.repeat(64)}`,
+                JSON.stringify(liker), JSON.stringify(comment),
+            ]
+        )).rows[0].accepted;
+        await expect(checkpointTarget(likerSource)).resolves.toBe(true);
+        expect((await db.query<{
+            liker_credential_slot: string;
+            comment_credential_slot: string;
+        }>(
+            `SELECT liker_credential_slot, comment_credential_slot
+             FROM public.analysis_v2_target_evidence_manifests
+             WHERE request_id = $1`,
+            [created.request_id]
+        )).rows[0]).toEqual({
+            liker_credential_slot: 'secondary',
+            comment_credential_slot: 'secondary',
+        });
+        const directLikerOperation = `target-likers:${'a'.repeat(64)}`;
+        const directLikerInput = 'b'.repeat(64);
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, 'apify', 'target-liker-actor',
+                'primary', 0.2, 'succeeded', 'MixedDirectLiker1'
+             )`,
+            [
+                created.request_id, targetJobKey, directLikerOperation,
+                directLikerInput, DISPATCH_TOKEN, ADMISSION_CLAIM,
+            ]
+        );
+        await expect(checkpointTarget({
+            ...likerSource,
+            input_hash: directLikerInput,
+            provider_run_id: 'MixedDirectLiker1',
+            provider_operation_key: directLikerOperation,
+            provider_credential_slot: 'primary',
+        })).resolves.toBe(true);
+        expect((await db.query<{
+            liker_credential_slot: string;
+            comment_credential_slot: string;
+        }>(
+            `SELECT liker_credential_slot, comment_credential_slot
+             FROM public.analysis_v2_target_evidence_manifests
+             WHERE request_id = $1
+             ORDER BY ctid DESC
+             LIMIT 1`,
+            [created.request_id]
+        )).rows[0]).toEqual({
+            liker_credential_slot: 'primary',
+            comment_credential_slot: 'secondary',
+        });
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, 'apify', 'target-liker-actor',
+                'secondary', 0.2, 'succeeded', 'AmbiguousLiker1'
+             )`,
+            [
+                created.request_id, targetJobKey, likerOperationKey,
+                likerInputHash, DISPATCH_TOKEN, ADMISSION_CLAIM,
+            ]
+        );
+        await expect(checkpointTarget({
+            ...likerSource,
+            provider_run_id: 'AmbiguousLiker1',
+        })).rejects.toThrow('ANALYSIS_V2_PROVIDER_EVIDENCE_SOURCE_INVALID');
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_v2_target_evidence_manifests
+             WHERE request_id = $1`,
+            [created.request_id]
+        )).rows[0].count).toBe(2);
+        const notApplicableSource = {
+            status: 'not_applicable',
+            input_hash: '9'.repeat(64),
+            provider: null,
+            provider_run_id: null,
+            provider_operation_key: null,
+            provider_credential_slot: null,
+            coverage: [],
+        };
+        await expect(checkpointTarget(
+            notApplicableSource, notApplicableSource
+        )).resolves.toBe(true);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_v2_target_evidence_manifests
+             WHERE request_id = $1
+               AND liker_credential_slot IS NULL
+               AND comment_credential_slot IS NULL`,
+            [created.request_id]
+        )).rows[0].count).toBe(1);
+        await expect(checkpointTarget({
+            ...likerSource,
+            provider_run_id: 'ForeignLikerRun1',
+        })).resolves.toBe(false);
         await db.query(
             `UPDATE public.analysis_pipeline_jobs
              SET lease_token = $3
