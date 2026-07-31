@@ -14,6 +14,8 @@ import {
     type AnalysisV2ProjectedProgress,
 } from './v2-progress-projector';
 import type { AnalysisV2StageId } from './v2-worker';
+import type { AnalysisV2ProgressCandidateMediaPreview } from './progress-candidate-media';
+import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 
 const TARGET_LATENCY_SECONDS = 300;
 
@@ -36,7 +38,64 @@ export interface AnalysisV2ProgressReporter {
         username: string;
         startedAt: string;
         totalCount: number;
+        preview?: AnalysisV2ProgressCandidateMediaPreview;
     }): Promise<boolean>;
+}
+
+type ImageProxySigner = (rawUrl: string | undefined) => string | undefined;
+
+const EMPTY_HEARTBEAT_MEDIA = Object.freeze({
+    imageUrl: null as string | null,
+    feedImageUrls: [] as string[],
+});
+
+function signedProxyPath(rawUrl: string, sign: ImageProxySigner): string {
+    if (!rawUrl || rawUrl.length > 8_192) {
+        throw new Error('Invalid progress preview image URL.');
+    }
+    const path = sign(rawUrl);
+    if (
+        typeof path !== 'string'
+        || path.length === 0
+        || path.length > 2_048
+        || !path.startsWith('/api/image-proxy?')
+    ) {
+        throw new Error('Unable to sign progress preview image URL.');
+    }
+    return path;
+}
+
+function prepareHeartbeatMedia(
+    preview: AnalysisV2ProgressCandidateMediaPreview | undefined,
+    sign: ImageProxySigner
+): { imageUrl: string | null; feedImageUrls: string[] } {
+    if (!preview) return { imageUrl: null, feedImageUrls: [] };
+    if (!Array.isArray(preview.feedImageUrls) || preview.feedImageUrls.length > 3) {
+        throw new Error('Invalid progress preview feed images.');
+    }
+    if (
+        preview.profilePicUrl !== undefined
+        && (typeof preview.profilePicUrl !== 'string' || preview.profilePicUrl.length === 0)
+    ) {
+        throw new Error('Invalid progress preview profile image.');
+    }
+    if (preview.feedImageUrls.some(url => typeof url !== 'string' || url.length === 0)) {
+        throw new Error('Invalid progress preview feed image.');
+    }
+    if (new Set(preview.feedImageUrls).size !== preview.feedImageUrls.length) {
+        throw new Error('Duplicate progress preview feed image.');
+    }
+
+    const feedImageUrls = preview.feedImageUrls.map(url => signedProxyPath(url, sign));
+    if (new Set(feedImageUrls).size !== feedImageUrls.length) {
+        throw new Error('Duplicate signed progress preview feed image.');
+    }
+    return {
+        imageUrl: preview.profilePicUrl
+            ? signedProxyPath(preview.profilePicUrl, sign)
+            : null,
+        feedImageUrls,
+    };
 }
 
 function workMap(tracks: AnalysisV2ProgressTracksInput) {
@@ -106,8 +165,10 @@ function checkpointInput(
 export function createAnalysisV2ProgressReporter(input: {
     store?: AnalysisV2ProgressStore;
     reloadState?: (requestId: string) => Promise<AnalysisV2DagState | null>;
+    imageProxySigner?: ImageProxySigner;
 } = {}): AnalysisV2ProgressReporter {
     const store = input.store ?? analysisV2ProgressStore;
+    const imageProxySigner = input.imageProxySigner ?? createImageProxyPath;
 
     async function checkpointWithConflictRecovery(
         report: AnalysisV2ProgressReportInput,
@@ -131,9 +192,15 @@ export function createAnalysisV2ProgressReporter(input: {
     }
 
     return {
-        async heartbeat({ claim, username, startedAt, totalCount }) {
+        async heartbeat({ claim, username, startedAt, totalCount, preview }) {
             if (!store.heartbeatActiveProfile) {
                 throw new Error('ANALYSIS_V2_ACTIVE_PROFILE_HEARTBEAT_UNAVAILABLE');
+            }
+            let media = EMPTY_HEARTBEAT_MEDIA;
+            try {
+                media = prepareHeartbeatMedia(preview, imageProxySigner);
+            } catch {
+                media = EMPTY_HEARTBEAT_MEDIA;
             }
             return store.heartbeatActiveProfile({
                 requestId: claim.requestId,
@@ -143,7 +210,8 @@ export function createAnalysisV2ProgressReporter(input: {
                 startedAt,
                 totalCount,
                 maskedUsername: maskAnalysisV2ProgressUsername(username),
-                imageUrl: null,
+                imageUrl: media.imageUrl,
+                feedImageUrls: media.feedImageUrls,
             });
         },
 

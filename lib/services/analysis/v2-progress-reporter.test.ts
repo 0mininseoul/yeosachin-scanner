@@ -155,10 +155,132 @@ describe('analysis V2 progress reporter', () => {
         expect(heartbeatActiveProfile).toHaveBeenCalledWith(expect.objectContaining({
             maskedUsername: 'c************e',
             imageUrl: null,
+            feedImageUrls: [],
             startedAt: '2026-07-14T02:00:00.000Z',
             totalCount: 30,
         }));
         expect(JSON.stringify(heartbeatActiveProfile.mock.calls)).not.toContain('Candidate.Name');
+    });
+
+    it('signs an already-selected candidate preview before one heartbeat persistence call', async () => {
+        const heartbeatActiveProfile = vi.fn(async () => true);
+        const imageProxySigner = vi.fn((rawUrl: string | null | undefined) => (
+            rawUrl ? `/api/image-proxy?token=signed-${rawUrl.split('/').at(-1)}` : undefined
+        ));
+        const store = progressStore();
+        store.heartbeatActiveProfile = heartbeatActiveProfile;
+        const reporter = createAnalysisV2ProgressReporter({ store, imageProxySigner });
+
+        await reporter.heartbeat!({
+            claim: claim({
+                jobKey: 'track:profile-ai:batch:0', track: 'profile_ai', kind: 'ai', batch: 0,
+            }),
+            stage: 'profile_ai',
+            username: 'Candidate.Name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+            preview: {
+                profilePicUrl: 'https://cdninstagram.com/candidate/profile.jpg',
+                feedImageUrls: [
+                    'https://cdninstagram.com/candidate/post-1.jpg',
+                    'https://cdninstagram.com/candidate/post-2.jpg',
+                ],
+            },
+        });
+
+        expect(imageProxySigner).toHaveBeenCalledTimes(3);
+        expect(heartbeatActiveProfile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            maskedUsername: 'c************e',
+            imageUrl: '/api/image-proxy?token=signed-profile.jpg',
+            feedImageUrls: [
+                '/api/image-proxy?token=signed-post-1.jpg',
+                '/api/image-proxy?token=signed-post-2.jpg',
+            ],
+        }));
+        expect(JSON.stringify(heartbeatActiveProfile.mock.calls))
+            .not.toContain('https://cdninstagram.com');
+    });
+
+    it('falls back to one media-free heartbeat when preview signing fails', async () => {
+        const heartbeatActiveProfile = vi.fn(async () => true);
+        const store = progressStore();
+        store.heartbeatActiveProfile = heartbeatActiveProfile;
+        const reporter = createAnalysisV2ProgressReporter({
+            store,
+            imageProxySigner: () => { throw new Error('SIGNING_FAILED'); },
+        });
+
+        await expect(reporter.heartbeat!({
+            claim: claim(),
+            stage: 'profile_ai',
+            username: 'candidate.name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+            preview: {
+                profilePicUrl: 'https://cdninstagram.com/candidate/profile.jpg',
+                feedImageUrls: [],
+            },
+        })).resolves.toBe(true);
+
+        expect(heartbeatActiveProfile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            imageUrl: null,
+            feedImageUrls: [],
+        }));
+    });
+
+    it('falls back to one media-free heartbeat when preview validation fails', async () => {
+        const heartbeatActiveProfile = vi.fn(async () => true);
+        const store = progressStore();
+        store.heartbeatActiveProfile = heartbeatActiveProfile;
+        const reporter = createAnalysisV2ProgressReporter({
+            store,
+            imageProxySigner: rawUrl => `/api/image-proxy?token=${rawUrl}`,
+        });
+
+        await expect(reporter.heartbeat!({
+            claim: claim(),
+            stage: 'profile_ai',
+            username: 'candidate.name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+            preview: {
+                feedImageUrls: [
+                    'https://cdninstagram.com/candidate/post-1.jpg',
+                    'https://cdninstagram.com/candidate/post-2.jpg',
+                    'https://cdninstagram.com/candidate/post-3.jpg',
+                    'https://cdninstagram.com/candidate/post-4.jpg',
+                ],
+            },
+        })).resolves.toBe(true);
+
+        expect(heartbeatActiveProfile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            imageUrl: null,
+            feedImageUrls: [],
+        }));
+    });
+
+    it('keeps heartbeat persistence failures fatal after preparing preview media', async () => {
+        const store = progressStore();
+        store.heartbeatActiveProfile = vi.fn(async () => {
+            throw new Error('HEARTBEAT_PERSISTENCE_FAILED');
+        });
+        const reporter = createAnalysisV2ProgressReporter({
+            store,
+            imageProxySigner: () => '/api/image-proxy?token=signed',
+        });
+
+        await expect(reporter.heartbeat!({
+            claim: claim(),
+            stage: 'profile_ai',
+            username: 'candidate.name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+            preview: {
+                profilePicUrl: 'https://cdninstagram.com/candidate/profile.jpg',
+                feedImageUrls: [],
+            },
+        })).rejects.toThrow('HEARTBEAT_PERSISTENCE_FAILED');
+        expect(store.heartbeatActiveProfile).toHaveBeenCalledOnce();
     });
 
     it('reloads current DAG state once when a parallel completion makes counters stale', async () => {

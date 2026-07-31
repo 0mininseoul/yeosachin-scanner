@@ -75,7 +75,11 @@ function snapshot() {
                 progressBp: 0,
             },
         },
-        activeProfile: { maskedUsername: 'a***e', imageUrl: null },
+        activeProfile: {
+            maskedUsername: 'a***e',
+            imageUrl: null,
+            feedImageUrls: ['/api/image-proxy?token=progress-feed'],
+        },
         etaRange: { lowSeconds: 90, highSeconds: 180 },
         lastEventSeq: 1,
     };
@@ -156,7 +160,13 @@ describe('analysis V2 owner progress route', () => {
         });
         await expect(response.json()).resolves.toMatchObject({
             schemaVersion: 1,
-            snapshot: { requestId, lastEventSeq: 1 },
+            snapshot: {
+                requestId,
+                lastEventSeq: 1,
+                activeProfile: {
+                    feedImageUrls: ['/api/image-proxy?token=progress-feed'],
+                },
+            },
             events: [{ seq: 1, eventCode: 'PROFILE_SCREENED' }],
         });
     });

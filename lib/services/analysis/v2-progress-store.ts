@@ -92,6 +92,22 @@ const activeProfileInputSchema = z.object({
         .nullable(),
 }).strict();
 
+const imageProxyPathSchema = z.string()
+    .trim()
+    .min(1)
+    .max(2_048)
+    .refine(value => value.startsWith('/api/image-proxy?'));
+const heartbeatFeedImageUrlsSchema = z.array(imageProxyPathSchema)
+    .max(3)
+    .superRefine((value, context) => {
+        if (new Set(value).size !== value.length) {
+            context.addIssue({
+                code: 'custom',
+                message: 'Heartbeat feed image URLs must be unique.',
+            });
+        }
+    });
+
 const activeProfileHeartbeatInputSchema = z.object({
     requestId: z.string().regex(UUID_PATTERN),
     jobKey: z.string().regex(JOB_KEY_PATTERN),
@@ -106,6 +122,7 @@ const activeProfileHeartbeatInputSchema = z.object({
         .max(2_048)
         .refine(value => value.startsWith('/api/image-proxy?'))
         .nullable(),
+    feedImageUrls: heartbeatFeedImageUrlsSchema,
 }).strict();
 
 const etaInputSchema = z.object({
@@ -309,6 +326,7 @@ export interface AnalysisV2ProgressStore {
         totalCount: number;
         maskedUsername: string;
         imageUrl: string | null;
+        feedImageUrls: string[];
     }): Promise<boolean>;
     loadForOwner(input: {
         requestId: string;
@@ -480,6 +498,7 @@ export function createAnalysisV2ProgressStore(
                     p_total_count: input.totalCount,
                     p_masked_username: input.maskedUsername,
                     p_image_url: input.imageUrl,
+                    p_feed_image_urls: input.feedImageUrls,
                 }
             );
             if (error) throwRpcError(error, 'active profile heartbeat');

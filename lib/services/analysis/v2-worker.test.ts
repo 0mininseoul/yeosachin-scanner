@@ -908,6 +908,14 @@ describe('analysis V2 durable DAG worker', () => {
             totalCount: 30,
         }));
         const calls = vi.mocked(progress.heartbeat!).mock.calls;
+        expect(calls[0]![0]).toEqual({
+            claim: profileClaim,
+            stage: 'profile_fetch',
+            username: 'Candidate.One',
+            startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+            totalCount: 30,
+        });
+        expect(Object.hasOwn(calls[0]![0], 'preview')).toBe(false);
         expect(Date.parse(calls[1]![0].startedAt)).toBeGreaterThan(
             Date.parse(calls[0]![0].startedAt)
         );
@@ -973,6 +981,10 @@ describe('analysis V2 durable DAG worker', () => {
             stage: 'profile_ai',
             username: 'Candidate.One',
             totalCount: 30,
+            preview: {
+                profilePicUrl: 'https://cdn.example/candidate.jpg',
+                feedImageUrls: ['https://cdn.example/post.jpg'],
+            },
         }));
     });
 

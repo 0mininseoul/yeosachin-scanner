@@ -50,6 +50,23 @@ const boundedImageUrlSchema = z.string()
         message: 'Public image URLs must use the signed proxy or a fixed local synthetic asset.',
     })
     .nullable();
+const imageProxyPathSchema = z.string()
+    .trim()
+    .min(1)
+    .max(2_048)
+    .refine(value => value.startsWith('/api/image-proxy?'), {
+        message: 'Progress feed image URLs must use the signed image proxy.',
+    });
+const progressFeedImageUrlsSchema = z.array(imageProxyPathSchema)
+    .max(3)
+    .superRefine((value, context) => {
+        if (new Set(value).size !== value.length) {
+            context.addIssue({
+                code: 'custom',
+                message: 'Progress feed image URLs must be unique.',
+            });
+        }
+    });
 const stageCodeSchema = z.string().min(1).max(64).regex(/^[A-Z][A-Z0-9_]*$/);
 
 const FORBIDDEN_PUBLIC_COPY_PATTERNS = [
@@ -521,6 +538,7 @@ export const progressSnapshotV1Schema = z.object({
             .regex(/^[A-Za-z0-9._*]+$/)
             .regex(/\*/, 'Active profile username must be masked.'),
         imageUrl: boundedImageUrlSchema,
+        feedImageUrls: progressFeedImageUrlsSchema.optional(),
     }).strict().nullable(),
     etaRange: z.object({
         lowSeconds: z.number().int().nonnegative().max(3_600),

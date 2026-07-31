@@ -619,8 +619,6 @@ export async function executeAnalysisV2DagJob(
         handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
             reportActiveProfile: async (username: string, preview) => {
-                // The durable progress-media contract is introduced by the next stage.
-                void preview;
                 const startedAtMs = Math.max(
                     Date.now(),
                     lastActiveProfileStartedAtMs + 1
@@ -632,6 +630,7 @@ export async function executeAnalysisV2DagJob(
                     username,
                     startedAt: new Date(startedAtMs).toISOString(),
                     totalCount: activeProfileBatchTotal!,
+                    ...(preview === undefined ? {} : { preview }),
                 });
             },
         } : {}),

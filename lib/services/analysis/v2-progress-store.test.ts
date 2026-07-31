@@ -160,7 +160,7 @@ describe('V2 progress persistence adapter', () => {
         );
     });
 
-    it('persists only a masked profile-start heartbeat under the exact job fence', async () => {
+    it('persists masked profile-start media under the exact job fence in one RPC call', async () => {
         const mock = client(true);
         const store = createAnalysisV2ProgressStore(mock);
 
@@ -172,7 +172,11 @@ describe('V2 progress persistence adapter', () => {
             startedAt: '2026-07-14T02:00:00.000Z',
             totalCount: 30,
             maskedUsername: 'c************e',
-            imageUrl: null,
+            imageUrl: '/api/image-proxy?token=profile',
+            feedImageUrls: [
+                '/api/image-proxy?token=feed-1',
+                '/api/image-proxy?token=feed-2',
+            ],
         })).resolves.toBe(true);
 
         expect(mock.rpc).toHaveBeenCalledWith(
@@ -185,10 +189,51 @@ describe('V2 progress persistence adapter', () => {
                 p_started_at: '2026-07-14T02:00:00.000Z',
                 p_total_count: 30,
                 p_masked_username: 'c************e',
-                p_image_url: null,
+                p_image_url: '/api/image-proxy?token=profile',
+                p_feed_image_urls: [
+                    '/api/image-proxy?token=feed-1',
+                    '/api/image-proxy?token=feed-2',
+                ],
             }
         );
+        expect(mock.rpc).toHaveBeenCalledOnce();
         expect(JSON.stringify(mock.rpc.mock.calls)).not.toContain('Candidate.Name');
+    });
+
+    it('rejects raw, duplicate, excess, and unknown heartbeat media before its RPC call', async () => {
+        const mock = client(true);
+        const store = createAnalysisV2ProgressStore(mock);
+        const heartbeat = {
+            requestId,
+            jobKey: 'track:profile-ai:batch:3',
+            claimToken,
+            jobInputHash: inputHash,
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+            maskedUsername: 'c************e',
+            imageUrl: null,
+            feedImageUrls: [] as string[],
+        };
+
+        await expect(store.heartbeatActiveProfile!({
+            ...heartbeat,
+            feedImageUrls: ['https://raw.example/feed.jpg'],
+        })).rejects.toThrow();
+        await expect(store.heartbeatActiveProfile!({
+            ...heartbeat,
+            feedImageUrls: ['/api/image-proxy?token=one', '/api/image-proxy?token=one'],
+        })).rejects.toThrow();
+        await expect(store.heartbeatActiveProfile!({
+            ...heartbeat,
+            feedImageUrls: Array.from({ length: 4 }, (_, index) => (
+                `/api/image-proxy?token=${index}`
+            )),
+        })).rejects.toThrow();
+        await expect(store.heartbeatActiveProfile!({
+            ...heartbeat,
+            rawUrl: 'https://raw.example/profile.jpg',
+        } as typeof heartbeat)).rejects.toThrow();
+        expect(mock.rpc).not.toHaveBeenCalled();
     });
 
     it('uses the same IEEE-754 weighted progress calculation as the database', async () => {
