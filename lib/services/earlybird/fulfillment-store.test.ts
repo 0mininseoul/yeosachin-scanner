@@ -300,6 +300,51 @@ describe('earlybird fulfillment store', () => {
         });
     });
 
+    it('waits for a fresh admission when create loses only the freshness race', async () => {
+        const orderStore = store({
+            createOrReplayRequest: vi.fn(async () => ({
+                orderId: ORDER,
+                status: 'retryable_failure' as const,
+                requestId: null,
+                created: false,
+                initialJobKey: null,
+            })),
+        });
+        const dispatchAnalysisJob = vi.fn();
+
+        await expect(advanceAdmittedEarlybirdFulfillment(identity(), {
+            store: orderStore,
+            rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
+            reserveFreshAdmission: vi.fn(async () => ({
+                state: 'ready' as const,
+                generation: 2,
+                selectedPlanAllowed: true,
+                admissionToken: CLAIM,
+                snapshot: {
+                    followersCount: 120,
+                    followingCount: 140,
+                    capacityRequiredPlanId: 'basic' as const,
+                    requiredPlanId: 'basic' as const,
+                    selectedPlanId: 'basic' as const,
+                    plans: [],
+                    pricingVersion: 'deferred',
+                    refreshedAt: '2026-07-31T00:00:00.000Z',
+                },
+            })),
+            enqueueFreshAdmission: vi.fn(),
+            markFreshAdmissionDispatched: vi.fn(),
+            releaseFreshAdmissionDispatch: vi.fn(),
+            dispatchAnalysisJob,
+        })).resolves.toEqual({
+            orderId: ORDER,
+            status: 'retryable_failure',
+            requestId: null,
+            nextAction: 'wait_for_fresh_admission',
+        });
+        expect(orderStore.markManualReview).not.toHaveBeenCalled();
+        expect(dispatchAnalysisJob).not.toHaveBeenCalled();
+    });
+
     it('sends blocked or newly ineligible paid work to manual review', async () => {
         const orderStore = store();
         await expect(advanceAdmittedEarlybirdFulfillment(identity(), {

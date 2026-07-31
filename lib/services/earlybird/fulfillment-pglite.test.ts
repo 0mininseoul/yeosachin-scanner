@@ -88,6 +88,13 @@ const transientJobExhaustionRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const freshnessRaceMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260731020000_fix_earlybird_fulfillment_admission_freshness_race.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -580,6 +587,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(canonicalTargetSchemaFailureRecoveryMigration);
         await db.exec(scrubbedTargetSchemaFailureRecoveryMigration);
         await db.exec(transientJobExhaustionRecoveryMigration);
+        await db.exec(freshnessRaceMigration);
     });
 
     beforeEach(async () => {
@@ -1264,6 +1272,210 @@ describe('operator-approved earlybird fulfillment migration', () => {
             access_mode: 'production',
             user_id: USER,
         });
+    });
+
+    it('reopens only a post-claim stale admission and creates exactly one request after refresh', async () => {
+        await admit();
+        await makeAdmissionReady();
+        const staleLease = await claim();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_refreshed_at = pg_catalog.clock_timestamp() - INTERVAL '2 minutes 1 second'
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+
+        await expect(asService<{
+            fulfillment_status: string;
+            request_id: string | null;
+            created: boolean;
+        }>(
+            'SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)',
+            [ORDER, CLAIM, staleLease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'retryable_failure',
+            request_id: null,
+            created: false,
+        }] });
+        expect((await db.query<{
+            status: string;
+            lease_token: string | null;
+            request_id: string | null;
+            manual_review_at: string | null;
+            last_error_code: string | null;
+            attempt_count: number;
+        }>(
+            `SELECT status, lease_token, request_id, manual_review_at, last_error_code, attempt_count
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'retryable_failure',
+            lease_token: null,
+            request_id: null,
+            manual_review_at: null,
+            last_error_code: 'ADMISSION_FRESHNESS_EXPIRED',
+            attempt_count: 1,
+        });
+        expect((await asService<FulfillmentIdentity>(
+            'SELECT * FROM public.list_recoverable_earlybird_fulfillments(20)'
+        )).rows).toEqual([expect.objectContaining({
+            order_id: ORDER,
+            fulfillment_status: 'retryable_failure',
+        })]);
+
+        await makeAdmissionReady();
+        const freshLease = await claim();
+        const created = (await asService<{
+            request_id: string;
+            fulfillment_status: string;
+            created: boolean;
+        }>(
+            'SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)',
+            [ORDER, CLAIM, freshLease.lease_fence]
+        )).rows[0];
+        expect(created).toMatchObject({
+            fulfillment_status: 'analysis_in_progress', created: true,
+        });
+        await expect(asService<{
+            request_id: string;
+            created: boolean;
+        }>(
+            'SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)',
+            [ORDER, CLAIM, freshLease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            request_id: created.request_id,
+            created: false,
+        }] });
+        expect((await db.query<{ count: number }>(
+            'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_requests'
+        )).rows[0].count).toBe(1);
+    });
+
+    it('never reopens null, future, fresh, or immutable conflicting admissions', async () => {
+        const cases = [
+            { sql: 'NULL::TIMESTAMPTZ', expectedStatus: 'manual_review', code: 'SNAPSHOT_CONFLICT' },
+            { sql: "pg_catalog.clock_timestamp() + INTERVAL '31 seconds'", expectedStatus: 'manual_review', code: 'SNAPSHOT_CONFLICT' },
+            { sql: 'pg_catalog.clock_timestamp()', expectedStatus: 'analysis_in_progress', code: null },
+        ];
+        for (const testCase of cases) {
+            await admit();
+            await makeAdmissionReady();
+            const lease = await claim();
+            await db.exec(
+                `UPDATE public.analysis_preflights SET admission_refreshed_at = ${testCase.sql}
+                 WHERE id = '${PREFLIGHT}'`
+            );
+            await expect(asService<{ fulfillment_status: string }>(
+                'SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)',
+                [ORDER, CLAIM, lease.lease_fence]
+            )).resolves.toMatchObject({ rows: [{
+                fulfillment_status: testCase.expectedStatus,
+            }] });
+            expect((await db.query<{ last_error_code: string | null }>(
+                'SELECT last_error_code FROM public.earlybird_fulfillments WHERE order_id = $1',
+                [ORDER]
+            )).rows[0].last_error_code).toBe(testCase.code);
+            await db.query(
+                `UPDATE public.earlybird_fulfillments
+                 SET status = 'admission_pending', lease_token = NULL,
+                     lease_expires_at = NULL, last_error_code = NULL,
+                     last_error_at = NULL, manual_review_at = NULL
+                 WHERE order_id = $1`,
+                [ORDER]
+            );
+        }
+    });
+
+    it.each([
+        ['target', "UPDATE public.analysis_preflights SET target_instagram_id = 'other.account' WHERE id = $1", 'SNAPSHOT_CONFLICT'],
+        ['exclusion', "UPDATE public.analysis_preflights SET exclusion_decision = 'exclude', excluded_instagram_id = 'other.account' WHERE id = $1", 'SNAPSHOT_CONFLICT'],
+        ['payment', 'UPDATE public.earlybird_orders SET actual_amount_krw = expected_amount_krw + 1 WHERE preflight_id = $1', 'SNAPSHOT_CONFLICT'],
+        ['card', "UPDATE public.analysis_preflights SET plan_cards_snapshot = jsonb_set(plan_cards_snapshot, '{basic,launchStatus}', '\"test_only\"') WHERE id = $1", 'PLAN_NOT_ALLOWED'],
+    ])('keeps a changed %s invariant in manual review instead of reopening it', async (
+        _name,
+        mutation,
+        expectedCode
+    ) => {
+        await admit();
+        await makeAdmissionReady();
+        const lease = await claim();
+        await db.query(mutation, [PREFLIGHT]);
+        await expect(asService<{ fulfillment_status: string }>(
+            'SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)',
+            [ORDER, CLAIM, lease.lease_fence]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'manual_review',
+        }] });
+        expect((await db.query<{ last_error_code: string }>(
+            'SELECT last_error_code FROM public.earlybird_fulfillments WHERE order_id = $1',
+            [ORDER]
+        )).rows[0].last_error_code).toBe(expectedCode);
+    });
+
+    it('recovers one legacy stale snapshot conflict with a manual-review CAS', async () => {
+        await admit();
+        await makeAdmissionReady();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_refreshed_at = pg_catalog.clock_timestamp() - INTERVAL '2 minutes 1 second'
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review', lease_token = NULL, lease_expires_at = NULL,
+                 last_error_code = 'SNAPSHOT_CONFLICT',
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'expired', expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second'
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+        const manualReviewAt = (await db.query<{ manual_review_at: string }>(
+            'SELECT manual_review_at FROM public.earlybird_fulfillments WHERE order_id = $1',
+            [ORDER]
+        )).rows[0].manual_review_at;
+
+        await expect(asService(
+            `SELECT * FROM public.recover_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, '2026-01-01T00:00:00.000Z']
+        )).rejects.toThrow(/EARLYBIRD_FRESHNESS_RECOVERY_CAS_MISMATCH/);
+        await expect(asService<{
+            fulfillment_status: string;
+            preflight_id: string;
+        }>(
+            `SELECT * FROM public.recover_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).resolves.toMatchObject({ rows: [{
+            fulfillment_status: 'retryable_failure', preflight_id: PREFLIGHT,
+        }] });
+        expect((await db.query<{
+            status: string;
+            manual_review_at: string | null;
+            last_error_code: string;
+        }>(
+            `SELECT status, manual_review_at, last_error_code
+             FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'retryable_failure',
+            manual_review_at: null,
+            last_error_code: 'ADMISSION_FRESHNESS_EXPIRED',
+        });
+        await expect(asService(
+            `SELECT * FROM public.recover_earlybird_freshness_snapshot_conflict(
+                $1, $2::TIMESTAMPTZ
+            )`,
+            [ORDER, manualReviewAt]
+        )).rejects.toThrow(/EARLYBIRD_FRESHNESS_RECOVERY_STATE_INVALID/);
     });
 
     it('recovers expired claims and reconciles completed requests without admitting others', async () => {
