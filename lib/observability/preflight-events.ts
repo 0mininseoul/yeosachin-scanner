@@ -6,15 +6,28 @@ import type {
 import type { OperationalRequestContext } from './request';
 import { operationalLogger } from './server';
 
+const PREFLIGHT_WORKER_ERROR_CODES: Record<
+    PreflightWorkerFailureClassification['category'],
+    string
+> = {
+    auth: 'PROVIDER_ERROR',
+    circuit: 'PROVIDER_ERROR',
+    http: 'PROVIDER_ERROR',
+    rate_limit: 'RATE_LIMITED',
+    schema: 'PROVIDER_ERROR',
+    timeout: 'TIMEOUT',
+    transport: 'PROVIDER_ERROR',
+    configuration: 'JOB_DISPATCH_NOT_READY',
+    persistence: 'PREFLIGHT_PERSISTENCE_ERROR',
+    provider: 'PROVIDER_ERROR',
+    run_pending: 'PROVIDER_ERROR',
+    unknown: 'UNKNOWN',
+};
+
 export function preflightWorkerErrorCode(
     category: PreflightWorkerFailureClassification['category'],
 ): string {
-    if (category === 'rate_limit') return 'RATE_LIMITED';
-    if (category === 'timeout') return 'TIMEOUT';
-    if (category === 'configuration') return 'JOB_DISPATCH_NOT_READY';
-    if (category === 'persistence') return 'INTERNAL_ERROR';
-    if (category === 'unknown') return 'UNKNOWN';
-    return 'PROVIDER_ERROR';
+    return PREFLIGHT_WORKER_ERROR_CODES[category];
 }
 
 function observationFields(
@@ -59,7 +72,11 @@ export function emitPreflightProcessObservation(
             fields: {
                 ...fields,
                 ...(observation.requiredPlan ? { plan_id: observation.requiredPlan } : {}),
-                ...(observation.errorCode ? { error_code: observation.errorCode } : {}),
+                ...(observation.failureCategory
+                    ? { error_code: preflightWorkerErrorCode(observation.failureCategory) }
+                    : observation.errorCode
+                        ? { error_code: observation.errorCode }
+                        : {}),
                 disposition: observation.outcome,
             },
         });

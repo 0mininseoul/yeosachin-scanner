@@ -118,8 +118,9 @@ describe('V2 shared result service', () => {
         })).toThrow('INVALID_V2_SHARE_IMAGE_INPUT');
     });
 
-    it('returns a shared-only masked DTO while preserving public bio copy', async () => {
-        const loadPage = vi.fn(async () => page());
+    it('returns a shared-only masked DTO without exposing the owner bio', async () => {
+        const ownerPage = page();
+        const loadPage = vi.fn(async () => ownerPage);
         const service = createV2ShareResultService({
             createStore: imageProxySigner => {
                 expect(imageProxySigner('ignored', {
@@ -142,7 +143,6 @@ describe('V2 shared result service', () => {
         expect(shared?.femaleAccounts[0]).toMatchObject({
             handleMasked: expect.stringMatching(/^vi[^A-Za-z0-9._]+$/),
             fullNameMasked: expect.stringMatching(/^[^표시이름]+$/),
-            bio: '공개 bio',
         });
         expect(shared?.privateAccounts[0]).toMatchObject({
             handleMasked: expect.stringMatching(/^vi[^A-Za-z0-9._]+$/),
@@ -154,6 +154,7 @@ describe('V2 shared result service', () => {
         expect(shared?.femaleAccounts[0]).not.toHaveProperty('instagramId');
         expect(shared?.femaleAccounts[0]).not.toHaveProperty('fullName');
         expect(shared?.femaleAccounts[0]).not.toHaveProperty('instagramUrl');
+        expect(shared?.femaleAccounts[0]).not.toHaveProperty('bio');
         expect(shared?.privateAccounts[0]).not.toHaveProperty('instagramId');
         expect(shared?.privateAccounts[0]).not.toHaveProperty('fullName');
         expect(shared?.privateAccounts[0]).not.toHaveProperty('instagramUrl');
@@ -166,10 +167,11 @@ describe('V2 shared result service', () => {
             '비공개 이름',
             'candidate:one',
             'candidate:two',
+            '공개 bio',
         ]) {
             expect(serialized).not.toContain(secretValue);
         }
-        expect(serialized).toContain('공개 bio');
+        expect(ownerPage.femaleAccounts[0]).toHaveProperty('bio', '공개 bio');
         expect(loadPage).toHaveBeenCalledWith({
             requestId,
             userId,
@@ -177,6 +179,56 @@ describe('V2 shared result service', () => {
             privateCursor: undefined,
             pageSize: 24,
         });
+    });
+
+    it('does not let owner fields override generated shared identity fields', async () => {
+        const ownerPage = page();
+        Object.assign(ownerPage.femaleAccounts[0], {
+            accountKey: `account_${'z'.repeat(43)}`,
+            handleMasked: 'raw.owner.handle',
+            fullNameMasked: '원본 소유자 이름',
+        });
+        const service = createV2ShareResultService({
+            createStore: () => ({ loadPage: async () => ownerPage }),
+        });
+
+        const shared = await service.loadPage({
+            requestId,
+            ownerUserId: userId,
+            shareToken: token,
+        });
+
+        expect(shared?.femaleAccounts[0]).toMatchObject({
+            accountKey: expect.stringMatching(/^account_[A-Za-z0-9_-]{43}$/),
+            handleMasked: expect.stringMatching(/^vi[^A-Za-z0-9._]+$/),
+            fullNameMasked: expect.stringMatching(/^[^표시이름]+$/),
+        });
+        expect(shared?.femaleAccounts[0]?.accountKey).not.toBe(
+            `account_${'z'.repeat(43)}`
+        );
+        expect(JSON.stringify(shared)).not.toContain('raw.owner.handle');
+        expect(JSON.stringify(shared)).not.toContain('원본 소유자 이름');
+    });
+
+    it('drops unexpected owner-only fields before validating the shared DTO', async () => {
+        const ownerPage = page();
+        Object.assign(ownerPage.femaleAccounts[0], {
+            ownerOnlySecret: 'must-never-reach-anonymous-readers',
+        });
+        const service = createV2ShareResultService({
+            createStore: () => ({ loadPage: async () => ownerPage }),
+        });
+
+        const shared = await service.loadPage({
+            requestId,
+            ownerUserId: userId,
+            shareToken: token,
+        });
+
+        expect(shared?.femaleAccounts[0]).not.toHaveProperty('ownerOnlySecret');
+        expect(JSON.stringify(shared)).not.toContain(
+            'must-never-reach-anonymous-readers'
+        );
     });
 
     it('wraps owner cursors in a share-token-bound opaque cursor', async () => {
@@ -242,7 +294,6 @@ describe('V2 shared result service', () => {
                 handleMasked: 'vi••••',
                 fullNameMasked: '•• ••',
                 profileImage: null,
-                bio: '공개 bio',
                 displayScore: 8.1,
                 riskBand: 'high_risk',
                 featuredRank: 1,
@@ -271,6 +322,13 @@ describe('V2 shared result service', () => {
                 instagramId: 'must.not.leak',
             }],
         }).success).toBe(false);
+        expect(v2SharedResultPageSchema.safeParse({
+            ...sharedShape,
+            femaleAccounts: [{
+                ...sharedShape.femaleAccounts[0],
+                bio: '공개 bio',
+            }],
+        }).success).toBe(false);
     });
 
     it('rejects a shared DTO that carries a raw candidate id image path', () => {
@@ -285,7 +343,6 @@ describe('V2 shared result service', () => {
                 profileImage:
                     `/api/share/${token}/image`
                     + '?kind=female&candidateId=candidate%3Aone',
-                bio: '공개 bio',
                 displayScore: 8.1,
                 riskBand: 'high_risk',
                 featuredRank: 1,
