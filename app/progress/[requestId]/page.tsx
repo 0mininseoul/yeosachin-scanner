@@ -345,10 +345,14 @@ export default function ProgressPage({ params }: PageProps) {
                         block's optical centre below the ring's. */}
                     <div className="absolute inset-0 flex flex-col items-center justify-center">
                         <span className="num flex items-baseline text-fg">
-                            <span className="text-[44px] font-black leading-none tracking-[-0.03em]">
+                            {/* Lighter than the report's verdict number on
+                                purpose: this one is a status while you wait, not
+                                a finding, and at black it shouted over a screen
+                                whose job is to be calm. */}
+                            <span className="text-[44px] font-bold leading-none tracking-[-0.03em]">
                                 {Math.round(data.progress)}
                             </span>
-                            <span className="ml-0.5 text-[17px] font-bold leading-none text-fg-dim">%</span>
+                            <span className="ml-0.5 text-[17px] font-semibold leading-none text-fg-dim">%</span>
                         </span>
                         <span className="mt-2 text-[11.5px] font-semibold leading-none text-fg-dim">
                             {activeTrackLabel}
