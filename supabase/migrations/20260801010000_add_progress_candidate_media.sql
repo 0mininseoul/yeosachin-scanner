@@ -36,6 +36,12 @@ ALTER TABLE public.analysis_v2_active_profile_heartbeats
     ADD COLUMN feed_image_urls TEXT[] NOT NULL DEFAULT '{}'::TEXT[];
 
 ALTER TABLE public.analysis_v2_active_profile_heartbeats
+    ADD COLUMN candidate_key TEXT,
+    ADD CONSTRAINT analysis_v2_active_profile_candidate_key_check CHECK (
+        candidate_key IS NULL OR candidate_key ~ '^[a-f0-9]{64}$'
+    );
+
+ALTER TABLE public.analysis_v2_active_profile_heartbeats
     ADD CONSTRAINT analysis_v2_active_profile_feed_images_check CHECK (
         public.analysis_v2_valid_active_profile_feed_image_urls(feed_image_urls)
     );
@@ -53,7 +59,8 @@ CREATE FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat(
     p_total_count INTEGER,
     p_masked_username TEXT,
     p_image_url TEXT DEFAULT NULL,
-    p_feed_image_urls TEXT[] DEFAULT '{}'::TEXT[]
+    p_feed_image_urls TEXT[] DEFAULT '{}'::TEXT[],
+    p_candidate_key TEXT DEFAULT NULL
 )
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -85,6 +92,10 @@ BEGIN
        )
        OR NOT public.analysis_v2_valid_active_profile_feed_image_urls(
             p_feed_image_urls
+       )
+       OR (
+            p_candidate_key IS NOT NULL
+            AND p_candidate_key !~ '^[a-f0-9]{64}$'
        ) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_V2_PROGRESS_INVALID', ERRCODE = 'P0001';
@@ -115,10 +126,12 @@ BEGIN
 
     INSERT INTO public.analysis_v2_active_profile_heartbeats (
         request_id, job_key, job_input_hash, claim_token, started_at,
-        completed_count, total_count, masked_username, image_url, feed_image_urls, updated_at
+        completed_count, total_count, masked_username, image_url,
+        feed_image_urls, candidate_key, updated_at
     ) VALUES (
         p_request_id, p_job_key, p_job_input_hash, p_claim_token, p_started_at,
-        0, p_total_count, p_masked_username, p_image_url, p_feed_image_urls, v_now
+        0, p_total_count, p_masked_username, p_image_url,
+        p_feed_image_urls, p_candidate_key, v_now
     )
     ON CONFLICT (request_id, job_key) DO UPDATE
     SET job_input_hash = EXCLUDED.job_input_hash,
@@ -133,6 +146,7 @@ BEGIN
         masked_username = EXCLUDED.masked_username,
         image_url = EXCLUDED.image_url,
         feed_image_urls = EXCLUDED.feed_image_urls,
+        candidate_key = EXCLUDED.candidate_key,
         updated_at = EXCLUDED.updated_at
     WHERE EXCLUDED.claim_token
             IS DISTINCT FROM public.analysis_v2_active_profile_heartbeats.claim_token
@@ -149,10 +163,10 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat(
-    UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT, TEXT[]
+    UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT, TEXT[], TEXT
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat(
-    UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT, TEXT[]
+    UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT, TEXT[], TEXT
 ) TO service_role;
 
 CREATE OR REPLACE FUNCTION public.load_analysis_v2_progress(
@@ -199,11 +213,17 @@ BEGIN
     IF NOT FOUND THEN RETURN NULL; END IF;
 
     IF v_state.status = 'processing' THEN
-        SELECT pg_catalog.jsonb_build_object(
-            'maskedUsername', heartbeat.masked_username,
-            'imageUrl', heartbeat.image_url,
-            'feedImageUrls', heartbeat.feed_image_urls
-        )
+        SELECT
+            pg_catalog.jsonb_build_object(
+                'maskedUsername', heartbeat.masked_username,
+                'imageUrl', heartbeat.image_url,
+                'feedImageUrls', heartbeat.feed_image_urls
+            ) || CASE
+                WHEN heartbeat.candidate_key IS NULL THEN '{}'::JSONB
+                ELSE pg_catalog.jsonb_build_object(
+                    'candidateKey', heartbeat.candidate_key
+                )
+            END
         INTO v_active_profile
         FROM public.analysis_v2_active_profile_heartbeats AS heartbeat
         JOIN public.analysis_pipeline_jobs AS job

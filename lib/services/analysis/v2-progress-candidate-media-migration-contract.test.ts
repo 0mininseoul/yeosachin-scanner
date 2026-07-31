@@ -24,15 +24,27 @@ describe('V2 progress candidate-media migration contract', () => {
         expect(migration).not.toMatch(/CREATE\s+TABLE/i);
     });
 
+    it('adds only a nullable opaque candidate key with an exact lowercase digest check', () => {
+        const migration = readFileSync(migrationPath, 'utf8');
+        expect(migration).toContain('ADD COLUMN candidate_key TEXT');
+        expect(migration).toContain('analysis_v2_active_profile_candidate_key_check');
+        expect(migration).toContain("candidate_key ~ '^[a-f0-9]{64}$'");
+        expect(migration).not.toMatch(/raw_username|instagram_username/i);
+        expect(migration).not.toMatch(/candidate_key\s+TEXT\s+NOT NULL/i);
+    });
+
     it('replaces the exact heartbeat signature without retaining an overload', () => {
         const migration = readFileSync(migrationPath, 'utf8');
         expect(migration).toContain(
             'DROP FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat(\n    UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT\n);'
         );
         expect(migration).toContain('p_feed_image_urls TEXT[] DEFAULT \'{}\'::TEXT[]');
+        expect(migration).toContain('p_candidate_key TEXT DEFAULT NULL');
         expect(migration).toContain(
-            'UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT, TEXT[]'
+            'UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT, TEXT[], TEXT'
         );
+        expect(migration.match(/DROP FUNCTION public\.checkpoint_analysis_v2_active_profile_heartbeat/g))
+            .toHaveLength(1);
         expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat');
     });
 
@@ -47,6 +59,7 @@ describe('V2 progress candidate-media migration contract', () => {
             'EXCLUDED.started_at\n                > public.analysis_v2_active_profile_heartbeats.started_at',
         ]) expect(migration).toContain(fence);
         expect(migration).toContain('feed_image_urls = EXCLUDED.feed_image_urls');
+        expect(migration).toContain('candidate_key = EXCLUDED.candidate_key');
     });
 
     it('overlays only the latest live heartbeat media through the owner-scoped loader', () => {
@@ -54,6 +67,8 @@ describe('V2 progress candidate-media migration contract', () => {
         expect(migration).toContain('CREATE OR REPLACE FUNCTION public.load_analysis_v2_progress');
         expect(migration).toContain('analysis_request.user_id = p_user_id');
         expect(migration).toContain("'feedImageUrls', heartbeat.feed_image_urls");
+        expect(migration).toContain("'candidateKey', heartbeat.candidate_key");
+        expect(migration).toContain('WHEN heartbeat.candidate_key IS NULL THEN');
         expect(migration).toContain('job.lease_expires_at > pg_catalog.clock_timestamp()');
         expect(migration).toContain(
             'ORDER BY heartbeat.started_at DESC, heartbeat.updated_at DESC, heartbeat.job_key DESC'
