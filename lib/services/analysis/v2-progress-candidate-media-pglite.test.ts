@@ -1,0 +1,357 @@
+import { readFileSync } from 'node:fs';
+import { PGlite, type Results } from '@electric-sql/pglite';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+const migration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801010000_add_progress_candidate_media.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
+const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
+const OWNER_ID = '22222222-2222-4222-8222-222222222222';
+const OTHER_USER_ID = '33333333-3333-4333-8333-333333333333';
+const CLAIM_A = '44444444-4444-4444-8444-444444444444';
+const CLAIM_B = '55555555-5555-4555-8555-555555555555';
+const HASH = 'a'.repeat(64);
+const JOB_A = 'track:profile-ai:batch:0';
+const JOB_B = 'track:profiles:batch:1';
+
+function at(offsetMilliseconds = 0): string {
+    return new Date(Date.now() + offsetMilliseconds).toISOString();
+}
+
+let db: PGlite;
+
+async function asService<T>(sql: string, params: unknown[] = []): Promise<Results<T>> {
+    await db.exec('SET ROLE service_role');
+    try {
+        return await db.query<T>(sql, params);
+    } finally {
+        await db.exec('RESET ROLE');
+    }
+}
+
+async function heartbeat(input: {
+    jobKey?: string;
+    claimToken?: string;
+    inputHash?: string;
+    startedAt?: string;
+    totalCount?: number;
+    feedImageUrls?: string[];
+    omitFeedImageUrls?: boolean;
+} = {}): Promise<boolean> {
+    const values = [
+        REQUEST_ID,
+        input.jobKey ?? JOB_A,
+        input.claimToken ?? CLAIM_A,
+        input.inputHash ?? HASH,
+        input.startedAt ?? at(),
+        input.totalCount ?? 2,
+        'c******e',
+        '/api/image-proxy?token=profile',
+    ];
+    const result = input.omitFeedImageUrls
+        ? await asService<{ checkpoint_analysis_v2_active_profile_heartbeat: boolean }>(
+            `SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
+                $1, $2, $3, $4, $5, $6, $7, $8
+            )`, values
+        )
+        : await asService<{ checkpoint_analysis_v2_active_profile_heartbeat: boolean }>(
+            `SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
+                $1, $2, $3, $4, $5, $6, $7, $8, $9
+            )`, [...values, input.feedImageUrls ?? []]
+        );
+    return result.rows[0]!.checkpoint_analysis_v2_active_profile_heartbeat;
+}
+
+async function seed(): Promise<void> {
+    await db.query(
+        `INSERT INTO public.analysis_requests (id, user_id, pipeline_version, status)
+         VALUES ($1, $2, 'v2', 'processing')`, [REQUEST_ID, OWNER_ID]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_progress_state (request_id, status, snapshot)
+         VALUES ($1, 'processing', '{"activeProfile":null}')`, [REQUEST_ID]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_pipeline_jobs (
+            request_id, job_key, status, input_hash, lease_token, lease_expires_at
+         ) VALUES
+            ($1, $2, 'processing', $3, $4, pg_catalog.clock_timestamp() + INTERVAL '5 minutes'),
+            ($1, $5, 'processing', $3, $4, pg_catalog.clock_timestamp() + INTERVAL '5 minutes')`,
+        [REQUEST_ID, JOB_A, HASH, CLAIM_A, JOB_B]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_dag_batch_topology (
+            request_id, topology_kind, batch, item_count
+         ) VALUES ($1, 'profile', 0, 2), ($1, 'profile', 1, 2)`, [REQUEST_ID]
+    );
+    await db.query(
+        `INSERT INTO public.analysis_progress_events (request_id, seq, event_json)
+         VALUES ($1, 1, '{"schemaVersion":1,"seq":1,"eventCode":"PROFILE_SCREENED"}')`,
+        [REQUEST_ID]
+    );
+}
+
+describe('V2 progress candidate-media migration PGlite contract', () => {
+    beforeAll(async () => {
+        db = await PGlite.create();
+        await db.exec(`
+            CREATE ROLE anon NOLOGIN;
+            CREATE ROLE authenticated NOLOGIN;
+            CREATE ROLE service_role NOLOGIN;
+            CREATE TABLE public.analysis_requests (
+                id UUID PRIMARY KEY, user_id UUID NOT NULL,
+                pipeline_version TEXT NOT NULL, status TEXT NOT NULL
+            );
+            CREATE TABLE public.analysis_pipeline_jobs (
+                request_id UUID NOT NULL, job_key TEXT NOT NULL, status TEXT NOT NULL,
+                input_hash TEXT NOT NULL, lease_token UUID,
+                lease_expires_at TIMESTAMP WITH TIME ZONE,
+                PRIMARY KEY (request_id, job_key)
+            );
+            CREATE TABLE public.analysis_v2_dag_batch_topology (
+                request_id UUID NOT NULL, topology_kind TEXT NOT NULL,
+                batch INTEGER NOT NULL, item_count INTEGER NOT NULL,
+                PRIMARY KEY (request_id, topology_kind, batch)
+            );
+            CREATE TABLE public.analysis_v2_active_profile_heartbeats (
+                request_id UUID NOT NULL, job_key TEXT NOT NULL, job_input_hash TEXT NOT NULL,
+                claim_token UUID NOT NULL, started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                completed_count SMALLINT NOT NULL DEFAULT 0, total_count SMALLINT NOT NULL,
+                masked_username TEXT NOT NULL, image_url TEXT, updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                PRIMARY KEY (request_id, job_key),
+                FOREIGN KEY (request_id, job_key)
+                    REFERENCES public.analysis_pipeline_jobs(request_id, job_key)
+            );
+            ALTER TABLE public.analysis_v2_active_profile_heartbeats ENABLE ROW LEVEL SECURITY;
+            ALTER TABLE public.analysis_v2_active_profile_heartbeats FORCE ROW LEVEL SECURITY;
+            REVOKE ALL ON TABLE public.analysis_v2_active_profile_heartbeats
+                FROM PUBLIC, anon, authenticated, service_role;
+            CREATE TABLE public.analysis_progress_state (
+                request_id UUID PRIMARY KEY, status TEXT NOT NULL, snapshot JSONB NOT NULL
+            );
+            CREATE TABLE public.analysis_progress_events (
+                request_id UUID NOT NULL, seq BIGINT NOT NULL, event_json JSONB NOT NULL,
+                PRIMARY KEY (request_id, seq)
+            );
+            CREATE FUNCTION public.analysis_v2_progress_snapshot_json(
+                p_state public.analysis_progress_state
+            ) RETURNS JSONB LANGUAGE sql AS $$ SELECT p_state.snapshot $$;
+            CREATE FUNCTION public.analysis_v2_progress_event_json(
+                p_event public.analysis_progress_events
+            ) RETURNS JSONB LANGUAGE sql AS $$ SELECT p_event.event_json $$;
+            CREATE FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat(
+                UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT
+            ) RETURNS BOOLEAN LANGUAGE sql AS $$ SELECT TRUE $$;
+            CREATE OR REPLACE FUNCTION public.analysis_v2_purge_terminal_active_profile_heartbeat()
+            RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+            BEGIN
+                IF NEW.status IN ('completed', 'failed', 'cancelled')
+                   AND OLD.status IS DISTINCT FROM NEW.status THEN
+                    DELETE FROM public.analysis_v2_active_profile_heartbeats AS heartbeat
+                    WHERE heartbeat.request_id = NEW.request_id AND heartbeat.job_key = NEW.job_key;
+                END IF;
+                RETURN NULL;
+            END;
+            $$;
+            CREATE TRIGGER analysis_v2_active_profile_terminal_purge
+            AFTER UPDATE OF status ON public.analysis_pipeline_jobs
+            FOR EACH ROW EXECUTE FUNCTION public.analysis_v2_purge_terminal_active_profile_heartbeat();
+        `);
+        await db.exec(migration);
+    }, 30_000);
+
+    beforeEach(async () => {
+        await db.exec(`TRUNCATE public.analysis_progress_events,
+            public.analysis_v2_active_profile_heartbeats,
+            public.analysis_v2_dag_batch_topology,
+            public.analysis_pipeline_jobs,
+            public.analysis_progress_state,
+            public.analysis_requests`);
+        await seed();
+    });
+
+    afterAll(async () => { await db.close(); });
+
+    it('stores only a bounded, unique proxy-path array in the existing heartbeat table', async () => {
+        await expect(heartbeat({ feedImageUrls: [
+            '/api/image-proxy?token=one', '/api/image-proxy?token=two', '/api/image-proxy?token=three',
+        ] })).resolves.toBe(true);
+        await expect(db.query(`UPDATE public.analysis_v2_active_profile_heartbeats
+            SET feed_image_urls = ARRAY['/api/image-proxy?token=one', NULL]
+            WHERE request_id = $1 AND job_key = $2`,
+        [REQUEST_ID, JOB_A])).rejects.toThrow();
+        await expect(db.query(`UPDATE public.analysis_v2_active_profile_heartbeats
+            SET feed_image_urls = NULL
+            WHERE request_id = $1 AND job_key = $2`,
+        [REQUEST_ID, JOB_A])).rejects.toThrow();
+        for (const invalid of [
+            `ARRAY['https://raw.example/image.jpg']`,
+            `ARRAY['/api/image-proxy?token=1','/api/image-proxy?token=2','/api/image-proxy?token=3','/api/image-proxy?token=4']`,
+            `ARRAY['/api/image-proxy?token=duplicate','/api/image-proxy?token=duplicate']`,
+        ]) {
+            await expect(db.query(`UPDATE public.analysis_v2_active_profile_heartbeats
+                SET feed_image_urls = ${invalid} WHERE request_id = $1 AND job_key = $2`,
+            [REQUEST_ID, JOB_A])).rejects.toThrow();
+        }
+        const tables = await db.query<{ tablename: string }>(
+            "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename"
+        );
+        expect(tables.rows.map(row => row.tablename)).toEqual([
+            'analysis_pipeline_jobs',
+            'analysis_progress_events',
+            'analysis_progress_state',
+            'analysis_requests',
+            'analysis_v2_active_profile_heartbeats',
+            'analysis_v2_dag_batch_topology',
+        ]);
+    });
+
+    it('rejects non-canonical array dimensions through the controlled validator', async () => {
+        await expect(db.query<{ valid: boolean }>(`
+            SELECT public.analysis_v2_valid_active_profile_feed_image_urls(
+                '[0:1]={"/api/image-proxy?token=one","/api/image-proxy?token=two"}'::TEXT[]
+            ) AS valid
+        `)).resolves.toMatchObject({ rows: [{ valid: false }] });
+        await expect(db.query<{ valid: boolean }>(`
+            SELECT public.analysis_v2_valid_active_profile_feed_image_urls(
+                ARRAY[['/api/image-proxy?token=one', '/api/image-proxy?token=two']]
+            ) AS valid
+        `)).resolves.toMatchObject({ rows: [{ valid: false }] });
+        const heartbeatArgs = [
+            REQUEST_ID, JOB_A, CLAIM_A, HASH, at(), 2, 'c******e', '/api/image-proxy?token=profile',
+        ];
+        await expect(asService(`
+            SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                '[0:1]={"/api/image-proxy?token=one","/api/image-proxy?token=two"}'::TEXT[]
+            )
+        `, heartbeatArgs)).rejects.toThrow(/ANALYSIS_V2_PROGRESS_INVALID/);
+        await expect(asService(`
+            SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                ARRAY[['/api/image-proxy?token=one', '/api/image-proxy?token=two']]
+            )
+        `, heartbeatArgs)).rejects.toThrow(/ANALYSIS_V2_PROGRESS_INVALID/);
+    });
+
+    it('replaces the old signature, keeps old callers working, and stores new media', async () => {
+        const signatures = await db.query<{ args: string }>(`
+            SELECT pg_catalog.pg_get_function_identity_arguments(proc.oid) AS args
+            FROM pg_catalog.pg_proc AS proc
+            WHERE proc.pronamespace = 'public'::pg_catalog.regnamespace
+              AND proc.proname = 'checkpoint_analysis_v2_active_profile_heartbeat'
+        `);
+        expect(signatures.rows).toHaveLength(1);
+        expect(signatures.rows[0]!.args).toContain('p_feed_image_urls text[]');
+        await expect(heartbeat({ omitFeedImageUrls: true })).resolves.toBe(true);
+        await expect(heartbeat({
+            startedAt: at(1_000),
+            feedImageUrls: ['/api/image-proxy?token=feed'],
+        })).resolves.toBe(true);
+        await expect(db.query<{ feed_image_urls: string[] }>(
+            'SELECT feed_image_urls FROM public.analysis_v2_active_profile_heartbeats WHERE request_id = $1 AND job_key = $2',
+            [REQUEST_ID, JOB_A]
+        )).resolves.toMatchObject({ rows: [{ feed_image_urls: ['/api/image-proxy?token=feed'] }] });
+    });
+
+    it('preserves the exact job, hash, claim, lease, topology, and idempotency fences', async () => {
+        const startedAt = at();
+        await expect(heartbeat({ startedAt })).resolves.toBe(true);
+        await expect(heartbeat({ startedAt })).resolves.toBe(false);
+        await expect(heartbeat({ startedAt: at(1_000) })).resolves.toBe(true);
+        await db.query('UPDATE public.analysis_pipeline_jobs SET lease_token = $1 WHERE request_id = $2 AND job_key = $3', [CLAIM_B, REQUEST_ID, JOB_A]);
+        await expect(heartbeat({ claimToken: CLAIM_B, startedAt: at(-1_000) })).resolves.toBe(true);
+        await expect(heartbeat({ claimToken: CLAIM_A })).rejects.toThrow(/ANALYSIS_V2_PROGRESS_FENCE_MISMATCH/);
+        await expect(heartbeat({ claimToken: CLAIM_B, inputHash: 'b'.repeat(64) })).rejects.toThrow(/ANALYSIS_V2_PROGRESS_FENCE_MISMATCH/);
+        await expect(heartbeat({ claimToken: CLAIM_B, totalCount: 3 })).rejects.toThrow(/ANALYSIS_V2_PROGRESS_TOPOLOGY_MISMATCH/);
+        await db.query(`UPDATE public.analysis_pipeline_jobs SET lease_expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second'
+            WHERE request_id = $1 AND job_key = $2`, [REQUEST_ID, JOB_A]);
+        await expect(heartbeat({ claimToken: CLAIM_B })).rejects.toThrow(/ANALYSIS_V2_PROGRESS_FENCE_MISMATCH/);
+    });
+
+    it('owner-scopes the loader and overlays media from only the latest live heartbeat', async () => {
+        await heartbeat({ feedImageUrls: ['/api/image-proxy?token=older'] });
+        await heartbeat({
+            jobKey: JOB_B,
+            startedAt: at(1_000),
+            feedImageUrls: ['/api/image-proxy?token=latest'],
+        });
+        const owner = await asService<{ load_analysis_v2_progress: {
+            snapshot: { activeProfile: unknown };
+            events: Array<{ schemaVersion: number; seq: number; eventCode: string }>;
+        } }>(
+            'SELECT public.load_analysis_v2_progress($1, $2)', [REQUEST_ID, OWNER_ID]
+        );
+        expect(owner.rows[0]!.load_analysis_v2_progress.snapshot.activeProfile).toEqual({
+            maskedUsername: 'c******e', imageUrl: '/api/image-proxy?token=profile',
+            feedImageUrls: ['/api/image-proxy?token=latest'],
+        });
+        expect(owner.rows[0]!.load_analysis_v2_progress.events).toEqual([
+            { schemaVersion: 1, seq: 1, eventCode: 'PROFILE_SCREENED' },
+        ]);
+        const afterEvent = await asService<{ load_analysis_v2_progress: { events: unknown[] } }>(
+            'SELECT public.load_analysis_v2_progress($1, $2, 1)', [REQUEST_ID, OWNER_ID]
+        );
+        expect(afterEvent.rows[0]!.load_analysis_v2_progress.events).toEqual([]);
+        const other = await asService<{ load_analysis_v2_progress: unknown }>(
+            'SELECT public.load_analysis_v2_progress($1, $2)', [REQUEST_ID, OTHER_USER_ID]
+        );
+        expect(other.rows[0]!.load_analysis_v2_progress).toBeNull();
+        await db.query(`UPDATE public.analysis_pipeline_jobs
+            SET lease_expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second'
+            WHERE request_id = $1 AND job_key = $2`, [REQUEST_ID, JOB_B]);
+        const expired = await asService<{ load_analysis_v2_progress: { snapshot: { activeProfile: unknown } } }>(
+            'SELECT public.load_analysis_v2_progress($1, $2)', [REQUEST_ID, OWNER_ID]
+        );
+        expect(expired.rows[0]!.load_analysis_v2_progress.snapshot.activeProfile).toEqual({
+            maskedUsername: 'c******e', imageUrl: '/api/image-proxy?token=profile',
+            feedImageUrls: ['/api/image-proxy?token=older'],
+        });
+    });
+
+    it('keeps terminal purge, RLS, and exact service-role-only RPC ACLs intact', async () => {
+        await heartbeat({ feedImageUrls: ['/api/image-proxy?token=purge'] });
+        await db.query("UPDATE public.analysis_pipeline_jobs SET status = 'completed' WHERE request_id = $1 AND job_key = $2", [REQUEST_ID, JOB_A]);
+        await expect(db.query('SELECT * FROM public.analysis_v2_active_profile_heartbeats')).resolves.toMatchObject({ rows: [] });
+        const privileges = await db.query<{
+            rpc_service: boolean; rpc_auth: boolean; table_auth: boolean;
+            helper_service: boolean; helper_auth: boolean; helper_anon: boolean;
+            load_service: boolean; load_auth: boolean; load_anon: boolean;
+        }>(`
+            SELECT pg_catalog.has_function_privilege('service_role',
+                       'public.checkpoint_analysis_v2_active_profile_heartbeat(uuid,text,uuid,text,timestamptz,integer,text,text,text[])', 'EXECUTE') AS rpc_service,
+                   pg_catalog.has_function_privilege('authenticated',
+                       'public.checkpoint_analysis_v2_active_profile_heartbeat(uuid,text,uuid,text,timestamptz,integer,text,text,text[])', 'EXECUTE') AS rpc_auth,
+                   pg_catalog.has_table_privilege('authenticated',
+                       'public.analysis_v2_active_profile_heartbeats', 'SELECT') AS table_auth,
+                   pg_catalog.has_function_privilege('service_role',
+                       'public.analysis_v2_valid_active_profile_feed_image_urls(text[])', 'EXECUTE') AS helper_service,
+                   pg_catalog.has_function_privilege('authenticated',
+                       'public.analysis_v2_valid_active_profile_feed_image_urls(text[])', 'EXECUTE') AS helper_auth,
+                   pg_catalog.has_function_privilege('anon',
+                       'public.analysis_v2_valid_active_profile_feed_image_urls(text[])', 'EXECUTE') AS helper_anon,
+                   pg_catalog.has_function_privilege('service_role',
+                       'public.load_analysis_v2_progress(uuid,uuid,bigint,integer)', 'EXECUTE') AS load_service,
+                   pg_catalog.has_function_privilege('authenticated',
+                       'public.load_analysis_v2_progress(uuid,uuid,bigint,integer)', 'EXECUTE') AS load_auth,
+                   pg_catalog.has_function_privilege('anon',
+                       'public.load_analysis_v2_progress(uuid,uuid,bigint,integer)', 'EXECUTE') AS load_anon
+        `);
+        expect(privileges.rows[0]).toEqual({
+            rpc_service: true, rpc_auth: false, table_auth: false,
+            helper_service: false, helper_auth: false, helper_anon: false,
+            load_service: true, load_auth: false, load_anon: false,
+        });
+        const rls = await db.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(`
+            SELECT relrowsecurity, relforcerowsecurity
+            FROM pg_catalog.pg_class
+            WHERE oid = 'public.analysis_v2_active_profile_heartbeats'::pg_catalog.regclass
+        `);
+        expect(rls.rows).toEqual([{ relrowsecurity: true, relforcerowsecurity: true }]);
+    });
+});
