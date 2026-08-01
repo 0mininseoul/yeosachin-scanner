@@ -244,6 +244,13 @@ describe('beta Apify credit reservation migration contract', () => {
         expect(compactSql(hold)).toContain(
             'SELECT grant_row.* INTO v_grant'
         );
+        expect(hold).toContain('FROM public.users AS users');
+        expect(hold.indexOf('FROM public.users AS users')).toBeLessThan(
+            hold.indexOf('FROM public.analysis_preflights AS preflight')
+        );
+        expect(hold.indexOf('FROM public.users AS users')).toBeLessThan(
+            hold.indexOf('FROM public.analysis_beta_access_grants AS grant_row')
+        );
         expect(hold.indexOf('FOR v_locked_snapshot IN')).toBeLessThan(
             hold.indexOf('v_now := pg_catalog.clock_timestamp()')
         );
@@ -256,6 +263,13 @@ describe('beta Apify credit reservation migration contract', () => {
 
         expect(compactSql(activate)).toContain(
             'SELECT grant_row.* INTO v_grant'
+        );
+        expect(activate).toContain('FROM public.users AS users');
+        expect(activate.indexOf('FROM public.users AS users')).toBeLessThan(
+            activate.indexOf('FROM public.analysis_preflights AS preflight')
+        );
+        expect(activate.indexOf('FROM public.users AS users')).toBeLessThan(
+            activate.indexOf('FROM public.analysis_beta_access_grants AS grant_row')
         );
         expect(activate.indexOf('FOR v_locked_snapshot IN')).toBeLessThan(
             activate.indexOf('v_now := pg_catalog.clock_timestamp()')

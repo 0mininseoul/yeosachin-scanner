@@ -437,6 +437,19 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
+    -- Match the repository-wide user -> preflight lock order. The eventual
+    -- allocation insert needs this same KEY SHARE lock for its user FK; taking
+    -- it first avoids a cycle with concurrent user deletion and its cascades.
+    PERFORM users.id
+    FROM public.users AS users
+    WHERE users.id = p_user_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_PREFLIGHT_NOT_ELIGIBLE',
+            ERRCODE = 'P0001';
+    END IF;
+
     SELECT preflight.*
     INTO v_preflight
     FROM public.analysis_preflights AS preflight
@@ -730,6 +743,18 @@ BEGIN
        OR NOT (p_max_snapshot_age_seconds BETWEEN 1 AND 900) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_BETA_ALLOCATION_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    -- Keep user lifecycle operations and every beta admission on the same
+    -- user -> preflight order. The allocation FK later reuses this lock.
+    PERFORM users.id
+    FROM public.users AS users
+    WHERE users.id = p_user_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE',
             ERRCODE = 'P0001';
     END IF;
 
