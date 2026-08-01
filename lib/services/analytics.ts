@@ -113,6 +113,15 @@ const SESSION_REPLAY_MASK_SELECTORS = [
     'option',
     '[contenteditable]',
 ] as const;
+const SESSION_REPLAY_MASK_ATTRIBUTES = [
+    'href',
+    'src',
+    'alt',
+    'title',
+    'aria-label',
+    'value',
+    'placeholder',
+] as const;
 const SESSION_REPLAY_BLOCK_SELECTORS = [
     '.amp-block',
     '[data-amp-block]',
@@ -124,6 +133,7 @@ const SESSION_REPLAY_BLOCK_SELECTORS = [
     'canvas',
     'svg',
 ] as const;
+const SESSION_REPLAY_TRACK_TYPES = new Set(['replay', 'interaction']);
 
 const APPROVED_EVENTS = new Set<AnalyticsEvent>(Object.values(EVENTS));
 
@@ -580,7 +590,7 @@ function isTrustedReplayTrackUrl(value: string): boolean {
             && url.searchParams.getAll('type').length === 1
             && (url.searchParams.get('device_id')?.length ?? 0) > 0
             && /^\d{10,16}$/.test(url.searchParams.get('session_id') ?? '')
-            && url.searchParams.get('type') === 'replay';
+            && SESSION_REPLAY_TRACK_TYPES.has(url.searchParams.get('type') ?? '');
     } catch {
         return false;
     }
@@ -690,6 +700,7 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
                     privacyConfig: {
                         defaultMaskLevel: 'conservative',
                         maskSelector: [...SESSION_REPLAY_MASK_SELECTORS],
+                        maskAttributes: [...SESSION_REPLAY_MASK_ATTRIBUTES],
                         blockSelector: [...SESSION_REPLAY_BLOCK_SELECTORS],
                     },
                     interactionConfig: {

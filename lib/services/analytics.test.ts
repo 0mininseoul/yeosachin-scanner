@@ -5,7 +5,7 @@ import { SessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';
 import { SessionReplayLocalConfig } from '@amplitude/session-replay-browser/lib/cjs/config/local-config.js';
 import { SessionReplayJoinedConfigGenerator } from '@amplitude/session-replay-browser/lib/cjs/config/joined-config.js';
 import { SessionReplay } from '@amplitude/session-replay-browser/lib/cjs/session-replay.js';
-import { getPageUrl } from '@amplitude/session-replay-browser/lib/cjs/helpers.js';
+import { getPageUrl, maskAttributeFn } from '@amplitude/session-replay-browser/lib/cjs/helpers.js';
 
 const amplitudeMocks = vi.hoisted(() => ({
     getUserId: vi.fn(),
@@ -200,6 +200,15 @@ describe('Amplitude analytics adapter', () => {
                 sampleRate: 0,
                     privacyConfig: {
                         defaultMaskLevel: 'conservative',
+                        maskAttributes: [
+                            'href',
+                            'src',
+                            'alt',
+                            'title',
+                            'aria-label',
+                            'value',
+                            'placeholder',
+                        ],
                         maskSelector: [
                             '.amp-mask',
                             '[data-amp-mask]',
@@ -914,6 +923,113 @@ describe('Amplitude analytics adapter', () => {
         });
         expect(JSON.stringify(replayFetch.mock.calls)).not.toContain('X-Client-Url');
         expect(JSON.stringify(replayFetch.mock.calls)).not.toContain('Cookie');
+    });
+
+    it('masks configured sensitive attributes before the replay SDK serializes them', async () => {
+        enableReplayBrowser();
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                privacyConfig: {
+                    defaultMaskLevel: string;
+                    maskAttributes: string[];
+                };
+            };
+        };
+        const attributeMask = maskAttributeFn(
+            options.sessionReplay.privacyConfig,
+            () => 'https://production-alias.example/analyze',
+        );
+        const genericElement = { closest: () => null, tagName: 'A' } as unknown as HTMLElement;
+        const inputElement = { closest: () => null, tagName: 'INPUT' } as unknown as HTMLElement;
+        const rawAttributes = {
+            href: 'https://private.example/target',
+            src: 'https://private.example/avatar.jpg',
+            alt: 'private profile photo',
+            title: 'private tooltip',
+            'aria-label': 'private control',
+            value: 'private input value',
+            placeholder: 'private input hint',
+        };
+        const serializedAttributes = Object.fromEntries(
+            Object.entries(rawAttributes).map(([key, value]) => [
+                key,
+                attributeMask(key, value, key === 'value' || key === 'placeholder' ? inputElement : genericElement),
+            ]),
+        );
+
+        expect(options.sessionReplay.privacyConfig.defaultMaskLevel).toBe('conservative');
+        expect(options.sessionReplay.privacyConfig.maskAttributes).toEqual(
+            expect.arrayContaining(Object.keys(rawAttributes)),
+        );
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private.example');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private profile photo');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private tooltip');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private control');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private input value');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private input hint');
+    });
+
+    it('uploads an exact interaction batch through the replay transport', async () => {
+        enableReplayBrowser();
+        const replayFetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+        vi.stubGlobal('fetch', replayFetch);
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleSendEvents: (request: {
+                    body: string;
+                    headers: Record<string, string>;
+                    keepalive: boolean;
+                    method: 'POST';
+                    url: string;
+                }) => Promise<Response>;
+            };
+        };
+        const url = 'https://api-sr.amplitude.com/sessions/v2/track?device_id=device&session_id=1721234567890&type=interaction';
+
+        const response = await options.sessionReplay.handleSendEvents({
+            body: 'safe-interaction-payload',
+            headers: { Authorization: `Bearer ${API_KEY}` },
+            keepalive: true,
+            method: 'POST',
+            url,
+        });
+
+        expect(response.status).toBe(200);
+        expect(replayFetch).toHaveBeenCalledWith(url, expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('drops a non-allowlisted replay transport type', async () => {
+        enableReplayBrowser();
+        const replayFetch = vi.fn();
+        vi.stubGlobal('fetch', replayFetch);
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleSendEvents: (request: {
+                    body: string;
+                    headers: Record<string, string>;
+                    keepalive: boolean;
+                    method: 'POST';
+                    url: string;
+                }) => Promise<Response>;
+            };
+        };
+
+        const response = await options.sessionReplay.handleSendEvents({
+            body: 'unsafe-payload',
+            headers: { Authorization: `Bearer ${API_KEY}` },
+            keepalive: true,
+            method: 'POST',
+            url: 'https://api-sr.amplitude.com/sessions/v2/track?device_id=device&session_id=1721234567890&type=console',
+        });
+
+        expect(response.status).toBe(204);
+        expect(replayFetch).not.toHaveBeenCalled();
     });
 
     it.each([
