@@ -139,7 +139,7 @@ function AmplitudeReplayRouteObserver() {
 }
 
 export function AmplitudeProvider({ children }: AmplitudeProviderProps) {
-    // useSearchParams makes query-bearing URLs fail closed before they can be replayed.
+    // Eligible-route query and hash values are canonicalized before replay persistence.
     // Only the zero-DOM route observer suspends; the product subtree is mounted exactly once.
     return <AmplitudeProviderClient>{children}</AmplitudeProviderClient>;
 }
