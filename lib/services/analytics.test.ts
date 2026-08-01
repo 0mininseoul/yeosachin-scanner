@@ -99,6 +99,7 @@ describe('Amplitude analytics adapter', () => {
     });
 
     afterEach(() => {
+        vi.useRealTimers();
         vi.unstubAllEnvs();
         vi.unstubAllGlobals();
     });
@@ -475,6 +476,86 @@ describe('Amplitude analytics adapter', () => {
             currentUrl: sensitiveUrl,
             shouldRecord: replay.getShouldRecord(),
         })).toContain('"shouldRecord":false');
+    });
+
+    it('rejects stale cached replay approval when the live config request times out', async () => {
+        enableReplayBrowser();
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', '1');
+        const storage = new Map<string, string>();
+        vi.stubGlobal('localStorage', {
+            getItem: (key: string) => storage.get(key) ?? null,
+            removeItem: (key: string) => storage.delete(key),
+            setItem: (key: string, value: string) => storage.set(key, value),
+        });
+        vi.stubGlobal('document', {
+            createDocumentFragment: () => ({ querySelector: vi.fn() }),
+        });
+        const neverSettles = vi.fn(() => new Promise<Response>(() => undefined));
+        vi.stubGlobal('fetch', neverSettles);
+        storage.set(`AMP_remote_config_${API_KEY.substring(0, 10)}`, JSON.stringify({
+            lastFetch: new Date().toISOString(),
+            remoteConfig: {
+                configs: {
+                    sessionReplay: {
+                        sr_sampling_config: { capture_enabled: true, sample_rate: 1 },
+                        sr_interaction_config: { enabled: true, batch: false },
+                        sr_logging_config: {
+                            console: { enabled: true },
+                            network: { enabled: true, body: { request: true, response: true } },
+                        },
+                        sr_privacy_config: {
+                            defaultMaskLevel: 'light',
+                            unmaskSelector: ['*'],
+                        },
+                    },
+                },
+            },
+        }));
+        const { initAmplitude } = await loadReplayAnalytics();
+        await initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleFetchConfig: (request: {
+                    headers: Record<string, string>;
+                    method: 'GET';
+                    signal?: AbortSignal;
+                    url: string;
+                }) => Promise<Response>;
+                privacyConfig: {
+                    defaultMaskLevel: string;
+                    maskSelector: string[];
+                };
+                sampleRate: number;
+            };
+        };
+        const localConfig = new SessionReplayLocalConfig(API_KEY, {
+            ...options.sessionReplay,
+            logLevel: LogLevel.None,
+        } as never);
+        const remoteClient = new RemoteConfigClient(
+            API_KEY,
+            new Logger(),
+            'US',
+            undefined,
+            options.sessionReplay.handleFetchConfig,
+        );
+        const generator = new SessionReplayJoinedConfigGenerator(remoteClient, localConfig);
+
+        vi.useFakeTimers();
+        const joinedConfigPromise = generator.generateJoinedConfig();
+        await vi.advanceTimersByTimeAsync(1_501);
+        const { joinedConfig, remoteConfig } = await joinedConfigPromise;
+        vi.useRealTimers();
+
+        expect(neverSettles).toHaveBeenCalled();
+        expect(remoteConfig).toBeUndefined();
+        expect(joinedConfig.captureEnabled).toBe(false);
+        expect(joinedConfig.loggingConfig).toBeUndefined();
+        expect(joinedConfig.privacyConfig).toMatchObject({
+            defaultMaskLevel: 'conservative',
+            maskSelector: expect.arrayContaining(['form', '[data-amp-mask]']),
+        });
+        expect(joinedConfig.privacyConfig?.unmaskSelector).not.toContain('*');
     });
 
     it('uses the Vercel rollout sample when trusted upstream config allows capture', async () => {

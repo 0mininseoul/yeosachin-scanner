@@ -50,6 +50,16 @@ describe('Amplitude replay privacy contract', () => {
         expect(analytics).toContain("'[contenteditable]'");
     });
 
+    it('rejects cached replay config in both installed SDK module formats', () => {
+        const patch = source('patches/@amplitude+session-replay-browser+1.47.4.patch');
+
+        expect(patch.match(/source !== 'remote'/g)).toHaveLength(2);
+        expect(patch).toContain('lib/cjs/config/joined-config.js');
+        expect(patch).toContain('lib/esm/config/joined-config.js');
+        expect(patch.indexOf("source !== 'remote'"))
+            .toBeLessThan(patch.indexOf('JSON.stringify(remoteConfig'));
+    });
+
     it('masks core route containers while retaining private and media blocks', () => {
         const landing = source('app/page.tsx');
         const analyze = source('app/analyze/page.tsx');
