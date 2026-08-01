@@ -125,6 +125,13 @@ export interface ProviderRunCheckpoint
         maxChargeUsd: number;
     }): void | Promise<void>;
     onRunStarted?(runId: string): void | Promise<void>;
+    /**
+     * Internal, adopted-dataset-only allowance. It is emitted exclusively by
+     * `adoptedProviderCheckpoint` for a cross-count relationship adoption.
+     */
+    allowAdoptedRelationshipTruncation?: true;
+    /** Source declared count paired with the adopted-only allowance above. */
+    adoptedRelationshipSourceDeclaredCount?: number;
 }
 
 /** Serializable subset stored with an analysis request. */
@@ -168,6 +175,10 @@ export interface ProviderCallContext
         maxChargeUsd: number;
     }): void | Promise<void>;
     onRunStarted?(runId: string): void | Promise<void>;
+    /** Internal, adopted-dataset-only allowance; never set for a live run. */
+    allowAdoptedRelationshipTruncation?: true;
+    /** Source declared count paired with the adopted-only allowance above. */
+    adoptedRelationshipSourceDeclaredCount?: number;
     onProfileStart?(username: string): void | Promise<void>;
     onProfileResolved?(): void | Promise<void>;
     recordUsage(delta: ProviderUsageDelta): void;

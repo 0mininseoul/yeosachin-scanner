@@ -124,6 +124,19 @@ function mockBatchedClient(batches: Array<Array<Record<string, unknown>>>) {
     return { actor, run, dataset } as unknown as ApifyClientLike;
 }
 
+function adoptedRelationshipContext() {
+    return {
+        resumeRunId: 'AdoptedRun12345',
+        logicalProvider: 'apify' as const,
+        actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+        credentialSlot: 'primary' as const,
+        maxChargeUsd: 0.2,
+        allowAdoptedRelationshipTruncation: true as const,
+        adoptedRelationshipSourceDeclaredCount: 233,
+        recordUsage: vi.fn(),
+    };
+}
+
 describe('apifyProvider', () => {
     it('selects one explicit credential slot without automatic account pooling', () => {
         const env = {
@@ -1151,6 +1164,85 @@ describe('apifyProvider', () => {
         const { client } = mockClient(items);
         const provider = makeApifyProvider({ client, env: {} });
         await expect(provider.getFollowers!('target', 20)).rejects.toThrow('중복 비율');
+    });
+
+    it('adopts a reconciled 233-row relationship Dataset into deterministic 232-row evidence', async () => {
+        const items = Array.from(
+            { length: 233 },
+            (_, index) => relationshipItem(`u${index.toString().padStart(3, '0')}`)
+        );
+        const { client, listItems } = mockClient(items);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const result = await provider.getFollowers!(
+            'target',
+            232,
+            adoptedRelationshipContext()
+        );
+
+        expect(result).toHaveLength(232);
+        expect(result.map(row => row.username)).toEqual(
+            items.slice(0, 232).map(row => row.username)
+        );
+        expect(new Set(result.map(row => row.username.toLowerCase())).size).toBe(232);
+        expect(listItems).toHaveBeenCalledWith({ offset: 0, limit: 234 });
+    });
+
+    it('validates every adopted overflow row and rejects sub-99-percent duplicates', async () => {
+        const malformed = Array.from(
+            { length: 233 },
+            (_, index) => relationshipItem(`u${index.toString().padStart(3, '0')}`)
+        );
+        malformed[232] = relationshipItem('invalid-overflow', { is_private: 'false' });
+        const malformedClient = mockClient(malformed);
+        await expect(makeApifyProvider({ client: malformedClient.client, env: {} })
+            .getFollowers!('target', 232, adoptedRelationshipContext()))
+            .rejects.toThrow('결과 232번 행');
+
+        const duplicates = Array.from(
+            { length: 230 },
+            (_, index) => relationshipItem(`u${index.toString().padStart(3, '0')}`)
+        );
+        duplicates.push(
+            relationshipItem('u000'),
+            relationshipItem('u001'),
+            relationshipItem('u002')
+        );
+        const duplicateClient = mockClient(duplicates);
+        await expect(makeApifyProvider({
+            client: duplicateClient.client,
+            env: { APIFY_RELATIONSHIP_MIN_UNIQUE_RATIO: '0.99' },
+        }).getFollowers!('target', 232, adoptedRelationshipContext()))
+            .rejects.toThrow('중복 비율');
+    });
+
+    it('rejects flagged relationship truncation without a persisted run before Actor start', async () => {
+        const items = Array.from(
+            { length: 233 },
+            (_, index) => relationshipItem(`u${index.toString().padStart(3, '0')}`)
+        );
+        const { client, call } = mockClient(items);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getFollowers!('target', 232, {
+            allowAdoptedRelationshipTruncation: true,
+            adoptedRelationshipSourceDeclaredCount: 233,
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('callback-free persisted run');
+        expect(client.actor).not.toHaveBeenCalled();
+        expect(client.run).not.toHaveBeenCalled();
+        expect(call).not.toHaveBeenCalled();
+    });
+
+    it('keeps a live 233-to-232 relationship Dataset fail-closed', async () => {
+        const items = Array.from(
+            { length: 233 },
+            (_, index) => relationshipItem(`u${index.toString().padStart(3, '0')}`)
+        );
+        const { client } = mockClient(items);
+        await expect(makeApifyProvider({ client, env: {} }).getFollowers!('target', 232, {
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('APIFY_DATASET_LIMIT_EXCEEDED');
     });
 
     it('fails closed when a profile batch has under 95% username coverage', async () => {

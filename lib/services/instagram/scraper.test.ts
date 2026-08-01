@@ -72,6 +72,44 @@ describe('라우팅', () => {
         }));
     });
 
+    it('forwards adopted relationship truncation only to its resumed Apify call', async () => {
+        const apify = vi.fn().mockResolvedValue([]);
+        __setProvidersForTest(
+            { SCRAPER_FOLLOWERS: 'apify', SCRAPER_FALLBACK: 'false' },
+            { apify: providerWith({ name: 'apify', getFollowers: apify }) }
+        );
+
+        await getFollowers('adopted_target', 232, {
+            providerRun: {
+                resumeRunId: 'AdoptedRun12345',
+                logicalProvider: 'apify',
+                actorId: 'apify/relationship-scraper',
+                credentialSlot: 'primary',
+                maxChargeUsd: 0.2,
+                allowAdoptedRelationshipTruncation: true,
+                adoptedRelationshipSourceDeclaredCount: 233,
+            },
+        });
+        await getFollowers('normal_target', 232, {
+            provider: 'apify',
+            fallback: false,
+        });
+
+        expect(apify).toHaveBeenNthCalledWith(
+            1,
+            'adopted_target',
+            232,
+            expect.objectContaining({
+                resumeRunId: 'AdoptedRun12345',
+                allowAdoptedRelationshipTruncation: true,
+                adoptedRelationshipSourceDeclaredCount: 233,
+            })
+        );
+        const normalContext = apify.mock.calls[1]?.[2];
+        expect(normalContext).not.toHaveProperty('allowAdoptedRelationshipTruncation');
+        expect(normalContext).not.toHaveProperty('adoptedRelationshipSourceDeclaredCount');
+    });
+
     it('stored Apify run ID가 있으면 원래 primary 대신 같은 run을 재개한다', async () => {
         const selfhosted = vi.fn().mockResolvedValue({ username: 'selfhosted-result' });
         const apify = vi.fn().mockResolvedValue({ username: 'apify-result' });

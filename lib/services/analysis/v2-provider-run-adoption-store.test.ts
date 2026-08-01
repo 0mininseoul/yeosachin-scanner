@@ -55,6 +55,37 @@ it('resolves an exact recovery-lineage run without constructing callbacks', asyn
     });
     expect(adoptedProviderCheckpoint(run!)).not.toHaveProperty('onRunStarted');
     expect(adoptedProviderCheckpoint(run!)).not.toHaveProperty('onCostRunFinished');
+    expect(adoptedProviderCheckpoint(run!)).not.toHaveProperty(
+        'allowAdoptedRelationshipTruncation'
+    );
+});
+
+it('carries the source count only for a cross-count adopted relationship run', async () => {
+    const rpc = vi.fn().mockResolvedValue({
+        data: {
+            sourceRequestId: '33333333-3333-4333-8333-333333333333',
+            sourceJobKey: identity.jobKey,
+            operationKey: identity.operationKey,
+            inputHash: identity.inputHash,
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'secondary',
+            maxChargeUsd: 1.25,
+            runId: 'ExistingRun1234',
+            actualUsageUsd: 0.42,
+            usageReconciledAt: '2026-07-30T00:00:00Z',
+            relationshipSourceDeclaredCount: 233,
+        },
+        error: null,
+    });
+    const run = await createAnalysisV2ProviderRunAdoptionStore({ rpc }).resolve(identity);
+
+    expect(adoptedProviderCheckpoint(run!)).toMatchObject({
+        resumeRunId: 'ExistingRun1234',
+        allowAdoptedRelationshipTruncation: true,
+        adoptedRelationshipSourceDeclaredCount: 233,
+    });
+    expect(adoptedProviderCheckpoint(run!)).not.toHaveProperty('onRunStarted');
 });
 
 describe('fail closed', () => {
