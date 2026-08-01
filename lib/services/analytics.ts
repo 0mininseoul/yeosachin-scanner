@@ -380,16 +380,15 @@ function isTrustedReplayConfigUrl(value: string, apiKey: string): boolean {
     return value === `https://sr-client-cfg.amplitude.com/config/${apiKey}?config_group=browser`;
 }
 
-function hasExpectedReplaySampling(value: unknown, expected: ReplaySamplingConfig): boolean {
-    if (!expected.captureEnabled || typeof value !== 'object' || value === null) return false;
+function hasRemoteReplayCaptureApproval(value: unknown): boolean {
+    if (typeof value !== 'object' || value === null) return false;
     const payload = value as {
         configs?: { sessionReplay?: { sr_sampling_config?: unknown } };
     };
     const sampling = payload.configs?.sessionReplay?.sr_sampling_config;
     return typeof sampling === 'object'
         && sampling !== null
-        && (sampling as { capture_enabled?: unknown }).capture_enabled === true
-        && (sampling as { sample_rate?: unknown }).sample_rate === expected.sampleRate;
+        && (sampling as { capture_enabled?: unknown }).capture_enabled === true;
 }
 
 function loadUnifiedSdk(): Promise<UnifiedSdk> {
@@ -559,7 +558,7 @@ function createSafeSessionReplayRemoteConfig(apiKey: string) {
                 !response.ok
                 || response.redirected
                 || response.type === 'opaqueredirect'
-                || !hasExpectedReplaySampling(await response.json(), expectedSampling)
+                || !hasRemoteReplayCaptureApproval(await response.json())
             ) {
                 return replayConfigResponse({ captureEnabled: false, sampleRate: 0 });
             }

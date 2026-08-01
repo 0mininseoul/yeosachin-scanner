@@ -1,0 +1,30 @@
+diff --git a/node_modules/@amplitude/session-replay-browser/lib/cjs/config/joined-config.js b/node_modules/@amplitude/session-replay-browser/lib/cjs/config/joined-config.js
+index 20050dc..326662f 100644
+--- a/node_modules/@amplitude/session-replay-browser/lib/cjs/config/joined-config.js
++++ b/node_modules/@amplitude/session-replay-browser/lib/cjs/config/joined-config.js
+@@ -74,6 +74,10 @@ var SessionReplayJoinedConfigGenerator = /** @class */ (function () {
+                         return [4 /*yield*/, new Promise(function (resolve, reject) {
+                                 _this.remoteConfigClient.subscribe('configs.sessionReplay', { timeout: REMOTE_CONFIG_TIMEOUT_MS }, function (remoteConfig, source) {
+                                     var _a;
++                                    if (source !== 'remote') {
++                                        reject(new Error('Cached Session Replay remote config is not accepted'));
++                                        return;
++                                    }
+                                     _this.localConfig.loggerProvider.debug("Session Replay remote configuration received from ".concat(source, ":"), JSON.stringify(remoteConfig, null, 2));
+                                     if (!remoteConfig) {
+                                         reject(new Error('No remote config received'));
+diff --git a/node_modules/@amplitude/session-replay-browser/lib/esm/config/joined-config.js b/node_modules/@amplitude/session-replay-browser/lib/esm/config/joined-config.js
+index 201cf1c..fdc809b 100644
+--- a/node_modules/@amplitude/session-replay-browser/lib/esm/config/joined-config.js
++++ b/node_modules/@amplitude/session-replay-browser/lib/esm/config/joined-config.js
+@@ -70,6 +70,10 @@ var SessionReplayJoinedConfigGenerator = /** @class */ (function () {
+                         return [4 /*yield*/, new Promise(function (resolve, reject) {
+                                 _this.remoteConfigClient.subscribe('configs.sessionReplay', { timeout: REMOTE_CONFIG_TIMEOUT_MS }, function (remoteConfig, source) {
+                                     var _a;
++                                    if (source !== 'remote') {
++                                        reject(new Error('Cached Session Replay remote config is not accepted'));
++                                        return;
++                                    }
+                                     _this.localConfig.loggerProvider.debug("Session Replay remote configuration received from ".concat(source, ":"), JSON.stringify(remoteConfig, null, 2));
+                                     if (!remoteConfig) {
+                                         reject(new Error('No remote config received'));
