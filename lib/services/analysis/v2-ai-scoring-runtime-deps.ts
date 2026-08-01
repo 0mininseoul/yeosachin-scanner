@@ -52,8 +52,8 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PROFILE_JOB_PREFIX = 'track:profiles:batch:';
 const PROFILE_AI_JOB_PREFIX = 'track:profile-ai:batch:';
 const REVERSE_LIKE_JOB_KEY = 'track:reverse-likes:collect';
-const MAX_REVERSE_CANDIDATES = 10;
-const REVERSE_LIKE_LIMIT = 100;
+export const MAX_REVERSE_CANDIDATES = 10;
+export const REVERSE_LIKE_LIMIT = 100;
 
 export const ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_v2_profile_fetch_for_consumer',
@@ -326,7 +326,7 @@ function lengthPrefixed(value: string): string {
     return `${Buffer.byteLength(value, 'utf8')}:${value}`;
 }
 
-function reverseLikeMaximumCharge(
+export function reverseLikeMaximumCharge(
     candidateCount: number,
     env: Record<string, string | undefined>
 ): number {

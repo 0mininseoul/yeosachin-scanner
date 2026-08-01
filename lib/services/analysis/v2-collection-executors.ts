@@ -84,7 +84,7 @@ import type {
 } from './v2-worker';
 import {
     resolveAnalysisV2ApifyCredentialSlot,
-    type AuthorizedTestProviderOperationKind,
+    type ProviderPolicyOperationKind,
 } from './authorized-test-provider-policy';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
@@ -233,7 +233,7 @@ export function createAnalysisV2CollectionTopology(
     return Object.freeze(result);
 }
 
-function relationshipMaximumCharge(
+export function relationshipMaximumCharge(
     declaredCount: number,
     env: Record<string, string | undefined>
 ): number {
@@ -254,7 +254,7 @@ function relationshipMaximumCharge(
     return checkedMaximumCharge(Math.max(25, declaredCount) * costPerResult, maximum, 'relationship');
 }
 
-function profileMaximumCharge(
+export function profileMaximumCharge(
     count: number,
     env: Record<string, string | undefined>
 ): number {
@@ -275,7 +275,7 @@ function profileMaximumCharge(
     return checkedMaximumCharge(count * costPerResult, maximum, 'profile fallback');
 }
 
-function interactionMaximumCharge(
+export function interactionMaximumCharge(
     kind: 'likers' | 'comments',
     postCount: number,
     limitPerPost: number,
@@ -308,7 +308,7 @@ async function bindApifyRun(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
     request: AnalysisV2CollectionRequestContext;
-    operation: AuthorizedTestProviderOperationKind;
+    operation: ProviderPolicyOperationKind;
     operationKey: string;
     inputHash: string;
     actorId: string;
@@ -757,10 +757,9 @@ async function repairProfileBatch(input: {
         dependencies,
         claim,
         request,
-        // The repair run gets its OWN ledger row under the profile-repair operation key, but
-        // resolves its credential slot through the profile-fallback slot: no eighth slot is added
-        // to the persisted seven-key policy.
-        operation: 'profile-fallback',
+        // Legacy seven-key policies intentionally alias this through the resolver; beta's frozen
+        // eight-key map gets its own slot and reservation family.
+        operation: 'profile-repair',
         operationKey: createAnalysisV2ProviderOperationKey('profile-repair', canonicalInput),
         inputHash: createAnalysisV2ProviderInputHash(canonicalInput),
         actorId: REPLACEMENT_PROFILE_ACTOR.actorId,

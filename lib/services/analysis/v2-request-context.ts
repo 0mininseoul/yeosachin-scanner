@@ -8,8 +8,8 @@ import {
 } from '@/lib/domain/analysis/plan-catalog';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
-    authorizedTestProviderExecutionPolicySchema,
-    type AuthorizedTestProviderExecutionPolicy,
+    providerExecutionPolicySchema,
+    type ProviderExecutionPolicy,
 } from './authorized-test-provider-policy';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -21,7 +21,7 @@ const contextSchema = z.object({
     targetUsername: z.string().regex(/^[a-z0-9._]{1,30}$/),
     excludedUsername: z.string().regex(/^[a-z0-9._]{1,30}$/).nullable(),
     accessMode: z.enum(PLAN_ACCESS_MODES),
-    providerExecutionPolicy: authorizedTestProviderExecutionPolicySchema.nullable(),
+    providerExecutionPolicy: providerExecutionPolicySchema.nullable(),
     planId: z.enum(PLAN_IDS),
     followersDeclaredCount: z.number().int().min(0).max(1_200),
     followingDeclaredCount: z.number().int().min(0).max(1_200),
@@ -40,7 +40,7 @@ export interface AnalysisV2CollectionRequestContext {
     targetUsername: string;
     excludedUsername: string | null;
     accessMode: PlanAccessMode;
-    providerExecutionPolicy: AuthorizedTestProviderExecutionPolicy | null;
+    providerExecutionPolicy: ProviderExecutionPolicy | null;
     planId: PlanId;
     followersDeclaredCount: number;
     followingDeclaredCount: number;
@@ -120,8 +120,10 @@ export function createAnalysisV2CollectionRequestContextStore(
             }
             const plan = getAnalysisPlan(parsed.data.planId);
             if (
-                (parsed.data.providerExecutionPolicy !== null
+                (parsed.data.providerExecutionPolicy?.mode === 'test_operation_split'
                     && parsed.data.accessMode !== 'test_entitlement')
+                || (parsed.data.providerExecutionPolicy?.mode === 'betatest_free_pool'
+                    && parsed.data.accessMode !== 'production')
                 || parsed.data.detailedMutualLimit !== plan.detailedMutualLimit
                 || parsed.data.followersDeclaredCount > plan.relationshipCapacity.followers
                 || parsed.data.followingDeclaredCount > plan.relationshipCapacity.following

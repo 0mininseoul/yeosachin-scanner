@@ -178,4 +178,38 @@ describe('analysis V2 collection request context', () => {
             jobInputHash,
         })).rejects.toThrow('ANALYSIS_V2_COLLECTION_CONTEXT_SNAPSHOT_DRIFT');
     });
+
+    it('loads the exact beta eight-family policy only on a production snapshot', async () => {
+        const providerExecutionPolicy = {
+            mode: 'betatest_free_pool',
+            policyVersion: 'betatest-free-pool-v1',
+            operationSlots: {
+                'target-profile': 'primary',
+                'relationship-followers': 'tertiary',
+                'relationship-following': 'quaternary',
+                'profile-fallback': 'quinary',
+                'profile-repair': 'senary',
+                'target-likers': 'septenary',
+                'target-comments': 'primary',
+                'candidate-likers': 'tertiary',
+            },
+        } as const;
+        const beta = client({
+            requestId,
+            targetUsername: 'target',
+            excludedUsername: null,
+            accessMode: 'production',
+            providerExecutionPolicy,
+            planId: 'basic',
+            followersDeclaredCount: 2,
+            followingDeclaredCount: 2,
+            detailedMutualLimit: 300,
+        });
+        await expect(createAnalysisV2CollectionRequestContextStore(beta.value).load({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+        })).resolves.toMatchObject({ accessMode: 'production', providerExecutionPolicy });
+    });
 });

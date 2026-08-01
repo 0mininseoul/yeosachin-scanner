@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS,
+    betaTestProviderExecutionPolicySchema,
     assertAuthorizedTestProviderCredentialsAvailable,
     authorizedTestProviderExecutionPolicySchema,
     configuredAuthorizedTestProviderPolicy,
@@ -72,6 +73,12 @@ describe('authorized analysis V2 test provider policy', () => {
             operation: 'relationship-following',
             env: authorizedEnv,
         })).toBe('secondary');
+        expect(resolveAnalysisV2ApifyCredentialSlot({
+            accessMode: 'test_entitlement',
+            policy,
+            operation: 'profile-repair',
+            env: authorizedEnv,
+        })).toBe('tertiary');
         expect(configuredAuthorizedTestProviderPolicy({
             ...authorizedTarget,
             targetUsername: 'someone.else',
@@ -186,5 +193,40 @@ describe('authorized analysis V2 test provider policy', () => {
             ...senaryEnv,
             ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'septenary',
         })).toThrow('ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT');
+    });
+
+    it('resolves the frozen beta eight-family map on free slots and keeps repair distinct', () => {
+        const betaPolicy = betaTestProviderExecutionPolicySchema.parse({
+            mode: 'betatest_free_pool',
+            policyVersion: 'betatest-free-pool-v1',
+            operationSlots: {
+                'target-profile': 'primary',
+                'relationship-followers': 'tertiary',
+                'relationship-following': 'quaternary',
+                'profile-fallback': 'quinary',
+                'profile-repair': 'senary',
+                'target-likers': 'septenary',
+                'target-comments': 'primary',
+                'candidate-likers': 'tertiary',
+            },
+        });
+        const betaEnv = {
+            APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+            APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+            APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+            APIFY_SENARY_API_TOKEN: 'senary-test-token',
+            APIFY_SEPTENARY_API_TOKEN: 'septenary-test-token',
+        };
+        expect(resolveAnalysisV2ApifyCredentialSlot({
+            accessMode: 'production', policy: betaPolicy, operation: 'profile-repair', env: betaEnv,
+        })).toBe('senary');
+        expect(resolveAnalysisV2ApifyCredentialSlot({
+            accessMode: 'production', policy: betaPolicy, operation: 'profile-fallback', env: betaEnv,
+        })).toBe('quinary');
+        expect(betaTestProviderExecutionPolicySchema.safeParse({
+            ...betaPolicy,
+            operationSlots: { ...betaPolicy.operationSlots, 'profile-repair': 'secondary' },
+        }).success).toBe(false);
     });
 });
