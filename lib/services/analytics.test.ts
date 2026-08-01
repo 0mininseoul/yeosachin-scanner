@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Logger, RemoteConfigClient } from '@amplitude/analytics-core';
+import { Logger, LogLevel, RemoteConfigClient } from '@amplitude/analytics-core';
 import { SessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';
 import { SessionReplayLocalConfig } from '@amplitude/session-replay-browser/lib/cjs/config/local-config.js';
 import { SessionReplayJoinedConfigGenerator } from '@amplitude/session-replay-browser/lib/cjs/config/joined-config.js';
@@ -669,6 +669,32 @@ describe('Amplitude analytics adapter', () => {
         });
     });
 
+    it('enables the exact 1.0 production replay beta sample', async () => {
+        enableReplayBrowser();
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', '1');
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await expect(initAmplitude(null)).resolves.toBe(true);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { sampleRate: number };
+        };
+        expect(options.sessionReplay.sampleRate).toBe(1);
+    });
+
+    it.each(['1.0', '1.01', '2'])('fails replay closed for invalid production replay sample %s', async (sampleRate) => {
+        enableReplayBrowser();
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', sampleRate);
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await expect(initAmplitude(null)).resolves.toBe(true);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { sampleRate: number };
+        };
+        expect(options.sessionReplay.sampleRate).toBe(0);
+    });
+
     it.each(['', 'preview', 'development'])('never enables replay without the exact public production discriminator %j', async (publicEnvironment) => {
         enableReplayBrowser();
         vi.stubEnv('NEXT_PUBLIC_VERCEL_ENV', publicEnvironment);
@@ -969,6 +995,35 @@ describe('Amplitude analytics adapter', () => {
         expect(JSON.stringify(serializedAttributes)).not.toContain('private control');
         expect(JSON.stringify(serializedAttributes)).not.toContain('private input value');
         expect(JSON.stringify(serializedAttributes)).not.toContain('private input hint');
+    });
+
+    it('forwards configured attribute masking through the installed session replay adapter', async () => {
+        const maskAttributes = ['href', 'value'];
+        const plugin = new SessionReplayPlugin({
+            privacyConfig: {
+                defaultMaskLevel: 'conservative',
+                maskAttributes,
+            },
+        } as never);
+        const init = vi.fn().mockReturnValue({ promise: Promise.resolve() });
+        plugin.sessionReplay = { init } as never;
+
+        await plugin.setup({
+            apiKey: 'test-key',
+            deviceId: 'test-device',
+            flushMaxRetries: 2,
+            instanceName: 'adapter-runtime-test',
+            loggerProvider: new Logger(),
+            logLevel: LogLevel.Warn,
+            optOut: false,
+            serverZone: 'US',
+            sessionId: 1,
+        } as never, {} as never);
+
+        const receivedOptions = init.mock.calls[0]?.[1] as {
+            privacyConfig?: { maskAttributes?: string[] };
+        };
+        expect(receivedOptions.privacyConfig?.maskAttributes).toEqual(maskAttributes);
     });
 
     it('uploads an exact interaction batch through the replay transport', async () => {

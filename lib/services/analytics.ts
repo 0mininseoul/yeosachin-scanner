@@ -61,7 +61,7 @@ type PropertyValidator = (value: unknown) => AnalyticsScalar | undefined;
 const API_KEY_PATTERN = /^[0-9a-f]{32}$/i;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_QUEUED_EVENTS = 50;
-const SESSION_REPLAY_MAX_SAMPLE_RATE = 0.1;
+const SESSION_REPLAY_MAX_SAMPLE_RATE = 1;
 const SESSION_REPLAY_SAFE_PATHS = new Set([
     '/',
     '/privacy',
@@ -344,7 +344,7 @@ function configuredReplaySampling(): ReplaySamplingConfig {
     }
 
     const rawSampleRate = process.env.NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE ?? '';
-    if (!/^0\.(?:0[1-9]|1|10)$/.test(rawSampleRate)) return disabled;
+    if (!/^(?:0\.(?:0[1-9]|1|10)|1)$/.test(rawSampleRate)) return disabled;
     const sampleRate = Number(rawSampleRate);
     if (!Number.isFinite(sampleRate) || sampleRate <= 0 || sampleRate > SESSION_REPLAY_MAX_SAMPLE_RATE) {
         return disabled;
