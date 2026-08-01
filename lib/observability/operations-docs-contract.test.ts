@@ -218,6 +218,8 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/Amplitude[^\n]*capture_enabled[^\n]*false[^\n]*(veto|차단)/i);
         expect(operations).toMatch(/(오류|실패|malformed|형식 오류)[^\n]*(fail-closed|sample[^\n]*0)/i);
         expect(operations).toMatch(/(캐시|cache)[^\n]*(거부|무시|적용하지 않)/i);
+        expect(operations).toMatch(/(캐시|cache)[^\n]*(타임아웃|timeout)[^\n]*captureEnabled[^\n]*false/i);
+        expect(operations).not.toMatch(/(타임아웃|timeout)[^\n]*sampleRate[^\n]*0/i);
         for (const selector of ['form', 'input', 'select', 'textarea', 'option', 'contenteditable']) {
             expect(operations).toContain(selector);
         }
