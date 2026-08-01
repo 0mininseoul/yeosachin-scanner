@@ -72,6 +72,40 @@ const authorizedProviderEnv = {
     APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
 };
 
+const betaProviderPolicy = {
+    mode: 'betatest_free_pool',
+    policyVersion: 'betatest-free-pool-v1',
+    operationSlots: {
+        'target-profile': 'primary',
+        'relationship-followers': 'tertiary',
+        'relationship-following': 'quaternary',
+        'profile-fallback': 'quinary',
+        'profile-repair': 'senary',
+        'target-likers': 'septenary',
+        'target-comments': 'primary',
+        'candidate-likers': 'tertiary',
+    },
+    operationBudgets: {
+        'target-profile': 0.0052,
+        'relationship-followers': 0.02,
+        'relationship-following': 0.02,
+        'profile-fallback': 1,
+        'profile-repair': 1,
+        'target-likers': 1,
+        'target-comments': 1,
+        'candidate-likers': 1,
+    },
+} as const;
+
+const betaProviderEnv = {
+    APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+    APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+    APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+    APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+    APIFY_SENARY_API_TOKEN: 'senary-test-token',
+    APIFY_SEPTENARY_API_TOKEN: 'septenary-test-token',
+};
+
 function requestContext(
     overrides: Partial<AnalysisV2CollectionRequestContext> = {}
 ): AnalysisV2CollectionRequestContext {
@@ -514,6 +548,34 @@ describe('analysis V2 concrete collection executors', () => {
             value: { resolve } as AnalysisV2ProviderRunAdoptionStore,
         };
     }
+
+    it('rejects a beta family charge above its frozen budget before reserve or provider I/O', async () => {
+        const providers = providerStore();
+        const getFollowersMock = vi.fn(async () => []);
+        const getFollowingMock = vi.fn(async () => []);
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'production',
+                providerExecutionPolicy: betaProviderPolicy,
+                followersDeclaredCount: 1,
+                followingDeclaredCount: 1,
+            })),
+            providerRunStore: providers.value,
+            getFollowers: getFollowersMock,
+            getFollowing: getFollowingMock,
+            env: betaProviderEnv,
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(),
+                freezeRelationships: vi.fn(),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toThrow('ANALYSIS_BETA_POOL_BUDGET_DRIFT');
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(getFollowersMock).not.toHaveBeenCalled();
+        expect(getFollowingMock).not.toHaveBeenCalled();
+    });
 
     it('resumes sufficient adopted relationship Datasets at the current declared count', async () => {
         const adoption = adoptedRelationshipStore();

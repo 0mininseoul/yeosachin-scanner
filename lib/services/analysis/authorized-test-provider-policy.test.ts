@@ -4,7 +4,9 @@ import {
     betaTestProviderExecutionPolicySchema,
     assertAuthorizedTestProviderCredentialsAvailable,
     authorizedTestProviderExecutionPolicySchema,
+    assertBetaProviderExecutionBudgetCatalog,
     configuredAuthorizedTestProviderPolicy,
+    resolveAnalysisV2ApifyProviderBinding,
     resolveAnalysisV2ApifyCredentialSlot,
 } from './authorized-test-provider-policy';
 import { ANALYSIS_V2_PROVIDER_OPERATION_KINDS } from './v2-provider-run-store';
@@ -196,6 +198,16 @@ describe('authorized analysis V2 test provider policy', () => {
     });
 
     it('resolves the frozen beta eight-family map on free slots and keeps repair distinct', () => {
+        const operationBudgets = {
+            'target-profile': 0.0052,
+            'relationship-followers': 0.02,
+            'relationship-following': 0.03,
+            'profile-fallback': 0.04,
+            'profile-repair': 0.05,
+            'target-likers': 0.06,
+            'target-comments': 0.07,
+            'candidate-likers': 0.08,
+        } as const;
         const betaPolicy = betaTestProviderExecutionPolicySchema.parse({
             mode: 'betatest_free_pool',
             policyVersion: 'betatest-free-pool-v1',
@@ -209,6 +221,7 @@ describe('authorized analysis V2 test provider policy', () => {
                 'target-comments': 'primary',
                 'candidate-likers': 'tertiary',
             },
+            operationBudgets,
         });
         const betaEnv = {
             APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
@@ -224,9 +237,59 @@ describe('authorized analysis V2 test provider policy', () => {
         expect(resolveAnalysisV2ApifyCredentialSlot({
             accessMode: 'production', policy: betaPolicy, operation: 'profile-fallback', env: betaEnv,
         })).toBe('quinary');
+        for (const operation of Object.keys(operationBudgets) as Array<keyof typeof operationBudgets>) {
+            expect(resolveAnalysisV2ApifyProviderBinding({
+                accessMode: 'production',
+                policy: betaPolicy,
+                operation,
+                maxChargeUsd: operationBudgets[operation],
+                env: betaEnv,
+            })).toEqual({
+                credentialSlot: betaPolicy.operationSlots[operation],
+                frozenFamilyBudgetUsd: operationBudgets[operation],
+            });
+        }
         expect(betaTestProviderExecutionPolicySchema.safeParse({
             ...betaPolicy,
             operationSlots: { ...betaPolicy.operationSlots, 'profile-repair': 'secondary' },
         }).success).toBe(false);
+        const withoutBudgets = { ...betaPolicy } as Record<string, unknown>;
+        delete withoutBudgets.operationBudgets;
+        expect(betaTestProviderExecutionPolicySchema.safeParse(withoutBudgets).success).toBe(false);
+        expect(betaTestProviderExecutionPolicySchema.safeParse({
+            ...betaPolicy,
+            operationBudgets: { ...operationBudgets, extra: 0.01 },
+        }).success).toBe(false);
+        for (const invalid of [0, -0.01, Number.NaN, 0.1234567890123]) {
+            expect(betaTestProviderExecutionPolicySchema.safeParse({
+                ...betaPolicy,
+                operationBudgets: { ...operationBudgets, 'profile-repair': invalid },
+            }).success).toBe(false);
+        }
+
+        expect(() => resolveAnalysisV2ApifyProviderBinding({
+            accessMode: 'production',
+            policy: betaPolicy,
+            operation: 'profile-repair',
+            maxChargeUsd: operationBudgets['profile-repair'] + 0.000000000001,
+            env: betaEnv,
+        })).toThrow('ANALYSIS_BETA_POOL_BUDGET_DRIFT');
+        expect(() => assertBetaProviderExecutionBudgetCatalog({
+            policy: betaPolicy,
+            requiredBudgets: { ...operationBudgets, 'candidate-likers': 0.080000000001 },
+        })).toThrow('ANALYSIS_BETA_POOL_BUDGET_DRIFT');
+        expect(assertBetaProviderExecutionBudgetCatalog({
+            policy: betaPolicy,
+            requiredBudgets: operationBudgets,
+        })).toEqual(betaPolicy);
+        expect(assertBetaProviderExecutionBudgetCatalog({
+            policy: {
+                ...betaPolicy,
+                operationBudgets: Object.fromEntries(
+                    Object.entries(operationBudgets).map(([key, value]) => [key, value + 0.01])
+                ) as typeof operationBudgets,
+            },
+            requiredBudgets: operationBudgets,
+        }).mode).toBe('betatest_free_pool');
     });
 });

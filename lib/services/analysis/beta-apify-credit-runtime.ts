@@ -1,25 +1,22 @@
 import { z } from 'zod';
-import { getAnalysisPlan, type PlanId } from '@/lib/domain/analysis/plan-catalog';
+import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import {
     BETA_APIFY_FREE_CREDENTIAL_SLOTS,
     isBetaApifyFreeCredentialSlot,
     type BetaApifyFreeCredentialSlot,
 } from './beta-apify-credit-pool';
 import {
-    interactionMaximumCharge,
-    profileMaximumCharge,
-    relationshipMaximumCharge,
-} from './v2-collection-executors';
-import { profileRepairMaximumCharge } from './v2-profile-repair';
-import {
-    MAX_REVERSE_CANDIDATES,
-    reverseLikeMaximumCharge,
-} from './v2-ai-scoring-runtime-deps';
+    BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+    getBetaApifyOperationBudgetCatalog,
+} from './beta-apify-operation-budget';
+export {
+    BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+    getBetaApifyOperationBudgetCatalog,
+} from './beta-apify-operation-budget';
 
 export const BETA_APIFY_RUNTIME_CONFIG_ERROR = 'ANALYSIS_BETA_RUNTIME_CONFIG_INVALID';
 export const BETA_APIFY_POOL_CAPACITY_ERROR = 'ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE';
 export const BETA_APIFY_POOL_PERSISTENCE_ERROR = 'ANALYSIS_BETA_POOL_PERSISTENCE_ERROR';
-export const BETA_APIFY_TARGET_PROFILE_BUDGET_USD = 0.0052;
 
 export const BETA_APIFY_OPERATION_FAMILIES = Object.freeze([
     'target-profile',
@@ -188,47 +185,6 @@ function ensureExactSixSnapshots(value: unknown): readonly BetaApifyPoolSnapshot
     return Object.freeze(parsed.data.map(row => Object.freeze({ ...row })));
 }
 
-function positiveBudget(value: number): number {
-    const normalized = exactUsd(value, MAX_BUDGET_USD);
-    if (normalized <= 0) throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
-    return normalized;
-}
-
-function operationBudgets(
-    selectedPlanId: PlanId,
-    env: Record<string, string | undefined> = process.env
-): BetaApifyOperationBudgetMap {
-    const plan = getAnalysisPlan(selectedPlanId);
-    const profileBatchCount = Math.ceil(plan.detailedMutualLimit / 30);
-    // Every value is the current executor's own max-charge ceiling multiplied by its proven
-    // bounded topology: relationship retry <= 2, one fallback/repair per 30-profile batch,
-    // target 4x150 likers + 6x15 comments, and one 10x100 reverse-like run.
-    const followers = relationshipMaximumCharge(plan.relationshipCapacity.followers, env);
-    const following = relationshipMaximumCharge(plan.relationshipCapacity.following, env);
-    const profileFallback = profileBatchCount * profileMaximumCharge(30, env);
-    const profileRepair = profileBatchCount * profileRepairMaximumCharge(30);
-    const targetLikers = interactionMaximumCharge('likers', 4, 150, env);
-    const targetComments = interactionMaximumCharge('comments', 6, 15, env);
-    const candidateLikers = reverseLikeMaximumCharge(MAX_REVERSE_CANDIDATES, env);
-    return Object.freeze({
-        'target-profile': positiveBudget(BETA_APIFY_TARGET_PROFILE_BUDGET_USD),
-        'relationship-followers': positiveBudget(followers * 2),
-        'relationship-following': positiveBudget(following * 2),
-        'profile-fallback': positiveBudget(profileFallback),
-        'profile-repair': positiveBudget(profileRepair),
-        'target-likers': positiveBudget(targetLikers),
-        'target-comments': positiveBudget(targetComments),
-        'candidate-likers': positiveBudget(candidateLikers),
-    });
-}
-
-export function getBetaApifyOperationBudgetCatalog(
-    selectedPlanId: PlanId,
-    env: Record<string, string | undefined> = process.env
-): BetaApifyOperationBudgetMap {
-    return operationBudgets(selectedPlanId, env);
-}
-
 function exactHeadrooms(value: readonly BetaApifyPoolSnapshot[]): Readonly<Record<BetaApifyFreeCredentialSlot, number>> {
     let snapshots: readonly BetaApifyPoolSnapshot[];
     try {
@@ -254,7 +210,7 @@ export function planBetaApifyCreditAllocation(input: {
         throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
     }
     const remaining = { ...exactHeadrooms(input.effectiveHeadrooms) };
-    const budgets = operationBudgets(input.selectedPlanId, input.env);
+    const budgets = getBetaApifyOperationBudgetCatalog(input.selectedPlanId, input.env);
     const slots: Partial<Record<BetaApifyOperationFamily, BetaApifyFreeCredentialSlot>> = {};
     if (remaining[input.targetProfileSlot] < budgets['target-profile']) {
         throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
@@ -336,7 +292,13 @@ function checkedAge(value: number): number {
 }
 
 async function invoke(client: BetaApifyPoolStoreClient, name: string, params: Record<string, unknown>): Promise<unknown> {
-    const { data, error } = await client.rpc(name, params);
+    let result: Awaited<ReturnType<BetaApifyPoolStoreClient['rpc']>>;
+    try {
+        result = await client.rpc(name, params);
+    } catch {
+        throw new Error(BETA_APIFY_POOL_PERSISTENCE_ERROR);
+    }
+    const { data, error } = result;
     if (error) persistenceFailure(error);
     return normalizedRpcData(data);
 }

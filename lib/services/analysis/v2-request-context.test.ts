@@ -8,6 +8,7 @@ import {
     createAnalysisV2CollectionRequestContextStore,
     type AnalysisV2CollectionRequestContextSupabaseClient,
 } from './v2-request-context';
+import { getBetaApifyOperationBudgetCatalog } from './beta-apify-credit-runtime';
 
 // gitleaks:allow -- deterministic UUID fixtures
 const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
@@ -180,6 +181,7 @@ describe('analysis V2 collection request context', () => {
     });
 
     it('loads the exact beta eight-family policy only on a production snapshot', async () => {
+        const operationBudgets = getBetaApifyOperationBudgetCatalog('basic', {});
         const providerExecutionPolicy = {
             mode: 'betatest_free_pool',
             policyVersion: 'betatest-free-pool-v1',
@@ -193,6 +195,7 @@ describe('analysis V2 collection request context', () => {
                 'target-comments': 'primary',
                 'candidate-likers': 'tertiary',
             },
+            operationBudgets,
         } as const;
         const beta = client({
             requestId,
@@ -205,11 +208,35 @@ describe('analysis V2 collection request context', () => {
             followingDeclaredCount: 2,
             detailedMutualLimit: 300,
         });
-        await expect(createAnalysisV2CollectionRequestContextStore(beta.value).load({
+        await expect(createAnalysisV2CollectionRequestContextStore(beta.value, {}).load({
             requestId,
             jobKey: 'track:relationships:collect',
             claimToken,
             jobInputHash,
         })).resolves.toMatchObject({ accessMode: 'production', providerExecutionPolicy });
+
+        const drifted = client({
+            requestId,
+            targetUsername: 'target',
+            excludedUsername: null,
+            accessMode: 'production',
+            providerExecutionPolicy: {
+                ...providerExecutionPolicy,
+                operationBudgets: {
+                    ...operationBudgets,
+                    'candidate-likers': operationBudgets['candidate-likers'] - 0.000000000001,
+                },
+            },
+            planId: 'basic',
+            followersDeclaredCount: 2,
+            followingDeclaredCount: 2,
+            detailedMutualLimit: 300,
+        });
+        await expect(createAnalysisV2CollectionRequestContextStore(drifted.value, {}).load({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+        })).rejects.toThrow('ANALYSIS_BETA_POOL_BUDGET_DRIFT');
     });
 });

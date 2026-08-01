@@ -32,6 +32,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802050000_harden_betatest_apify_credit_capacity.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802060000_expose_betatest_frozen_provider_budgets.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -566,6 +570,11 @@ interface ReservationJson {
 }
 
 let db: PGlite;
+let partialSettlementUpgrade: {
+    allocation_state: string;
+    active_count: number;
+    settled_count: number;
+} | null = null;
 
 async function serviceQuery<T>(
     sql: string,
@@ -749,9 +758,60 @@ async function reserveFresh(
 beforeAll(async () => {
     db = await PGlite.create({ extensions: { pgcrypto } });
     await db.exec(bootstrap);
-    for (const migration of migrations) {
+    for (const migration of migrations.slice(0, -1)) {
         await db.exec(migration);
     }
+    await seedPendingBetaRequest();
+    const allocation = await activateBeta();
+    await db.query(
+        `INSERT INTO public.analysis_v2_provider_runs (
+            request_id, job_key, operation_key, input_hash, job_claim_token,
+            reservation_token, logical_provider, actor_id, credential_slot,
+            max_charge_usd, status
+         ) VALUES ($1, 'collect', $2, $3, $4, $5, 'apify', 'actor/test',
+            'tertiary', 0.02, 'starting')`,
+        [
+            REQUEST_ID,
+            `relationship-followers:${DIGEST}`,
+            INPUT_HASH,
+            CLAIM_TOKEN,
+            RESERVATION_TOKEN,
+        ]
+    );
+    await db.query(
+        `UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1`,
+        [REQUEST_ID]
+    );
+    await serviceQuery(
+        `SELECT public.settle_analysis_beta_apify_credit_allocation(
+            $1, 'request_terminal'
+        )`,
+        [allocation.allocationId]
+    );
+
+    const latestMigration = migrations.at(-1);
+    if (!latestMigration) throw new Error('missing frozen-budget migration');
+    await db.exec(latestMigration);
+    const upgraded = await db.query<{
+        allocation_state: string;
+        active_count: number;
+        settled_count: number;
+    }>(
+        `SELECT allocation.lifecycle_state AS allocation_state,
+                pg_catalog.count(*) FILTER (
+                    WHERE reservation.lifecycle_state = 'active'
+                )::INTEGER AS active_count,
+                pg_catalog.count(*) FILTER (
+                    WHERE reservation.lifecycle_state = 'settled'
+                )::INTEGER AS settled_count
+         FROM public.analysis_beta_pool_allocations AS allocation
+         JOIN public.analysis_beta_pool_reservations AS reservation
+           ON reservation.allocation_id = allocation.id
+         WHERE allocation.id = $1
+         GROUP BY allocation.id`,
+        [allocation.allocationId]
+    );
+    partialSettlementUpgrade = upgraded.rows[0] ?? null;
 });
 
 beforeEach(async () => {
@@ -789,6 +849,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802030100_validate_betatest_provider_policy.sql',
             '20260802040000_settle_betatest_apify_credit_reservations.sql',
             '20260802050000_harden_betatest_apify_credit_capacity.sql',
+            '20260802060000_expose_betatest_frozen_provider_budgets.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated
@@ -796,6 +857,11 @@ describe('betatest provider policy/guard migration PGlite', () => {
              WHERE conname = 'analysis_v2_provider_execution_policies_branch_check'`
         );
         expect(constraint.rows).toEqual([{ validated: true }]);
+        expect(partialSettlementUpgrade).toEqual({
+            allocation_state: 'active',
+            active_count: 1,
+            settled_count: 7,
+        });
     });
 
     it('keeps legacy senary valid, septenary invalid, and beta secondary invalid', async () => {
@@ -1108,18 +1174,33 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await db.query(
             `INSERT INTO public.analysis_requests (
                 id, user_id, target_instagram_id, status, pipeline_version,
-                plan_access_mode_snapshot, test_entitlement_jti_hash
-             ) VALUES ($1, $2, $3, 'processing', 'v2', 'test_entitlement', $4)`,
-            [REQUEST_ID, USER_ID, TARGET, JTI_HASH]
+                plan_access_mode_snapshot, test_entitlement_jti_hash,
+                selected_plan_id_snapshot, analysis_scope_snapshot
+             ) VALUES (
+                $1, $2, $3, 'processing', 'v2', 'test_entitlement', $4,
+                'standard', $5::JSONB
+             )`,
+            [
+                REQUEST_ID,
+                USER_ID,
+                TARGET,
+                JTI_HASH,
+                JSON.stringify({
+                    relationshipCapacity: { followers: 300, following: 300 },
+                    detailedMutualLimit: 300,
+                }),
+            ]
         );
         await db.query(
             `INSERT INTO public.analysis_preflights (
-                id, user_id, status, access_mode, consumed_request_id, expires_at
+                id, user_id, status, access_mode, target_instagram_id,
+                target_followers_count, target_following_count,
+                consumed_request_id, expires_at
              ) VALUES (
-                $1, $2, 'consumed', 'test_entitlement', $3,
+                $1, $2, 'consumed', 'test_entitlement', $3, 120, 140, $4,
                 pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
              )`,
-            [PREFLIGHT_ID, USER_ID, REQUEST_ID]
+            [PREFLIGHT_ID, USER_ID, TARGET, REQUEST_ID]
         );
         await db.query(
             `INSERT INTO public.analysis_pipeline_jobs (
@@ -1148,11 +1229,83 @@ describe('betatest provider policy/guard migration PGlite', () => {
              )`,
             [REQUEST_ID, JTI_HASH, TARGET, JSON.stringify(legacySlots), policyHash.rows[0].hash]
         );
+        const legacyContext = await serviceQuery<JsonRow<{
+            providerExecutionPolicy: Record<string, unknown>;
+        }>>(
+            `SELECT public.load_analysis_v2_collection_context_with_policy(
+                $1, 'collect', $2, $3
+            ) AS result`,
+            [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH]
+        );
+        expect(legacyContext.rows[0].result.providerExecutionPolicy).toEqual({
+            mode: 'test_operation_split',
+            policyVersion: 'authorized-free-e2e-v1',
+            operationSlots: legacySlots,
+        });
         await expect(reserveProvider({
             family: 'profile-repair',
             slot: 'primary',
             max: 0.01,
         })).resolves.toMatchObject({ created: true });
+    });
+
+    it('keeps an ordinary production collection context policy-free', async () => {
+        await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
+        await db.query(
+            `INSERT INTO public.analysis_requests (
+                id, user_id, target_instagram_id, status, pipeline_version,
+                preflight_id, plan_access_mode_snapshot,
+                selected_plan_id_snapshot, analysis_scope_snapshot
+             ) VALUES (
+                $1, $2, $3, 'processing', 'v2', $4, 'production',
+                'basic', $5::JSONB
+             )`,
+            [
+                REQUEST_ID,
+                USER_ID,
+                TARGET,
+                PREFLIGHT_ID,
+                JSON.stringify({
+                    relationshipCapacity: { followers: 300, following: 300 },
+                    detailedMutualLimit: 300,
+                }),
+            ]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, status, access_mode, target_instagram_id,
+                target_followers_count, target_following_count,
+                consumed_request_id, expires_at
+             ) VALUES (
+                $1, $2, 'consumed', 'production', $3, 120, 140, $4,
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+             )`,
+            [PREFLIGHT_ID, USER_ID, TARGET, REQUEST_ID]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs (
+                request_id, job_key, status, dispatch_state, lease_token,
+                lease_expires_at
+             ) VALUES (
+                $1, 'collect', 'processing', 'dispatched', $2,
+                pg_catalog.clock_timestamp() + INTERVAL '5 minutes'
+             )`,
+            [REQUEST_ID, CLAIM_TOKEN]
+        );
+
+        const ordinaryContext = await serviceQuery<JsonRow<{
+            accessMode: string;
+            providerExecutionPolicy: null;
+        }>>(
+            `SELECT public.load_analysis_v2_collection_context_with_policy(
+                $1, 'collect', $2, $3
+            ) AS result`,
+            [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH]
+        );
+        expect(ordinaryContext.rows[0].result).toMatchObject({
+            accessMode: 'production',
+            providerExecutionPolicy: null,
+        });
     });
 
     it('allows only initial plus fresh generation one within the held .0052', async () => {
@@ -1236,8 +1389,22 @@ describe('betatest provider policy/guard migration PGlite', () => {
             providerExecutionPolicy: {
                 mode: 'betatest_free_pool',
                 policyVersion: 'betatest-free-pool-v1',
+                operationSlots: betaSlots,
+                operationBudgets: betaBudgets,
             },
         });
+
+        await db.query(
+            `UPDATE public.analysis_beta_pool_reservations
+             SET reserved_usd = 0.019
+             WHERE operation_family = 'candidate-likers'`
+        );
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_collection_context_with_policy(
+                $1, 'collect', $2, $3
+            )`,
+            [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH]
+        )).rejects.toThrow(/ANALYSIS_V2_COLLECTION_CONTEXT_FENCE_MISMATCH/);
 
         await db.query(
             `UPDATE public.analysis_requests SET analysis_entry_channel = 'standard'

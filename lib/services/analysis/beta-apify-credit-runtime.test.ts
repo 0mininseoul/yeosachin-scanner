@@ -92,6 +92,20 @@ describe('beta Apify runtime foundation', () => {
             .rejects.toThrow(BETA_APIFY_POOL_CAPACITY_ERROR);
     });
 
+    it('sanitizes a rejected RPC promise without leaking provider or account details', async () => {
+        const rawSecret = 'fake-apify-token-at-https://api.apify.com/v2/users/account-123';
+        const client: BetaApifyPoolStoreClient = {
+            rpc: vi.fn().mockRejectedValue(new Error(rawSecret)),
+        };
+        const error = await createBetaApifyCreditPoolStore(client)
+            .loadSnapshots(300)
+            .catch((caught: unknown) => caught);
+
+        expect(error).toEqual(new Error(BETA_APIFY_POOL_PERSISTENCE_ERROR));
+        expect(JSON.stringify(error)).not.toContain(rawSecret);
+        expect(String(error)).not.toMatch(/api\.apify\.com|account-123|fake-apify-token/);
+    });
+
     it('plans an immutable deterministic complete map, preserving target-profile hold', () => {
         const input = slots(10);
         const planned = planBetaApifyCreditAllocation({

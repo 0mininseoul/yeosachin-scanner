@@ -9,9 +9,6 @@ import {
     apifyInteractionAdapter,
     type ApifyInteractionAdapter,
 } from '@/lib/services/instagram/providers/apify-interactions';
-import {
-    numberSetting,
-} from '@/lib/services/instagram/providers/apify-relationship';
 import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -44,7 +41,17 @@ import type {
     AnalysisV2StageReadClaim,
     AnalysisV2TargetProfileReadModel,
 } from './v2-ai-scoring-executors';
-import { resolveAnalysisV2ApifyCredentialSlot } from './authorized-test-provider-policy';
+import { resolveAnalysisV2ApifyProviderBinding } from './authorized-test-provider-policy';
+import {
+    ANALYSIS_V2_MAX_REVERSE_CANDIDATES as MAX_REVERSE_CANDIDATES,
+    ANALYSIS_V2_REVERSE_LIKE_LIMIT as REVERSE_LIKE_LIMIT,
+    reverseLikeMaximumCharge,
+} from './v2-apify-operation-costs';
+export {
+    ANALYSIS_V2_MAX_REVERSE_CANDIDATES as MAX_REVERSE_CANDIDATES,
+    ANALYSIS_V2_REVERSE_LIKE_LIMIT as REVERSE_LIKE_LIMIT,
+    reverseLikeMaximumCharge,
+} from './v2-apify-operation-costs';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -52,8 +59,6 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PROFILE_JOB_PREFIX = 'track:profiles:batch:';
 const PROFILE_AI_JOB_PREFIX = 'track:profile-ai:batch:';
 const REVERSE_LIKE_JOB_KEY = 'track:reverse-likes:collect';
-export const MAX_REVERSE_CANDIDATES = 10;
-export const REVERSE_LIKE_LIMIT = 100;
 
 export const ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_v2_profile_fetch_for_consumer',
@@ -326,31 +331,6 @@ function lengthPrefixed(value: string): string {
     return `${Buffer.byteLength(value, 'utf8')}:${value}`;
 }
 
-export function reverseLikeMaximumCharge(
-    candidateCount: number,
-    env: Record<string, string | undefined>
-): number {
-    const costPerResult = numberSetting(
-        env,
-        'APIFY_LIKERS_ESTIMATED_COST_PER_RESULT_USD',
-        0.00155,
-        0.00000001,
-        100
-    );
-    const maximum = numberSetting(
-        env,
-        'APIFY_LIKERS_MAX_ESTIMATED_COST_USD_PER_OPERATION',
-        1_500 * 0.00155,
-        0.00000001,
-        100_000
-    );
-    const estimated = Number((candidateCount * REVERSE_LIKE_LIMIT * costPerResult).toFixed(12));
-    if (estimated > maximum + Number.EPSILON) {
-        throw new Error('ANALYSIS_V2_REVERSE_LIKE_BUDGET_EXCEEDED');
-    }
-    return estimated;
-}
-
 function providerContext(
     checkpoint: Awaited<ReturnType<AnalysisV2ProviderRunStore['bindAdapterCheckpoint']>>['checkpoint']
 ): ProviderCallContext {
@@ -419,19 +399,22 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 'candidate-likers',
                 canonicalInput
             );
+            const maxChargeUsd = reverseLikeMaximumCharge(candidates.length, env);
+            const providerBinding = resolveAnalysisV2ApifyProviderBinding({
+                accessMode: requestContext.accessMode,
+                policy: requestContext.providerExecutionPolicy,
+                operation: 'candidate-likers',
+                maxChargeUsd,
+                env,
+            });
             const binding = await providerRunStore.bindAdapterCheckpoint({
                 ...claim,
                 operationKey,
                 inputHash: createAnalysisV2ProviderInputHash(canonicalInput),
                 logicalProvider: 'apify',
                 actorId: APIFY_LIKERS_ACTOR_ID,
-                credentialSlot: resolveAnalysisV2ApifyCredentialSlot({
-                    accessMode: requestContext.accessMode,
-                    policy: requestContext.providerExecutionPolicy,
-                    operation: 'candidate-likers',
-                    env,
-                }),
-                maxChargeUsd: reverseLikeMaximumCharge(candidates.length, env),
+                credentialSlot: providerBinding.credentialSlot,
+                maxChargeUsd,
             });
             const likers = await adapter.getPostLikers(
                 candidates.map(row => row.postUrl),

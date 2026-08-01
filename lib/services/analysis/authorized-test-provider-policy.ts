@@ -99,12 +99,30 @@ const betaOperationSlotsSchema = z.object({
     'target-comments': betaCredentialSlotSchema,
     'candidate-likers': betaCredentialSlotSchema,
 }).strict();
+const betaBudgetUsdSchema = z.number().finite().gt(0).max(1_000).refine(value => (
+    Math.abs(value * 1_000_000_000_000 - Math.round(value * 1_000_000_000_000))
+        < 0.01
+), 'Budget must use no more than 12 decimal places.');
+export const betaOperationBudgetMapSchema = z.object({
+    'target-profile': betaBudgetUsdSchema,
+    'relationship-followers': betaBudgetUsdSchema,
+    'relationship-following': betaBudgetUsdSchema,
+    'profile-fallback': betaBudgetUsdSchema,
+    'profile-repair': betaBudgetUsdSchema,
+    'target-likers': betaBudgetUsdSchema,
+    'target-comments': betaBudgetUsdSchema,
+    'candidate-likers': betaBudgetUsdSchema,
+}).strict();
+export type BetaProviderOperationBudgetMap = z.infer<
+    typeof betaOperationBudgetMapSchema
+>;
 
 /** Frozen request policy emitted only by the beta admission allocator. */
 export const betaTestProviderExecutionPolicySchema = z.object({
     mode: z.literal('betatest_free_pool'),
     policyVersion: z.literal(BETATEST_FREE_POOL_PROVIDER_POLICY_VERSION),
     operationSlots: betaOperationSlotsSchema,
+    operationBudgets: betaOperationBudgetMapSchema,
 }).strict();
 
 export type BetaTestProviderExecutionPolicy = z.infer<
@@ -115,6 +133,7 @@ export const providerExecutionPolicySchema = z.union([
     betaTestProviderExecutionPolicySchema,
 ]);
 export type ProviderExecutionPolicy = z.infer<typeof providerExecutionPolicySchema>;
+export const ANALYSIS_BETA_POOL_BUDGET_DRIFT = 'ANALYSIS_BETA_POOL_BUDGET_DRIFT';
 
 const SLOT_ENV_KEYS: Readonly<Record<AuthorizedTestProviderOperationKind, string>> = {
     'target-profile': 'ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT',
@@ -258,4 +277,47 @@ export function resolveAnalysisV2ApifyCredentialSlot(input: {
         throw new Error('ANALYSIS_V2_PROVIDER_POLICY_OPERATION_ERROR');
     }
     return policy.operationSlots[input.operation as keyof typeof policy.operationSlots];
+}
+
+export function resolveAnalysisV2ApifyProviderBinding(input: {
+    accessMode: PlanAccessMode;
+    policy: ProviderExecutionPolicy | null;
+    operation: ProviderPolicyOperationKind;
+    maxChargeUsd: number;
+    env?: Record<string, string | undefined>;
+}): Readonly<{
+    credentialSlot: ApifyCredentialSlot;
+    frozenFamilyBudgetUsd: number | null;
+}> {
+    const credentialSlot = resolveAnalysisV2ApifyCredentialSlot(input);
+    if (input.policy?.mode !== 'betatest_free_pool') {
+        return Object.freeze({ credentialSlot, frozenFamilyBudgetUsd: null });
+    }
+    const policy = betaTestProviderExecutionPolicySchema.parse(input.policy);
+    const maxChargeUsd = betaBudgetUsdSchema.safeParse(input.maxChargeUsd);
+    if (
+        !maxChargeUsd.success
+        || maxChargeUsd.data > policy.operationBudgets[input.operation] + Number.EPSILON
+    ) {
+        throw new Error(ANALYSIS_BETA_POOL_BUDGET_DRIFT);
+    }
+    return Object.freeze({
+        credentialSlot,
+        frozenFamilyBudgetUsd: policy.operationBudgets[input.operation],
+    });
+}
+
+export function assertBetaProviderExecutionBudgetCatalog(input: {
+    policy: ProviderExecutionPolicy;
+    requiredBudgets: BetaProviderOperationBudgetMap;
+}): ProviderExecutionPolicy {
+    const policy = providerExecutionPolicySchema.parse(input.policy);
+    if (policy.mode !== 'betatest_free_pool') return policy;
+    const required = betaOperationBudgetMapSchema.safeParse(input.requiredBudgets);
+    if (!required.success || BETATEST_PROVIDER_OPERATION_KINDS.some(operation => (
+        required.data[operation] > policy.operationBudgets[operation] + Number.EPSILON
+    ))) {
+        throw new Error(ANALYSIS_BETA_POOL_BUDGET_DRIFT);
+    }
+    return policy;
 }

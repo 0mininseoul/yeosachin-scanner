@@ -11,7 +11,6 @@ import {
 } from '@/lib/services/instagram/providers/apify-interactions';
 import {
     isApifyQueuedStartCancellation,
-    numberSetting,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import { REPLACEMENT_PROFILE_ACTOR } from '@/lib/services/instagram/providers/apify-profile-details';
@@ -70,9 +69,22 @@ import {
 } from './v2-request-context';
 import {
     canonicalProviderInput,
-    checkedMaximumCharge,
     lengthPrefixed,
 } from './v2-provider-identity';
+import {
+    ANALYSIS_V2_TARGET_COMMENT_LIMIT as TARGET_COMMENT_LIMIT,
+    ANALYSIS_V2_TARGET_COMMENT_POST_LIMIT as TARGET_COMMENT_POST_LIMIT,
+    ANALYSIS_V2_TARGET_LIKER_LIMIT as TARGET_LIKER_LIMIT,
+    ANALYSIS_V2_TARGET_LIKER_POST_LIMIT as TARGET_LIKER_POST_LIMIT,
+    interactionMaximumCharge,
+    profileMaximumCharge,
+    relationshipMaximumCharge,
+} from './v2-apify-operation-costs';
+export {
+    interactionMaximumCharge,
+    profileMaximumCharge,
+    relationshipMaximumCharge,
+} from './v2-apify-operation-costs';
 import { extractRawTargetInteractions } from './v2-target-interactions';
 import {
     analysisV2TargetProfileReuseStore,
@@ -83,15 +95,11 @@ import type {
     AnalysisV2StageExecutorRegistry,
 } from './v2-worker';
 import {
-    resolveAnalysisV2ApifyCredentialSlot,
+    resolveAnalysisV2ApifyProviderBinding,
     type ProviderPolicyOperationKind,
 } from './authorized-test-provider-policy';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
-const TARGET_LIKER_LIMIT = 150;
-const TARGET_COMMENT_LIMIT = 15;
-const TARGET_LIKER_POST_LIMIT = 4;
-const TARGET_COMMENT_POST_LIMIT = 6;
 
 type RelationshipGetter = typeof getFollowers;
 type ProfileBatchFetcher = typeof getProfilesBatchV2;
@@ -233,77 +241,6 @@ export function createAnalysisV2CollectionTopology(
     return Object.freeze(result);
 }
 
-export function relationshipMaximumCharge(
-    declaredCount: number,
-    env: Record<string, string | undefined>
-): number {
-    const costPerResult = numberSetting(
-        env,
-        'APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD',
-        0.00085,
-        0,
-        100
-    );
-    const maximum = numberSetting(
-        env,
-        'APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION',
-        1.1,
-        0.00000001,
-        100_000
-    );
-    return checkedMaximumCharge(Math.max(25, declaredCount) * costPerResult, maximum, 'relationship');
-}
-
-export function profileMaximumCharge(
-    count: number,
-    env: Record<string, string | undefined>
-): number {
-    const costPerResult = numberSetting(
-        env,
-        'APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD',
-        0.0026,
-        0,
-        100
-    );
-    const maximum = numberSetting(
-        env,
-        'APIFY_PROFILE_MAX_ESTIMATED_COST_USD_PER_OPERATION',
-        1,
-        0.00000001,
-        100_000
-    );
-    return checkedMaximumCharge(count * costPerResult, maximum, 'profile fallback');
-}
-
-export function interactionMaximumCharge(
-    kind: 'likers' | 'comments',
-    postCount: number,
-    limitPerPost: number,
-    env: Record<string, string | undefined>
-): number {
-    const prefix = kind === 'likers' ? 'APIFY_LIKERS' : 'APIFY_COMMENTS';
-    const defaultCost = kind === 'likers' ? 0.00155 : 0.0026;
-    const costPerResult = numberSetting(
-        env,
-        `${prefix}_ESTIMATED_COST_PER_RESULT_USD`,
-        defaultCost,
-        0.00000001,
-        100
-    );
-    const maximum = numberSetting(
-        env,
-        `${prefix}_MAX_ESTIMATED_COST_USD_PER_OPERATION`,
-        (kind === 'likers' ? 1_500 : 90) * defaultCost,
-        0.00000001,
-        100_000
-    );
-    return checkedMaximumCharge(
-        postCount * limitPerPost * costPerResult,
-        maximum,
-        `target ${kind}`
-    );
-}
-
 async function bindApifyRun(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
@@ -314,6 +251,13 @@ async function bindApifyRun(input: {
     actorId: string;
     maxChargeUsd: number;
 }) {
+    const providerBinding = resolveAnalysisV2ApifyProviderBinding({
+        accessMode: input.request.accessMode,
+        policy: input.request.providerExecutionPolicy,
+        operation: input.operation,
+        maxChargeUsd: input.maxChargeUsd,
+        env: input.dependencies.env,
+    });
     const identity = {
         requestId: input.claim.requestId,
         jobKey: input.claim.jobKey,
@@ -322,12 +266,7 @@ async function bindApifyRun(input: {
         inputHash: input.inputHash,
         logicalProvider: 'apify',
         actorId: input.actorId,
-        credentialSlot: resolveAnalysisV2ApifyCredentialSlot({
-            accessMode: input.request.accessMode,
-            policy: input.request.providerExecutionPolicy,
-            operation: input.operation,
-            env: input.dependencies.env,
-        }),
+        credentialSlot: providerBinding.credentialSlot,
         maxChargeUsd: input.maxChargeUsd,
     } as const;
     const binding = await bindAdoptedProviderRunOrFallback({
