@@ -650,11 +650,17 @@ export async function processAnalysisV2FreshAdmission(
         }, result.failureCount, error);
     };
     try {
-        const betaHold = claim.analysisEntryChannel === 'betatest'
-            ? await dependencies.betaCreditCoordinator?.reuse(claim.preflightId)
-            : undefined;
-        if (claim.analysisEntryChannel === 'betatest' && !betaHold) {
-            throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+        let betaHold: Awaited<ReturnType<BetaApifyPreflightCoordinator['reuse']>>
+            | undefined;
+        if (claim.analysisEntryChannel === 'betatest') {
+            try {
+                betaHold = await dependencies.betaCreditCoordinator?.reuse(
+                    claim.preflightId
+                );
+                if (!betaHold) throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+            } catch (error) {
+                return await settleFailure(error);
+            }
         }
         let profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
         let reusableProfileInputHash: string | null = null;

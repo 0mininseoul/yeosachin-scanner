@@ -996,6 +996,75 @@ describe('durable fresh V2 admission worker', () => {
         );
     });
 
+    it('durably blocks the third persistent beta hold-reuse failure before profile I/O', async () => {
+        let failureCount = 0;
+        const { client, rpc } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                        analysis_entry_channel: 'betatest',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc) {
+                failureCount++;
+                return {
+                    data: [{
+                        admission_status: failureCount === 3 ? 'blocked' : 'pending',
+                        failure_count: failureCount,
+                        admission_error_code: failureCount === 3
+                            ? 'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE'
+                            : null,
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseRpc) {
+                return { data: true, error: null };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const getProfile = vi.fn();
+        const getFallbackProfile = vi.fn();
+        const betaCreditCoordinator = {
+            prepare: vi.fn(),
+            reuse: vi.fn().mockRejectedValue(
+                new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE')
+            ),
+        };
+
+        for (const expectedAttempt of [1, 2]) {
+            await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+                getProfile,
+                getFallbackProfile,
+                betaCreditCoordinator,
+                createClaimToken: () => CLAIM_TOKEN,
+            })).rejects.toMatchObject({
+                message: 'PREFLIGHT_WORKER_RETRY',
+                classification: { workerAttemptCount: expectedAttempt },
+            });
+        }
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile,
+            getFallbackProfile,
+            betaCreditCoordinator,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).resolves.toBe('blocked');
+
+        expect(failureCount).toBe(3);
+        expect(betaCreditCoordinator.reuse).toHaveBeenCalledTimes(3);
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+        expect(rpc).not.toHaveBeenCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseRpc,
+            expect.anything()
+        );
+    });
+
     it('releases the exact claim when terminal block persistence fails', async () => {
         const { client, rpc } = clientWith(async (name) => {
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
