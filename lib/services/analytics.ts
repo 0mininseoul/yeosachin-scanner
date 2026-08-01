@@ -62,7 +62,47 @@ const API_KEY_PATTERN = /^[0-9a-f]{32}$/i;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_QUEUED_EVENTS = 50;
 const SESSION_REPLAY_MAX_SAMPLE_RATE = 0.1;
-const SESSION_REPLAY_SAFE_PATHS = new Set(['/', '/privacy', '/terms']);
+const SESSION_REPLAY_SAFE_PATHS = new Set([
+    '/',
+    '/privacy',
+    '/terms',
+    '/login',
+    '/analyze',
+    '/earlybird',
+    '/mypage',
+]);
+const SESSION_REPLAY_DYNAMIC_PATHS = [
+    /^\/progress\/[^/]+$/,
+    /^\/result\/[^/]+$/,
+    /^\/share\/[^/]+$/,
+] as const;
+type ReplayUgcFilterRule = { selector: string; replacement: string };
+// The installed replay SDK applies these local rules before persisting replay meta, click, and
+// scroll URLs. Every production alias is covered without coupling this bundle to a hostname.
+const SESSION_REPLAY_UGC_FILTER_RULES: readonly ReplayUgcFilterRule[] = [
+    { selector: 'http://*/progress/*', replacement: '/progress/:requestId' },
+    { selector: 'https://*/progress/*', replacement: '/progress/:requestId' },
+    { selector: 'http://*/result/*', replacement: '/result/:requestId' },
+    { selector: 'https://*/result/*', replacement: '/result/:requestId' },
+    { selector: 'http://*/share/*', replacement: '/share/:token' },
+    { selector: 'https://*/share/*', replacement: '/share/:token' },
+    { selector: 'http://*/privacy*', replacement: '/privacy' },
+    { selector: 'https://*/privacy*', replacement: '/privacy' },
+    { selector: 'http://*/terms*', replacement: '/terms' },
+    { selector: 'https://*/terms*', replacement: '/terms' },
+    { selector: 'http://*/login*', replacement: '/login' },
+    { selector: 'https://*/login*', replacement: '/login' },
+    { selector: 'http://*/analyze*', replacement: '/analyze' },
+    { selector: 'https://*/analyze*', replacement: '/analyze' },
+    { selector: 'http://*/earlybird*', replacement: '/earlybird' },
+    { selector: 'https://*/earlybird*', replacement: '/earlybird' },
+    { selector: 'http://*/mypage*', replacement: '/mypage' },
+    { selector: 'https://*/mypage*', replacement: '/mypage' },
+    { selector: 'http://*/?*', replacement: '/' },
+    { selector: 'https://*/?*', replacement: '/' },
+    { selector: 'http://*/', replacement: '/' },
+    { selector: 'https://*/', replacement: '/' },
+];
 const SESSION_REPLAY_MASK_SELECTORS = [
     '.amp-mask',
     '[data-amp-mask]',
@@ -262,9 +302,10 @@ function currentReplayLocation(): ReplayLocation | null {
 function isReplaySafeLocation(location: ReplayLocation | null = currentReplayLocation()): boolean {
     return Boolean(
         location
-        && SESSION_REPLAY_SAFE_PATHS.has(location.pathname)
-        && location.search.length === 0
-        && location.hash.length === 0,
+        && (
+            SESSION_REPLAY_SAFE_PATHS.has(location.pathname)
+            || SESSION_REPLAY_DYNAMIC_PATHS.some((pattern) => pattern.test(location.pathname))
+        ),
     );
 }
 
@@ -310,6 +351,9 @@ function replayRemoteConfig(sampling: ReplaySamplingConfig) {
                     sample_rate: sampling.sampleRate,
                     capture_enabled: sampling.captureEnabled,
                 },
+                ...(sampling.captureEnabled ? {
+                    sr_interaction_config: { enabled: true, batch: true },
+                } : {}),
             },
         },
     } as const;
@@ -648,7 +692,11 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
                         maskSelector: [...SESSION_REPLAY_MASK_SELECTORS],
                         blockSelector: [...SESSION_REPLAY_BLOCK_SELECTORS],
                     },
-                    interactionConfig: { enabled: false, batch: false },
+                    interactionConfig: {
+                        enabled: true,
+                        batch: true,
+                        ugcFilterRules: [...SESSION_REPLAY_UGC_FILTER_RULES],
+                    },
                     performanceConfig: { enabled: false },
                     captureDocumentTitle: false,
                     enableUrlChangePolling: false,
@@ -721,9 +769,8 @@ function shutdownSessionReplay(): void {
 }
 
 /**
- * This is called on every App Router transition. Once a session enters a sensitive route,
- * capture is stopped rather than trusting a route URL, query, or client-side transition to
- * remain safe. A later navigation requires a fresh page/session before replay can resume.
+ * This is called on every App Router transition. Eligible routes are canonicalized by the SDK's
+ * local UGC rules, including dynamic IDs, query strings, and hashes. Any other route is stopped.
  */
 export function enforceAmplitudeReplayRoutePrivacy(): void {
     if (

@@ -18,7 +18,7 @@ function LoginContent() {
     }, [error]);
 
     return (
-        <main data-amp-block className="flex min-h-dvh flex-col items-center justify-center px-5 py-12">
+        <main data-amp-mask className="flex min-h-dvh flex-col items-center justify-center px-5 py-12">
             <div className="w-full max-w-[400px]">
                 {/* brand + header */}
                 <div className="mb-8 text-center">
