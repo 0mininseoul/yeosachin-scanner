@@ -29,6 +29,8 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
         expect(migration).toContain('v_source_preflight.admission_selected_plan_id IS DISTINCT FROM v_order.plan_id');
         expect(migration).toContain('v_source_preflight.admission_capacity_required_plan_id');
         expect(migration).toContain('v_source_preflight.admission_required_plan_id');
+        expect(migration).toContain('v_order, v_recovery_preflight, v_current');
+        expect(migration).toContain('v_order, v_source_preflight, v_current');
         expect(migration).toContain("ANALYSIS_V2_PROVIDER_RUN_ADOPTION_LINEAGE_CONFLICT");
     });
 
