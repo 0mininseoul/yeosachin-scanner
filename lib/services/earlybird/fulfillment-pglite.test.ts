@@ -207,6 +207,13 @@ const relationshipAdoptionChargeDriftMigration = readFileSync(
     ),
     'utf8'
 );
+const relationshipAdoptionSourceCountMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801190000_return_cross_count_relationship_adoption_source_count.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -1622,6 +1629,34 @@ describe('operator-approved earlybird fulfillment migration', () => {
             `),
             'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_TRIGGER_SHAPE_MISMATCH'
         );
+    });
+
+    it('rejects a tampered current resolver before the source-count patch and rolls back', async () => {
+        const signature =
+            'public.resolve_analysis_v2_recovery_provider_run'
+            + '(uuid,text,uuid,text,text,text,text,text,numeric)';
+        const definition = async (): Promise<string> => (
+            (await db.query<{ definition: string }>(
+                'SELECT pg_catalog.pg_get_functiondef($1::regprocedure) AS definition',
+                [signature]
+            )).rows[0].definition
+        );
+        const before = await definition();
+        const tampered = before.replace(
+            'source_run.usage_reconciled_at IS NOT NULL',
+            'source_run.usage_reconciled_at IS NULL'
+        );
+        expect(tampered).not.toBe(before);
+        await db.exec('BEGIN');
+        try {
+            await db.exec(tampered);
+            await expect(db.exec(relationshipAdoptionSourceCountMigration)).rejects.toThrow(
+                'ANALYSIS_V2_RELATIONSHIP_ADOPTION_SOURCE_COUNT_SHAPE_MISMATCH'
+            );
+        } finally {
+            await db.exec('ROLLBACK');
+        }
+        expect(await definition()).toBe(before);
     });
 
     it('enqueues a confirmed payment but never exposes it to recovery before admission', async () => {
@@ -4931,21 +4966,59 @@ describe('operator-approved earlybird fulfillment migration', () => {
             ]
         )).rejects.toThrow('ANALYSIS_V2_PROVIDER_RUN_ADOPTION_SOURCE_UNAVAILABLE');
 
-        await db.exec('BEGIN');
+        const resolverSignature =
+            'public.resolve_analysis_v2_recovery_provider_run'
+            + '(uuid,text,uuid,text,text,text,text,text,numeric)';
+        const resolverBeforeSourceCount = (await db.query<{ definition: string }>(
+            'SELECT pg_catalog.pg_get_functiondef($1::regprocedure) AS definition',
+            [resolverSignature]
+        )).rows[0].definition;
         try {
-            const adopted = (await asService<{ adopted: { runId: string } }>(
-                `SELECT public.resolve_analysis_v2_recovery_provider_run(
-                    $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .1972
-                 ) AS adopted`,
-                [
-                    r2.request_id, relationshipJob, DISPATCH_TOKEN,
-                    currentFollowers.operation_key, currentFollowers.input_hash,
-                    sourceRuns[3].actorId,
-                ]
-            )).rows[0].adopted;
-            expect(adopted).toMatchObject({ runId: 'PartialFollowersRun1' });
+            await db.exec(relationshipAdoptionSourceCountMigration);
+            await db.exec(relationshipAdoptionSourceCountMigration);
+            await db.exec('BEGIN');
+            try {
+                const exact = (await asService<{
+                    adopted: Record<string, unknown>;
+                }>(
+                    `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                        $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .2
+                     ) AS adopted`,
+                    [
+                        r2.request_id, targetJob, DISPATCH_TOKEN,
+                        sourceRuns[1].operationKey, sourceRuns[1].inputHash,
+                        sourceRuns[1].actorId,
+                    ]
+                )).rows[0].adopted;
+                expect(exact).toMatchObject({ runId: 'PartialLikerRun1' });
+                expect(exact).not.toHaveProperty('relationshipSourceDeclaredCount');
+
+                const adopted = (await asService<{
+                    adopted: Record<string, unknown>;
+                }>(
+                    `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                        $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .1972
+                     ) AS adopted`,
+                    [
+                        r2.request_id, relationshipJob, DISPATCH_TOKEN,
+                        currentFollowers.operation_key, currentFollowers.input_hash,
+                        sourceRuns[3].actorId,
+                    ]
+                )).rows[0].adopted;
+                expect(adopted).toMatchObject({
+                    runId: 'PartialFollowersRun1',
+                    relationshipSourceDeclaredCount: 233,
+                });
+            } finally {
+                await db.exec('ROLLBACK');
+            }
         } finally {
-            await db.exec('ROLLBACK');
+            await db.exec(resolverBeforeSourceCount);
+            await db.exec(`
+                REVOKE ALL ON FUNCTION ${resolverSignature}
+                    FROM PUBLIC, anon, authenticated, service_role;
+                GRANT EXECUTE ON FUNCTION ${resolverSignature} TO service_role;
+            `);
         }
 
         for (const [label, operationKey, inputHash, provider, actor, slot] of [

@@ -628,8 +628,27 @@ export async function runApifyRelationshipActor(
     }
 
     const actorLimit = Math.max(definition.minimumLimit, limit);
+    const allowAdoptedRelationshipTruncation =
+        context?.allowAdoptedRelationshipTruncation === true;
+    if (
+        allowAdoptedRelationshipTruncation
+        && (
+            !context.resumeRunId
+            || !APIFY_RUN_ID_PATTERN.test(context.resumeRunId.trim())
+            || context.startReserved === true
+            || typeof context.onBeforeRunStart === 'function'
+            || typeof context.onRunStarted === 'function'
+            || typeof context.onCostRunStarted === 'function'
+            || typeof context.onCostRunFinished === 'function'
+            || typeof context.onRunStartRejected === 'function'
+        )
+    ) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: adopted relationship truncation requires a callback-free persisted run.'
+        );
+    }
     const adoptedRelationshipSourceDeclaredCount =
-        context?.allowAdoptedRelationshipTruncation === true
+        allowAdoptedRelationshipTruncation
         ? context.adoptedRelationshipSourceDeclaredCount
         : undefined;
     if (
