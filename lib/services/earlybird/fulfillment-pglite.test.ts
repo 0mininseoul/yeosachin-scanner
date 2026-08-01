@@ -193,6 +193,13 @@ const sourcePreflightPartialAdoptionMigration = readFileSync(
     ),
     'utf8'
 );
+const correctedPartialAdoptionTopologyMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801170000_correct_partial_adoption_incident_topology.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -309,6 +316,7 @@ type FulfillmentIdentity = {
 };
 
 let db: PGlite;
+let sourcePreflightPartialAdoptionDefinition: string;
 
 async function asService<T>(
     sql: string,
@@ -1221,6 +1229,15 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(schemaRecoveryProviderAdoptionRearmMigration);
         await db.exec(sourcePreflightPartialAdoptionMigration);
         await db.exec(sourcePreflightPartialAdoptionMigration);
+        sourcePreflightPartialAdoptionDefinition = (await db.query<{
+            definition: string;
+        }>(`
+            SELECT pg_catalog.pg_get_functiondef(
+                'public.rearm_earlybird_zero_spend_adoption_policy_failure(uuid,uuid,timestamp with time zone)'::regprocedure
+            ) AS definition
+        `)).rows[0].definition;
+        await db.exec(correctedPartialAdoptionTopologyMigration);
+        await db.exec(correctedPartialAdoptionTopologyMigration);
     });
 
     beforeEach(async () => {
@@ -1286,6 +1303,70 @@ describe('operator-approved earlybird fulfillment migration', () => {
 
     afterAll(async () => {
         await db.close();
+    });
+
+    it('rejects security, lock, and immutable audit replay drift before replacing the 1600 definition', async () => {
+        const signature =
+            'public.rearm_earlybird_zero_spend_adoption_policy_failure'
+            + '(uuid,uuid,timestamp with time zone)';
+        const currentDefinition = async (): Promise<string> => (
+            (await db.query<{ definition: string }>(`
+                SELECT pg_catalog.pg_get_functiondef($1::regprocedure) AS definition
+            `, [signature])).rows[0].definition
+        );
+        const definitionMutations = [
+            {
+                name: 'missing order row lock',
+                from: 'WHERE earlybird_order.id = p_order_id FOR UPDATE;',
+                to: 'WHERE earlybird_order.id = p_order_id;',
+            },
+            {
+                name: 'disabled immutable audit replay branch',
+                from: 'WHERE audit.order_id = p_order_id;\n    IF FOUND THEN',
+                to: 'WHERE audit.order_id = p_order_id;\n    IF FALSE THEN',
+            },
+        ];
+        const mutations: Array<{
+            name: string;
+            apply: () => Promise<unknown>;
+        }> = [
+            {
+                name: 'security invoker',
+                apply: () => db.exec(`ALTER FUNCTION ${signature} SECURITY INVOKER`),
+            },
+            {
+                name: 'unsafe search path',
+                apply: () => db.exec(`ALTER FUNCTION ${signature} SET search_path TO public`),
+            },
+            ...definitionMutations.map(({ name, from, to }) => ({
+                name,
+                apply: async () => {
+                    const mutated = sourcePreflightPartialAdoptionDefinition.replace(from, to);
+                    expect(mutated, name).not.toBe(sourcePreflightPartialAdoptionDefinition);
+                    await db.exec(mutated);
+                },
+            })),
+        ];
+
+        for (const mutation of mutations) {
+            const finalDefinition = await currentDefinition();
+            await db.exec('BEGIN');
+            try {
+                await db.exec(sourcePreflightPartialAdoptionDefinition);
+                await mutation.apply();
+                expect(await currentDefinition(), mutation.name)
+                    .not.toBe(sourcePreflightPartialAdoptionDefinition);
+                await expect(
+                    db.exec(correctedPartialAdoptionTopologyMigration),
+                    mutation.name
+                ).rejects.toThrow(
+                    'EARLYBIRD_PARTIAL_ADOPTION_TOPOLOGY_SAFETY_SHAPE_MISMATCH'
+                );
+            } finally {
+                await db.exec('ROLLBACK');
+            }
+            expect(await currentDefinition(), mutation.name).toBe(finalDefinition);
+        }
     });
 
     it('enqueues a confirmed payment but never exposes it to recovery before admission', async () => {
@@ -3854,6 +3935,45 @@ describe('operator-approved earlybird fulfillment migration', () => {
     });
 
     it('rearms the exact r1 partial-adoption failure and lets r2 adopt all source runs', async () => {
+        expect((await db.query<{
+            public_execute: boolean;
+            anon_execute: boolean;
+            authenticated_execute: boolean;
+            service_execute: boolean;
+        }>(
+            `SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_proc AS proc
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+                        proc.proacl, pg_catalog.acldefault('f', proc.proowner)
+                    )) AS privilege
+                    WHERE proc.oid =
+                        'public.rearm_earlybird_zero_spend_adoption_policy_failure(uuid,uuid,timestamp with time zone)'::regprocedure
+                      AND privilege.grantee = 0
+                      AND privilege.privilege_type = 'EXECUTE'
+                ) AS public_execute,
+                pg_catalog.has_function_privilege(
+                    'anon',
+                    'public.rearm_earlybird_zero_spend_adoption_policy_failure(uuid,uuid,timestamp with time zone)',
+                    'EXECUTE'
+                ) AS anon_execute,
+                pg_catalog.has_function_privilege(
+                    'authenticated',
+                    'public.rearm_earlybird_zero_spend_adoption_policy_failure(uuid,uuid,timestamp with time zone)',
+                    'EXECUTE'
+                ) AS authenticated_execute,
+                pg_catalog.has_function_privilege(
+                    'service_role',
+                    'public.rearm_earlybird_zero_spend_adoption_policy_failure(uuid,uuid,timestamp with time zone)',
+                    'EXECUTE'
+                ) AS service_execute`
+        )).rows[0]).toEqual({
+            public_execute: false,
+            anon_execute: false,
+            authenticated_execute: false,
+            service_execute: true,
+        });
         await db.query(
             `UPDATE public.earlybird_orders
              SET plan_id = 'standard', target_followers_count = 235,
@@ -3863,7 +3983,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         );
         await db.query(
             `UPDATE public.analysis_preflights
-             SET target_followers_count = 233, target_following_count = 624,
+             SET target_followers_count = 232, target_following_count = 623,
                  capacity_required_plan_id = 'standard', required_plan_id = 'standard',
                  plan_cards_snapshot = $2::JSONB
              WHERE id = $1`,
@@ -3872,16 +3992,16 @@ describe('operator-approved earlybird fulfillment migration', () => {
         const requestKey = await seedRecoveredRequestCollision();
         await db.query(
             `UPDATE public.analysis_preflights
-             SET target_followers_count = 233,
-                 target_following_count = CASE WHEN id = $1 THEN 623 ELSE 624 END,
+             SET target_followers_count = CASE WHEN id = $1 THEN 233 ELSE 232 END,
+                 target_following_count = 623,
                  capacity_required_plan_id = 'standard', required_plan_id = 'standard',
                  plan_cards_snapshot = $2::JSONB,
                  admission_status = 'ready', admission_selected_plan_id = 'standard',
                  admission_entitlement_jti_hash = $3, admission_token = $5,
                  admission_refreshed_at = clock_timestamp(),
-                 admission_target_followers_count = 233,
-                 admission_target_following_count =
-                    CASE WHEN id = $1 THEN 623 ELSE 624 END,
+                 admission_target_followers_count =
+                    CASE WHEN id = $1 THEN 233 ELSE 232 END,
+                 admission_target_following_count = 623,
                  admission_capacity_required_plan_id = 'standard',
                  admission_required_plan_id = 'standard',
                  admission_plan_cards_snapshot = $2::JSONB
@@ -3896,8 +4016,8 @@ describe('operator-approved earlybird fulfillment migration', () => {
              SET admission_status = 'ready', admission_selected_plan_id = 'standard',
                  admission_entitlement_jti_hash = $2, admission_token = $3,
                  admission_refreshed_at = clock_timestamp(),
-                 admission_target_followers_count = 233,
-                 admission_target_following_count = 624,
+                 admission_target_followers_count = 232,
+                 admission_target_following_count = 623,
                  admission_capacity_required_plan_id = 'standard',
                  admission_required_plan_id = 'standard',
                  admission_plan_cards_snapshot = $4::JSONB
@@ -3909,19 +4029,25 @@ describe('operator-approved earlybird fulfillment migration', () => {
         );
         const relationshipJob = 'track:relationships:collect';
         const targetJob = 'track:target-evidence:collect';
-        const relationshipIdentity = async (count: number, replacement: boolean) => (
+        const relationshipIdentity = async (
+            side: 'followers' | 'following',
+            count: number,
+            replacement = false
+        ) => (
             (await db.query<{ operation_key: string; input_hash: string }>(
                 `SELECT * FROM public.analysis_v2_relationship_provider_identity(
-                    'following', 'sample.account', $1, 'standard', $2
+                    $1, 'sample.account', $2, 'standard', $3
                  )`,
-                [count, replacement]
+                [side, count, replacement]
             )).rows[0]
         );
-        const sourceFollowing = await relationshipIdentity(623, true);
-        const sourceInitialFollowing = await relationshipIdentity(623, false);
-        const currentFollowing = await relationshipIdentity(624, true);
-        const currentInitialFollowing = await relationshipIdentity(624, false);
-        const wrongSourceFollowing = await relationshipIdentity(622, true);
+        const sourceFollowing = await relationshipIdentity('following', 623);
+        const sourceFollowers = await relationshipIdentity('followers', 233);
+        const currentFollowing = await relationshipIdentity('following', 623);
+        const currentFollowers = await relationshipIdentity('followers', 232);
+        const wrongSourceFollowing = await relationshipIdentity('following', 622);
+        const replacementFollowing = await relationshipIdentity('following', 623, true);
+        const wrongCurrentFollowing = await relationshipIdentity('following', 624);
         const sourceRuns = [
             {
                 jobKey: relationshipJob,
@@ -3952,12 +4078,12 @@ describe('operator-approved earlybird fulfillment migration', () => {
             {
                 jobKey: relationshipJob,
                 track: 'relationships',
-                operationKey: sourceInitialFollowing.operation_key,
-                inputHash: sourceInitialFollowing.input_hash,
-                destinationOperationKey: currentInitialFollowing.operation_key,
-                destinationInputHash: currentInitialFollowing.input_hash,
+                operationKey: sourceFollowers.operation_key,
+                inputHash: sourceFollowers.input_hash,
+                destinationOperationKey: currentFollowers.operation_key,
+                destinationInputHash: currentFollowers.input_hash,
                 actorId: 'scraping_solutions/instagram-scraper-followers-following-no-cookies',
-                runId: 'PartialInitialFollowingRun1',
+                runId: 'PartialFollowersRun1',
             },
             ...Array.from({ length: 4 }, (_, index) => ({
                 jobKey: `track:profiles:batch:${index}`,
@@ -4092,14 +4218,18 @@ describe('operator-approved earlybird fulfillment migration', () => {
             );
         };
 
-        await db.exec('BEGIN');
-        try {
-            await db.query(
+        const expectWrongSourceRejected = async (
+            wrongIdentity: { operation_key: string; input_hash: string },
+            wrongRunId: string
+        ): Promise<void> => {
+            await db.exec('BEGIN');
+            try {
+                await db.query(
                 `DELETE FROM public.analysis_v2_provider_runs
                  WHERE request_id = $1 AND job_key = $2 AND operation_key = $3`,
                 [FAILED_REQUEST, relationshipJob, sourceFollowing.operation_key]
-            );
-            await db.query(
+                );
+                await db.query(
                 `INSERT INTO public.analysis_v2_provider_runs(
                     request_id, job_key, operation_key, input_hash,
                     job_claim_token, reservation_token, logical_provider,
@@ -4107,31 +4237,32 @@ describe('operator-approved earlybird fulfillment migration', () => {
                     actual_usage_usd, usage_reconciled_at
                  ) VALUES ($1, $2, $3, $4, extensions.gen_random_uuid(),
                     extensions.gen_random_uuid(), 'apify', $5, 'secondary', .2,
-                    'succeeded', 'WrongFollowingRun1', .1, clock_timestamp())`,
+                    'succeeded', $6, .1, clock_timestamp())`,
                 [
                     FAILED_REQUEST, relationshipJob,
-                    wrongSourceFollowing.operation_key,
-                    wrongSourceFollowing.input_hash,
+                    wrongIdentity.operation_key,
+                    wrongIdentity.input_hash,
                     sourceRuns[0].actorId,
+                    wrongRunId,
                 ]
-            );
-            const wrongSourceRuns = [
+                );
+                const wrongSourceRuns = [
                 {
                     ...sourceRuns[0],
-                    operationKey: wrongSourceFollowing.operation_key,
-                    inputHash: wrongSourceFollowing.input_hash,
-                    runId: 'WrongFollowingRun1',
+                    operationKey: wrongIdentity.operation_key,
+                    inputHash: wrongIdentity.input_hash,
+                    runId: wrongRunId,
                 },
                 ...sourceRuns.slice(1, 3),
-            ];
-            for (const [index, sourceRun] of wrongSourceRuns.entries()) {
-                const destination = index === 0
-                    ? {
-                        operationKey: currentFollowing.operation_key,
-                        inputHash: currentFollowing.input_hash,
-                    }
-                    : destinationIdentity(sourceRun);
-                await db.query(
+                ];
+                for (const [index, sourceRun] of wrongSourceRuns.entries()) {
+                    const destination = index === 0
+                        ? {
+                            operationKey: currentFollowing.operation_key,
+                            inputHash: currentFollowing.input_hash,
+                        }
+                        : destinationIdentity(sourceRun);
+                    await db.query(
                     `INSERT INTO public.analysis_v2_recovery_provider_run_adoptions(
                         request_id, job_key, operation_key, destination_input_hash,
                         source_request_id, source_job_key, source_operation_key,
@@ -4142,22 +4273,26 @@ describe('operator-approved earlybird fulfillment migration', () => {
                         destination.inputHash, FAILED_REQUEST,
                         sourceRun.operationKey, sourceRun.runId,
                     ]
-                );
-            }
-            await markPartialFailure();
-            await expect(db.query(
+                    );
+                }
+                await markPartialFailure();
+                await expect(db.query(
                 `SELECT * FROM public.rearm_earlybird_zero_spend_adoption_policy_failure(
                     $1, $2, $3::TIMESTAMPTZ
                  )`,
                 [ORDER, r1.request_id, manualReviewAt]
-            )).rejects.toThrow('EARLYBIRD_ADOPTION_POLICY_FAILURE_REARM_INELIGIBLE');
-        } finally {
-            await db.exec('ROLLBACK');
-        }
+                )).rejects.toThrow('EARLYBIRD_ADOPTION_POLICY_FAILURE_REARM_INELIGIBLE');
+            } finally {
+                await db.exec('ROLLBACK');
+            }
+        };
+        await expectWrongSourceRejected(wrongSourceFollowing, 'WrongFollowingRun1');
+        await expectWrongSourceRejected(replacementFollowing, 'ReplacementFollowingRun1');
 
         for (const { sourceIndex, crossedDestination } of [
             { sourceIndex: 0, crossedDestination: 'operation' },
             { sourceIndex: 0, crossedDestination: 'input' },
+            { sourceIndex: 0, crossedDestination: 'replacement' },
             { sourceIndex: 1, crossedDestination: 'input' },
         ] as const) {
             await db.exec('BEGIN');
@@ -4173,11 +4308,21 @@ describe('operator-approved earlybird fulfillment migration', () => {
                         [
                             r1.request_id,
                             sourceRun.jobKey,
-                            index === sourceIndex && crossedDestination === 'operation'
-                                ? `relationship-following:${'0'.repeat(64)}`
+                            index === sourceIndex
+                                && (crossedDestination === 'operation'
+                                    || crossedDestination === 'replacement')
+                                ? crossedDestination === 'replacement'
+                                    ? replacementFollowing.operation_key
+                                    : wrongCurrentFollowing.operation_key
                                 : destination.operationKey,
-                            index === sourceIndex && crossedDestination === 'input'
-                                ? '0'.repeat(64)
+                            index === sourceIndex
+                                && (crossedDestination === 'input'
+                                    || crossedDestination === 'replacement')
+                                ? crossedDestination === 'replacement'
+                                    ? replacementFollowing.input_hash
+                                    : sourceIndex === 0
+                                        ? wrongCurrentFollowing.input_hash
+                                        : '0'.repeat(64)
                                 : destination.inputHash,
                             FAILED_REQUEST,
                             sourceRun.operationKey,
@@ -4270,6 +4415,33 @@ describe('operator-approved earlybird fulfillment migration', () => {
              WHERE request_id = $1 AND job_key = $2`,
             [r1.request_id, targetJob]
         );
+
+        await db.exec('BEGIN');
+        try {
+            await db.query(
+                `INSERT INTO public.analysis_v2_provider_runs(
+                    request_id, job_key, operation_key, input_hash,
+                    job_claim_token, reservation_token, logical_provider,
+                    actor_id, credential_slot, max_charge_usd, status, run_id,
+                    actual_usage_usd, usage_reconciled_at
+                 ) VALUES ($1, $2, $3, $4, extensions.gen_random_uuid(),
+                    extensions.gen_random_uuid(), 'apify', 'extra-liker-actor',
+                    'secondary', .2, 'succeeded', 'ExtraLikerRun1', .1,
+                    clock_timestamp())`,
+                [
+                    FAILED_REQUEST, targetJob,
+                    `target-likers:${'1'.repeat(64)}`, '1'.repeat(64),
+                ]
+            );
+            await expect(db.query(
+                `SELECT * FROM public.rearm_earlybird_zero_spend_adoption_policy_failure(
+                    $1, $2, $3::TIMESTAMPTZ
+                 )`,
+                [ORDER, r1.request_id, manualReviewAt]
+            )).rejects.toThrow('EARLYBIRD_ADOPTION_POLICY_FAILURE_REARM_INELIGIBLE');
+        } finally {
+            await db.exec('ROLLBACK');
+        }
 
         await db.exec('BEGIN');
         try {
@@ -4450,8 +4622,8 @@ describe('operator-approved earlybird fulfillment migration', () => {
              SET admission_status = 'ready', admission_selected_plan_id = 'standard',
                  admission_entitlement_jti_hash = $2, admission_token = $3,
                  admission_refreshed_at = clock_timestamp(),
-                 admission_target_followers_count = 233,
-                 admission_target_following_count = 624,
+                 admission_target_followers_count = 232,
+                 admission_target_following_count = 623,
                  admission_capacity_required_plan_id = 'standard',
                  admission_required_plan_id = 'standard',
                  admission_plan_cards_snapshot = $4::JSONB
