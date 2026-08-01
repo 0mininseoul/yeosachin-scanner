@@ -15,6 +15,8 @@ import {
 const CYCLE_START = '2026-08-01T00:00:00.000Z';
 const CYCLE_END = '2026-09-01T00:00:00.000Z';
 const OBSERVED_AT = new Date('2026-08-02T01:02:03.000Z');
+const MAX_OBSERVED_AT_FUTURE_SKEW_MS = 60_000;
+const TEST_CLOCK = Object.freeze({ now: () => OBSERVED_AT.getTime() });
 
 function rawLimits(
     monthlyLimitUsd: unknown = 10,
@@ -88,7 +90,7 @@ describe('beta Apify credit pool primitives', () => {
             credentialSlot: 'primary',
             client,
             observedAt: OBSERVED_AT,
-        });
+        }, TEST_CLOCK);
 
         expect(reading).toEqual({
             credentialSlot: 'primary',
@@ -126,7 +128,7 @@ describe('beta Apify credit pool primitives', () => {
                 rawMonthlyUsage(detailedMonthlyUsageUsd)
             ),
             observedAt: OBSERVED_AT,
-        });
+        }, TEST_CLOCK);
 
         expect(reading.monthlyUsageUsd).toBe(expectedUsageUsd);
     });
@@ -169,7 +171,53 @@ describe('beta Apify credit pool primitives', () => {
             credentialSlot: 'tertiary',
             client: clientWith(limits, monthlyUsage),
             observedAt: OBSERVED_AT,
-        })).rejects.toEqual(new Error(BETA_APIFY_CREDIT_READ_ERROR));
+        }, TEST_CLOCK)).rejects.toEqual(new Error(BETA_APIFY_CREDIT_READ_ERROR));
+    });
+
+    it.each([
+        [
+            'an expired cycle',
+            '2026-07-01T00:00:00.000Z',
+            '2026-08-02T01:02:02.999Z',
+        ],
+        [
+            'a future cycle',
+            '2026-08-02T01:02:03.001Z',
+            CYCLE_END,
+        ],
+        [
+            'the exact cycle rollover instant',
+            CYCLE_START,
+            OBSERVED_AT.toISOString(),
+        ],
+    ])('rejects matching provider responses for %s', async (
+        _name,
+        cycleStart,
+        cycleEnd
+    ) => {
+        await expect(readBetaApifyAccountCredit({
+            credentialSlot: 'primary',
+            client: clientWith(
+                rawLimits(10, cycleStart, cycleEnd),
+                rawMonthlyUsage(2, cycleStart, cycleEnd)
+            ),
+            observedAt: OBSERVED_AT,
+        }, TEST_CLOCK)).rejects.toEqual(new Error(BETA_APIFY_CREDIT_READ_ERROR));
+    });
+
+    it('rejects an observation beyond trusted clock skew before provider I/O starts', async () => {
+        const client = clientWith();
+        const futureObservedAt = new Date(
+            OBSERVED_AT.getTime() + MAX_OBSERVED_AT_FUTURE_SKEW_MS + 1
+        );
+
+        await expect(readBetaApifyAccountCredit({
+            credentialSlot: 'primary',
+            client,
+            observedAt: futureObservedAt,
+        }, TEST_CLOCK)).rejects.toEqual(new Error(BETA_APIFY_CREDIT_READ_ERROR));
+        expect(client.limits).not.toHaveBeenCalled();
+        expect(client.monthlyUsage).not.toHaveBeenCalled();
     });
 
     it('subtracts active reservations and local post-snapshot debit without going negative', () => {
@@ -226,7 +274,7 @@ describe('beta Apify credit pool primitives', () => {
             activeReservationsUsdBySlot: betaSlotAmounts(1),
             localPostSnapshotDebitUsdBySlot: betaSlotAmounts(0.5),
             observedAt: OBSERVED_AT,
-        });
+        }, TEST_CLOCK);
 
         await vi.waitFor(() => expect(started).toHaveLength(12));
         expect(clientForSlot.mock.calls.map(([slot]) => slot)).toEqual(
@@ -253,6 +301,64 @@ describe('beta Apify credit pool primitives', () => {
         );
     });
 
+    it('uses immutable pre-call reservation and debit snapshots during deferred reads', async () => {
+        let releaseReads: (() => void) | undefined;
+        const readGate = new Promise<void>(resolve => {
+            releaseReads = resolve;
+        });
+        const started: string[] = [];
+        const activeReservationsUsdBySlot = betaSlotAmounts(3);
+        const localPostSnapshotDebitUsdBySlot = betaSlotAmounts(2);
+        const clientForSlot = vi.fn((slot: BetaApifyFreeCredentialSlot) => ({
+            limits: vi.fn(async () => {
+                started.push(`limits:${slot}`);
+                await readGate;
+                return rawLimits();
+            }),
+            monthlyUsage: vi.fn(async () => {
+                started.push(`monthlyUsage:${slot}`);
+                await readGate;
+                return rawMonthlyUsage();
+            }),
+        }));
+
+        const pending = refreshBetaApifyCreditPool({
+            clientForSlot,
+            activeReservationsUsdBySlot,
+            localPostSnapshotDebitUsdBySlot,
+            observedAt: OBSERVED_AT,
+        }, TEST_CLOCK);
+
+        await vi.waitFor(() => expect(started).toHaveLength(12));
+        for (const slot of BETA_APIFY_FREE_CREDENTIAL_SLOTS) {
+            activeReservationsUsdBySlot[slot] = 0;
+            localPostSnapshotDebitUsdBySlot[slot] = 0;
+        }
+        releaseReads?.();
+
+        const readings = await pending;
+        for (const reading of readings) {
+            expect(reading).toMatchObject({
+                activeReservationsUsd: 3,
+                localPostSnapshotDebitUsd: 2,
+                effectiveHeadroomUsd: 3,
+            });
+        }
+    });
+
+    it('validates every slot amount before creating a provider client', async () => {
+        const activeReservationsUsdBySlot = betaSlotAmounts(1);
+        activeReservationsUsdBySlot.primary = Number.NaN;
+        const clientForSlot = vi.fn(() => clientWith());
+
+        await expect(refreshBetaApifyCreditPool({
+            clientForSlot,
+            activeReservationsUsdBySlot,
+            observedAt: OBSERVED_AT,
+        }, TEST_CLOCK)).rejects.toEqual(new Error(BETA_APIFY_CREDIT_REFRESH_ERROR));
+        expect(clientForSlot).not.toHaveBeenCalled();
+    });
+
     it.each(['rejected provider call', 'invalid provider response'])(
         'fails the entire six-slot refresh closed for a %s',
         async failureKind => {
@@ -272,7 +378,7 @@ describe('beta Apify credit pool primitives', () => {
             const error = await refreshBetaApifyCreditPool({
                 clientForSlot,
                 observedAt: OBSERVED_AT,
-            }).then(
+            }, TEST_CLOCK).then(
                 () => undefined,
                 reason => reason
             );

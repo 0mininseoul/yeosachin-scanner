@@ -19,28 +19,41 @@ export const BETA_APIFY_CREDIT_READ_ERROR =
 export const BETA_APIFY_CREDIT_REFRESH_ERROR =
     'ANALYSIS_BETA_APIFY_CREDIT_REFRESH_ERROR';
 
+const MAX_OBSERVED_AT_FUTURE_SKEW_MS = 60_000;
+
 export interface ApifyUserCreditClient {
     limits(): Promise<unknown>;
     monthlyUsage(): Promise<unknown>;
 }
 
+export interface BetaApifyCreditClock {
+    readonly now: () => number;
+}
+
 export interface BetaApifyAccountCreditReading {
-    credentialSlot: BetaApifyFreeCredentialSlot;
-    monthlyLimitUsd: number;
-    monthlyUsageUsd: number;
-    billingCycleStartAt: string;
-    billingCycleEndAt: string;
-    observedAt: string;
+    readonly credentialSlot: BetaApifyFreeCredentialSlot;
+    readonly monthlyLimitUsd: number;
+    readonly monthlyUsageUsd: number;
+    readonly billingCycleStartAt: string;
+    readonly billingCycleEndAt: string;
+    readonly observedAt: string;
 }
 
 export interface BetaApifyEffectiveCredit extends BetaApifyAccountCreditReading {
-    activeReservationsUsd: number;
-    localPostSnapshotDebitUsd: number;
-    effectiveHeadroomUsd: number;
+    readonly activeReservationsUsd: number;
+    readonly localPostSnapshotDebitUsd: number;
+    readonly effectiveHeadroomUsd: number;
 }
 
-type SlotAmounts = Partial<Record<BetaApifyFreeCredentialSlot, number>>;
+export type BetaApifySlotAmounts = Readonly<
+    Partial<Record<BetaApifyFreeCredentialSlot, number>>
+>;
+type CompleteSlotAmounts = Readonly<Record<BetaApifyFreeCredentialSlot, number>>;
 type UnknownRecord = Record<string, unknown>;
+
+const SYSTEM_CREDIT_CLOCK: BetaApifyCreditClock = Object.freeze({
+    now: () => Date.now(),
+});
 
 export function isBetaApifyFreeCredentialSlot(
     value: unknown
@@ -78,12 +91,36 @@ function requireTimestamp(value: unknown): string {
     return new Date(timestamp).toISOString();
 }
 
+function requireTimestampMilliseconds(value: unknown): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
+    }
+    return value;
+}
+
+function snapshotSlotAmounts(amounts?: BetaApifySlotAmounts): CompleteSlotAmounts {
+    return Object.freeze(Object.fromEntries(
+        BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(credentialSlot => [
+            credentialSlot,
+            requireNonNegativeFinite(amounts?.[credentialSlot] ?? 0),
+        ])
+    ) as Record<BetaApifyFreeCredentialSlot, number>);
+}
+
 export async function readBetaApifyAccountCredit(input: {
-    credentialSlot: BetaApifyFreeCredentialSlot;
-    client: ApifyUserCreditClient;
-    observedAt?: Date;
-}): Promise<BetaApifyAccountCreditReading> {
+    readonly credentialSlot: BetaApifyFreeCredentialSlot;
+    readonly client: ApifyUserCreditClient;
+    readonly observedAt?: Date;
+}, clock: BetaApifyCreditClock = SYSTEM_CREDIT_CLOCK): Promise<BetaApifyAccountCreditReading> {
     try {
+        const trustedNowMs = requireTimestampMilliseconds(clock.now());
+        const observedAt = requireTimestamp(
+            input.observedAt ?? new Date(trustedNowMs)
+        );
+        const observedAtMs = Date.parse(observedAt);
+        if (observedAtMs > trustedNowMs + MAX_OBSERVED_AT_FUTURE_SKEW_MS) {
+            throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
+        }
         if (!isBetaApifyFreeCredentialSlot(input.credentialSlot)) {
             throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
         }
@@ -115,11 +152,15 @@ export async function readBetaApifyAccountCredit(input: {
         const limitsCycleEndAt = requireTimestamp(limitsCycle.endAt);
         const usageCycleStartAt = requireTimestamp(usageCycle.startAt);
         const usageCycleEndAt = requireTimestamp(usageCycle.endAt);
+        const billingCycleStartMs = Date.parse(limitsCycleStartAt);
+        const billingCycleEndMs = Date.parse(limitsCycleEndAt);
 
         if (
             limitsCycleStartAt !== usageCycleStartAt
             || limitsCycleEndAt !== usageCycleEndAt
-            || Date.parse(limitsCycleStartAt) >= Date.parse(limitsCycleEndAt)
+            || billingCycleStartMs >= billingCycleEndMs
+            || billingCycleStartMs > observedAtMs
+            || observedAtMs >= billingCycleEndMs
         ) {
             throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
         }
@@ -130,7 +171,7 @@ export async function readBetaApifyAccountCredit(input: {
             monthlyUsageUsd,
             billingCycleStartAt: limitsCycleStartAt,
             billingCycleEndAt: limitsCycleEndAt,
-            observedAt: requireTimestamp(input.observedAt ?? new Date()),
+            observedAt,
         });
     } catch {
         throw new Error(BETA_APIFY_CREDIT_READ_ERROR);
@@ -138,10 +179,10 @@ export async function readBetaApifyAccountCredit(input: {
 }
 
 export function calculateBetaApifyEffectiveHeadroom(input: {
-    monthlyLimitUsd: number;
-    monthlyUsageUsd: number;
-    activeReservationsUsd: number;
-    localPostSnapshotDebitUsd: number;
+    readonly monthlyLimitUsd: number;
+    readonly monthlyUsageUsd: number;
+    readonly activeReservationsUsd: number;
+    readonly localPostSnapshotDebitUsd: number;
 }): number {
     const monthlyLimitUsd = requireNonNegativeFinite(input.monthlyLimitUsd);
     const monthlyUsageUsd = requireNonNegativeFinite(input.monthlyUsageUsd);
@@ -162,26 +203,32 @@ export function calculateBetaApifyEffectiveHeadroom(input: {
 }
 
 export async function refreshBetaApifyCreditPool(input: {
-    clientForSlot(slot: BetaApifyFreeCredentialSlot): ApifyUserCreditClient;
-    activeReservationsUsdBySlot?: SlotAmounts;
-    localPostSnapshotDebitUsdBySlot?: SlotAmounts;
-    observedAt?: Date;
-}): Promise<readonly BetaApifyEffectiveCredit[]> {
-    const observedAt = input.observedAt ?? new Date();
+    readonly clientForSlot: (
+        slot: BetaApifyFreeCredentialSlot
+    ) => ApifyUserCreditClient;
+    readonly activeReservationsUsdBySlot?: BetaApifySlotAmounts;
+    readonly localPostSnapshotDebitUsdBySlot?: BetaApifySlotAmounts;
+    readonly observedAt?: Date;
+}, clock: BetaApifyCreditClock = SYSTEM_CREDIT_CLOCK): Promise<readonly BetaApifyEffectiveCredit[]> {
     try {
+        const activeReservationsUsdBySlot = snapshotSlotAmounts(
+            input.activeReservationsUsdBySlot
+        );
+        const localPostSnapshotDebitUsdBySlot = snapshotSlotAmounts(
+            input.localPostSnapshotDebitUsdBySlot
+        );
+        const observedAt = input.observedAt ?? new Date(clock.now());
         const readings = await Promise.all(
             BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(async credentialSlot => {
                 const reading = await readBetaApifyAccountCredit({
                     credentialSlot,
                     client: input.clientForSlot(credentialSlot),
                     observedAt,
-                });
-                const activeReservationsUsd = requireNonNegativeFinite(
-                    input.activeReservationsUsdBySlot?.[credentialSlot] ?? 0
-                );
-                const localPostSnapshotDebitUsd = requireNonNegativeFinite(
-                    input.localPostSnapshotDebitUsdBySlot?.[credentialSlot] ?? 0
-                );
+                }, clock);
+                const activeReservationsUsd =
+                    activeReservationsUsdBySlot[credentialSlot];
+                const localPostSnapshotDebitUsd =
+                    localPostSnapshotDebitUsdBySlot[credentialSlot];
 
                 return Object.freeze({
                     ...reading,
