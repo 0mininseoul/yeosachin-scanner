@@ -200,6 +200,13 @@ const correctedPartialAdoptionTopologyMigration = readFileSync(
     ),
     'utf8'
 );
+const relationshipAdoptionChargeDriftMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801180000_fix_relationship_adoption_charge_drift.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -317,6 +324,7 @@ type FulfillmentIdentity = {
 
 let db: PGlite;
 let sourcePreflightPartialAdoptionDefinition: string;
+let correctedPartialAdoptionResolverDefinition: string;
 
 async function asService<T>(
     sql: string,
@@ -1238,11 +1246,21 @@ describe('operator-approved earlybird fulfillment migration', () => {
         `)).rows[0].definition;
         await db.exec(correctedPartialAdoptionTopologyMigration);
         await db.exec(correctedPartialAdoptionTopologyMigration);
+        correctedPartialAdoptionResolverDefinition = (await db.query<{
+            definition: string;
+        }>(`
+            SELECT pg_catalog.pg_get_functiondef(
+                'public.resolve_analysis_v2_recovery_provider_run(uuid,text,uuid,text,text,text,text,text,numeric)'::regprocedure
+            ) AS definition
+        `)).rows[0].definition;
+        await db.exec(relationshipAdoptionChargeDriftMigration);
+        await db.exec(relationshipAdoptionChargeDriftMigration);
     });
 
     beforeEach(async () => {
         await db.exec(`
             TRUNCATE public.analysis_v2_recovery_provider_run_adoptions,
+                public.earlybird_partial_adoption_second_rearms,
                 public.earlybird_adoption_policy_failure_rearms,
                 public.earlybird_schema_failure_recoveries,
                 public.earlybird_fulfillments,
@@ -1367,6 +1385,243 @@ describe('operator-approved earlybird fulfillment migration', () => {
             }
             expect(await currentDefinition(), mutation.name).toBe(finalDefinition);
         }
+    });
+
+    it('fails closed on resolver and second-rearm security or lock drift', async () => {
+        const resolverSignature =
+            'public.resolve_analysis_v2_recovery_provider_run'
+            + '(uuid,text,uuid,text,text,text,text,text,numeric)';
+        const rearmSignature =
+            'public.rearm_earlybird_partial_adoption_second_failure'
+            + '(uuid,uuid,timestamp with time zone)';
+        expect((await db.query<{
+            security_definer: boolean;
+            safe_search_path: boolean;
+            anon_execute: boolean;
+            authenticated_execute: boolean;
+            service_execute: boolean;
+        }>(`
+            SELECT proc.prosecdef AS security_definer,
+                COALESCE('search_path=""' = ANY(proc.proconfig), FALSE)
+                    AS safe_search_path,
+                pg_catalog.has_function_privilege('anon', proc.oid, 'EXECUTE')
+                    AS anon_execute,
+                pg_catalog.has_function_privilege('authenticated', proc.oid, 'EXECUTE')
+                    AS authenticated_execute,
+                pg_catalog.has_function_privilege('service_role', proc.oid, 'EXECUTE')
+                    AS service_execute
+            FROM pg_catalog.pg_proc AS proc
+            WHERE proc.oid = $1::regprocedure
+        `, [rearmSignature])).rows[0]).toEqual({
+            security_definer: true,
+            safe_search_path: true,
+            anon_execute: false,
+            authenticated_execute: false,
+            service_execute: true,
+        });
+        const definition = async (signature: string): Promise<string> => (
+            (await db.query<{ definition: string }>(
+                'SELECT pg_catalog.pg_get_functiondef($1::regprocedure) AS definition',
+                [signature]
+            )).rows[0].definition
+        );
+        const auditShape = async (): Promise<string> => (
+            (await db.query<{ hash: string }>(`
+                SELECT pg_catalog.md5(
+                    table_row.relrowsecurity::TEXT || ':'
+                    || table_row.relforcerowsecurity::TEXT || ':'
+                    || COALESCE(table_row.relacl::TEXT, '') || ':'
+                    || COALESCE((
+                        SELECT pg_catalog.string_agg(
+                            attribute.attnum::TEXT || ':' || attribute.attname || ':'
+                            || pg_catalog.format_type(
+                                attribute.atttypid, attribute.atttypmod
+                            ) || ':' || attribute.attnotnull::TEXT || ':'
+                            || COALESCE(pg_catalog.pg_get_expr(
+                                default_row.adbin, default_row.adrelid
+                            ), ''), ',' ORDER BY attribute.attnum
+                        )
+                        FROM pg_catalog.pg_attribute AS attribute
+                        LEFT JOIN pg_catalog.pg_attrdef AS default_row
+                          ON default_row.adrelid = attribute.attrelid
+                         AND default_row.adnum = attribute.attnum
+                        WHERE attribute.attrelid = table_row.oid
+                          AND attribute.attnum > 0 AND NOT attribute.attisdropped
+                    ), '') || ':' || COALESCE((
+                        SELECT pg_catalog.string_agg(
+                            pg_catalog.pg_get_constraintdef(constraint_row.oid),
+                            ',' ORDER BY constraint_row.contype,
+                                pg_catalog.pg_get_constraintdef(constraint_row.oid)
+                        )
+                        FROM pg_catalog.pg_constraint AS constraint_row
+                        WHERE constraint_row.conrelid = table_row.oid
+                    ), '') || ':' || COALESCE((
+                        SELECT pg_catalog.string_agg(
+                            trigger_row.tgname || ':' || trigger_row.tgtype::TEXT || ':'
+                            || trigger_row.tgenabled::TEXT || ':'
+                            || trigger_row.tgfoid::regprocedure::TEXT,
+                            ',' ORDER BY trigger_row.tgname
+                        )
+                        FROM pg_catalog.pg_trigger AS trigger_row
+                        WHERE trigger_row.tgrelid = table_row.oid
+                          AND NOT trigger_row.tgisinternal
+                    ), '')
+                ) AS hash
+                FROM pg_catalog.pg_class AS table_row
+                WHERE table_row.oid =
+                    'public.earlybird_partial_adoption_second_rearms'::regclass
+            `)).rows[0].hash
+        );
+        expect({
+            oldResolver: await db.query(
+                'SELECT pg_catalog.md5($1::TEXT) AS hash',
+                [correctedPartialAdoptionResolverDefinition]
+            ).then(result => result.rows[0]),
+            newResolver: await db.query(
+                'SELECT pg_catalog.md5(pg_catalog.pg_get_functiondef($1::regprocedure)) AS hash',
+                [resolverSignature]
+            ).then(result => result.rows[0]),
+            rearm: await db.query(
+                'SELECT pg_catalog.md5(pg_catalog.pg_get_functiondef($1::regprocedure)) AS hash',
+                [rearmSignature]
+            ).then(result => result.rows[0]),
+        }).toEqual({
+            oldResolver: { hash: '046d6ba9df0c23106151db6d5e2afb8d' },
+            newResolver: { hash: '1486eec1954681d6da029172d1976d2e' },
+            rearm: { hash: 'bfa202272672f2b954ad0eaedcb47cc5' },
+        });
+        const expectMigrationRejected = async (
+            prepare: () => Promise<unknown>,
+            error: string
+        ): Promise<void> => {
+            const resolverBefore = await definition(resolverSignature);
+            const rearmBefore = await definition(rearmSignature);
+            const auditBefore = await auditShape();
+            await db.exec('BEGIN');
+            try {
+                await prepare();
+                await expect(db.exec(relationshipAdoptionChargeDriftMigration))
+                    .rejects.toThrow(error);
+            } finally {
+                await db.exec('ROLLBACK');
+            }
+            expect(await definition(resolverSignature)).toBe(resolverBefore);
+            expect(await definition(rearmSignature)).toBe(rearmBefore);
+            expect(await auditShape()).toBe(auditBefore);
+        };
+
+        for (const mutation of [
+            `ALTER FUNCTION ${resolverSignature} SECURITY INVOKER`,
+            `ALTER FUNCTION ${resolverSignature} SET search_path TO public`,
+        ]) {
+            await expectMigrationRejected(async () => {
+                await db.exec(correctedPartialAdoptionResolverDefinition);
+                await db.exec(mutation);
+            }, 'ANALYSIS_V2_RELATIONSHIP_CHARGE_DRIFT_OLD_SHAPE_MISMATCH');
+        }
+        await expectMigrationRejected(async () => {
+            const mutated = correctedPartialAdoptionResolverDefinition.replace(
+                'WHERE preflight.id = v_failed_request.preflight_id FOR UPDATE;',
+                'WHERE preflight.id = v_failed_request.preflight_id;'
+            );
+            expect(mutated).not.toBe(correctedPartialAdoptionResolverDefinition);
+            await db.exec(mutated);
+        }, 'ANALYSIS_V2_RELATIONSHIP_CHARGE_DRIFT_OLD_SHAPE_MISMATCH');
+
+        for (const mutation of [
+            `ALTER FUNCTION ${rearmSignature} SECURITY INVOKER`,
+            `ALTER FUNCTION ${rearmSignature} SET search_path TO public`,
+            `GRANT EXECUTE ON FUNCTION ${rearmSignature} TO anon`,
+        ]) {
+            await expectMigrationRejected(
+                () => db.exec(mutation),
+                'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_EXISTING_SHAPE_MISMATCH'
+            );
+        }
+        await expectMigrationRejected(async () => {
+            const current = await definition(rearmSignature);
+            const mutated = current.replace(
+                'WHERE earlybird_order.id = p_order_id FOR UPDATE;',
+                'WHERE earlybird_order.id = p_order_id;'
+            );
+            expect(mutated).not.toBe(current);
+            await db.exec(mutated);
+        }, 'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_EXISTING_SHAPE_MISMATCH');
+
+        for (const mutation of [
+            `ALTER TABLE public.earlybird_partial_adoption_second_rearms
+                DISABLE ROW LEVEL SECURITY`,
+            `ALTER TABLE public.earlybird_partial_adoption_second_rearms
+                NO FORCE ROW LEVEL SECURITY`,
+            `GRANT SELECT ON public.earlybird_partial_adoption_second_rearms TO anon`,
+            `GRANT SELECT ON public.earlybird_partial_adoption_second_rearms
+                TO authenticated`,
+            `GRANT SELECT ON public.earlybird_partial_adoption_second_rearms
+                TO service_role`,
+            `ALTER TABLE public.earlybird_partial_adoption_second_rearms
+                ADD COLUMN unexpected_shape BOOLEAN`,
+            `ALTER TABLE public.earlybird_partial_adoption_second_rearms
+                ADD CONSTRAINT unexpected_shape_check CHECK (order_id IS NOT NULL)`,
+        ]) {
+            await expectMigrationRejected(
+                () => db.exec(mutation),
+                'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_TABLE_SHAPE_MISMATCH'
+            );
+        }
+        for (const constraintType of ['p', 'u', 'f', 'c']) {
+            await expectMigrationRejected(async () => {
+                const constraintName = (await db.query<{ name: string }>(`
+                    SELECT constraint_row.conname AS name
+                    FROM pg_catalog.pg_constraint AS constraint_row
+                    WHERE constraint_row.conrelid =
+                        'public.earlybird_partial_adoption_second_rearms'::regclass
+                      AND constraint_row.contype = $1
+                    ORDER BY constraint_row.conname LIMIT 1
+                `, [constraintType])).rows[0].name;
+                await db.exec(
+                    `ALTER TABLE public.earlybird_partial_adoption_second_rearms
+                     DROP CONSTRAINT "${constraintName.replaceAll('"', '""')}"`
+                );
+            }, 'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_TABLE_SHAPE_MISMATCH');
+        }
+        await expectMigrationRejected(
+            () => db.exec(`
+                ALTER TABLE public.earlybird_partial_adoption_second_rearms
+                DISABLE TRIGGER prevent_earlybird_partial_adoption_second_rearm_mutation
+            `),
+            'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_TRIGGER_SHAPE_MISMATCH'
+        );
+        await expectMigrationRejected(
+            () => db.exec(`
+                CREATE FUNCTION public.wrong_second_rearm_trigger()
+                RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+                SET search_path = '' AS $$ BEGIN RETURN NEW; END; $$;
+                DROP TRIGGER prevent_earlybird_partial_adoption_second_rearm_mutation
+                    ON public.earlybird_partial_adoption_second_rearms;
+                CREATE TRIGGER prevent_earlybird_partial_adoption_second_rearm_mutation
+                    BEFORE UPDATE OR DELETE
+                    ON public.earlybird_partial_adoption_second_rearms
+                    FOR EACH ROW EXECUTE FUNCTION public.wrong_second_rearm_trigger();
+            `),
+            'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_TRIGGER_SHAPE_MISMATCH'
+        );
+        await expectMigrationRejected(
+            () => db.exec(`ALTER FUNCTION
+                public.prevent_earlybird_partial_adoption_second_rearm_mutation()
+                SECURITY INVOKER`),
+            'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_TRIGGER_SHAPE_MISMATCH'
+        );
+        await expectMigrationRejected(
+            () => db.exec(`
+                DROP TRIGGER prevent_earlybird_partial_adoption_second_rearm_mutation
+                    ON public.earlybird_partial_adoption_second_rearms;
+                CREATE TRIGGER prevent_earlybird_partial_adoption_second_rearm_mutation
+                    BEFORE UPDATE ON public.earlybird_partial_adoption_second_rearms
+                    FOR EACH ROW EXECUTE FUNCTION
+                    public.prevent_earlybird_partial_adoption_second_rearm_mutation();
+            `),
+            'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_TRIGGER_SHAPE_MISMATCH'
+        );
     });
 
     it('enqueues a confirmed payment but never exposes it to recovery before admission', async () => {
@@ -3934,7 +4189,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         )).rows[0].count).toBe(0);
     });
 
-    it('rearms the exact r1 partial-adoption failure and lets r2 adopt all source runs', async () => {
+    it('rearms the exact r1 and r2 partial-adoption failures and lets r3 adopt all source runs', async () => {
         expect((await db.query<{
             public_execute: boolean;
             anon_execute: boolean;
@@ -4118,11 +4373,13 @@ describe('operator-approved earlybird fulfillment migration', () => {
                     actor_id, credential_slot, max_charge_usd, status, run_id,
                     actual_usage_usd, usage_reconciled_at
                  ) VALUES ($1, $2, $3, $4, $5, $6, 'apify', $7, 'secondary',
-                    .2, 'succeeded', $8, .1, clock_timestamp())`,
+                    $9, 'succeeded', $8, $10, clock_timestamp())`,
                 [
                     FAILED_REQUEST, sourceRun.jobKey, sourceRun.operationKey,
                     sourceRun.inputHash, CLAIM, ADMISSION_CLAIM,
                     sourceRun.actorId, sourceRun.runId,
+                    sourceRun.runId === 'PartialFollowersRun1' ? 0.19805 : 0.2,
+                    sourceRun.runId === 'PartialFollowersRun1' ? 0.1631 : 0.1,
                 ]
             );
         }
@@ -4648,7 +4905,9 @@ describe('operator-approved earlybird fulfillment migration', () => {
         const destinationJobs = new Map(
             sourceRuns.map(sourceRun => [sourceRun.jobKey, sourceRun])
         );
-        for (const sourceRun of destinationJobs.values()) {
+        for (const sourceRun of [...destinationJobs.values()].filter(
+            run => run.jobKey === relationshipJob || run.jobKey === targetJob
+        )) {
             await db.query(
                 `INSERT INTO public.analysis_pipeline_jobs(
                     request_id, job_key, track, kind, input_hash, required_job_keys,
@@ -4661,27 +4920,496 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 ]
             );
         }
+        await expect(db.query(
+            `SELECT public.resolve_analysis_v2_exact_recovery_provider_run(
+                $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .199
+             )`,
+            [
+                r2.request_id, relationshipJob, DISPATCH_TOKEN,
+                currentFollowing.operation_key, currentFollowing.input_hash,
+                sourceRuns[0].actorId,
+            ]
+        )).rejects.toThrow('ANALYSIS_V2_PROVIDER_RUN_ADOPTION_SOURCE_UNAVAILABLE');
+
+        await db.exec('BEGIN');
+        try {
+            const adopted = (await asService<{ adopted: { runId: string } }>(
+                `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                    $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .1972
+                 ) AS adopted`,
+                [
+                    r2.request_id, relationshipJob, DISPATCH_TOKEN,
+                    currentFollowers.operation_key, currentFollowers.input_hash,
+                    sourceRuns[3].actorId,
+                ]
+            )).rows[0].adopted;
+            expect(adopted).toMatchObject({ runId: 'PartialFollowersRun1' });
+        } finally {
+            await db.exec('ROLLBACK');
+        }
+
+        for (const [label, operationKey, inputHash, provider, actor, slot] of [
+            [
+                'operation', wrongCurrentFollowing.operation_key,
+                currentFollowers.input_hash, 'apify', sourceRuns[3].actorId, 'secondary',
+            ],
+            [
+                'input', currentFollowers.operation_key,
+                wrongCurrentFollowing.input_hash, 'apify', sourceRuns[3].actorId, 'secondary',
+            ],
+            [
+                'provider', currentFollowers.operation_key,
+                currentFollowers.input_hash, 'rapidapi', sourceRuns[3].actorId, 'secondary',
+            ],
+            [
+                'actor', currentFollowers.operation_key,
+                currentFollowers.input_hash, 'apify', 'wrong-actor', 'secondary',
+            ],
+            [
+                'slot', currentFollowers.operation_key,
+                currentFollowers.input_hash, 'apify', sourceRuns[3].actorId, 'primary',
+            ],
+        ] as const) {
+            await expect(asService(
+                `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                    $1, $2, $3, $4, $5, $6, $7, $8, .1972
+                 )`,
+                [
+                    r2.request_id, relationshipJob, DISPATCH_TOKEN,
+                    operationKey, inputHash, provider, actor, slot,
+                ]
+            ), label).rejects.toThrow(
+                /ANALYSIS_V2_PROVIDER_RUN_ADOPTION_(?:INVALID|SOURCE_UNAVAILABLE)/
+            );
+        }
+        await db.exec('BEGIN');
+        try {
+            await db.query(
+                `UPDATE public.analysis_v2_provider_runs
+                 SET actual_usage_usd = .198
+                 WHERE request_id = $1 AND run_id = 'PartialFollowersRun1'`,
+                [FAILED_REQUEST]
+            );
+            await db.exec('SET LOCAL ROLE service_role');
+            await expect(db.query(
+                `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                    $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .1972
+                 )`,
+                [
+                    r2.request_id, relationshipJob, DISPATCH_TOKEN,
+                    currentFollowers.operation_key, currentFollowers.input_hash,
+                    sourceRuns[3].actorId,
+                ]
+            )).rejects.toThrow('ANALYSIS_V2_PROVIDER_RUN_ADOPTION_SOURCE_UNAVAILABLE');
+        } finally {
+            await db.exec('ROLLBACK');
+        }
+
+        const secondManualReviewAt = '2032-03-04T05:06:07.000Z';
+        const markSecondFailure = async (): Promise<void> => {
+            await db.query(
+                `UPDATE public.analysis_pipeline_jobs
+                 SET status = 'completed', attempt_count = 1, lease_token = NULL,
+                     lease_expires_at = NULL, last_error_code = NULL
+                 WHERE request_id = $1 AND job_key = 'coordinator:bootstrap'`,
+                [r2.request_id]
+            );
+            await db.query(
+                `UPDATE public.analysis_pipeline_jobs
+                 SET status = 'failed', attempt_count = 1, lease_token = NULL,
+                     lease_expires_at = NULL,
+                     last_error_code = 'ANALYSIS_V2_JOB_HANDLER_FAILED'
+                 WHERE request_id = $1 AND job_key = $2`,
+                [r2.request_id, relationshipJob]
+            );
+            await db.query(
+                `UPDATE public.analysis_pipeline_jobs
+                 SET status = 'cancelled', attempt_count = 0, lease_token = NULL,
+                     lease_expires_at = NULL, last_error_code = 'REQUEST_TERMINATED'
+                 WHERE request_id = $1 AND job_key = $2`,
+                [r2.request_id, targetJob]
+            );
+            await db.query(
+                `UPDATE public.analysis_requests
+                 SET status = 'failed', error_message = 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+                     target_instagram_id = 'retained.'
+                        || substr(replace(id::TEXT, '-', ''), 1, 20)
+                 WHERE id = $1`,
+                [r2.request_id]
+            );
+            await db.query(
+                `UPDATE public.analysis_preflights
+                 SET target_instagram_id = 'retained.'
+                        || substr(replace(id::TEXT, '-', ''), 1, 20),
+                     exclusion_decision = 'skip', excluded_instagram_id = NULL,
+                     pii_scrubbed_at = clock_timestamp()
+                 WHERE consumed_request_id = $1`,
+                [r2.request_id]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+                 VALUES ($1, 'ANALYSIS_V2_JOB_HANDLER_FAILED')`,
+                [r2.request_id]
+            );
+            await db.query(
+                `UPDATE public.earlybird_fulfillments
+                 SET status = 'manual_review', request_id = $1, attempt_count = 3,
+                     last_error_code = 'ANALYSIS_FAILED',
+                     manual_review_at = $2::TIMESTAMPTZ,
+                     lease_token = NULL, lease_expires_at = NULL
+                 WHERE order_id = $3`,
+                [r2.request_id, secondManualReviewAt, ORDER]
+            );
+        };
+        await db.exec('BEGIN');
+        try {
+            await markSecondFailure();
+            await db.exec('SET LOCAL ROLE service_role');
+            await expect(db.query(
+                `SELECT * FROM public.rearm_earlybird_partial_adoption_second_failure(
+                    $1, $2, $3::TIMESTAMPTZ
+                 )`,
+                [ORDER, r2.request_id, secondManualReviewAt]
+            )).rejects.toThrow('EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_INELIGIBLE');
+        } finally {
+            await db.exec('ROLLBACK');
+        }
+
+        const followingAdopted = (await asService<{ adopted: { runId: string } }>(
+            `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .2
+             ) AS adopted`,
+            [
+                r2.request_id, relationshipJob, DISPATCH_TOKEN,
+                currentFollowing.operation_key, currentFollowing.input_hash,
+                sourceRuns[0].actorId,
+            ]
+        )).rows[0].adopted;
+        expect(followingAdopted.runId).toBe('PartialRelationshipRun1');
+        await markSecondFailure();
+
+        const expectSecondRearmMutationRejected = async (
+            mutation: () => Promise<unknown>
+        ): Promise<void> => {
+            await db.exec('BEGIN');
+            try {
+                await mutation();
+                await db.exec('SET LOCAL ROLE service_role');
+                await expect(db.query(
+                    `SELECT * FROM public.rearm_earlybird_partial_adoption_second_failure(
+                        $1, $2, $3::TIMESTAMPTZ
+                     )`,
+                    [ORDER, r2.request_id, secondManualReviewAt]
+                )).rejects.toThrow(
+                    'EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_INELIGIBLE'
+                );
+            } finally {
+                await db.exec('ROLLBACK');
+            }
+        };
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.earlybird_fulfillments SET attempt_count = 2
+             WHERE order_id = $1`, [ORDER]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_preflights SET idempotency_key = $2 WHERE id = $1`,
+            [rearmed.preflight_id, `${preflightFamilyKey}.r4`]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_pipeline_jobs SET status = 'processing'
+             WHERE request_id = $1 AND job_key = $2`, [r2.request_id, targetJob]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `DELETE FROM public.analysis_v2_failure_receipts WHERE request_id = $1`,
+            [r2.request_id]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_requests SET target_instagram_id = 'wrong.retained'
+             WHERE id = $1`, [r2.request_id]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_preflights SET target_instagram_id = 'wrong.retained'
+             WHERE consumed_request_id = $1`, [r2.request_id]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_preflights SET pii_scrubbed_at = NULL
+             WHERE consumed_request_id = $1`, [r2.request_id]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_preflights SET exclusion_decision = 'include'
+             WHERE consumed_request_id = $1`, [r2.request_id]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_preflights SET excluded_instagram_id = 'drifted.user'
+             WHERE consumed_request_id = $1`, [r2.request_id]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_preflights
+             SET exclusion_decision = 'include',
+                 excluded_instagram_id = 'drifted.user'
+             WHERE consumed_request_id = $1`, [r2.request_id]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.analysis_v2_failure_receipts
+             SET error_code = 'ANALYSIS_V2_PROGRESS_CONFLICT'
+             WHERE request_id = $1`, [r2.request_id]
+        ));
+        for (const [jobKey, column, value] of [
+            ['coordinator:bootstrap', 'track', 'relationships'],
+            ['coordinator:bootstrap', 'kind', 'collection'],
+            [relationshipJob, 'track', 'target_evidence'],
+            [relationshipJob, 'kind', 'bootstrap'],
+            [targetJob, 'track', 'relationships'],
+            [targetJob, 'kind', 'bootstrap'],
+        ]) {
+            await expectSecondRearmMutationRejected(() => db.query(
+                `UPDATE public.analysis_pipeline_jobs SET ${column} = $3
+                 WHERE request_id = $1 AND job_key = $2`,
+                [r2.request_id, jobKey, value]
+            ));
+        }
+        await expectSecondRearmMutationRejected(() => db.query(
+            `UPDATE public.earlybird_orders SET actual_amount_krw = expected_amount_krw + 1
+             WHERE id = $1`, [ORDER]
+        ));
+        for (const table of [
+            'analysis_provider_cost_ledger',
+            'analysis_v2_ai_attempts',
+            'analysis_v2_relationship_sides',
+            'analysis_v2_target_evidence_manifests',
+        ]) {
+            await expectSecondRearmMutationRejected(() => db.query(
+                `INSERT INTO public.${table}(request_id) VALUES ($1)`,
+                [r2.request_id]
+            ));
+        }
+        await expectSecondRearmMutationRejected(() => db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider, actor_id,
+                credential_slot, max_charge_usd, status
+             ) VALUES ($1, $2, $3, $4, $5, $6, 'apify', 'direct-actor',
+                'secondary', .2, 'starting')`,
+            [
+                r2.request_id, targetJob, `target-likers:${'1'.repeat(64)}`,
+                '1'.repeat(64), DISPATCH_TOKEN, ADMISSION_CLAIM,
+            ]
+        ));
+        await expectSecondRearmMutationRejected(() => db.query(
+            `INSERT INTO public.analysis_v2_recovery_provider_run_adoptions(
+                request_id, job_key, operation_key, destination_input_hash,
+                source_request_id, source_job_key, source_operation_key,
+                source_run_id
+             ) VALUES ($1, $2, $3, $4, $5, $6, $3, $7)`,
+            [
+                r1.request_id, relationshipJob, sourceRuns[4].operationKey,
+                sourceRuns[4].inputHash, FAILED_REQUEST, sourceRuns[4].jobKey,
+                sourceRuns[4].runId,
+            ]
+        ));
+        await expectSecondRearmMutationRejected(async () => {
+            const foreignOperation = `target-likers:${'3'.repeat(64)}`;
+            await db.query(
+                `INSERT INTO public.analysis_requests(
+                    id, user_id, target_instagram_id, target_gender, status,
+                    progress, pipeline_version
+                 ) VALUES ($1, $2, 'foreign.r1.source', 'male', 'failed', 100, 'v2')`,
+                [ACTIVE_REQUEST, USER]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_pipeline_jobs(
+                    request_id, job_key, track, kind, input_hash,
+                    required_job_keys, status
+                 ) VALUES ($1, $2, 'target_evidence', 'collection', $3, '{}',
+                    'completed')`,
+                [ACTIVE_REQUEST, targetJob, '3'.repeat(64)]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_provider_runs(
+                    request_id, job_key, operation_key, input_hash,
+                    job_claim_token, reservation_token, logical_provider,
+                    actor_id, credential_slot, max_charge_usd, status, run_id,
+                    actual_usage_usd, usage_reconciled_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, 'apify', 'foreign-r1-actor',
+                    'secondary', .2, 'succeeded', 'ForeignR1ChainRun1', .1,
+                    clock_timestamp())`,
+                [
+                    ACTIVE_REQUEST, targetJob, foreignOperation, '3'.repeat(64),
+                    CLAIM, ADMISSION_CLAIM,
+                ]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_recovery_provider_run_adoptions(
+                    request_id, job_key, operation_key, destination_input_hash,
+                    source_request_id, source_job_key, source_operation_key,
+                    source_run_id
+                 ) VALUES ($1, $2, $3, $4, $5, $2, $3, 'ForeignR1ChainRun1')`,
+                [
+                    r1.request_id, targetJob, foreignOperation,
+                    '3'.repeat(64), ACTIVE_REQUEST,
+                ]
+            );
+        });
+        await expectSecondRearmMutationRejected(async () => {
+            const foreignOperation = `target-likers:${'2'.repeat(64)}`;
+            await db.query(
+                `INSERT INTO public.analysis_requests(
+                    id, user_id, target_instagram_id, target_gender, status,
+                    progress, pipeline_version
+                 ) VALUES ($1, $2, 'foreign.source', 'male', 'failed', 100, 'v2')`,
+                [ACTIVE_REQUEST, USER]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_pipeline_jobs(
+                    request_id, job_key, track, kind, input_hash,
+                    required_job_keys, status
+                 ) VALUES ($1, $2, 'target_evidence', 'collection', $3, '{}',
+                    'completed')`,
+                [ACTIVE_REQUEST, targetJob, '2'.repeat(64)]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_provider_runs(
+                    request_id, job_key, operation_key, input_hash,
+                    job_claim_token, reservation_token, logical_provider,
+                    actor_id, credential_slot, max_charge_usd, status, run_id,
+                    actual_usage_usd, usage_reconciled_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, 'apify', 'foreign-actor',
+                    'secondary', .2, 'succeeded', 'ForeignSecondRun1', .1,
+                    clock_timestamp())`,
+                [
+                    ACTIVE_REQUEST, targetJob, foreignOperation, '2'.repeat(64),
+                    CLAIM, ADMISSION_CLAIM,
+                ]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_recovery_provider_run_adoptions(
+                    request_id, job_key, operation_key, destination_input_hash,
+                    source_request_id, source_job_key, source_operation_key,
+                    source_run_id
+                 ) VALUES ($1, $2, $3, $4, $5, $2, $3, 'ForeignSecondRun1')`,
+                [
+                    r2.request_id, targetJob, foreignOperation,
+                    '2'.repeat(64), ACTIVE_REQUEST,
+                ]
+            );
+        });
+
+        expect((await db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count
+             FROM public.analysis_v2_provider_runs WHERE request_id = $1`,
+            [FAILED_REQUEST]
+        )).rows[0].count).toBe(8);
+        const secondRearmCall = () => asService<{
+            preflight_id: string;
+            fulfillment_status: string;
+        }>(
+            `SELECT * FROM public.rearm_earlybird_partial_adoption_second_failure(
+                $1, $2, $3::TIMESTAMPTZ
+             )`,
+            [ORDER, r2.request_id, secondManualReviewAt]
+        );
+        // PGlite is a documented single-user/connection engine. Independently
+        // scheduled callers still verify the replay result and cardinality;
+        // the PostgreSQL row-lock order is asserted in the drift tests above.
+        const [firstSecondRearm, concurrentSecondRearm] = await Promise.all([
+            secondRearmCall(), secondRearmCall(),
+        ]);
+        const secondRearmed = firstSecondRearm.rows[0];
+        expect(concurrentSecondRearm.rows[0].preflight_id)
+            .toBe(secondRearmed.preflight_id);
+        expect(secondRearmed.fulfillment_status).toBe('admission_pending');
+        expect((await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_preflights WHERE id = $1`,
+            [secondRearmed.preflight_id]
+        )).rows[0].idempotency_key).toBe(`${preflightFamilyKey}.r3`);
+        expect((await db.query<{ audit_count: number; preflight_count: number }>(`
+            SELECT
+                (SELECT count(*)::INTEGER
+                 FROM public.earlybird_partial_adoption_second_rearms
+                 WHERE order_id = $1) AS audit_count,
+                (SELECT count(*)::INTEGER FROM public.analysis_preflights
+                 WHERE user_id = $2 AND idempotency_key = $3) AS preflight_count
+        `, [ORDER, USER, `${preflightFamilyKey}.r3`])).rows[0]).toEqual({
+            audit_count: 1,
+            preflight_count: 1,
+        });
+        await expect(asService(
+            `SELECT * FROM public.rearm_earlybird_partial_adoption_second_failure(
+                $1, $2, $3::TIMESTAMPTZ
+             )`,
+            [ORDER, r2.request_id, secondManualReviewAt]
+        )).resolves.toMatchObject({ rows: [expect.objectContaining({
+            preflight_id: secondRearmed.preflight_id,
+        })] });
+        await expect(db.query(
+            `UPDATE public.earlybird_partial_adoption_second_rearms
+             SET expected_fulfillment_attempt_count = 4 WHERE order_id = $1`,
+            [ORDER]
+        )).rejects.toThrow('EARLYBIRD_PARTIAL_ADOPTION_SECOND_REARM_IMMUTABLE');
+
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_status = 'ready', admission_selected_plan_id = 'standard',
+                 admission_entitlement_jti_hash = $2, admission_token = $3,
+                 admission_refreshed_at = clock_timestamp(),
+                 admission_target_followers_count = 232,
+                 admission_target_following_count = 623,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $4::JSONB
+             WHERE id = $1`,
+            [
+                secondRearmed.preflight_id, admissionHash(), ADMISSION_TOKEN,
+                JSON.stringify(standardRequiredCards),
+            ]
+        );
+        const r3Lease = await claim();
+        const r3 = (await asService<{ request_id: string }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+             )`,
+            [ORDER, CLAIM, r3Lease.lease_fence]
+        )).rows[0];
+        expect((await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_requests WHERE id = $1`,
+            [r3.request_id]
+        )).rows[0].idempotency_key).toBe(`${requestKey}.r3`);
+        for (const sourceRun of destinationJobs.values()) {
+            await db.query(
+                `INSERT INTO public.analysis_pipeline_jobs(
+                    request_id, job_key, track, kind, input_hash, required_job_keys,
+                    status, lease_token, lease_expires_at
+                 ) VALUES ($1, $2, $3, 'collection', $4, '{}', 'processing', $5,
+                    clock_timestamp() + INTERVAL '5 minutes')`,
+                [
+                    r3.request_id, sourceRun.jobKey, sourceRun.track,
+                    sourceRun.inputHash, DISPATCH_TOKEN,
+                ]
+            );
+        }
         for (const sourceRun of sourceRuns) {
             const destination = destinationIdentity(sourceRun);
             const adopted = (await asService<{ adopted: { runId: string } }>(
                 `SELECT public.resolve_analysis_v2_recovery_provider_run(
-                    $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .2
+                    $1, $2, $3, $4, $5, 'apify', $6, 'secondary', $7
                  ) AS adopted`,
                 [
-                    r2.request_id, sourceRun.jobKey, DISPATCH_TOKEN,
+                    r3.request_id, sourceRun.jobKey, DISPATCH_TOKEN,
                     destination.operationKey, destination.inputHash, sourceRun.actorId,
+                    sourceRun.runId === 'PartialFollowersRun1' ? 0.1972 : 0.2,
                 ]
             )).rows[0].adopted;
             expect(adopted.runId).toBe(sourceRun.runId);
         }
-        expect((await db.query<{ r1: number; r2: number }>(
+        expect((await db.query<{ r1: number; r2: number; r3: number }>(
             `SELECT
                 count(*) FILTER (WHERE request_id = $1)::INTEGER AS r1,
-                count(*) FILTER (WHERE request_id = $2)::INTEGER AS r2
+                count(*) FILTER (WHERE request_id = $2)::INTEGER AS r2,
+                count(*) FILTER (WHERE request_id = $3)::INTEGER AS r3
              FROM public.analysis_v2_recovery_provider_run_adoptions
-             WHERE request_id IN ($1, $2)`,
-            [r1.request_id, r2.request_id]
-        )).rows[0]).toEqual({ r1: 3, r2: 8 });
+             WHERE request_id IN ($1, $2, $3)`,
+            [r1.request_id, r2.request_id, r3.request_id]
+        )).rows[0]).toEqual({ r1: 3, r2: 1, r3: 8 });
         expect((await db.query<{
             direct: number;
             costs: number;
@@ -4691,16 +5419,16 @@ describe('operator-approved earlybird fulfillment migration', () => {
         }>(
             `SELECT
                 (SELECT count(*)::INTEGER FROM public.analysis_v2_provider_runs
-                 WHERE request_id IN ($1, $2)) AS direct,
+                 WHERE request_id IN ($1, $2, $3)) AS direct,
                 (SELECT count(*)::INTEGER FROM public.analysis_provider_cost_ledger
-                 WHERE request_id IN ($1, $2)) AS costs,
+                 WHERE request_id IN ($1, $2, $3)) AS costs,
                 (SELECT count(*)::INTEGER FROM public.analysis_v2_ai_attempts
-                 WHERE request_id IN ($1, $2)) AS ai,
+                 WHERE request_id IN ($1, $2, $3)) AS ai,
                 (SELECT count(*)::INTEGER FROM public.analysis_v2_relationship_sides
-                 WHERE request_id IN ($1, $2)) AS relationship_evidence,
+                 WHERE request_id IN ($1, $2, $3)) AS relationship_evidence,
                 (SELECT count(*)::INTEGER FROM public.analysis_v2_target_evidence_manifests
-                 WHERE request_id IN ($1, $2)) AS target_evidence`,
-            [r1.request_id, r2.request_id]
+                 WHERE request_id IN ($1, $2, $3)) AS target_evidence`,
+            [r1.request_id, r2.request_id, r3.request_id]
         )).rows[0]).toEqual({
             direct: 0,
             costs: 0,
