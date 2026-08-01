@@ -22,6 +22,13 @@ const capacitySafeCountDriftMigration = readFileSync(
     ),
     'utf8'
 );
+const schemaRecoveryCapacitySafeCountDriftMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801130000_allow_schema_recovery_capacity_safe_count_drift.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const scrubbedFreshnessRecoveryMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260731040000_recover_scrubbed_earlybird_freshness_conflict.sql',
@@ -366,6 +373,45 @@ describe('earlybird fulfillment outbox migration contract', () => {
         );
         expect(scrubbedFreshnessRecoveryMigration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.rebind_expired_paid_earlybird_preflight\(UUID\)[\s\S]*?TO service_role;/
+        );
+    });
+
+    it('permits schema-failure recovery count drift only inside the immutable selected card', () => {
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            "SET LOCAL lock_timeout = '5s';"
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            "SET LOCAL statement_timeout = '2min';"
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.recover_earlybird_schema_failed_fulfillment('
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).not.toContain(
+            'v_preflight.target_followers_count\n            IS DISTINCT FROM v_order.target_followers_count'
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            'v_order.target_followers_count IS NULL'
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            'v_preflight.target_followers_count IS NULL'
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            'v_plan_id = v_order.plan_id'
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            'v_preflight.target_followers_count > v_card_followers'
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            'v_required_card_count <> 1'
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toContain(
+            "MESSAGE = 'EARLYBIRD_SCHEMA_FAILURE_RECOVERY_SNAPSHOT_CONFLICT'"
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.recover_earlybird_schema_failed_fulfillment\(UUID\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(schemaRecoveryCapacitySafeCountDriftMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.recover_earlybird_schema_failed_fulfillment\(UUID\)[\s\S]*?TO service_role;/
         );
     });
 

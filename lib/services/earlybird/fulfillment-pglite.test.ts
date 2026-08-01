@@ -88,6 +88,13 @@ const transientJobExhaustionRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const schemaRecoveryCapacitySafeCountDriftMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801130000_allow_schema_recovery_capacity_safe_count_drift.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const freshnessRaceMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260731020000_fix_earlybird_fulfillment_admission_freshness_race.sql',
@@ -1103,6 +1110,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(canonicalTargetSchemaFailureRecoveryMigration);
         await db.exec(scrubbedTargetSchemaFailureRecoveryMigration);
         await db.exec(transientJobExhaustionRecoveryMigration);
+        await db.exec(schemaRecoveryCapacitySafeCountDriftMigration);
         await db.exec(freshnessRaceMigration);
         await db.exec(capacitySafeCountDriftMigration);
         await db.exec(scrubbedFreshnessRecoveryMigration);
@@ -4409,6 +4417,109 @@ describe('operator-approved earlybird fulfillment migration', () => {
             `SELECT pg_catalog.count(*)::INTEGER AS count
              FROM public.earlybird_schema_failure_recoveries`
         )).rows[0].count).toBe(1);
+    });
+
+    it('recovers a capacity-safe one-sided count drift without rewriting either witness', async () => {
+        await seedSchemaFailedManualReview('sample.account');
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 160
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+
+        const recovered = await asService<{ preflight_id: string }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+        const recoveryPreflightId = recovered.rows[0].preflight_id;
+
+        expect((await db.query<{
+            target_followers_count: number;
+            target_following_count: number;
+        }>(
+            `SELECT target_followers_count, target_following_count
+             FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            target_followers_count: 120,
+            target_following_count: 140,
+        });
+        expect((await db.query<{
+            target_followers_count: number;
+            target_following_count: number;
+        }>(
+            `SELECT target_followers_count, target_following_count
+             FROM public.analysis_preflights WHERE id = $1`,
+            [PREFLIGHT]
+        )).rows[0]).toEqual({
+            target_followers_count: 160,
+            target_following_count: 140,
+        });
+        expect((await db.query<{
+            target_followers_count: number;
+            target_following_count: number;
+        }>(
+            `SELECT target_followers_count, target_following_count
+             FROM public.analysis_preflights WHERE id = $1`,
+            [recoveryPreflightId]
+        )).rows[0]).toEqual({
+            target_followers_count: 120,
+            target_following_count: 140,
+        });
+    });
+
+    it('recovers the exact paid/preflight counts idempotently', async () => {
+        await seedSchemaFailedManualReview('sample.account');
+
+        const first = await asService<{ preflight_id: string }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+        const second = await asService<{ preflight_id: string }>(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        );
+
+        expect(second.rows[0].preflight_id).toBe(first.rows[0].preflight_id);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(1);
+    });
+
+    it.each([
+        ['paid order', 'UPDATE public.earlybird_orders SET target_followers_count = 801 WHERE id = $1'],
+        ['consumed preflight', 'UPDATE public.analysis_preflights SET target_followers_count = 801 WHERE id = $1'],
+    ])('rejects a %s observation above the selected Standard capacity without recovering', async (_, sql) => {
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 500, target_following_count = 500,
+                 capacity_required_plan_id = 'standard', required_plan_id = 'standard',
+                 plan_cards_snapshot = $2::JSONB
+             WHERE id = $1`,
+            [PREFLIGHT, JSON.stringify(standardRequiredCards)]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard', expected_groble_product_id = 'standard-product',
+                 actual_groble_product_id = 'standard-product', expected_amount_krw = 0,
+                 actual_amount_krw = 0, target_followers_count = 500,
+                 target_following_count = 500
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await seedSchemaFailedManualReview('sample.account');
+        await db.query(sql, [sql.includes('earlybird_orders') ? ORDER : PREFLIGHT]);
+
+        await expect(asService(
+            'SELECT * FROM public.recover_earlybird_schema_failed_fulfillment($1)',
+            [ORDER]
+        )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_SNAPSHOT_CONFLICT/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.earlybird_schema_failure_recoveries`
+        )).rows[0].count).toBe(0);
     });
 
     it('recovers only a legacy request target that is canonically equivalent to the paid order target', async () => {
