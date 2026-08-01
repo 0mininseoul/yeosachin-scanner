@@ -495,7 +495,7 @@ function reusableTargetProfileRunStore(
 }
 
 describe('analysis V2 concrete collection executors', () => {
-    function adoptedRelationshipStore() {
+    function adoptedRelationshipStore(relationshipSourceDeclaredCount?: number) {
         const resolve = vi.fn(async (input: AnalysisV2ProviderRunReservationInput) => ({
             sourceRequestId: '8df77338-2672-4ef2-93fe-13a0683ec9b4',
             sourceJobKey: input.jobKey,
@@ -508,6 +508,9 @@ describe('analysis V2 concrete collection executors', () => {
             runId: `adopted${input.operationKey.slice(-8)}`,
             actualUsageUsd: 0.1,
             usageReconciledAt: capturedAt,
+            ...(relationshipSourceDeclaredCount === undefined ? {} : {
+                relationshipSourceDeclaredCount,
+            }),
         }));
         return {
             resolve,
@@ -529,6 +532,9 @@ describe('analysis V2 concrete collection executors', () => {
         ) => {
             expect(options?.expectedResultCount).toBe(2);
             expect(options?.providerRun?.resumeRunId).toMatch(/^adopted/);
+            expect(options?.providerRun).not.toHaveProperty(
+                'allowAdoptedRelationshipTruncation'
+            );
             return rows;
         });
         const checkpointRelationshipSide = vi.fn(async (input) => ({
@@ -573,6 +579,81 @@ describe('analysis V2 concrete collection executors', () => {
         expect(adoption.resolve).toHaveBeenCalledTimes(2);
         expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
         expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
+    });
+
+    it('passes the truncation allowance only through a cross-count adopted binding', async () => {
+        const adoption = adoptedRelationshipStore(233);
+        const providers = providerStore();
+        const rows = Array.from({ length: 232 }, (_, index) => ({
+            username: `user_${index.toString().padStart(3, '0')}`,
+            isPrivate: false,
+            isVerified: false,
+        }));
+        const getter = vi.fn(async (
+            _username: string,
+            limit?: number,
+            options?: ScrapeRequestOptions
+        ) => {
+            expect(limit).toBe(232);
+            expect(options?.providerRun).toMatchObject({
+                resumeRunId: expect.stringMatching(/^adopted/),
+                allowAdoptedRelationshipTruncation: true,
+                adoptedRelationshipSourceDeclaredCount: 233,
+            });
+            return rows;
+        });
+        const checkpointRelationshipSide = vi.fn(async (value) => ({
+            side: value.side,
+            sourceStatus: value.source.status,
+            revision: 1,
+            declaredCount: value.declaredCount,
+            collectedCount: value.rows.length,
+            coverageBps: 10_000,
+            inputHash: value.source.inputHash,
+            resultHash,
+        }));
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                followersDeclaredCount: 232,
+                followingDeclaredCount: 232,
+            })),
+            providerRunStore: providers.value,
+            providerRunAdoptionStore: adoption.value,
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 0,
+                    publicCount: 0,
+                    privateCount: 0,
+                    detailedPublicCount: 0,
+                    unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: [],
+                    privateMutualUsernames: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        });
+
+        await expect(executor(stageContext('relationships', state()))).resolves.toBeDefined();
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
+        expect(checkpointRelationshipSide).toHaveBeenCalledWith(expect.objectContaining({
+            declaredCount: 232,
+            rows: expect.arrayContaining([expect.objectContaining({ username: 'user_000' })]),
+        }));
+        expect(checkpointRelationshipSide.mock.calls.map(([value]) => value.rows.length)).toEqual([
+            232,
+            232,
+        ]);
     });
 
     it('fails closed without a paid fallback when an adopted Dataset is insufficient', async () => {

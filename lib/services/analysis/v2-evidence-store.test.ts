@@ -277,8 +277,8 @@ describe('analysis V2 evidence store', () => {
 
         await expect(store.checkpointRelationshipSide({
             ...base,
-            declaredCount: 100,
-            rows: relationshipRows(98),
+            declaredCount: 232,
+            rows: relationshipRows(229),
         })).rejects.toBeInstanceOf(AnalysisV2RelationshipIncompleteError);
         await expect(store.checkpointRelationshipSide({
             ...base,

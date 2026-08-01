@@ -628,7 +628,28 @@ export async function runApifyRelationshipActor(
     }
 
     const actorLimit = Math.max(definition.minimumLimit, limit);
-    const datasetLimit = actorLimit + definition.maximumMetadataItems;
+    const adoptedRelationshipSourceDeclaredCount =
+        context?.allowAdoptedRelationshipTruncation === true
+        ? context.adoptedRelationshipSourceDeclaredCount
+        : undefined;
+    if (
+        adoptedRelationshipSourceDeclaredCount !== undefined
+        && (
+            !Number.isInteger(adoptedRelationshipSourceDeclaredCount)
+            || adoptedRelationshipSourceDeclaredCount < limit
+            || adoptedRelationshipSourceDeclaredCount > definition.maximumLimit
+        )
+    ) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: adopted relationship source count is outside the configured limit.'
+        );
+    }
+    // A reconciled cross-count adoption may have exactly the old declared row
+    // count in its immutable Dataset. Every row is still parsed and deduped;
+    // only the deterministic returned list is capped at the destination count.
+    const parseLimit = adoptedRelationshipSourceDeclaredCount ?? actorLimit;
+    const datasetLimit = adoptedRelationshipSourceDeclaredCount
+        ?? actorLimit + definition.maximumMetadataItems;
     const estimatedOperationCostUsd = datasetLimit * definition.estimatedCostPerResultUsd;
     if (
         context?.maxChargeUsd === undefined
@@ -787,8 +808,8 @@ export async function runApifyRelationshipActor(
                 'SCRAPING_INCOMPLETE_ERROR: APIFY_DATASET_READ_INCOMPLETE Apify dataset을 끝까지 읽지 못했습니다.'
             );
         }
-        const mapped = definition.parseDataset(items, account, kind, actorLimit);
-        if (mapped.length > actorLimit) {
+        const mapped = definition.parseDataset(items, account, kind, parseLimit);
+        if (mapped.length > parseLimit) {
             throw new Error(
                 'SCRAPING_SCHEMA_ERROR: APIFY_RESULT_LIMIT_EXCEEDED Apify actor가 resultsLimit보다 많은 결과를 반환했습니다.'
             );

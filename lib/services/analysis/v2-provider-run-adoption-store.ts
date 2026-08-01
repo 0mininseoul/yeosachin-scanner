@@ -20,6 +20,9 @@ const adoptedRunSchema = z.object({
     runId: z.string().regex(/^[A-Za-z0-9]{8,64}$/),
     actualUsageUsd: z.coerce.number().min(0).max(100_000),
     usageReconciledAt: z.string().datetime({ offset: true }),
+    // Only the cross-count relationship resolver returns this. Exact adoption
+    // deliberately leaves it absent so the adapter remains fail-closed.
+    relationshipSourceDeclaredCount: z.number().int().min(1).max(1_200).optional(),
 }).strict();
 
 export interface AdoptedAnalysisV2ProviderRun {
@@ -34,6 +37,7 @@ export interface AdoptedAnalysisV2ProviderRun {
     runId: string;
     actualUsageUsd: number;
     usageReconciledAt: string;
+    relationshipSourceDeclaredCount?: number;
 }
 
 export interface AnalysisV2ProviderRunAdoptionStore {
@@ -106,6 +110,10 @@ export function adoptedProviderCheckpoint(
         actorId: run.actorId,
         credentialSlot: run.credentialSlot,
         maxChargeUsd: run.maxChargeUsd,
+        ...(run.relationshipSourceDeclaredCount === undefined ? {} : {
+            allowAdoptedRelationshipTruncation: true as const,
+            adoptedRelationshipSourceDeclaredCount: run.relationshipSourceDeclaredCount,
+        }),
     });
 }
 
