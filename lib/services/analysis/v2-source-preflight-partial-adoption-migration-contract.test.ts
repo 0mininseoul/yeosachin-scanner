@@ -33,10 +33,13 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
     });
 
     it('permits only a nonempty exact-lineage adoption subset in the audited zero-spend policy rearm', () => {
-        expect(migration).toContain("'OR NOT EXISTS (' || chr(10) || '            SELECT 1'");
+        expect(migration).toContain('v_partial_adoption_variant BOOLEAN');
+        expect(migration).toContain('v_fulfillment.attempt_count = 2');
+        expect(migration).toContain("v_preflight.idempotency_key IS NOT DISTINCT FROM (v_base_preflight_key || ''.r1'')");
+        expect(migration).toContain('v_fulfillment.attempt_count <> 5 AND NOT v_partial_adoption_variant');
         expect(migration).toContain('adoption.source_request_id IS DISTINCT FROM v_lineage.failed_request_id');
         expect(migration).toContain("job.last_error_code = ''ANALYSIS_V2_PROGRESS_CONFLICT''");
-        expect(migration).toContain('v_fulfillment.attempt_count NOT BETWEEN 1 AND 5');
+        expect(migration).not.toContain('NOT BETWEEN 1 AND 5');
         expect(migration).toContain('EARLYBIRD_SOURCE_PREFLIGHT_PARTIAL_ADOPTION_REARM_PATCH_MISMATCH');
     });
 });
