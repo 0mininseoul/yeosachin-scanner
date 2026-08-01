@@ -28,6 +28,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802040000_settle_betatest_apify_credit_reservations.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802050000_harden_betatest_apify_credit_capacity.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -754,6 +758,8 @@ beforeEach(async () => {
     await db.exec(`
         DELETE FROM public.analysis_v2_provider_runs;
         DELETE FROM public.analysis_v2_provider_execution_policies;
+        DELETE FROM public.analysis_beta_pool_reservation_archive;
+        DELETE FROM public.analysis_beta_pool_local_debits;
         DELETE FROM public.analysis_beta_pool_reservations;
         DELETE FROM public.analysis_beta_pool_allocations;
         DELETE FROM public.analysis_pipeline_jobs;
@@ -782,6 +788,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802030000_bind_betatest_provider_policy.sql',
             '20260802030100_validate_betatest_provider_policy.sql',
             '20260802040000_settle_betatest_apify_credit_reservations.sql',
+            '20260802050000_harden_betatest_apify_credit_capacity.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated
@@ -1483,6 +1490,88 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await serviceQuery(`SELECT public.recover_analysis_beta_apify_credit_allocations(10)`);
         const held = await db.query<{ state: string }>(`SELECT lifecycle_state AS state FROM public.analysis_beta_pool_reservations`);
         expect(held.rows).toEqual([{ state: 'preflight_held' }]);
+    });
+
+    it('rejects a debit-insufficient slot at the hold RPC precheck while another slot remains usable', async () => {
+        await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
+        await db.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, status, access_mode, target_instagram_id,
+                target_followers_count, target_following_count, expires_at
+             ) VALUES ($1, $2, 'pending', 'production', $3, 120, 140,
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes')`,
+            [PREFLIGHT_ID, USER_ID, TARGET]
+        );
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1, TRUE, pg_catalog.clock_timestamp() + INTERVAL '1 hour', $2
+            )`,
+            [USER_ID, AUDIT_HASH]
+        );
+        await serviceQuery(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(snapshots())]
+        );
+        const observed = (await db.query<{ observed_at: string }>(
+            `SELECT observed_at FROM public.analysis_apify_credit_snapshots
+             WHERE credential_slot = 'primary'`
+        )).rows[0].observed_at;
+        await db.query(
+            `INSERT INTO public.analysis_beta_pool_reservation_archive (
+                allocation_id, operation_family, credential_slot, reserved_usd,
+                actual_usd, released_usd, reconciliation_watermark, settled_at,
+                settlement_reason, archive_state, unabsorbed_debit_usd
+             ) VALUES (
+                '90000000-0000-4000-8000-000000000001', 'target-profile',
+                'primary', 0.998000000000, 0.998000000000, 0,
+                $1, pg_catalog.clock_timestamp(), 'recovery', 'settled',
+                0.998000000000
+             )`, [observed]
+        );
+
+        await expect(serviceQuery(
+            `SELECT public.hold_analysis_beta_apify_preflight_credit(
+                $1, $2, 'primary', 0.005200000000, 300
+            )`, [PREFLIGHT_ID, USER_ID]
+        )).rejects.toThrow(/ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE/);
+        expect((await db.query(
+            'SELECT id FROM public.analysis_beta_pool_allocations WHERE preflight_id = $1',
+            [PREFLIGHT_ID]
+        )).rows).toEqual([]);
+        await expect(serviceQuery(
+            `SELECT public.hold_analysis_beta_apify_preflight_credit(
+                $1, $2, 'tertiary', 0.005200000000, 300
+            )`, [PREFLIGHT_ID, USER_ID]
+        )).resolves.toBeDefined();
+    });
+
+    it('fails immutable archive conflicts before deleting the live allocation', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await db.query(`UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1`, [REQUEST_ID]);
+        const allocationId = (await db.query<{ id: string }>(
+            `SELECT id FROM public.analysis_beta_pool_allocations WHERE request_id = $1`, [REQUEST_ID]
+        )).rows[0].id;
+        await db.query(
+            `INSERT INTO public.analysis_beta_pool_reservation_archive (
+                allocation_id, operation_family, credential_slot, reserved_usd,
+                actual_usd, released_usd, reconciliation_watermark, settled_at,
+                settlement_reason, archive_state, unabsorbed_debit_usd
+             ) VALUES ($1, 'target-profile', 'tertiary', 0.005200000000,
+                0, 0.005200000000, NULL, pg_catalog.clock_timestamp(),
+                'recovery', 'settled', 0)`, [allocationId]
+        );
+        await expect(serviceQuery(
+            `SELECT public.archive_settled_analysis_beta_apify_credit_allocations(10)`
+        )).rejects.toThrow(/ANALYSIS_BETA_POOL_ARCHIVE_CONFLICT/);
+        expect((await db.query(
+            `SELECT lifecycle_state FROM public.analysis_beta_pool_allocations WHERE id = $1`,
+            [allocationId]
+        )).rows).toEqual([{ lifecycle_state: 'active' }]);
+        expect((await db.query<{ credential_slot: string }>(
+            `SELECT credential_slot FROM public.analysis_beta_pool_reservation_archive
+             WHERE allocation_id = $1 AND operation_family = 'target-profile'`, [allocationId]
+        )).rows).toEqual([{ credential_slot: 'tertiary' }]);
     });
 
     it('archives deterministic settled family history before allowing retained parents to delete', async () => {
