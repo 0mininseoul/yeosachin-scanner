@@ -105,9 +105,10 @@ describe('preflight worker route', () => {
         const response = await POST(request({ preflightId }));
         expect(response.status).toBe(200);
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
-        expect(mocks.process).toHaveBeenCalledWith(preflightId, {
+        expect(mocks.process).toHaveBeenCalledWith(preflightId, expect.objectContaining({
+            betaCreditCoordinator: expect.any(Object),
             observer: expect.any(Function),
-        });
+        }));
         await expect(response.json()).resolves.toEqual({ status: 'ready' });
         expect(mocks.emit).toHaveBeenCalledWith({
             event: 'preflight.profile_collected',
@@ -155,7 +156,8 @@ describe('preflight worker route', () => {
                 generation: 3,
                 dispatchGeneration: 2,
                 dispatchToken,
-            }
+            },
+            expect.objectContaining({ betaCreditCoordinator: expect.any(Object) })
         );
         expect(mocks.process).not.toHaveBeenCalled();
     });

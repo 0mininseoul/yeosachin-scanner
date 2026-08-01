@@ -67,6 +67,10 @@ import {
     type PreflightProviderRunStore,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
+import {
+    BETA_APIFY_POOL_CAPACITY_ERROR,
+    type BetaApifyPreflightCoordinator,
+} from './beta-apify-preflight-coordinator';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -135,6 +139,8 @@ export interface ClaimedPreflight {
     userId: string;
     targetInstagramId: string;
     accessMode: PlanAccessMode;
+    /** Set only by the database claim contract; public creation remains standard-only. */
+    analysisEntryChannel?: 'standard' | 'betatest';
     workerAttemptCount: number;
     catalogSnapshot: PreflightCatalogSnapshot;
 }
@@ -827,6 +833,9 @@ export function createSupabasePreflightStore(
                 userId: requiredUuid(row.user_id, 'user id'),
                 targetInstagramId: requiredUsername(row.target_instagram_id),
                 accessMode: requiredAccessMode(row.access_mode),
+                analysisEntryChannel: row.analysis_entry_channel === undefined
+                    ? 'standard'
+                    : z.enum(['standard', 'betatest']).parse(row.analysis_entry_channel),
                 workerAttemptCount: requiredWorkerAttemptCount(row.worker_attempt_count),
                 catalogSnapshot: {
                     plans: planCatalogSnapshotSchema.parse(row.plan_catalog_snapshot),
@@ -1126,6 +1135,7 @@ export async function processPreflight(
         getProfile?: typeof getSelfHostedProfileSummary;
         getFallbackProfile?: typeof getApifyProfileSummary;
         providerRunStore?: PreflightProviderRunStore;
+        betaCreditCoordinator?: BetaApifyPreflightCoordinator;
         env?: Record<string, string | undefined>;
         observer?: PreflightProcessObserver;
     } = {}
@@ -1146,6 +1156,16 @@ export async function processPreflight(
         'followersCount' | 'followingCount'
     > = {};
     try {
+        const isBetatest = claim.analysisEntryChannel === 'betatest';
+        const betaHold = isBetatest
+            ? await dependencies.betaCreditCoordinator?.prepare({
+                preflightId: claim.preflightId,
+                userId: claim.userId,
+            })
+            : undefined;
+        if (isBetatest && !betaHold) {
+            throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+        }
         const inputHash = preflightTargetInputHash(
             claim.targetInstagramId,
             dependencies.env ?? process.env
@@ -1158,6 +1178,12 @@ export async function processPreflight(
 
         let profile: InstagramProfile | null;
         if (existingRun) {
+            if (
+                betaHold
+                && existingRun.credentialSlot !== betaHold.credentialSlot
+            ) {
+                throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+            }
             if (
                 ['starting', 'rejected', 'failed', 'aborted', 'timed_out']
                     .includes(existingRun.status)
@@ -1179,7 +1205,9 @@ export async function processPreflight(
                 store: providerRuns,
                 claim,
                 inputHash,
-                identity: preflightProviderIdentity(existingRun.credentialSlot),
+                identity: preflightProviderIdentity(
+                    betaHold?.credentialSlot ?? existingRun.credentialSlot
+                ),
             });
             profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                 claim.targetInstagramId,
@@ -1205,7 +1233,8 @@ export async function processPreflight(
                     existingRun: false,
                 });
                 const identity = preflightProviderIdentity(
-                    selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                    betaHold?.credentialSlot
+                    ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
                 );
                 const bound = await bindPreflightProviderRunCheckpoint({
                     store: providerRuns,
@@ -1270,6 +1299,19 @@ export async function processPreflight(
         });
         return 'ready';
     } catch (error) {
+        if (
+            !terminalized
+            && error instanceof Error
+            && error.message === BETA_APIFY_POOL_CAPACITY_ERROR
+        ) {
+            await store.finalizeBlocked(claim, 'BETA_CAPACITY_UNAVAILABLE');
+            terminalized = true;
+            notifyPreflightObserver(dependencies.observer, {
+                type: 'completed', outcome: 'blocked', ...baseObservation,
+                ...profileObservation, errorCode: 'BETA_CAPACITY_UNAVAILABLE',
+            });
+            return 'blocked';
+        }
         const failure = classifyPreflightError(error);
         if (!terminalized && !failure.retryable) {
             try {

@@ -93,6 +93,27 @@ describe('beta Apify runtime foundation', () => {
             .rejects.toThrow(BETA_APIFY_POOL_CAPACITY_ERROR);
     });
 
+    it('loads only the frozen target reservation identity without a user id', async () => {
+        const client = rpcClient({
+            allocationId: UUID,
+            preflightId: UUID,
+            credentialSlot: 'septenary',
+            targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+        });
+        const store = createBetaApifyCreditPoolStore(client);
+        await expect(store.loadPreflightHold(UUID)).resolves.toEqual({
+            allocationId: UUID,
+            preflightId: UUID,
+            credentialSlot: 'septenary',
+            targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+        });
+        expect(client.rpc).toHaveBeenCalledWith(
+            'load_analysis_beta_apify_preflight_hold',
+            { p_preflight_id: UUID }
+        );
+        expect(JSON.stringify(client.rpc.mock.calls[0]?.[1])).not.toMatch(/user_id|token|account/i);
+    });
+
     it('sanitizes a rejected RPC promise without leaking provider or account details', async () => {
         const rawSecret = 'fake-apify-token-at-https://api.apify.com/v2/users/account-123';
         const client: BetaApifyPoolStoreClient = {

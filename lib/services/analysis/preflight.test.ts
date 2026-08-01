@@ -29,6 +29,7 @@ import type {
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
 import { PREFLIGHT_PROVIDER_DEADLINE_MS } from './preflight-runtime-policy';
+import type { BetaApifyPreflightCoordinator } from './beta-apify-preflight-coordinator';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -39,6 +40,54 @@ const preflightIdentitySecret = Buffer.alloc(32, 14).toString('base64url');
 const imageProxySigningSecret = Buffer.alloc(32, 15).toString('base64url');
 const preflightInputHash = preflightTargetInputHash('target.name', {
     ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+});
+
+describe('betatest preflight credit fence', () => {
+    it('prepares the frozen beta target hold before profile or provider work', async () => {
+        const events: string[] = [];
+        const coordinator: BetaApifyPreflightCoordinator = {
+            reuse: vi.fn(),
+            prepare: vi.fn(async () => {
+                events.push('hold');
+                return { allocationId: '423e4567-e89b-42d3-a456-426614174000', credentialSlot: 'septenary' as const, existing: false };
+            }),
+        };
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const primary = vi.fn(async () => {
+            events.push('profile');
+            return profile();
+        });
+
+        const outcome = await processPreflight(preflightId, {
+            store,
+            betaCreditCoordinator: coordinator,
+            getProfile: primary,
+            providerRunStore: providerRunStore(),
+        });
+
+        expect(events[0]).toBe('hold');
+        expect(events).toContain('profile');
+        expect(primary).toHaveBeenCalled();
+        expect(store.finalizeReady).toHaveBeenCalled();
+        expect(outcome).toBe('ready');
+    });
+
+    it('blocks beta capacity before profile collection and releases the claim', async () => {
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const getProfile = vi.fn();
+        await expect(processPreflight(preflightId, {
+            store,
+            betaCreditCoordinator: {
+                reuse: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); },
+                prepare: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); },
+            },
+            getProfile,
+        })).resolves.toBe('blocked');
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'BETA_CAPACITY_UNAVAILABLE');
+    });
 });
 
 beforeAll(() => {

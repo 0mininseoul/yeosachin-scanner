@@ -20,6 +20,13 @@ import {
     emitPreflightProcessObservation,
     preflightWorkerErrorCode,
 } from '@/lib/observability/preflight-events';
+import {
+    createBetaApifyCreditPoolStore,
+} from '@/lib/services/analysis/beta-apify-credit-runtime';
+import {
+    createBetaApifyPreflightCoordinator,
+    createServerBetaApifyCreditClientFactory,
+} from '@/lib/services/analysis/beta-apify-preflight-coordinator';
 
 const workerRequestSchema = z.union([
     z.object({
@@ -82,6 +89,10 @@ async function handlePOST(
 
     const task = parsed.data;
     const isFreshAdmission = 'kind' in task;
+    const betaCreditCoordinator = createBetaApifyPreflightCoordinator({
+        store: createBetaApifyCreditPoolStore(supabaseAdmin),
+        clientForSlot: createServerBetaApifyCreditClientFactory(),
+    });
     let profileFailureObserved = false;
     try {
         let outcome: 'noop' | 'ready' | 'blocked';
@@ -91,9 +102,12 @@ async function handlePOST(
                 generation: task.generation,
                 dispatchGeneration: task.dispatchGeneration,
                 dispatchToken: task.dispatchToken,
-            });
+            }, { betaCreditCoordinator });
         } else {
+            // Construction is server-only and lazy: no token is read and no network starts
+            // until a claimed row identifies itself as the dedicated beta channel.
             outcome = await processPreflight(task.preflightId, {
+                betaCreditCoordinator,
                 observer(observation: PreflightProcessObservation) {
                     if (observation.type === 'failed') profileFailureObserved = true;
                     emitPreflightProcessObservation(context, observation);

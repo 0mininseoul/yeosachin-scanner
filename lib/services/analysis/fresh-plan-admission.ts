@@ -21,6 +21,10 @@ import {
     type FreshAdmissionProviderRunStore,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
+import {
+    BETA_APIFY_POOL_CAPACITY_ERROR,
+    type BetaApifyPreflightCoordinator,
+} from './beta-apify-preflight-coordinator';
 
 export const ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
     reserveRpc: 'reserve_analysis_v2_preflight_admission',
@@ -148,6 +152,7 @@ const claimResultSchema = z.array(z.object({
     claimed: z.boolean(),
     admission_status: z.enum(['pending', 'processing', 'ready', 'blocked']),
     target_instagram_id: usernameSchema.nullable(),
+    analysis_entry_channel: z.enum(['standard', 'betatest']).optional().default('standard'),
 }).strict()).length(1);
 const terminalResultSchema = z.array(z.object({
     admission_status: z.enum(['ready', 'blocked']),
@@ -232,6 +237,7 @@ interface ClaimedAnalysisV2FreshAdmission {
     generation: number;
     claimToken: string;
     targetInstagramId: string;
+    analysisEntryChannel: 'standard' | 'betatest';
 }
 
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
@@ -481,6 +487,7 @@ async function claimAnalysisV2FreshAdmission(
         ...validatedInput,
         claimToken,
         targetInstagramId: row.target_instagram_id,
+        analysisEntryChannel: row.analysis_entry_channel,
     });
 }
 
@@ -601,6 +608,7 @@ export async function processAnalysisV2FreshAdmission(
         providerRunStore?: FreshAdmissionProviderRunStore;
         env?: Record<string, string | undefined>;
         createClaimToken?: () => string;
+        betaCreditCoordinator?: BetaApifyPreflightCoordinator;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const claim = await claimAnalysisV2FreshAdmission(
@@ -642,6 +650,12 @@ export async function processAnalysisV2FreshAdmission(
         }, result.failureCount, error);
     };
     try {
+        const betaHold = claim.analysisEntryChannel === 'betatest'
+            ? await dependencies.betaCreditCoordinator?.reuse(claim.preflightId)
+            : undefined;
+        if (claim.analysisEntryChannel === 'betatest' && !betaHold) {
+            throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+        }
         let profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
         let reusableProfileInputHash: string | null = null;
         try {
@@ -676,6 +690,13 @@ export async function processAnalysisV2FreshAdmission(
                     claimToken: claim.claimToken,
                     inputHash,
                 });
+                if (
+                    betaHold
+                    && existingRun
+                    && existingRun.credentialSlot !== betaHold.credentialSlot
+                ) {
+                    throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+                }
                 if (existingRun?.status === 'rejected') {
                     throw new Error('SCRAPING_PROVIDER_START_REJECTED_ERROR');
                 }
@@ -685,7 +706,8 @@ export async function processAnalysisV2FreshAdmission(
                     existingRun: existingRun !== null,
                 });
                 const identity = preflightProviderIdentity(
-                    existingRun?.credentialSlot
+                    betaHold?.credentialSlot
+                    ?? existingRun?.credentialSlot
                     ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
                 );
                 const bound = await bindPreflightProviderRunCheckpoint({

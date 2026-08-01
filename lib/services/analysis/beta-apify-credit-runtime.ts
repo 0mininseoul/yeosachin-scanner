@@ -96,6 +96,15 @@ const allocationSchema = z.object({
     operationBudgetMap: operationBudgetMapSchema.nullable(),
     expiresAt: TIMESTAMP,
 }).strict();
+const preflightHoldSchema = z.object({
+    allocationId: z.string().regex(UUID_PATTERN),
+    preflightId: z.string().regex(UUID_PATTERN),
+    credentialSlot: slotSchema,
+    targetProfileBudgetUsd: usdSchema.refine(
+        value => value === BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+        'Target budget must remain frozen.'
+    ),
+}).strict();
 const settlementSchema = z.object({
     allocationId: z.string().regex(UUID_PATTERN),
     lifecycleState: z.enum(['preflight_held', 'active', 'settled']),
@@ -272,6 +281,8 @@ export function planBetaApifyCreditAllocation(input: {
 export interface BetaApifyCreditPoolStore {
     upsertSnapshots(snapshots: readonly BetaApifyPoolSnapshot[]): Promise<readonly BetaApifyPoolSnapshot[]>;
     loadSnapshots(maxSnapshotAgeSeconds: number): Promise<readonly BetaApifyPoolSnapshot[]>;
+    /** Service-only retry identity; intentionally excludes user ids and all provider data. */
+    loadPreflightHold(preflightId: string): Promise<z.infer<typeof preflightHoldSchema> | null>;
     holdPreflight(input: { preflightId: string; userId: string; credentialSlot: BetaApifyFreeCredentialSlot; maxSnapshotAgeSeconds: number }): Promise<BetaApifyPoolAllocation>;
     activateRequest(input: { preflightId: string; requestId: string; userId: string; selectedPlanId: PlanId; operationSlotMap: BetaApifyOperationSlotMap; operationBudgetMap: BetaApifyOperationBudgetMap; maxSnapshotAgeSeconds: number }): Promise<BetaApifyPoolAllocation>;
     settle(allocationId: string, reason: 'request_terminal' | 'preflight_expired' | 'recovery'): Promise<z.infer<typeof settlementSchema>>;
@@ -326,6 +337,15 @@ export function createBetaApifyCreditPoolStore(client: BetaApifyPoolStoreClient)
                 p_max_age_seconds: checkedAge(maxSnapshotAgeSeconds),
             });
             return ensureExactSixSnapshots(data);
+        },
+        async loadPreflightHold(preflightId) {
+            const data = await invoke(client, 'load_analysis_beta_apify_preflight_hold', {
+                p_preflight_id: checkedUuid(preflightId),
+            });
+            if (data === null) return null;
+            const parsed = preflightHoldSchema.safeParse(data);
+            if (!parsed.success) throw new Error(BETA_APIFY_POOL_PERSISTENCE_ERROR);
+            return Object.freeze(parsed.data);
         },
         async holdPreflight(input) {
             const data = await invoke(client, 'hold_analysis_beta_apify_preflight_credit', {
