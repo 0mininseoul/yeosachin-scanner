@@ -353,6 +353,28 @@ BEGIN
         'public.rearm_earlybird_zero_spend_adoption_policy_failure(uuid,uuid,timestamp with time zone)'::pg_catalog.regprocedure
     );
     IF pg_catalog.strpos(v_rearm_definition, 'v_partial_adoption_variant BOOLEAN') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_topology_valid BOOLEAN') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_adoption_topology_valid BOOLEAN') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'pg_catalog.count(*) = 8') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'pg_catalog.count(*) = 3') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'count(DISTINCT source_run.job_key) FILTER') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^relationship-followers:') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^relationship-following:') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^profile-fallback:') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^target-likers:') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^target-comments:') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.status = ''succeeded''') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.actual_usage_usd IS NOT NULL') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.usage_reconciled_at IS NOT NULL') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key = adoption.source_operation_key') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.run_id = adoption.source_run_id') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_source_topology_valid') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_adoption_topology_valid') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'run.request_id = v_request.id') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'public.analysis_provider_cost_ledger AS cost') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'public.analysis_v2_ai_attempts AS attempt') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'public.analysis_v2_relationship_sides AS evidence') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'public.analysis_v2_target_evidence_manifests AS evidence') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_fulfillment.attempt_count <> 5 AND NOT v_partial_adoption_variant') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'ANALYSIS_V2_PROGRESS_CONFLICT') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_fulfillment.attempt_count = 2') > 0
@@ -364,11 +386,82 @@ BEGIN
     ELSE
         v_rearm_rewritten := pg_catalog.replace(v_rearm_definition,
             '    v_preflight_generation INTEGER;',
-            '    v_preflight_generation INTEGER;' || chr(10) || '    v_partial_adoption_variant BOOLEAN;'
+            '    v_preflight_generation INTEGER;' || chr(10)
+                || '    v_partial_adoption_variant BOOLEAN;' || chr(10)
+                || '    v_partial_source_topology_valid BOOLEAN;' || chr(10)
+                || '    v_partial_adoption_topology_valid BOOLEAN;'
         );
         v_rearm_rewritten := pg_catalog.replace(v_rearm_rewritten,
-            '    v_normalized_preflight.excluded_instagram_id := v_order.excluded_instagram_id;',
-            '    v_normalized_preflight.excluded_instagram_id := v_order.excluded_instagram_id;' || chr(10) || '    v_partial_adoption_variant := v_fulfillment.attempt_count = 2' || chr(10) || '       AND v_preflight.idempotency_key IS NOT DISTINCT FROM (v_base_preflight_key || ''.r1'')' || chr(10) || '       AND EXISTS (SELECT 1 FROM public.analysis_v2_recovery_provider_run_adoptions AS adoption WHERE adoption.request_id = v_request.id)' || chr(10) || '       AND NOT EXISTS (SELECT 1 FROM public.analysis_v2_recovery_provider_run_adoptions AS adoption WHERE adoption.request_id = v_request.id AND adoption.source_request_id IS DISTINCT FROM v_lineage.failed_request_id);'
+            $old$    v_normalized_preflight.excluded_instagram_id := v_order.excluded_instagram_id;$old$,
+            $new$    v_normalized_preflight.excluded_instagram_id := v_order.excluded_instagram_id;
+    SELECT pg_catalog.count(*) = 8
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key = 'track:relationships:collect'
+              AND source_run.operation_key ~ '^relationship-followers:[0-9a-f]{64}$'
+       ) = 1
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key = 'track:relationships:collect'
+              AND source_run.operation_key ~ '^relationship-following:[0-9a-f]{64}$'
+       ) = 1
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key ~ '^track:profiles:batch:[0-3]$'
+              AND source_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$'
+       ) = 4
+       AND pg_catalog.count(DISTINCT source_run.job_key) FILTER (
+            WHERE source_run.job_key ~ '^track:profiles:batch:[0-3]$'
+              AND source_run.operation_key ~ '^profile-fallback:[0-9a-f]{64}$'
+       ) = 4
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key = 'track:target-evidence:collect'
+              AND source_run.operation_key ~ '^target-likers:[0-9a-f]{64}$'
+       ) = 1
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key = 'track:target-evidence:collect'
+              AND source_run.operation_key ~ '^target-comments:[0-9a-f]{64}$'
+       ) = 1
+       AND pg_catalog.bool_and(
+            source_run.status = 'succeeded'
+            AND source_run.run_id IS NOT NULL
+            AND source_run.actual_usage_usd IS NOT NULL
+            AND source_run.usage_reconciled_at IS NOT NULL
+       )
+    INTO v_partial_source_topology_valid
+    FROM public.analysis_v2_provider_runs AS source_run
+    WHERE source_run.request_id = v_lineage.failed_request_id;
+    SELECT pg_catalog.count(*) = 3
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key = 'track:relationships:collect'
+              AND source_run.operation_key ~ '^relationship-following:[0-9a-f]{64}$'
+       ) = 1
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key = 'track:target-evidence:collect'
+              AND source_run.operation_key ~ '^target-likers:[0-9a-f]{64}$'
+       ) = 1
+       AND pg_catalog.count(*) FILTER (
+            WHERE source_run.job_key = 'track:target-evidence:collect'
+              AND source_run.operation_key ~ '^target-comments:[0-9a-f]{64}$'
+       ) = 1
+       AND pg_catalog.count(source_run.request_id) = 3
+       AND pg_catalog.bool_and(adoption.job_key = source_run.job_key)
+    INTO v_partial_adoption_topology_valid
+    FROM public.analysis_v2_recovery_provider_run_adoptions AS adoption
+    LEFT JOIN public.analysis_v2_provider_runs AS source_run
+      ON source_run.request_id = adoption.source_request_id
+     AND source_run.job_key = adoption.source_job_key
+     AND source_run.operation_key = adoption.source_operation_key
+     AND source_run.run_id = adoption.source_run_id
+    WHERE adoption.request_id = v_request.id
+      AND adoption.source_request_id = v_lineage.failed_request_id;
+    v_partial_adoption_variant := v_fulfillment.attempt_count = 2
+       AND v_preflight.idempotency_key IS NOT DISTINCT FROM (v_base_preflight_key || '.r1')
+       AND COALESCE(v_partial_source_topology_valid, FALSE)
+       AND COALESCE(v_partial_adoption_topology_valid, FALSE)
+       AND NOT EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_recovery_provider_run_adoptions AS adoption
+            WHERE adoption.request_id = v_request.id
+              AND adoption.source_request_id IS DISTINCT FROM v_lineage.failed_request_id
+       );$new$
         );
         v_rearm_rewritten := pg_catalog.replace(v_rearm_rewritten,
             'OR v_fulfillment.attempt_count <> 5',
@@ -384,6 +477,28 @@ BEGIN
         );
         IF v_rearm_rewritten = v_rearm_definition
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_adoption_variant BOOLEAN') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_topology_valid BOOLEAN') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_adoption_topology_valid BOOLEAN') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'pg_catalog.count(*) = 8') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'pg_catalog.count(*) = 3') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'count(DISTINCT source_run.job_key) FILTER') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^relationship-followers:') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^relationship-following:') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^profile-fallback:') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^target-likers:') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^target-comments:') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.status = ''succeeded''') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.actual_usage_usd IS NOT NULL') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.usage_reconciled_at IS NOT NULL') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key = adoption.source_operation_key') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.run_id = adoption.source_run_id') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_source_topology_valid') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_adoption_topology_valid') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'run.request_id = v_request.id') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'public.analysis_provider_cost_ledger AS cost') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'public.analysis_v2_ai_attempts AS attempt') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'public.analysis_v2_relationship_sides AS evidence') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'public.analysis_v2_target_evidence_manifests AS evidence') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_fulfillment.attempt_count <> 5 AND NOT v_partial_adoption_variant') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'ANALYSIS_V2_PROGRESS_CONFLICT') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_fulfillment.attempt_count = 2') = 0

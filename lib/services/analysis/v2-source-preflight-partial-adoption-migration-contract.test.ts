@@ -59,12 +59,27 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
         expect(migration).toContain('public.analysis_v2_valid_source_adoption_preflights(');
     });
 
-    it('permits only a nonempty exact-lineage adoption subset in the audited zero-spend policy rearm', () => {
+    it('permits only the exact eight-source, three-adoption incident topology in the audited rearm', () => {
         expect(migration).toContain('v_partial_adoption_variant BOOLEAN');
         expect(migration).toContain('v_fulfillment.attempt_count = 2');
         expect(migration).toContain("v_preflight.idempotency_key IS NOT DISTINCT FROM (v_base_preflight_key || ''.r1'')");
         expect(migration).toContain('v_fulfillment.attempt_count <> 5 AND NOT v_partial_adoption_variant');
         expect(migration).toContain('adoption.source_request_id IS DISTINCT FROM v_lineage.failed_request_id');
+        expect(migration).toContain('v_partial_source_topology_valid BOOLEAN');
+        expect(migration).toContain('v_partial_adoption_topology_valid BOOLEAN');
+        expect(migration).toContain('pg_catalog.count(*) = 8');
+        expect(migration).toContain('pg_catalog.count(*) = 3');
+        expect(migration).toContain("'^relationship-followers:[0-9a-f]{64}$'");
+        expect(migration).toContain("'^relationship-following:[0-9a-f]{64}$'");
+        expect(migration).toContain("'^profile-fallback:[0-9a-f]{64}$'");
+        expect(migration).toContain("'^target-likers:[0-9a-f]{64}$'");
+        expect(migration).toContain("'^target-comments:[0-9a-f]{64}$'");
+        expect(migration).toContain('pg_catalog.count(source_run.request_id) = 3');
+        expect(migration).toContain('pg_catalog.bool_and(adoption.job_key = source_run.job_key)');
+        expect(migration).toContain('COALESCE(v_partial_source_topology_valid, FALSE)');
+        expect(migration).toContain('COALESCE(v_partial_adoption_topology_valid, FALSE)');
+        expect(migration).toContain('public.analysis_provider_cost_ledger AS cost');
+        expect(migration).toContain('public.analysis_v2_ai_attempts AS attempt');
         expect(migration).toContain("job.last_error_code = ''ANALYSIS_V2_PROGRESS_CONFLICT''");
         expect(migration).toContain('NOT v_partial_adoption_variant AND job.attempt_count = 0');
         expect(migration).not.toContain('NOT BETWEEN 1 AND 5');
