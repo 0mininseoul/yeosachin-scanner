@@ -642,6 +642,8 @@ export const progressReadV1Schema = z.object({
 
 export type ProgressReadV1 = z.infer<typeof progressReadV1Schema>;
 
+const COVERAGE_RATIO_CONSISTENCY_TOLERANCE = 1e-12;
+
 const relationshipCoverageSchema = z.object({
     declared: z.number().int().nonnegative(),
     collected: z.number().int().nonnegative(),
@@ -650,8 +652,15 @@ const relationshipCoverageSchema = z.object({
     exactCountMatch: z.boolean(),
 }).strict().superRefine((value, context) => {
     const expected = assessRelationshipCoverage(value.declared, value.collected);
+    if (Math.abs(value.coverageRatio - expected.coverageRatio)
+        > COVERAGE_RATIO_CONSISTENCY_TOLERANCE) {
+        context.addIssue({
+            code: 'custom',
+            message: 'coverageRatio does not match declared and collected counts.',
+            path: ['coverageRatio'],
+        });
+    }
     for (const [field, actual, expectedValue] of [
-        ['coverageRatio', value.coverageRatio, expected.coverageRatio],
         ['meetsCoverageGate', value.meetsCoverageGate, expected.meetsCoverageGate],
         ['exactCountMatch', value.exactCountMatch, expected.exactCountMatch],
     ] as const) {
