@@ -162,7 +162,7 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/internal checkout body[^\n]*post-drain/);
     });
 
-    it('documents fail-closed 5% Amplitude Session Replay with eight event panels', () => {
+    it('documents fail-closed 100% beta Amplitude Session Replay with eight event panels', () => {
         const operations = source('docs/amplitude-analytics-operations.md');
         const env = source('.env.example');
         const dashboardSection = operations.match(/## 4\. 대시보드 생성[\s\S]*?(?=## 5\. Live 검증)/)?.[0] ?? '';
@@ -173,7 +173,7 @@ describe('analytics and observability disclosure contract', () => {
             /NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED[^\n]*true/
         );
         expect(operations).toMatch(
-            /NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE[^\n]*0\.05/
+            /NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE[^\n]*1/
         );
         expect(operations).toMatch(
             /DEMO_ANALYSIS_ENABLED[^\n]*(server-only|서버 전용)[^\n]*(데모 자격|demo eligibility)/i
@@ -181,10 +181,10 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(
             /DEMO_ANALYSIS_ENABLED[^\n]*값과 관계없이[^\n]*`\/analyze`[^\n]*`\/progress\/:requestId`[^\n]*`\/result\/:requestId`[^\n]*`\/share\/:token`[^\n]*수집 후보/i
         );
-        expect(operations).toMatch(/현재 승인된[^\n]*0\.05/);
-        expect(operations).toMatch(/0\.01[^\n]*0\.10/);
+        expect(operations).toMatch(/현재 승인된[^\n]*NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=1[^\n]*(100%|100 %)/);
+        expect(operations).toMatch(/0\.01[^\n]*0\.10[^\n]*1/);
         expect(operations).toMatch(/(범위 밖|형식 오류)[^\n]*(fail-closed|sampleRate:[^\n]*0)/);
-        expect(operations).toMatch(/(0\.05|sample rate)[^\n]*(변경|변경은)[^\n]*(별도 검토|검토 필요)/i);
+        expect(operations).toMatch(/(beta|베타)[^\n]*100%[^\n]*(검증|확인)/i);
         expect(operations).toMatch(
             /Session Replay 허용 경로 템플릿[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`[^\n]*`\/login`[^\n]*`\/analyze`[^\n]*`\/earlybird`[^\n]*`\/mypage`[^\n]*`\/progress\/:requestId`[^\n]*`\/result\/:requestId`[^\n]*`\/share\/:token`/i
         );

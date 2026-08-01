@@ -1,0 +1,48 @@
+diff --git a/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/session-replay.js b/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/session-replay.js
+index d7c5540..2a1baff 100644
+--- a/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/session-replay.js
++++ b/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/session-replay.js
+@@ -74,6 +74,7 @@ var SessionReplayPlugin = /** @class */ (function () {
+                                 maskSelector: (_d = this.options.privacyConfig) === null || _d === void 0 ? void 0 : _d.maskSelector,
+                                 unmaskSelector: (_e = this.options.privacyConfig) === null || _e === void 0 ? void 0 : _e.unmaskSelector,
+                                 defaultMaskLevel: (_f = this.options.privacyConfig) === null || _f === void 0 ? void 0 : _f.defaultMaskLevel,
++                                maskAttributes: this.options.privacyConfig === null || this.options.privacyConfig === void 0 ? void 0 : this.options.privacyConfig.maskAttributes,
+                             },
+                             debugMode: this.options.debugMode,
+                             shouldInlineStylesheet: this.options.shouldInlineStylesheet,
+diff --git a/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/typings/session-replay.d.ts b/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/typings/session-replay.d.ts
+index 0822735..3372950 100644
+--- a/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/typings/session-replay.d.ts
++++ b/node_modules/@amplitude/plugin-session-replay-browser/lib/cjs/typings/session-replay.d.ts
+@@ -14,6 +14,7 @@ export type MaskLevel = 'light' | 'medium' | 'conservative';
+ export interface SessionReplayPrivacyConfig {
+     blockSelector?: string | string[];
+     defaultMaskLevel?: MaskLevel;
++    maskAttributes?: string[];
+     maskSelector?: string[];
+     unmaskSelector?: string[];
+ }
+diff --git a/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/session-replay.js b/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/session-replay.js
+index f6c0784..72736da 100644
+--- a/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/session-replay.js
++++ b/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/session-replay.js
+@@ -71,6 +71,7 @@ var SessionReplayPlugin = /** @class */ (function () {
+                                 maskSelector: (_d = this.options.privacyConfig) === null || _d === void 0 ? void 0 : _d.maskSelector,
+                                 unmaskSelector: (_e = this.options.privacyConfig) === null || _e === void 0 ? void 0 : _e.unmaskSelector,
+                                 defaultMaskLevel: (_f = this.options.privacyConfig) === null || _f === void 0 ? void 0 : _f.defaultMaskLevel,
++                                maskAttributes: this.options.privacyConfig === null || this.options.privacyConfig === void 0 ? void 0 : this.options.privacyConfig.maskAttributes,
+                             },
+                             debugMode: this.options.debugMode,
+                             shouldInlineStylesheet: this.options.shouldInlineStylesheet,
+diff --git a/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/typings/session-replay.d.ts b/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/typings/session-replay.d.ts
+index 0822735..3372950 100644
+--- a/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/typings/session-replay.d.ts
++++ b/node_modules/@amplitude/plugin-session-replay-browser/lib/esm/typings/session-replay.d.ts
+@@ -14,6 +14,7 @@ export type MaskLevel = 'light' | 'medium' | 'conservative';
+ export interface SessionReplayPrivacyConfig {
+     blockSelector?: string | string[];
+     defaultMaskLevel?: MaskLevel;
++    maskAttributes?: string[];
+     maskSelector?: string[];
+     unmaskSelector?: string[];
+ }
