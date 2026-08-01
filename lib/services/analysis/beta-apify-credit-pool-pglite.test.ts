@@ -2,13 +2,26 @@ import { existsSync, readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-const migrationUrl = new URL(
-    '../../../supabase/migrations/20260802010000_add_betatest_apify_credit_pool.sql',
-    import.meta.url
-);
-const migration = existsSync(migrationUrl)
-    ? readFileSync(migrationUrl, 'utf8')
-    : '';
+const migrationUrls = [
+    new URL(
+        '../../../supabase/migrations/20260802010000_add_betatest_apify_credit_pool.sql',
+        import.meta.url
+    ),
+    new URL(
+        '../../../supabase/migrations/20260802010100_validate_betatest_entry_channel_constraints.sql',
+        import.meta.url
+    ),
+];
+const migrations = migrationUrls.map(migrationUrl => (
+    existsSync(migrationUrl) ? readFileSync(migrationUrl, 'utf8') : ''
+));
+const [foundationMigration, validationMigration] = migrations;
+const ENTRY_CHANNEL_CONSTRAINTS = [
+    'analysis_preflights_entry_channel_access_check',
+    'analysis_preflights_entry_channel_check',
+    'analysis_requests_entry_channel_access_check',
+    'analysis_requests_entry_channel_check',
+] as const;
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const OTHER_USER_ID = '10000000-0000-4000-8000-000000000002';
@@ -107,6 +120,10 @@ interface SnapshotReading {
 type SnapshotInput = Omit<SnapshotReading, 'effectiveHeadroomUsd'>;
 
 let db: PGlite;
+let validationStateAfterFoundation: Array<{
+    conname: string;
+    convalidated: boolean;
+}> = [];
 
 async function serviceQuery<T>(
     sql: string,
@@ -199,13 +216,26 @@ async function loadSnapshots(maxAgeSeconds = 300): Promise<SnapshotReading[]> {
 beforeAll(async () => {
     db = await PGlite.create();
     await db.exec(bootstrap);
-    if (migration !== '') {
+    for (const [index, migration] of migrations.entries()) {
+        if (migration === '') continue;
         await db.exec(migration);
+        if (index === 0) {
+            const state = await db.query<{
+                conname: string;
+                convalidated: boolean;
+            }>(`
+                SELECT conname, convalidated
+                FROM pg_catalog.pg_constraint
+                WHERE conname = ANY($1::TEXT[])
+                ORDER BY conname
+            `, [ENTRY_CHANNEL_CONSTRAINTS]);
+            validationStateAfterFoundation = state.rows;
+        }
     }
 });
 
 beforeEach(async () => {
-    if (migration === '') return;
+    if (foundationMigration === '') return;
     await db.exec(`
         DELETE FROM public.analysis_beta_access_grants;
         DELETE FROM public.analysis_preflights;
@@ -227,8 +257,37 @@ afterAll(async () => {
 });
 
 describe('beta Apify credit pool foundation migration PGlite', () => {
-    it('applies the forward migration to the current six-slot foundation', () => {
-        expect(migration).not.toBe('');
+    it('applies both forward migrations in timestamp order', () => {
+        expect(foundationMigration).not.toBe('');
+        expect(validationMigration).not.toBe('');
+        expect(migrationUrls.map(url => url.pathname.split('/').at(-1))).toEqual([
+            '20260802010000_add_betatest_apify_credit_pool.sql',
+            '20260802010100_validate_betatest_entry_channel_constraints.sql',
+        ]);
+    });
+
+    it('defers existing-row validation to the second migration transaction', async () => {
+        expect(validationStateAfterFoundation).toEqual(
+            ENTRY_CHANNEL_CONSTRAINTS.map(conname => ({
+                conname,
+                convalidated: false,
+            }))
+        );
+        const validationStateAfterSecond = await db.query<{
+            conname: string;
+            convalidated: boolean;
+        }>(`
+            SELECT conname, convalidated
+            FROM pg_catalog.pg_constraint
+            WHERE conname = ANY($1::TEXT[])
+            ORDER BY conname
+        `, [ENTRY_CHANNEL_CONSTRAINTS]);
+        expect(validationStateAfterSecond.rows).toEqual(
+            ENTRY_CHANNEL_CONSTRAINTS.map(conname => ({
+                conname,
+                convalidated: true,
+            }))
+        );
     });
 
     it('accepts exactly seven general slots and the separate six beta slots', async () => {

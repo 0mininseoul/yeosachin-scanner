@@ -3,8 +3,8 @@
 -- This forward-only slice establishes exact credential/operation vocabularies,
 -- a server-owned entry channel, non-enumerable beta access grants, and atomic
 -- sanitized provider-credit snapshots. Allocation, reservation, provider-run
--- policy, and settlement state are intentionally appended by Task 2B before
--- this migration is approved or applied anywhere.
+-- policy, and settlement state are intentionally introduced by their own later
+-- Task 2B migration so this foundation keeps a bounded lock transaction.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
@@ -212,52 +212,6 @@ $$;
 
 REVOKE ALL ON FUNCTION public.analysis_beta_valid_operation_budget_map(JSONB)
     FROM PUBLIC, anon, authenticated, service_role;
-
--- Entry channel is server-persisted metadata, not a PlanAccessMode. Existing
--- rows and every existing insert path remain standard through the defaults.
--- A beta path must retain production access snapshots and may not manufacture
--- a signed test-entitlement identity.
-ALTER TABLE public.analysis_preflights
-    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';
-
-ALTER TABLE public.analysis_requests
-    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';
-
-ALTER TABLE public.analysis_preflights
-    ADD CONSTRAINT analysis_preflights_entry_channel_check CHECK (
-        analysis_entry_channel IN ('standard', 'betatest')
-    ) NOT VALID,
-    ADD CONSTRAINT analysis_preflights_entry_channel_access_check CHECK (
-        analysis_entry_channel <> 'betatest'
-        OR access_mode = 'production'
-    ) NOT VALID;
-
-ALTER TABLE public.analysis_requests
-    ADD CONSTRAINT analysis_requests_entry_channel_check CHECK (
-        analysis_entry_channel IN ('standard', 'betatest')
-    ) NOT VALID,
-    ADD CONSTRAINT analysis_requests_entry_channel_access_check CHECK (
-        analysis_entry_channel <> 'betatest'
-        OR (
-            pipeline_version IS NOT DISTINCT FROM 'v2'
-            AND plan_access_mode_snapshot IS NOT DISTINCT FROM 'production'
-            AND test_entitlement_jti_hash IS NULL
-        )
-    ) NOT VALID;
-
-ALTER TABLE public.analysis_preflights
-    VALIDATE CONSTRAINT analysis_preflights_entry_channel_check;
-ALTER TABLE public.analysis_preflights
-    VALIDATE CONSTRAINT analysis_preflights_entry_channel_access_check;
-ALTER TABLE public.analysis_requests
-    VALIDATE CONSTRAINT analysis_requests_entry_channel_check;
-ALTER TABLE public.analysis_requests
-    VALIDATE CONSTRAINT analysis_requests_entry_channel_access_check;
-
-COMMENT ON COLUMN public.analysis_preflights.analysis_entry_channel IS
-    'Server-persisted entry channel; betatest is authority only when paired with a current service-owned access grant.';
-COMMENT ON COLUMN public.analysis_requests.analysis_entry_channel IS
-    'Immutable-at-admission entry channel snapshot; it does not widen the production/test_entitlement access-mode domain.';
 
 -- No grant is seeded. Operators will add grants through a later service-owned
 -- mutation boundary, with only a non-reversible audit reference in this table.
@@ -728,3 +682,42 @@ GRANT EXECUTE ON FUNCTION public.upsert_analysis_beta_apify_credit_snapshots(JSO
 
 COMMENT ON FUNCTION public.upsert_analysis_beta_apify_credit_snapshots(JSONB) IS
     'Atomically validates and replaces the exact six sanitized healthy snapshots under canonical row locks; partial refresh is impossible.';
+
+-- Entry channel is server-persisted metadata, not a PlanAccessMode. Existing
+-- rows and every existing insert path remain standard through the defaults.
+-- A beta path must retain production access snapshots and may not manufacture
+-- a signed test-entitlement identity. Keep this as the final executable block
+-- so its ACCESS EXCLUSIVE locks are held for the shortest part of this
+-- migration; 20260802010100 validates existing rows in a new transaction.
+ALTER TABLE public.analysis_preflights
+    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';
+
+ALTER TABLE public.analysis_requests
+    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';
+
+ALTER TABLE public.analysis_preflights
+    ADD CONSTRAINT analysis_preflights_entry_channel_check CHECK (
+        analysis_entry_channel IN ('standard', 'betatest')
+    ) NOT VALID,
+    ADD CONSTRAINT analysis_preflights_entry_channel_access_check CHECK (
+        analysis_entry_channel <> 'betatest'
+        OR access_mode = 'production'
+    ) NOT VALID;
+
+ALTER TABLE public.analysis_requests
+    ADD CONSTRAINT analysis_requests_entry_channel_check CHECK (
+        analysis_entry_channel IN ('standard', 'betatest')
+    ) NOT VALID,
+    ADD CONSTRAINT analysis_requests_entry_channel_access_check CHECK (
+        analysis_entry_channel <> 'betatest'
+        OR (
+            pipeline_version IS NOT DISTINCT FROM 'v2'
+            AND plan_access_mode_snapshot IS NOT DISTINCT FROM 'production'
+            AND test_entitlement_jti_hash IS NULL
+        )
+    ) NOT VALID;
+
+COMMENT ON COLUMN public.analysis_preflights.analysis_entry_channel IS
+    'Server-persisted entry channel; betatest is authority only when paired with a current service-owned access grant.';
+COMMENT ON COLUMN public.analysis_requests.analysis_entry_channel IS
+    'Immutable-at-admission entry channel snapshot; it does not widen the production/test_entitlement access-mode domain.';

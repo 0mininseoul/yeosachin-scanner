@@ -9,6 +9,27 @@ const migrationPath = join(
 const migration = existsSync(migrationPath)
     ? readFileSync(migrationPath, 'utf8')
     : '';
+const validationMigrationPath = join(
+    process.cwd(),
+    'supabase/migrations/20260802010100_validate_betatest_entry_channel_constraints.sql'
+);
+const validationMigration = existsSync(validationMigrationPath)
+    ? readFileSync(validationMigrationPath, 'utf8')
+    : '';
+const entryChannelConstraints = [
+    'analysis_preflights_entry_channel_check',
+    'analysis_preflights_entry_channel_access_check',
+    'analysis_requests_entry_channel_check',
+    'analysis_requests_entry_channel_access_check',
+] as const;
+
+function executableStatements(sql: string): string[] {
+    return sql
+        .replace(/^\s*--.*$/gm, '')
+        .split(';')
+        .map(statement => statement.trim())
+        .filter(Boolean);
+}
 
 function functionDefinition(name: string): string {
     const start = migration.indexOf(`FUNCTION public.${name}(`);
@@ -31,11 +52,15 @@ function tableDefinition(name: string): string {
 describe('beta Apify credit pool foundation migration contract', () => {
     it('uses the reserved append-only migration and does not add Task 2B state yet', () => {
         expect(migration).not.toBe('');
+        expect(validationMigration).not.toBe('');
         expect(migrationPath).toContain('20260802010000');
+        expect(validationMigrationPath).toContain('20260802010100');
         expect(migration).not.toContain('CREATE TABLE public.analysis_beta_pool_allocations');
         expect(migration).not.toContain('CREATE TABLE public.analysis_beta_pool_reservations');
         expect(migration).not.toContain('betatest_free_pool');
         expect(migration).not.toContain('reserve_analysis_v2_provider_run');
+        expect(validationMigration).not.toContain('analysis_beta_pool_allocations');
+        expect(validationMigration).not.toContain('analysis_beta_pool_reservations');
     });
 
     it('extends only the current general helper to the exact seven-slot vocabulary', () => {
@@ -151,24 +176,28 @@ describe('beta Apify credit pool foundation migration contract', () => {
         );
     });
 
-    it('adds channel checks unvalidated and validates them in a lighter-lock phase', () => {
+    it('ends the foundation transaction with unvalidated entry-channel metadata', () => {
         expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
-        for (const constraint of [
-            'analysis_preflights_entry_channel_check',
-            'analysis_preflights_entry_channel_access_check',
-            'analysis_requests_entry_channel_check',
-            'analysis_requests_entry_channel_access_check',
-        ]) {
+        expect(migration).not.toContain('VALIDATE CONSTRAINT');
+
+        const entryBlockStart = migration.indexOf(
+            '-- Entry channel is server-persisted metadata'
+        );
+        const finalRpcComment = migration.indexOf(
+            'COMMENT ON FUNCTION public.upsert_analysis_beta_apify_credit_snapshots'
+        );
+        expect(entryBlockStart).toBeGreaterThan(finalRpcComment);
+        const entryBlock = migration.slice(entryBlockStart);
+
+        for (const constraint of entryChannelConstraints) {
             const addIndex = migration.indexOf(`ADD CONSTRAINT ${constraint}`);
-            const notValidIndex = migration.indexOf('NOT VALID', addIndex);
-            const validateIndex = migration.indexOf(
-                `VALIDATE CONSTRAINT ${constraint}`
-            );
+            const statementEnd = migration.indexOf(';', addIndex);
+            const addition = migration.slice(addIndex, statementEnd + 1);
             expect(addIndex, `${constraint} must be added`).toBeGreaterThanOrEqual(0);
-            expect(notValidIndex, `${constraint} must be NOT VALID`)
-                .toBeGreaterThan(addIndex);
-            expect(validateIndex, `${constraint} must be validated separately`)
-                .toBeGreaterThan(notValidIndex);
+            expect(addition, `${constraint} must be NOT VALID`)
+                .toMatch(new RegExp(
+                    `ADD CONSTRAINT ${constraint}[\\s\\S]*?\\) NOT VALID(?:,|;)`
+                ));
         }
 
         const preflightColumn = migration.match(
@@ -179,6 +208,29 @@ describe('beta Apify credit pool foundation migration contract', () => {
         )?.[0] ?? '';
         expect(preflightColumn).not.toContain('ADD CONSTRAINT');
         expect(requestColumn).not.toContain('ADD CONSTRAINT');
+        expect(entryBlock).not.toMatch(
+            /CREATE TABLE|CREATE OR REPLACE FUNCTION|INSERT INTO|GRANT EXECUTE|REVOKE ALL/
+        );
+        expect(migration.trim()).toMatch(
+            /COMMENT ON COLUMN public\.analysis_requests\.analysis_entry_channel[\s\S]*?;$/
+        );
+    });
+
+    it('validates only the four entry-channel checks in a later transaction', () => {
+        expect(validationMigration).toMatch(/^--/);
+        const statements = executableStatements(validationMigration);
+        expect(statements).toEqual([
+            "SET LOCAL lock_timeout = '5s'",
+            "SET LOCAL statement_timeout = '2min'",
+            `ALTER TABLE public.analysis_preflights\n    VALIDATE CONSTRAINT ${entryChannelConstraints[0]}`,
+            `ALTER TABLE public.analysis_preflights\n    VALIDATE CONSTRAINT ${entryChannelConstraints[1]}`,
+            `ALTER TABLE public.analysis_requests\n    VALIDATE CONSTRAINT ${entryChannelConstraints[2]}`,
+            `ALTER TABLE public.analysis_requests\n    VALIDATE CONSTRAINT ${entryChannelConstraints[3]}`,
+        ]);
+        expect(validationMigration.match(/VALIDATE CONSTRAINT/g)).toHaveLength(4);
+        expect(statements.join('\n')).not.toMatch(
+            /ADD COLUMN|ADD CONSTRAINT|CREATE |DROP |INSERT INTO|UPDATE |DELETE FROM|TRUNCATE |GRANT |REVOKE |COMMENT ON/
+        );
     });
 
     it('creates a non-enumerable audited grant table with no seeded user', () => {
