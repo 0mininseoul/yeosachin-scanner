@@ -3,6 +3,12 @@
 -- path, but only for that immutable recovery row and its exact stale-ready
 -- preflight. The normal paid-preflight rebind remains the only way forward
 -- once the row has been rearmed.
+--
+-- Claim/create take fulfillment -> order, while paid-preflight rebind takes
+-- order -> fulfillment. This RPC already owns the order lock before reaching
+-- its immutable-recovery FOUND branch, so waiting for fulfillment here could
+-- deadlock claim/create. A NOWAIT lock fails the operator call deterministically
+-- and releases its order lock instead; retry then observes the canonical state.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -34,6 +40,14 @@ BEGIN
        OR pg_catalog.strpos(
             v_definition,
             'public.earlybird_provider_run_adoption_ready('
+       ) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'EARLYBIRD_SCHEMA_FAILURE_RECOVERY_BUSY'
+       ) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'FOR UPDATE NOWAIT'
        ) = 0 THEN
         v_rewritten := pg_catalog.replace(v_definition, $old$
     IF FOUND THEN
@@ -53,10 +67,17 @@ BEGIN
     END IF;
 $old$, $new$
     IF FOUND THEN
-        SELECT fulfillment.* INTO v_fulfillment
-        FROM public.earlybird_fulfillments AS fulfillment
-        WHERE fulfillment.order_id = v_order.id
-        FOR UPDATE;
+        BEGIN
+            SELECT fulfillment.* INTO v_fulfillment
+            FROM public.earlybird_fulfillments AS fulfillment
+            WHERE fulfillment.order_id = v_order.id
+            FOR UPDATE NOWAIT;
+        EXCEPTION
+            WHEN lock_not_available THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'EARLYBIRD_SCHEMA_FAILURE_RECOVERY_BUSY',
+                    ERRCODE = 'P0001';
+        END;
         IF NOT FOUND
            OR v_order.preflight_id IS DISTINCT FROM v_recovery.recovery_preflight_id THEN
             RAISE EXCEPTION USING

@@ -503,6 +503,15 @@ describe('earlybird fulfillment outbox migration contract', () => {
             'FOR UPDATE'
         );
         expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            'FOR UPDATE NOWAIT'
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            'WHEN lock_not_available THEN'
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            'EARLYBIRD_SCHEMA_FAILURE_RECOVERY_BUSY'
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
             "'PROVIDER_RUN_ADOPTION_REQUIRED'"
         );
         expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
