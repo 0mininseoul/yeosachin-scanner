@@ -36,6 +36,13 @@ const exactSchemaRecoveryProviderRunAdoptionMigration = readFileSync(
     ),
     'utf8'
 );
+const schemaRecoveryProviderAdoptionRearmMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801150000_rearm_schema_recovery_provider_adoption.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const scrubbedFreshnessRecoveryMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260731040000_recover_scrubbed_earlybird_freshness_conflict.sql',
@@ -453,6 +460,30 @@ describe('earlybird fulfillment outbox migration contract', () => {
         expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
             'resolve_analysis_v2_recovery_provider_run'
         );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'EARLYBIRD_SCHEMA_RECOVERY_EXACT_RESOLVER_KEY_PATCH_MISMATCH'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'EARLYBIRD_SCHEMA_RECOVERY_EXACT_RESOLVER_STATUS_PATCH_MISMATCH'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'EARLYBIRD_SCHEMA_RECOVERY_EXACT_RESOLVER_TOMBSTONE_PATCH_MISMATCH'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'v_exact_key = v_exact_definition'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'v_exact_status = v_exact_key'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'v_exact_tombstone = v_exact_status'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'current_preflight.id = p_recovery_preflight_id'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'recovery.recovery_preflight_id = p_recovery_preflight_id'
+        );
         expect(exactSchemaRecoveryProviderRunAdoptionMigration).toMatch(
             /REVOKE ALL ON FUNCTION public\.earlybird_provider_run_adoption_ready\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
         );
@@ -461,6 +492,39 @@ describe('earlybird fulfillment outbox migration contract', () => {
         );
         expect(exactSchemaRecoveryProviderRunAdoptionMigration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.resolve_analysis_v2_recovery_provider_run\([\s\S]*?TO service_role;/
+        );
+    });
+
+    it('rearms only the immutable stale provider-adoption recovery through the existing operator RPC', () => {
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            "'public.recover_earlybird_schema_failed_fulfillment(uuid)'"
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            'FOR UPDATE'
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            "'PROVIDER_RUN_ADOPTION_REQUIRED'"
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            "v_fulfillment.status = 'admission_pending'"
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            'v_order.preflight_id IS DISTINCT FROM v_recovery.recovery_preflight_id'
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            'public.earlybird_provider_run_adoption_ready('
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            "status = 'admission_pending'"
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toContain(
+            'EARLYBIRD_SCHEMA_FAILURE_RECOVERY_ADOPTION_REARM_INELIGIBLE'
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.recover_earlybird_schema_failed_fulfillment\(UUID\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(schemaRecoveryProviderAdoptionRearmMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.recover_earlybird_schema_failed_fulfillment\(UUID\)[\s\S]*?TO service_role;/
         );
     });
 
