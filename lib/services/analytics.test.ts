@@ -932,7 +932,7 @@ describe('Amplitude analytics adapter', () => {
         const options = amplitudeMocks.initAll.mock.calls[0][1] as {
             sessionReplay: {
                 privacyConfig: {
-                    defaultMaskLevel: string;
+                    defaultMaskLevel: 'conservative';
                     maskAttributes: string[];
                 };
             };
