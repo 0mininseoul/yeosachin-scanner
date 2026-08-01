@@ -330,6 +330,11 @@ async function runAttempt<T>(
         invocationWaitLimitSecs: options?.providerRun?.invocationWaitLimitSecs,
         invocationDeadlineAtMs: options?.providerRun?.invocationDeadlineAtMs,
         startCancellationSignal: options?.providerRun?.startCancellationSignal,
+        ...(options?.providerRun?.allowAdoptedRelationshipTruncation === true ? {
+            allowAdoptedRelationshipTruncation: true,
+            adoptedRelationshipSourceDeclaredCount:
+                options.providerRun.adoptedRelationshipSourceDeclaredCount,
+        } : {}),
         onBeforeRunStart: options?.providerRun?.onBeforeRunStart,
         onRunStarted: options?.providerRun?.onRunStarted,
         onProfileStart: options?.onProfileStart,
