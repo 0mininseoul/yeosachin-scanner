@@ -76,6 +76,8 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
         expect(migration).toContain("'^target-comments:[0-9a-f]{64}$'");
         expect(migration).toContain('pg_catalog.count(source_run.request_id) = 3');
         expect(migration).toContain('pg_catalog.bool_and(adoption.job_key = source_run.job_key)');
+        expect(migration).toContain('adoption.operation_key = source_run.operation_key');
+        expect(migration).toContain('adoption.destination_input_hash = source_run.input_hash');
         expect(migration).toContain('COALESCE(v_partial_source_topology_valid, FALSE)');
         expect(migration).toContain('COALESCE(v_partial_adoption_topology_valid, FALSE)');
         expect(migration).toContain('public.analysis_provider_cost_ledger AS cost');

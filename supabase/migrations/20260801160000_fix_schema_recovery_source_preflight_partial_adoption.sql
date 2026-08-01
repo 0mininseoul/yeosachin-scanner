@@ -368,6 +368,8 @@ BEGIN
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.usage_reconciled_at IS NOT NULL') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key = adoption.source_operation_key') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.run_id = adoption.source_run_id') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'adoption.operation_key = source_run.operation_key') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'adoption.destination_input_hash = source_run.input_hash') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_source_topology_valid') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_adoption_topology_valid') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'run.request_id = v_request.id') > 0
@@ -443,6 +445,10 @@ BEGIN
        ) = 1
        AND pg_catalog.count(source_run.request_id) = 3
        AND pg_catalog.bool_and(adoption.job_key = source_run.job_key)
+       AND pg_catalog.bool_and(adoption.operation_key = source_run.operation_key)
+       AND pg_catalog.bool_and(
+            adoption.destination_input_hash = source_run.input_hash
+       )
     INTO v_partial_adoption_topology_valid
     FROM public.analysis_v2_recovery_provider_run_adoptions AS adoption
     LEFT JOIN public.analysis_v2_provider_runs AS source_run
@@ -492,6 +498,8 @@ BEGIN
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.usage_reconciled_at IS NOT NULL') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key = adoption.source_operation_key') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.run_id = adoption.source_run_id') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.operation_key = source_run.operation_key') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.destination_input_hash = source_run.input_hash') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_source_topology_valid') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_adoption_topology_valid') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'run.request_id = v_request.id') = 0

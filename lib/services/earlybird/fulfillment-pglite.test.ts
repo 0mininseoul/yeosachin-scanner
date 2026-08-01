@@ -3951,6 +3951,103 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 [r1.request_id, jobKey, track, '9'.repeat(64), DISPATCH_TOKEN]
             );
         }
+        const manualReviewAt = '2031-02-03T04:05:06.000Z';
+        const markPartialFailure = async (): Promise<void> => {
+            await db.query(
+                `UPDATE public.analysis_pipeline_jobs
+                 SET status = 'completed', attempt_count = 1, lease_token = NULL,
+                     lease_expires_at = NULL, last_error_code = NULL
+                 WHERE request_id = $1 AND job_key = 'coordinator:bootstrap'`,
+                [r1.request_id]
+            );
+            await db.query(
+                `UPDATE public.analysis_pipeline_jobs
+                 SET status = 'failed', attempt_count = 1, lease_token = NULL,
+                     lease_expires_at = NULL,
+                     last_error_code = 'ANALYSIS_V2_JOB_HANDLER_FAILED'
+                 WHERE request_id = $1 AND job_key = $2`,
+                [r1.request_id, relationshipJob]
+            );
+            await db.query(
+                `UPDATE public.analysis_pipeline_jobs
+                 SET status = 'cancelled', attempt_count = 1, lease_token = NULL,
+                     lease_expires_at = NULL,
+                     last_error_code = 'ANALYSIS_V2_PROGRESS_CONFLICT'
+                 WHERE request_id = $1 AND job_key = $2`,
+                [r1.request_id, targetJob]
+            );
+            await db.query(
+                `UPDATE public.analysis_requests
+                 SET status = 'failed', error_message = 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+                     target_instagram_id = 'retained.'
+                        || substr(replace(id::TEXT, '-', ''), 1, 20)
+                 WHERE id = $1`,
+                [r1.request_id]
+            );
+            await db.query(
+                `UPDATE public.analysis_preflights
+                 SET target_instagram_id = 'retained.'
+                        || substr(replace(id::TEXT, '-', ''), 1, 20),
+                     exclusion_decision = 'skip', excluded_instagram_id = NULL,
+                     pii_scrubbed_at = clock_timestamp()
+                 WHERE consumed_request_id = $1`,
+                [r1.request_id]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
+                 VALUES ($1, 'ANALYSIS_V2_JOB_HANDLER_FAILED')`,
+                [r1.request_id]
+            );
+            await db.query(
+                `UPDATE public.earlybird_fulfillments
+                 SET status = 'manual_review', request_id = $1, attempt_count = 2,
+                     last_error_code = 'ANALYSIS_FAILED',
+                     manual_review_at = $2::TIMESTAMPTZ,
+                     lease_token = NULL, lease_expires_at = NULL
+                 WHERE order_id = $3`,
+                [r1.request_id, manualReviewAt, ORDER]
+            );
+        };
+
+        for (const crossedDestination of ['operation', 'input'] as const) {
+            await db.exec('BEGIN');
+            try {
+                for (const [index, sourceRun] of sourceRuns.slice(0, 3).entries()) {
+                    await db.query(
+                        `INSERT INTO public.analysis_v2_recovery_provider_run_adoptions(
+                            request_id, job_key, operation_key, destination_input_hash,
+                            source_request_id, source_job_key, source_operation_key,
+                            source_run_id
+                         ) VALUES ($1, $2, $3, $4, $5, $2, $6, $7)`,
+                        [
+                            r1.request_id,
+                            sourceRun.jobKey,
+                            index === 0 && crossedDestination === 'operation'
+                                ? `relationship-following:${'0'.repeat(64)}`
+                                : sourceRun.operationKey,
+                            index === 0 && crossedDestination === 'input'
+                                ? '0'.repeat(64)
+                                : sourceRun.inputHash,
+                            FAILED_REQUEST,
+                            sourceRun.operationKey,
+                            sourceRun.runId,
+                        ]
+                    );
+                }
+                await markPartialFailure();
+                await expect(db.query(
+                    `SELECT * FROM public.rearm_earlybird_zero_spend_adoption_policy_failure(
+                        $1, $2, $3::TIMESTAMPTZ
+                     )`,
+                    [ORDER, r1.request_id, manualReviewAt]
+                )).rejects.toThrow(
+                    'EARLYBIRD_ADOPTION_POLICY_FAILURE_REARM_INELIGIBLE'
+                );
+            } finally {
+                await db.exec('ROLLBACK');
+            }
+        }
+
         for (const sourceRun of sourceRuns.slice(0, 3)) {
             await asService(
                 `SELECT public.resolve_analysis_v2_recovery_provider_run(
@@ -3968,61 +4065,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
              WHERE request_id = $1`,
             [r1.request_id]
         )).rows[0].count).toBe(3);
-
-        await db.query(
-            `UPDATE public.analysis_pipeline_jobs
-             SET status = 'completed', attempt_count = 1, lease_token = NULL,
-                 lease_expires_at = NULL, last_error_code = NULL
-             WHERE request_id = $1 AND job_key = 'coordinator:bootstrap'`,
-            [r1.request_id]
-        );
-        await db.query(
-            `UPDATE public.analysis_pipeline_jobs
-             SET status = 'failed', attempt_count = 1, lease_token = NULL,
-                 lease_expires_at = NULL,
-                 last_error_code = 'ANALYSIS_V2_JOB_HANDLER_FAILED'
-             WHERE request_id = $1 AND job_key = $2`,
-            [r1.request_id, relationshipJob]
-        );
-        await db.query(
-            `UPDATE public.analysis_pipeline_jobs
-             SET status = 'cancelled', attempt_count = 1, lease_token = NULL,
-                 lease_expires_at = NULL,
-                 last_error_code = 'ANALYSIS_V2_PROGRESS_CONFLICT'
-             WHERE request_id = $1 AND job_key = $2`,
-            [r1.request_id, targetJob]
-        );
-        const manualReviewAt = '2031-02-03T04:05:06.000Z';
-        await db.query(
-            `UPDATE public.analysis_requests
-             SET status = 'failed', error_message = 'ANALYSIS_V2_JOB_HANDLER_FAILED',
-                 target_instagram_id = 'retained.'
-                    || substr(replace(id::TEXT, '-', ''), 1, 20)
-             WHERE id = $1`,
-            [r1.request_id]
-        );
-        await db.query(
-            `UPDATE public.analysis_preflights
-             SET target_instagram_id = 'retained.'
-                    || substr(replace(id::TEXT, '-', ''), 1, 20),
-                 exclusion_decision = 'skip', excluded_instagram_id = NULL,
-                 pii_scrubbed_at = clock_timestamp()
-             WHERE consumed_request_id = $1`,
-            [r1.request_id]
-        );
-        await db.query(
-            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
-             VALUES ($1, 'ANALYSIS_V2_JOB_HANDLER_FAILED')`,
-            [r1.request_id]
-        );
-        await db.query(
-            `UPDATE public.earlybird_fulfillments
-             SET status = 'manual_review', request_id = $1, attempt_count = 2,
-                 last_error_code = 'ANALYSIS_FAILED', manual_review_at = $2::TIMESTAMPTZ,
-                 lease_token = NULL, lease_expires_at = NULL
-             WHERE order_id = $3`,
-            [r1.request_id, manualReviewAt, ORDER]
-        );
+        await markPartialFailure();
 
         for (const attemptCount of [1, 3, 4]) {
             await db.query(
