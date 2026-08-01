@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     BETA_APIFY_PLAN_ADMISSION_ERROR,
+    BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT,
+    BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT,
+    BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR,
     admitBetaApifyPlan,
     createBetaApifyPlanAdmissionStore,
 } from './beta-apify-plan-admission';
 import { BETA_APIFY_TARGET_PROFILE_BUDGET_USD } from './beta-apify-credit-runtime';
+import { BETA_APIFY_RUNTIME_CONFIG_ERROR } from './beta-apify-credit-runtime';
 import { BETA_APIFY_FREE_CREDENTIAL_SLOTS } from './beta-apify-credit-pool';
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
@@ -32,7 +36,7 @@ describe('beta Apify plan admission', () => {
             preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN, admissionGeneration: 1, selectedPlanId: 'basic',
             maxSnapshotAgeSeconds: 300,
             env: { BETATEST_FREE_POOL_ENABLED: 'true' },
-            store: { loadPreflightHold: vi.fn().mockResolvedValue(hold), loadSnapshots: vi.fn().mockResolvedValue(snapshots()), activate },
+            store: { replay: vi.fn().mockResolvedValue(null), loadPreflightHold: vi.fn().mockResolvedValue(hold), loadSnapshots: vi.fn().mockResolvedValue(snapshots()), activate },
         });
 
         expect(result).toMatchObject({ requestId: REQUEST_ID, initialJobKey: 'coordinator:bootstrap', replayed: false });
@@ -47,12 +51,14 @@ describe('beta Apify plan admission', () => {
         expect(Object.values(input.operationSlotMap)).not.toContain('secondary');
     });
 
-    it('collapses config, hold, snapshot, and provider faults into the stable beta admission error', async () => {
+    it('keeps provider/store outages sanitized but distinct from capacity', async () => {
         const secret = 'apify-token-account-raw-payload';
-        await expect(admitBetaApifyPlan({
+        const error = await admitBetaApifyPlan({
             preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN, admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
-            store: { loadPreflightHold: vi.fn().mockRejectedValue(new Error(secret)), loadSnapshots: vi.fn(), activate: vi.fn() },
-        })).rejects.toThrow(BETA_APIFY_PLAN_ADMISSION_ERROR);
+            store: { replay: vi.fn().mockRejectedValue(new Error(secret)), loadPreflightHold: vi.fn(), loadSnapshots: vi.fn(), activate: vi.fn() },
+        }).catch((caught: unknown) => caught);
+        expect(error).toEqual(new Error(BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR));
+        expect(String(error)).not.toContain(secret);
     });
 
     it('serializes a narrow sanitized RPC input and rejects malformed/replayed output', async () => {
@@ -86,6 +92,76 @@ describe('beta Apify plan admission', () => {
         expect(serialized).not.toMatch(/apify|https?:\/\//i);
     });
 
+    it('returns an immutable replay before feature config, hold, snapshot, and planning', async () => {
+        const replay = vi.fn().mockResolvedValue({
+            requestId: REQUEST_ID, initialJobKey: 'coordinator:bootstrap',
+            allocationId: '55555555-5555-4555-8555-555555555555', replayed: true,
+        });
+        const hold = vi.fn();
+        const loadSnapshots = vi.fn();
+        await expect(admitBetaApifyPlan({
+            preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
+            env: {}, store: { replay, loadPreflightHold: hold, loadSnapshots, activate: vi.fn() },
+        })).resolves.toMatchObject({ requestId: REQUEST_ID, replayed: true });
+        expect(replay).toHaveBeenCalledOnce();
+        expect(hold).not.toHaveBeenCalled();
+        expect(loadSnapshots).not.toHaveBeenCalled();
+    });
+
+    it('re-probes immutable replay when another call wins the activation race', async () => {
+        const stored = {
+            requestId: REQUEST_ID, initialJobKey: 'coordinator:bootstrap' as const,
+            allocationId: '55555555-5555-4555-8555-555555555555', replayed: true,
+        };
+        const replay = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(stored);
+        await expect(admitBetaApifyPlan({
+            preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
+            env: { BETATEST_FREE_POOL_ENABLED: 'true' },
+            store: {
+                replay,
+                loadPreflightHold: vi.fn().mockResolvedValue({
+                    allocationId: stored.allocationId, preflightId: PREFLIGHT_ID,
+                    credentialSlot: 'primary', targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+                }),
+                loadSnapshots: vi.fn().mockResolvedValue(snapshots()),
+                activate: vi.fn().mockRejectedValue(new Error(BETA_APIFY_PLAN_ADMISSION_ERROR)),
+            },
+        })).resolves.toEqual(stored);
+        expect(replay).toHaveBeenCalledTimes(2);
+    });
+
+    it('preserves invalid-input, runtime-config, persistence, and malformed-result categories', async () => {
+        const noCalls = { replay: vi.fn(), loadPreflightHold: vi.fn(), loadSnapshots: vi.fn(), activate: vi.fn() };
+        await expect(admitBetaApifyPlan({
+            preflightId: 'bad', userId: USER_ID, admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
+            store: noCalls,
+        })).rejects.toThrow(BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT);
+        await expect(admitBetaApifyPlan({
+            preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
+            store: { ...noCalls, replay: vi.fn().mockResolvedValue(null) }, env: {},
+        })).rejects.toThrow(BETA_APIFY_RUNTIME_CONFIG_ERROR);
+
+        const malformed = createBetaApifyPlanAdmissionStore({
+            rpc: vi.fn().mockResolvedValue({ data: { requestId: REQUEST_ID }, error: null }),
+        });
+        await expect(malformed.replay({
+            preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1, selectedPlanId: 'basic',
+        })).rejects.toThrow(BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT);
+
+        const outage = createBetaApifyPlanAdmissionStore({
+            rpc: vi.fn().mockRejectedValue(new Error('postgres://secret-host')),
+        });
+        await expect(outage.replay({
+            preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1, selectedPlanId: 'basic',
+        })).rejects.toThrow(BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR);
+    });
+
     it('fails closed when the admission token is stale or the feature switch is disabled', async () => {
         const store = createBetaApifyPlanAdmissionStore({
             rpc: vi.fn().mockResolvedValue({ data: null, error: { message: 'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE stale-token' } }),
@@ -105,7 +181,7 @@ describe('beta Apify plan admission', () => {
 
         await expect(admitBetaApifyPlan({
             preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN, admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
-            store: { loadPreflightHold: vi.fn(), loadSnapshots: vi.fn(), activate: vi.fn() }, env: {},
-        })).rejects.toThrow(BETA_APIFY_PLAN_ADMISSION_ERROR);
+            store: { replay: vi.fn().mockResolvedValue(null), loadPreflightHold: vi.fn(), loadSnapshots: vi.fn(), activate: vi.fn() }, env: {},
+        })).rejects.toThrow(BETA_APIFY_RUNTIME_CONFIG_ERROR);
     });
 });

@@ -2,6 +2,8 @@ import { z } from 'zod';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import {
     BETA_APIFY_POOL_CAPACITY_ERROR,
+    BETA_APIFY_POOL_PERSISTENCE_ERROR,
+    BETA_APIFY_RUNTIME_CONFIG_ERROR,
     BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
     BETA_APIFY_OPERATION_FAMILIES,
     getBetaApifyCreditPoolRuntimeConfig,
@@ -14,6 +16,9 @@ import type { BetaApifyFreeCredentialSlot } from './beta-apify-credit-pool';
 
 /** Public boundary for a checkout-free beta start. Never forwards provider details. */
 export const BETA_APIFY_PLAN_ADMISSION_ERROR = BETA_APIFY_POOL_CAPACITY_ERROR;
+export const BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR = BETA_APIFY_POOL_PERSISTENCE_ERROR;
+export const BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT = 'ANALYSIS_BETA_PLAN_ADMISSION_INVALID_INPUT';
+export const BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT = 'ANALYSIS_BETA_PLAN_ADMISSION_INVALID_RESULT';
 
 const UUID = z.string().uuid();
 const planId = z.enum(['basic', 'standard', 'plus']);
@@ -40,6 +45,13 @@ export interface BetaApifyPlanAdmissionStoreClient {
 }
 
 export interface BetaApifyPlanAdmissionStore {
+    replay(input: Readonly<{
+        preflightId: string;
+        userId: string;
+        admissionToken: string;
+        admissionGeneration: number;
+        selectedPlanId: PlanId;
+    }>): Promise<z.infer<typeof resultSchema> | null>;
     loadPreflightHold(preflightId: string): Promise<Readonly<{
         allocationId: string;
         preflightId: string;
@@ -63,17 +75,29 @@ function capacityError(): Error {
     return new Error(BETA_APIFY_PLAN_ADMISSION_ERROR);
 }
 
+function invalidInputError(): Error {
+    return new Error(BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT);
+}
+
+function persistenceError(): Error {
+    return new Error(BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR);
+}
+
+function invalidResultError(): Error {
+    return new Error(BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT);
+}
+
 function validUuid(value: string): string {
-    try { return UUID.parse(value).toLowerCase(); } catch { throw capacityError(); }
+    try { return UUID.parse(value).toLowerCase(); } catch { throw invalidInputError(); }
 }
 
 function validAge(value: number): number {
-    if (!Number.isSafeInteger(value) || value < 1 || value > 900) throw capacityError();
+    if (!Number.isSafeInteger(value) || value < 1 || value > 900) throw invalidInputError();
     return value;
 }
 
 function validGeneration(value: number): number {
-    if (!Number.isSafeInteger(value) || value < 1 || value > 100) throw capacityError();
+    if (!Number.isSafeInteger(value) || value < 1 || value > 100) throw invalidInputError();
     return value;
 }
 
@@ -83,7 +107,7 @@ function normalizeResult(data: unknown): unknown {
 
 function parsedResult(data: unknown): z.infer<typeof resultSchema> {
     const parsed = resultSchema.safeParse(normalizeResult(data));
-    if (!parsed.success) throw capacityError();
+    if (!parsed.success) throw invalidResultError();
     return Object.freeze(parsed.data);
 }
 
@@ -91,32 +115,83 @@ function parsedResult(data: unknown): z.infer<typeof resultSchema> {
  * Narrow service-role adapter. Inputs are frozen aliases, maps, and aggregate USD
  * budgets only; no provider token or account identity reaches the database.
  */
-export function createBetaApifyPlanAdmissionStore(client: BetaApifyPlanAdmissionStoreClient): Pick<BetaApifyPlanAdmissionStore, 'activate'> {
+function knownCapacityFailure(error: { message?: string }): boolean {
+    return typeof error.message === 'string' && /^(?:ANALYSIS_BETA_(?:POOL_|ALLOCATION_|ACCESS_|REQUEST_|PROVIDER_POLICY_)|ANALYSIS_V2_PREFLIGHT_)/.test(error.message);
+}
+
+function sanitizedBoundaryError(error: unknown): Error {
+    const message = error instanceof Error ? error.message : '';
+    if ([
+        BETA_APIFY_PLAN_ADMISSION_ERROR,
+        BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR,
+        BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT,
+        BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT,
+        BETA_APIFY_RUNTIME_CONFIG_ERROR,
+    ].includes(message)) return new Error(message);
+    return persistenceError();
+}
+
+async function rpc(
+    client: BetaApifyPlanAdmissionStoreClient,
+    name: string,
+    params: Record<string, unknown>
+): Promise<unknown> {
+    let response: Awaited<ReturnType<BetaApifyPlanAdmissionStoreClient['rpc']>>;
+    try {
+        response = await client.rpc(name, params);
+    } catch {
+        throw persistenceError();
+    }
+    if (response.error) {
+        if (knownCapacityFailure(response.error)) throw capacityError();
+        throw persistenceError();
+    }
+    return normalizeResult(response.data);
+}
+
+function identityParams(input: {
+    preflightId: string;
+    userId: string;
+    admissionToken: string;
+    admissionGeneration: number;
+    selectedPlanId: PlanId;
+}): Record<string, unknown> {
+    let selectedPlanId: PlanId;
+    try { selectedPlanId = planId.parse(input.selectedPlanId); } catch { throw invalidInputError(); }
+    return {
+        p_preflight_id: validUuid(input.preflightId),
+        p_user_id: validUuid(input.userId),
+        p_admission_token: validUuid(input.admissionToken),
+        p_admission_generation: validGeneration(input.admissionGeneration),
+        p_selected_plan_id: selectedPlanId,
+    };
+}
+
+export function createBetaApifyPlanAdmissionStore(client: BetaApifyPlanAdmissionStoreClient): Pick<BetaApifyPlanAdmissionStore, 'replay' | 'activate'> {
     return Object.freeze({
+        async replay(input) {
+            const data = await rpc(
+                client,
+                'load_analysis_v2_betatest_plan_replay',
+                identityParams(input)
+            );
+            if (data === null) return null;
+            return parsedResult(data);
+        },
         async activate(input) {
             const slots = operationSlots.safeParse(input.operationSlotMap);
             const budgets = operationBudgets.safeParse(input.operationBudgetMap);
             if (!slots.success || !budgets.success
                 || budgets.data['target-profile'] !== BETA_APIFY_TARGET_PROFILE_BUDGET_USD) {
-                throw capacityError();
+                throw invalidInputError();
             }
-            let response: Awaited<ReturnType<BetaApifyPlanAdmissionStoreClient['rpc']>>;
-            try {
-                response = await client.rpc('admit_analysis_v2_betatest_plan', {
-                    p_preflight_id: validUuid(input.preflightId),
-                    p_user_id: validUuid(input.userId),
-                    p_admission_token: validUuid(input.admissionToken),
-                    p_admission_generation: validGeneration(input.admissionGeneration),
-                    p_selected_plan_id: planId.parse(input.selectedPlanId),
+            const data = await rpc(client, 'admit_analysis_v2_betatest_plan', {
+                    ...identityParams(input),
                     p_operation_slot_map: slots.data,
                     p_operation_budget_map: budgets.data,
                     p_max_snapshot_age_seconds: validAge(input.maxSnapshotAgeSeconds),
                 });
-            } catch {
-                throw capacityError();
-            }
-            if (response.error) throw capacityError();
-            return parsedResult(response.data);
+            return parsedResult(data);
         },
     });
 }
@@ -146,30 +221,50 @@ export async function admitBetaApifyPlan(input: Readonly<{
     store: BetaApifyPlanAdmissionStore;
     env?: Record<string, string | undefined>;
 }>): Promise<z.infer<typeof resultSchema>> {
+    const preflightId = validUuid(input.preflightId);
+    const userId = validUuid(input.userId);
+    const admissionToken = validUuid(input.admissionToken);
+    const admissionGeneration = validGeneration(input.admissionGeneration);
+    const age = validAge(input.maxSnapshotAgeSeconds);
+    let selectedPlanId: PlanId;
+    try { selectedPlanId = planId.parse(input.selectedPlanId); } catch { throw invalidInputError(); }
+    const identity = { preflightId, userId, admissionToken, admissionGeneration, selectedPlanId };
+    let existing: z.infer<typeof resultSchema> | null;
+    try { existing = await input.store.replay(identity); } catch (error) {
+        throw sanitizedBoundaryError(error);
+    }
+    if (existing) return parsedResult(existing);
+
+    const config = getBetaApifyCreditPoolRuntimeConfig(input.env);
+    if (!config.enabled) throw new Error(BETA_APIFY_RUNTIME_CONFIG_ERROR);
+    let hold: Awaited<ReturnType<BetaApifyPlanAdmissionStore['loadPreflightHold']>>;
+    try { hold = await input.store.loadPreflightHold(preflightId); } catch (error) {
+        throw sanitizedBoundaryError(error);
+    }
+    if (!exactHold(hold, preflightId)) throw capacityError();
+    let snapshots: readonly BetaApifyPoolSnapshot[];
+    try { snapshots = await input.store.loadSnapshots(age); } catch (error) {
+        throw sanitizedBoundaryError(error);
+    }
+    const allocation = planBetaApifyCreditAllocation({
+        effectiveHeadrooms: snapshots,
+        targetProfileSlot: hold.credentialSlot,
+        selectedPlanId,
+        env: input.env,
+    });
     try {
-        const preflightId = validUuid(input.preflightId);
-        const userId = validUuid(input.userId);
-        const admissionToken = validUuid(input.admissionToken);
-        const admissionGeneration = validGeneration(input.admissionGeneration);
-        const age = validAge(input.maxSnapshotAgeSeconds);
-        const selectedPlanId = planId.parse(input.selectedPlanId);
-        if (!getBetaApifyCreditPoolRuntimeConfig(input.env).enabled) throw capacityError();
-        const hold = await input.store.loadPreflightHold(preflightId);
-        if (!exactHold(hold, preflightId)) throw capacityError();
-        const snapshots = await input.store.loadSnapshots(age);
-        const allocation = planBetaApifyCreditAllocation({
-            effectiveHeadrooms: snapshots,
-            targetProfileSlot: hold.credentialSlot,
-            selectedPlanId,
-            env: input.env,
-        });
         const result = await input.store.activate({
             preflightId, userId, admissionToken, admissionGeneration, selectedPlanId, maxSnapshotAgeSeconds: age,
             operationSlotMap: allocation.operationSlotMap,
             operationBudgetMap: allocation.operationBudgetMap,
         });
         return parsedResult(result);
-    } catch {
-        throw capacityError();
+    } catch (error) {
+        let raced: z.infer<typeof resultSchema> | null;
+        try { raced = await input.store.replay(identity); } catch (replayError) {
+            throw sanitizedBoundaryError(replayError);
+        }
+        if (raced) return parsedResult(raced);
+        throw sanitizedBoundaryError(error);
     }
 }

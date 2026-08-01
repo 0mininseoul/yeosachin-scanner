@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { getAnalysisPlan, PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
+import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
 
 // This is intentionally a real PostgreSQL test.  It starts a uniquely named
 // postgres:16 container unless a caller supplies the same URL-style opt-in
@@ -26,6 +28,14 @@ const migrationFiles = [
 ].map(file => readFileSync(new URL(`../../../supabase/migrations/${file}`, import.meta.url), 'utf8'));
 const frozenBudgetMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260802060000_expose_betatest_frozen_provider_budgets.sql',
+    import.meta.url,
+), 'utf8');
+const wireRuntimeMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260802070000_wire_betatest_preflight_credit_runtime.sql',
+    import.meta.url,
+), 'utf8');
+const planAdmissionMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260802080000_admit_betatest_apify_plan.sql',
     import.meta.url,
 ), 'utf8');
 const betaSlots = {
@@ -158,7 +168,7 @@ function snapshots(limit = 1): string {
 }
 
 async function seedHold(client: Client, userId: string, preflightId: string, limit = 1): Promise<void> {
-    await client.query('INSERT INTO public.users (id) VALUES ($1)', [userId]);
+    await client.query('INSERT INTO public.users (id) VALUES ($1) ON CONFLICT (id) DO NOTHING', [userId]);
     await client.query(
         `INSERT INTO public.analysis_preflights (
             id, user_id, status, access_mode, target_instagram_id,
@@ -173,6 +183,106 @@ async function seedHold(client: Client, userId: string, preflightId: string, lim
         )`, [userId, 'a'.repeat(64)],
     );
     await client.query('SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::jsonb)', [snapshots(limit)]);
+}
+
+interface PlanAdmissionResult {
+    requestId: string;
+    initialJobKey: 'coordinator:bootstrap';
+    allocationId: string;
+    replayed: boolean;
+}
+
+function admissionSnapshotPayload() {
+    const launch = Object.fromEntries(PLAN_IDS.map(planId => [planId, 'production']));
+    const cards = Object.fromEntries(PLAN_IDS.map((planId, index) => {
+        const plan = getAnalysisPlan(planId);
+        return [planId, {
+            launchStatus: 'production',
+            relationshipCapacity: plan.relationshipCapacity,
+            detailedMutualLimit: plan.detailedMutualLimit,
+            selectionState: index === 0 ? 'required' : 'available_upgrade',
+            unavailableReason: null,
+        }];
+    }));
+    const pricing = Object.fromEntries(PLAN_IDS.map(planId => [planId, {
+        status: planId === 'plus' ? 'deferred' : 'quoted',
+        currency: 'KRW',
+        amountKrw: planId === 'basic' ? 6900 : planId === 'standard' ? 9900 : null,
+    }]));
+    return { launch, cards, pricing, policies: { riskPolicy: 'v29' } };
+}
+
+async function seedReadyAdmission(input: {
+    client: Client;
+    userId: string;
+    preflightId: string;
+    admissionToken: string;
+    planId?: PlanId;
+    snapshotLimit?: number;
+    refreshedAgeSeconds?: number;
+}): Promise<void> {
+    const planId = input.planId ?? 'basic';
+    const snapshot = admissionSnapshotPayload();
+    await seedHold(input.client, input.userId, input.preflightId, input.snapshotLimit ?? 10);
+    await input.client.query(
+        `SELECT public.hold_analysis_beta_apify_preflight_credit(
+            $1, $2, 'primary', 0.0052, 300
+        )`,
+        [input.preflightId, input.userId],
+    );
+    await input.client.query(
+        `UPDATE public.analysis_apify_credit_snapshots
+         SET monthly_limit_usd = $1, monthly_usage_usd = 0`,
+        [input.snapshotLimit ?? 10],
+    );
+    await input.client.query(
+        `UPDATE public.analysis_preflights
+         SET status = 'ready', exclusion_decision = 'skip', target_is_private = FALSE,
+             capacity_required_plan_id = 'basic', required_plan_id = 'basic',
+             launch_status_snapshot = $2::jsonb, plan_cards_snapshot = $3::jsonb,
+             pricing_version = 'earlybird-2026-07-v2', pricing_snapshot = $4::jsonb,
+             policy_versions_snapshot = $5::jsonb, ready_at = clock_timestamp(),
+             admission_status = 'ready', admission_generation = 1,
+             admission_selected_plan_id = $6, admission_token = $7,
+             admission_refreshed_at = clock_timestamp() - $8 * interval '1 second',
+             updated_at = clock_timestamp()
+         WHERE id = $1`,
+        [
+            input.preflightId,
+            JSON.stringify(snapshot.launch),
+            JSON.stringify(snapshot.cards),
+            JSON.stringify(snapshot.pricing),
+            JSON.stringify(snapshot.policies),
+            planId,
+            input.admissionToken,
+            input.refreshedAgeSeconds ?? 0,
+        ],
+    );
+}
+
+async function admitReadyPlan(input: {
+    client: Client;
+    userId: string;
+    preflightId: string;
+    admissionToken: string;
+    planId?: PlanId;
+    slots?: Record<string, string>;
+}): Promise<PlanAdmissionResult> {
+    const planId = input.planId ?? 'basic';
+    const admitted = await input.client.query<{ result: PlanAdmissionResult }>(
+        `SELECT public.admit_analysis_v2_betatest_plan(
+            $1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, 300
+        ) AS result`,
+        [
+            input.preflightId,
+            input.userId,
+            input.admissionToken,
+            planId,
+            JSON.stringify(input.slots ?? betaSlots),
+            JSON.stringify(getBetaApifyOperationBudgetCatalog(planId, {})),
+        ],
+    );
+    return admitted.rows[0]!.result;
 }
 
 async function seedActivatedBetaRequest(client: Client): Promise<{
@@ -510,5 +620,337 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
             [future.allocationId],
         );
         expect(futureReservations.rows).toEqual([{ state: 'active', count: 8 }]);
+
+        // Finish the real forward chain only after the 0600 relation-lock
+        // behavior above has been observed. Subsequent cases exercise the
+        // worker wiring and the atomic 0800 admission boundary on PostgreSQL.
+        await first.query(wireRuntimeMigration);
+        await first.query(planAdmissionMigration);
     }, 30_000);
+
+    it('samples database time after the grant barrier and rejects an admission that crosses two minutes', async () => {
+        const userId = randomUUID();
+        const preflightId = randomUUID();
+        const admissionToken = randomUUID();
+        await seedReadyAdmission({
+            client: first,
+            userId,
+            preflightId,
+            admissionToken,
+            refreshedAgeSeconds: 118,
+        });
+
+        let grantLockOpen = false;
+        let admission: Promise<PlanAdmissionResult> | null = null;
+        try {
+            await observer.query('BEGIN');
+            grantLockOpen = true;
+            await observer.query(
+                `SELECT user_id FROM public.analysis_beta_access_grants
+                 WHERE user_id = $1 FOR UPDATE`,
+                [userId],
+            );
+            const admissionPid = (await first.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            admission = admitReadyPlan({
+                client: first,
+                userId,
+                preflightId,
+                admissionToken,
+            });
+            void admission.catch(() => undefined);
+            await waitUntilBlocked(admissionPid);
+
+            // The preflight was fresh when the function began. It becomes
+            // older than two minutes while blocked on the authoritative grant.
+            await new Promise(resolve => setTimeout(resolve, 2_500));
+            await observer.query('COMMIT');
+            grantLockOpen = false;
+            await expect(admission).rejects.toThrow(/ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/);
+        } finally {
+            if (grantLockOpen) await observer.query('ROLLBACK').catch(() => undefined);
+            if (admission) await admission.catch(() => undefined);
+        }
+
+        const durable = await first.query<{
+            requests: number;
+            jobs: number;
+            state: string;
+        }>(
+            `SELECT
+                (SELECT count(*)::int FROM public.analysis_requests WHERE preflight_id = $1) AS requests,
+                (SELECT count(*)::int FROM public.analysis_pipeline_jobs AS job
+                 JOIN public.analysis_requests AS request ON request.id = job.request_id
+                 WHERE request.preflight_id = $1) AS jobs,
+                (SELECT lifecycle_state FROM public.analysis_beta_pool_allocations
+                 WHERE preflight_id = $1) AS state`,
+            [preflightId],
+        );
+        expect(durable.rows).toEqual([{ requests: 0, jobs: 0, state: 'preflight_held' }]);
+    }, 15_000);
+
+    it('turns concurrent calls for one preflight into one admission plus immutable replay', async () => {
+        const userId = randomUUID();
+        const preflightId = randomUUID();
+        const admissionToken = randomUUID();
+        await seedReadyAdmission({ client: first, userId, preflightId, admissionToken });
+
+        let winnerTransactionOpen = false;
+        let contender: Promise<PlanAdmissionResult> | null = null;
+        try {
+            await first.query('BEGIN');
+            winnerTransactionOpen = true;
+            const winner = await admitReadyPlan({
+                client: first,
+                userId,
+                preflightId,
+                admissionToken,
+            });
+            expect(winner.replayed).toBe(false);
+
+            const contenderPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            contender = admitReadyPlan({
+                client: second,
+                userId,
+                preflightId,
+                admissionToken,
+                // A racing caller may replan, but replay must use stored maps.
+                slots: { ...betaSlots, 'target-comments': 'senary' },
+            });
+            void contender.catch(() => undefined);
+            await waitUntilBlocked(contenderPid);
+            await first.query('COMMIT');
+            winnerTransactionOpen = false;
+
+            const replay = await contender;
+            expect(replay).toMatchObject({
+                requestId: winner.requestId,
+                allocationId: winner.allocationId,
+                initialJobKey: 'coordinator:bootstrap',
+                replayed: true,
+            });
+        } finally {
+            if (winnerTransactionOpen) await first.query('ROLLBACK').catch(() => undefined);
+            if (contender) await contender.catch(() => undefined);
+        }
+
+        const counts = await first.query<{ requests: number; jobs: number; policies: number }>(
+            `SELECT
+                (SELECT count(*)::int FROM public.analysis_requests WHERE preflight_id = $1) AS requests,
+                (SELECT count(*)::int FROM public.analysis_pipeline_jobs AS job
+                 JOIN public.analysis_requests AS request ON request.id = job.request_id
+                 WHERE request.preflight_id = $1) AS jobs,
+                (SELECT count(*)::int FROM public.analysis_v2_provider_execution_policies AS policy
+                 JOIN public.analysis_requests AS request ON request.id = policy.request_id
+                 WHERE request.preflight_id = $1) AS policies`,
+            [preflightId],
+        );
+        expect(counts.rows).toEqual([{ requests: 1, jobs: 1, policies: 1 }]);
+    });
+
+    it('serializes separate admissions for one user and leaves the loser recoverable', async () => {
+        const userId = randomUUID();
+        const preflightA = randomUUID();
+        const preflightB = randomUUID();
+        const tokenA = randomUUID();
+        const tokenB = randomUUID();
+        await seedReadyAdmission({ client: first, userId, preflightId: preflightA, admissionToken: tokenA });
+        await seedReadyAdmission({ client: first, userId, preflightId: preflightB, admissionToken: tokenB });
+
+        let winnerTransactionOpen = false;
+        let contender: Promise<PlanAdmissionResult> | null = null;
+        try {
+            await first.query('BEGIN');
+            winnerTransactionOpen = true;
+            await admitReadyPlan({
+                client: first,
+                userId,
+                preflightId: preflightA,
+                admissionToken: tokenA,
+            });
+            const contenderPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            contender = admitReadyPlan({
+                client: second,
+                userId,
+                preflightId: preflightB,
+                admissionToken: tokenB,
+            });
+            void contender.catch(() => undefined);
+            await waitUntilBlocked(contenderPid);
+            await first.query('COMMIT');
+            winnerTransactionOpen = false;
+            await expect(contender).rejects.toThrow(/ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/);
+        } finally {
+            if (winnerTransactionOpen) await first.query('ROLLBACK').catch(() => undefined);
+            if (contender) await contender.catch(() => undefined);
+        }
+
+        const state = await first.query<{
+            requests: number;
+            loser_preflight: string;
+            loser_allocation: string;
+        }>(
+            `SELECT
+                (SELECT count(*)::int FROM public.analysis_requests WHERE user_id = $1) AS requests,
+                (SELECT status FROM public.analysis_preflights WHERE id = $2) AS loser_preflight,
+                (SELECT lifecycle_state FROM public.analysis_beta_pool_allocations
+                 WHERE preflight_id = $2) AS loser_allocation`,
+            [userId, preflightB],
+        );
+        expect(state.rows).toEqual([{
+            requests: 1,
+            loser_preflight: 'ready',
+            loser_allocation: 'preflight_held',
+        }]);
+    });
+
+    it('serializes shared pool headroom and rolls back the non-fitting admission', async () => {
+        const userA = randomUUID();
+        const userB = randomUUID();
+        const preflightA = randomUUID();
+        const preflightB = randomUUID();
+        const tokenA = randomUUID();
+        const tokenB = randomUUID();
+        await seedReadyAdmission({ client: first, userId: userA, preflightId: preflightA, admissionToken: tokenA });
+        await seedReadyAdmission({ client: first, userId: userB, preflightId: preflightB, admissionToken: tokenB });
+
+        const oneActivationHeadroom = {
+            primary: 0,
+            tertiary: 0.914,
+            quaternary: 2.23,
+            quinary: 0.782600000001,
+            senary: 0.93,
+            septenary: 0.81,
+        } as const;
+        for (const [slot, desiredHeadroom] of Object.entries(oneActivationHeadroom)) {
+            await first.query(
+                `UPDATE public.analysis_apify_credit_snapshots AS snapshot
+                 SET monthly_limit_usd = snapshot.monthly_limit_usd
+                       - capacity.effective_capacity_usd + $2
+                 FROM public.analysis_beta_pool_effective_capacity_snapshot() AS capacity
+                 WHERE snapshot.credential_slot = $1
+                   AND capacity.credential_slot = snapshot.credential_slot`,
+                [slot, desiredHeadroom],
+            );
+        }
+
+        let winnerTransactionOpen = false;
+        let contender: Promise<PlanAdmissionResult> | null = null;
+        try {
+            await first.query('BEGIN');
+            winnerTransactionOpen = true;
+            await admitReadyPlan({
+                client: first,
+                userId: userA,
+                preflightId: preflightA,
+                admissionToken: tokenA,
+            });
+            const contenderPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            contender = admitReadyPlan({
+                client: second,
+                userId: userB,
+                preflightId: preflightB,
+                admissionToken: tokenB,
+            });
+            void contender.catch(() => undefined);
+            await waitUntilBlocked(contenderPid);
+            await first.query('COMMIT');
+            winnerTransactionOpen = false;
+            await expect(contender).rejects.toThrow(/ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE/);
+        } finally {
+            if (winnerTransactionOpen) await first.query('ROLLBACK').catch(() => undefined);
+            if (contender) await contender.catch(() => undefined);
+        }
+
+        const state = await first.query<{
+            requests: number;
+            winner_state: string;
+            loser_state: string;
+        }>(
+            `SELECT
+                (SELECT count(*)::int FROM public.analysis_requests
+                 WHERE preflight_id IN ($1, $2)) AS requests,
+                (SELECT lifecycle_state FROM public.analysis_beta_pool_allocations
+                 WHERE preflight_id = $1) AS winner_state,
+                (SELECT lifecycle_state FROM public.analysis_beta_pool_allocations
+                 WHERE preflight_id = $2) AS loser_state`,
+            [preflightA, preflightB],
+        );
+        expect(state.rows).toEqual([{
+            requests: 1,
+            winner_state: 'active',
+            loser_state: 'preflight_held',
+        }]);
+    });
+
+    it('keeps terminal replay available through settlement and then archives without deadlock', async () => {
+        const userId = randomUUID();
+        const preflightId = randomUUID();
+        const admissionToken = randomUUID();
+        await seedReadyAdmission({
+            client: first,
+            userId,
+            preflightId,
+            admissionToken,
+            snapshotLimit: 100,
+        });
+        const admitted = await admitReadyPlan({
+            client: first,
+            userId,
+            preflightId,
+            admissionToken,
+        });
+        await first.query(
+            `UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1`,
+            [admitted.requestId],
+        );
+        await first.query(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation(
+                $1, 'request_terminal'
+            )`,
+            [admitted.allocationId],
+        );
+
+        const replay = await first.query<{ result: PlanAdmissionResult }>(
+            `SELECT public.load_analysis_v2_betatest_plan_replay(
+                $1, $2, $3, 1, 'basic'
+            ) AS result`,
+            [preflightId, userId, admissionToken],
+        );
+        expect(replay.rows[0]!.result).toMatchObject({
+            requestId: admitted.requestId,
+            allocationId: admitted.allocationId,
+            replayed: true,
+        });
+
+        // Hold the same user fence: archive must skip instead of forming a
+        // reverse lock cycle, then succeed immediately after release.
+        await first.query('BEGIN');
+        await first.query('SELECT id FROM public.users WHERE id = $1 FOR UPDATE', [userId]);
+        const skipped = await second.query<{ result: number }>(
+            `SELECT public.archive_settled_analysis_beta_apify_credit_allocations(100) AS result`,
+        );
+        expect(skipped.rows[0]!.result).toBeGreaterThanOrEqual(0);
+        await first.query('COMMIT');
+        await second.query(
+            `SELECT public.archive_settled_analysis_beta_apify_credit_allocations(100)`,
+        );
+
+        const archived = await first.query<{ live: number; archived: number }>(
+            `SELECT
+                (SELECT count(*)::int FROM public.analysis_beta_pool_allocations
+                 WHERE id = $1) AS live,
+                (SELECT count(*)::int FROM public.analysis_beta_pool_reservation_archive
+                 WHERE allocation_id = $1) AS archived`,
+            [admitted.allocationId],
+        );
+        expect(archived.rows).toEqual([{ live: 0, archived: 8 }]);
+    }, 15_000);
 });

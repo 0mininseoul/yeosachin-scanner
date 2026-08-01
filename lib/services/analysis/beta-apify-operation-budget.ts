@@ -15,6 +15,45 @@ import {
 import { profileRepairMaximumCharge } from './v2-profile-repair';
 
 export const BETA_APIFY_TARGET_PROFILE_BUDGET_USD = 0.0052;
+export const BETATEST_APIFY_FROZEN_BUDGET_CATALOG_VERSION = 'betatest-free-pool-v1' as const;
+
+/**
+ * Immutable provider-budget contract mirrored byte-for-byte by the 0800 DB helper.
+ * General Apify cost env overrides may tighten runtime requirements, but can never
+ * rewrite an already-reviewed beta reservation policy.
+ */
+export const BETATEST_APIFY_FROZEN_OPERATION_BUDGETS = Object.freeze({
+    basic: Object.freeze({
+        'target-profile': 0.0052,
+        'relationship-followers': 0.68,
+        'relationship-following': 0.68,
+        'profile-fallback': 0.782600000001,
+        'profile-repair': 0.81,
+        'target-likers': 0.93,
+        'target-comments': 0.234,
+        'candidate-likers': 1.55,
+    }),
+    standard: Object.freeze({
+        'target-profile': 0.0052,
+        'relationship-followers': 1.36,
+        'relationship-following': 1.36,
+        'profile-fallback': 1.5626,
+        'profile-repair': 1.62,
+        'target-likers': 0.93,
+        'target-comments': 0.234,
+        'candidate-likers': 1.55,
+    }),
+    plus: Object.freeze({
+        'target-profile': 0.0052,
+        'relationship-followers': 2.04,
+        'relationship-following': 2.04,
+        'profile-fallback': 2.3426,
+        'profile-repair': 2.43,
+        'target-likers': 0.93,
+        'target-comments': 0.234,
+        'candidate-likers': 1.55,
+    }),
+} satisfies Readonly<Record<PlanId, Readonly<BetaProviderOperationBudgetMap>>>);
 
 function completeFamilyBudget(value: number): number {
     const normalized = Math.ceil(value * 1_000_000_000_000)
@@ -31,7 +70,7 @@ function completeFamilyBudget(value: number): number {
  * one independent target-profile fallback; the bounded target interaction topologies; and one
  * bounded reverse-like run.
  */
-export function getBetaApifyOperationBudgetCatalog(
+export function getRequiredBetaApifyOperationBudgetCatalog(
     selectedPlanId: PlanId,
     env: Record<string, string | undefined> = process.env
 ): Readonly<BetaProviderOperationBudgetMap> {
@@ -71,4 +110,13 @@ export function getBetaApifyOperationBudgetCatalog(
             env
         )),
     });
+}
+
+/** Returns only the reviewed immutable policy map; env is accepted for API compatibility. */
+export function getBetaApifyOperationBudgetCatalog(
+    selectedPlanId: PlanId,
+    _env: Record<string, string | undefined> = process.env
+): Readonly<BetaProviderOperationBudgetMap> {
+    void _env;
+    return BETATEST_APIFY_FROZEN_OPERATION_BUDGETS[selectedPlanId];
 }

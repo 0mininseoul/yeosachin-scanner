@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import { getAnalysisPlan, PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
 import { profileMaximumCharge } from './v2-apify-operation-costs';
 import { ANALYSIS_V2_PROFILE_BATCH_LIMIT } from './v2-dag-planner';
@@ -45,6 +45,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802070000_wire_betatest_preflight_credit_runtime.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802080000_admit_betatest_apify_plan.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -56,6 +60,7 @@ const CLAIM_TOKEN_B = '40000000-0000-4000-8000-000000000002';
 const CLAIM_TOKEN_C = '40000000-0000-4000-8000-000000000003';
 const RESERVATION_TOKEN = '50000000-0000-4000-8000-000000000001';
 const DISPATCH_TOKEN = '70000000-0000-4000-8000-000000000001';
+const ADMISSION_TOKEN = '80000000-0000-4000-8000-000000000001';
 const PROVIDER_RUN_ID = 'BetaRun123456';
 const TARGET = 'target.user';
 const INPUT_HASH = 'a'.repeat(64);
@@ -157,6 +162,59 @@ AS $$
     SELECT p_key ~ '^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[0-9a-f]{64}$'
 $$;
 
+CREATE FUNCTION public.analysis_v2_valid_launch_snapshot(p_snapshot JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+    SELECT COALESCE(
+        pg_catalog.jsonb_typeof(p_snapshot) = 'object'
+        AND p_snapshot ?& ARRAY['basic','standard','plus']
+        AND p_snapshot - ARRAY['basic','standard','plus'] = '{}'::JSONB,
+        FALSE
+    )
+$$;
+CREATE FUNCTION public.analysis_v2_valid_plan_cards_snapshot(p_snapshot JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+    SELECT COALESCE(
+        pg_catalog.jsonb_typeof(p_snapshot) = 'object'
+        AND p_snapshot ?& ARRAY['basic','standard','plus']
+        AND p_snapshot - ARRAY['basic','standard','plus'] = '{}'::JSONB
+        AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.jsonb_each(p_snapshot) AS card(plan_id, value)
+            WHERE pg_catalog.jsonb_typeof(card.value) <> 'object'
+               OR NOT card.value ?& ARRAY[
+                    'launchStatus','relationshipCapacity','detailedMutualLimit',
+                    'selectionState','unavailableReason'
+               ]
+        ), FALSE
+    )
+$$;
+CREATE FUNCTION public.analysis_v2_valid_pricing_snapshot(p_snapshot JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+    SELECT COALESCE(
+        pg_catalog.jsonb_typeof(p_snapshot) = 'object'
+        AND p_snapshot ?& ARRAY['basic','standard','plus']
+        AND p_snapshot - ARRAY['basic','standard','plus'] = '{}'::JSONB,
+        FALSE
+    )
+$$;
+CREATE FUNCTION public.analysis_v2_valid_policy_versions_snapshot(p_snapshot JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+    SELECT COALESCE(
+        pg_catalog.jsonb_typeof(p_snapshot) = 'object'
+        AND p_snapshot <> '{}'::JSONB,
+        FALSE
+    )
+$$;
+CREATE FUNCTION public.analysis_v2_valid_scope_snapshot(p_snapshot JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+    SELECT COALESCE(
+        pg_catalog.jsonb_typeof(p_snapshot) = 'object'
+        AND p_snapshot ?& ARRAY['relationshipCapacity','detailedMutualLimit']
+        AND p_snapshot - ARRAY['relationshipCapacity','detailedMutualLimit'] = '{}'::JSONB
+        AND pg_catalog.jsonb_typeof(p_snapshot->'relationshipCapacity') = 'object',
+        FALSE
+    )
+$$;
+
 CREATE TABLE public.users (id UUID PRIMARY KEY);
 
 CREATE TABLE public.analysis_requests (
@@ -172,6 +230,22 @@ CREATE TABLE public.analysis_requests (
     test_entitlement_jti_hash TEXT,
     selected_plan_id_snapshot TEXT,
     analysis_scope_snapshot JSONB
+    ,target_gender TEXT
+    ,progress INTEGER NOT NULL DEFAULT 0
+    ,progress_step TEXT
+    ,current_step TEXT
+    ,step_data JSONB NOT NULL DEFAULT '{}'::JSONB
+    ,gender_stats JSONB NOT NULL DEFAULT '{}'::JSONB
+    ,plan_type TEXT
+    ,idempotency_key TEXT
+    ,exclusion_decision_snapshot TEXT
+    ,capacity_required_plan_id_snapshot TEXT
+    ,required_plan_id_snapshot TEXT
+    ,plan_launch_status_snapshot JSONB
+    ,plan_cards_snapshot JSONB
+    ,pricing_version_snapshot TEXT
+    ,pricing_snapshot JSONB
+    ,policy_versions_snapshot JSONB
 );
 
 CREATE TABLE public.analysis_preflights (
@@ -181,17 +255,26 @@ CREATE TABLE public.analysis_preflights (
     error_code TEXT,
     access_mode TEXT NOT NULL CHECK (access_mode IN ('production', 'test_entitlement')),
     target_instagram_id TEXT,
+    exclusion_decision TEXT NOT NULL DEFAULT 'skip',
     worker_attempt_count INTEGER NOT NULL DEFAULT 0,
     plan_catalog_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
+    launch_status_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
+    plan_cards_snapshot JSONB,
     pricing_version TEXT NOT NULL DEFAULT 'test',
     pricing_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
+    policy_versions_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
     target_followers_count INTEGER,
     target_following_count INTEGER,
+    target_is_private BOOLEAN,
+    capacity_required_plan_id TEXT,
+    required_plan_id TEXT,
     excluded_instagram_id TEXT,
     lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
     admission_status TEXT,
     admission_generation INTEGER,
+    admission_selected_plan_id TEXT,
+    admission_token UUID,
     admission_requested_at TIMESTAMPTZ,
     admission_claim_token UUID,
     admission_lease_expires_at TIMESTAMPTZ,
@@ -209,6 +292,8 @@ CREATE TABLE public.analysis_preflights (
     dispatch_reserved_at TIMESTAMPTZ,
     dispatched_at TIMESTAMPTZ,
     consumed_request_id UUID,
+    consumed_at TIMESTAMPTZ,
+    ready_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     expires_at TIMESTAMPTZ NOT NULL
@@ -234,6 +319,7 @@ CREATE TABLE public.analysis_pipeline_jobs (
     last_error_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     input_hash TEXT NOT NULL DEFAULT '${INPUT_HASH}',
+    required_job_keys TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
     lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
     PRIMARY KEY (request_id, job_key)
@@ -646,6 +732,13 @@ interface ReservationJson {
     };
 }
 
+interface PlanAdmissionJson {
+    requestId: string;
+    initialJobKey: 'coordinator:bootstrap';
+    allocationId: string;
+    replayed: boolean;
+}
+
 let db: PGlite;
 let partialSettlementUpgrade: {
     allocation_state: string;
@@ -676,6 +769,26 @@ function snapshots(): unknown[] {
         observedAt: new Date(now - 1_000).toISOString(),
         healthState: 'healthy',
     }));
+}
+
+function admissionSnapshotPayload() {
+    const launch = Object.fromEntries(PLAN_IDS.map(planId => [planId, 'production']));
+    const cards = Object.fromEntries(PLAN_IDS.map((planId, index) => {
+        const plan = getAnalysisPlan(planId);
+        return [planId, {
+            launchStatus: 'production',
+            relationshipCapacity: plan.relationshipCapacity,
+            detailedMutualLimit: plan.detailedMutualLimit,
+            selectionState: index === 0 ? 'required' : 'available_upgrade',
+            unavailableReason: null,
+        }];
+    }));
+    const pricing = Object.fromEntries(PLAN_IDS.map(planId => [planId, {
+        status: planId === 'plus' ? 'deferred' : 'quoted',
+        currency: 'KRW',
+        amountKrw: planId === 'basic' ? 6900 : planId === 'standard' ? 9900 : null,
+    }]));
+    return { launch, cards, pricing, policies: { riskPolicy: 'v29' } };
 }
 
 async function seedPendingBetaPreflight(): Promise<void> {
@@ -742,6 +855,81 @@ async function seedPendingBetaRequest(): Promise<void> {
          VALUES ($1, 'collect')`,
         [REQUEST_ID]
     );
+}
+
+async function seedReadyBetaAdmission(planId: PlanId): Promise<void> {
+    await seedPendingBetaPreflight();
+    const snapshot = admissionSnapshotPayload();
+    await db.query(
+        `UPDATE public.analysis_apify_credit_snapshots
+         SET monthly_limit_usd = 10, monthly_usage_usd = 0`
+    );
+    await db.query(
+        `UPDATE public.analysis_preflights
+         SET status = 'ready', exclusion_decision = 'skip', target_is_private = FALSE,
+             capacity_required_plan_id = 'basic', required_plan_id = 'basic',
+             launch_status_snapshot = $2::JSONB, plan_cards_snapshot = $3::JSONB,
+             pricing_version = 'earlybird-2026-07-v2', pricing_snapshot = $4::JSONB,
+             policy_versions_snapshot = $5::JSONB, ready_at = pg_catalog.clock_timestamp(),
+             admission_status = 'ready', admission_generation = 1,
+             admission_selected_plan_id = $6, admission_token = $7,
+             admission_refreshed_at = pg_catalog.clock_timestamp(), updated_at = pg_catalog.clock_timestamp()
+         WHERE id = $1`,
+        [
+            PREFLIGHT_ID,
+            JSON.stringify(snapshot.launch),
+            JSON.stringify(snapshot.cards),
+            JSON.stringify(snapshot.pricing),
+            JSON.stringify(snapshot.policies),
+            planId,
+            ADMISSION_TOKEN,
+        ]
+    );
+}
+
+async function admitBetaPlan(input: {
+    planId?: PlanId;
+    token?: string;
+    generation?: number;
+    slots?: Record<string, string>;
+    budgets?: Record<string, number>;
+} = {}): Promise<PlanAdmissionJson> {
+    const planId = input.planId ?? 'basic';
+    const result = await serviceQuery<JsonRow<PlanAdmissionJson>>(
+        `SELECT public.admit_analysis_v2_betatest_plan(
+            $1, $2, $3, $4, $5, $6::JSONB, $7::JSONB, 300
+        ) AS result`,
+        [
+            PREFLIGHT_ID,
+            USER_ID,
+            input.token ?? ADMISSION_TOKEN,
+            input.generation ?? 1,
+            planId,
+            JSON.stringify(input.slots ?? betaSlots),
+            JSON.stringify(input.budgets ?? getBetaApifyOperationBudgetCatalog(planId, {})),
+        ]
+    );
+    return result.rows[0].result;
+}
+
+async function replayBetaPlan(input: {
+    planId?: PlanId;
+    token?: string;
+    generation?: number;
+} = {}): Promise<PlanAdmissionJson | null> {
+    const result = await serviceQuery<JsonRow<PlanAdmissionJson | null>>(
+        `SELECT public.load_analysis_v2_betatest_plan_replay(
+            $1, $2, $3, $4, $5
+        ) AS result`,
+        [
+            PREFLIGHT_ID,
+            USER_ID,
+            input.token ?? ADMISSION_TOKEN,
+            input.generation ?? 1,
+            input.planId ?? 'basic',
+        ]
+    );
+    return result.rows[0].result;
 }
 
 async function activateBeta(
@@ -835,7 +1023,7 @@ async function reserveFresh(
 beforeAll(async () => {
     db = await PGlite.create({ extensions: { pgcrypto } });
     await db.exec(bootstrap);
-    for (const migration of migrations.slice(0, -1)) {
+    for (const migration of migrations.slice(0, -2)) {
         await db.exec(migration);
     }
     await seedPendingBetaRequest();
@@ -866,9 +1054,9 @@ beforeAll(async () => {
         [allocation.allocationId]
     );
 
-    const latestMigration = migrations.at(-1);
-    if (!latestMigration) throw new Error('missing frozen-budget migration');
-    await db.exec(latestMigration);
+    const upgradeMigrations = migrations.slice(-2);
+    if (upgradeMigrations.length !== 2) throw new Error('missing runtime migrations');
+    for (const migration of upgradeMigrations) await db.exec(migration);
     const upgraded = await db.query<{
         allocation_state: string;
         active_count: number;
@@ -928,6 +1116,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802050000_harden_betatest_apify_credit_capacity.sql',
             '20260802060000_expose_betatest_frozen_provider_budgets.sql',
             '20260802070000_wire_betatest_preflight_credit_runtime.sql',
+            '20260802080000_admit_betatest_apify_plan.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated
@@ -940,6 +1129,250 @@ describe('betatest provider policy/guard migration PGlite', () => {
             active_count: 1,
             settled_count: 7,
         });
+    });
+
+    it.each(PLAN_IDS)('keeps the %s frozen TS and DB budget catalogs byte-identical', async planId => {
+        const result = await db.query<{ catalog: Record<string, number> }>(
+            `SELECT public.analysis_beta_plan_operation_budget_map($1) AS catalog`,
+            [planId]
+        );
+        expect(result.rows[0]?.catalog).toEqual(
+            getBetaApifyOperationBudgetCatalog(planId, {
+                APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD: '0.000001',
+            })
+        );
+    });
+
+    it.each(PLAN_IDS)('atomically admits one complete %s beta request and bootstrap job', async planId => {
+        await seedReadyBetaAdmission(planId);
+        const admitted = await admitBetaPlan({ planId });
+        expect(admitted).toMatchObject({
+            initialJobKey: 'coordinator:bootstrap', replayed: false,
+        });
+        const state = await db.query<{
+            preflight_status: string;
+            consumed_request_id: string;
+            request_channel: string;
+            access_mode: string;
+            selected_plan: string;
+            background_processing: boolean;
+            job_key: string;
+            job_track: string;
+            job_kind: string;
+            job_batch: number | null;
+            required_keys: string[];
+            allocation_state: string;
+            allocation_request_id: string;
+            policy_mode: string;
+            policy_version: string;
+            policy_hash_valid: boolean;
+            reservation_count: number;
+            active_count: number;
+        }>(
+            `SELECT preflight.status AS preflight_status,
+                    preflight.consumed_request_id,
+                    request.analysis_entry_channel AS request_channel,
+                    request.plan_access_mode_snapshot AS access_mode,
+                    request.selected_plan_id_snapshot AS selected_plan,
+                    request.background_processing,
+                    job.job_key, job.track AS job_track, job.kind AS job_kind,
+                    job.batch AS job_batch, job.required_job_keys AS required_keys,
+                    allocation.lifecycle_state AS allocation_state,
+                    allocation.request_id AS allocation_request_id,
+                    policy.mode AS policy_mode, policy.policy_version,
+                    policy.policy_hash = public.analysis_beta_provider_policy_hash(
+                        request.target_instagram_id, policy.operation_slot_map
+                    ) AS policy_hash_valid,
+                    pg_catalog.count(reservation.*)::INTEGER AS reservation_count,
+                    pg_catalog.count(reservation.*) FILTER (
+                        WHERE reservation.lifecycle_state = 'active'
+                    )::INTEGER AS active_count
+             FROM public.analysis_preflights AS preflight
+             JOIN public.analysis_requests AS request
+               ON request.id = preflight.consumed_request_id
+             JOIN public.analysis_pipeline_jobs AS job
+               ON job.request_id = request.id AND job.job_key = 'coordinator:bootstrap'
+             JOIN public.analysis_beta_pool_allocations AS allocation
+               ON allocation.request_id = request.id
+             JOIN public.analysis_beta_pool_reservations AS reservation
+               ON reservation.allocation_id = allocation.id
+             JOIN public.analysis_v2_provider_execution_policies AS policy
+               ON policy.request_id = request.id
+             WHERE preflight.id = $1
+             GROUP BY preflight.id, request.id, job.request_id, job.job_key,
+                      allocation.id, policy.request_id`,
+            [PREFLIGHT_ID]
+        );
+        expect(state.rows).toEqual([expect.objectContaining({
+            preflight_status: 'consumed',
+            consumed_request_id: admitted.requestId,
+            request_channel: 'betatest', access_mode: 'production',
+            selected_plan: planId, background_processing: false,
+            job_key: 'coordinator:bootstrap', job_track: 'coordinator',
+            job_kind: 'bootstrap', job_batch: null, required_keys: [],
+            allocation_state: 'active', allocation_request_id: admitted.requestId,
+            policy_mode: 'betatest_free_pool',
+            policy_version: 'betatest-free-pool-v1', policy_hash_valid: true,
+            reservation_count: 8, active_count: 8,
+        })]);
+    });
+
+    it('replays stored identity after grant disable/expiry and ignores a racing caller replan', async () => {
+        await seedReadyBetaAdmission('basic');
+        const admitted = await admitBetaPlan();
+        await db.query(
+            `UPDATE public.analysis_beta_access_grants
+             SET enabled = FALSE, expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second'
+             WHERE user_id = $1`,
+            [USER_ID]
+        );
+        await expect(replayBetaPlan()).resolves.toEqual({ ...admitted, replayed: true });
+        const alternateSlots = Object.fromEntries(
+            OPERATIONS.map(operation => [operation, 'septenary'])
+        );
+        await expect(admitBetaPlan({ slots: alternateSlots }))
+            .resolves.toEqual({ ...admitted, replayed: true });
+        const state = await db.query<{ requests: number; jobs: number; allocations: number }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_requests) AS requests,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_pipeline_jobs) AS jobs,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_beta_pool_allocations) AS allocations`
+        );
+        expect(state.rows).toEqual([{ requests: 1, jobs: 1, allocations: 1 }]);
+    });
+
+    it('preserves terminal settled replay without requiring a current grant', async () => {
+        await seedReadyBetaAdmission('basic');
+        const admitted = await admitBetaPlan();
+        await db.query(`UPDATE public.analysis_requests SET status='failed' WHERE id=$1`, [admitted.requestId]);
+        await serviceQuery(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation($1, 'request_terminal')`,
+            [admitted.allocationId]
+        );
+        await db.query(`DELETE FROM public.analysis_beta_access_grants WHERE user_id=$1`, [USER_ID]);
+        await expect(replayBetaPlan()).resolves.toEqual({ ...admitted, replayed: true });
+    });
+
+    it('rejects corrupt provider policy, bootstrap job, and reservation integrity on replay', async () => {
+        await seedReadyBetaAdmission('basic');
+        const admitted = await admitBetaPlan();
+        await db.query(
+            `UPDATE public.analysis_v2_provider_execution_policies
+             SET policy_hash=$2 WHERE request_id=$1`,
+            [admitted.requestId, 'f'.repeat(64)]
+        );
+        await expect(replayBetaPlan()).rejects.toThrow(/ANALYSIS_BETA_(?:PROVIDER_POLICY|ALLOCATION)_CONFLICT/);
+        await db.query(
+            `UPDATE public.analysis_v2_provider_execution_policies
+             SET policy_hash=public.analysis_beta_provider_policy_hash(target_instagram_id, operation_slot_map)
+             WHERE request_id=$1`,
+            [admitted.requestId]
+        );
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs SET input_hash=$2
+             WHERE request_id=$1 AND job_key='coordinator:bootstrap'`,
+            [admitted.requestId, 'f'.repeat(64)]
+        );
+        await expect(replayBetaPlan()).rejects.toThrow(/ANALYSIS_BETA_ALLOCATION_CONFLICT/);
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET input_hash=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(
+                'analysis-v2-job-input-v1' || pg_catalog.chr(10) || pg_catalog.lower($1::TEXT)
+                || pg_catalog.chr(10) || 'coordinator:bootstrap','UTF8'),'sha256'),'hex')
+             WHERE request_id=$1 AND job_key='coordinator:bootstrap'`,
+            [admitted.requestId]
+        );
+        await db.query(
+            `UPDATE public.analysis_beta_pool_reservations
+             SET credential_slot='septenary'
+             WHERE allocation_id=$1 AND operation_family='relationship-followers'`,
+            [admitted.allocationId]
+        );
+        await expect(replayBetaPlan()).rejects.toThrow(/ANALYSIS_BETA_ALLOCATION_CONFLICT/);
+    });
+
+    it('rejects wrong token/generation and stale admission without partial durable work', async () => {
+        await seedReadyBetaAdmission('basic');
+        await expect(admitBetaPlan({ token: CLAIM_TOKEN })).rejects.toThrow(
+            /ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/
+        );
+        await expect(admitBetaPlan({ generation: 2 })).rejects.toThrow(
+            /ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_refreshed_at=pg_catalog.clock_timestamp() - INTERVAL '3 minutes'
+             WHERE id=$1`,
+            [PREFLIGHT_ID]
+        );
+        await expect(admitBetaPlan()).rejects.toThrow(/ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/);
+        const state = await db.query<{ requests: number; jobs: number; lifecycle: string; reservations: number }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_requests) AS requests,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_pipeline_jobs) AS jobs,
+                allocation.lifecycle_state AS lifecycle,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_beta_pool_reservations) AS reservations
+             FROM public.analysis_beta_pool_allocations AS allocation
+             WHERE allocation.preflight_id=$1`,
+            [PREFLIGHT_ID]
+        );
+        expect(state.rows).toEqual([{ requests: 0, jobs: 0, lifecycle: 'preflight_held', reservations: 1 }]);
+    });
+
+    it('rolls back underbudget, overbudget, and insufficient-capacity admissions', async () => {
+        await seedReadyBetaAdmission('basic');
+        const frozen = getBetaApifyOperationBudgetCatalog('basic', {});
+        await expect(admitBetaPlan({
+            budgets: { ...frozen, 'candidate-likers': frozen['candidate-likers'] - 0.000000000001 },
+        })).rejects.toThrow(/ANALYSIS_BETA_ALLOCATION_INVALID/);
+        await expect(admitBetaPlan({
+            budgets: { ...frozen, 'candidate-likers': frozen['candidate-likers'] + 0.000000000001 },
+        })).rejects.toThrow(/ANALYSIS_BETA_ALLOCATION_INVALID/);
+        await db.query(
+            `UPDATE public.analysis_apify_credit_snapshots
+             SET monthly_limit_usd=0.1, monthly_usage_usd=0`
+        );
+        await expect(admitBetaPlan()).rejects.toThrow(/ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE/);
+        const state = await db.query<{ requests: number; jobs: number; lifecycle: string; reservations: number }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_requests) AS requests,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_pipeline_jobs) AS jobs,
+                allocation.lifecycle_state AS lifecycle,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_beta_pool_reservations) AS reservations
+             FROM public.analysis_beta_pool_allocations AS allocation
+             WHERE allocation.preflight_id=$1`,
+            [PREFLIGHT_ID]
+        );
+        expect(state.rows).toEqual([{ requests: 0, jobs: 0, lifecycle: 'preflight_held', reservations: 1 }]);
+    });
+
+    it('keeps both admission RPCs service-only and ordinary access modes unable to opt in', async () => {
+        const privileges = await db.query<{ replay_public: boolean; replay_service: boolean; admit_auth: boolean; admit_service: boolean }>(
+            `SELECT
+                pg_catalog.has_function_privilege('public','public.load_analysis_v2_betatest_plan_replay(uuid,uuid,uuid,integer,text)','EXECUTE') AS replay_public,
+                pg_catalog.has_function_privilege('service_role','public.load_analysis_v2_betatest_plan_replay(uuid,uuid,uuid,integer,text)','EXECUTE') AS replay_service,
+                pg_catalog.has_function_privilege('authenticated','public.admit_analysis_v2_betatest_plan(uuid,uuid,uuid,integer,text,jsonb,jsonb,integer)','EXECUTE') AS admit_auth,
+                pg_catalog.has_function_privilege('service_role','public.admit_analysis_v2_betatest_plan(uuid,uuid,uuid,integer,text,jsonb,jsonb,integer)','EXECUTE') AS admit_service`
+        );
+        expect(privileges.rows).toEqual([{
+            replay_public: false, replay_service: true, admit_auth: false, admit_service: true,
+        }]);
+
+        await db.query(`INSERT INTO public.users(id) VALUES($1)`, [USER_ID]);
+        await db.query(
+            `INSERT INTO public.analysis_preflights(
+                id,user_id,status,access_mode,target_instagram_id,expires_at,
+                admission_token,admission_generation,admission_selected_plan_id
+             ) VALUES($1,$2,'ready','production',$3,pg_catalog.clock_timestamp()+INTERVAL '30 minutes',$4,1,'basic')`,
+            [PREFLIGHT_ID, USER_ID, TARGET, ADMISSION_TOKEN]
+        );
+        await expect(replayBetaPlan()).rejects.toThrow(/ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/);
+        const counts = await db.query<{ requests: number; allocations: number }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_requests) AS requests,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_beta_pool_allocations) AS allocations`
+        );
+        expect(counts.rows).toEqual([{ requests: 0, allocations: 0 }]);
     });
 
     it('durably exhausts three betatest fresh-admission failures with stale-token fencing', async () => {

@@ -7,6 +7,7 @@ import {
     BETA_APIFY_OPERATION_FAMILIES,
     createBetaApifyCreditPoolStore,
     getBetaApifyOperationBudgetCatalog,
+    getRequiredBetaApifyOperationBudgetCatalog,
     getBetaApifyCreditPoolRuntimeConfig,
     planBetaApifyCreditAllocation,
     type BetaApifyPoolStoreClient,
@@ -255,12 +256,36 @@ describe('beta Apify runtime foundation', () => {
         const expectedConservativeBudget = Math.ceil(
             rawMaximum * 1_000_000_000_000
         ) / 1_000_000_000_000;
-        const frozenBudget = getBetaApifyOperationBudgetCatalog(
+        const requiredBudget = getRequiredBetaApifyOperationBudgetCatalog(
             'basic',
             env
         )['profile-fallback'];
 
-        expect(frozenBudget).toBe(expectedConservativeBudget);
-        expect(frozenBudget).toBeGreaterThanOrEqual(rawMaximum);
+        expect(requiredBudget).toBe(expectedConservativeBudget);
+        expect(requiredBudget).toBeGreaterThanOrEqual(rawMaximum);
+    });
+
+    it.each(PLAN_IDS)('keeps the %s frozen beta policy catalog immutable across general cost env overrides', planId => {
+        const baseline = getBetaApifyOperationBudgetCatalog(planId, {});
+        const cheaper = getBetaApifyOperationBudgetCatalog(planId, {
+            APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD: '0.000001',
+            APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD: '0.000001',
+        });
+        const expensive = getBetaApifyOperationBudgetCatalog(planId, {
+            APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD: '0.005',
+            APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD: '0.002',
+        });
+        expect(cheaper).toEqual(baseline);
+        expect(expensive).toEqual(baseline);
+        expect(Object.isFrozen(baseline)).toBe(true);
+
+        const expensiveRequired = getRequiredBetaApifyOperationBudgetCatalog(planId, {
+            APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD: '0.005',
+            APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD: '0.002',
+            APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION: '10',
+        });
+        expect(expensiveRequired['profile-fallback']).toBeGreaterThan(
+            baseline['profile-fallback']
+        );
     });
 });

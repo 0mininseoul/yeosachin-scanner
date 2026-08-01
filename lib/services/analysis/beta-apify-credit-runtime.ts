@@ -12,6 +12,7 @@ import {
 export {
     BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
     getBetaApifyOperationBudgetCatalog,
+    getRequiredBetaApifyOperationBudgetCatalog,
 } from './beta-apify-operation-budget';
 
 export const BETA_APIFY_RUNTIME_CONFIG_ERROR = 'ANALYSIS_BETA_RUNTIME_CONFIG_INVALID';

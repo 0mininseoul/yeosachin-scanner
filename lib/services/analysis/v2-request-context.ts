@@ -13,7 +13,7 @@ import {
     providerExecutionPolicySchema,
     type ProviderExecutionPolicy,
 } from './authorized-test-provider-policy';
-import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
+import { getRequiredBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -139,7 +139,7 @@ export function createAnalysisV2CollectionRequestContextStore(
                 try {
                     assertBetaProviderExecutionBudgetCatalog({
                         policy: parsed.data.providerExecutionPolicy,
-                        requiredBudgets: getBetaApifyOperationBudgetCatalog(
+                        requiredBudgets: getRequiredBetaApifyOperationBudgetCatalog(
                             parsed.data.planId,
                             env
                         ),
