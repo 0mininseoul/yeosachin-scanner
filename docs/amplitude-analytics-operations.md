@@ -18,13 +18,13 @@ Amplitude는 클라이언트 제품 퍼널을 보는 보조 분석 도구다. �
 
 ## 2. 개인정보 경계
 
-Session Replay의 top-level current page URL은 query와 hash가 없고 path가 `/`, `/privacy`, `/terms` 중 하나일 때만 허용된다. 로그인, analyze, progress, result, share, account, profile 및 그 밖의 모든 경로는 allowlist 밖이므로 차단한다. 안전 경로에서 시작한 세션도 민감 경로로 이동하면 Replay를 중지하며, 다시 허용하려면 새 페이지/세션이 필요하다.
+Session Replay 허용 경로 템플릿은 `/`, `/privacy`, `/terms`, `/login`, `/analyze`, `/earlybird`, `/mypage`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`이다. 허용 경로의 query·hash와 동적 request ID·share token은 local UGC filter rule이 Replay meta와 batched click·scroll interaction을 영속화하기 전에 식별자와 query가 없는 정적 경로 템플릿으로 치환한다. 알 수 없는 경로와 admin·API 경로는 allowlist 밖에서 fail-closed로 Replay를 중지하며, 중지된 세션은 새 페이지/세션 전까지 다시 시작하지 않는다.
 
-DNT 또는 GPC(Global Privacy Control) opt-out이면 fail-closed로 `sampleRate: 0`, `capture_enabled: false`로 Replay를 차단한다. SDK 또는 remote config의 sampling 값이 기대값과 불일치하거나 응답 오류·실패가 발생해도 같은 fail-closed 응답을 반환한다. interaction, network, document title, URL change, performance 수집도 끈다.
+DNT 또는 GPC(Global Privacy Control) opt-out이면 fail-closed로 `sampleRate: 0`, `capture_enabled: false`로 Replay를 차단한다. SDK 또는 remote acknowledgement의 sampling 값이 기대값과 불일치하거나 remote config 응답 오류·실패가 발생해도 같은 fail-closed 응답을 반환한다. Replay의 click·scroll interaction은 batching을 켜서 수집하지만 network·console·performance·document title 수집은 끈다. 일반 Analytics autocapture도 page URL·view, form·element·frustration interaction을 포함해 계속 끈 상태다.
 
-Replay 화면 구조에는 `form`, `input`, `select`, `textarea`, `option`, `[contenteditable]`를 마스킹한다. `img`, `video`, `audio`, `canvas`, `svg`와 `.amp-block`, `[data-amp-block]`, `[data-amp-sensitive]`, `[data-amp-private]`는 차단한다. 이는 안전 경로에만 적용되는 추가 방어선이며, 민감 경로를 Replay로 분석할 근거가 아니다.
+Replay는 conservative 기본 수준으로 모든 text와 input을 마스킹하고, `form`, `input`, `select`, `textarea`, `option`, `[contenteditable]`, `.amp-mask`, `[data-amp-mask]`도 명시적으로 마스킹한다. DOM attribute의 `href`, `src`, `alt`, `title`, `aria-label`, `value`, `placeholder` 값 역시 직렬화 전에 마스킹하며 unmask selector는 두지 않는다. `img`, `video`, `audio`, `canvas`, `svg` 전체와 `.amp-block`, `[data-amp-block]`, `[data-amp-sensitive]`, `[data-amp-private]`는 차단한다.
 
-명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay의 serialized DOM에는 공개 페이지의 `href`, `src`, `inline-style`, `resource`, `link URL`과 공개 외부 링크가 포함될 수 있다. 공개 사업자 연락처 `contact@ascentum.co.kr`와 `mailto:` 링크 attribute도 serialized DOM에 포함될 수 있는 허용 공개 DOM 값이다. 민감 콘텐츠는 page allowlist와 mask/block selector로 보호하며, 이는 blanket URL sanitizer가 아니다. 민감·비허용 페이지 또는 query/hash가 붙은 top-level current page URL은 gate가 캡처를 차단한다. 생 인스타그램 식별자, 이름, bio/소개글, 댓글/comment, caption/캡션, 이미지·미디어와 고객 또는 사용자 입력 이메일·전화번호·연락처, 결제 연락처, raw 오류·응답 같은 민감 개인정보는 replay 또는 event에 보내지 않는다. Replay는 허용 경로의 표본 세션 문제를 분석할 때만 사용하며 민감 화면을 분석하려 하지 않는다.
+명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay URL은 local UGC filter rule으로 정규화하고, DOM의 URL·접근성·입력 관련 attribute는 위 명시 allowlist로 마스킹한다. 생 인스타그램 식별자, 이름, bio/소개글, 댓글/comment, caption/캡션, 이미지·미디어와 고객 또는 사용자 입력 이메일·전화번호·연락처, 결제 연락처, raw 오류·응답 같은 민감 개인정보는 replay 또는 event에 보내지 않는다. 허용 핵심 경로의 page/container는 구조와 흐름만 보이도록 마스킹하며, 실제 private/sensitive 영역과 미디어는 계속 차단한다.
 
 ## 3. 이벤트와 허용 속성
 
@@ -53,23 +53,25 @@ Replay 화면 구조에는 `form`, `input`, `select`, `textarea`, `option`, `[co
 7. 결과 사용: `result_viewed`, `result_shared` 추이와 `share_channel`, `is_shared` breakdown
 8. 이벤트 기반 핵심 이탈 세그먼트: 같은 세션에서 `target_submitted` 후 `preflight_succeeded`가 없거나 `plan_selected` 후 `checkout_redirected`가 없는 사용자. Replay 링크 없이 후속 이벤트 유무로만 구성
 
-기존 8개 이벤트 대시보드 패널은 유지한다. Replay는 이 대시보드의 대체 지표나 별도 민감 화면 패널이 아니며, 안전 경로에서 수신된 표본 세션의 문제를 조사할 때만 보조적으로 확인한다. Plus 대기 신청 전용 차트도 만들지 않고 대시보드에서 제외한다.
+기존 8개 이벤트 대시보드 패널은 유지한다. Replay는 이 대시보드의 대체 지표나 별도 민감 화면 패널이 아니며, 허용 핵심 경로에서 수신된 표본 세션의 문제를 조사할 때만 보조적으로 확인한다. Plus 대기 신청 전용 차트도 만들지 않고 대시보드에서 제외한다.
 
 ## 5. Live 검증
 
-- Production 검증에서는 5% sampling 때문에 한 세션에서 Replay 영상이 반드시 생긴다고 가정하지 않는다. query·hash 없는 `/`, `/privacy`, `/terms` 표본 세션을 충분히 만들어 안전 경로 Replay 수신 여부를 확인한다.
+- Production 검증에서는 5% sampling 때문에 한 세션에서 Replay 영상이 반드시 생긴다고 가정하거나 배포 전에 실제 UI 수신을 확정하지 않는다. `/`, `/privacy`, `/terms`, `/login`, `/analyze`, `/earlybird`, `/mypage`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`을 통과하는 표본 세션을 충분히 만든 뒤 Replay 수신 여부를 확인한다.
 - Amplitude User Lookup 또는 Debugger에서 이벤트 순서와 Supabase UUID identity를 확인한다. 익명 이벤트가 인증 후 잘못된 이메일·전화번호 identity에 연결되지 않았는지 확인한다.
 - 결제 완료 fixture 또는 실제 검증 결제는 고객 화면이 `paid`를 읽은 뒤 `payment_confirmed_viewed`를 한 번만 보내는지 확인한다. 중복 새로고침은 dedupe 계약과 비교한다.
 - 각 이벤트 상세의 properties 탭에서 schema에 없는 값이 제거되는지 확인한다.
-- 민감 경로(로그인, analyze, progress, result, share, account, profile)와 query/hash가 붙은 안전 경로에서 Replay가 수신되지 않는지 확인한다. DNT/GPC opt-out 브라우저도 수신되지 않아야 한다.
-- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 검사한다. Replay의 top-level current page URL만 허용 경로와 query/hash 조건을 확인한다. 공개 페이지의 DOM/resource/link URL, 공개 외부 링크, 공개 사업자 이메일과 `mailto:` attribute는 존재 자체가 실패나 위반이 아니다. 고객 또는 사용자 입력 이메일·연락처와 민감 개인정보가 없고 mask/block selector가 적용됐는지를 검사한다.
+- 합성 query·hash·request ID·share token으로 허용 경로를 이동하고, 수신된 Replay가 있을 때 meta와 batched click·scroll interaction의 page URL이 각각 식별자 없는 정적 경로 템플릿으로만 표시되는지 확인한다. click과 scroll을 실제로 발생시켜 표본 세션에서 interaction이 연결되는지도 확인한다.
+- 알 수 없는 경로와 admin·API 경로에서는 Replay가 수신되지 않는지 확인한다. DNT/GPC opt-out 브라우저도 수신되지 않아야 한다.
+- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 검사한다. Replay에는 고객 또는 사용자 입력 이메일·연락처와 민감 개인정보가 없어야 하며, text/input과 `href`, `src`, `alt`, `title`, `aria-label`, `value`, `placeholder`가 마스킹되고 private/sensitive 노드와 모든 `img`, `video`, `audio`, `canvas`, `svg`가 차단됐는지 확인한다.
+- Replay payload와 UI에서 network·console·performance·document title 수집 및 일반 Analytics autocapture가 활성화되지 않았는지 확인한다.
 
 검증 중 민감 속성이 발견되면 대시보드 작성과 Production rollout을 중단한다. allowlist 또는 caller를 수정하고 잘못 수집된 데이터의 삭제 절차를 Amplitude 프로젝트 관리자와 확인한 뒤 다시 검증한다.
 
 ## 6. Rollout과 롤백
 
-`DEMO_ANALYSIS_ENABLED`는 server-only 데모 자격(demo eligibility)만 제어하며 브라우저로 직렬화하거나 Replay gate에 사용하지 않는다. 따라서 `DEMO_ANALYSIS_ENABLED`가 `true`여도 안전 공개 페이지는 다른 Replay 조건을 모두 충족하면 수집 후보가 될 수 있다. 데모 분석 콘텐츠가 표시되는 analyze, progress, result, share 및 admin 경로는 route allowlist 밖이라 차단되고, 세션이 이 경로로 전환되면 현재 Replay는 영구 종료된다.
+`DEMO_ANALYSIS_ENABLED`는 server-only 데모 자격(demo eligibility)만 제어하며 브라우저로 직렬화하거나 Replay gate에 사용하지 않는다. 따라서 값과 관계없이 `/analyze`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`을 포함한 위 허용 핵심 경로는 다른 Replay 조건을 모두 충족하면 수집 후보가 된다. 알 수 없는 경로와 admin·API 경로는 계속 route allowlist 밖에서 차단된다.
 
-Rollout은 로컬 테스트, Vercel Preview 실이벤트, 금지 속성 검사, Production에 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true` 및 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0.05` 설정, Production live 검증 순서로 진행한다. 배포 직후 핵심 funnel 이벤트 수신과 제품 흐름을 함께 확인한다.
+Rollout은 로컬 테스트, Vercel Preview 명시 이벤트 검증, 금지 속성·URL canonicalization 검사, Production에 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true` 및 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0.05` 설정, Production live 검증 순서로 진행한다. 배포 전에는 Replay UI 수신을 완료된 사실로 기록하지 않으며, 배포 직후 충분한 5% 표본을 만든 다음 핵심 funnel 이벤트, canonical route template, batched click·scroll interaction, 마스킹·차단 상태와 제품 흐름을 함께 확인한다.
 
 Replay만 롤백하려면 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=false`와 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=0`을 함께 설정하고 재배포한다. 이 조치는 명시 이벤트 analytics는 유지한다. 반대로 `NEXT_PUBLIC_AMPLITUDE_API_KEY`를 제거하는 것은 전체 analytics kill switch로서 명시 이벤트 전송까지 모두 중단한다. SDK 실패나 key 제거 후에도 로그인·preflight·checkout·결과 화면이 정상 동작해야 한다.

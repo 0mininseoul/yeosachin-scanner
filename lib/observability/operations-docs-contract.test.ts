@@ -179,49 +179,42 @@ describe('analytics and observability disclosure contract', () => {
             /DEMO_ANALYSIS_ENABLED[^\n]*(server-only|서버 전용)[^\n]*(데모 자격|demo eligibility)/i
         );
         expect(operations).toMatch(
-            /DEMO_ANALYSIS_ENABLED[^\n]*`true`[^\n]*(안전 공개 페이지|safe public page)[^\n]*Replay[^\n]*(후보|수집 가능)/i
-        );
-        expect(operations).toMatch(
-            /데모 분석[^\n]*analyze[^\n]*progress[^\n]*result[^\n]*(route|경로)[^\n]*(allowlist 밖|차단)/
+            /DEMO_ANALYSIS_ENABLED[^\n]*값과 관계없이[^\n]*`\/analyze`[^\n]*`\/progress\/:requestId`[^\n]*`\/result\/:requestId`[^\n]*`\/share\/:token`[^\n]*수집 후보/i
         );
         expect(operations).toMatch(/현재 승인된[^\n]*0\.05/);
         expect(operations).toMatch(/0\.01[^\n]*0\.10/);
         expect(operations).toMatch(/(범위 밖|형식 오류)[^\n]*(fail-closed|sampleRate:[^\n]*0)/);
         expect(operations).toMatch(/(0\.05|sample rate)[^\n]*(변경|변경은)[^\n]*(별도 검토|검토 필요)/i);
-        expect(operations).toMatch(/query[^\n]*hash|hash[^\n]*query/i);
         expect(operations).toMatch(
-            /top-level current page URL[^\n]*query[^\n]*hash[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`/i
+            /Session Replay 허용 경로 템플릿[^\n]*`\/`[^\n]*`\/privacy`[^\n]*`\/terms`[^\n]*`\/login`[^\n]*`\/analyze`[^\n]*`\/earlybird`[^\n]*`\/mypage`[^\n]*`\/progress\/:requestId`[^\n]*`\/result\/:requestId`[^\n]*`\/share\/:token`/i
         );
         expect(operations).toMatch(
-            /serialized DOM[^\n]*href[^\n]*src[^\n]*inline-style[^\n]*resource[^\n]*link URL[^\n]*공개 외부 링크[^\n]*(포함될 수|포함 가능)/i
+            /query·hash[^\n]*동적 request ID·share token[^\n]*local UGC filter rule[^\n]*Replay meta[^\n]*batched click·scroll interaction[^\n]*식별자[^\n]*정적 경로 템플릿/i
         );
         expect(operations).toMatch(
-            /민감 콘텐츠[^\n]*(page allowlist|페이지 allowlist)[^\n]*(mask|block)[^\n]*blanket URL sanitizer[^\n]*(아니|없)/i
+            /알 수 없는 경로[^\n]*admin[^\n]*API 경로[^\n]*fail-closed/i
         );
         expect(operations).toMatch(
             /명시 이벤트[^\n]*페이지 URL[^\n]*(보내지 않|전송하지 않)/
         );
         expect(operations).toMatch(
-            /DOM\/resource\/link URL[^\n]*존재[^\n]*(실패|위반)[^\n]*(아니|않)/
+            /click·scroll interaction[^\n]*batching[^\n]*network[^\n]*console[^\n]*performance[^\n]*document title[^\n]*끈다/i
         );
         expect(operations).toMatch(
             /(고객|사용자 입력)[^\n]*(이메일|email)[^\n]*(연락처|contact)[^\n]*(replay|event)[^\n]*(보내지 않|전송하지 않)/i
         );
         expect(operations).toMatch(
-            /(공개 사업자 연락처|public business contact)[^\n]*contact@ascentum\.co\.kr[^\n]*mailto:[^\n]*(serialized DOM|직렬화)[^\n]*(허용|포함될 수)/i
+            /conservative[^\n]*text[^\n]*input[^\n]*(마스킹|mask)/i
         );
-        expect(operations).not.toMatch(
-            /Replay payload에는[^\n]*`\/terms` URL만 포함될 수/
-        );
-        expect(operations).not.toMatch(
-            /Replay 표본[^\n]*허용 경로 URL 외의 URL[^\n]*없어야/
-        );
-        expect(operations).toMatch(
-            /로그인[^\n]*analyze[^\n]*progress[^\n]*result[^\n]*share[^\n]*account[^\n]*profile[^\n]*(allowlist 밖|차단)/
-        );
+        expect(operations).toMatch(/unmask selector[^\n]*(두지 않|없)/i);
+        for (const attribute of ['href', 'src', 'alt', 'title', 'aria-label', 'value', 'placeholder']) {
+            expect(operations).toContain(attribute);
+        }
+        expect(operations).not.toContain('contact@ascentum.co.kr');
+        expect(operations).not.toContain('mailto:');
         expect(operations).toMatch(/DNT[^\n]*(GPC|Global Privacy Control)|(GPC|Global Privacy Control)[^\n]*DNT/);
         expect(operations).toMatch(/DNT[^\n]*GPC[^\n]*fail-closed[^\n]*sampleRate:[^\n]*0/i);
-        expect(operations).toMatch(/(SDK|remote config)[^\n]*(불일치|오류|실패)[^\n]*(fail-closed|sample[^\n]*0)|(fail-closed|sample[^\n]*0)[^\n]*(SDK|remote config)/i);
+        expect(operations).toMatch(/(SDK|remote acknowledgement)[^\n]*(불일치|오류|실패)[^\n]*(fail-closed|sample[^\n]*0)|(fail-closed|sample[^\n]*0)[^\n]*(SDK|remote acknowledgement)/i);
         for (const selector of ['form', 'input', 'select', 'textarea', 'option', 'contenteditable']) {
             expect(operations).toContain(selector);
         }

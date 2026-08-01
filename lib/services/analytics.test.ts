@@ -5,6 +5,7 @@ import { SessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';
 import { SessionReplayLocalConfig } from '@amplitude/session-replay-browser/lib/cjs/config/local-config.js';
 import { SessionReplayJoinedConfigGenerator } from '@amplitude/session-replay-browser/lib/cjs/config/joined-config.js';
 import { SessionReplay } from '@amplitude/session-replay-browser/lib/cjs/session-replay.js';
+import { getPageUrl, maskAttributeFn } from '@amplitude/session-replay-browser/lib/cjs/helpers.js';
 
 const amplitudeMocks = vi.hoisted(() => ({
     getUserId: vi.fn(),
@@ -199,6 +200,15 @@ describe('Amplitude analytics adapter', () => {
                 sampleRate: 0,
                     privacyConfig: {
                         defaultMaskLevel: 'conservative',
+                        maskAttributes: [
+                            'href',
+                            'src',
+                            'alt',
+                            'title',
+                            'aria-label',
+                            'value',
+                            'placeholder',
+                        ],
                         maskSelector: [
                             '.amp-mask',
                             '[data-amp-mask]',
@@ -221,7 +231,11 @@ describe('Amplitude analytics adapter', () => {
                             'svg',
                         ],
                     },
-                    interactionConfig: { enabled: false, batch: false },
+                    interactionConfig: {
+                        enabled: true,
+                        batch: true,
+                        ugcFilterRules: expect.any(Array),
+                    },
                     performanceConfig: { enabled: false },
                     captureDocumentTitle: false,
                     enableUrlChangePolling: false,
@@ -402,7 +416,7 @@ describe('Amplitude analytics adapter', () => {
         };
         expect(options.sessionReplay).toMatchObject({
             sampleRate: 0,
-            interactionConfig: { enabled: false, batch: false },
+            interactionConfig: { enabled: true, batch: true },
         });
         expect(options.sessionReplay.handleSendEvents).toEqual(expect.any(Function));
 
@@ -514,16 +528,27 @@ describe('Amplitude analytics adapter', () => {
             configs: {
                 sessionReplay: {
                     sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 },
+                    sr_interaction_config: { enabled: true, batch: true },
                 },
             },
         });
     });
 
-    it.each(['/', '/privacy', '/terms'])(
-        'keeps safe public replay eligible at %s when server demo analysis is enabled',
+    it.each([
+        '/',
+        '/privacy',
+        '/terms',
+        '/login',
+        '/analyze',
+        '/earlybird',
+        '/mypage',
+        '/progress/demo-request-id',
+        '/result/demo-request-id',
+        '/share/demo-token',
+    ])(
+        'keeps eligible replay enabled at %s with interaction batching',
         async (pathname) => {
             enableReplayBrowser({ pathname });
-            vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
             const { initAmplitude } = await loadReplayAnalytics();
 
             await expect(initAmplitude(null)).resolves.toBe(true);
@@ -531,23 +556,60 @@ describe('Amplitude analytics adapter', () => {
             const options = amplitudeMocks.initAll.mock.calls[0][1] as {
                 sessionReplay: {
                     privacyConfig: { maskSelector: string[] };
+                    interactionConfig: { enabled: boolean; batch: boolean; ugcFilterRules: unknown[] };
                     sampleRate: number;
                 };
             };
             expect(options.sessionReplay.sampleRate).toBe(0.1);
+            expect(options.sessionReplay.interactionConfig).toMatchObject({ enabled: true, batch: true });
+            expect(options.sessionReplay.interactionConfig.ugcFilterRules).not.toHaveLength(0);
             expect(options.sessionReplay.privacyConfig.maskSelector).toEqual(
                 expect.arrayContaining(['form', 'input', 'textarea', 'select', 'option', '[contenteditable]']),
             );
         },
     );
 
+    it('sanitizes synthetic identifiers, queries, and hashes for replay meta and interaction URLs', async () => {
+        const requestId = '11111111-1111-4111-8111-111111111111';
+        const shareToken = 'synthetic-share-token-that-must-never-persist';
+        enableReplayBrowser({ pathname: `/progress/${requestId}`, search: '?email=person@example.com', hash: '#details' });
+        const { initAmplitude } = await loadReplayAnalytics();
+
+        await initAmplitude(null);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { interactionConfig: { ugcFilterRules: Array<{ selector: string; replacement: string }> } };
+        };
+        const rules = options.sessionReplay.interactionConfig.ugcFilterRules;
+        const rawUrls = [
+            'https://production-alias.example/?email=person@example.com#details',
+            'http://preview-alias.example/privacy?email=person@example.com#details',
+            'https://custom-alias.example/terms?email=person@example.com#details',
+            'http://production-alias.example/login?email=person@example.com#details',
+            'https://preview-alias.example/analyze?email=person@example.com#details',
+            'http://custom-alias.example/earlybird?email=person@example.com#details',
+            'https://production-alias.example/mypage?email=person@example.com#details',
+            `https://production-alias.example/progress/${requestId}?email=person@example.com#details`,
+            `http://preview-alias.example/result/${requestId}?source=private#summary`,
+            `https://custom-alias.example/share/${shareToken}?phone=01012345678#open`,
+        ];
+        const sanitized = rawUrls.map((url) => getPageUrl(url, rules));
+
+        expect(sanitized).toEqual([
+            '/', '/privacy', '/terms', '/login', '/analyze', '/earlybird', '/mypage',
+            '/progress/:requestId', '/result/:requestId', '/share/:token',
+        ]);
+        expect(JSON.stringify(sanitized)).not.toContain(requestId);
+        expect(JSON.stringify(sanitized)).not.toContain(shareToken);
+        expect(JSON.stringify(sanitized)).not.toContain('person@example.com');
+        expect(JSON.stringify(sanitized)).not.toContain('01012345678');
+    });
+
     it.each([
-        '/analyze',
-        '/progress/demo-request-id',
-        '/result/demo-request-id',
-        '/share/demo-token',
         '/admin/analysis-audit',
-    ])('never enables initial replay on analysis or sensitive route %s', async (pathname) => {
+        '/api/analysis/run',
+        '/unknown-route',
+    ])('never enables initial replay on an ineligible route %s', async (pathname) => {
         enableReplayBrowser({ pathname });
         vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
         const { initAmplitude } = await loadReplayAnalytics();
@@ -645,7 +707,7 @@ describe('Amplitude analytics adapter', () => {
         expect(options.sessionReplay.sampleRate).toBe(0);
     });
 
-    it('fails replay closed for a sensitive result route without changing funnel delivery', async () => {
+    it('keeps replay eligible on a result route without changing funnel delivery', async () => {
         enableReplayBrowser({ pathname: '/result/request-id' });
         const analytics = await loadReplayAnalytics();
 
@@ -653,7 +715,7 @@ describe('Amplitude analytics adapter', () => {
         analytics.markAnalyticsIdentityReady();
         analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, { source: 'direct' });
         const options = amplitudeMocks.initAll.mock.calls[0][1] as { sessionReplay: { sampleRate: number } };
-        expect(options.sessionReplay.sampleRate).toBe(0);
+        expect(options.sessionReplay.sampleRate).toBe(0.1);
         expect(amplitudeMocks.track).toHaveBeenCalledWith('landing_viewed', { source: 'direct' });
     });
 
@@ -754,7 +816,7 @@ describe('Amplitude analytics adapter', () => {
         }));
     });
 
-    it('stops replay exactly once when a route becomes sensitive and on teardown', async () => {
+    it('stops replay exactly once when a route becomes ineligible and on teardown', async () => {
         enableReplayBrowser();
         const shutdown = vi.fn();
         amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
@@ -762,7 +824,7 @@ describe('Amplitude analytics adapter', () => {
         await analytics.initAmplitude(null);
 
         const location = (window as unknown as { location: { pathname: string; search: string; hash: string } }).location;
-        location.pathname = '/analyze';
+        location.pathname = '/admin/analysis-audit';
         analytics.enforceAmplitudeReplayRoutePrivacy();
         analytics.enforceAmplitudeReplayRoutePrivacy();
         analytics.teardownAmplitudeSessionReplay();
@@ -771,9 +833,9 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1);
     });
 
-    it('drops a replay upload when the current location gains a query or hash', async () => {
+    it('keeps replay upload enabled when an eligible route has a query or hash', async () => {
         enableReplayBrowser();
-        const replayFetch = vi.fn();
+        const replayFetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
         vi.stubGlobal('fetch', replayFetch);
         const analytics = await loadReplayAnalytics();
         await analytics.initAmplitude(null);
@@ -800,8 +862,8 @@ describe('Amplitude analytics adapter', () => {
             url: 'https://api-sr.amplitude.com/sessions/v2/track?device_id=device&session_id=1721234567890&type=replay',
         });
 
-        expect(response.status).toBe(204);
-        expect(replayFetch).not.toHaveBeenCalled();
+        expect(response.status).toBe(200);
+        expect(replayFetch).toHaveBeenCalledTimes(1);
     });
 
     it('uploads a safe-route replay with only the fixed transport metadata', async () => {
@@ -863,11 +925,118 @@ describe('Amplitude analytics adapter', () => {
         expect(JSON.stringify(replayFetch.mock.calls)).not.toContain('Cookie');
     });
 
+    it('masks configured sensitive attributes before the replay SDK serializes them', async () => {
+        enableReplayBrowser();
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                privacyConfig: {
+                    defaultMaskLevel: 'conservative';
+                    maskAttributes: string[];
+                };
+            };
+        };
+        const attributeMask = maskAttributeFn(
+            options.sessionReplay.privacyConfig,
+            () => 'https://production-alias.example/analyze',
+        );
+        const genericElement = { closest: () => null, tagName: 'A' } as unknown as HTMLElement;
+        const inputElement = { closest: () => null, tagName: 'INPUT' } as unknown as HTMLElement;
+        const rawAttributes = {
+            href: 'https://private.example/target',
+            src: 'https://private.example/avatar.jpg',
+            alt: 'private profile photo',
+            title: 'private tooltip',
+            'aria-label': 'private control',
+            value: 'private input value',
+            placeholder: 'private input hint',
+        };
+        const serializedAttributes = Object.fromEntries(
+            Object.entries(rawAttributes).map(([key, value]) => [
+                key,
+                attributeMask(key, value, key === 'value' || key === 'placeholder' ? inputElement : genericElement),
+            ]),
+        );
+
+        expect(options.sessionReplay.privacyConfig.defaultMaskLevel).toBe('conservative');
+        expect(options.sessionReplay.privacyConfig.maskAttributes).toEqual(
+            expect.arrayContaining(Object.keys(rawAttributes)),
+        );
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private.example');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private profile photo');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private tooltip');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private control');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private input value');
+        expect(JSON.stringify(serializedAttributes)).not.toContain('private input hint');
+    });
+
+    it('uploads an exact interaction batch through the replay transport', async () => {
+        enableReplayBrowser();
+        const replayFetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+        vi.stubGlobal('fetch', replayFetch);
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleSendEvents: (request: {
+                    body: string;
+                    headers: Record<string, string>;
+                    keepalive: boolean;
+                    method: 'POST';
+                    url: string;
+                }) => Promise<Response>;
+            };
+        };
+        const url = 'https://api-sr.amplitude.com/sessions/v2/track?device_id=device&session_id=1721234567890&type=interaction';
+
+        const response = await options.sessionReplay.handleSendEvents({
+            body: 'safe-interaction-payload',
+            headers: { Authorization: `Bearer ${API_KEY}` },
+            keepalive: true,
+            method: 'POST',
+            url,
+        });
+
+        expect(response.status).toBe(200);
+        expect(replayFetch).toHaveBeenCalledWith(url, expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('drops a non-allowlisted replay transport type', async () => {
+        enableReplayBrowser();
+        const replayFetch = vi.fn();
+        vi.stubGlobal('fetch', replayFetch);
+        const analytics = await loadReplayAnalytics();
+        await analytics.initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleSendEvents: (request: {
+                    body: string;
+                    headers: Record<string, string>;
+                    keepalive: boolean;
+                    method: 'POST';
+                    url: string;
+                }) => Promise<Response>;
+            };
+        };
+
+        const response = await options.sessionReplay.handleSendEvents({
+            body: 'unsafe-payload',
+            headers: { Authorization: `Bearer ${API_KEY}` },
+            keepalive: true,
+            method: 'POST',
+            url: 'https://api-sr.amplitude.com/sessions/v2/track?device_id=device&session_id=1721234567890&type=console',
+        });
+
+        expect(response.status).toBe(204);
+        expect(replayFetch).not.toHaveBeenCalled();
+    });
+
     it.each([
         ['pushState', '/#token'],
         ['pushState', '/?request_id=secret'],
         ['replaceState', '/share/token'],
-    ] as const)('shuts down synchronously before native %s exposes %s', async (method, target) => {
+    ] as const)('keeps replay active for an eligible native %s transition to %s', async (method, target) => {
         enableReplayBrowser();
         const shutdown = vi.fn();
         amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
@@ -877,11 +1046,11 @@ describe('Amplitude analytics adapter', () => {
 
         window.history[method]({}, '', target);
 
-        expect(shutdown).toHaveBeenCalledTimes(1);
+        expect(shutdown).not.toHaveBeenCalled();
         removeGuards();
     });
 
-    it.each(['hashchange', 'popstate'])('shuts down for a native %s location mutation', async (eventName) => {
+    it.each(['hashchange', 'popstate'])('keeps replay active for an eligible native %s location mutation', async (eventName) => {
         enableReplayBrowser();
         const shutdown = vi.fn();
         amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
@@ -894,11 +1063,11 @@ describe('Amplitude analytics adapter', () => {
 
         window.dispatchEvent(new Event(eventName));
 
-        expect(shutdown).toHaveBeenCalledTimes(1);
+        expect(shutdown).not.toHaveBeenCalled();
         removeGuards();
     });
 
-    it('keeps a sticky shutdown while initialization is deferred across a sensitive transition', async () => {
+    it('keeps a sticky shutdown while initialization is deferred across an ineligible transition', async () => {
         enableReplayBrowser();
         const shutdown = vi.fn();
         amplitudeMocks.sessionReplay.mockReturnValue({ shutdown });
@@ -911,7 +1080,7 @@ describe('Amplitude analytics adapter', () => {
         const initialization = analytics.initAmplitude(null);
         await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
 
-        window.history.pushState({}, '', '/#token');
+        window.history.pushState({}, '', '/admin/analysis-audit');
         finishInitialization();
         await initialization;
         analytics.markAnalyticsIdentityReady();

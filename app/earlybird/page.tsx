@@ -39,7 +39,7 @@ export default async function EarlybirdPage({
     return (
         <div className="min-h-dvh">
             <TopBar />
-            <main data-amp-block className="mx-auto max-w-[500px] px-5 pb-16 pt-10">
+            <main data-amp-mask className="mx-auto max-w-[500px] px-5 pb-16 pt-10">
                 {order ? (
                     <EarlybirdStatus order={order} />
                 ) : (

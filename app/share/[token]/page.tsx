@@ -254,7 +254,7 @@ export default function ShareResultPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-block className="mx-auto max-w-[480px] px-5 pt-8">
+            <main data-amp-mask className="mx-auto max-w-[480px] px-5 pt-8">
                 <Eyebrow>판독 리포트 · 공유본</Eyebrow>
 
                 {/* Profile lockup — mirrors the owner result page. */}

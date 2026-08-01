@@ -43,13 +43,13 @@ describe('Amplitude replay privacy contract', () => {
         );
         expect(analytics).not.toContain('Route, demo mode, DNT');
         expect(analytics).toContain('sampleRate: 0');
-        expect(analytics).toContain('interactionConfig: { enabled: false, batch: false }');
-        expect(analytics).not.toContain('ugcFilterRules');
+        expect(analytics).toMatch(/interactionConfig:\s*\{\s*enabled: true,\s*batch: true,/);
+        expect(analytics).toContain('ugcFilterRules');
         expect(analytics).toContain('handleSendEvents: createSafeSessionReplaySender(apiKey)');
         expect(analytics).toContain("'[contenteditable]'");
     });
 
-    it('masks every form control and blocks media plus every sensitive route container', () => {
+    it('masks core route containers while retaining private and media blocks', () => {
         const landing = source('app/page.tsx');
         const analyze = source('app/analyze/page.tsx');
         const login = source('app/login/page.tsx');
@@ -63,15 +63,15 @@ describe('Amplitude replay privacy contract', () => {
 
         expect(landing).toContain('data-amp-mask');
         expect(analyze.match(/data-amp-mask/g)?.length).toBeGreaterThanOrEqual(2);
-        expect(analyze).toContain('data-amp-block');
-        expect(login).toContain('data-amp-block');
-        expect(mypage).toContain('data-amp-block');
-        expect(earlybirdPage).toContain('data-amp-block');
+        expect(analyze).toMatch(/<main[^>]*data-amp-mask/);
+        expect(login).toMatch(/<main[^>]*data-amp-mask/);
+        expect(mypage).toMatch(/<main[^>]*data-amp-mask/);
+        expect(earlybirdPage).toMatch(/<main[^>]*data-amp-mask/);
         expect(earlybird).toContain('data-amp-block');
         expect(history).toContain('data-amp-block');
-        expect(progress).toMatch(/<main[^>]*data-amp-block/);
-        expect(result).toMatch(/<main[^>]*data-amp-block/);
-        expect(shared).toMatch(/<main[^>]*data-amp-block/);
+        expect(progress).toMatch(/<main[^>]*data-amp-mask/);
+        expect(result).toMatch(/<main[^>]*data-amp-mask/);
+        expect(shared).toMatch(/<main[^>]*data-amp-mask/);
     });
 
     it('does not send route values into replay lifecycle calls', () => {
@@ -81,9 +81,21 @@ describe('Amplitude replay privacy contract', () => {
         expect(provider).toContain('enforceAmplitudeReplayRoutePrivacy()');
         expect(provider).not.toMatch(/enforceAmplitudeReplayRoutePrivacy\([^)]/);
         expect(analytics).toContain('SESSION_REPLAY_SAFE_PATHS');
-        expect(analytics).toContain('location.search.length === 0');
-        expect(analytics).toContain('location.hash.length === 0');
+        expect(analytics).not.toContain('location.search.length === 0');
+        expect(analytics).not.toContain('location.hash.length === 0');
         expect(provider).toContain('installAmplitudeReplayNavigationGuards()');
+    });
+
+    it('uses local UGC rules to canonicalize every eligible route before replay persistence', () => {
+        const analytics = source('lib/services/analytics.ts');
+
+        for (const route of [
+            '/', '/privacy', '/terms', '/login', '/analyze', '/earlybird', '/mypage',
+            '/progress/:requestId', '/result/:requestId', '/share/:token',
+        ]) {
+            expect(analytics).toContain(`replacement: '${route}'`);
+        }
+        expect(analytics).not.toContain('yeosachin.vercel.app');
     });
 
     it('keeps server-only demo eligibility independent from the replay client', () => {

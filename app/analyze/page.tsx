@@ -489,7 +489,7 @@ const DISCLOSURE_ACCEPTED = true;
                 ) : undefined}
             />
 
-            <main data-amp-block className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
+            <main data-amp-mask className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
                 {!preflight ? (
                     <>
                         <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>

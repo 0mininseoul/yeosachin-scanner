@@ -786,7 +786,7 @@ export default function ResultPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-block className="mx-auto max-w-[480px] px-5 pt-7">
+            <main data-amp-mask className="mx-auto max-w-[480px] px-5 pt-7">
                 {/* case header */}
                 {/* The share control belongs to the report, not to the app chrome:
                     in the top bar it read as a site-level menu item rather than

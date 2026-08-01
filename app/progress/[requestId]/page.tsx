@@ -313,7 +313,7 @@ export default function ProgressPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-block className="mx-auto flex max-w-[460px] flex-col px-5 pt-4">
+            <main data-amp-mask className="mx-auto flex max-w-[460px] flex-col px-5 pt-4">
                 <Eyebrow className="self-start">판독 진행 중</Eyebrow>
 
                 {/* The scope is the gauge.
