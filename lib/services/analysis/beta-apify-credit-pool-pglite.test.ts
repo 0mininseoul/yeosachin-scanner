@@ -537,6 +537,19 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
         )).rejects.toThrow(/analysis_apify_credit_snapshots_state_check/);
     });
 
+    it('rejects non-finite timestamps at the snapshot table boundary', async () => {
+        await expect(db.query(
+            `UPDATE public.analysis_apify_credit_snapshots
+             SET monthly_limit_usd = 10,
+                 monthly_usage_usd = 2,
+                 billing_cycle_start_at = '-infinity'::TIMESTAMPTZ,
+                 billing_cycle_end_at = 'infinity'::TIMESTAMPTZ,
+                 observed_at = '-infinity'::TIMESTAMPTZ,
+                 health_state = 'healthy'
+             WHERE credential_slot = 'primary'`
+        )).rejects.toThrow(/analysis_apify_credit_snapshots_state_check/);
+    });
+
     it('atomically refreshes all six slots and reads foundation-only headroom', async () => {
         const stored = await upsertSnapshots();
         expect(stored.map(row => row.credentialSlot)).toEqual(BETA_SLOTS);
@@ -622,6 +635,25 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
         expect(await loadSnapshots()).toEqual(before);
     });
 
+    it.each([
+        ['negative-infinite cycle start', 'billingCycleStartAt', '-infinity'],
+        ['positive-infinite cycle end', 'billingCycleEndAt', 'infinity'],
+        ['negative-infinite observation', 'observedAt', '-infinity'],
+        ['positive-infinite observation', 'observedAt', 'infinity'],
+    ])('rejects %s with the sanitized invalid-snapshot error', async (
+        _name,
+        field,
+        value
+    ) => {
+        const invalid = snapshotBatch((entry, index) => (
+            index === 0 ? { ...entry, [field]: value } : entry
+        ));
+
+        await expect(upsertSnapshots(invalid)).rejects.toThrow(
+            /ANALYSIS_BETA_POOL_SNAPSHOT_INVALID/
+        );
+    });
+
     it('rejects same-observation mutation and older snapshot regression', async () => {
         const initial = snapshotBatch();
         const stored = await upsertSnapshots(initial);
@@ -648,10 +680,13 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
             /ANALYSIS_BETA_POOL_SNAPSHOT_UNHEALTHY/
         );
         await upsertSnapshots();
-        await db.exec(`
+        const staleObservedAt = new Date(
+            Date.now() - 6 * 60 * 1000
+        ).toISOString();
+        await db.query(`
             UPDATE public.analysis_apify_credit_snapshots
-            SET observed_at = pg_catalog.clock_timestamp() - INTERVAL '6 minutes'
-        `);
+            SET observed_at = $1::TIMESTAMPTZ
+        `, [staleObservedAt]);
         await expect(loadSnapshots(300)).rejects.toThrow(
             /ANALYSIS_BETA_POOL_SNAPSHOT_STALE/
         );

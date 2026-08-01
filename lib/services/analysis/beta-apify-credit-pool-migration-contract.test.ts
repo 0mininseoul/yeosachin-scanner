@@ -49,9 +49,6 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(migration).toContain(
             'REVOKE ALL ON FUNCTION public.analysis_v2_valid_apify_credential_slot(TEXT)'
         );
-        expect(migration).not.toContain(
-            'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_test_operation_slot_map'
-        );
     });
 
     it('defines an independent exact six-slot beta helper that rejects null structurally', () => {
@@ -62,6 +59,41 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(helper).not.toContain("'secondary'");
         expect(helper).toContain('COALESCE(');
         expect(helper).toContain('FALSE');
+        expect(helper).toContain('IMMUTABLE');
+        expect(helper).toContain("SET search_path = ''");
+    });
+
+    it('pins the legacy authorized policy to primary through senary', () => {
+        const helper = functionDefinition(
+            'analysis_v2_valid_test_operation_slot_map'
+        );
+        for (const operation of [
+            'target-profile',
+            'relationship-followers',
+            'relationship-following',
+            'profile-fallback',
+            'target-likers',
+            'target-comments',
+            'candidate-likers',
+        ]) {
+            expect(helper).toContain(`'${operation}'`);
+        }
+        expect(helper).toMatch(
+            /slot_value #>> '\{\}'\s*NOT IN\s*\(\s*'primary',\s*'secondary',\s*'tertiary',\s*'quaternary',\s*'quinary',\s*'senary'\s*\)/
+        );
+        expect(helper).not.toContain("'septenary'");
+        expect(helper).not.toContain(
+            'analysis_v2_valid_apify_credential_slot'
+        );
+        expect(helper).toContain(
+            "p_map->>'target-profile' = p_map->>'profile-fallback'"
+        );
+        expect(helper).toContain(
+            "p_map->>'relationship-followers' <> p_map->>'relationship-following'"
+        );
+        expect(helper).toContain(
+            "p_map->>'target-likers' <> p_map->>'candidate-likers'"
+        );
         expect(helper).toContain('IMMUTABLE');
         expect(helper).toContain("SET search_path = ''");
     });
@@ -95,10 +127,10 @@ describe('beta Apify credit pool foundation migration contract', () => {
 
     it('adds a separate entry channel without widening either PlanAccessMode domain', () => {
         expect(migration).toMatch(
-            /ALTER TABLE public\.analysis_preflights[\s\S]*?ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard'/
+            /ALTER TABLE public\.analysis_preflights\s+ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';/
         );
         expect(migration).toMatch(
-            /ALTER TABLE public\.analysis_requests[\s\S]*?ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard'/
+            /ALTER TABLE public\.analysis_requests\s+ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';/
         );
         expect(migration.match(/analysis_entry_channel IN \('standard', 'betatest'\)/g))
             .toHaveLength(2);
@@ -117,6 +149,36 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(migration).not.toMatch(
             /plan_access_mode_snapshot IN \([^)]*'betatest'/
         );
+    });
+
+    it('adds channel checks unvalidated and validates them in a lighter-lock phase', () => {
+        expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
+        for (const constraint of [
+            'analysis_preflights_entry_channel_check',
+            'analysis_preflights_entry_channel_access_check',
+            'analysis_requests_entry_channel_check',
+            'analysis_requests_entry_channel_access_check',
+        ]) {
+            const addIndex = migration.indexOf(`ADD CONSTRAINT ${constraint}`);
+            const notValidIndex = migration.indexOf('NOT VALID', addIndex);
+            const validateIndex = migration.indexOf(
+                `VALIDATE CONSTRAINT ${constraint}`
+            );
+            expect(addIndex, `${constraint} must be added`).toBeGreaterThanOrEqual(0);
+            expect(notValidIndex, `${constraint} must be NOT VALID`)
+                .toBeGreaterThan(addIndex);
+            expect(validateIndex, `${constraint} must be validated separately`)
+                .toBeGreaterThan(notValidIndex);
+        }
+
+        const preflightColumn = migration.match(
+            /ALTER TABLE public\.analysis_preflights\s+ADD COLUMN analysis_entry_channel[\s\S]*?;/
+        )?.[0] ?? '';
+        const requestColumn = migration.match(
+            /ALTER TABLE public\.analysis_requests\s+ADD COLUMN analysis_entry_channel[\s\S]*?;/
+        )?.[0] ?? '';
+        expect(preflightColumn).not.toContain('ADD CONSTRAINT');
+        expect(requestColumn).not.toContain('ADD CONSTRAINT');
     });
 
     it('creates a non-enumerable audited grant table with no seeded user', () => {
@@ -183,6 +245,9 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(table).toContain('billing_cycle_start_at IS NOT NULL');
         expect(table).toContain('billing_cycle_end_at IS NOT NULL');
         expect(table).toContain('observed_at IS NOT NULL');
+        expect(table).toContain('pg_catalog.isfinite(billing_cycle_start_at)');
+        expect(table).toContain('pg_catalog.isfinite(billing_cycle_end_at)');
+        expect(table).toContain('pg_catalog.isfinite(observed_at)');
         expect(table).not.toMatch(
             /token|account_id|user_id|email|cookie|payload|raw_/i
         );
@@ -227,6 +292,9 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(upsert).toContain('billingCycleEndAt');
         expect(upsert).toContain('cycle_start_at <= v_observed_at');
         expect(upsert).toContain('v_observed_at < v_cycle_end_at');
+        expect(upsert).toContain('pg_catalog.isfinite(v_cycle_start_at)');
+        expect(upsert).toContain('pg_catalog.isfinite(v_cycle_end_at)');
+        expect(upsert).toContain('pg_catalog.isfinite(v_observed_at)');
         expect(upsert).toContain('v_common_observed_at');
         expect(upsert).not.toContain('v_common_cycle_start_at');
         expect(upsert).not.toContain('v_common_cycle_end_at');

@@ -32,6 +32,57 @@ $$;
 REVOKE ALL ON FUNCTION public.analysis_v2_valid_apify_credential_slot(TEXT)
     FROM PUBLIC, anon, authenticated, service_role;
 
+-- The authorized-free-e2e-v1 policy is a historical six-slot contract. Pin
+-- its accepted slot vocabulary so widening the general V2 helper cannot
+-- silently make septenary valid for already-deployed policy constraints.
+CREATE OR REPLACE FUNCTION public.analysis_v2_valid_test_operation_slot_map(
+    p_map JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT COALESCE(
+        pg_catalog.jsonb_typeof(p_map) = 'object'
+        AND p_map ?& ARRAY[
+            'target-profile',
+            'relationship-followers',
+            'relationship-following',
+            'profile-fallback',
+            'target-likers',
+            'target-comments',
+            'candidate-likers'
+        ]
+        AND p_map - ARRAY[
+            'target-profile',
+            'relationship-followers',
+            'relationship-following',
+            'profile-fallback',
+            'target-likers',
+            'target-comments',
+            'candidate-likers'
+        ] = '{}'::JSONB
+        AND NOT EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_each(p_map)
+                AS entry(operation_kind, slot_value)
+            WHERE pg_catalog.jsonb_typeof(entry.slot_value) <> 'string'
+               OR entry.slot_value #>> '{}' NOT IN (
+                    'primary', 'secondary', 'tertiary',
+                    'quaternary', 'quinary', 'senary'
+               )
+        )
+        AND p_map->>'target-profile' = p_map->>'profile-fallback'
+        AND p_map->>'relationship-followers' <> p_map->>'relationship-following'
+        AND p_map->>'target-likers' <> p_map->>'candidate-likers',
+        FALSE
+    );
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_valid_test_operation_slot_map(JSONB)
+    FROM PUBLIC, anon, authenticated, service_role;
+
 -- Beta-free credentials are an independent immutable subset. In particular,
 -- secondary cannot become eligible through a general-V2 vocabulary change.
 CREATE OR REPLACE FUNCTION public.analysis_beta_valid_apify_credential_slot(
@@ -167,20 +218,24 @@ REVOKE ALL ON FUNCTION public.analysis_beta_valid_operation_budget_map(JSONB)
 -- A beta path must retain production access snapshots and may not manufacture
 -- a signed test-entitlement identity.
 ALTER TABLE public.analysis_preflights
-    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard',
+    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';
+
+ALTER TABLE public.analysis_requests
+    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard';
+
+ALTER TABLE public.analysis_preflights
     ADD CONSTRAINT analysis_preflights_entry_channel_check CHECK (
         analysis_entry_channel IN ('standard', 'betatest')
-    ),
+    ) NOT VALID,
     ADD CONSTRAINT analysis_preflights_entry_channel_access_check CHECK (
         analysis_entry_channel <> 'betatest'
         OR access_mode = 'production'
-    );
+    ) NOT VALID;
 
 ALTER TABLE public.analysis_requests
-    ADD COLUMN analysis_entry_channel TEXT NOT NULL DEFAULT 'standard',
     ADD CONSTRAINT analysis_requests_entry_channel_check CHECK (
         analysis_entry_channel IN ('standard', 'betatest')
-    ),
+    ) NOT VALID,
     ADD CONSTRAINT analysis_requests_entry_channel_access_check CHECK (
         analysis_entry_channel <> 'betatest'
         OR (
@@ -188,7 +243,16 @@ ALTER TABLE public.analysis_requests
             AND plan_access_mode_snapshot IS NOT DISTINCT FROM 'production'
             AND test_entitlement_jti_hash IS NULL
         )
-    );
+    ) NOT VALID;
+
+ALTER TABLE public.analysis_preflights
+    VALIDATE CONSTRAINT analysis_preflights_entry_channel_check;
+ALTER TABLE public.analysis_preflights
+    VALIDATE CONSTRAINT analysis_preflights_entry_channel_access_check;
+ALTER TABLE public.analysis_requests
+    VALIDATE CONSTRAINT analysis_requests_entry_channel_check;
+ALTER TABLE public.analysis_requests
+    VALIDATE CONSTRAINT analysis_requests_entry_channel_access_check;
 
 COMMENT ON COLUMN public.analysis_preflights.analysis_entry_channel IS
     'Server-persisted entry channel; betatest is authority only when paired with a current service-owned access grant.';
@@ -293,6 +357,9 @@ CREATE TABLE public.analysis_apify_credit_snapshots (
             AND billing_cycle_start_at IS NOT NULL
             AND billing_cycle_end_at IS NOT NULL
             AND observed_at IS NOT NULL
+            AND pg_catalog.isfinite(billing_cycle_start_at)
+            AND pg_catalog.isfinite(billing_cycle_end_at)
+            AND pg_catalog.isfinite(observed_at)
             AND monthly_limit_usd BETWEEN 0 AND 100000
             AND monthly_usage_usd BETWEEN 0 AND 100000
             AND monthly_limit_usd = pg_catalog.round(monthly_limit_usd, 12)
@@ -543,6 +610,9 @@ BEGIN
            OR v_monthly_usage_usd NOT BETWEEN 0 AND 100000
            OR v_monthly_limit_usd <> pg_catalog.round(v_monthly_limit_usd, 12)
            OR v_monthly_usage_usd <> pg_catalog.round(v_monthly_usage_usd, 12)
+           OR NOT pg_catalog.isfinite(v_cycle_start_at)
+           OR NOT pg_catalog.isfinite(v_cycle_end_at)
+           OR NOT pg_catalog.isfinite(v_observed_at)
            OR NOT (
                 v_cycle_start_at <= v_observed_at
                 AND v_observed_at < v_cycle_end_at
