@@ -1001,7 +1001,121 @@ describe('betatest provider policy/guard migration PGlite', () => {
         )).rejects.toThrow(/ANALYSIS_V2_COLLECTION_CONTEXT_FENCE_MISMATCH/);
     });
 
-    it('keeps policy/credit tables and helper mutation service-only', async () => {
+    it('denies direct policy and beta-credit DML without changing state', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        const allocation = await db.query<{
+            id: string;
+            lifecycle: string;
+            policy_hash: string;
+            reservation_count: number;
+        }>(
+            `SELECT allocation.id,
+                    allocation.lifecycle_state AS lifecycle,
+                    policy.policy_hash,
+                    (SELECT pg_catalog.count(*)::INTEGER
+                     FROM public.analysis_beta_pool_reservations AS reservation
+                     WHERE reservation.allocation_id = allocation.id) AS reservation_count
+             FROM public.analysis_beta_pool_allocations AS allocation
+             JOIN public.analysis_v2_provider_execution_policies AS policy
+               ON policy.request_id = allocation.request_id
+             WHERE allocation.request_id = $1`,
+            [REQUEST_ID]
+        );
+        const before = allocation.rows[0];
+        expect(before).toBeDefined();
+
+        const attempts: Array<{ sql: string; params: unknown[] }> = [
+            {
+                sql: `INSERT INTO public.analysis_v2_provider_execution_policies (
+                    request_id, mode, policy_version, entitlement_jti_hash,
+                    target_instagram_id, operation_slot_map, policy_hash
+                ) VALUES ($1, 'betatest_free_pool', 'betatest-free-pool-v1',
+                    NULL, $2, $3::JSONB, $4)`,
+                params: [REQUEST_ID, TARGET, JSON.stringify(betaSlots), 'f'.repeat(64)],
+            },
+            {
+                sql: `UPDATE public.analysis_v2_provider_execution_policies
+                      SET policy_hash = $2 WHERE request_id = $1`,
+                params: [REQUEST_ID, 'f'.repeat(64)],
+            },
+            {
+                sql: 'DELETE FROM public.analysis_v2_provider_execution_policies WHERE request_id = $1',
+                params: [REQUEST_ID],
+            },
+            {
+                sql: `INSERT INTO public.analysis_beta_pool_allocations (
+                    id, preflight_id, user_id, lifecycle_state, expires_at
+                ) VALUES ($1, $2, $3, 'preflight_held',
+                    pg_catalog.clock_timestamp() + INTERVAL '1 hour')`,
+                params: [
+                    '60000000-0000-4000-8000-000000000001',
+                    PREFLIGHT_ID,
+                    USER_ID,
+                ],
+            },
+            {
+                sql: `UPDATE public.analysis_beta_pool_allocations
+                      SET lifecycle_state = 'preflight_held' WHERE id = $1`,
+                params: [before.id],
+            },
+            {
+                sql: 'DELETE FROM public.analysis_beta_pool_allocations WHERE id = $1',
+                params: [before.id],
+            },
+            {
+                sql: `INSERT INTO public.analysis_beta_pool_reservations (
+                    allocation_id, operation_family, credential_slot,
+                    reserved_usd, lifecycle_state
+                ) VALUES ($1, 'target-profile', 'primary',
+                    0.005200000000, 'active')`,
+                params: [before.id],
+            },
+            {
+                sql: `UPDATE public.analysis_beta_pool_reservations
+                      SET reserved_usd = 0.005100000000
+                      WHERE allocation_id = $1 AND operation_family = 'target-profile'`,
+                params: [before.id],
+            },
+            {
+                sql: `DELETE FROM public.analysis_beta_pool_reservations
+                      WHERE allocation_id = $1 AND operation_family = 'target-profile'`,
+                params: [before.id],
+            },
+        ];
+
+        for (const role of ['service_role', 'authenticated'] as const) {
+            for (const attempt of attempts) {
+                await db.exec(`SET ROLE ${role}`);
+                try {
+                    await expect(db.query(attempt.sql, attempt.params))
+                        .rejects.toThrow(/permission denied/i);
+                } finally {
+                    await db.exec('RESET ROLE');
+                }
+            }
+        }
+
+        const after = await db.query<{
+            id: string;
+            lifecycle: string;
+            policy_hash: string;
+            reservation_count: number;
+        }>(
+            `SELECT allocation.id,
+                    allocation.lifecycle_state AS lifecycle,
+                    policy.policy_hash,
+                    (SELECT pg_catalog.count(*)::INTEGER
+                     FROM public.analysis_beta_pool_reservations AS reservation
+                     WHERE reservation.allocation_id = allocation.id) AS reservation_count
+             FROM public.analysis_beta_pool_allocations AS allocation
+             JOIN public.analysis_v2_provider_execution_policies AS policy
+               ON policy.request_id = allocation.request_id
+             WHERE allocation.request_id = $1`,
+            [REQUEST_ID]
+        );
+        expect(after.rows).toEqual([before]);
+
         for (const table of [
             'analysis_v2_provider_execution_policies',
             'analysis_beta_pool_allocations',
