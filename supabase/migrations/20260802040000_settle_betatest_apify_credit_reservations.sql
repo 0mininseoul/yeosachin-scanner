@@ -480,7 +480,7 @@ ALTER TABLE public.analysis_beta_pool_reservation_archive ENABLE ROW LEVEL SECUR
 ALTER TABLE public.analysis_beta_pool_reservation_archive FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.analysis_beta_pool_reservation_archive FROM PUBLIC, anon, authenticated, service_role;
 COMMENT ON TABLE public.analysis_beta_pool_reservation_archive IS
-    'Immutable PII-free deterministic allocation/family settlement history and local debit ledger.';
+    'Immutable PII-free deterministic allocation/family settlement history and local debit ledger. ambiguous_held is intentionally never snapshot-retired: after source-ledger retention it remains a full conservative debit until a separately reviewed, evidence-backed service remediation exists.';
 
 CREATE OR REPLACE FUNCTION public.analysis_beta_pool_effective_local_debit_usd(
     p_credential_slot TEXT, p_observed_at TIMESTAMP WITH TIME ZONE
@@ -497,6 +497,10 @@ CREATE OR REPLACE FUNCTION public.analysis_beta_pool_effective_local_debit_usd(
       FROM public.analysis_beta_pool_reservation_archive AS archive
     ) AS debit
     WHERE debit.credential_slot = p_credential_slot
+      -- There is deliberately no synthetic post-retention watermark for an
+      -- ambiguous start. A provider snapshot, even a much newer one, cannot
+      -- prove the unknown charge was included, so only settled debit has the
+      -- strict-newer retirement path.
       AND (debit.state = 'ambiguous_held'
         OR debit.reconciliation_watermark >= p_observed_at);
 $$;

@@ -78,5 +78,7 @@ describe('betatest credit settlement/recovery migration contract', () => {
         expectServiceOnly('archive_settled_analysis_beta_apify_credit_allocations(INTEGER)');
         expect(migration).toContain('ON DELETE SET NULL');
         expect(migration).toContain('analysis_beta_pool_local_debits');
+        expect(migration).toContain("debit.state = 'ambiguous_held'");
+        expect(migration).toContain('never snapshot-retired');
     });
 });
