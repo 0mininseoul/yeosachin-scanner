@@ -123,23 +123,25 @@ describe('preflight provider-run adapter', () => {
         expect(JSON.stringify(rpc.mock.calls)).not.toContain('target.name');
     });
 
-    it('loads a stored senary identity and rejects an unsupported septenary identity', async () => {
-        const senaryStore = createPreflightProviderRunStore({
-            rpc: vi.fn(async () => ({
-                data: row('running', { credentialSlot: 'senary' }),
-                error: null,
-            })),
-        });
-        await expect(senaryStore.load({ preflightId, claimToken, inputHash }))
-            .resolves.toMatchObject({ credentialSlot: 'senary' });
+    it('loads stored senary and septenary identities and rejects octonary', async () => {
+        for (const credentialSlot of ['senary', 'septenary'] as const) {
+            const store = createPreflightProviderRunStore({
+                rpc: vi.fn(async () => ({
+                    data: row('running', { credentialSlot }),
+                    error: null,
+                })),
+            });
+            await expect(store.load({ preflightId, claimToken, inputHash }))
+                .resolves.toMatchObject({ credentialSlot });
+        }
 
-        const septenaryStore = createPreflightProviderRunStore({
+        const unsupportedStore = createPreflightProviderRunStore({
             rpc: vi.fn(async () => ({
-                data: row('running', { credentialSlot: 'septenary' }),
+                data: row('running', { credentialSlot: 'octonary' }),
                 error: null,
             })),
         });
-        await expect(septenaryStore.load({ preflightId, claimToken, inputHash }))
+        await expect(unsupportedStore.load({ preflightId, claimToken, inputHash }))
             .rejects.toThrow('invalid run identity');
     });
 
@@ -309,7 +311,7 @@ describe('preflight provider-run adapter', () => {
         expect(JSON.stringify(rpc.mock.calls)).not.toContain('api-token');
     });
 
-    it('reconciles all six credential slots and rejects unstable status or over-cap usage', async () => {
+    it('reconciles all seven credential slots and rejects unstable status or over-cap usage', async () => {
         const slots = [
             'primary',
             'secondary',
@@ -317,6 +319,7 @@ describe('preflight provider-run adapter', () => {
             'quaternary',
             'quinary',
             'senary',
+            'septenary',
         ] as const;
         const stable = slots.map((credentialSlot, index) => row('succeeded', {
             preflightId: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
@@ -347,9 +350,9 @@ describe('preflight provider-run adapter', () => {
                     }),
                 };
             },
-        })).resolves.toEqual({ eligible: 6, finalized: 6, failed: 0, hasMore: false });
+        })).resolves.toEqual({ eligible: 7, finalized: 7, failed: 0, hasMore: false });
         expect(new Set(selectedSlots)).toEqual(new Set(slots));
-        expect(reconcileUsage).toHaveBeenCalledTimes(6);
+        expect(reconcileUsage).toHaveBeenCalledTimes(7);
 
         const unsafeStore = {
             listUnreconciled: vi.fn(async () => [stable[0], stable[1]]),
