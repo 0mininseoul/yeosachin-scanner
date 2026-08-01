@@ -24,6 +24,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802030100_validate_betatest_provider_policy.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802040000_settle_betatest_apify_credit_reservations.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -212,7 +216,9 @@ CREATE TABLE public.analysis_preflight_provider_runs (
     credential_slot TEXT NOT NULL,
     max_charge_usd NUMERIC(18, 12) NOT NULL,
     status TEXT NOT NULL DEFAULT 'starting',
+    actual_usage_usd NUMERIC(18, 12),
     reserved_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    usage_reconciled_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     PRIMARY KEY (preflight_id, operation_key)
 );
@@ -775,6 +781,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802020000_add_betatest_apify_credit_reservations.sql',
             '20260802030000_bind_betatest_provider_policy.sql',
             '20260802030100_validate_betatest_provider_policy.sql',
+            '20260802040000_settle_betatest_apify_credit_reservations.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated
@@ -1394,5 +1401,85 @@ describe('betatest provider policy/guard migration PGlite', () => {
         } finally {
             await db.exec('RESET ROLE');
         }
+    });
+
+    it('settles a terminal request family-by-family and releases safe no-run budgets', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await db.query(
+            `UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`,
+            [REQUEST_ID]
+        );
+        const allocationId = (await db.query<{ id: string }>(
+            `SELECT id FROM public.analysis_beta_pool_allocations WHERE request_id = $1`, [REQUEST_ID]
+        )).rows[0].id;
+        const settled = await serviceQuery<JsonRow<{
+            lifecycleState: string; settledFamilies: number; releasedUsd: number;
+        }>>(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation($1, 'request_terminal') AS result`,
+            [allocationId]
+        );
+        expect(settled.rows[0].result).toMatchObject({
+            lifecycleState: 'settled', settledFamilies: 8,
+        });
+        const families = await db.query<{ state: string; count: number }>(
+            `SELECT lifecycle_state AS state, pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_beta_pool_reservations GROUP BY lifecycle_state`
+        );
+        expect(families.rows).toEqual([{ state: 'settled', count: 8 }]);
+    });
+
+    it('keeps an ambiguous started provider family held, then settles it after reconciliation', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs (
+                request_id, job_key, operation_key, input_hash, job_claim_token,
+                reservation_token, logical_provider, actor_id, credential_slot,
+                max_charge_usd, status
+             ) VALUES ($1, 'collect', $2, $3, $4, $5, 'apify', 'actor/test',
+                'tertiary', 0.02, 'starting')`,
+            [REQUEST_ID, `relationship-followers:${DIGEST}`, INPUT_HASH, CLAIM_TOKEN, RESERVATION_TOKEN]
+        );
+        await db.query(`UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1`, [REQUEST_ID]);
+        const allocationId = (await db.query<{ id: string }>(
+            `SELECT id FROM public.analysis_beta_pool_allocations WHERE request_id = $1`, [REQUEST_ID]
+        )).rows[0].id;
+        const partial = await serviceQuery<JsonRow<{ lifecycleState: string; heldFamilies: number }>>(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation($1, 'request_terminal') AS result`, [allocationId]
+        );
+        expect(partial.rows[0].result).toMatchObject({ lifecycleState: 'active', heldFamilies: 1 });
+        await db.query(
+            `UPDATE public.analysis_v2_provider_runs
+             SET status = 'failed', actual_usage_usd = 0.005,
+                 run_id = 'BetaRun123456', run_started_at = pg_catalog.clock_timestamp(),
+                 terminalized_at = pg_catalog.clock_timestamp(), usage_reconciled_at = pg_catalog.clock_timestamp()
+             WHERE request_id = $1`, [REQUEST_ID]
+        );
+        const complete = await serviceQuery<JsonRow<{ lifecycleState: string; actualUsd: number }>>(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation($1, 'recovery') AS result`, [allocationId]
+        );
+        expect(complete.rows[0].result).toMatchObject({ lifecycleState: 'settled', actualUsd: 0.005 });
+    });
+
+    it('releases an expired no-run preflight but never releases its starting intent', async () => {
+        await seedPendingBetaPreflight();
+        await db.query(`UPDATE public.analysis_preflights SET expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second' WHERE id = $1`, [PREFLIGHT_ID]);
+        await expect(serviceQuery(
+            `SELECT public.recover_analysis_beta_apify_credit_allocations(10)`
+        )).resolves.toBeDefined();
+        const released = await db.query<{ state: string }>(
+            `SELECT lifecycle_state AS state FROM public.analysis_beta_pool_allocations`
+        );
+        expect(released.rows).toEqual([{ state: 'settled' }]);
+
+        await db.exec(`DELETE FROM public.analysis_beta_pool_reservations; DELETE FROM public.analysis_beta_pool_allocations; DELETE FROM public.analysis_preflights; DELETE FROM public.analysis_beta_access_grants; DELETE FROM public.users;`);
+        await seedPendingBetaPreflight();
+        await db.query(`UPDATE public.analysis_preflights SET status = 'processing', lease_token = $2, lease_expires_at = pg_catalog.clock_timestamp() + INTERVAL '1 minute' WHERE id = $1`, [PREFLIGHT_ID, CLAIM_TOKEN]);
+        await reserveInitial();
+        await db.query(`UPDATE public.analysis_preflights SET expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second' WHERE id = $1`, [PREFLIGHT_ID]);
+        await serviceQuery(`SELECT public.recover_analysis_beta_apify_credit_allocations(10)`);
+        const held = await db.query<{ state: string }>(`SELECT lifecycle_state AS state FROM public.analysis_beta_pool_reservations`);
+        expect(held.rows).toEqual([{ state: 'preflight_held' }]);
     });
 });
