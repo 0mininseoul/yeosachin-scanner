@@ -33,8 +33,8 @@ describe('Amplitude replay privacy contract', () => {
 
         expect(analytics).toContain("NEXT_PUBLIC_VERCEL_ENV === 'production'");
         expect(analytics).toContain("NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED !== 'true'");
-        expect(analytics).toContain('SESSION_REPLAY_MAX_SAMPLE_RATE = 0.1');
-        expect(analytics).toContain("/^0\\.(?:0[1-9]|1|10)$/.test(rawSampleRate)");
+        expect(analytics).toContain('SESSION_REPLAY_MAX_SAMPLE_RATE = 1');
+        expect(analytics).toContain("/^(?:0\\.(?:0[1-9]|1|10)|1)$/.test(rawSampleRate)");
         expect(analytics).toContain('captureEnabled: false, sampleRate: 0');
         expect(analytics).toContain('hasExpectedReplaySampling');
         expect(analytics).toContain('isTrustedReplayConfigUrl');
