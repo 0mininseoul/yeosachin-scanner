@@ -484,6 +484,24 @@ describe('beta Apify credit reservation migration PGlite', () => {
         ]);
     });
 
+    it('permits the beta capacity code only for the immutable beta channel', async () => {
+        await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
+        await seedEligiblePreflight();
+        await expect(db.query(
+            `UPDATE public.analysis_preflights
+             SET error_code='BETA_CAPACITY_UNAVAILABLE' WHERE id=$1`,
+            [PREFLIGHT_ID]
+        )).rejects.toThrow('analysis_preflights_beta_capacity_channel_check');
+        await db.query(
+            `UPDATE public.analysis_preflights SET analysis_entry_channel='betatest',
+                error_code='BETA_CAPACITY_UNAVAILABLE' WHERE id=$1`,
+            [PREFLIGHT_ID]
+        );
+        await expect(db.query<{ error_code: string }>(
+            'SELECT error_code FROM public.analysis_preflights WHERE id=$1', [PREFLIGHT_ID]
+        )).resolves.toMatchObject({ rows: [{ error_code: 'BETA_CAPACITY_UNAVAILABLE' }] });
+    });
+
     it('claims the beta channel and keeps the fresh-admission dispatch fence', async () => {
         await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
         await seedEligiblePreflight();

@@ -16,6 +16,13 @@ ALTER TABLE public.analysis_preflights
             'BETA_CAPACITY_UNAVAILABLE', 'ANALYSIS_FAILED'
         )
     );
+-- The public beta-capacity terminal code is meaningful only for the dedicated
+-- immutable entry channel. Existing rows with every earlier code remain valid.
+ALTER TABLE public.analysis_preflights
+    ADD CONSTRAINT analysis_preflights_beta_capacity_channel_check CHECK (
+        error_code IS DISTINCT FROM 'BETA_CAPACITY_UNAVAILABLE'
+        OR analysis_entry_channel = 'betatest'
+    );
 
 CREATE OR REPLACE FUNCTION public.load_analysis_beta_apify_preflight_hold(
     p_preflight_id UUID

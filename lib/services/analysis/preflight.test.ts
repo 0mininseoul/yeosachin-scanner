@@ -43,6 +43,20 @@ const preflightInputHash = preflightTargetInputHash('target.name', {
 });
 
 describe('betatest preflight credit fence', () => {
+    it.each(['production', 'test_entitlement'] as const)(
+        'never persists the beta capacity code for a %s channel error',
+        async accessMode => {
+            const claimed = claim({ accessMode, analysisEntryChannel: 'standard' });
+            const store = workerStore(claimed);
+            await expect(processPreflight(preflightId, {
+                store,
+                providerRunStore: providerRunStore(),
+                getProfile: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); },
+            })).resolves.toBe('blocked');
+            expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'ANALYSIS_FAILED');
+        }
+    );
+
     it('prepares the frozen beta target hold before profile or provider work', async () => {
         const events: string[] = [];
         const coordinator: BetaApifyPreflightCoordinator = {

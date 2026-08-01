@@ -1301,6 +1301,7 @@ export async function processPreflight(
     } catch (error) {
         if (
             !terminalized
+            && claim.analysisEntryChannel === 'betatest'
             && error instanceof Error
             && error.message === BETA_APIFY_POOL_CAPACITY_ERROR
         ) {

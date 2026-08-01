@@ -25,4 +25,10 @@ describe('betatest preflight runtime migration contract', () => {
         expect(migration).toContain("REVOKE ALL ON FUNCTION public.load_analysis_beta_apify_preflight_hold(UUID)");
         expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.load_analysis_beta_apify_preflight_hold(UUID) TO service_role');
     });
+
+    it('fences beta capacity persistence to the dedicated entry channel', () => {
+        expect(migration).toContain('analysis_preflights_beta_capacity_channel_check');
+        expect(migration).toContain("error_code IS DISTINCT FROM 'BETA_CAPACITY_UNAVAILABLE'");
+        expect(migration).toContain("analysis_entry_channel = 'betatest'");
+    });
 });
