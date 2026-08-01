@@ -35,6 +35,9 @@ describe('betatest credit hardening migration contract', () => {
             expect(fn).toContain('analysis_beta_pool_effective_capacity_snapshot');
             expect(fn).not.toMatch(/monthly_limit_usd\s*-\s*[^;]*monthly_usage_usd\s*-\s*v_reserved_usd/);
         }
+        // BEFORE INSERT does not include NEW in the aggregate, so this is the
+        // final concurrent admission charge and must reject any shortfall.
+        expect(guard).toMatch(/v_capacity\s*<\s*NEW\.reserved_usd/);
     });
 
     it('keeps immutable reservation archive rows insert-only and conflicts before live deletion', () => {

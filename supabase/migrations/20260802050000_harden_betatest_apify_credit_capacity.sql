@@ -214,7 +214,11 @@ BEGIN
     SELECT snapshot.* INTO v_snapshot FROM public.analysis_apify_credit_snapshots AS snapshot WHERE snapshot.credential_slot = NEW.credential_slot;
     SELECT capacity.effective_capacity_usd INTO v_capacity FROM public.analysis_beta_pool_effective_capacity_snapshot() AS capacity
       WHERE capacity.credential_slot = NEW.credential_slot;
-    IF v_snapshot.health_state <> 'healthy' OR v_snapshot.observed_at IS NULL OR v_capacity < 0 THEN
+    -- This is a BEFORE INSERT trigger, so the effective snapshot contains
+    -- existing state only.  Charge NEW exactly once at this final concurrent
+    -- fence instead of merely rejecting already-negative capacity.
+    IF v_snapshot.health_state <> 'healthy' OR v_snapshot.observed_at IS NULL
+       OR v_capacity < NEW.reserved_usd THEN
       RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE', ERRCODE = 'P0001';
     END IF;
     RETURN NEW;

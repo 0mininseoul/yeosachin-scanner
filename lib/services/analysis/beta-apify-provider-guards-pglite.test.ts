@@ -1545,6 +1545,161 @@ describe('betatest provider policy/guard migration PGlite', () => {
         )).resolves.toBeDefined();
     });
 
+    it('rejects a positive residual reservation shortfall and permits an exact fit', async () => {
+        await seedPendingBetaPreflight();
+        // The initial target-profile hold is 0.0052.  Leave exactly 0.005 in
+        // primary, so a BEFORE INSERT fence must include the proposed row.
+        await db.query(
+            `UPDATE public.analysis_apify_credit_snapshots
+             SET monthly_limit_usd = 0.010200000000,
+                 monthly_usage_usd = 0
+             WHERE credential_slot = 'primary'`
+        );
+        await db.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, status, access_mode, expires_at
+             ) VALUES (
+                '20000000-0000-4000-8000-000000000099', $1,
+                'pending', 'production',
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+             )`,
+            [USER_ID]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_beta_pool_allocations (
+                id, preflight_id, user_id, lifecycle_state, expires_at
+             ) VALUES (
+                '60000000-0000-4000-8000-000000000099',
+                '20000000-0000-4000-8000-000000000099', $1,
+                'preflight_held', pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+             )`,
+            [USER_ID]
+        );
+
+        await expect(db.query(
+            `INSERT INTO public.analysis_beta_pool_reservations (
+                allocation_id, operation_family, credential_slot,
+                reserved_usd, lifecycle_state
+             ) VALUES (
+                '60000000-0000-4000-8000-000000000099', 'target-profile',
+                'primary', 0.005000000001, 'preflight_held'
+             )`
+        )).rejects.toThrow(/ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE/);
+
+        await expect(db.query(
+            `INSERT INTO public.analysis_beta_pool_reservations (
+                allocation_id, operation_family, credential_slot,
+                reserved_usd, lifecycle_state
+             ) VALUES (
+                '60000000-0000-4000-8000-000000000099', 'target-profile',
+                'primary', 0.005000000000, 'preflight_held'
+             )`
+        )).resolves.toBeDefined();
+    });
+
+    it('keeps an archived settled debit through an equal snapshot and retires it only after a newer exact-six refresh', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await makeJobLive();
+        await reserveProvider({ max: 0.02 });
+        await serviceQuery(
+            `SELECT public.checkpoint_analysis_v2_provider_run_started(
+                $1, 'collect', $2, $3, $4, $5
+            )`,
+            [
+                REQUEST_ID,
+                CLAIM_TOKEN,
+                `relationship-followers:${DIGEST}`,
+                RESERVATION_TOKEN,
+                PROVIDER_RUN_ID,
+            ]
+        );
+        await serviceQuery(
+            `SELECT public.checkpoint_analysis_v2_provider_run_terminal(
+                $1, 'collect', $2, $3, $4, $5, 'succeeded', 0.01
+            )`,
+            [
+                REQUEST_ID,
+                CLAIM_TOKEN,
+                `relationship-followers:${DIGEST}`,
+                RESERVATION_TOKEN,
+                PROVIDER_RUN_ID,
+            ]
+        );
+        await db.query(
+            `UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`,
+            [REQUEST_ID]
+        );
+        const allocationId = (await db.query<{ id: string }>(
+            `SELECT id FROM public.analysis_beta_pool_allocations WHERE request_id = $1`,
+            [REQUEST_ID]
+        )).rows[0]!.id;
+        await serviceQuery(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation(
+                $1, 'request_terminal'
+            )`,
+            [allocationId]
+        );
+        const watermark = (await db.query<{ watermark: string }>(
+            `SELECT reconciliation_watermark AS watermark
+             FROM public.analysis_beta_pool_reservations
+             WHERE allocation_id = $1 AND operation_family = 'relationship-followers'`,
+            [allocationId]
+        )).rows[0]!.watermark;
+        await serviceQuery(
+            `SELECT public.archive_settled_analysis_beta_apify_credit_allocations(10)`
+        );
+
+        const archived = await db.query<{ history: number; live: number }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_beta_pool_reservation_archive
+                 WHERE allocation_id = $1) AS history,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_beta_pool_allocations
+                 WHERE id = $1) AS live`,
+            [allocationId]
+        );
+        expect(archived.rows).toEqual([{ history: 8, live: 0 }]);
+
+        const equalSnapshot = snapshots().map(snapshot => ({
+            ...(snapshot as Record<string, unknown>), observedAt: watermark,
+        }));
+        await serviceQuery(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(equalSnapshot)]
+        );
+        const equalCapacity = await db.query<{ capacity: string }>(
+            `SELECT effective_capacity_usd AS capacity
+             FROM public.analysis_beta_pool_effective_capacity_snapshot()
+             WHERE credential_slot = 'tertiary'`
+        );
+        expect(Number(equalCapacity.rows[0]!.capacity)).toBeCloseTo(0.99, 12);
+
+        const newerObservedAt = new Date(
+            new Date(watermark).getTime() + 1
+        ).toISOString();
+        const newerSnapshot = snapshots().map(snapshot => ({
+            ...(snapshot as Record<string, unknown>), observedAt: newerObservedAt,
+        }));
+        await serviceQuery(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(newerSnapshot)]
+        );
+        const newerCapacity = await db.query<{ capacity: string }>(
+            `SELECT effective_capacity_usd AS capacity
+             FROM public.analysis_beta_pool_effective_capacity_snapshot()
+             WHERE credential_slot = 'tertiary'`
+        );
+        expect(Number(newerCapacity.rows[0]!.capacity)).toBeCloseTo(1, 12);
+        expect((await db.query(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_beta_pool_reservation_archive
+             WHERE allocation_id = $1`,
+            [allocationId]
+        )).rows).toEqual([{ count: 8 }]);
+    });
+
     it('fails immutable archive conflicts before deleting the live allocation', async () => {
         await seedPendingBetaRequest();
         await activateBeta();
