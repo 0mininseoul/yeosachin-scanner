@@ -4,6 +4,20 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
+-- The original generic arithmetic check accidentally made the deliberately
+-- conservative ambiguous_held archive shape impossible (it requires zero
+-- released debit, whereas a deterministic settlement releases the remainder).
+-- Keep the two archive shapes explicit and mutually exclusive.
+ALTER TABLE public.analysis_beta_pool_reservation_archive
+    DROP CONSTRAINT analysis_beta_pool_reservation_archive_check,
+    ADD CONSTRAINT analysis_beta_pool_reservation_archive_check CHECK (
+        (archive_state = 'settled'
+            AND actual_usd BETWEEN 0 AND reserved_usd
+            AND released_usd = reserved_usd - actual_usd)
+        OR (archive_state = 'ambiguous_held'
+            AND actual_usd = 0 AND released_usd = 0)
+    );
+
 CREATE OR REPLACE FUNCTION public.analysis_beta_pool_effective_capacity_snapshot()
 RETURNS TABLE (
     credential_slot TEXT,

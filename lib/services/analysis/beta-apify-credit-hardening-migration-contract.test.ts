@@ -42,6 +42,8 @@ describe('betatest credit hardening migration contract', () => {
 
     it('keeps immutable reservation archive rows insert-only and conflicts before live deletion', () => {
         const archive = definition('archive_settled_analysis_beta_apify_credit_allocations');
+        expect(migration).toContain('DROP CONSTRAINT analysis_beta_pool_reservation_archive_check');
+        expect(migration).toContain("archive_state = 'ambiguous_held'");
         expect(archive).not.toContain('ON CONFLICT (allocation_id,operation_family) DO UPDATE');
         expect(archive).toContain('ANALYSIS_BETA_POOL_ARCHIVE_CONFLICT');
         expect(archive.indexOf('ANALYSIS_BETA_POOL_ARCHIVE_CONFLICT'))
