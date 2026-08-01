@@ -53,6 +53,7 @@ const PREFLIGHT_ID = '20000000-0000-4000-8000-000000000001';
 const REQUEST_ID = '30000000-0000-4000-8000-000000000001';
 const CLAIM_TOKEN = '40000000-0000-4000-8000-000000000001';
 const CLAIM_TOKEN_B = '40000000-0000-4000-8000-000000000002';
+const CLAIM_TOKEN_C = '40000000-0000-4000-8000-000000000003';
 const RESERVATION_TOKEN = '50000000-0000-4000-8000-000000000001';
 const DISPATCH_TOKEN = '70000000-0000-4000-8000-000000000001';
 const PROVIDER_RUN_ID = 'BetaRun123456';
@@ -194,9 +195,14 @@ CREATE TABLE public.analysis_preflights (
     admission_requested_at TIMESTAMPTZ,
     admission_claim_token UUID,
     admission_lease_expires_at TIMESTAMPTZ,
+    admission_failure_count INTEGER NOT NULL DEFAULT 0,
+    admission_refreshed_at TIMESTAMPTZ,
+    admission_error_code TEXT,
+    admission_last_error_code TEXT,
     admission_dispatch_generation INTEGER NOT NULL DEFAULT 1,
     admission_dispatch_token UUID,
     admission_dispatch_state TEXT NOT NULL DEFAULT 'reserved',
+    admission_dispatched_at TIMESTAMPTZ,
     dispatch_generation INTEGER NOT NULL DEFAULT 0,
     dispatch_state TEXT NOT NULL DEFAULT 'unreserved',
     dispatch_token UUID,
@@ -204,6 +210,7 @@ CREATE TABLE public.analysis_preflights (
     dispatched_at TIMESTAMPTZ,
     consumed_request_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     expires_at TIMESTAMPTZ NOT NULL
 );
 
@@ -574,6 +581,50 @@ LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT NULL::UUID,NULL:
 CREATE FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER)
 RETURNS TABLE(claimed BOOLEAN, admission_status TEXT, target_instagram_id TEXT)
 LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT FALSE,NULL::TEXT,NULL::TEXT $$;
+
+CREATE FUNCTION public.record_analysis_v2_preflight_admission_failure(
+    p_preflight_id UUID, p_admission_generation INTEGER, p_claim_token UUID
+)
+RETURNS TABLE(admission_status TEXT, failure_count INTEGER, admission_error_code TEXT)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+    v_preflight public.analysis_preflights%ROWTYPE;
+    v_failure_count INTEGER;
+    v_status TEXT;
+    v_error_code TEXT;
+BEGIN
+    IF p_preflight_id IS NULL OR p_admission_generation IS NULL
+       OR p_admission_generation NOT BETWEEN 1 AND 100 OR p_claim_token IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE='ANALYSIS_V2_FRESH_ADMISSION_INVALID', ERRCODE='P0001';
+    END IF;
+    SELECT preflight.* INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.id=p_preflight_id
+      AND preflight.admission_generation=p_admission_generation
+      AND preflight.admission_status='processing'
+      AND preflight.admission_claim_token=p_claim_token
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING MESSAGE='ANALYSIS_V2_PREFLIGHT_NOT_READY', ERRCODE='P0001';
+    END IF;
+    v_failure_count:=LEAST(v_preflight.admission_failure_count+1,3);
+    v_status:=CASE WHEN v_failure_count>=3 THEN 'blocked' ELSE 'pending' END;
+    v_error_code:=CASE WHEN v_status='blocked' THEN 'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE' ELSE NULL END;
+    UPDATE public.analysis_preflights AS preflight
+    SET admission_status=v_status,
+        admission_refreshed_at=CASE WHEN v_status='blocked' THEN v_now ELSE NULL END,
+        admission_claim_token=NULL, admission_lease_expires_at=NULL,
+        admission_error_code=v_error_code, admission_failure_count=v_failure_count,
+        admission_last_error_code='ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE', updated_at=v_now
+    WHERE preflight.id=v_preflight.id;
+    RETURN QUERY SELECT v_status,v_failure_count,v_error_code;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.record_analysis_v2_preflight_admission_failure(UUID, INTEGER, UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.record_analysis_v2_preflight_admission_failure(UUID, INTEGER, UUID)
+    TO service_role;
 `;
 
 interface JsonRow<T> {
@@ -889,6 +940,78 @@ describe('betatest provider policy/guard migration PGlite', () => {
             active_count: 1,
             settled_count: 7,
         });
+    });
+
+    it('durably exhausts three betatest fresh-admission failures with stale-token fencing', async () => {
+        await seedPendingBetaPreflight();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status='ready', admission_status='pending', admission_generation=1,
+                 admission_dispatch_generation=1, admission_dispatch_token=$2,
+                 admission_dispatch_state='reserved'
+             WHERE id=$1`,
+            [PREFLIGHT_ID, DISPATCH_TOKEN]
+        );
+        const tokens = [CLAIM_TOKEN, CLAIM_TOKEN_B, CLAIM_TOKEN_C];
+        for (let index = 0; index < tokens.length; index++) {
+            const token = tokens[index];
+            const claimed = await serviceQuery<{
+                claimed: boolean; admission_status: string; analysis_entry_channel: string;
+            }>(
+                `SELECT * FROM public.claim_analysis_v2_preflight_admission(
+                    $1, 1, 1, $2, $3, 60
+                )`,
+                [PREFLIGHT_ID, DISPATCH_TOKEN, token]
+            );
+            expect(claimed.rows[0]).toMatchObject({
+                claimed: true,
+                admission_status: 'processing',
+                analysis_entry_channel: 'betatest',
+            });
+            const failed = await serviceQuery<{
+                admission_status: string; failure_count: number;
+                admission_error_code: string | null;
+            }>(
+                `SELECT * FROM public.record_analysis_v2_preflight_admission_failure(
+                    $1, 1, $2
+                )`,
+                [PREFLIGHT_ID, token]
+            );
+            expect(failed.rows[0]).toEqual({
+                admission_status: index === 2 ? 'blocked' : 'pending',
+                failure_count: index + 1,
+                admission_error_code: index === 2
+                    ? 'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE'
+                    : null,
+            });
+            await expect(serviceQuery(
+                `SELECT * FROM public.record_analysis_v2_preflight_admission_failure(
+                    $1, 1, $2
+                )`,
+                [PREFLIGHT_ID, token]
+            )).rejects.toThrow(/ANALYSIS_V2_PREFLIGHT_NOT_READY/);
+        }
+        const state = await db.query<{
+            admission_status: string; admission_failure_count: number;
+            admission_error_code: string; admission_claim_token: string | null;
+            admission_lease_expires_at: string | null;
+        }>(
+            `SELECT admission_status,admission_failure_count,admission_error_code,
+                    admission_claim_token,admission_lease_expires_at
+             FROM public.analysis_preflights WHERE id=$1`,
+            [PREFLIGHT_ID]
+        );
+        expect(state.rows[0]).toEqual({
+            admission_status: 'blocked', admission_failure_count: 3,
+            admission_error_code: 'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE',
+            admission_claim_token: null, admission_lease_expires_at: null,
+        });
+        const noWork = await db.query<{ requests: number; runs: number }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_requests) AS requests,
+                (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_preflight_provider_runs) AS runs`
+        );
+        expect(noWork.rows).toEqual([{ requests: 0, runs: 0 }]);
     });
 
     it('keeps legacy senary valid, septenary invalid, and beta secondary invalid', async () => {
