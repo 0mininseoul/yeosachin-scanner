@@ -28,7 +28,7 @@ describe('Amplitude replay privacy contract', () => {
         expect(analytics).not.toContain('unmaskSelector');
     });
 
-    it('requires production-only explicit bounded sampling and a fail-closed remote acknowledgement', () => {
+    it('uses bounded Vercel sampling with a fail-closed upstream capture veto', () => {
         const analytics = source('lib/services/analytics.ts');
 
         expect(analytics).toContain("NEXT_PUBLIC_VERCEL_ENV === 'production'");
@@ -36,7 +36,8 @@ describe('Amplitude replay privacy contract', () => {
         expect(analytics).toContain('SESSION_REPLAY_MAX_SAMPLE_RATE = 1');
         expect(analytics).toContain("/^(?:0\\.(?:0[1-9]|1|10)|1)$/.test(rawSampleRate)");
         expect(analytics).toContain('captureEnabled: false, sampleRate: 0');
-        expect(analytics).toContain('hasExpectedReplaySampling');
+        expect(analytics).toContain('hasRemoteReplayCaptureApproval');
+        expect(analytics).not.toContain('hasExpectedReplaySampling');
         expect(analytics).toContain('isTrustedReplayConfigUrl');
         expect(analytics).toContain(
             'Revalidate route, DNT, GPC, environment, and sticky shutdown after the config fetch.'

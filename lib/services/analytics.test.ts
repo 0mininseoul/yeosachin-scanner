@@ -477,12 +477,13 @@ describe('Amplitude analytics adapter', () => {
         })).toContain('"shouldRecord":false');
     });
 
-    it('enables only the explicit bounded production sample after an exact remote acknowledgement', async () => {
+    it('uses the Vercel rollout sample when trusted upstream config allows capture', async () => {
         enableReplayBrowser();
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', '1');
         const hostileRemoteConfig = {
             configs: {
                 sessionReplay: {
-                    sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 },
+                    sr_sampling_config: { capture_enabled: true, sample_rate: 0.05 },
                     sr_interaction_config: { enabled: true, batch: true },
                     sr_logging_config: {
                         console: { enabled: true },
@@ -508,7 +509,7 @@ describe('Amplitude analytics adapter', () => {
                 }) => Promise<Response>;
             };
         };
-        expect(options.sessionReplay.sampleRate).toBe(0.1);
+        expect(options.sessionReplay.sampleRate).toBe(1);
         const response = await options.sessionReplay.handleFetchConfig({
             headers: { accept: 'application/json' },
             method: 'GET',
@@ -527,7 +528,7 @@ describe('Amplitude analytics adapter', () => {
         expect(await response.json()).toEqual({
             configs: {
                 sessionReplay: {
-                    sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 },
+                    sr_sampling_config: { capture_enabled: true, sample_rate: 1 },
                     sr_interaction_config: { enabled: true, batch: true },
                 },
             },
@@ -745,14 +746,14 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.track).toHaveBeenCalledWith('landing_viewed', { source: 'direct' });
     });
 
-    it('does not accept unavailable, malformed, or wrong-sample remote replay config', async () => {
+    it('fails replay closed when upstream config is unavailable, malformed, or disables capture', async () => {
         enableReplayBrowser();
         const configFetch = vi.fn()
             .mockRejectedValueOnce(new Error('offline'))
             .mockResolvedValueOnce(new Response(JSON.stringify({ configs: { sessionReplay: {} } })))
             .mockResolvedValueOnce(new Response(JSON.stringify({
                 configs: {
-                    sessionReplay: { sr_sampling_config: { capture_enabled: true, sample_rate: 0.01 } },
+                    sessionReplay: { sr_sampling_config: { capture_enabled: false, sample_rate: 1 } },
                 },
             })));
         vi.stubGlobal('fetch', configFetch);
@@ -781,6 +782,70 @@ describe('Amplitude analytics adapter', () => {
         });
         expect((await untrusted.json()).configs.sessionReplay.sr_sampling_config.capture_enabled).toBe(false);
         expect(configFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('fails replay closed when the route becomes ineligible during upstream config fetch', async () => {
+        enableReplayBrowser();
+        let resolveFetch!: (response: Response) => void;
+        const configFetch = vi.fn().mockReturnValue(new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+        }));
+        vi.stubGlobal('fetch', configFetch);
+        const { initAmplitude } = await loadReplayAnalytics();
+        await initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { handleFetchConfig: (request: { headers: Record<string, string>; method: 'GET'; url: string }) => Promise<Response> };
+        };
+
+        const responsePromise = options.sessionReplay.handleFetchConfig({
+            headers: { Accept: '*/*' },
+            method: 'GET',
+            url: `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+        });
+        (window.location as unknown as { pathname: string }).pathname = '/admin/analysis-audit';
+        resolveFetch(new Response(JSON.stringify({
+            configs: { sessionReplay: { sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 } } },
+        })));
+
+        expect(await responsePromise.then((response) => response.json())).toEqual({
+            configs: {
+                sessionReplay: {
+                    sr_sampling_config: { capture_enabled: false, sample_rate: 0 },
+                },
+            },
+        });
+    });
+
+    it('fails replay closed when privacy opt-out appears during upstream config fetch', async () => {
+        enableReplayBrowser();
+        let resolveFetch!: (response: Response) => void;
+        const configFetch = vi.fn().mockReturnValue(new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+        }));
+        vi.stubGlobal('fetch', configFetch);
+        const { initAmplitude } = await loadReplayAnalytics();
+        await initAmplitude(null);
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: { handleFetchConfig: (request: { headers: Record<string, string>; method: 'GET'; url: string }) => Promise<Response> };
+        };
+
+        const responsePromise = options.sessionReplay.handleFetchConfig({
+            headers: { Accept: '*/*' },
+            method: 'GET',
+            url: `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+        });
+        (window.navigator as unknown as { doNotTrack?: string }).doNotTrack = '1';
+        resolveFetch(new Response(JSON.stringify({
+            configs: { sessionReplay: { sr_sampling_config: { capture_enabled: true, sample_rate: 0.1 } } },
+        })));
+
+        expect(await responsePromise.then((response) => response.json())).toEqual({
+            configs: {
+                sessionReplay: {
+                    sr_sampling_config: { capture_enabled: false, sample_rate: 0 },
+                },
+            },
+        });
     });
 
     it.each([
