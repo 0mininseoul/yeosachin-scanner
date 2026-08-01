@@ -93,6 +93,68 @@ describe('analysis V2 public contracts', () => {
         }).success).toBe(false);
     });
 
+    it('accepts a PostgreSQL JSON-rounded coverage ratio when the counts are consistent', () => {
+        const databaseRoundTrip = JSON.parse(JSON.stringify({
+            targetInstagramId: 'target',
+            targetProfileImage: null,
+            planId: 'standard',
+            followers: {
+                declared: 664,
+                collected: 663,
+                coverageRatio: 0.998493975903614,
+                meetsCoverageGate: true,
+                exactCountMatch: false,
+            },
+            following: {
+                declared: 3,
+                collected: 3,
+                coverageRatio: 1,
+                meetsCoverageGate: true,
+                exactCountMatch: true,
+            },
+            detectedMutuals: 3,
+            publicMutuals: 3,
+            privateMutuals: 0,
+            screenedMutuals: 3,
+            genderStats: { male: 1, female: 1, unknown: 1 },
+            notScreenedMutuals: 0,
+            exclusionApplied: false,
+            scorePolicyVersion: 'risk-policy-v2.2',
+        }));
+
+        expect(analysisResultSummaryV1Schema.safeParse(databaseRoundTrip).success).toBe(true);
+    });
+
+    it('rejects a materially wrong coverage ratio even when the other coverage fields match', () => {
+        expect(analysisResultSummaryV1Schema.safeParse({
+            targetInstagramId: 'target',
+            targetProfileImage: null,
+            planId: 'standard',
+            followers: {
+                declared: 664,
+                collected: 663,
+                coverageRatio: 0.998,
+                meetsCoverageGate: true,
+                exactCountMatch: false,
+            },
+            following: {
+                declared: 3,
+                collected: 3,
+                coverageRatio: 1,
+                meetsCoverageGate: true,
+                exactCountMatch: true,
+            },
+            detectedMutuals: 3,
+            publicMutuals: 3,
+            privateMutuals: 0,
+            screenedMutuals: 3,
+            genderStats: { male: 1, female: 1, unknown: 1 },
+            notScreenedMutuals: 0,
+            exclusionApplied: false,
+            scorePolicyVersion: 'risk-policy-v2.2',
+        }).success).toBe(false);
+    });
+
     it('recovers only a strictly bound consumed preflight request', () => {
         expect(preflightStatusV1Schema.parse({
             schemaVersion: 1,
