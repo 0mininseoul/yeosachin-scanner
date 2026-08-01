@@ -184,54 +184,158 @@ REVOKE ALL ON FUNCTION public.activate_analysis_beta_apify_request_credit_unboun
 ) FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE OR REPLACE FUNCTION public.analysis_v2_reserve_provider_run_internal(
-    p_request_id UUID, p_job_key TEXT, p_claim_token UUID, p_operation_key TEXT,
-    p_input_hash TEXT, p_logical_provider TEXT, p_actor_id TEXT,
-    p_credential_slot TEXT, p_max_charge_usd NUMERIC, p_reservation_token UUID
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_operation_key TEXT,
+    p_input_hash TEXT,
+    p_logical_provider TEXT,
+    p_actor_id TEXT,
+    p_credential_slot TEXT,
+    p_max_charge_usd NUMERIC,
+    p_reservation_token UUID
 )
-RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-DECLARE v_job public.analysis_pipeline_jobs%ROWTYPE;
-DECLARE v_existing public.analysis_v2_provider_runs%ROWTYPE;
-DECLARE v_beta BOOLEAN;
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_preflight_id UUID;
+    v_request public.analysis_requests%ROWTYPE;
+    v_job public.analysis_pipeline_jobs%ROWTYPE;
+    v_existing public.analysis_v2_provider_runs%ROWTYPE;
 BEGIN
-    SELECT EXISTS (
-        SELECT 1 FROM public.analysis_v2_provider_execution_policies AS policy
-        WHERE policy.request_id = p_request_id AND policy.mode = 'betatest_free_pool'
-    ) INTO v_beta;
-    IF NOT public.analysis_v2_valid_provider_operation_key(p_operation_key)
-       OR NOT (public.analysis_v2_valid_apify_credential_slot(p_credential_slot)
-               OR (v_beta AND public.analysis_beta_valid_apify_credential_slot(p_credential_slot)))
+    IF p_request_id IS NULL
+       OR p_job_key IS NULL
+       OR pg_catalog.char_length(p_job_key) NOT BETWEEN 1 AND 160
+       OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
+       OR p_claim_token IS NULL
+       OR p_operation_key IS NULL
+       OR NOT public.analysis_v2_valid_provider_operation_key(p_operation_key)
+       OR p_input_hash IS NULL
+       OR p_input_hash !~ '^[0-9a-f]{64}$'
+       OR p_logical_provider IS NULL
+       OR p_logical_provider NOT IN ('apify', 'coderx')
+       OR p_actor_id IS NULL
+       OR pg_catalog.char_length(p_actor_id) NOT BETWEEN 3 AND 200
+       OR p_actor_id !~ '^[A-Za-z0-9][A-Za-z0-9._~/-]{2,199}$'
+       OR NOT public.analysis_v2_valid_apify_credential_slot(
+            p_credential_slot
+       )
+       OR p_max_charge_usd IS NULL
        OR p_max_charge_usd NOT BETWEEN 0 AND 100000
-       OR p_max_charge_usd <> pg_catalog.round(p_max_charge_usd, 12) THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_INVALID', ERRCODE = 'P0001';
+       OR p_max_charge_usd <> pg_catalog.round(p_max_charge_usd, 12)
+       OR p_reservation_token IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_INVALID',
+            ERRCODE = 'P0001';
     END IF;
-    SELECT job.* INTO v_job FROM public.analysis_pipeline_jobs AS job
-    WHERE job.request_id = p_request_id AND job.job_key = p_job_key FOR UPDATE;
-    IF NOT FOUND OR v_job.status <> 'processing'
+
+    SELECT preflight.id
+    INTO v_preflight_id
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.consumed_request_id = p_request_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_NOT_FOUND',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT analysis_request.*
+    INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id
+      AND analysis_request.pipeline_version = 'v2'
+    FOR UPDATE;
+    IF NOT FOUND OR v_request.status NOT IN ('pending', 'processing') THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_NOT_ACTIVE',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT job.*
+    INTO v_job
+    FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id
+      AND job.job_key = p_job_key
+    FOR UPDATE;
+    IF NOT FOUND
+       OR v_job.status <> 'processing'
        OR v_job.lease_token IS DISTINCT FROM p_claim_token
-       OR v_job.lease_expires_at <= pg_catalog.clock_timestamp() THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH', ERRCODE = 'P0001';
+       OR v_job.lease_expires_at IS NULL
+       OR v_job.lease_expires_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH',
+            ERRCODE = 'P0001';
     END IF;
-    SELECT provider_run.* INTO v_existing FROM public.analysis_v2_provider_runs AS provider_run
-    WHERE provider_run.request_id = p_request_id AND provider_run.job_key = p_job_key
-      AND provider_run.operation_key = p_operation_key FOR UPDATE;
+
+    SELECT provider_run.*
+    INTO v_existing
+    FROM public.analysis_v2_provider_runs AS provider_run
+    WHERE provider_run.request_id = p_request_id
+      AND provider_run.job_key = p_job_key
+      AND provider_run.operation_key = p_operation_key
+    FOR UPDATE;
+
     IF FOUND THEN
         IF v_existing.input_hash IS DISTINCT FROM p_input_hash
            OR v_existing.logical_provider IS DISTINCT FROM p_logical_provider
            OR v_existing.actor_id IS DISTINCT FROM p_actor_id
            OR v_existing.credential_slot IS DISTINCT FROM p_credential_slot
            OR v_existing.max_charge_usd IS DISTINCT FROM p_max_charge_usd THEN
-            RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_IDENTITY_CONFLICT', ERRCODE = 'P0001';
+            RAISE EXCEPTION USING
+                MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_IDENTITY_CONFLICT',
+                ERRCODE = 'P0001';
         END IF;
-        RETURN pg_catalog.jsonb_build_object('created', FALSE, 'run', public.analysis_v2_provider_run_json(v_existing));
+
+        IF v_existing.job_claim_token IS DISTINCT FROM p_claim_token THEN
+            UPDATE public.analysis_v2_provider_runs AS provider_run
+            SET job_claim_token = p_claim_token,
+                updated_at = v_now
+            WHERE provider_run.request_id = p_request_id
+              AND provider_run.job_key = p_job_key
+              AND provider_run.operation_key = p_operation_key
+            RETURNING provider_run.* INTO v_existing;
+        END IF;
+
+        RETURN pg_catalog.jsonb_build_object(
+            'created', FALSE,
+            'run', public.analysis_v2_provider_run_json(v_existing)
+        );
     END IF;
+
     INSERT INTO public.analysis_v2_provider_runs (
-        request_id, job_key, operation_key, input_hash, job_claim_token,
-        reservation_token, logical_provider, actor_id, credential_slot, max_charge_usd
+        request_id,
+        job_key,
+        operation_key,
+        input_hash,
+        job_claim_token,
+        reservation_token,
+        logical_provider,
+        actor_id,
+        credential_slot,
+        max_charge_usd
     ) VALUES (
-        p_request_id, p_job_key, p_operation_key, p_input_hash, p_claim_token,
-        p_reservation_token, p_logical_provider, p_actor_id, p_credential_slot, p_max_charge_usd
-    ) RETURNING * INTO v_existing;
-    RETURN pg_catalog.jsonb_build_object('created', TRUE, 'run', public.analysis_v2_provider_run_json(v_existing));
+        p_request_id,
+        p_job_key,
+        p_operation_key,
+        p_input_hash,
+        p_claim_token,
+        p_reservation_token,
+        p_logical_provider,
+        p_actor_id,
+        p_credential_slot,
+        p_max_charge_usd
+    )
+    RETURNING * INTO v_existing;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'created', TRUE,
+        'run', public.analysis_v2_provider_run_json(v_existing)
+    );
 END;
 $$;
 REVOKE ALL ON FUNCTION public.analysis_v2_reserve_provider_run_internal(

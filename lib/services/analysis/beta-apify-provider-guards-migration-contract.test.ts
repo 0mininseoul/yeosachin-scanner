@@ -163,6 +163,34 @@ describe('betatest provider policy/guard migration contract', () => {
         );
     });
 
+    it('preserves shared internal validation and live-claim replay takeover', () => {
+        const internal = functionDefinition(
+            'analysis_v2_reserve_provider_run_internal'
+        );
+        for (const validation of [
+            'v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp()',
+            'pg_catalog.char_length(p_job_key) NOT BETWEEN 1 AND 160',
+            'NOT public.analysis_v2_valid_provider_operation_key(p_operation_key)',
+            "p_input_hash !~ '^[0-9a-f]{64}$'",
+            "p_logical_provider NOT IN ('apify', 'coderx')",
+            'pg_catalog.char_length(p_actor_id) NOT BETWEEN 3 AND 200',
+            'NOT public.analysis_v2_valid_apify_credential_slot',
+            'p_reservation_token IS NULL',
+        ]) {
+            expect(internal).toContain(validation);
+        }
+        expectInOrder(internal, [
+            'FROM public.analysis_preflights AS preflight',
+            'FROM public.analysis_requests AS analysis_request',
+            'FROM public.analysis_pipeline_jobs AS job',
+            'FROM public.analysis_v2_provider_runs AS provider_run',
+            'IF v_existing.job_claim_token IS DISTINCT FROM p_claim_token',
+            'UPDATE public.analysis_v2_provider_runs AS provider_run',
+            'SET job_claim_token = p_claim_token',
+            'updated_at = v_now',
+        ]);
+    });
+
     it('retains the legacy profile-repair alias only in the legacy branch', () => {
         const reserve = functionDefinition('reserve_analysis_v2_provider_run');
         const legacy = reserve.slice(

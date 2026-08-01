@@ -31,7 +31,10 @@ const USER_ID = '10000000-0000-4000-8000-000000000001';
 const PREFLIGHT_ID = '20000000-0000-4000-8000-000000000001';
 const REQUEST_ID = '30000000-0000-4000-8000-000000000001';
 const CLAIM_TOKEN = '40000000-0000-4000-8000-000000000001';
+const CLAIM_TOKEN_B = '40000000-0000-4000-8000-000000000002';
 const RESERVATION_TOKEN = '50000000-0000-4000-8000-000000000001';
+const DISPATCH_TOKEN = '70000000-0000-4000-8000-000000000001';
+const PROVIDER_RUN_ID = 'BetaRun123456';
 const TARGET = 'target.user';
 const INPUT_HASH = 'a'.repeat(64);
 const OTHER_INPUT_HASH = 'b'.repeat(64);
@@ -187,6 +190,13 @@ CREATE TABLE public.analysis_pipeline_jobs (
     dispatch_task_name TEXT,
     delivered_at TIMESTAMPTZ,
     first_started_at TIMESTAMPTZ,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    track TEXT NOT NULL DEFAULT 'collect',
+    kind TEXT NOT NULL DEFAULT 'collect',
+    batch INTEGER,
+    last_error_code TEXT,
+    last_error_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     input_hash TEXT NOT NULL DEFAULT '${INPUT_HASH}',
     lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
@@ -258,7 +268,12 @@ CREATE TABLE public.analysis_v2_provider_runs (
     credential_slot TEXT NOT NULL,
     max_charge_usd NUMERIC(18, 12) NOT NULL,
     status TEXT NOT NULL DEFAULT 'starting',
+    run_id TEXT,
+    actual_usage_usd NUMERIC(18, 12),
     reserved_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    run_started_at TIMESTAMPTZ,
+    terminalized_at TIMESTAMPTZ,
+    usage_reconciled_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     PRIMARY KEY (request_id, job_key, operation_key),
     FOREIGN KEY (request_id, job_key)
@@ -352,6 +367,156 @@ CREATE TABLE public.analysis_v2_provider_cleanup_intents (
     request_id UUID PRIMARY KEY,
     completed_at TIMESTAMPTZ
 );
+
+CREATE FUNCTION public.claim_analysis_v2_job(
+    p_request_id UUID, p_job_key TEXT, p_dispatch_generation INTEGER,
+    p_dispatch_token UUID, p_claim_token UUID,
+    p_lease_seconds INTEGER DEFAULT 120, p_max_attempts INTEGER DEFAULT 7
+)
+RETURNS TABLE(
+    claimed BOOLEAN, job_status TEXT, attempt_count INTEGER,
+    lease_expires_at TIMESTAMPTZ, track TEXT, job_kind TEXT,
+    batch INTEGER, input_hash TEXT
+)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+    v_request public.analysis_requests%ROWTYPE;
+    v_job public.analysis_pipeline_jobs%ROWTYPE;
+BEGIN
+    IF p_request_id IS NULL OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
+       OR p_dispatch_generation NOT BETWEEN 1 AND 1000
+       OR p_dispatch_token IS NULL OR p_claim_token IS NULL
+       OR p_lease_seconds NOT BETWEEN 30 AND 600
+       OR p_max_attempts NOT BETWEEN 1 AND 20 THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_INVALID_JOB_CLAIM_INPUT', ERRCODE = 'P0001';
+    END IF;
+    PERFORM 1 FROM public.analysis_preflights AS preflight
+    WHERE preflight.consumed_request_id = p_request_id FOR UPDATE;
+    SELECT analysis_request.* INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id
+      AND analysis_request.pipeline_version = 'v2' FOR UPDATE;
+    SELECT job.* INTO v_job FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id AND job.job_key = p_job_key FOR UPDATE;
+    IF v_request.id IS NULL OR v_job.request_id IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_JOB_NOT_FOUND', ERRCODE = 'P0001';
+    END IF;
+    IF v_job.dispatch_generation <> p_dispatch_generation
+       OR v_job.dispatch_reservation_token <> p_dispatch_token
+       OR v_job.dispatch_state NOT IN ('enqueued', 'delivered') THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_JOB_DISPATCH_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+    IF v_job.status = 'processing' AND v_job.lease_expires_at > v_now THEN
+        RETURN QUERY SELECT v_job.lease_token = p_claim_token,
+            v_job.status, v_job.attempt_count, v_job.lease_expires_at,
+            v_job.track, v_job.kind, v_job.batch, v_job.input_hash;
+        RETURN;
+    END IF;
+    UPDATE public.analysis_pipeline_jobs AS job
+    SET status = 'processing', dispatch_state = 'delivered',
+        lease_token = p_claim_token,
+        lease_expires_at = v_now + p_lease_seconds * INTERVAL '1 second',
+        attempt_count = job.attempt_count + 1,
+        first_started_at = COALESCE(job.first_started_at, v_now),
+        updated_at = v_now
+    WHERE job.request_id = p_request_id AND job.job_key = p_job_key
+    RETURNING job.* INTO v_job;
+    RETURN QUERY SELECT TRUE, v_job.status, v_job.attempt_count,
+        v_job.lease_expires_at, v_job.track, v_job.kind, v_job.batch,
+        v_job.input_hash;
+END
+$$;
+REVOKE ALL ON FUNCTION public.claim_analysis_v2_job(
+    UUID, TEXT, INTEGER, UUID, UUID, INTEGER, INTEGER
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_job(
+    UUID, TEXT, INTEGER, UUID, UUID, INTEGER, INTEGER
+) TO service_role;
+
+CREATE FUNCTION public.checkpoint_analysis_v2_provider_run_started(
+    p_request_id UUID, p_job_key TEXT, p_claim_token UUID,
+    p_operation_key TEXT, p_reservation_token UUID, p_run_id TEXT
+)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+    v_job public.analysis_pipeline_jobs%ROWTYPE;
+    v_run public.analysis_v2_provider_runs%ROWTYPE;
+BEGIN
+    PERFORM 1 FROM public.analysis_preflights AS preflight
+    WHERE preflight.consumed_request_id = p_request_id FOR UPDATE;
+    PERFORM 1 FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id AND analysis_request.pipeline_version = 'v2' FOR UPDATE;
+    SELECT job.* INTO v_job FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id AND job.job_key = p_job_key FOR UPDATE;
+    IF v_job.status <> 'processing' OR v_job.lease_token IS DISTINCT FROM p_claim_token
+       OR v_job.lease_expires_at <= v_now THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+    SELECT provider_run.* INTO v_run FROM public.analysis_v2_provider_runs AS provider_run
+    WHERE provider_run.request_id = p_request_id AND provider_run.job_key = p_job_key
+      AND provider_run.operation_key = p_operation_key FOR UPDATE;
+    IF v_run.reservation_token IS DISTINCT FROM p_reservation_token
+       OR v_run.job_claim_token IS DISTINCT FROM p_claim_token THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.analysis_v2_provider_runs AS provider_run
+    SET status = 'running', run_id = p_run_id, run_started_at = v_now,
+        updated_at = v_now
+    WHERE provider_run.request_id = p_request_id AND provider_run.job_key = p_job_key
+      AND provider_run.operation_key = p_operation_key
+    RETURNING provider_run.* INTO v_run;
+    RETURN public.analysis_v2_provider_run_json(v_run);
+END
+$$;
+REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_provider_run_started(
+    UUID, TEXT, UUID, TEXT, UUID, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_provider_run_started(
+    UUID, TEXT, UUID, TEXT, UUID, TEXT
+) TO service_role;
+
+CREATE FUNCTION public.checkpoint_analysis_v2_provider_run_terminal(
+    p_request_id UUID, p_job_key TEXT, p_claim_token UUID,
+    p_operation_key TEXT, p_reservation_token UUID, p_run_id TEXT,
+    p_status TEXT, p_actual_usage_usd NUMERIC
+)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+    v_run public.analysis_v2_provider_runs%ROWTYPE;
+BEGIN
+    PERFORM 1 FROM public.analysis_preflights AS preflight
+    WHERE preflight.consumed_request_id = p_request_id FOR UPDATE;
+    PERFORM 1 FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id AND analysis_request.pipeline_version = 'v2' FOR UPDATE;
+    PERFORM 1 FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id AND job.job_key = p_job_key FOR UPDATE;
+    SELECT provider_run.* INTO v_run FROM public.analysis_v2_provider_runs AS provider_run
+    WHERE provider_run.request_id = p_request_id AND provider_run.job_key = p_job_key
+      AND provider_run.operation_key = p_operation_key FOR UPDATE;
+    IF v_run.reservation_token IS DISTINCT FROM p_reservation_token
+       OR v_run.job_claim_token IS DISTINCT FROM p_claim_token
+       OR v_run.run_id IS DISTINCT FROM p_run_id OR v_run.status <> 'running' THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.analysis_v2_provider_runs AS provider_run
+    SET status = p_status, actual_usage_usd = p_actual_usage_usd,
+        terminalized_at = v_now, usage_reconciled_at = v_now,
+        updated_at = v_now
+    WHERE provider_run.request_id = p_request_id AND provider_run.job_key = p_job_key
+      AND provider_run.operation_key = p_operation_key
+    RETURNING provider_run.* INTO v_run;
+    RETURN public.analysis_v2_provider_run_json(v_run);
+END
+$$;
+REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_provider_run_terminal(
+    UUID, TEXT, UUID, TEXT, UUID, TEXT, TEXT, NUMERIC
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_provider_run_terminal(
+    UUID, TEXT, UUID, TEXT, UUID, TEXT, TEXT, NUMERIC
+) TO service_role;
 
 CREATE TABLE public.analysis_v2_provider_execution_policies (
     request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
@@ -521,6 +686,7 @@ async function reserveProvider(input: {
     max?: number;
     inputHash?: string;
     reservationToken?: string;
+    claimToken?: string;
     requestId?: string;
     jobKey?: string;
 } = {}): Promise<ReservationJson> {
@@ -532,7 +698,7 @@ async function reserveProvider(input: {
         [
             input.requestId ?? REQUEST_ID,
             input.jobKey ?? 'collect',
-            CLAIM_TOKEN,
+            input.claimToken ?? CLAIM_TOKEN,
             `${family}:${input.digest ?? DIGEST}`,
             input.inputHash ?? INPUT_HASH,
             input.slot ?? betaSlots[family] ?? 'primary',
@@ -815,6 +981,93 @@ describe('betatest provider policy/guard migration PGlite', () => {
         });
         await expect(reserveProvider({ max: 0.02, inputHash: OTHER_INPUT_HASH }))
             .rejects.toThrow(/ANALYSIS_V2_PROVIDER_RUN_IDENTITY_CONFLICT/);
+    });
+
+    it('rebinds an exact beta replay to a reclaimed live job claim', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET dispatch_state = 'delivered', dispatch_generation = 1,
+                 dispatch_reservation_token = $2
+             WHERE request_id = $1 AND job_key = 'collect'`,
+            [REQUEST_ID, DISPATCH_TOKEN]
+        );
+        const claimA = await serviceQuery<{ claimed: boolean }>(
+            `SELECT claimed FROM public.claim_analysis_v2_job(
+                $1, 'collect', 1, $2, $3, 120, 7
+            )`,
+            [REQUEST_ID, DISPATCH_TOKEN, CLAIM_TOKEN]
+        );
+        expect(claimA.rows).toEqual([{ claimed: true }]);
+        await expect(reserveProvider({ max: 0.01 }))
+            .resolves.toMatchObject({ created: true });
+
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET lease_expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second'
+             WHERE request_id = $1 AND job_key = 'collect'`,
+            [REQUEST_ID]
+        );
+        const claimB = await serviceQuery<{ claimed: boolean }>(
+            `SELECT claimed FROM public.claim_analysis_v2_job(
+                $1, 'collect', 1, $2, $3, 120, 7
+            )`,
+            [REQUEST_ID, DISPATCH_TOKEN, CLAIM_TOKEN_B]
+        );
+        expect(claimB.rows).toEqual([{ claimed: true }]);
+
+        await expect(reserveProvider({
+            max: 0.01,
+            claimToken: CLAIM_TOKEN_B,
+        })).resolves.toMatchObject({ created: false });
+        const rebound = await db.query<{ claim_token: string }>(
+            `SELECT job_claim_token AS claim_token
+             FROM public.analysis_v2_provider_runs
+             WHERE request_id = $1 AND job_key = 'collect'
+               AND operation_key = $2`,
+            [REQUEST_ID, `relationship-followers:${DIGEST}`]
+        );
+        expect(rebound.rows).toEqual([{ claim_token: CLAIM_TOKEN_B }]);
+
+        await expect(serviceQuery(
+            `SELECT public.checkpoint_analysis_v2_provider_run_started(
+                $1, 'collect', $2, $3, $4, $5
+            )`,
+            [
+                REQUEST_ID,
+                CLAIM_TOKEN_B,
+                `relationship-followers:${DIGEST}`,
+                RESERVATION_TOKEN,
+                PROVIDER_RUN_ID,
+            ]
+        )).resolves.toBeDefined();
+        await expect(serviceQuery(
+            `SELECT public.checkpoint_analysis_v2_provider_run_terminal(
+                $1, 'collect', $2, $3, $4, $5, 'succeeded', 0.005
+            )`,
+            [
+                REQUEST_ID,
+                CLAIM_TOKEN_B,
+                `relationship-followers:${DIGEST}`,
+                RESERVATION_TOKEN,
+                PROVIDER_RUN_ID,
+            ]
+        )).resolves.toBeDefined();
+        const terminal = await db.query<{
+            status: string;
+            claim_token: string;
+        }>(
+            `SELECT status, job_claim_token AS claim_token
+             FROM public.analysis_v2_provider_runs
+             WHERE request_id = $1 AND job_key = 'collect'
+               AND operation_key = $2`,
+            [REQUEST_ID, `relationship-followers:${DIGEST}`]
+        );
+        expect(terminal.rows).toEqual([{
+            status: 'succeeded',
+            claim_token: CLAIM_TOKEN_B,
+        }]);
     });
 
     it('serializes cumulative family headroom so a second operation cannot oversubscribe', async () => {
