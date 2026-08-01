@@ -355,11 +355,16 @@ BEGIN
     IF pg_catalog.strpos(v_rearm_definition, 'v_partial_adoption_variant BOOLEAN') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_topology_valid BOOLEAN') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_partial_adoption_topology_valid BOOLEAN') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_preflight public.analysis_preflights%ROWTYPE') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_current_operation TEXT') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'pg_catalog.count(*) = 8') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'pg_catalog.count(*) = 3') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'count(DISTINCT source_run.job_key) FILTER') > 0
-       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^relationship-followers:') > 0
-       AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^relationship-following:') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_initial_operation') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_operation') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_current_operation') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_preflight.admission_target_following_count') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'v_preflight.target_following_count, v_order.plan_id, TRUE') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^profile-fallback:') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^target-likers:') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^target-comments:') > 0
@@ -368,8 +373,9 @@ BEGIN
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.usage_reconciled_at IS NOT NULL') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key = adoption.source_operation_key') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.run_id = adoption.source_run_id') > 0
-       AND pg_catalog.strpos(v_rearm_definition, 'adoption.operation_key = source_run.operation_key') > 0
-       AND pg_catalog.strpos(v_rearm_definition, 'adoption.destination_input_hash = source_run.input_hash') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'adoption.operation_key = v_partial_current_operation') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'adoption.destination_input_hash = v_partial_current_input') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'ELSE adoption.operation_key = source_run.operation_key') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_source_topology_valid') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_adoption_topology_valid') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'run.request_id = v_request.id') > 0
@@ -391,19 +397,53 @@ BEGIN
             '    v_preflight_generation INTEGER;' || chr(10)
                 || '    v_partial_adoption_variant BOOLEAN;' || chr(10)
                 || '    v_partial_source_topology_valid BOOLEAN;' || chr(10)
-                || '    v_partial_adoption_topology_valid BOOLEAN;'
+                || '    v_partial_adoption_topology_valid BOOLEAN;' || chr(10)
+                || '    v_partial_source_preflight public.analysis_preflights%ROWTYPE;' || chr(10)
+                || '    v_partial_source_initial_operation TEXT;' || chr(10)
+                || '    v_partial_source_initial_input TEXT;' || chr(10)
+                || '    v_partial_source_operation TEXT;' || chr(10)
+                || '    v_partial_source_input TEXT;' || chr(10)
+                || '    v_partial_current_operation TEXT;' || chr(10)
+                || '    v_partial_current_input TEXT;'
         );
         v_rearm_rewritten := pg_catalog.replace(v_rearm_rewritten,
             $old$    v_normalized_preflight.excluded_instagram_id := v_order.excluded_instagram_id;$old$,
             $new$    v_normalized_preflight.excluded_instagram_id := v_order.excluded_instagram_id;
+    SELECT source_preflight.* INTO v_partial_source_preflight
+    FROM public.analysis_requests AS source_request
+    JOIN public.analysis_preflights AS source_preflight
+      ON source_preflight.id = source_request.preflight_id
+    WHERE source_request.id = v_lineage.failed_request_id;
+    SELECT identity.operation_key, identity.input_hash
+    INTO v_partial_source_initial_operation, v_partial_source_initial_input
+    FROM public.analysis_v2_relationship_provider_identity(
+        'following', v_order.target_instagram_id,
+        v_partial_source_preflight.admission_target_following_count,
+        v_order.plan_id, FALSE
+    ) AS identity;
+    SELECT identity.operation_key, identity.input_hash
+    INTO v_partial_source_operation, v_partial_source_input
+    FROM public.analysis_v2_relationship_provider_identity(
+        'following', v_order.target_instagram_id,
+        v_partial_source_preflight.admission_target_following_count,
+        v_order.plan_id, TRUE
+    ) AS identity;
+    SELECT identity.operation_key, identity.input_hash
+    INTO v_partial_current_operation, v_partial_current_input
+    FROM public.analysis_v2_relationship_provider_identity(
+        'following', v_order.target_instagram_id,
+        v_preflight.target_following_count, v_order.plan_id, TRUE
+    ) AS identity;
     SELECT pg_catalog.count(*) = 8
        AND pg_catalog.count(*) FILTER (
             WHERE source_run.job_key = 'track:relationships:collect'
-              AND source_run.operation_key ~ '^relationship-followers:[0-9a-f]{64}$'
+              AND source_run.operation_key = v_partial_source_initial_operation
+              AND source_run.input_hash = v_partial_source_initial_input
        ) = 1
        AND pg_catalog.count(*) FILTER (
             WHERE source_run.job_key = 'track:relationships:collect'
-              AND source_run.operation_key ~ '^relationship-following:[0-9a-f]{64}$'
+              AND source_run.operation_key = v_partial_source_operation
+              AND source_run.input_hash = v_partial_source_input
        ) = 1
        AND pg_catalog.count(*) FILTER (
             WHERE source_run.job_key ~ '^track:profiles:batch:[0-3]$'
@@ -433,7 +473,10 @@ BEGIN
     SELECT pg_catalog.count(*) = 3
        AND pg_catalog.count(*) FILTER (
             WHERE source_run.job_key = 'track:relationships:collect'
-              AND source_run.operation_key ~ '^relationship-following:[0-9a-f]{64}$'
+              AND source_run.operation_key = v_partial_source_operation
+              AND source_run.input_hash = v_partial_source_input
+              AND adoption.operation_key = v_partial_current_operation
+              AND adoption.destination_input_hash = v_partial_current_input
        ) = 1
        AND pg_catalog.count(*) FILTER (
             WHERE source_run.job_key = 'track:target-evidence:collect'
@@ -445,9 +488,14 @@ BEGIN
        ) = 1
        AND pg_catalog.count(source_run.request_id) = 3
        AND pg_catalog.bool_and(adoption.job_key = source_run.job_key)
-       AND pg_catalog.bool_and(adoption.operation_key = source_run.operation_key)
        AND pg_catalog.bool_and(
-            adoption.destination_input_hash = source_run.input_hash
+            CASE
+                WHEN source_run.operation_key = v_partial_source_operation
+                    THEN adoption.operation_key = v_partial_current_operation
+                     AND adoption.destination_input_hash = v_partial_current_input
+                ELSE adoption.operation_key = source_run.operation_key
+                 AND adoption.destination_input_hash = source_run.input_hash
+            END
        )
     INTO v_partial_adoption_topology_valid
     FROM public.analysis_v2_recovery_provider_run_adoptions AS adoption
@@ -485,11 +533,16 @@ BEGIN
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_adoption_variant BOOLEAN') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_topology_valid BOOLEAN') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_adoption_topology_valid BOOLEAN') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_preflight public.analysis_preflights%ROWTYPE') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_current_operation TEXT') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'pg_catalog.count(*) = 8') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'pg_catalog.count(*) = 3') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'count(DISTINCT source_run.job_key) FILTER') = 0
-           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^relationship-followers:') = 0
-           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^relationship-following:') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_initial_operation') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_operation') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_current_operation') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_preflight.admission_target_following_count') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'v_preflight.target_following_count, v_order.plan_id, TRUE') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^profile-fallback:') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^target-likers:') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^target-comments:') = 0
@@ -498,8 +551,9 @@ BEGIN
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.usage_reconciled_at IS NOT NULL') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key = adoption.source_operation_key') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.run_id = adoption.source_run_id') = 0
-           OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.operation_key = source_run.operation_key') = 0
-           OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.destination_input_hash = source_run.input_hash') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.operation_key = v_partial_current_operation') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.destination_input_hash = v_partial_current_input') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'ELSE adoption.operation_key = source_run.operation_key') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_source_topology_valid') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_adoption_topology_valid') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'run.request_id = v_request.id') = 0

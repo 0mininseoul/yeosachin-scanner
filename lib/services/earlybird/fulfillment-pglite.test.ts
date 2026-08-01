@@ -3854,16 +3854,83 @@ describe('operator-approved earlybird fulfillment migration', () => {
     });
 
     it('rearms the exact r1 partial-adoption failure and lets r2 adopt all source runs', async () => {
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard', target_followers_count = 235,
+                 target_following_count = 623
+             WHERE id = $1`,
+            [ORDER]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 233, target_following_count = 624,
+                 capacity_required_plan_id = 'standard', required_plan_id = 'standard',
+                 plan_cards_snapshot = $2::JSONB
+             WHERE id = $1`,
+            [PREFLIGHT, JSON.stringify(standardRequiredCards)]
+        );
         const requestKey = await seedRecoveredRequestCollision();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 233,
+                 target_following_count = CASE WHEN id = $1 THEN 623 ELSE 624 END,
+                 capacity_required_plan_id = 'standard', required_plan_id = 'standard',
+                 plan_cards_snapshot = $2::JSONB,
+                 admission_status = 'ready', admission_selected_plan_id = 'standard',
+                 admission_entitlement_jti_hash = $3, admission_token = $5,
+                 admission_refreshed_at = clock_timestamp(),
+                 admission_target_followers_count = 233,
+                 admission_target_following_count =
+                    CASE WHEN id = $1 THEN 623 ELSE 624 END,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $2::JSONB
+             WHERE id = $1 OR id = $4`,
+            [
+                SOURCE_PREFLIGHT, JSON.stringify(standardRequiredCards),
+                admissionHash(), PREFLIGHT, ADMISSION_TOKEN,
+            ]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_status = 'ready', admission_selected_plan_id = 'standard',
+                 admission_entitlement_jti_hash = $2, admission_token = $3,
+                 admission_refreshed_at = clock_timestamp(),
+                 admission_target_followers_count = 233,
+                 admission_target_following_count = 624,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $4::JSONB
+             WHERE id = $1`,
+            [
+                RECOVERY_PREFLIGHT, admissionHash(), ADMISSION_TOKEN,
+                JSON.stringify(standardRequiredCards),
+            ]
+        );
         const relationshipJob = 'track:relationships:collect';
         const targetJob = 'track:target-evidence:collect';
+        const relationshipIdentity = async (count: number, replacement: boolean) => (
+            (await db.query<{ operation_key: string; input_hash: string }>(
+                `SELECT * FROM public.analysis_v2_relationship_provider_identity(
+                    'following', 'sample.account', $1, 'standard', $2
+                 )`,
+                [count, replacement]
+            )).rows[0]
+        );
+        const sourceFollowing = await relationshipIdentity(623, true);
+        const sourceInitialFollowing = await relationshipIdentity(623, false);
+        const currentFollowing = await relationshipIdentity(624, true);
+        const currentInitialFollowing = await relationshipIdentity(624, false);
+        const wrongSourceFollowing = await relationshipIdentity(622, true);
         const sourceRuns = [
             {
                 jobKey: relationshipJob,
                 track: 'relationships',
-                operationKey: `relationship-following:${'a'.repeat(64)}`,
-                inputHash: 'd'.repeat(64),
-                actorId: 'relationship-actor',
+                operationKey: sourceFollowing.operation_key,
+                inputHash: sourceFollowing.input_hash,
+                destinationOperationKey: currentFollowing.operation_key,
+                destinationInputHash: currentFollowing.input_hash,
+                actorId: 'scraping_solutions/instagram-scraper-followers-following-no-cookies',
                 runId: 'PartialRelationshipRun1',
             },
             {
@@ -3885,10 +3952,12 @@ describe('operator-approved earlybird fulfillment migration', () => {
             {
                 jobKey: relationshipJob,
                 track: 'relationships',
-                operationKey: `relationship-followers:${'4'.repeat(64)}`,
-                inputHash: '4'.repeat(64),
-                actorId: 'relationship-actor',
-                runId: 'PartialFollowersRun1',
+                operationKey: sourceInitialFollowing.operation_key,
+                inputHash: sourceInitialFollowing.input_hash,
+                destinationOperationKey: currentInitialFollowing.operation_key,
+                destinationInputHash: currentInitialFollowing.input_hash,
+                actorId: 'scraping_solutions/instagram-scraper-followers-following-no-cookies',
+                runId: 'PartialInitialFollowingRun1',
             },
             ...Array.from({ length: 4 }, (_, index) => ({
                 jobKey: `track:profiles:batch:${index}`,
@@ -3899,6 +3968,14 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 runId: `PartialProfileRun${index + 1}`,
             })),
         ];
+        const destinationIdentity = (sourceRun: typeof sourceRuns[number]) => ({
+            operationKey: 'destinationOperationKey' in sourceRun
+                ? sourceRun.destinationOperationKey
+                : sourceRun.operationKey,
+            inputHash: 'destinationInputHash' in sourceRun
+                ? sourceRun.destinationInputHash
+                : sourceRun.inputHash,
+        });
         for (const sourceRun of sourceRuns) {
             await db.query(
                 `INSERT INTO public.analysis_pipeline_jobs(
@@ -3929,8 +4006,14 @@ describe('operator-approved earlybird fulfillment migration', () => {
              WHERE request_id = $1`,
             [FAILED_REQUEST]
         )).rows[0].count).toBe(8);
-        await admit();
-        await makeAdmissionReady();
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'admission_pending', operator_admitted_at = clock_timestamp(),
+                 next_attempt_at = clock_timestamp(), last_error_code = NULL,
+                 manual_review_at = NULL
+             WHERE order_id = $1`,
+            [ORDER]
+        );
         const lease = await claim();
         const r1 = (await asService<{ request_id: string }>(
             `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
@@ -4009,10 +4092,74 @@ describe('operator-approved earlybird fulfillment migration', () => {
             );
         };
 
+        await db.exec('BEGIN');
+        try {
+            await db.query(
+                `DELETE FROM public.analysis_v2_provider_runs
+                 WHERE request_id = $1 AND job_key = $2 AND operation_key = $3`,
+                [FAILED_REQUEST, relationshipJob, sourceFollowing.operation_key]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_provider_runs(
+                    request_id, job_key, operation_key, input_hash,
+                    job_claim_token, reservation_token, logical_provider,
+                    actor_id, credential_slot, max_charge_usd, status, run_id,
+                    actual_usage_usd, usage_reconciled_at
+                 ) VALUES ($1, $2, $3, $4, extensions.gen_random_uuid(),
+                    extensions.gen_random_uuid(), 'apify', $5, 'secondary', .2,
+                    'succeeded', 'WrongFollowingRun1', .1, clock_timestamp())`,
+                [
+                    FAILED_REQUEST, relationshipJob,
+                    wrongSourceFollowing.operation_key,
+                    wrongSourceFollowing.input_hash,
+                    sourceRuns[0].actorId,
+                ]
+            );
+            const wrongSourceRuns = [
+                {
+                    ...sourceRuns[0],
+                    operationKey: wrongSourceFollowing.operation_key,
+                    inputHash: wrongSourceFollowing.input_hash,
+                    runId: 'WrongFollowingRun1',
+                },
+                ...sourceRuns.slice(1, 3),
+            ];
+            for (const [index, sourceRun] of wrongSourceRuns.entries()) {
+                const destination = index === 0
+                    ? {
+                        operationKey: currentFollowing.operation_key,
+                        inputHash: currentFollowing.input_hash,
+                    }
+                    : destinationIdentity(sourceRun);
+                await db.query(
+                    `INSERT INTO public.analysis_v2_recovery_provider_run_adoptions(
+                        request_id, job_key, operation_key, destination_input_hash,
+                        source_request_id, source_job_key, source_operation_key,
+                        source_run_id
+                     ) VALUES ($1, $2, $3, $4, $5, $2, $6, $7)`,
+                    [
+                        r1.request_id, sourceRun.jobKey, destination.operationKey,
+                        destination.inputHash, FAILED_REQUEST,
+                        sourceRun.operationKey, sourceRun.runId,
+                    ]
+                );
+            }
+            await markPartialFailure();
+            await expect(db.query(
+                `SELECT * FROM public.rearm_earlybird_zero_spend_adoption_policy_failure(
+                    $1, $2, $3::TIMESTAMPTZ
+                 )`,
+                [ORDER, r1.request_id, manualReviewAt]
+            )).rejects.toThrow('EARLYBIRD_ADOPTION_POLICY_FAILURE_REARM_INELIGIBLE');
+        } finally {
+            await db.exec('ROLLBACK');
+        }
+
         for (const crossedDestination of ['operation', 'input'] as const) {
             await db.exec('BEGIN');
             try {
                 for (const [index, sourceRun] of sourceRuns.slice(0, 3).entries()) {
+                    const destination = destinationIdentity(sourceRun);
                     await db.query(
                         `INSERT INTO public.analysis_v2_recovery_provider_run_adoptions(
                             request_id, job_key, operation_key, destination_input_hash,
@@ -4024,10 +4171,10 @@ describe('operator-approved earlybird fulfillment migration', () => {
                             sourceRun.jobKey,
                             index === 0 && crossedDestination === 'operation'
                                 ? `relationship-following:${'0'.repeat(64)}`
-                                : sourceRun.operationKey,
+                                : destination.operationKey,
                             index === 0 && crossedDestination === 'input'
                                 ? '0'.repeat(64)
-                                : sourceRun.inputHash,
+                                : destination.inputHash,
                             FAILED_REQUEST,
                             sourceRun.operationKey,
                             sourceRun.runId,
@@ -4049,15 +4196,16 @@ describe('operator-approved earlybird fulfillment migration', () => {
         }
 
         for (const sourceRun of sourceRuns.slice(0, 3)) {
-            await asService(
+            const destination = destinationIdentity(sourceRun);
+            await expect(asService(
                 `SELECT public.resolve_analysis_v2_recovery_provider_run(
                     $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .2
                  )`,
                 [
                     r1.request_id, sourceRun.jobKey, DISPATCH_TOKEN,
-                    sourceRun.operationKey, sourceRun.inputHash, sourceRun.actorId,
+                    destination.operationKey, destination.inputHash, sourceRun.actorId,
                 ]
-            );
+            ), `r1 must adopt ${sourceRun.runId}`).resolves.toBeDefined();
         }
         expect((await db.query<{ count: number }>(
             `SELECT count(*)::INTEGER AS count
@@ -4293,7 +4441,22 @@ describe('operator-approved earlybird fulfillment migration', () => {
             [r1.request_id]
         )).rows[0].idempotency_key).toBe(`${requestKey}.r1`);
 
-        await makeAdmissionReady(rearmed.preflight_id);
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET admission_status = 'ready', admission_selected_plan_id = 'standard',
+                 admission_entitlement_jti_hash = $2, admission_token = $3,
+                 admission_refreshed_at = clock_timestamp(),
+                 admission_target_followers_count = 233,
+                 admission_target_following_count = 624,
+                 admission_capacity_required_plan_id = 'standard',
+                 admission_required_plan_id = 'standard',
+                 admission_plan_cards_snapshot = $4::JSONB
+             WHERE id = $1`,
+            [
+                rearmed.preflight_id, admissionHash(), ADMISSION_TOKEN,
+                JSON.stringify(standardRequiredCards),
+            ]
+        );
         const r2Lease = await claim();
         const r2 = (await asService<{ request_id: string }>(
             `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
@@ -4323,13 +4486,14 @@ describe('operator-approved earlybird fulfillment migration', () => {
             );
         }
         for (const sourceRun of sourceRuns) {
+            const destination = destinationIdentity(sourceRun);
             const adopted = (await asService<{ adopted: { runId: string } }>(
                 `SELECT public.resolve_analysis_v2_recovery_provider_run(
                     $1, $2, $3, $4, $5, 'apify', $6, 'secondary', .2
                  ) AS adopted`,
                 [
                     r2.request_id, sourceRun.jobKey, DISPATCH_TOKEN,
-                    sourceRun.operationKey, sourceRun.inputHash, sourceRun.actorId,
+                    destination.operationKey, destination.inputHash, sourceRun.actorId,
                 ]
             )).rows[0].adopted;
             expect(adopted.runId).toBe(sourceRun.runId);
