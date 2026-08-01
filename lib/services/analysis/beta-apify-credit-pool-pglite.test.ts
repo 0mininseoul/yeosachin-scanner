@@ -333,6 +333,14 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
                 'v2', 'test_entitlement', $2, 'betatest')`,
             [USER_ID, AUDIT_HASH]
         )).rejects.toThrow(/analysis_requests_entry_channel_access_check/);
+        await expect(db.query(
+            `INSERT INTO public.analysis_requests (
+                id, user_id, pipeline_version, plan_access_mode_snapshot,
+                test_entitlement_jti_hash, analysis_entry_channel
+             ) VALUES ('30000000-0000-4000-8000-000000000004', $1,
+                NULL, NULL, NULL, 'betatest')`,
+            [USER_ID]
+        )).rejects.toThrow(/analysis_requests_entry_channel_access_check/);
 
         await expect(db.query(
             `INSERT INTO public.analysis_preflights (
@@ -521,6 +529,12 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
             'health_state',
             'refreshed_at',
         ]);
+
+        await expect(db.query(
+            `UPDATE public.analysis_apify_credit_snapshots
+             SET health_state = 'healthy'
+             WHERE credential_slot = 'primary'`
+        )).rejects.toThrow(/analysis_apify_credit_snapshots_state_check/);
     });
 
     it('atomically refreshes all six slots and reads foundation-only headroom', async () => {
@@ -541,6 +555,25 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
         expect(JSON.stringify(loaded)).not.toMatch(
             /token|accountId|userId|email|cookie|payload|raw/i
         );
+    });
+
+    it('accepts distinct valid billing cycles for the six independent accounts', async () => {
+        const observedAt = new Date(Date.now() - 2_000).toISOString();
+        const independentCycles = snapshotBatch((entry, index) => ({
+            ...entry,
+            billingCycleStartAt: new Date(
+                Date.now() - (index + 1) * 24 * 60 * 60 * 1000
+            ).toISOString(),
+            billingCycleEndAt: new Date(
+                Date.now() + (index + 2) * 24 * 60 * 60 * 1000
+            ).toISOString(),
+            observedAt,
+        }));
+
+        const stored = await upsertSnapshots(independentCycles);
+        expect(stored.map(row => row.billingCycleStartAt)).toHaveLength(6);
+        expect(new Set(stored.map(row => row.billingCycleStartAt)).size).toBe(6);
+        expect(await loadSnapshots()).toEqual(stored);
     });
 
     it.each([
@@ -570,16 +603,6 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
                 ? { ...entry, rawPayload: 'forbidden' } as unknown as SnapshotInput
                 : entry
         ))],
-        ['mismatched cycle', () => snapshotBatch((entry, index) => (
-            index === 5
-                ? {
-                    ...entry,
-                    billingCycleEndAt: new Date(
-                        Date.parse(entry.billingCycleEndAt) + 1000
-                    ).toISOString(),
-                }
-                : entry
-        ))],
         ['stale observation', () => snapshotBatch(entry => ({
             ...entry,
             observedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
@@ -601,7 +624,7 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
 
     it('rejects same-observation mutation and older snapshot regression', async () => {
         const initial = snapshotBatch();
-        await upsertSnapshots(initial);
+        const stored = await upsertSnapshots(initial);
 
         const changedSameObservation = initial.map((entry, index) => (
             index === 0 ? { ...entry, monthlyUsageUsd: entry.monthlyUsageUsd + 1 } : entry
@@ -617,7 +640,7 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
         await expect(upsertSnapshots(older)).rejects.toThrow(
             /ANALYSIS_BETA_POOL_SNAPSHOT_CONFLICT/
         );
-        expect(await loadSnapshots()).toEqual(await loadSnapshots());
+        expect(await loadSnapshots()).toEqual(stored);
     });
 
     it('fails closed when snapshots are unhealthy, stale, or the age bound is invalid', async () => {
@@ -637,6 +660,19 @@ describe('beta Apify credit pool foundation migration PGlite', () => {
         );
         await expect(loadSnapshots(901)).rejects.toThrow(
             /ANALYSIS_BETA_POOL_SNAPSHOT_INVALID/
+        );
+    });
+
+    it('fails closed if the exact-six batch observation timestamp is split', async () => {
+        await upsertSnapshots();
+        await db.exec(`
+            UPDATE public.analysis_apify_credit_snapshots
+            SET observed_at = observed_at + INTERVAL '1 second'
+            WHERE credential_slot = 'septenary'
+        `);
+
+        await expect(loadSnapshots()).rejects.toThrow(
+            /ANALYSIS_BETA_POOL_SNAPSHOT_INCOMPLETE/
         );
     });
 

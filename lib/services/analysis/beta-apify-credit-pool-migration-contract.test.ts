@@ -106,7 +106,10 @@ describe('beta Apify credit pool foundation migration contract', () => {
             /analysis_entry_channel <> 'betatest'[\s\S]*?access_mode = 'production'/
         );
         expect(migration).toMatch(
-            /analysis_entry_channel <> 'betatest'[\s\S]*?plan_access_mode_snapshot = 'production'/
+            /analysis_entry_channel <> 'betatest'[\s\S]*?plan_access_mode_snapshot IS NOT DISTINCT FROM 'production'/
+        );
+        expect(migration).toContain(
+            "pipeline_version IS NOT DISTINCT FROM 'v2'"
         );
         expect(migration).not.toMatch(
             /access_mode IN \([^)]*'betatest'/
@@ -175,6 +178,11 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(table).toContain('analysis_beta_valid_apify_credential_slot');
         expect(table).toContain('BETWEEN 0 AND 100000');
         expect(table).toContain("health_state IN ('healthy', 'unhealthy')");
+        expect(table).toContain('monthly_limit_usd IS NOT NULL');
+        expect(table).toContain('monthly_usage_usd IS NOT NULL');
+        expect(table).toContain('billing_cycle_start_at IS NOT NULL');
+        expect(table).toContain('billing_cycle_end_at IS NOT NULL');
+        expect(table).toContain('observed_at IS NOT NULL');
         expect(table).not.toMatch(
             /token|account_id|user_id|email|cookie|payload|raw_/i
         );
@@ -219,6 +227,9 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(upsert).toContain('billingCycleEndAt');
         expect(upsert).toContain('cycle_start_at <= v_observed_at');
         expect(upsert).toContain('v_observed_at < v_cycle_end_at');
+        expect(upsert).toContain('v_common_observed_at');
+        expect(upsert).not.toContain('v_common_cycle_start_at');
+        expect(upsert).not.toContain('v_common_cycle_end_at');
         expect(upsert).toContain("v_now + INTERVAL '1 minute'");
         expect(upsert).toContain("v_now - INTERVAL '5 minutes'");
         expect(upsert).toContain('FOR UPDATE');
@@ -234,9 +245,13 @@ describe('beta Apify credit pool foundation migration contract', () => {
         expect(load).toContain('p_max_age_seconds BETWEEN 1 AND 900');
         expect(load).toContain("snapshot.health_state <> 'healthy'");
         expect(load).toContain('snapshot.observed_at < v_now -');
+        expect(load).toContain('count(DISTINCT snapshot.observed_at)');
         expect(load).toContain("'effectiveHeadroomUsd'");
         expect(load).toContain('GREATEST(');
         expect(load).toContain('snapshot.monthly_limit_usd - snapshot.monthly_usage_usd');
+        expect(load).not.toMatch(
+            /count\(DISTINCT \(\s*snapshot\.billing_cycle_start_at/i
+        );
         expect(migration).toContain('foundation-only headroom');
 
         for (const signature of [
