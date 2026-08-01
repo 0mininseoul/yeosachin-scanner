@@ -363,6 +363,8 @@ BEGIN
        AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_initial_operation') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_operation') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_partial_current_operation') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.input_hash = v_partial_source_initial_input') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'source_run.input_hash = v_partial_source_input') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_partial_source_preflight.admission_target_following_count') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'v_preflight.target_following_count, v_order.plan_id, TRUE') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'source_run.operation_key ~ ''^profile-fallback:') > 0
@@ -376,6 +378,7 @@ BEGIN
        AND pg_catalog.strpos(v_rearm_definition, 'adoption.operation_key = v_partial_current_operation') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'adoption.destination_input_hash = v_partial_current_input') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'ELSE adoption.operation_key = source_run.operation_key') > 0
+       AND pg_catalog.strpos(v_rearm_definition, 'AND adoption.destination_input_hash = source_run.input_hash') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_source_topology_valid') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'COALESCE(v_partial_adoption_topology_valid') > 0
        AND pg_catalog.strpos(v_rearm_definition, 'run.request_id = v_request.id') > 0
@@ -541,6 +544,8 @@ BEGIN
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_initial_operation') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_operation') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_current_operation') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.input_hash = v_partial_source_initial_input') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.input_hash = v_partial_source_input') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_partial_source_preflight.admission_target_following_count') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'v_preflight.target_following_count, v_order.plan_id, TRUE') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'source_run.operation_key ~ ''^profile-fallback:') = 0
@@ -554,6 +559,7 @@ BEGIN
            OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.operation_key = v_partial_current_operation') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'adoption.destination_input_hash = v_partial_current_input') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'ELSE adoption.operation_key = source_run.operation_key') = 0
+           OR pg_catalog.strpos(v_rearm_rewritten, 'AND adoption.destination_input_hash = source_run.input_hash') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_source_topology_valid') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'COALESCE(v_partial_adoption_topology_valid') = 0
            OR pg_catalog.strpos(v_rearm_rewritten, 'run.request_id = v_request.id') = 0

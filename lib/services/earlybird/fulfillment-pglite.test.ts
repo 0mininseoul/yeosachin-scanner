@@ -4155,7 +4155,11 @@ describe('operator-approved earlybird fulfillment migration', () => {
             await db.exec('ROLLBACK');
         }
 
-        for (const crossedDestination of ['operation', 'input'] as const) {
+        for (const { sourceIndex, crossedDestination } of [
+            { sourceIndex: 0, crossedDestination: 'operation' },
+            { sourceIndex: 0, crossedDestination: 'input' },
+            { sourceIndex: 1, crossedDestination: 'input' },
+        ] as const) {
             await db.exec('BEGIN');
             try {
                 for (const [index, sourceRun] of sourceRuns.slice(0, 3).entries()) {
@@ -4169,10 +4173,10 @@ describe('operator-approved earlybird fulfillment migration', () => {
                         [
                             r1.request_id,
                             sourceRun.jobKey,
-                            index === 0 && crossedDestination === 'operation'
+                            index === sourceIndex && crossedDestination === 'operation'
                                 ? `relationship-following:${'0'.repeat(64)}`
                                 : destination.operationKey,
-                            index === 0 && crossedDestination === 'input'
+                            index === sourceIndex && crossedDestination === 'input'
                                 ? '0'.repeat(64)
                                 : destination.inputHash,
                             FAILED_REQUEST,

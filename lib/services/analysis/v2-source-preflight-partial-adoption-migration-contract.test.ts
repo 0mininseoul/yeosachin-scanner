@@ -74,6 +74,8 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
         expect(migration).toContain('v_partial_current_operation');
         expect(migration).toContain('v_partial_source_preflight.admission_target_following_count');
         expect(migration).toContain('v_preflight.target_following_count, v_order.plan_id, TRUE');
+        expect(migration).toContain('source_run.input_hash = v_partial_source_initial_input');
+        expect(migration).toContain('source_run.input_hash = v_partial_source_input');
         expect(migration).toContain("'^profile-fallback:[0-9a-f]{64}$'");
         expect(migration).toContain("'^target-likers:[0-9a-f]{64}$'");
         expect(migration).toContain("'^target-comments:[0-9a-f]{64}$'");
@@ -82,6 +84,7 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
         expect(migration).toContain('adoption.operation_key = v_partial_current_operation');
         expect(migration).toContain('adoption.destination_input_hash = v_partial_current_input');
         expect(migration).toContain('ELSE adoption.operation_key = source_run.operation_key');
+        expect(migration).toContain('AND adoption.destination_input_hash = source_run.input_hash');
         expect(migration).toContain('COALESCE(v_partial_source_topology_valid, FALSE)');
         expect(migration).toContain('COALESCE(v_partial_adoption_topology_valid, FALSE)');
         expect(migration).toContain('public.analysis_provider_cost_ledger AS cost');
