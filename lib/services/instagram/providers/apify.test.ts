@@ -26,6 +26,7 @@ import {
     type AnalysisV2ProviderRunSupabaseClient,
 } from '@/lib/services/analysis/v2-provider-run-store';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import { APIFY_CREDENTIAL_SLOTS } from './types';
 
 function rejectedStartError(
     statusCode = 402,
@@ -126,6 +127,15 @@ function mockBatchedClient(batches: Array<Array<Record<string, unknown>>>) {
 
 describe('apifyProvider', () => {
     it('selects one explicit credential slot without automatic account pooling', () => {
+        expect(APIFY_CREDENTIAL_SLOTS).toEqual([
+            'primary',
+            'secondary',
+            'tertiary',
+            'quaternary',
+            'quinary',
+            'senary',
+            'septenary',
+        ]);
         const env = {
             APIFY_PRIMARY_API_TOKEN: 'primary-token',
             APIFY_SECONDARY_API_TOKEN: 'secondary-token',
@@ -133,6 +143,7 @@ describe('apifyProvider', () => {
             APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
             APIFY_SENARY_API_TOKEN: 'senary-token',
+            APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
         };
         expect(selectApifyApiToken(env)).toBe('primary-token');
         expect(selectApifyCredentialSlot(env)).toBe('primary');
@@ -146,15 +157,20 @@ describe('apifyProvider', () => {
         )).toBe('secondary-token');
         expect(() => selectApifyApiToken({ ...env, APIFY_API_TOKEN_SLOT: 'pool' }))
             .toThrow('APIFY_API_TOKEN_SLOT');
-        for (const slot of ['tertiary', 'quaternary', 'quinary', 'senary'] as const) {
+        for (const slot of [
+            'tertiary',
+            'quaternary',
+            'quinary',
+            'senary',
+            'septenary',
+        ] as const) {
             const selected = { ...env, ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot };
             expect(selectAnalysisV2ApifyCredentialSlot(selected)).toBe(slot);
             expect(selectApifyApiToken(selected, slot)).toBe(`${slot}-token`);
         }
-        expect(() => selectAnalysisV2ApifyCredentialSlot({
-            ...env,
-            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'septenary',
-        })).toThrow('ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
+        expect(() => selectApifyApiToken({
+            APIFY_API_TOKEN: 'legacy-primary-token',
+        }, 'septenary')).toThrow('APIFY_SEPTENARY_API_TOKEN');
         expect(() => selectAnalysisV2ApifyCredentialSlot({
             ...env,
             ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'pool',

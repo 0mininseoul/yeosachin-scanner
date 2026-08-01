@@ -4,10 +4,7 @@ import {
     selectApifyApiToken,
     selectAnalysisV2ApifyCredentialSlot,
 } from '@/lib/services/instagram/providers/apify-relationship';
-import {
-    APIFY_CREDENTIAL_SLOTS,
-    type ApifyCredentialSlot,
-} from '@/lib/services/instagram/providers/types';
+import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 
 export const AUTHORIZED_TEST_PROVIDER_POLICY_VERSION = 'authorized-free-e2e-v1' as const;
 
@@ -24,7 +21,16 @@ export const AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS = [
 export type AuthorizedTestProviderOperationKind =
     (typeof AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS)[number];
 
-const credentialSlotSchema = z.enum(APIFY_CREDENTIAL_SLOTS);
+const AUTHORIZED_TEST_APIFY_CREDENTIAL_SLOTS = [
+    'primary',
+    'secondary',
+    'tertiary',
+    'quaternary',
+    'quinary',
+    'senary',
+] as const satisfies readonly ApifyCredentialSlot[];
+
+const credentialSlotSchema = z.enum(AUTHORIZED_TEST_APIFY_CREDENTIAL_SLOTS);
 const operationSlotsSchema = z.object({
     'target-profile': credentialSlotSchema,
     'relationship-followers': credentialSlotSchema,

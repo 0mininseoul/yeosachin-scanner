@@ -15,6 +15,7 @@ export const APIFY_CREDENTIAL_SLOTS = [
     'quaternary',
     'quinary',
     'senary',
+    'septenary',
 ] as const;
 export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number];
 
