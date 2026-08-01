@@ -739,6 +739,89 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
         }
     }, 15_000);
 
+    it('breaks the recovery-to-continuation row-lock cycle with NOWAIT', async () => {
+        const seed = await seedNativeCheckout(
+            pool,
+            304,
+            'native-recovery-nowait@example.com'
+        );
+        const orderId = (await pool.query<{ id: string }>(
+            `INSERT INTO public.earlybird_orders(
+                user_id, preflight_id, target_instagram_id,
+                target_followers_count, target_following_count,
+                exclusion_decision, plan_id, pricing_version,
+                expected_amount_krw, expected_groble_product_id,
+                disclosure_version, disclosure_text, disclosure_accepted_at
+             ) VALUES (
+                $1, $2, 'native_lock_304', 300, 100, 'skip', 'basic',
+                $3, 14900, 'basic_product-01', 'earlybird-48h-v1',
+                'lock-cycle-fixture', pg_catalog.clock_timestamp()
+             ) RETURNING id`,
+            [seed.userId, seed.preflightId, LEGACY_PRICING_VERSION]
+        )).rows[0].id;
+        await pool.query(
+            `INSERT INTO public.earlybird_fulfillments(order_id, status)
+             VALUES ($1, 'manual_review')`,
+            [orderId]
+        );
+
+        const continuationClient = await pool.connect();
+        const recoveryClient = await pool.connect();
+        const continuationApplication = 'earlybird-recovery-nowait-continuation';
+        try {
+            await continuationClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [continuationApplication]
+            );
+            await continuationClient.query('BEGIN');
+            await continuationClient.query(
+                `SELECT 1 FROM public.earlybird_fulfillments
+                 WHERE order_id = $1 FOR UPDATE`,
+                [orderId]
+            );
+
+            await recoveryClient.query('BEGIN');
+            await recoveryClient.query(
+                `SELECT 1 FROM public.earlybird_orders
+                 WHERE id = $1 FOR UPDATE`,
+                [orderId]
+            );
+
+            const continuationOrderLock = continuationClient.query(
+                `SELECT 1 FROM public.earlybird_orders
+                 WHERE id = $1 FOR UPDATE`,
+                [orderId]
+            );
+            expect(await waitForLockWait(
+                pool,
+                continuationApplication
+            )).toBe(true);
+
+            await expect(recoveryClient.query(
+                `SELECT 1 FROM public.earlybird_fulfillments
+                 WHERE order_id = $1 FOR UPDATE NOWAIT`,
+                [orderId]
+            )).rejects.toMatchObject({ code: '55P03' });
+
+            // The production FOUND branch translates 55P03 to
+            // EARLYBIRD_SCHEMA_FAILURE_RECOVERY_BUSY. Rolling back the failed
+            // operator call releases its order lock, so the continuation can
+            // finish instead of participating in PostgreSQL deadlock detection.
+            await recoveryClient.query('ROLLBACK');
+            await expect(continuationOrderLock).resolves.toMatchObject({
+                rowCount: 1,
+            });
+            await continuationClient.query('COMMIT');
+        } catch (error) {
+            await continuationClient.query('ROLLBACK').catch(() => undefined);
+            await recoveryClient.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            continuationClient.release();
+            recoveryClient.release();
+        }
+    }, 15_000);
+
     it('serializes actual auto-admit against create/replay without a FK deadlock', async () => {
         const seed = await seedNativeCheckout(
             pool,
