@@ -1380,6 +1380,8 @@ describe('betatest provider policy/guard migration PGlite', () => {
             'analysis_v2_provider_execution_policies',
             'analysis_beta_pool_allocations',
             'analysis_beta_pool_reservations',
+            'analysis_beta_pool_reservation_archive',
+            'analysis_beta_pool_local_debits',
         ]) {
             await expect(serviceQuery(`SELECT * FROM public.${table}`))
                 .rejects.toThrow(/permission denied/i);
@@ -1481,5 +1483,23 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await serviceQuery(`SELECT public.recover_analysis_beta_apify_credit_allocations(10)`);
         const held = await db.query<{ state: string }>(`SELECT lifecycle_state AS state FROM public.analysis_beta_pool_reservations`);
         expect(held.rows).toEqual([{ state: 'preflight_held' }]);
+    });
+
+    it('archives deterministic settled family history before allowing retained parents to delete', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await db.query(`UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1`, [REQUEST_ID]);
+        await expect(serviceQuery(`SELECT public.archive_settled_analysis_beta_apify_credit_allocations(10)`)).resolves.toBeDefined();
+        const history = await db.query<{
+            allocation_id: string; operation: string; reserved: number; actual: number; released: number;
+        }>(`SELECT allocation_id, operation_family AS operation, reserved_usd AS reserved,
+                   actual_usd AS actual, released_usd AS released
+            FROM public.analysis_beta_pool_reservation_archive ORDER BY operation_family`);
+        expect(history.rows).toHaveLength(8);
+        expect(history.rows.every(row => Number(row.actual) === 0 && Number(row.released) === Number(row.reserved))).toBe(true);
+        await expect(db.query(`DELETE FROM public.analysis_preflights WHERE id = $1`, [PREFLIGHT_ID])).resolves.toBeDefined();
+        await db.query(`DELETE FROM public.analysis_pipeline_jobs WHERE request_id = $1`, [REQUEST_ID]);
+        await expect(db.query(`DELETE FROM public.analysis_requests WHERE id = $1`, [REQUEST_ID])).resolves.toBeDefined();
+        await expect(db.query(`DELETE FROM public.users WHERE id = $1`, [USER_ID])).resolves.toBeDefined();
     });
 });

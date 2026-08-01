@@ -11,11 +11,11 @@ const migration = existsSync(migrationPath)
     : '';
 
 function definition(name: string): string {
-    const marker = `FUNCTION public.${name}(`;
-    const start = migration.indexOf(marker);
+    const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
+    const start = migration.lastIndexOf(marker);
     expect(start, `${name} must be defined`).toBeGreaterThanOrEqual(0);
-    const create = migration.lastIndexOf('CREATE', start);
-    const end = migration.indexOf('\n$$;', start);
+    const create = start;
+    const end = migration.indexOf('$$;', start);
     expect(create).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     return migration.slice(create, end + 4);
@@ -70,7 +70,7 @@ describe('betatest credit settlement/recovery migration contract', () => {
 
     it('has bounded nonblocking service-only recovery and retention cleanup', () => {
         const recover = definition('recover_analysis_beta_apify_credit_allocations');
-        expect(recover).toContain('FOR UPDATE OF allocation SKIP LOCKED');
+        expect(recover).toContain('FOR UPDATE OF users SKIP LOCKED');
         expect(recover).toContain('p_limit NOT BETWEEN 1 AND 1000');
         expect(recover).toContain('pg_catalog.clock_timestamp()');
         expectServiceOnly('settle_analysis_beta_apify_credit_allocation(UUID,TEXT)');

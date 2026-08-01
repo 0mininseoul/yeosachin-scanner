@@ -436,3 +436,140 @@ COMMENT ON FUNCTION public.settle_analysis_beta_apify_credit_allocation(UUID, TE
     'Service-only idempotent settlement. Ambiguous starts/running/unreconciled ledger rows retain their complete reservation.';
 COMMENT ON FUNCTION public.recover_analysis_beta_apify_credit_allocations(INTEGER) IS
     'Bounded service-only terminal/expiry sweep using database time and SKIP LOCKED.';
+
+-- Correction within this unapplied forward migration: parent deletion must not
+-- silently detach live work.  Retention archives deterministic family history
+-- first, then deletes the allocation; active/nonterminal rows keep RESTRICT
+-- protection.  The temporary SET NULL declarations above are therefore never
+-- externally observable and are replaced before this migration commits.
+ALTER TABLE public.analysis_beta_pool_allocations
+    DROP CONSTRAINT analysis_beta_pool_allocations_preflight_id_fkey,
+    DROP CONSTRAINT analysis_beta_pool_allocations_request_id_fkey,
+    DROP CONSTRAINT analysis_beta_pool_allocations_user_id_fkey,
+    ALTER COLUMN preflight_id SET NOT NULL,
+    ALTER COLUMN user_id SET NOT NULL,
+    ADD CONSTRAINT analysis_beta_pool_allocations_preflight_id_fkey
+        FOREIGN KEY (preflight_id) REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT,
+    ADD CONSTRAINT analysis_beta_pool_allocations_request_id_fkey
+        FOREIGN KEY (request_id) REFERENCES public.analysis_requests(id) ON DELETE RESTRICT,
+    ADD CONSTRAINT analysis_beta_pool_allocations_user_id_fkey
+        FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+CREATE TABLE public.analysis_beta_pool_reservation_archive (
+    allocation_id UUID NOT NULL,
+    operation_family TEXT NOT NULL,
+    credential_slot TEXT NOT NULL CHECK (public.analysis_beta_valid_apify_credential_slot(credential_slot)),
+    reserved_usd NUMERIC(18, 12) NOT NULL,
+    actual_usd NUMERIC(18, 12) NOT NULL,
+    released_usd NUMERIC(18, 12) NOT NULL,
+    reconciliation_watermark TIMESTAMP WITH TIME ZONE,
+    settled_at TIMESTAMP WITH TIME ZONE,
+    settlement_reason TEXT NOT NULL,
+    archive_state TEXT NOT NULL CHECK (archive_state IN ('settled', 'ambiguous_held')),
+    unabsorbed_debit_usd NUMERIC(18, 12) NOT NULL,
+    archived_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    PRIMARY KEY (allocation_id, operation_family),
+    CHECK (reserved_usd > 0 AND actual_usd BETWEEN 0 AND reserved_usd
+       AND released_usd = reserved_usd - actual_usd),
+    CHECK ((archive_state = 'settled' AND unabsorbed_debit_usd = actual_usd
+            AND (actual_usd = 0 OR reconciliation_watermark IS NOT NULL))
+        OR (archive_state = 'ambiguous_held' AND unabsorbed_debit_usd = reserved_usd
+            AND actual_usd = 0 AND released_usd = 0 AND reconciliation_watermark IS NULL))
+);
+ALTER TABLE public.analysis_beta_pool_reservation_archive ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.analysis_beta_pool_reservation_archive FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.analysis_beta_pool_reservation_archive FROM PUBLIC, anon, authenticated, service_role;
+COMMENT ON TABLE public.analysis_beta_pool_reservation_archive IS
+    'Immutable PII-free deterministic allocation/family settlement history and local debit ledger.';
+
+CREATE OR REPLACE FUNCTION public.analysis_beta_pool_effective_local_debit_usd(
+    p_credential_slot TEXT, p_observed_at TIMESTAMP WITH TIME ZONE
+) RETURNS NUMERIC LANGUAGE sql STABLE SET search_path = '' AS $$
+    SELECT COALESCE(pg_catalog.sum(debit.usd), 0::NUMERIC)
+    FROM (
+      SELECT reservation.credential_slot, reservation.actual_usd AS usd,
+             reservation.reconciliation_watermark, 'settled'::TEXT AS state
+      FROM public.analysis_beta_pool_reservations AS reservation
+      WHERE reservation.lifecycle_state = 'settled' AND reservation.actual_usd > 0
+      UNION ALL
+      SELECT archive.credential_slot, archive.unabsorbed_debit_usd,
+             archive.reconciliation_watermark, archive.archive_state
+      FROM public.analysis_beta_pool_reservation_archive AS archive
+    ) AS debit
+    WHERE debit.credential_slot = p_credential_slot
+      AND (debit.state = 'ambiguous_held'
+        OR debit.reconciliation_watermark >= p_observed_at);
+$$;
+REVOKE ALL ON FUNCTION public.analysis_beta_pool_effective_local_debit_usd(TEXT, TIMESTAMP WITH TIME ZONE)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+-- The recovery candidate takes the same *first* lifecycle lock as admission
+-- (user) and never holds allocation before user/preflight/request.
+CREATE OR REPLACE FUNCTION public.recover_analysis_beta_apify_credit_allocations(
+    p_limit INTEGER DEFAULT 100
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+DECLARE v_candidate UUID; DECLARE v_result JSONB := '[]'::JSONB;
+BEGIN
+ IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN
+   RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_BETA_SETTLEMENT_INVALID', ERRCODE = 'P0001'; END IF;
+ FOR v_candidate IN
+   SELECT allocation.id FROM public.analysis_beta_pool_allocations AS allocation
+   JOIN public.users AS users ON users.id = allocation.user_id
+   LEFT JOIN public.analysis_requests AS request ON request.id = allocation.request_id
+   LEFT JOIN public.analysis_preflights AS preflight ON preflight.id = allocation.preflight_id
+   WHERE (allocation.lifecycle_state = 'active' AND request.status IN ('completed', 'failed'))
+      OR (allocation.lifecycle_state = 'preflight_held' AND (preflight.expires_at <= v_now OR preflight.status IN ('blocked','expired')))
+   ORDER BY allocation.created_at, allocation.id LIMIT p_limit
+   FOR UPDATE OF users SKIP LOCKED
+ LOOP v_result := v_result || public.settle_analysis_beta_apify_credit_allocation(v_candidate, 'recovery'); END LOOP;
+ RETURN v_result;
+END; $$;
+REVOKE ALL ON FUNCTION public.recover_analysis_beta_apify_credit_allocations(INTEGER)
+ FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.recover_analysis_beta_apify_credit_allocations(INTEGER) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(
+    p_limit INTEGER DEFAULT 100
+) RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE v_id UUID; DECLARE v_count INTEGER := 0; DECLARE v_state TEXT;
+BEGIN
+ IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN
+  RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_BETA_SETTLEMENT_INVALID', ERRCODE = 'P0001'; END IF;
+ -- User-first locking mirrors every mutator. Terminal ambiguous state is
+ -- archived as a full held debit, not guessed as a no-run.
+ FOR v_id IN SELECT allocation.id FROM public.analysis_beta_pool_allocations AS allocation
+   JOIN public.users AS users ON users.id = allocation.user_id
+   LEFT JOIN public.analysis_requests AS request ON request.id = allocation.request_id
+   LEFT JOIN public.analysis_preflights AS preflight ON preflight.id = allocation.preflight_id
+   WHERE allocation.lifecycle_state = 'settled'
+      OR (allocation.lifecycle_state = 'active' AND request.status IN ('completed','failed'))
+      OR (allocation.lifecycle_state = 'preflight_held' AND (preflight.expires_at <= pg_catalog.clock_timestamp() OR preflight.status IN ('blocked','expired')))
+   ORDER BY allocation.updated_at, allocation.id LIMIT p_limit FOR UPDATE OF users SKIP LOCKED
+ LOOP
+   PERFORM public.settle_analysis_beta_apify_credit_allocation(v_id, 'recovery');
+   SELECT lifecycle_state INTO v_state FROM public.analysis_beta_pool_allocations WHERE id = v_id FOR UPDATE;
+   INSERT INTO public.analysis_beta_pool_reservation_archive(
+     allocation_id,operation_family,credential_slot,reserved_usd,actual_usd,released_usd,
+     reconciliation_watermark,settled_at,settlement_reason,archive_state,unabsorbed_debit_usd
+   ) SELECT reservation.allocation_id,reservation.operation_family,reservation.credential_slot,
+       reservation.reserved_usd,reservation.actual_usd,reservation.released_usd,
+       reservation.reconciliation_watermark,COALESCE(reservation.settled_at, pg_catalog.clock_timestamp()),
+       COALESCE(reservation.settlement_reason,'retention_ambiguous'),
+       CASE WHEN reservation.lifecycle_state = 'settled' THEN 'settled' ELSE 'ambiguous_held' END,
+       CASE WHEN reservation.lifecycle_state = 'settled' THEN reservation.actual_usd ELSE reservation.reserved_usd END
+     FROM public.analysis_beta_pool_reservations AS reservation WHERE reservation.allocation_id = v_id
+   ON CONFLICT (allocation_id,operation_family) DO UPDATE SET
+      credential_slot = EXCLUDED.credential_slot, reserved_usd = EXCLUDED.reserved_usd,
+      actual_usd = EXCLUDED.actual_usd, released_usd = EXCLUDED.released_usd,
+      reconciliation_watermark = EXCLUDED.reconciliation_watermark, settled_at = EXCLUDED.settled_at,
+      settlement_reason = EXCLUDED.settlement_reason, archive_state = EXCLUDED.archive_state,
+      unabsorbed_debit_usd = EXCLUDED.unabsorbed_debit_usd;
+   DELETE FROM public.analysis_beta_pool_allocations WHERE id = v_id;
+   v_count := v_count + 1;
+ END LOOP;
+ RETURN v_count;
+END; $$;
+REVOKE ALL ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER)
+ FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER) TO service_role;
