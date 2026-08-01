@@ -30,8 +30,33 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
         expect(migration).toContain('v_source_preflight.admission_capacity_required_plan_id');
         expect(migration).toContain('v_source_preflight.admission_required_plan_id');
         expect(migration).toContain('v_order, v_recovery_preflight, v_current');
-        expect(migration).toContain('v_order, v_source_preflight, v_current');
+        expect(migration).toContain(
+            'v_order, v_recovery_preflight, v_source_preflight, v_current'
+        );
         expect(migration).toContain("ANALYSIS_V2_PROVIDER_RUN_ADOPTION_LINEAGE_CONFLICT");
+    });
+
+    it('recomputes source, current, and immutable order partitions independently', () => {
+        expect(migration).toContain(
+            'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_source_adoption_preflights('
+        );
+        expect(migration).toContain('v_source_capacity_rank');
+        expect(migration).toContain('v_current_capacity_rank');
+        expect(migration).toContain('v_order_capacity_rank');
+        expect(migration).toContain('p_source.admission_target_followers_count');
+        expect(migration).toContain('p_current.target_followers_count');
+        expect(migration).toContain('p_order.target_followers_count');
+        expect(migration).toContain('p_source.admission_plan_cards_snapshot = v_source_cards');
+        expect(migration).toContain('p_current.admission_plan_cards_snapshot = v_current_cards');
+        expect(migration).toContain('SECURITY DEFINER');
+        expect(migration).toContain(
+            'REVOKE ALL ON FUNCTION public.analysis_v2_valid_source_adoption_preflights('
+        );
+        expect(migration).not.toContain(
+            'GRANT EXECUTE ON FUNCTION public.analysis_v2_valid_source_adoption_preflights('
+        );
+        expect(migration).toContain('public.analysis_v2_valid_recovery_adoption_preflights(');
+        expect(migration).toContain('public.analysis_v2_valid_source_adoption_preflights(');
     });
 
     it('permits only a nonempty exact-lineage adoption subset in the audited zero-spend policy rearm', () => {
@@ -41,6 +66,7 @@ describe('schema-recovery source-preflight partial-adoption migration', () => {
         expect(migration).toContain('v_fulfillment.attempt_count <> 5 AND NOT v_partial_adoption_variant');
         expect(migration).toContain('adoption.source_request_id IS DISTINCT FROM v_lineage.failed_request_id');
         expect(migration).toContain("job.last_error_code = ''ANALYSIS_V2_PROGRESS_CONFLICT''");
+        expect(migration).toContain('NOT v_partial_adoption_variant AND job.attempt_count = 0');
         expect(migration).not.toContain('NOT BETWEEN 1 AND 5');
         expect(migration).toContain('EARLYBIRD_SOURCE_PREFLIGHT_PARTIAL_ADOPTION_REARM_PATCH_MISMATCH');
     });

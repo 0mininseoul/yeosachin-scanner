@@ -16,6 +16,7 @@ beforeAll(async () => {
         CREATE ROLE anon NOLOGIN;
         CREATE ROLE authenticated NOLOGIN;
         CREATE ROLE service_role NOLOGIN;
+        CREATE TABLE public.earlybird_orders (id uuid);
         CREATE TABLE public.analysis_preflights (id uuid);
         CREATE TABLE public.analysis_pipeline_jobs (id uuid);
         CREATE OR REPLACE FUNCTION public.resolve_analysis_v2_recovery_provider_run(
