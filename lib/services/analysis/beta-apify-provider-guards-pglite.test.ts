@@ -41,6 +41,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802060000_expose_betatest_frozen_provider_budgets.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802070000_wire_betatest_preflight_credit_runtime.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -173,8 +177,13 @@ CREATE TABLE public.analysis_preflights (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.users(id),
     status TEXT NOT NULL DEFAULT 'pending',
+    error_code TEXT,
     access_mode TEXT NOT NULL CHECK (access_mode IN ('production', 'test_entitlement')),
     target_instagram_id TEXT,
+    worker_attempt_count INTEGER NOT NULL DEFAULT 0,
+    plan_catalog_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
+    pricing_version TEXT NOT NULL DEFAULT 'test',
+    pricing_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
     target_followers_count INTEGER,
     target_following_count INTEGER,
     excluded_instagram_id TEXT,
@@ -185,6 +194,9 @@ CREATE TABLE public.analysis_preflights (
     admission_requested_at TIMESTAMPTZ,
     admission_claim_token UUID,
     admission_lease_expires_at TIMESTAMPTZ,
+    admission_dispatch_generation INTEGER NOT NULL DEFAULT 1,
+    admission_dispatch_token UUID,
+    admission_dispatch_state TEXT NOT NULL DEFAULT 'reserved',
     dispatch_generation INTEGER NOT NULL DEFAULT 0,
     dispatch_state TEXT NOT NULL DEFAULT 'unreserved',
     dispatch_token UUID,
@@ -553,6 +565,15 @@ ALTER TABLE public.analysis_v2_provider_execution_policies ENABLE ROW LEVEL SECU
 ALTER TABLE public.analysis_v2_provider_execution_policies FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.analysis_v2_provider_execution_policies
     FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE FUNCTION public.claim_analysis_v2_preflight(UUID, UUID, INTEGER DEFAULT 300)
+RETURNS TABLE(preflight_id UUID, user_id UUID, claimed BOOLEAN, target_instagram_id TEXT,
+    access_mode TEXT, plan_catalog_snapshot JSONB, pricing_version TEXT, pricing_snapshot JSONB,
+    worker_attempt_count INTEGER, lease_expires_at TIMESTAMPTZ, preflight_status TEXT)
+LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT NULL::UUID,NULL::UUID,FALSE,NULL::TEXT,NULL::TEXT,NULL::JSONB,NULL::TEXT,NULL::JSONB,NULL::INTEGER,NULL::TIMESTAMPTZ,NULL::TEXT $$;
+CREATE FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER)
+RETURNS TABLE(claimed BOOLEAN, admission_status TEXT, target_instagram_id TEXT)
+LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT FALSE,NULL::TEXT,NULL::TEXT $$;
 `;
 
 interface JsonRow<T> {
@@ -855,6 +876,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802040000_settle_betatest_apify_credit_reservations.sql',
             '20260802050000_harden_betatest_apify_credit_capacity.sql',
             '20260802060000_expose_betatest_frozen_provider_budgets.sql',
+            '20260802070000_wire_betatest_preflight_credit_runtime.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated

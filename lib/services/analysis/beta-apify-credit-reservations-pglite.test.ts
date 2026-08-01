@@ -15,6 +15,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802020000_add_betatest_apify_credit_reservations.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802070000_wire_betatest_preflight_credit_runtime.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(migrationUrl => (
     existsSync(migrationUrl) ? readFileSync(migrationUrl, 'utf8') : ''
@@ -27,6 +31,9 @@ const PREFLIGHT_ID = '20000000-0000-4000-8000-000000000001';
 const OTHER_PREFLIGHT_ID = '20000000-0000-4000-8000-000000000002';
 const REQUEST_ID = '30000000-0000-4000-8000-000000000001';
 const OTHER_REQUEST_ID = '30000000-0000-4000-8000-000000000002';
+const CLAIM_TOKEN = '40000000-0000-4000-8000-000000000001';
+const CLAIM_TOKEN_B = '40000000-0000-4000-8000-000000000002';
+const DISPATCH_TOKEN = '50000000-0000-4000-8000-000000000001';
 const AUDIT_HASH = 'a'.repeat(64);
 const TARGET_PROFILE_BUDGET_USD = 0.0052;
 const BETA_SLOTS = [
@@ -112,6 +119,7 @@ CREATE TABLE public.analysis_preflights (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.users(id),
     status TEXT NOT NULL DEFAULT 'pending',
+    error_code TEXT,
     access_mode TEXT NOT NULL CHECK (
         access_mode IN ('production', 'test_entitlement')
     ),
@@ -121,6 +129,23 @@ CREATE TABLE public.analysis_preflights (
     dispatch_reserved_at TIMESTAMP WITH TIME ZONE,
     dispatched_at TIMESTAMP WITH TIME ZONE,
     consumed_request_id UUID,
+    target_instagram_id TEXT,
+    lease_token UUID,
+    lease_expires_at TIMESTAMPTZ,
+    claimed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    worker_attempt_count INTEGER NOT NULL DEFAULT 0,
+    plan_catalog_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
+    pricing_version TEXT NOT NULL DEFAULT 'test',
+    pricing_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
+    admission_status TEXT NOT NULL DEFAULT 'pending',
+    admission_generation INTEGER NOT NULL DEFAULT 1,
+    admission_dispatch_generation INTEGER NOT NULL DEFAULT 1,
+    admission_dispatch_token UUID,
+    admission_dispatch_state TEXT NOT NULL DEFAULT 'reserved',
+    admission_dispatched_at TIMESTAMPTZ,
+    admission_claim_token UUID,
+    admission_lease_expires_at TIMESTAMPTZ,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL
         DEFAULT pg_catalog.clock_timestamp(),
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL
@@ -153,6 +178,16 @@ CREATE TABLE public.analysis_v2_provider_runs (
     FOREIGN KEY (request_id, job_key)
         REFERENCES public.analysis_pipeline_jobs(request_id, job_key)
 );
+
+-- Faithful predecessor signatures are required because 070000 replaces them.
+CREATE FUNCTION public.claim_analysis_v2_preflight(UUID, UUID, INTEGER DEFAULT 300)
+RETURNS TABLE(preflight_id UUID, user_id UUID, claimed BOOLEAN, target_instagram_id TEXT,
+    access_mode TEXT, plan_catalog_snapshot JSONB, pricing_version TEXT, pricing_snapshot JSONB,
+    worker_attempt_count INTEGER, lease_expires_at TIMESTAMPTZ, preflight_status TEXT)
+LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT NULL::UUID,NULL::UUID,FALSE,NULL::TEXT,NULL::TEXT,NULL::JSONB,NULL::TEXT,NULL::JSONB,NULL::INTEGER,NULL::TIMESTAMPTZ,NULL::TEXT $$;
+CREATE FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER)
+RETURNS TABLE(claimed BOOLEAN, admission_status TEXT, target_instagram_id TEXT)
+LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT FALSE,NULL::TEXT,NULL::TEXT $$;
 `;
 
 interface JsonRow<T> {
@@ -423,7 +458,67 @@ describe('beta Apify credit reservation migration PGlite', () => {
             '20260802010000_add_betatest_apify_credit_pool.sql',
             '20260802010100_validate_betatest_entry_channel_constraints.sql',
             '20260802020000_add_betatest_apify_credit_reservations.sql',
+            '20260802070000_wire_betatest_preflight_credit_runtime.sql',
         ]);
+    });
+
+    it('loads a held target identity with no owner or provider fields and replays it exactly', async () => {
+        await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
+        await seedEligiblePreflight();
+        await upsertGrant();
+        await upsertSnapshots();
+        await holdCredit(PREFLIGHT_ID, USER_ID, 'septenary');
+
+        const loaded = await serviceQuery<JsonRow<Record<string, unknown> | null>>(
+            'SELECT public.load_analysis_beta_apify_preflight_hold($1::UUID) AS result',
+            [PREFLIGHT_ID]
+        );
+        expect(loaded.rows[0].result).toEqual({
+            allocationId: expect.any(String),
+            preflightId: PREFLIGHT_ID,
+            credentialSlot: 'septenary',
+            targetProfileBudgetUsd: 0.0052,
+        });
+        expect(Object.keys(loaded.rows[0].result ?? {}).sort()).toEqual([
+            'allocationId', 'credentialSlot', 'preflightId', 'targetProfileBudgetUsd',
+        ]);
+    });
+
+    it('claims the beta channel and keeps the fresh-admission dispatch fence', async () => {
+        await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
+        await seedEligiblePreflight();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_instagram_id = 'target.user', status = 'pending',
+                 analysis_entry_channel = 'betatest', admission_status = 'pending',
+                 admission_dispatch_token = $2, admission_dispatch_state = 'reserved'
+             WHERE id = $1`,
+            [PREFLIGHT_ID, DISPATCH_TOKEN]
+        );
+        const claimed = await serviceQuery<{
+            analysis_entry_channel: string; claimed: boolean; preflight_status: string;
+        }>(
+            'SELECT * FROM public.claim_analysis_v2_preflight($1, $2, 60)',
+            [PREFLIGHT_ID, CLAIM_TOKEN]
+        );
+        expect(claimed.rows[0]).toMatchObject({
+            analysis_entry_channel: 'betatest', claimed: true, preflight_status: 'processing',
+        });
+        await db.query(
+            `UPDATE public.analysis_preflights SET status='ready', lease_token=NULL,
+                lease_expires_at=NULL WHERE id=$1`, [PREFLIGHT_ID]
+        );
+        const fresh = await serviceQuery<{
+            claimed: boolean; admission_status: string; target_instagram_id: string;
+            analysis_entry_channel: string;
+        }>(
+            'SELECT * FROM public.claim_analysis_v2_preflight_admission($1, 1, 1, $2, $3, 60)',
+            [PREFLIGHT_ID, DISPATCH_TOKEN, CLAIM_TOKEN_B]
+        );
+        expect(fresh.rows[0]).toEqual({
+            claimed: true, admission_status: 'processing', target_instagram_id: 'target.user',
+            analysis_entry_channel: 'betatest',
+        });
     });
 
     it('forces RLS, exposes no forbidden columns, and denies direct DML', async () => {
