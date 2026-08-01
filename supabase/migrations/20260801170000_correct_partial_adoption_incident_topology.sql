@@ -14,6 +14,17 @@ DECLARE
     v_rewritten TEXT;
     v_block_start INTEGER;
     v_block_end INTEGER;
+    v_security_definer BOOLEAN;
+    v_safe_search_path BOOLEAN;
+    v_fulfillment_lock_marker TEXT :=
+        'WHERE fulfillment.order_id = p_order_id FOR UPDATE;';
+    v_audit_replay_marker TEXT := $marker$    SELECT audit.* INTO v_audit
+    FROM public.earlybird_adoption_policy_failure_rearms AS audit
+    WHERE audit.order_id = p_order_id;
+    IF FOUND THEN$marker$;
+    v_audit_return_marker TEXT := $marker$        RETURN QUERY SELECT p_order_id, v_fulfillment.status,
+            v_audit.rearmed_preflight_id, v_audit.policy_failed_request_id;
+        RETURN;$marker$;
     v_old_declarations TEXT := $old$    v_partial_source_preflight public.analysis_preflights%ROWTYPE;
     v_partial_source_initial_operation TEXT;
     v_partial_source_initial_input TEXT;
@@ -136,6 +147,68 @@ DECLARE
 $new$;
 BEGIN
     v_definition := pg_catalog.pg_get_functiondef(v_signature::pg_catalog.regprocedure);
+    SELECT
+        proc.prosecdef,
+        COALESCE('search_path=""' = ANY(proc.proconfig), FALSE)
+    INTO v_security_definer, v_safe_search_path
+    FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid = v_signature::pg_catalog.regprocedure;
+    IF NOT COALESCE(v_security_definer, FALSE)
+       OR NOT COALESCE(v_safe_search_path, FALSE)
+       OR pg_catalog.strpos(v_definition, 'SECURITY DEFINER') = 0
+       OR pg_catalog.strpos(v_definition, 'SET search_path TO ''''') = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'WHERE earlybird_order.id = p_order_id FOR UPDATE;'
+       ) = 0
+       OR (
+            pg_catalog.length(v_definition)
+            - pg_catalog.length(pg_catalog.replace(
+                v_definition, v_fulfillment_lock_marker, ''
+            ))
+       ) <> 2 * pg_catalog.length(v_fulfillment_lock_marker)
+       OR pg_catalog.strpos(
+            v_definition,
+            'WHERE request.id = p_expected_failed_request_id FOR UPDATE;'
+       ) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'WHERE preflight.id = v_order.preflight_id FOR UPDATE;'
+       ) = 0
+       OR pg_catalog.strpos(v_definition, v_audit_replay_marker) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'v_audit.policy_failed_request_id IS DISTINCT FROM p_expected_failed_request_id'
+       ) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'v_audit.expected_manual_review_at'
+       ) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'v_order.preflight_id IS DISTINCT FROM v_audit.rearmed_preflight_id'
+       ) = 0
+       OR pg_catalog.strpos(v_definition, v_audit_return_marker) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'INSERT INTO public.earlybird_adoption_policy_failure_rearms('
+       ) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'v_request.idempotency_key IS DISTINCT FROM'
+       ) = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            '(''earlybird:'' || pg_catalog.lower(v_order.id::TEXT) || ''.r1'')'
+       ) = 0
+       OR pg_catalog.strpos(v_definition, 'family_preflight.idempotency_key') = 0
+       OR pg_catalog.strpos(
+            v_definition,
+            'v_base_preflight_key || ''.r'' || (v_preflight_generation + 1)::TEXT'
+       ) = 0 THEN
+        RAISE EXCEPTION
+            'EARLYBIRD_PARTIAL_ADOPTION_TOPOLOGY_SAFETY_SHAPE_MISMATCH';
+    END IF;
     v_block_start := pg_catalog.strpos(
         v_definition,
         '    SELECT source_preflight.* INTO v_partial_source_preflight'
@@ -233,6 +306,35 @@ BEGIN
            OR pg_catalog.strpos(v_rewritten, 'public.analysis_v2_valid_recovery_adoption_preflights(') = 0
            OR pg_catalog.strpos(v_rewritten, 'v_fulfillment.attempt_count <> 5 AND NOT v_partial_adoption_variant') = 0
            OR pg_catalog.strpos(v_rewritten, 'run.request_id = v_request.id') = 0
+           OR pg_catalog.strpos(
+                v_rewritten,
+                'WHERE earlybird_order.id = p_order_id FOR UPDATE;'
+           ) = 0
+           OR (
+                pg_catalog.length(v_rewritten)
+                - pg_catalog.length(pg_catalog.replace(
+                    v_rewritten, v_fulfillment_lock_marker, ''
+                ))
+           ) <> 2 * pg_catalog.length(v_fulfillment_lock_marker)
+           OR pg_catalog.strpos(
+                v_rewritten,
+                'WHERE request.id = p_expected_failed_request_id FOR UPDATE;'
+           ) = 0
+           OR pg_catalog.strpos(
+                v_rewritten,
+                'WHERE preflight.id = v_order.preflight_id FOR UPDATE;'
+           ) = 0
+           OR pg_catalog.strpos(v_rewritten, v_audit_replay_marker) = 0
+           OR pg_catalog.strpos(v_rewritten, v_audit_return_marker) = 0
+           OR pg_catalog.strpos(
+                v_rewritten,
+                'INSERT INTO public.earlybird_adoption_policy_failure_rearms('
+           ) = 0
+           OR pg_catalog.strpos(
+                v_rewritten,
+                'v_request.idempotency_key IS DISTINCT FROM'
+           ) = 0
+           OR pg_catalog.strpos(v_rewritten, 'family_preflight.idempotency_key') = 0
            OR pg_catalog.md5(pg_catalog.substr(
                 v_rewritten, v_block_start, pg_catalog.length(v_new_block)
            )) <> pg_catalog.md5(v_new_block) THEN
@@ -241,6 +343,17 @@ BEGIN
     END IF;
 
     EXECUTE v_rewritten;
+    SELECT
+        proc.prosecdef,
+        COALESCE('search_path=""' = ANY(proc.proconfig), FALSE)
+    INTO v_security_definer, v_safe_search_path
+    FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid = v_signature::pg_catalog.regprocedure;
+    IF NOT COALESCE(v_security_definer, FALSE)
+       OR NOT COALESCE(v_safe_search_path, FALSE) THEN
+        RAISE EXCEPTION
+            'EARLYBIRD_PARTIAL_ADOPTION_TOPOLOGY_SAFETY_SHAPE_MISMATCH';
+    END IF;
 END;
 $migration$;
 

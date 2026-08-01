@@ -41,10 +41,24 @@ describe('correct partial-adoption incident topology migration', () => {
         expect(migration).toContain('adoption.destination_input_hash = v_partial_current_following_input');
         expect(migration).toContain('ELSE adoption.operation_key = source_run.operation_key');
         expect(migration).toContain('AND adoption.destination_input_hash = source_run.input_hash');
-        expect(migration).not.toContain("v_order.plan_id, TRUE\n+    ) AS identity;");
+        expect(migration).not.toMatch(
+            /analysis_v2_relationship_provider_identity\([\s\S]{0,200}v_order[.]plan_id, TRUE/
+        );
     });
 
     it('preserves zero-spend and legacy fences and keeps the RPC service-only', () => {
+        expect(migration).toContain("COALESCE('search_path=\"\"' = ANY(proc.proconfig), FALSE)");
+        expect(migration).toContain('proc.prosecdef');
+        expect(migration).toContain('SECURITY DEFINER');
+        expect(migration).toContain("SET search_path TO ''''");
+        expect(migration).toContain('WHERE earlybird_order.id = p_order_id FOR UPDATE;');
+        expect(migration).toContain('WHERE request.id = p_expected_failed_request_id FOR UPDATE;');
+        expect(migration).toContain('WHERE preflight.id = v_order.preflight_id FOR UPDATE;');
+        expect(migration).toContain('SELECT audit.* INTO v_audit');
+        expect(migration).toContain('v_audit.rearmed_preflight_id, v_audit.policy_failed_request_id;');
+        expect(migration).toContain('INSERT INTO public.earlybird_adoption_policy_failure_rearms(');
+        expect(migration).toContain('family_preflight.idempotency_key');
+        expect(migration).toContain('EARLYBIRD_PARTIAL_ADOPTION_TOPOLOGY_SAFETY_SHAPE_MISMATCH');
         expect(migration).toContain('run.request_id = v_request.id');
         expect(migration).toContain('public.analysis_provider_cost_ledger AS cost');
         expect(migration).toContain('public.analysis_v2_ai_attempts AS attempt');

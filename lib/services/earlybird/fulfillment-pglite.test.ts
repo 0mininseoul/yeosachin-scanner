@@ -316,6 +316,7 @@ type FulfillmentIdentity = {
 };
 
 let db: PGlite;
+let sourcePreflightPartialAdoptionDefinition: string;
 
 async function asService<T>(
     sql: string,
@@ -1228,6 +1229,13 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(schemaRecoveryProviderAdoptionRearmMigration);
         await db.exec(sourcePreflightPartialAdoptionMigration);
         await db.exec(sourcePreflightPartialAdoptionMigration);
+        sourcePreflightPartialAdoptionDefinition = (await db.query<{
+            definition: string;
+        }>(`
+            SELECT pg_catalog.pg_get_functiondef(
+                'public.rearm_earlybird_zero_spend_adoption_policy_failure(uuid,uuid,timestamp with time zone)'::regprocedure
+            ) AS definition
+        `)).rows[0].definition;
         await db.exec(correctedPartialAdoptionTopologyMigration);
         await db.exec(correctedPartialAdoptionTopologyMigration);
     });
@@ -1295,6 +1303,70 @@ describe('operator-approved earlybird fulfillment migration', () => {
 
     afterAll(async () => {
         await db.close();
+    });
+
+    it('rejects security, lock, and immutable audit replay drift before replacing the 1600 definition', async () => {
+        const signature =
+            'public.rearm_earlybird_zero_spend_adoption_policy_failure'
+            + '(uuid,uuid,timestamp with time zone)';
+        const currentDefinition = async (): Promise<string> => (
+            (await db.query<{ definition: string }>(`
+                SELECT pg_catalog.pg_get_functiondef($1::regprocedure) AS definition
+            `, [signature])).rows[0].definition
+        );
+        const definitionMutations = [
+            {
+                name: 'missing order row lock',
+                from: 'WHERE earlybird_order.id = p_order_id FOR UPDATE;',
+                to: 'WHERE earlybird_order.id = p_order_id;',
+            },
+            {
+                name: 'disabled immutable audit replay branch',
+                from: 'WHERE audit.order_id = p_order_id;\n    IF FOUND THEN',
+                to: 'WHERE audit.order_id = p_order_id;\n    IF FALSE THEN',
+            },
+        ];
+        const mutations: Array<{
+            name: string;
+            apply: () => Promise<unknown>;
+        }> = [
+            {
+                name: 'security invoker',
+                apply: () => db.exec(`ALTER FUNCTION ${signature} SECURITY INVOKER`),
+            },
+            {
+                name: 'unsafe search path',
+                apply: () => db.exec(`ALTER FUNCTION ${signature} SET search_path TO public`),
+            },
+            ...definitionMutations.map(({ name, from, to }) => ({
+                name,
+                apply: async () => {
+                    const mutated = sourcePreflightPartialAdoptionDefinition.replace(from, to);
+                    expect(mutated, name).not.toBe(sourcePreflightPartialAdoptionDefinition);
+                    await db.exec(mutated);
+                },
+            })),
+        ];
+
+        for (const mutation of mutations) {
+            const finalDefinition = await currentDefinition();
+            await db.exec('BEGIN');
+            try {
+                await db.exec(sourcePreflightPartialAdoptionDefinition);
+                await mutation.apply();
+                expect(await currentDefinition(), mutation.name)
+                    .not.toBe(sourcePreflightPartialAdoptionDefinition);
+                await expect(
+                    db.exec(correctedPartialAdoptionTopologyMigration),
+                    mutation.name
+                ).rejects.toThrow(
+                    'EARLYBIRD_PARTIAL_ADOPTION_TOPOLOGY_SAFETY_SHAPE_MISMATCH'
+                );
+            } finally {
+                await db.exec('ROLLBACK');
+            }
+            expect(await currentDefinition(), mutation.name).toBe(finalDefinition);
+        }
     });
 
     it('enqueues a confirmed payment but never exposes it to recovery before admission', async () => {
