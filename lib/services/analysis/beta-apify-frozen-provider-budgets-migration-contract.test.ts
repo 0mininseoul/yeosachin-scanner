@@ -19,6 +19,27 @@ function contextFunction(): string {
 }
 
 describe('betatest frozen provider budget context migration', () => {
+    it('takes the canonical allocation apply fence before any trigger or child repair lock', () => {
+        const lock = 'LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE;';
+        const lockIndex = migration.indexOf(lock);
+        const functionIndex = migration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.activate_analysis_beta_pool_reservations()'
+        );
+        const triggerIndex = migration.indexOf(
+            'CREATE TRIGGER activate_analysis_beta_pool_reservations'
+        );
+        const childRepairIndex = migration.indexOf(
+            '\nUPDATE public.analysis_beta_pool_reservations AS reservation\n'
+        );
+
+        expect(lockIndex).toBeGreaterThan(
+            migration.indexOf("SET LOCAL statement_timeout = '2min';")
+        );
+        expect(lockIndex).toBeLessThan(functionIndex);
+        expect(lockIndex).toBeLessThan(triggerIndex);
+        expect(lockIndex).toBeLessThan(childRepairIndex);
+    });
+
     it('recreates the latest context fence without weakening predecessor claim semantics', () => {
         const context = contextFunction();
         for (const fragment of [

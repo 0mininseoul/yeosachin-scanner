@@ -1,7 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
+import { profileMaximumCharge } from './v2-apify-operation-costs';
+import { ANALYSIS_V2_PROFILE_BATCH_LIMIT } from './v2-dag-planner';
 
 const migrationUrls = [
     new URL(
@@ -1167,6 +1172,56 @@ describe('betatest provider policy/guard migration PGlite', () => {
             [REQUEST_ID]
         );
         expect(count.rows).toEqual([{ count: 1 }]);
+    });
+
+    it('accepts the final independent target fallback after every candidate profile batch', async () => {
+        const catalog = getBetaApifyOperationBudgetCatalog('standard', {});
+        const maximumCandidateBatches = Math.ceil(
+            getAnalysisPlan('standard').detailedMutualLimit
+                / ANALYSIS_V2_PROFILE_BATCH_LIMIT
+        );
+        const candidateBatchMaximum = profileMaximumCharge(
+            ANALYSIS_V2_PROFILE_BATCH_LIMIT,
+            {}
+        );
+        const targetFallbackMaximum = profileMaximumCharge(1, {});
+
+        await seedPendingBetaRequest();
+        await db.query(
+            `UPDATE public.analysis_apify_credit_snapshots
+             SET monthly_limit_usd = 10, monthly_usage_usd = 0`
+        );
+        await activateBeta(betaSlots, catalog);
+        await makeJobLive();
+        for (let index = 1; index <= maximumCandidateBatches; index += 1) {
+            await expect(reserveProvider({
+                family: 'profile-fallback',
+                digest: index.toString(16).padStart(64, '0'),
+                slot: betaSlots['profile-fallback'],
+                max: candidateBatchMaximum,
+                reservationToken: randomUUID(),
+            })).resolves.toMatchObject({ created: true });
+        }
+
+        await expect(reserveProvider({
+            family: 'profile-fallback',
+            digest: 'f'.repeat(64),
+            slot: betaSlots['profile-fallback'],
+            max: targetFallbackMaximum,
+            reservationToken: randomUUID(),
+        })).resolves.toMatchObject({ created: true });
+        const spent = await db.query<{ total: string; count: number }>(
+            `SELECT pg_catalog.sum(max_charge_usd)::TEXT AS total,
+                    pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_v2_provider_runs
+             WHERE request_id = $1
+               AND pg_catalog.split_part(operation_key, ':', 1) = 'profile-fallback'`,
+            [REQUEST_ID]
+        );
+        expect(spent.rows).toEqual([{
+            total: catalog['profile-fallback'].toFixed(12),
+            count: maximumCandidateBatches + 1,
+        }]);
     });
 
     it('keeps standard provider reserve and legacy profile-repair alias compatible', async () => {

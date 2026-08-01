@@ -17,7 +17,8 @@ import { profileRepairMaximumCharge } from './v2-profile-repair';
 export const BETA_APIFY_TARGET_PROFILE_BUDGET_USD = 0.0052;
 
 function completeFamilyBudget(value: number): number {
-    const normalized = Number(value.toFixed(12));
+    const normalized = Math.ceil(value * 1_000_000_000_000)
+        / 1_000_000_000_000;
     if (!Number.isFinite(normalized) || normalized <= 0 || normalized > 1_000) {
         throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE');
     }
@@ -26,8 +27,9 @@ function completeFamilyBudget(value: number): number {
 
 /**
  * Complete conservative family budgets from the exact starts allowed by the frozen plan:
- * two relationship attempts per side; one fallback and repair per 30-profile batch; the bounded
- * target interaction topologies; and one bounded reverse-like run.
+ * two relationship attempts per side; one fallback and repair per 30-profile candidate batch;
+ * one independent target-profile fallback; the bounded target interaction topologies; and one
+ * bounded reverse-like run.
  */
 export function getBetaApifyOperationBudgetCatalog(
     selectedPlanId: PlanId,
@@ -47,6 +49,7 @@ export function getBetaApifyOperationBudgetCatalog(
         ),
         'profile-fallback': completeFamilyBudget(
             profileMaximumCharge(ANALYSIS_V2_PROFILE_BATCH_LIMIT, env) * profileBatchCount
+                + profileMaximumCharge(1, env)
         ),
         'profile-repair': completeFamilyBudget(
             profileRepairMaximumCharge(ANALYSIS_V2_PROFILE_BATCH_LIMIT) * profileBatchCount

@@ -22,6 +22,7 @@ import {
     MAX_REVERSE_CANDIDATES,
     reverseLikeMaximumCharge,
 } from './v2-ai-scoring-runtime-deps';
+import { ANALYSIS_V2_PROFILE_BATCH_LIMIT } from './v2-dag-planner';
 import { getAnalysisPlan, PLAN_IDS } from '@/lib/domain/analysis/plan-catalog';
 
 const UUID = '974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd';
@@ -197,5 +198,48 @@ describe('beta Apify runtime foundation', () => {
             expect(value).toBeGreaterThan(0);
             expect(Number(value.toFixed(12))).toBe(value);
         }
+    });
+
+    it.each(PLAN_IDS)(
+        'freezes every candidate profile batch plus one independent target fallback for %s',
+        planId => {
+            const plan = getAnalysisPlan(planId);
+            const maximumCandidateBatches = Math.ceil(
+                plan.detailedMutualLimit / ANALYSIS_V2_PROFILE_BATCH_LIMIT
+            );
+            const cumulativeMaximum = Number((
+                profileMaximumCharge(ANALYSIS_V2_PROFILE_BATCH_LIMIT, {})
+                    * maximumCandidateBatches
+                + profileMaximumCharge(1, {})
+            ).toFixed(12));
+
+            expect(cumulativeMaximum).toBeLessThanOrEqual(
+                getBetaApifyOperationBudgetCatalog(planId, {})['profile-fallback']
+            );
+        }
+    );
+
+    it('rounds a fractional profile-family topology upward at twelve decimals', () => {
+        const env = {
+            APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD: '0.0026000000004',
+        };
+        const plan = getAnalysisPlan('basic');
+        const maximumCandidateBatches = Math.ceil(
+            plan.detailedMutualLimit / ANALYSIS_V2_PROFILE_BATCH_LIMIT
+        );
+        const rawMaximum = profileMaximumCharge(
+            ANALYSIS_V2_PROFILE_BATCH_LIMIT,
+            env
+        ) * maximumCandidateBatches + profileMaximumCharge(1, env);
+        const expectedConservativeBudget = Math.ceil(
+            rawMaximum * 1_000_000_000_000
+        ) / 1_000_000_000_000;
+        const frozenBudget = getBetaApifyOperationBudgetCatalog(
+            'basic',
+            env
+        )['profile-fallback'];
+
+        expect(frozenBudget).toBe(expectedConservativeBudget);
+        expect(frozenBudget).toBeGreaterThanOrEqual(rawMaximum);
     });
 });

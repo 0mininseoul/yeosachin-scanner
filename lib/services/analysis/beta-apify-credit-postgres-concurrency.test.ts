@@ -24,6 +24,30 @@ const migrationFiles = [
     '20260802040000_settle_betatest_apify_credit_reservations.sql',
     '20260802050000_harden_betatest_apify_credit_capacity.sql',
 ].map(file => readFileSync(new URL(`../../../supabase/migrations/${file}`, import.meta.url), 'utf8'));
+const frozenBudgetMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260802060000_expose_betatest_frozen_provider_budgets.sql',
+    import.meta.url,
+), 'utf8');
+const betaSlots = {
+    'target-profile': 'primary',
+    'relationship-followers': 'tertiary',
+    'relationship-following': 'quaternary',
+    'profile-fallback': 'quinary',
+    'profile-repair': 'septenary',
+    'target-likers': 'senary',
+    'target-comments': 'tertiary',
+    'candidate-likers': 'quaternary',
+} as const;
+const betaBudgets = {
+    'target-profile': 0.0052,
+    'relationship-followers': 0.02,
+    'relationship-following': 0.02,
+    'profile-fallback': 0.02,
+    'profile-repair': 0.02,
+    'target-likers': 0.02,
+    'target-comments': 0.02,
+    'candidate-likers': 0.02,
+} as const;
 
 function faithfulBootstrap(): string {
     // Do not duplicate a fragile reduced DDL here: extract the same complete
@@ -67,6 +91,59 @@ async function waitUntilBlocked(pid: number): Promise<void> {
     throw new Error('BETA_APIFY_POSTGRES_LOCK_BARRIER_TIMEOUT');
 }
 
+interface MigrationLockObservation {
+    blockingPids: number[];
+    locks: Array<{
+        relation_name: string;
+        mode: string;
+        granted: boolean;
+    }>;
+}
+
+async function waitForMigrationRelationLock(pid: number): Promise<MigrationLockObservation> {
+    for (let i = 0; i < 100; i += 1) {
+        const activity = await observer.query<{
+            wait_event_type: string | null;
+            blocking_pids: number[];
+        }>(
+            `SELECT activity.wait_event_type,
+                    pg_catalog.pg_blocking_pids(activity.pid) AS blocking_pids
+             FROM pg_catalog.pg_stat_activity AS activity
+             WHERE activity.pid = $1`,
+            [pid],
+        );
+        if (activity.rows[0]?.wait_event_type === 'Lock') {
+            const locks = await observer.query<{
+                relation_name: string;
+                mode: string;
+                granted: boolean;
+            }>(
+                `SELECT relation.relname AS relation_name,
+                        relation_lock.mode, relation_lock.granted
+                 FROM pg_catalog.pg_locks AS relation_lock
+                 JOIN pg_catalog.pg_class AS relation
+                   ON relation.oid = relation_lock.relation
+                 JOIN pg_catalog.pg_namespace AS namespace
+                   ON namespace.oid = relation.relnamespace
+                 WHERE relation_lock.pid = $1
+                   AND namespace.nspname = 'public'
+                   AND relation.relname IN (
+                        'analysis_beta_pool_allocations',
+                        'analysis_beta_pool_reservations'
+                   )
+                 ORDER BY relation.relname, relation_lock.mode`,
+                [pid],
+            );
+            return {
+                blockingPids: activity.rows[0].blocking_pids,
+                locks: locks.rows,
+            };
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('BETA_APIFY_POSTGRES_MIGRATION_LOCK_TIMEOUT');
+}
+
 function snapshots(limit = 1): string {
     const now = Date.now();
     return JSON.stringify(['primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary'].map(credentialSlot => ({
@@ -98,6 +175,83 @@ async function seedHold(client: Client, userId: string, preflightId: string, lim
     await client.query('SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::jsonb)', [snapshots(limit)]);
 }
 
+async function seedActivatedBetaRequest(client: Client): Promise<{
+    allocationId: string;
+    claimToken: string;
+    requestId: string;
+}> {
+    const userId = randomUUID();
+    const preflightId = randomUUID();
+    const requestId = randomUUID();
+    const claimToken = randomUUID();
+    await seedHold(client, userId, preflightId, 10);
+    await client.query(
+        `SELECT public.hold_analysis_beta_apify_preflight_credit(
+            $1, $2, 'primary', 0.0052, 300
+        )`,
+        [preflightId, userId],
+    );
+    await client.query(
+        `INSERT INTO public.analysis_requests (
+            id, user_id, target_instagram_id, status, background_processing,
+            pipeline_version, preflight_id, plan_access_mode_snapshot,
+            test_entitlement_jti_hash, selected_plan_id_snapshot,
+            analysis_scope_snapshot
+         ) VALUES (
+            $1, $2, 'target.user', 'pending', FALSE, 'v2', $3,
+            'production', NULL, 'standard', $4::jsonb
+         )`,
+        [
+            requestId,
+            userId,
+            preflightId,
+            JSON.stringify({
+                relationshipCapacity: { followers: 300, following: 300 },
+                detailedMutualLimit: 300,
+            }),
+        ],
+    );
+    await client.query(
+        `UPDATE public.analysis_preflights
+         SET status = 'consumed', consumed_request_id = $2
+         WHERE id = $1`,
+        [preflightId, requestId],
+    );
+    await client.query(
+        `INSERT INTO public.analysis_pipeline_jobs (request_id, job_key)
+         VALUES ($1, 'collect')`,
+        [requestId],
+    );
+    const activated = await client.query<{
+        result: { allocationId: string };
+    }>(
+        `SELECT public.activate_analysis_beta_apify_request_credit(
+            $1, $2, $3, 'standard', $4::jsonb, $5::jsonb, 300
+        ) AS result`,
+        [
+            preflightId,
+            requestId,
+            userId,
+            JSON.stringify(betaSlots),
+            JSON.stringify(betaBudgets),
+        ],
+    );
+    await client.query(
+        `UPDATE public.analysis_pipeline_jobs
+         SET status = 'processing', dispatch_state = 'dispatched',
+             dispatch_generation = 1, dispatched_at = clock_timestamp(),
+             lease_token = $2,
+             lease_expires_at = clock_timestamp() + interval '5 minutes'
+         WHERE request_id = $1 AND job_key = 'collect'`,
+        [requestId, claimToken],
+    );
+    return {
+        allocationId: activated.rows[0]!.result.allocationId,
+        claimToken,
+        requestId,
+    };
+}
+
 describe('beta Apify credit PostgreSQL 16 concurrency', () => {
     beforeAll(async () => {
         if (!databaseUrl) {
@@ -122,9 +276,18 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
     }, 90_000);
 
     afterAll(async () => {
-        await Promise.all([first?.end(), second?.end(), observer?.end()]);
-        if (containerStarted) {
-            execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
+        try {
+            const clients = [first, second, observer]
+                .filter((client): client is Client => Boolean(client));
+            await Promise.allSettled(clients.map(client => client.end()));
+        } finally {
+            if (containerStarted) {
+                try {
+                    execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
+                } catch {
+                    // `--rm` may already have removed a container that exited unexpectedly.
+                }
+            }
         }
     }, 30_000);
 
@@ -218,4 +381,134 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
         );
         expect(state.rows).toEqual([{ holds: 2, capacity: '0.000000000000' }]);
     });
+
+    it('waits at the canonical allocation fence while terminal settlement remains open', async () => {
+        const seeded = await seedActivatedBetaRequest(first);
+        const reservationToken = randomUUID();
+        await first.query(
+            `SELECT public.reserve_analysis_v2_provider_run(
+                $1, 'collect', $2, $3, $4, 'apify', 'actor/test',
+                'tertiary', 0.01, $5
+            )`,
+            [
+                seeded.requestId,
+                seeded.claimToken,
+                `relationship-followers:${'c'.repeat(64)}`,
+                'd'.repeat(64),
+                reservationToken,
+            ],
+        );
+        await first.query(
+            `UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`,
+            [seeded.requestId],
+        );
+
+        let firstTransactionOpen = false;
+        let secondTransactionOpen = false;
+        let migrationApply: Promise<unknown> | null = null;
+        try {
+            await first.query('BEGIN');
+            firstTransactionOpen = true;
+            const settlement = await first.query<{
+                result: { lifecycleState: string; heldFamilies: number };
+            }>(
+                `SELECT public.settle_analysis_beta_apify_credit_allocation(
+                    $1, 'request_terminal'
+                ) AS result`,
+                [seeded.allocationId],
+            );
+            expect(settlement.rows[0]?.result).toMatchObject({
+                lifecycleState: 'active',
+                heldFamilies: 1,
+            });
+
+            await second.query('BEGIN');
+            secondTransactionOpen = true;
+            const firstPid = (await first.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            const secondPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            const migrationStartedAt = Date.now();
+            migrationApply = second.query(frozenBudgetMigration);
+            const observation = await waitForMigrationRelationLock(secondPid);
+            expect(observation.blockingPids).toContain(firstPid);
+            expect(observation.locks.find(lock => (
+                lock.relation_name === 'analysis_beta_pool_allocations'
+                && lock.granted === false
+            ))).toMatchObject({
+                mode: 'ExclusiveLock',
+                granted: false,
+            });
+            expect(observation.locks.some(lock => (
+                lock.mode === 'ShareRowExclusiveLock'
+            ))).toBe(false);
+            expect(observation.locks.filter(lock => (
+                lock.relation_name === 'analysis_beta_pool_reservations'
+            ))).toEqual([]);
+
+            await first.query('COMMIT');
+            firstTransactionOpen = false;
+            await migrationApply;
+            await second.query('COMMIT');
+            secondTransactionOpen = false;
+            expect(Date.now() - migrationStartedAt).toBeLessThan(5_000);
+        } finally {
+            if (firstTransactionOpen) {
+                await first.query('ROLLBACK').catch(() => undefined);
+            }
+            if (migrationApply) {
+                await migrationApply.catch(() => undefined);
+            }
+            if (secondTransactionOpen) {
+                await second.query('ROLLBACK').catch(() => undefined);
+            }
+        }
+
+        const partial = await first.query<{
+            allocation_state: string;
+            active_count: number;
+            settled_count: number;
+        }>(
+            `SELECT allocation.lifecycle_state AS allocation_state,
+                    count(*) FILTER (
+                        WHERE reservation.lifecycle_state = 'active'
+                    )::int AS active_count,
+                    count(*) FILTER (
+                        WHERE reservation.lifecycle_state = 'settled'
+                    )::int AS settled_count
+             FROM public.analysis_beta_pool_allocations AS allocation
+             JOIN public.analysis_beta_pool_reservations AS reservation
+               ON reservation.allocation_id = allocation.id
+             WHERE allocation.id = $1
+             GROUP BY allocation.id`,
+            [seeded.allocationId],
+        );
+        expect(partial.rows).toEqual([{
+            allocation_state: 'active',
+            active_count: 1,
+            settled_count: 7,
+        }]);
+        const trigger = await first.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM pg_catalog.pg_trigger
+             WHERE tgname = 'activate_analysis_beta_pool_reservations'
+               AND NOT tgisinternal`,
+        );
+        expect(trigger.rows).toEqual([{ count: 1 }]);
+
+        const future = await seedActivatedBetaRequest(first);
+        const futureReservations = await first.query<{
+            state: string;
+            count: number;
+        }>(
+            `SELECT lifecycle_state AS state, count(*)::int AS count
+             FROM public.analysis_beta_pool_reservations
+             WHERE allocation_id = $1
+             GROUP BY lifecycle_state`,
+            [future.allocationId],
+        );
+        expect(futureReservations.rows).toEqual([{ state: 'active', count: 8 }]);
+    }, 30_000);
 });
