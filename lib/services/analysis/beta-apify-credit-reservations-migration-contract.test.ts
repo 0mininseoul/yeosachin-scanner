@@ -220,6 +220,54 @@ describe('beta Apify credit reservation migration contract', () => {
         );
     });
 
+    it('re-reads database time only after every admission-relevant row lock', () => {
+        const grantMutation = functionDefinition(
+            'upsert_analysis_beta_access_grant'
+        );
+        const hold = functionDefinition(
+            'hold_analysis_beta_apify_preflight_credit'
+        );
+        const activate = functionDefinition(
+            'activate_analysis_beta_apify_request_credit'
+        );
+
+        expect(grantMutation).toContain('pg_catalog.pg_advisory_xact_lock');
+        expect(grantMutation).toContain(
+            'FROM public.analysis_beta_access_grants AS existing_grant'
+        );
+        expect(grantMutation.indexOf('FOR UPDATE')).toBeLessThan(
+            grantMutation.indexOf('v_now := pg_catalog.clock_timestamp()')
+        );
+        expect(grantMutation.indexOf('v_now := pg_catalog.clock_timestamp()'))
+            .toBeLessThan(grantMutation.lastIndexOf('p_expires_at <= v_now'));
+
+        expect(compactSql(hold)).toContain(
+            'SELECT grant_row.* INTO v_grant'
+        );
+        expect(hold.indexOf('FOR v_locked_snapshot IN')).toBeLessThan(
+            hold.indexOf('v_now := pg_catalog.clock_timestamp()')
+        );
+        expect(hold.indexOf('v_now := pg_catalog.clock_timestamp()'))
+            .toBeLessThan(hold.lastIndexOf('v_preflight.expires_at <= v_now'));
+        expect(hold.indexOf('v_now := pg_catalog.clock_timestamp()'))
+            .toBeLessThan(hold.lastIndexOf('v_grant.expires_at <= v_now'));
+        expect(hold.indexOf('v_now := pg_catalog.clock_timestamp()'))
+            .toBeLessThan(hold.lastIndexOf('v_locked_snapshot.observed_at < v_now'));
+
+        expect(compactSql(activate)).toContain(
+            'SELECT grant_row.* INTO v_grant'
+        );
+        expect(activate.indexOf('FOR v_locked_snapshot IN')).toBeLessThan(
+            activate.indexOf('v_now := pg_catalog.clock_timestamp()')
+        );
+        expect(activate.indexOf('v_now := pg_catalog.clock_timestamp()'))
+            .toBeLessThan(activate.lastIndexOf('v_existing.expires_at <= v_now'));
+        expect(activate.indexOf('v_now := pg_catalog.clock_timestamp()'))
+            .toBeLessThan(activate.lastIndexOf('v_grant.expires_at <= v_now'));
+        expect(activate.indexOf('v_now := pg_catalog.clock_timestamp()'))
+            .toBeLessThan(activate.lastIndexOf('v_locked_snapshot.observed_at < v_now'));
+    });
+
     it('holds target-profile credit only after grant, preflight, and six-snapshot validation', () => {
         const hold = functionDefinition(
             'hold_analysis_beta_apify_preflight_credit'
@@ -247,8 +295,8 @@ describe('beta Apify credit reservation migration contract', () => {
         expect(hold).toContain('v_preflight.expires_at <= v_now');
         expect(hold).toContain('analysis_preflight_provider_runs');
         expect(hold).toContain('FROM public.analysis_beta_access_grants AS grant_row');
-        expect(hold).toContain('grant_row.enabled = TRUE');
-        expect(hold).toContain('grant_row.expires_at > v_now');
+        expect(hold).toContain('v_grant.enabled IS DISTINCT FROM TRUE');
+        expect(hold).toContain('v_grant.expires_at <= v_now');
         expectCanonicalSnapshotLocks(hold);
         expect(hold).toContain("v_locked_snapshot.health_state <> 'healthy'");
         expect(hold).toContain('v_locked_snapshot.observed_at < v_now');
@@ -342,8 +390,8 @@ describe('beta Apify credit reservation migration contract', () => {
         expect(activate).toContain(
             'FROM public.analysis_beta_access_grants AS grant_row'
         );
-        expect(activate).toContain('grant_row.enabled = TRUE');
-        expect(activate).toContain('grant_row.expires_at > v_now');
+        expect(activate).toContain('v_grant.enabled IS DISTINCT FROM TRUE');
+        expect(activate).toContain('v_grant.expires_at <= v_now');
         expect(activate).toContain("p_operation_slot_map->>'target-profile'");
         expect(activate).toContain("p_operation_budget_map->>'target-profile'");
         expectCanonicalSnapshotLocks(activate);

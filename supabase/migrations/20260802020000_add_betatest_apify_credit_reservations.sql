@@ -179,7 +179,8 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_now TIMESTAMP WITH TIME ZONE;
+    v_existing_grant public.analysis_beta_access_grants%ROWTYPE;
 BEGIN
     IF p_user_id IS NULL
        OR p_enabled IS NULL
@@ -188,22 +189,45 @@ BEGIN
        OR (
             p_expires_at IS NOT NULL
             AND NOT pg_catalog.isfinite(p_expires_at)
-       )
-       OR (
-            p_enabled = TRUE
-            AND p_expires_at IS NOT NULL
-            AND p_expires_at <= v_now
        ) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_BETA_GRANT_INVALID',
             ERRCODE = 'P0001';
     END IF;
 
+    -- Serialize both the existing-row and first-insert cases without taking a
+    -- conflicting lock on users. Hold/activation later acquire the grant row
+    -- before their user foreign-key checks, so a user-row UPDATE lock here
+    -- would introduce a grant -> user / user -> grant deadlock cycle.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'analysis-beta-grant:' || pg_catalog.lower(p_user_id::TEXT),
+            0
+        )
+    );
+
     PERFORM users.id
     FROM public.users AS users
     WHERE users.id = p_user_id
     FOR KEY SHARE;
     IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_GRANT_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT existing_grant.*
+    INTO v_existing_grant
+    FROM public.analysis_beta_access_grants AS existing_grant
+    WHERE existing_grant.user_id = p_user_id
+    FOR UPDATE;
+
+    -- Any advisory/user/grant lock wait happened before this clock read. An
+    -- expiry that elapsed while waiting can therefore never be enabled.
+    v_now := pg_catalog.clock_timestamp();
+    IF p_enabled = TRUE
+       AND p_expires_at IS NOT NULL
+       AND p_expires_at <= v_now THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_BETA_GRANT_INVALID',
             ERRCODE = 'P0001';
@@ -386,6 +410,7 @@ DECLARE
     v_existing public.analysis_beta_pool_allocations%ROWTYPE;
     v_created public.analysis_beta_pool_allocations%ROWTYPE;
     v_existing_reservation public.analysis_beta_pool_reservations%ROWTYPE;
+    v_grant public.analysis_beta_access_grants%ROWTYPE;
     v_locked_snapshot public.analysis_apify_credit_snapshots%ROWTYPE;
     v_selected_snapshot public.analysis_apify_credit_snapshots%ROWTYPE;
     v_common_observed_at TIMESTAMP WITH TIME ZONE;
@@ -474,14 +499,10 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    PERFORM grant_row.user_id
+    SELECT grant_row.*
+    INTO v_grant
     FROM public.analysis_beta_access_grants AS grant_row
     WHERE grant_row.user_id = p_user_id
-      AND grant_row.enabled = TRUE
-      AND (
-            grant_row.expires_at IS NULL
-            OR grant_row.expires_at > v_now
-      )
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING
@@ -520,15 +541,51 @@ BEGIN
                     IS DISTINCT FROM v_common_observed_at THEN
                 v_snapshot_split := TRUE;
             END IF;
-            IF v_locked_snapshot.observed_at < v_now
-                    - pg_catalog.make_interval(
-                        secs => p_max_snapshot_age_seconds
-                    )
-               OR v_locked_snapshot.observed_at > v_now + INTERVAL '1 minute'
-               OR v_locked_snapshot.billing_cycle_start_at > v_now
-               OR v_locked_snapshot.billing_cycle_end_at <= v_now THEN
-                v_snapshot_stale := TRUE;
-            END IF;
+        END IF;
+    END LOOP;
+
+    -- Refresh database time only after the current grant and all six snapshot
+    -- rows are locked. Recheck every time-sensitive predicate on those locked
+    -- values so lock waits cannot turn an expired state into an admission.
+    v_now := pg_catalog.clock_timestamp();
+    IF v_preflight.expires_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_PREFLIGHT_NOT_ELIGIBLE',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_grant.enabled IS DISTINCT FROM TRUE
+       OR (
+            v_grant.expires_at IS NOT NULL
+            AND (
+                NOT pg_catalog.isfinite(v_grant.expires_at)
+                OR v_grant.expires_at <= v_now
+            )
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
+            ERRCODE = 'P0001';
+    END IF;
+
+    FOR v_locked_snapshot IN
+        SELECT snapshot.*
+        FROM public.analysis_apify_credit_snapshots AS snapshot
+        ORDER BY CASE snapshot.credential_slot
+            WHEN 'primary' THEN 1
+            WHEN 'tertiary' THEN 2
+            WHEN 'quaternary' THEN 3
+            WHEN 'quinary' THEN 4
+            WHEN 'senary' THEN 5
+            WHEN 'septenary' THEN 6
+        END
+    LOOP
+        IF v_locked_snapshot.observed_at < v_now
+                - pg_catalog.make_interval(
+                    secs => p_max_snapshot_age_seconds
+                )
+           OR v_locked_snapshot.observed_at > v_now + INTERVAL '1 minute'
+           OR v_locked_snapshot.billing_cycle_start_at > v_now
+           OR v_locked_snapshot.billing_cycle_end_at <= v_now THEN
+            v_snapshot_stale := TRUE;
         END IF;
     END LOOP;
 
@@ -641,6 +698,7 @@ DECLARE
     v_active public.analysis_beta_pool_allocations%ROWTYPE;
     v_request public.analysis_requests%ROWTYPE;
     v_target_reservation public.analysis_beta_pool_reservations%ROWTYPE;
+    v_grant public.analysis_beta_access_grants%ROWTYPE;
     v_locked_snapshot public.analysis_apify_credit_snapshots%ROWTYPE;
     v_job public.analysis_pipeline_jobs%ROWTYPE;
     v_proposed RECORD;
@@ -743,14 +801,10 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    PERFORM grant_row.user_id
+    SELECT grant_row.*
+    INTO v_grant
     FROM public.analysis_beta_access_grants AS grant_row
     WHERE grant_row.user_id = p_user_id
-      AND grant_row.enabled = TRUE
-      AND (
-            grant_row.expires_at IS NULL
-            OR grant_row.expires_at > v_now
-      )
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING
@@ -839,15 +893,51 @@ BEGIN
                     IS DISTINCT FROM v_common_observed_at THEN
                 v_snapshot_split := TRUE;
             END IF;
-            IF v_locked_snapshot.observed_at < v_now
-                    - pg_catalog.make_interval(
-                        secs => p_max_snapshot_age_seconds
-                    )
-               OR v_locked_snapshot.observed_at > v_now + INTERVAL '1 minute'
-               OR v_locked_snapshot.billing_cycle_start_at > v_now
-               OR v_locked_snapshot.billing_cycle_end_at <= v_now THEN
-                v_snapshot_stale := TRUE;
-            END IF;
+        END IF;
+    END LOOP;
+
+    -- All mutable admission fences are now locked. Refresh the database clock
+    -- and make the authoritative expiry/freshness decision using that time.
+    v_now := pg_catalog.clock_timestamp();
+    IF v_preflight.expires_at <= v_now
+       OR v_existing.expires_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_grant.enabled IS DISTINCT FROM TRUE
+       OR (
+            v_grant.expires_at IS NOT NULL
+            AND (
+                NOT pg_catalog.isfinite(v_grant.expires_at)
+                OR v_grant.expires_at <= v_now
+            )
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
+            ERRCODE = 'P0001';
+    END IF;
+
+    FOR v_locked_snapshot IN
+        SELECT snapshot.*
+        FROM public.analysis_apify_credit_snapshots AS snapshot
+        ORDER BY CASE snapshot.credential_slot
+            WHEN 'primary' THEN 1
+            WHEN 'tertiary' THEN 2
+            WHEN 'quaternary' THEN 3
+            WHEN 'quinary' THEN 4
+            WHEN 'senary' THEN 5
+            WHEN 'septenary' THEN 6
+        END
+    LOOP
+        IF v_locked_snapshot.observed_at < v_now
+                - pg_catalog.make_interval(
+                    secs => p_max_snapshot_age_seconds
+                )
+           OR v_locked_snapshot.observed_at > v_now + INTERVAL '1 minute'
+           OR v_locked_snapshot.billing_cycle_start_at > v_now
+           OR v_locked_snapshot.billing_cycle_end_at <= v_now THEN
+            v_snapshot_stale := TRUE;
         END IF;
     END LOOP;
 
