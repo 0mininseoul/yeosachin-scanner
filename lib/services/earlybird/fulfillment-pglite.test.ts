@@ -172,6 +172,13 @@ const adoptedEvidenceProviderCompositeMigration = readFileSync(
     ),
     'utf8'
 );
+const exactSchemaRecoveryProviderRunAdoptionMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801140000_adopt_exact_schema_recovery_provider_runs.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -1148,6 +1155,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(adoptionPolicyFailureRearmMigration);
         await db.exec(adoptionPolicyRearmGenerationMigration);
         await db.exec(adoptedEvidenceProviderCompositeMigration);
+        await db.exec(exactSchemaRecoveryProviderRunAdoptionMigration);
     });
 
     beforeEach(async () => {
@@ -1921,6 +1929,181 @@ describe('operator-approved earlybird fulfillment migration', () => {
             `SELECT idempotency_key FROM public.analysis_requests WHERE id = $1`,
             [created.request_id]
         )).rows[0].idempotency_key).toBe(`${baseKey}.r1`);
+    });
+
+    it('adopts reconciled provider runs from an exact schema-recovery preflight with capacity-safe count drift', async () => {
+        const baseKey = await seedDirectRecoveredRequestCollision();
+        const orderKey = ORDER.replace(/-/g, '');
+        const sourceJobKey = 'coordinator:bootstrap';
+        const operationKey = `relationship-followers:${'d'.repeat(64)}`;
+        const inputHash = 'e'.repeat(64);
+
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2,
+                 target_followers_count = 180,
+                 target_following_count = 190
+             WHERE id = $1`,
+            [PREFLIGHT, `earlybird.schema-recovery.${orderKey}`]
+        );
+        await makeAdmissionReady(PREFLIGHT, 180, 190);
+
+        for (let index = 0; index < 8; index += 1) {
+            const jobKey = index === 0
+                ? sourceJobKey
+                : `recovery:source:${index}`;
+            const runOperationKey = index === 0
+                ? operationKey
+                : `target-likers:${index.toString(16).repeat(64)}`;
+            const runInputHash = index === 0
+                ? inputHash
+                : index.toString(16).repeat(64);
+            await db.query(
+                `INSERT INTO public.analysis_pipeline_jobs(
+                    request_id, job_key, track, kind, input_hash,
+                    required_job_keys, status
+                 ) VALUES ($1, $2, 'coordinator', 'bootstrap', $3, '{}', 'completed')`,
+                [FAILED_REQUEST, jobKey, index.toString(16).repeat(64)]
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_provider_runs(
+                    request_id, job_key, operation_key, input_hash,
+                    job_claim_token, reservation_token, logical_provider,
+                    actor_id, credential_slot, max_charge_usd, status, run_id,
+                    actual_usage_usd, usage_reconciled_at
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, $6, 'apify',
+                    'apify/relationship-scraper', 'secondary', 1.25,
+                    'succeeded', $7, 0.42, pg_catalog.clock_timestamp()
+                 )`,
+                [
+                    FAILED_REQUEST, jobKey, runOperationKey, runInputHash,
+                    CLAIM, ADMISSION_CLAIM, `SchemaRecoveryRun${index}`,
+                ]
+            );
+        }
+
+        expect((await db.query<{ ready: boolean }>(
+            `SELECT public.earlybird_provider_run_adoption_ready(
+                $1, $2, $3
+             ) AS ready`,
+            [ORDER, FAILED_REQUEST, PREFLIGHT]
+        )).rows[0].ready).toBe(true);
+
+        await admit();
+        await makeAdmissionReady(PREFLIGHT, 180, 190);
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 180,
+                 target_following_count = 190
+             WHERE id = $1`,
+            [PREFLIGHT]
+        );
+        const lease = await claim();
+        const created = (await asService<{
+            request_id: string;
+            fulfillment_status: string;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request(
+                $1, $2, $3
+             )`,
+            [ORDER, CLAIM, lease.lease_fence]
+        )).rows[0];
+        expect(created).toMatchObject({
+            fulfillment_status: 'analysis_in_progress',
+            created: true,
+        });
+        expect((await db.query<{ idempotency_key: string }>(
+            'SELECT idempotency_key FROM public.analysis_requests WHERE id = $1',
+            [created.request_id]
+        )).rows[0].idempotency_key).toBe(`${baseKey}.r1`);
+        expect((await db.query<{ source_count: number; destination_count: number }>(
+            `SELECT
+                pg_catalog.count(*) FILTER (
+                    WHERE request_id = $1
+                )::INTEGER AS source_count,
+                pg_catalog.count(*) FILTER (
+                    WHERE request_id = $2
+                )::INTEGER AS destination_count
+             FROM public.analysis_v2_provider_runs`,
+            [FAILED_REQUEST, created.request_id]
+        )).rows[0]).toEqual({ source_count: 8, destination_count: 0 });
+
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET status = 'processing', lease_token = $3,
+                 lease_expires_at = pg_catalog.clock_timestamp() + INTERVAL '5 minutes'
+             WHERE request_id = $1 AND job_key = $2`,
+            [created.request_id, sourceJobKey, DISPATCH_TOKEN]
+        );
+        await expect(asService<{ adopted: Record<string, unknown> }>(
+            `SELECT public.resolve_analysis_v2_recovery_provider_run(
+                $1, $2, $3, $4, $5, 'apify',
+                'apify/relationship-scraper', 'secondary', 1.25
+             ) AS adopted`,
+            [
+                created.request_id, sourceJobKey, DISPATCH_TOKEN,
+                operationKey, inputHash,
+            ]
+        )).resolves.toMatchObject({ rows: [{
+            adopted: expect.objectContaining({
+                sourceRequestId: FAILED_REQUEST,
+                runId: 'SchemaRecoveryRun0',
+            }),
+        }] });
+        expect((await db.query<{ count: number }>(
+            'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_v2_recovery_provider_run_adoptions'
+        )).rows[0].count).toBe(1);
+    });
+
+    it.each([
+        ['non-lineage schema key', `earlybird.schema-recovery.${'0'.repeat(32)}`, 180, 190],
+        ['count outside the paid-card capacity', `earlybird.schema-recovery.${ORDER.replace(/-/g, '')}`, 401, 190],
+    ])('rejects exact schema-recovery adoption with a $case', async (
+        _case,
+        idempotencyKey,
+        followers,
+        following
+    ) => {
+        await seedDirectRecoveredRequestCollision();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET idempotency_key = $2,
+                 target_followers_count = $3,
+                 target_following_count = $4
+             WHERE id = $1`,
+            [PREFLIGHT, idempotencyKey, followers, following]
+        );
+        await makeAdmissionReady(PREFLIGHT, followers, following);
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id, job_key, track, kind, input_hash,
+                required_job_keys, status
+             ) VALUES ($1, 'coordinator:bootstrap', 'coordinator', 'bootstrap', $2, '{}', 'completed')`,
+            [FAILED_REQUEST, 'a'.repeat(64)]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, input_hash,
+                job_claim_token, reservation_token, logical_provider,
+                actor_id, credential_slot, max_charge_usd, status, run_id,
+                actual_usage_usd, usage_reconciled_at
+             ) VALUES (
+                $1, 'coordinator:bootstrap', $2, $3, $4, $5, 'apify',
+                'apify/relationship-scraper', 'secondary', 1.25,
+                'succeeded', 'RejectedSchemaRecoveryRun', 0.42,
+                pg_catalog.clock_timestamp()
+             )`,
+            [
+                FAILED_REQUEST, `relationship-followers:${'b'.repeat(64)}`,
+                'c'.repeat(64), CLAIM, ADMISSION_CLAIM,
+            ]
+        );
+        expect((await db.query<{ ready: boolean }>(
+            'SELECT public.earlybird_provider_run_adoption_ready($1, $2, $3) AS ready',
+            [ORDER, FAILED_REQUEST, PREFLIGHT]
+        )).rows[0].ready).toBe(false);
     });
 
     it.each([

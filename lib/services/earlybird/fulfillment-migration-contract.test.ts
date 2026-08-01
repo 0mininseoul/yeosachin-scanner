@@ -29,6 +29,13 @@ const schemaRecoveryCapacitySafeCountDriftMigration = readFileSync(
     ),
     'utf8'
 );
+const exactSchemaRecoveryProviderRunAdoptionMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260801140000_adopt_exact_schema_recovery_provider_runs.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const scrubbedFreshnessRecoveryMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260731040000_recover_scrubbed_earlybird_freshness_conflict.sql',
@@ -412,6 +419,48 @@ describe('earlybird fulfillment outbox migration contract', () => {
         );
         expect(schemaRecoveryCapacitySafeCountDriftMigration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.recover_earlybird_schema_failed_fulfillment\(UUID\)[\s\S]*?TO service_role;/
+        );
+    });
+
+    it('adopts only the exact schema-recovery preflight with independently safe count witnesses', () => {
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            "SET LOCAL lock_timeout = '5s';"
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            "SET LOCAL statement_timeout = '2min';"
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'analysis_v2_valid_retained_admission_adoption_preflights'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'p_order.target_followers_count IS NULL'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'p_current.target_followers_count IS NULL'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'current_preflight.id = recovery.recovery_preflight_id'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            "'earlybird.schema-recovery.'"
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            "'^earlybird[.]fulfillment[.]'"
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'resolve_analysis_v2_exact_recovery_provider_run'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toContain(
+            'resolve_analysis_v2_recovery_provider_run'
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.earlybird_provider_run_adoption_ready\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.resolve_analysis_v2_recovery_provider_run\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(exactSchemaRecoveryProviderRunAdoptionMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.resolve_analysis_v2_recovery_provider_run\([\s\S]*?TO service_role;/
         );
     });
 
