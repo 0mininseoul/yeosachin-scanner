@@ -200,6 +200,7 @@ const profileOutcomeSchema = z.object({
         'ai-stage-policy-v2.8',
         'ai-stage-policy-v2.9',
         'ai-stage-policy-v2.10',
+        'ai-stage-policy-v2.11',
     ]).optional(),
     mediaSelectionProvenance: mediaSelectionProvenanceSchema.optional(),
     inputQualityPolicy: z.literal('input-quality-v2.8').optional(),
@@ -318,7 +319,7 @@ const profileOutcomeSchema = z.object({
     )) {
         context.addIssue({ code: 'custom', message: 'Analyzed outcome is incomplete.' });
     }
-    // A v2.9/v2.10 admission value is routing provenance, not by itself proof
+    // A v2.9-v2.11 admission value is routing provenance, not by itself proof
     // that feature analysis was skipped. Resolver-eligible ambiguous personal
     // candidates run feature analysis concurrently and retain that routing
     // value. Only a row with no feature provenance is a true pre-feature
@@ -326,6 +327,7 @@ const profileOutcomeSchema = z.object({
     const v29FeatureSkipped = (
         value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
         || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.11'
     )
         && value.v29FeatureAdmission !== undefined
         && value.v29FeatureAdmission !== 'eligible'
@@ -358,7 +360,8 @@ const profileOutcomeSchema = z.object({
         || value.officialExclusionReason !== undefined;
     const inputQualityPolicyFamily = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
         || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
-        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10';
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.11';
     const requiresInputQualityProvenance = inputQualityPolicyFamily && !v29FeatureSkipped;
     if (!inputQualityPolicyFamily && hasV28Contamination) {
         context.addIssue({
@@ -593,12 +596,14 @@ const profilePayloadSchema = z.object({
         'ai-stage-policy-v2.8',
         'ai-stage-policy-v2.9',
         'ai-stage-policy-v2.10',
+        'ai-stage-policy-v2.11',
     ]).optional(),
     outcomes: z.array(profileOutcomeSchema).min(1).max(30),
 }).strict().superRefine((value, context) => {
     const exactV28Family = value.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
         || value.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
-        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10';
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+        || value.aiStagePolicyVersion === 'ai-stage-policy-v2.11';
     for (const [index, outcome] of value.outcomes.entries()) {
         const hasFeature = outcome.feature !== null;
         if (exactV28Family && hasFeature && outcome.aiStagePolicyVersion !== value.aiStagePolicyVersion) {
@@ -628,6 +633,13 @@ const profilePayloadSchema = z.object({
                 code: 'custom',
                 path: ['outcomes', index, 'aiStagePolicyVersion'],
                 message: 'v2.10 outcome requires a v2.10 batch policy.',
+            });
+        }
+        if (!exactV28Family && outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.11') {
+            context.addIssue({
+                code: 'custom',
+                path: ['outcomes', index, 'aiStagePolicyVersion'],
+                message: 'v2.11 outcome requires a v2.11 batch policy.',
             });
         }
     }
@@ -867,6 +879,7 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                     input.aiStagePolicyVersion === 'ai-stage-policy-v2.8'
                     || input.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
                     || input.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+                    || input.aiStagePolicyVersion === 'ai-stage-policy-v2.11'
                     ? { aiStagePolicyVersion: input.aiStagePolicyVersion }
                     : {}),
                 outcomes,

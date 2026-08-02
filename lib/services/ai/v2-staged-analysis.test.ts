@@ -30,6 +30,7 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     type AiStagePolicyVersion,
 } from './stage-policy';
 import {
@@ -1009,6 +1010,28 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('실제 보이는 단서를 한 가지 이상 콕 집어');
         expect(prompt).toContain('official_group_or_brand면 로고·팀명·발매');
         expect(prompt).toContain('물음표나 ㅋㅋ은');
+    });
+
+    it('uses decisive v2.11 summary copy and falls back when the model exposes analysis limitations', async () => {
+        const input = featureInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            oneLineOverview: '공개 단서가 부족해 관계의 맥락을 단정하기 어렵습니다.',
+        })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.features.oneLineOverview)
+            .toBe('사진과 소개에 드러난 개인 기록의 결이 선명해서, 피드가 보여 준 장면부터 차분히 짚어볼 계정입니다.');
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
+        expect(prompt).toContain('분석 방법이나 자료의 한계를 직접 말하지 마세요');
     });
 
     it('keeps shipped v2.9 overview acceptance and legacy prompt bytes immutable', async () => {

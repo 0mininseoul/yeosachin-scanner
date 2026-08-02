@@ -186,8 +186,8 @@ export interface AnalysisV2ProfileClassificationRow {
         | 'capacity_skipped' | 'terminal_unavailable';
     genderResolutionOperationKey?: string | null;
     genderResolutionResultHash?: string | null;
-    /** Durable v2.9/v2.10 policy fence for an intentional triage-only pre-feature skip. */
-    preFeaturePolicyVersion?: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' | null;
+    /** Durable v2.9-v2.11 policy fence for an intentional triage-only pre-feature skip. */
+    preFeaturePolicyVersion?: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' | 'ai-stage-policy-v2.11' | null;
     /** The non-eligible v2.9 admission that intentionally avoided a feature invocation. */
     preFeatureAdmission?: 'nonpersonal_or_official' | 'unsupported_unknown' | null;
     feature: AnalysisV2VerifiedFemaleFeatureData | null;
@@ -490,6 +490,7 @@ const featureRowSchema = z.object({
     preFeaturePolicyVersion: z.enum([
         'ai-stage-policy-v2.9',
         'ai-stage-policy-v2.10',
+        'ai-stage-policy-v2.11',
     ]).nullable().optional(),
     preFeatureAdmission: z.enum([
         'nonpersonal_or_official',
