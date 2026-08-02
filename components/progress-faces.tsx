@@ -2,7 +2,6 @@
 
 import Image from 'next/image';
 import { useEffect, useRef, useState } from 'react';
-import { ProfileFallback } from '@/components/case-ui';
 import {
     activeCandidateMediaKey,
     appendScreenedCandidate,
@@ -21,8 +20,9 @@ const TILE_PX = 84;
 // Slow enough to read a face, fast enough that the row is never still.
 const DRIFT_PX_PER_SECOND = 26;
 
-function FaceTile({ src, current }: { src: string | undefined; current: boolean }) {
+function FaceTile({ src, current }: { src: string; current: boolean }) {
     const [failed, setFailed] = useState(false);
+    if (failed) return null;
     return (
         <div
             className={`relative shrink-0 overflow-hidden border bg-panel ${
@@ -32,20 +32,16 @@ function FaceTile({ src, current }: { src: string | undefined; current: boolean 
             }`}
             style={{ width: TILE_PX, height: TILE_PX }}
         >
-            {src && !failed ? (
-                <Image
-                    src={src}
-                    alt=""
-                    width={TILE_PX}
-                    height={TILE_PX}
-                    unoptimized
-                    loading="lazy"
-                    className="h-full w-full object-cover"
-                    onError={() => setFailed(true)}
-                />
-            ) : (
-                <ProfileFallback variant="person" />
-            )}
+            <Image
+                src={src}
+                alt=""
+                width={TILE_PX}
+                height={TILE_PX}
+                unoptimized
+                loading="lazy"
+                className="h-full w-full object-cover"
+                onError={() => setFailed(true)}
+            />
         </div>
     );
 }
@@ -59,22 +55,29 @@ function CandidateMedia({
     copyIndex: number;
     current: boolean;
 }) {
-    const images: readonly (string | undefined)[] = [
+    /* Heartbeats contain signed, owner-scoped proxy paths. Keep the rendering
+       boundary defensive too: a malformed heartbeat must not turn the browser
+       into a raw Instagram-CDN client, and demo fallback art is not real
+       progress media. */
+    const imageUrls: readonly (string | undefined)[] = [
         candidate.imageUrl ?? undefined,
         ...candidate.feedImageUrls,
     ];
+    const images = imageUrls
+        .map(imageUrl => {
+            const src = safeResultImageUrl(imageUrl);
+            return src?.startsWith('/api/image-proxy?') ? src : undefined;
+        })
+        .filter((src): src is string => src !== undefined);
     return (
         <div className="flex shrink-0 gap-2.5">
-            {images.map((imageUrl, index) => {
-                const src = safeResultImageUrl(imageUrl);
-                return (
-                    <FaceTile
-                        key={candidateTileKey(candidate.occurrence, copyIndex, index, src)}
-                        src={src}
-                        current={current && index === 0}
-                    />
-                );
-            })}
+            {images.map((src, index) => (
+                <FaceTile
+                    key={candidateTileKey(candidate.occurrence, copyIndex, index, src)}
+                    src={src}
+                    current={current && index === 0}
+                />
+            ))}
         </div>
     );
 }
@@ -177,11 +180,20 @@ export function ProgressFaces({
         setCandidates(current => appendScreenedCandidate(current, active));
     }
 
-    const railRef = useFaceDrift(candidates.length);
+    const mediaCandidates = candidates.filter(candidate => {
+        const imageUrls: readonly (string | undefined)[] = [
+            candidate.imageUrl ?? undefined,
+            ...candidate.feedImageUrls,
+        ];
+        return imageUrls.some(imageUrl => (
+            safeResultImageUrl(imageUrl)?.startsWith('/api/image-proxy?')
+        ));
+    });
+    const railRef = useFaceDrift(mediaCandidates.length);
 
-    if (candidates.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
+    if (mediaCandidates.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
 
-    const newestOccurrence = candidates.at(-1)?.occurrence;
+    const newestOccurrence = mediaCandidates.at(-1)?.occurrence;
 
     return (
         /* Faded at both edges so the row reads as a window onto something longer
@@ -205,7 +217,7 @@ export function ProgressFaces({
                         data-progress-copy
                         className="flex shrink-0 gap-2.5"
                     >
-                        {candidates.map(candidate => (
+                        {mediaCandidates.map(candidate => (
                             <CandidateMedia
                                 key={candidateCopyKey(candidate.occurrence, copyIndex)}
                                 candidate={candidate}

@@ -921,6 +921,7 @@ export async function getProfilesBatchV2(
                 requestId: options.requestId,
                 onTelemetry,
                 onProfileStart: options.onProfileStart,
+                onProfileResolved: options.onProfileResolved,
                 providerRun: options.providerRun,
             }
         );

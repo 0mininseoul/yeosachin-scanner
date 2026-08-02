@@ -24,6 +24,16 @@ function feedImages(active: ActiveCandidateMedia): readonly string[] {
     return active.feedImageUrls?.slice(0, 3) ?? [];
 }
 
+/** Progress is an owner-facing surface: never render raw or placeholder media. */
+export function signedProgressCandidateMedia(
+    candidate: Pick<ScreenedCandidate, 'imageUrl' | 'feedImageUrls'>,
+): readonly string[] {
+    return [candidate.imageUrl, ...candidate.feedImageUrls]
+        .filter((url): url is string => (
+            typeof url === 'string' && url.startsWith('/api/image-proxy?')
+        ));
+}
+
 function sameCandidate(
     candidate: ScreenedCandidate,
     active: ActiveCandidateMedia,

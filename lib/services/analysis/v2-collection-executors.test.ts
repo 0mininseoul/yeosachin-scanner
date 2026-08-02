@@ -1961,6 +1961,7 @@ describe('analysis V2 concrete collection executors', () => {
             options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
         ) => {
             await options.onProfileStart?.('alice');
+            await options.onProfileResolved?.(profile('alice'));
             await options.onProfileStart?.('bob');
             const primary = [success('alice'), failure('bob')] as ProfileAttemptResult[];
             snapshots.push({ attempt: 'primary', requested: [...requested] });
@@ -2010,7 +2011,15 @@ describe('analysis V2 concrete collection executors', () => {
         })).resolves.toMatchObject({
             checkpoint: { manifest: { itemCount: 2, producerInputHash: inputHash } },
         });
-        expect(reportActiveProfile.mock.calls).toEqual([['alice'], ['bob'], ['bob']]);
+        expect(reportActiveProfile.mock.calls).toEqual([
+            ['alice'],
+            ['alice', {
+                profilePicUrl: 'https://images.example/alice.jpg',
+                feedImageUrls: ['https://images.example/0.jpg'],
+            }],
+            ['bob'],
+            ['bob'],
+        ]);
         expect(snapshots).toEqual([
             { attempt: 'primary', requested: ['alice', 'bob'] },
             { attempt: 'fallback', requested: ['bob'] },

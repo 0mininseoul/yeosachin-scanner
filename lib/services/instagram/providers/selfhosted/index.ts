@@ -58,9 +58,12 @@ async function reportProfileStart(
     }
 }
 
-async function reportProfileResolved(context: ProviderCallContext | undefined): Promise<void> {
+async function reportProfileResolved(
+    context: ProviderCallContext | undefined,
+    profile: InstagramProfile,
+): Promise<void> {
     try {
-        await context?.onProfileResolved?.();
+        await context?.onProfileResolved?.(profile);
     } catch (error) {
         if (isProgressPersistenceError(error)) throw error;
         throw new Error('ANALYSIS_PERSISTENCE_ERROR: profile work progress failed.');
@@ -208,7 +211,7 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
                         });
                     }
                     const profile = mapUserToProfile(rawUser);
-                    await reportProfileResolved(itemContext);
+                    await reportProfileResolved(itemContext, profile);
                     return successfulProfileAttempt({
                         requestedUsername: username,
                         source: 'selfhosted',

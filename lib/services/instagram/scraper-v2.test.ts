@@ -79,7 +79,17 @@ describe('getProfilesBatchV2', () => {
             if (username === 'carol') return null;
             return { ...rawUser('dave'), edge_followed_by: {} };
         });
-        const fallback = vi.fn(async () => [profile('bob'), profile('dave')]);
+        const fallback = vi.fn(async (
+            usernames: string[],
+            _batchSize: number | undefined,
+            context: ProviderCallContext | undefined,
+        ) => {
+            const profiles = usernames
+                .filter(username => username === 'bob' || username === 'dave')
+                .map(profile);
+            for (const item of profiles) await context?.onProfileResolved?.(item);
+            return profiles;
+        });
         __setProvidersForTest({}, {
             selfhosted: makeSelfHostedProvider({ fetchUser, concurrency: 1, retries: 0 }),
             apify: provider({
@@ -89,11 +99,15 @@ describe('getProfilesBatchV2', () => {
             }),
         });
         const snapshots: ProfilesBatchV2AttemptSnapshot[] = [];
+        const onProfileResolved = vi.fn<(item: InstagramProfile) => Promise<void>>(
+            async () => undefined
+        );
 
         const result = await getProfilesBatchV2(
             ['Alice', 'Bob', 'Carol', 'Dave'],
             {
                 providerRun: durablePaidStart(),
+                onProfileResolved,
                 persistAttemptOutcomes: async snapshot => { snapshots.push(snapshot); },
             }
         );
@@ -117,6 +131,8 @@ describe('getProfilesBatchV2', () => {
             3,
             expect.objectContaining({ recordUsage: expect.any(Function) })
         );
+        expect(onProfileResolved.mock.calls.map(([item]) => item.username))
+            .toEqual(['alice', 'bob', 'dave']);
         expect(snapshots[1].results.map(item => [
             item.outcome.requestedUsername,
             item.outcome.status,

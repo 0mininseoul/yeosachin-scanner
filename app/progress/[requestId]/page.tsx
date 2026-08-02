@@ -15,6 +15,7 @@ import {
     analysisDurationProgressCopy,
     analysisV2EventCopy,
 } from '@/lib/services/analysis/owner-view-presentation';
+import { preferredProgressNarration } from '@/lib/services/analysis/v2-progress-client-state';
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
@@ -296,9 +297,7 @@ export default function ProgressPage({ params }: PageProps) {
        is left" without the reader having to translate a percentage. */
     const runningCounts = runningTrack ? data.tracks![runningTrack.key] : null;
     const screenedCount = runningCounts && runningCounts.total > 0 ? runningCounts : null;
-    const latestEventCopy = data.events.length > 0
-        ? analysisV2EventCopy(data.events.at(-1)!.copyCode)
-        : null;
+    const narration = preferredProgressNarration(data.progressStep, data.events);
 
     return (
         <div className="min-h-dvh">
@@ -372,7 +371,11 @@ export default function ProgressPage({ params }: PageProps) {
                 )}
 
                 <p className="mt-3.5 text-center text-[12px] leading-relaxed text-fg-dim" aria-live="polite">
-                    {latestEventCopy ?? data.progressStep ?? '판독을 준비하고 있습니다.'}
+                    {narration
+                        ? narration === data.progressStep
+                            ? narration
+                            : analysisV2EventCopy(narration)
+                        : '판독을 준비하고 있습니다.'}
                     {screenedCount && (
                         <span className="num text-fg-mute">
                             {' · '}{screenedCount.done} / {screenedCount.total}

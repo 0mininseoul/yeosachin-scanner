@@ -1336,6 +1336,25 @@ describe('apifyProvider', () => {
             .toBeLessThan(call.mock.invocationCallOrder[0]);
     });
 
+    it('reports each successful Apify profile after its dataset row is resolved', async () => {
+        const { client } = mockClient([profileItem('alice'), profileItem('bob')]);
+        const provider = makeApifyProvider({ client, env: {} });
+        const onProfileResolved = vi.fn<(profile: InstagramProfile) => Promise<void>>(
+            async () => undefined
+        );
+
+        await expect(provider.getProfilesBatchOutcomes!(['alice', 'bob'], 2, {
+            recordUsage: vi.fn(),
+            onProfileResolved,
+        })).resolves.toMatchObject([
+            { outcome: { requestedUsername: 'alice', status: 'success' } },
+            { outcome: { requestedUsername: 'bob', status: 'success' } },
+        ]);
+
+        expect(onProfileResolved.mock.calls.map(([profile]) => profile.username))
+            .toEqual(['alice', 'bob']);
+    });
+
     it('keeps a single unexplained Actor omission retryable instead of claiming not-found', async () => {
         const { client, call } = mockClient([profileItem('alice')]);
         const provider = makeApifyProvider({
